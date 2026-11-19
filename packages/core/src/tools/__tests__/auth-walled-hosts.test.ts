@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { isAuthWalledUrl, authWalledGuidance } from '../base/auth-walled-hosts.js'
 import { urlReaderTool } from '../base/url-reader.js'
-import type { ToolContext } from '../types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 // A minimal context — the auth-walled short-circuit returns before touching
 // any of it, so only `abortSignal` needs to be present for the type.

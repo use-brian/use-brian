@@ -30,8 +30,14 @@
  * docs/architecture/platform/sensitivity.md.
  */
 
-import {ContextScopeAccumulator,deriveWriteScope,resourceScopeKey,type DerivedWriteEvidence,bindScopeSources,boundScopeSources,DerivedScopeError,type ScopeSource,type AccessContext,type Sensitivity,type SessionContextAuthority,pinAccessCeiling,intersectAccessCeilings} from '@use-brian/core'
-import type { KnowledgeLifecycleAction, KnowledgeWriteActor } from '@use-brian/core'
+import type {SessionContextAuthority} from '@use-brian/core/memory/session-state-types.js'
+import {pinAccessCeiling, intersectAccessCeilings} from '@use-brian/agent-runtime/security/access-ceiling.js'
+import type {AccessContext} from '@use-brian/agent-runtime/security/access-context.js'
+import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
+import {deriveWriteScope, resourceScopeKey, type DerivedWriteEvidence, DerivedScopeError, type ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
+import type {Sensitivity} from '@use-brian/agent-runtime/security/sensitivity.js'
+import {bindScopeSources, boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
+import type { KnowledgeLifecycleAction, KnowledgeWriteActor } from '@use-brian/core/workflow/knowledge-event-trigger.js'
 import { query, getPool, getAppPool, applyRLSGucs, rollbackAndRelease } from './client.js'
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'

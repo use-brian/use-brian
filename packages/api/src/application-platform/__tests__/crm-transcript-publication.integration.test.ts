@@ -1,11 +1,14 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
-import { ContextScopeAccumulator, boundScopeSources, pinAccessCeiling, type ScopeSource } from '@use-brian/core'
+import { pinAccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { getAppPool, getPool } from '../../db/client.js'
 import { createDeal } from '../../db/crm.js'
 import { addSessionMessage, findOrCreateSession } from '../../db/sessions.js'
 import { findAssistantById } from '../../db/users.js'
-import { publishNativeSessionMessageBatch } from '../../db/session-message-publication.js'
+import { publishNativeSessionMessageBatch } from '../../db/conversation-store.js'
 import { withSessionMessagePublication } from '../../db/session-context-revisions.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
 import { resolveTurnScopeSystem, turnOutputWrite } from '../../context-scope/resolve-turn-scope.js'
@@ -84,9 +87,8 @@ describe.sequential('[COMP:api/application-persistence] delegated CRM transcript
     try {
       return await withSessionMessagePublication(authority, current.sources, async db => {
         if (mutateEvent) await db.query(`SELECT public.${mutation}()`)
-        return db.query(mode === 'single' ? 'SELECT publish_native_session_message($1,$2,$3,$4,$5,$6)'
-          : 'SELECT publish_native_session_message_batch($1,$2,$3,$4,$5,$6)',
-        [f.workspaceId, session.id, JSON.stringify(mode === 'single' ? payload : [payload, payload]),
+        return db.query('SELECT publish_native_session_message_batch($1,$2,$3,$4,$5,$6)',
+        [f.workspaceId, session.id, JSON.stringify(mode === 'single' ? [payload] : [payload, payload]),
           write.derivation.producer, JSON.stringify(sources), write.derivationTarget])
       })
     } finally { if (mutateEvent) await f.pool.query(`DROP FUNCTION public.${mutation}()`) }
@@ -101,7 +103,9 @@ describe.sequential('[COMP:api/application-persistence] delegated CRM transcript
       expect(row.sessionId).toBe(session.id)
       expect(boundScopeSources(row)).toMatchObject([{ resourceKind: 'session_message', resourceId: row.id }])
       const edges = (await f.pool.query(`SELECT e.source_kind,e.source_id,e.source_version FROM scope_derivations d
-        JOIN scope_derivation_sources e ON e.workspace_id=d.workspace_id AND e.derivation_id=d.id
+        JOIN scope_derivation_sources link ON link.workspace_id=d.workspace_id AND link.derivation_id=d.id
+        JOIN scope_derivations frame ON frame.workspace_id=d.workspace_id AND frame.resource_kind='session_context_revision' AND frame.resource_id=link.source_id
+        JOIN scope_derivation_sources e ON e.workspace_id=frame.workspace_id AND e.derivation_id=frame.id
         WHERE d.workspace_id=$1 AND d.resource_kind='session_message' AND d.resource_id=$2`, [f.workspaceId, row.id])).rows
       expect(edges.map(edge => [edge.source_kind, edge.source_id, edge.source_version]).sort())
         .toEqual(sources.map(source => [source.resourceKind, source.resourceId, source.version]).sort())

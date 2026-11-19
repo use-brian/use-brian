@@ -31,7 +31,6 @@ vi.mock("@/lib/api/views", () => ({ getView: vi.fn(), listWorkspaceAssistants: v
 import { connectorReconnectCacheKey, chatRosterCacheKey } from "@/lib/surface-prefetch";
 
 import {
-  associationModuleCacheKey,
   assistantDetailCacheKey,
   assistantsCacheKey,
   brainKeysCacheKey,
@@ -225,10 +224,6 @@ describe("[COMP:app-web/surface-prefetch] every warm key is a key its surface re
   const src = (rel: string) => readFileSync(resolve(process.cwd(), "src", rel), "utf8");
   const SURFACES: Record<WarmableSurface, { source: string; builder: string }> = {
     projects: { source: "components/projects/projects-browser.tsx", builder: 'surfaceDataKey("projects", workspaceId)' },
-    association: {
-      source: "components/association/module-controls.tsx",
-      builder: "associationModuleCacheKey(workspaceId)",
-    },
     tasks: {
       source: "components/tasks/tasks-surface.tsx",
       builder: 'surfaceDataKey("tasks", workspaceId)',
@@ -286,9 +281,7 @@ describe("[COMP:app-web/surface-prefetch] every warm key is a key its surface re
       user.id = "u1";
       const target = warmTargetFor(surface, "w1");
       const expected =
-        surface === "association"
-          ? associationModuleCacheKey("w1")
-          : surface === "crm"
+        surface === "crm"
           ? crmConfigCacheKey("w1")
           : surface === "studio"
             ? connectorsCacheKey("w1")

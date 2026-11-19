@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { afterAll, describe, expect, it } from 'vitest'
-import { crmDomainEventToDispatchEvent } from '@use-brian/core'
+import { crmDomainEventToDispatchEvent } from '@use-brian/core/workflow/crm-event-trigger.js'
 import { getPool, getAppPool, queryWithRLS } from '../../db/client.js'
 import { createContact } from '../../db/crm.js'
 import { getGoalById, getGoalByIdSystem } from '../../db/goals.js'

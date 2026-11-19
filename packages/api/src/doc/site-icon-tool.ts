@@ -26,7 +26,9 @@
 
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { buildTool, workspaceFilesErrorMessage, type FilesApi, type Tool } from '@use-brian/core'
+import type { FilesApi } from '@use-brian/core/workspace-files/api.js'
+import { errorMessage as workspaceFilesErrorMessage } from '@use-brian/core/workspace-files/tool-helpers.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { imageIconToken } from '@use-brian/shared'
 
 import { fetchSiteIconImage, type BytesFetchFn } from './site-icon.js'

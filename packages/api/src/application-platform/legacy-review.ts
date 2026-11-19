@@ -3,7 +3,7 @@
  */
 import {z} from 'zod'
 import type {PoolClient} from 'pg'
-import type {ExecutionContext} from '@use-brian/core'
+import type {ExecutionContext} from '@use-brian/agent-runtime/security/execution-context.js'
 import {ApplicationPlatformError} from '@use-brian/shared'
 import {assertNativeApplicationGovernance} from './governance.js'
 

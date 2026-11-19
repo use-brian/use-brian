@@ -5,10 +5,11 @@ import { beforeEach, afterEach, describe, it, expect, vi } from "vitest";
 import { en } from "@/lib/i18n/dictionaries/en";
 import { TuningChatPanel } from "../tuning-chat-panel";
 import type { DocSessionMessage } from "@/lib/api/sessions";
-const mocks = vi.hoisted(() => ({ fetch: vi.fn(), messages: vi.fn(), pending: vi.fn(), stop: vi.fn(), approval: vi.fn() }));
+import { conversationRegistry } from "@/lib/chat/conversation-registry";
+const mocks = vi.hoisted(() => ({ fetch: vi.fn(), messages: vi.fn(), pending: vi.fn(), status: vi.fn(), stop: vi.fn(), approval: vi.fn() }));
 vi.mock("@/lib/i18n/client", () => ({ useT: () => en, format: (text: string) => text }));
 vi.mock("@/lib/auth-fetch", () => ({ authFetch: (...args: unknown[]) => mocks.fetch(...args), getAccessToken: () => null }));
-vi.mock("@/lib/api/sessions", async importOriginal => ({ ...await importOriginal<typeof import("@/lib/api/sessions")>(), fetchSessionMessages: (...args: unknown[]) => mocks.messages(...args), stopTurn: (...args: unknown[]) => mocks.stop(...args) }));
+vi.mock("@/lib/api/sessions", async importOriginal => ({ ...await importOriginal<typeof import("@/lib/api/sessions")>(), fetchSessionMessages: (...args: unknown[]) => mocks.messages(...args), readChatTurnStatus: (...args: unknown[]) => mocks.status(...args), stopTurn: (...args: unknown[]) => mocks.stop(...args) }));
 vi.mock("@/lib/api/pending-questions", async importOriginal => ({ ...await importOriginal<typeof import("@/lib/api/pending-questions")>(), fetchPendingSessionInput: (...args: unknown[]) => mocks.pending(...args) }));
 vi.mock("@/lib/api/approvals", () => ({ respondByKind: (...args: unknown[]) => mocks.approval(...args) }));
 vi.mock("@/lib/api/usage", () => ({ getUsage: async () => ({ plan: "free" }) }));
@@ -21,6 +22,9 @@ vi.mock("@/components/chrome/chat-file-attachment", () => ({ ChatFileAttachments
 vi.mock("@/components/chrome/chat-confirmation-card", () => ({ ChatConfirmationCard: ({ confirmation, onApprove, onDeny, onAlwaysAllow }: { confirmation: { toolCallId: string; allowPersistentApproval?: boolean }; onApprove: (id: string) => void; onDeny: (id: string, comment: string) => void; onAlwaysAllow?: (id: string) => void }) => <div data-confirmation><button onClick={() => onApprove(confirmation.toolCallId)}>approve</button><button onClick={() => onDeny(confirmation.toolCallId, "Keep the draft")}>deny</button>{confirmation.allowPersistentApproval && <button onClick={() => onAlwaysAllow?.(confirmation.toolCallId)}>always</button>}</div> }));
 vi.mock("@/components/chrome/pending-question-panel", () => ({ PendingQuestionPanel: ({ approvalId }: { approvalId: string }) => <div data-question>{approvalId}</div> }));
 vi.mock("@/lib/recorder/dock-recorder-bridge", () => ({ registerDockRecorderChatTarget: () => () => {} }));
+// The rail is a presentation of the shared conversation controller, which is
+// scoped by the signed-in viewer (write authority).
+vi.mock("@/lib/user", async importOriginal => ({ ...await importOriginal<typeof import("@/lib/user")>(), getUserInfo: () => ({ id: "viewer-1", name: "Viewer", email: "viewer@example.com" }), subscribeUserInfo: () => () => {} }));
 let root: Root, host: HTMLDivElement;
 const frame = (event: string, data = {}) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 function source() {
@@ -38,12 +42,14 @@ async function send(text: string) {
 beforeEach(async () => {
   vi.clearAllMocks(); localStorage.clear();
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  mocks.status.mockReset().mockResolvedValue({ status: "idle", turnId: null });
   mocks.messages.mockResolvedValue([]); mocks.pending.mockResolvedValue({ pending: null, toolConfirmation: null }); mocks.stop.mockResolvedValue({}); mocks.approval.mockResolvedValue({ ok: true });
   mocks.fetch.mockImplementation(async () => new Response(frame("status", { status: "idle" }) + frame("done")));
   host = document.createElement("div"); document.body.append(host); root = createRoot(host);
   await mount();
 });
-afterEach(() => { act(() => root.unmount()); host.remove(); });
+// The registry is a renderer singleton: each case starts with no conversations.
+afterEach(() => { act(() => root.unmount()); host.remove(); conversationRegistry().disposeAll(); });
 describe("[COMP:app-web/feed-chat-stream] Feed panel", () => {
   it("quotes selected text from a persisted message, sends its reference and restores saved quotes", async () => {
     const id = crypto.randomUUID();
@@ -67,9 +73,11 @@ describe("[COMP:app-web/feed-chat-stream] Feed panel", () => {
   });
   it("attaches explicit passage context beside the composer for one turn and can remove it", async () => {
     const anchor = { target: { kind: 'block' as const, segmentId: crypto.randomUUID(), blockId: crypto.randomUUID() }, quote: 'Selected opening', sourceRevision: 4, state: 'attached' as const };
+    // Feed targets name real (UUID) draft sessions; the controller validates them.
+    const passage = crypto.randomUUID();
     function Attached() {
       const [selected, setSelected] = useState<typeof anchor | undefined>(anchor);
-      return <TuningChatPanel sessionId="passage" assistantId="writer" assistantName="Writer" workspaceId="workspace" ready feedTarget={{ sessionId: 'passage', revision: 5 }} feedSelection={selected} onClearFeedSelection={() => setSelected(undefined)} />;
+      return <TuningChatPanel sessionId={passage} assistantId="writer" assistantName="Writer" workspaceId="workspace" ready feedTarget={{ sessionId: passage, revision: 5 }} feedSelection={selected} onClearFeedSelection={() => setSelected(undefined)} />;
     }
     await act(async () => root.render(<Attached />));
     const chip = host.querySelector('[data-feed-selection-attachment]')!;
@@ -77,10 +85,10 @@ describe("[COMP:app-web/feed-chat-stream] Feed panel", () => {
     expect(chip.textContent).toContain(anchor.quote);
     mocks.fetch.mockImplementation(async () => new Response(frame('done')));
     await send('Tighten this');
-    expect(JSON.parse(mocks.fetch.mock.calls.at(-1)![1].body).feedTarget).toEqual({ sessionId: 'passage', revision: 4, target: anchor.target });
+    expect(JSON.parse(mocks.fetch.mock.calls.at(-1)![1].body).feedTarget).toEqual({ sessionId: passage, revision: 4, target: anchor.target });
     expect(host.querySelector('[data-feed-selection-attachment]')).toBeNull();
     await send('Back to the image');
-    expect(JSON.parse(mocks.fetch.mock.calls.at(-1)![1].body).feedTarget).toEqual({ sessionId: 'passage', revision: 5 });
+    expect(JSON.parse(mocks.fetch.mock.calls.at(-1)![1].body).feedTarget).toEqual({ sessionId: passage, revision: 5 });
     await act(async () => root.render(<Attached key="remove" />));
     await act(async () => host.querySelector<HTMLButtonElement>('[data-feed-selection-attachment] button')!.click());
     await send('Whole post instead');
@@ -90,7 +98,8 @@ describe("[COMP:app-web/feed-chat-stream] Feed panel", () => {
     const quotedId = crypto.randomUUID(); const userId = crypto.randomUUID();
     mocks.messages.mockResolvedValue([row(quotedId, 'Earlier image direction')]);
     const anchor = { target: { kind: 'block' as const, segmentId: crypto.randomUUID(), blockId: crypto.randomUUID() }, quote: 'First passage', sourceRevision: 4, state: 'attached' as const };
-    const render = async (selection: typeof anchor | undefined) => act(async () => root.render(<TuningChatPanel sessionId="retry-scope" assistantId="writer" assistantName="Writer" workspaceId="workspace" ready feedTarget={{ sessionId: 'retry-scope', revision: 4 }} feedSelection={selection} />));
+    const retryScope = crypto.randomUUID();
+    const render = async (selection: typeof anchor | undefined) => act(async () => root.render(<TuningChatPanel sessionId={retryScope} assistantId="writer" assistantName="Writer" workspaceId="workspace" ready feedTarget={{ sessionId: retryScope, revision: 4 }} feedSelection={selection} />));
     await render(anchor);
     await act(async () => host.querySelector<HTMLButtonElement>(`button[aria-label="${en.chatApp.reply}"]`)!.click());
     const direct = source(); mocks.fetch.mockResolvedValueOnce(direct.response);
@@ -100,7 +109,7 @@ describe("[COMP:app-web/feed-chat-stream] Feed panel", () => {
     const retry = source(); mocks.fetch.mockResolvedValueOnce(retry.response);
     const buttons = host.querySelectorAll<HTMLButtonElement>(`button[aria-label="${en.feedPage.tuningChat.retry}"]`);
     await act(async () => buttons[buttons.length - 1]!.click());
-    expect(JSON.parse(mocks.fetch.mock.calls.at(-1)![1].body)).toMatchObject({ truncateFromMessageId: userId, feedTarget: { sessionId: 'retry-scope', revision: 4, target: anchor.target }, replyTo: { id: quotedId, text: 'Earlier image direction' } });
+    expect(JSON.parse(mocks.fetch.mock.calls.at(-1)![1].body)).toMatchObject({ truncateFromMessageId: userId, feedTarget: { sessionId: retryScope, revision: 4, target: anchor.target }, replyTo: { id: quotedId, text: 'Earlier image direction' } });
     expect(host.querySelector('[data-feed-selection-attachment]')?.textContent).toContain('Different passage');
     await act(async () => { retry.send('done'); retry.close(); });
   });
@@ -125,7 +134,8 @@ describe("[COMP:app-web/feed-chat-stream] Feed panel", () => {
     const fileId = crypto.randomUUID();
     mocks.fetch.mockImplementation(async (url, init) => {
       if (String(url).endsWith("/api/files/upload")) return new Response(JSON.stringify({ files: [{ id: fileId }] }), { status: 200 });
-      if (String(url).endsWith("/api/chat") && init?.method === "POST") return new Response(frame("done"));
+      // The server accepts the turn (`session`) before it ends; chips detach on acceptance.
+      if (String(url).endsWith("/api/chat") && init?.method === "POST") return new Response(frame("session", { sessionId: "draft" }) + frame("done"));
       return new Response(frame("status", { status: "idle" }) + frame("done"));
     });
     const field = host.querySelector("textarea")!;
@@ -169,9 +179,11 @@ describe("[COMP:app-web/feed-chat-stream] Feed panel", () => {
     await send("Refine this");
     await act(async () => { direct.send("text_delta", { text: "Partial" }); direct.close(); });
     expect(mocks.fetch.mock.calls.at(-1)![0]).toMatch(/sessions\/draft\/stream$/);
+    mocks.status.mockResolvedValue({ status: "running", turnId: null });
     await act(async () => { follow.send("status", { status: "running" }); follow.send("snapshot", { text: "Complete preview", reasoning: "Checking the source" }); follow.send("snapshot", { text: "Complete preview", reasoning: "Checking the source" }); });
     expect(host.textContent?.match(/Complete preview/g)).toHaveLength(1);
     mocks.messages.mockResolvedValue([row("u", "Refine this", "user"), row("a", "Full persisted answer")]);
+    mocks.status.mockResolvedValue({ status: "idle", turnId: null });
     await act(async () => { follow.send("turn_completed"); follow.send("done"); follow.close(); });
     expect(host.textContent).toContain("Full persisted answer");
     expect(host.textContent).not.toContain("Complete preview");
@@ -222,6 +234,11 @@ describe("[COMP:app-web/feed-chat-stream] Feed panel", () => {
     await act(async () => direct.close());
     expect(mocks.fetch.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(2);
     mocks.messages.mockResolvedValue([row("u", "Refine this", "user"), row("q", "Keep the example", "user"), row("a", "Updated")]);
+    // The authoritative fresh reads agree with the running legacy activity;
+    // only the fourth (done) read observes idle.
+    mocks.status.mockResolvedValueOnce({ status: "running", turnId: null })
+      .mockResolvedValueOnce({ status: "running", turnId: null })
+      .mockResolvedValueOnce({ status: "running", turnId: null });
     await act(async () => {
       follow.send("status", { status: "running" });
       follow.send("activity", { event: "input_applied", inputId: queuedBody.inputId, messageId: "q" });
@@ -238,12 +255,14 @@ describe("[COMP:app-web/feed-chat-stream] Feed panel", () => {
     await send("Refine this");
     await act(async () => direct.close());
     let resolve!: () => void;
-    mocks.stop.mockImplementation(() => new Promise<void>(done => { resolve = done; }));
+    mocks.stop.mockImplementation(() => new Promise<{ stopped: boolean }>(done => { resolve = () => done({ stopped: true }); }));
     await act(async () => host.querySelector<HTMLButtonElement>(`button[title="${en.feedPage.tuningChat.stop}"]`)!.click());
-    expect(mocks.stop).toHaveBeenCalledWith("draft");
+    expect(mocks.stop).toHaveBeenCalledWith("draft", null);
     expect(host.querySelector(`button[title="${en.feedPage.tuningChat.stop}"]`)).not.toBeNull();
     mocks.fetch.mockImplementation(async () => new Response(frame("done")));
     await act(async () => resolve());
+    // A followed turn settles on the relay's own completion, not locally.
+    await act(async () => { follow.send("turn_completed", { reason: "stopped_by_user" }); follow.send("done"); follow.close(); });
     expect(host.querySelector(`button[title="${en.feedPage.tuningChat.stop}"]`)).toBeNull();
   });
   it("shows a recovery refusal without resending and permits an explicit GET retry", async () => {

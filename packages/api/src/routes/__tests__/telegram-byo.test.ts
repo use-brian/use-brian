@@ -47,7 +47,7 @@ import { channelUserErrorText } from '../_channel-error-text.js'
 import { AuthorityChangedError } from '../../context-scope/authority-lease.js'
 import type { ChannelHooks } from '../channel-pipeline.js'
 import type { OutgoingMessage } from '@use-brian/channels'
-import type { ToolConfirmationRequest, ConfirmationResolver } from '@use-brian/core'
+import type { ToolConfirmationRequest, ConfirmationResolver } from '@use-brian/agent-runtime/mcp/types.js'
 
 /**
  * [COMP:api/telegram-byo-route]
@@ -1217,7 +1217,7 @@ describe('[COMP:api/telegram-byo-route] voice note without a transcript', () => 
   }
 
   it('defers voice question admission until transcription instead of rejecting an empty answer', async () => {
-    const core = await import('@use-brian/core')
+    const core = await import('@use-brian/core/media/preflight.js')
     const transcribe = vi.spyOn(core, 'transcribeFirstAudio').mockResolvedValue({ text: 'spoken answer', usage: null, model: 'test' })
     const store = { find: vi.fn(async () => []), isQuestionMessage: vi.fn(async () => true),
       create: vi.fn(), attach: vi.fn(), consume: vi.fn() } satisfies ChannelQuestionStore

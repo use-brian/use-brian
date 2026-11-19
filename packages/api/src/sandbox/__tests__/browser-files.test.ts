@@ -1,13 +1,8 @@
 import { describe, it, expect, vi } from 'vitest'
-vi.mock('@use-brian/core', async () => ({
-  ...(await import('../../../../core/src/security/sensitivity.js')),
-  ...(await import('../../../../core/src/security/context-scope.js')),
-  workspaceFilesCtxFor: (await import('../../../../core/src/workspace-files/tool-helpers.js')).ctxFor,
-}))
 import { createBrowserFileBridge } from '../browser-files.js'
-import { ContextScopeAccumulator } from '../../../../core/src/security/context-scope.js'
-import type { FilesApi, FilesContext } from '../../../../core/src/workspace-files/api.js'
-import type { ToolContext } from '../../../../core/src/tools/types.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { FilesApi, FilesContext } from '@use-brian/core/workspace-files/api.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 function fixture() {
   const file = { id: 'file', path: '/workspace.txt', mime: 'text/plain', sizeBytes: 3,

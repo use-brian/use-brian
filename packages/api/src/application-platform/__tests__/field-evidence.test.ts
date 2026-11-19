@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import type { PoolClient } from 'pg'
-import { bindScopeSource, boundScopeSources, type ApplicationOperationContext, type ScopeSource } from '@use-brian/core'
+import type { ApplicationOperationContext } from '@use-brian/core/application-platform/contracts.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { bindScopeSource, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import type { ApplicationRecordProjection } from '@use-brian/shared'
 import { bindApplicationFieldProjection, readApplicationFieldAncestors } from '../field-evidence.js'
 

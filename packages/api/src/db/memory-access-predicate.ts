@@ -9,7 +9,7 @@
  * Component tag: [COMP:brain/client-self-memory].
  */
 
-import type { AccessContext } from '@use-brian/core'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import {
   buildAccessPredicate,
   buildExecutionVisibilityPredicate,

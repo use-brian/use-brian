@@ -4,7 +4,7 @@
  * [COMP:brain/linkedin-import]
  */
 
-import type { FilesApi, FilesContext } from '@use-brian/core'
+import type { FilesApi, FilesContext } from '@use-brian/core/workspace-files/api.js'
 
 import { findUserById } from '../db/users.js'
 import { getOrCreateSelfEntity } from '../db/entities-store.js'

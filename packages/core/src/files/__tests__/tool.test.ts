@@ -1,4 +1,4 @@
-import { bindScopeSource } from '../../security/source-evidence.js'
+import { bindScopeSource } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { describe, it, expect, vi } from 'vitest'
 import { createReadFileTool } from '../tool.js'
 import type { FileStore, CachedFile } from '../types.js'

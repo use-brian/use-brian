@@ -24,8 +24,10 @@
  * Component tag: [COMP:scheduling/trigger-orchestration].
  */
 
-import type { ScheduledJob, JobExecutor, JobStore, AnalyticsLogger } from '@use-brian/core'
-import { sanitize as sanitizeAnalytics } from '@use-brian/core'
+import type { AnalyticsLogger } from '@use-brian/core/analytics/logger.js'
+import type { JobExecutor } from '@use-brian/core/scheduling/poll-worker.js'
+import type { ScheduledJob, JobStore } from '@use-brian/core/scheduling/types.js'
+import { sanitize as sanitizeAnalytics } from '@use-brian/core/analytics/logger.js'
 
 export type JobExecutorOptions = {
   /** Trigger-row store — nag state, parent lookups. */

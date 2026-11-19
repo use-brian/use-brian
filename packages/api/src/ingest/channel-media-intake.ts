@@ -18,7 +18,7 @@
 import type { CreateEpisodeInput, EpisodeRecord, EpisodeSensitivity } from '../db/episodes-store.js'
 import type { Recording } from '../db/recordings-store.js'
 import { buildChannelSessionKey } from '../db/pending-recording-confirmations-store.js'
-import { isStructuredDocument } from '@use-brian/core'
+import { isStructuredDocument } from '@use-brian/core/files/document-formats.js'
 
 export type ChannelMediaScope = { sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[] }
 

@@ -16,7 +16,8 @@
  * Component tag: [COMP:api/workspace-tool-policy-store].
  */
 
-import type { McpSettingsStore, McpToolSetting, ToolClassification } from '@use-brian/core'
+import type { ToolClassification } from '@use-brian/agent-runtime/mcp/classifier.js'
+import type { McpSettingsStore, McpToolSetting } from '@use-brian/agent-runtime/mcp/types.js'
 import { query } from './client.js'
 
 export type WorkspaceToolPolicy = {

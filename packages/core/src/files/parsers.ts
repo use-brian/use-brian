@@ -3,7 +3,6 @@
  * Convert supported documents to model-facing Markdown or native media data.
  */
 import { MAX_DRAWING_BYTES, parseLibrary } from '@use-brian/shared/drawing'
-import { estimateStringTokens } from '../compaction/compact.js'
 import {
   detectDocumentFormat,
   documentFamily,
@@ -12,11 +11,15 @@ import {
   type DocumentFormat,
 } from './document-formats.js'
 import { stripDataUris } from './data-uri.js'
-import { isHtmlFile, parseHtmlToMarkdown } from './html.js'
+import { lazyImplementation } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
 import { OfficeArchiveLimitError } from './office-archive-safety.js'
 import { parsePptxToMarkdown } from './pptx.js'
 import { parseXlsxToMarkdown } from './xlsx.js'
 import type { Format as AnyDocFormat } from '@firecrawl/anydoc'
+
+// The HTML converter (Turndown) loads on the first file that reaches the
+// HTML check, not when the parsers are imported (M4 step 5, D13).
+const loadHtmlConverter = lazyImplementation('The HTML to Markdown converter (Turndown)', () => import('./html.js'))
 
 const PPTX_MIME =
   'application/vnd.openxmlformats-officedocument.presentationml.presentation'
@@ -261,6 +264,7 @@ async function parseFileContentInner(
   // scripts and all — as if it were the document. Placed after byte detection
   // so a mislabeled Office payload named `.html` still parses as what it is.
   // See ./html.ts for what the raw-markup path cost in production.
+  const { isHtmlFile, parseHtmlToMarkdown } = await loadHtmlConverter()
   if (isHtmlFile(mimeType, fileName)) {
     const text = parseHtmlToMarkdown(buffer.toString('utf-8'))
     if (!text) {
@@ -312,9 +316,4 @@ export async function parseFileContent(
   return text === parsed.text ? parsed : { ...parsed, text }
 }
 
-/** Determine whether model-facing text is small enough to inline. */
-const INLINE_TOKEN_THRESHOLD = 5000
-
-export function shouldInline(text: string): boolean {
-  return estimateStringTokens(text) <= INLINE_TOKEN_THRESHOLD
-}
+export { shouldInline } from './inline-content.js'

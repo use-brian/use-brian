@@ -18,7 +18,7 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '../types.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import {
   type Json,
   type ConnectorFailureKind,

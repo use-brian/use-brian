@@ -8,6 +8,7 @@
   "include": ["src"],
   "references": [
     { "path": "../shared" },
+    { "path": "../agent-runtime" },
     { "path": "../office-model" },
     { "path": "../office-renderer" }
   ]

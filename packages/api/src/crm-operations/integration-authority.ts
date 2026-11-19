@@ -2,10 +2,14 @@
  * [COMP:api/crm-integration-auth]
  */
 import type { PoolClient } from 'pg'
+import { requireCrmIntegrationResources } from '@use-brian/core/crm/integration-authority.js'
 import {
-  CrmOperationsError, CrmSegmentPredicateSchema, requireCrmIntegrationResources, assertCrmOperationsAuthority,
-  type CrmOperationsCommand, type CrmOperationsContext,
-} from '@use-brian/core'
+  CrmOperationsError,
+  assertCrmOperationsAuthority,
+  type CrmOperationsCommand,
+  type CrmOperationsContext,
+} from '@use-brian/core/crm/operations-types.js'
+import { CrmSegmentPredicateSchema } from '@use-brian/core/crm/segments.js'
 import { lockCrmIntegrationCredential } from '../db/crm-integration-store.js'
 
 export async function authorizeCrmIntegrationCommand(client: PoolClient, context: CrmOperationsContext, command: CrmOperationsCommand): Promise<void> {

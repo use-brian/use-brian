@@ -135,6 +135,7 @@ export type SlackAdapterOptions = {
    * socket bypasses the tool layer).
    */
   onOutboundAudit?: (event: SlackOutboundAudit) => Promise<void>
+  beforePostMessage?: () => Promise<void>
 }
 
 export type { SlackOutboundAudit }
@@ -145,6 +146,7 @@ export function createSlackAdapter(options: SlackAdapterOptions): ChannelAdapter
   const api = createSlackApi({
     botToken: options.botToken,
     onOutboundAudit: options.onOutboundAudit,
+    beforePostMessage: options.beforePostMessage,
   })
   const config = options.config ?? {}
   const requireMention = config.requireMention ?? true

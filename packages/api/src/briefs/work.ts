@@ -26,7 +26,7 @@ import {
   type TaskHome,
   type WorkNextAction,
   type WorkReason,
-} from '@use-brian/core'
+} from '@use-brian/core/tasks/responsibility.js'
 import { buildAccessPredicate } from '../db/access-predicate.js'
 import { query, queryGated, queryWithRLS } from '../db/client.js'
 import { resolveWorkspaceViewpoint } from '../db/workspace-viewpoint.js'

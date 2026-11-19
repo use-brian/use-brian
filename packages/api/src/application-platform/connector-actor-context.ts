@@ -1,6 +1,6 @@
 /** Host-only request-bound actor minting. No model/header-derived identity. [COMP:api/connector-actor-context] */
 import { randomBytes, sign, type KeyObject } from 'node:crypto'
-import type { ExecutionContext } from '@use-brian/core'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { ApplicationPlatformError } from '@use-brian/shared'
 import { CONNECTOR_ACTOR_LIFETIME_SECONDS, CONNECTOR_ACTOR_TYPE, CONNECTOR_ACTOR_VERSION,
   connectorRequestBinding, parseConnectorActorClaims, type ConnectorActor, type ConnectorActorClaims,

@@ -3,7 +3,7 @@ import { createRequire } from 'node:module'
 import { createElement, type ComponentType, type ReactElement, type ReactNode } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
-import { a2uiWidgetSchema } from '@use-brian/core/dist/views/a2ui.js'
+import { a2uiWidgetSchema } from '@use-brian/core/views/a2ui.js'
 import { ChartLine } from '../widgets/ChartLine.js'
 import type { LineChartWidget } from '../types.js'
 

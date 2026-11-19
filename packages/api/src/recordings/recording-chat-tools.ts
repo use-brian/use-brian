@@ -27,15 +27,12 @@
 // actor from the ToolContext per call so read ceilings hold on every path.
 
 import { z } from 'zod'
-import {
-  buildTool,
-  actorFromContext,
-  type AccessContext,
-  type CrmStore,
-  type Embedder,
-  type Tool,
-  scopeEvidenceFromRows,
-} from '@use-brian/core'
+import type { CrmStore } from '@use-brian/core/crm/types.js'
+import type { Embedder } from '@use-brian/core/embeddings/embedder.js'
+import { actorFromContext } from '@use-brian/core/retrieval/tools.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import { scopeEvidenceFromRows } from '@use-brian/agent-runtime/security/context-scope.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import {
   listRecordingSpeakerLabels,
   searchRecording as searchRecordingFn,

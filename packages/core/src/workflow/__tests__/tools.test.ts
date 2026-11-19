@@ -11,7 +11,7 @@ import type {
   WorkflowStepRunRecord,
   WorkflowStore,
 } from '../types.js'
-import { buildTool, type Tool, type ToolContext } from '../../tools/types.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import type { ConsultRequest, ConsultResponse, ConsultTransport } from '../../a2a/types.js'
 import type { JobStore, ScheduledJob } from '../../scheduling/types.js'
 import type { DeliverToChannel } from '../executor.js'

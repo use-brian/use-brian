@@ -4,9 +4,12 @@ import type { WorkspaceMcpConsent } from '../workspace-mcp/consent.js'
  * executor.
  *
  * Returns `firstParty ∪ mcpTools` as a single `Map<string, Tool>`. The
- * `injectMcpTools` call resolves each MCP tool's effective policy and:
- *   - skips `block`-policy tools (not added to the map)
- *   - sets `resolveConfirmation` on `ask` / `allow` tools so the executor
+ * capability catalog (`prepareComposedCatalog`, `workflow` surface profile)
+ * admits the run's connectors and descriptors with metadata reads only;
+ * `applyDirectCapabilities` then activates them by name through the provider
+ * modules, which resolve each tool's effective policy and:
+ *   - skip `block`-policy tools (not added to the map)
+ *   - set `resolveConfirmation` on `ask` / `allow` tools so the executor
  *     can fail-fast on `ask` (Phase A) or pause for approval (Phase C).
  *
  * Built-in tools that declare `requiresConfirmation` (the KB write pair) ride
@@ -19,9 +22,16 @@ import type { WorkspaceMcpConsent } from '../workspace-mcp/consent.js'
  * [COMP:workflow/mcp-bridge]
  */
 
-import type { Tool, KnowledgeStoreInterface, KnowledgeRepoWriter, GDriveFilesStore, McpSettingsStore, FilesApi, EngineHooks, TurnScope } from '@use-brian/core'
+import type { KnowledgeStoreInterface, KnowledgeRepoWriter } from '@use-brian/core/knowledge/types.js'
+import type { GDriveFilesStore } from '@use-brian/core/tools/base/gdrive-files.js'
+import type { FilesApi } from '@use-brian/core/workspace-files/api.js'
+import type { EngineHooks } from '@use-brian/agent-runtime/engine/hooks.js'
+import type { McpSettingsStore } from '@use-brian/agent-runtime/mcp/types.js'
+import type { TurnScope } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { buildSourceServiceWorkflowTools } from './source-service.js'
-import { injectMcpTools } from '../mcp/inject.js'
+import { surfaceProfile } from '../mcp/catalog.js'
+import { applyDirectCapabilities, prepareComposedCatalog } from '../mcp/composition.js'
 import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
@@ -41,9 +51,9 @@ export type WorkflowToolRegistryDeps = {
   /**
    * KB source write-back port. Present ⇒ a `tool_call` step may write the
    * knowledge base, gated by the executor's approval pause (see the
-   * `allowKnowledgeWrites` note at the injection call). Absent ⇒ only
-   * manual-KB updates are reachable, and repo-backed writes are not exposed
-   * at all (`injectMcpTools` requires the port to emit them).
+   * knowledge-writes note at the catalog call). Absent ⇒ only manual-KB
+   * updates are reachable, and repo-backed writes are not exposed at all (the
+   * catalog requires the port to emit them).
    */
   knowledgeRepoWriter?: KnowledgeRepoWriter
   gdriveFilesStore?: GDriveFilesStore
@@ -94,8 +104,8 @@ export async function buildWorkflowToolRegistry(
 ): Promise<Map<string, Tool> & { discoveryWarnings?: readonly string[] }> {
   if(scope.turnScope){const service=await buildSourceServiceWorkflowTools(scope.turnScope);if(service)return service}
   // Start from a fresh shallow copy so first-party tool entries aren't
-  // mutated (injectMcpTools attaches a `resolveConfirmation` closure to
-  // any tool it touches; we never want that on the boot-time entries).
+  // mutated (activation attaches a `resolveConfirmation` closure to any tool
+  // it builds; we never want that on the boot-time entries).
   const tools = new Map<string, Tool>(deps.firstParty)
 
   // For scheduled triggers there is no user. Fall back to the workflow's
@@ -111,48 +121,47 @@ export async function buildWorkflowToolRegistry(
     return tools
   }
 
-  // The MCP injection mutates `tools` in place. Block-policy tools are
-  // skipped; ask-policy tools get a `resolveConfirmation` closure that
-  // the executor checks before invoking.
+  // The direct activation mutates `tools` in place. Block-policy tools are
+  // skipped; ask-policy tools get a `resolveConfirmation` closure that the
+  // executor checks before invoking.
   //
-  // `keepBuiltinsDirect: true` — preserves the workflow executor's
-  // ability to inspect each built-in's `requiresConfirmation` and route
-  // ask-policy pauses through the `kind='workflow_step'` unified-approvals
-  // surface + per-step permission grants. Routing built-ins through
-  // `mcp_call` would hide those flags from the executor.
+  // The `workflow` profile keeps built-ins direct: the workflow executor
+  // inspects each built-in's `requiresConfirmation` and routes ask-policy
+  // pauses through the `kind='workflow_step'` unified-approvals surface +
+  // per-step permission grants. Routing built-ins through `mcp_call` would
+  // hide those flags from the executor.
   //
-  // `keepDynamicToolsDirect: true` adds server-side registry adapters for
+  // It also keeps dynamic tools direct: server-side registry adapters for
   // custom HTTP/CLI tools. A deterministic tool_call cannot perform a model
   // search/call sequence, and the adapter keeps policy + hooks intact while
   // exposing the metadata the workflow approval gate needs. See
   // docs/architecture/integrations/mcp.md → "Tool search pattern" and
   // docs/architecture/features/workflow.md → "Unified approvals".
-  const injection = await injectMcpTools({
-    userId: scope.userId,
-    assistantId: scope.assistantId,
-    tools,
-    connectorStore: deps.connectorStore,
-    settingsStore: deps.settingsStore,
-    assistantConnectorStore: deps.assistantConnectorStore,
-    userTimezone: scope.userTimezone,
-    knowledgeStore: deps.knowledgeStore,
-    gdriveFilesStore: deps.gdriveFilesStore,
-    connectorGrantStore: deps.connectorGrantStore,
-    connectorInstanceStore: deps.connectorInstanceStore,
-    workspaceToolPolicyStore: deps.workspaceToolPolicyStore,
-    assistantTeamId: scope.workspaceId,
+  const composed = await prepareComposedCatalog({
+    // A consented workspace-MCP run narrows the folded dynamic sources to the
+    // consented operation names; the profile can never be widened.
+    profile: surfaceProfile('workflow', scope.workspaceConsent ? { restrictSearchToToolNames: scope.workspaceConsent.operationNames } : {}),
+    assistant: { id: scope.assistantId, workspaceId: scope.workspaceId },
+    connectorUserId: scope.userId,
+    contextScope: scope.turnScope,
     bindingMaximum: scope.workspaceConsent?.connectorBindings,
-    restrictSearchToToolNames: scope.workspaceConsent?.operationNames,
-    keepBuiltinsDirect: true,
-    keepDynamicToolsDirect: true,
-    // KB writes ARE exposed here, and are governed by the executor's own
-    // approval pause rather than a chat Approve/Deny card. Both write tools
-    // carry `requiresConfirmation: true`, and `keepBuiltinsDirect` (above) is
-    // what keeps that flag visible to the executor: `dispatchToolCall` reads
-    // it, routes to `askPolicyOutcome`, and — with `deps.requestApproval`
-    // wired — pauses the run on a `kind='workflow_step'` approval carrying
-    // frozen arguments. So a workflow never writes the KB unattended; it
-    // parks in the Approvals inbox exactly like an ask-policy MCP tool.
+    stores: {
+      connectorStore: deps.connectorStore,
+      connectorInstanceStore: deps.connectorInstanceStore,
+      connectorGrantStore: deps.connectorGrantStore,
+      assistantConnectorStore: deps.assistantConnectorStore,
+    },
+    // No grants store wired (legacy call sites, tests) ⇒ no grant filter, as before.
+    actionGrantReader: deps.assistantConnectorGrantsStore ? undefined : null,
+    // KB writes ARE exposed here (the `workflow` profile's knowledge writes),
+    // and are governed by the executor's own approval pause rather than a chat
+    // Approve/Deny card. Both write tools carry `requiresConfirmation: true`,
+    // and the direct profile (above) is what keeps that flag visible to the
+    // executor: `dispatchToolCall` reads it, routes to `askPolicyOutcome`, and
+    // — with `deps.requestApproval` wired — pauses the run on a
+    // `kind='workflow_step'` approval carrying frozen arguments. So a workflow
+    // never writes the KB unattended; it parks in the Approvals inbox exactly
+    // like an ask-policy MCP tool.
     //
     // This is what makes the `knowledge` event source a closed loop: an entry
     // changes → a workflow wakes → it drafts an edit → a human approves it.
@@ -163,14 +172,26 @@ export async function buildWorkflowToolRegistry(
     // `allowKnowledgeWrites: false`), so a KB write there would have no gate.
     // Author the decision as an `assistant_call` and the write as a
     // `tool_call`.
-    allowKnowledgeWrites: true,
-    knowledgeWriteAuthorization: 'workflow',
-    knowledgeRepoWriter: deps.knowledgeRepoWriter,
-    filesApi: deps.filesApi,
-    engineHooks: deps.engineHooks,
-    assistantConnectorGrantsStore: deps.assistantConnectorGrantsStore,
-    contextScope: scope.turnScope,
+    ...(deps.knowledgeStore ? { knowledge: { store: deps.knowledgeStore, repoWriter: deps.knowledgeRepoWriter } } : {}),
+    composition: {
+      stores: {
+        connectorStore: deps.connectorStore,
+        settingsStore: deps.settingsStore,
+        assistantConnectorStore: deps.assistantConnectorStore,
+        connectorGrantStore: deps.connectorGrantStore,
+        connectorInstanceStore: deps.connectorInstanceStore,
+        workspaceToolPolicyStore: deps.workspaceToolPolicyStore,
+        assistantConnectorGrantsStore: deps.assistantConnectorGrantsStore,
+        gdriveFilesStore: deps.gdriveFilesStore,
+        knowledgeStore: deps.knowledgeStore,
+        knowledgeRepoWriter: deps.knowledgeRepoWriter,
+      },
+      userTimezone: scope.userTimezone,
+      attachments: { filesApi: deps.filesApi },
+      hosted: { engineHooks: deps.engineHooks },
+    },
   })
+  const unavailable = await applyDirectCapabilities(tools, composed, { settingsStore: deps.settingsStore, hooks: deps.engineHooks })
 
   if (scope.workspaceConsent) for (const name of tools.keys()) if (!scope.workspaceConsent.operationNames.includes(name)) tools.delete(name)
   stripOrchestrationTools(tools)
@@ -183,5 +204,5 @@ export async function buildWorkflowToolRegistry(
   }) : tools
   // Preserve discovery diagnostics through access binding so a missing tool
   // reports the scope/policy limitation rather than suggesting reconnection.
-  return Object.assign(registry, { discoveryWarnings: injection.unavailable })
+  return Object.assign(registry, { discoveryWarnings: unavailable })
 }

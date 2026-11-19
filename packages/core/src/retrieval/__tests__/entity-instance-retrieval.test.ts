@@ -28,7 +28,7 @@ import type {
   SearchData,
   SearchResultRow,
 } from '../types.js'
-import type { ToolContext } from '../../tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const WORKSPACE_ID = 'ws-1'
 const USER_ID = 'user-1'

@@ -1,6 +1,6 @@
 import { z } from 'zod'
-import { maxSensitivity } from '../security/sensitivity.js'
-import type { ScopeEvidence } from '../security/context-scope.js'
+import { maxSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import type { ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
 
 const sensitivity = z.enum(['public', 'internal', 'confidential'])
 const labels = z.array(z.string().min(1))

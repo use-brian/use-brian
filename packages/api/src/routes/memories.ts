@@ -28,9 +28,13 @@ import { getSoulContext } from '../db/scoped-summary-store.js'
 
 import { Router,type Request,type Response } from 'express'
 import {ApplicationPlatformError} from '@use-brian/shared'
-import {ContextScopeAccumulator,DerivedScopeError,scopeEvidenceFromRows,executionToolContext,type AccessContext,type SessionContextAuthority} from '@use-brian/core'
+import type {SessionContextAuthority} from '@use-brian/core/memory/session-state-types.js'
+import type {AccessContext} from '@use-brian/agent-runtime/security/access-context.js'
+import {ContextScopeAccumulator, scopeEvidenceFromRows} from '@use-brian/agent-runtime/security/context-scope.js'
+import {DerivedScopeError} from '@use-brian/agent-runtime/security/derived-scope.js'
+import {executionToolContext} from '@use-brian/agent-runtime/security/execution-context.js'
 import {resolveNativeApplicationModuleExecution} from '../application-platform/native-module-runtime.js'
-import {assertSourceModelOutputAuthority} from '../application-platform/model-source-authority.js'
+import {admitModelOutput} from '../context-scope/admission.js'
 import {SourceProtocolError} from '@use-brian/brian-app/connector'
 import {isAuthorityChangedError} from '../context-scope/authority-lease.js'
 import {
@@ -88,7 +92,7 @@ async function resolveViewerRead(req:Request,assistantId:string):Promise<Session
 }
 async function admitViewerRead(authority:SessionContextAuthority,value:object):Promise<void>{
  authority.accumulator.note(scopeEvidenceFromRows([value]))
- await assertSourceModelOutputAuthority({...executionToolContext(authority.execution,{appId:'native-memory-read'}),scopeAccumulator:authority.accumulator})
+ await admitModelOutput({...executionToolContext(authority.execution,{appId:'native-memory-read'}),scopeAccumulator:authority.accumulator})
 }
 
 /** Keep native credential refusal distinct from unavailable Memory authority. */

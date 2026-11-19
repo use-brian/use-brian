@@ -17,7 +17,7 @@
 import { randomUUID } from 'node:crypto'
 import type { WorkflowDefinition, WorkflowModelAlias, WorkflowStore, WorkflowTrigger } from './types.js'
 import type { ResearchDepthConfig } from '../engine/research-depth.js'
-import type { AuthoringAuthority } from '../security/access-ceiling.js'
+import type { AuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
 
 /**
  * Default model tier for a scheduled-job reminder's agentic turn. Scheduled

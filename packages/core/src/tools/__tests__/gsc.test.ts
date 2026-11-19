@@ -5,7 +5,7 @@ import {
   createSearchConsoleTools,
   type SearchConsoleToolsApi,
 } from '../base/gsc.js'
-import type { ToolContext } from '../types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const ctx = {
   userId: 'test-user',

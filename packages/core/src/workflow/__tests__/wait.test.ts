@@ -22,7 +22,7 @@ import type {
   WorkflowStepRunRecord,
   WorkflowStore,
 } from '../types.js'
-import { buildTool, type Tool } from '../../tools/types.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import type { ConsultRequest, ConsultResponse, ConsultTransport } from '../../a2a/types.js'
 
 const WORKSPACE_ID = '00000000-0000-0000-0000-000000000001'

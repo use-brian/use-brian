@@ -17,7 +17,10 @@
 import type { PoolClient } from 'pg'
 import { randomUUID } from 'node:crypto'
 import { resolveGroupAudienceSystem, DeliveryAudienceUnverifiedError } from '../context-scope/delivery-authority.js'
-import { maxSensitivity, scopeGrantContains, type AccessCeiling, type ResourceScope } from '@use-brian/core'
+import type { AccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import { scopeGrantContains } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ResourceScope } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { maxSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { getPool, query } from '../db/client.js'
 import { readSessionById, type Session, type SessionMessage } from '../db/sessions.js'
 import { sessionKindSql, transportPolicy, type Transport } from '../session-kind.js'
@@ -137,13 +140,20 @@ export async function findOrCreateChannelRoom(params: ChannelRoomBinding & {
   return { room, created }
 }
 
-async function findChannelRoom(params: { workspaceId: string; channelType: string; channelId: string }): Promise<Session | null> {
+async function findChannelRoomId(params: { workspaceId: string; channelType: string; channelId: string }, includeHeldAddress=false): Promise<string | null> {
+  const shape=includeHeldAddress ? sessionKindSql.channelRoomDeliveryAddress('s') : sessionKindSql.activeChannelRoom('s')
   const row = (await query<{ id: string }>(
     `SELECT s.id FROM sessions s
-      WHERE s.workspace_id = $1 AND s.channel_type = $2 AND s.channel_id = $3 AND ${sessionKindSql.activeChannelRoom('s')}`,
+      WHERE s.workspace_id = $1 AND s.channel_type = $2 AND s.channel_id = $3 AND ${shape}
+      ${includeHeldAddress ? 'ORDER BY s.recording_privacy_held,s.id LIMIT 1' : ''}`,
     [params.workspaceId, params.channelType, params.channelId],
   )).rows[0]
-  return row ? readSessionById(row.id) : null
+  return row?.id ?? null
+}
+
+async function findChannelRoom(params: { workspaceId: string; channelType: string; channelId: string }): Promise<Session | null> {
+  const id=await findChannelRoomId(params)
+  return id ? readSessionById(id) : null
 }
 
 async function insertRoom(client: PoolClient, params: ChannelRoomBinding & {
@@ -440,6 +450,14 @@ export async function findRoomForDelivery(params: {
 }): Promise<Session | null> {
   if (!transportPolicy(params.channelType as Transport).rooms.converge) return null
   return findChannelRoom(params)
+}
+
+/** Resolve the delivery address before checking its readability. A held room
+ * still owns the address and must reach the writer's current audience check. */
+export async function findRoomDeliveryAddress(params: Parameters<typeof findRoomForDelivery>[0]) {
+  if (!transportPolicy(params.channelType as Transport).rooms.converge) return null
+  const id=await findChannelRoomId(params,true)
+  return id ? {id,anchorKind:'channel' as const} : null
 }
 
 /** A reconnect of the same integration AND same bot renews generation through

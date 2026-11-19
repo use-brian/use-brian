@@ -7,6 +7,7 @@ import { requireAuth } from '../../auth/middleware.js'
 import { createTokens } from '../../auth/jwt.js'
 import { authSessionStore } from '../auth-session-store.js'
 import { captureAuthoringAuthoritySystem } from '../../context-scope/workflow-authority.js'
+import type { ContextReadinessCheckId } from '../../context-scope/context-readiness.js'
 import { getPool, getAppPool, runWithAgentAccess } from '../client.js'
 import { createDbWorkflowStore, createDbWorkflowRunStore } from '../workflow-store.js'
 import { createDbGoalStore } from '../goals-store.js'
@@ -185,6 +186,13 @@ describe('operational AUTHORING admission (real PostgreSQL)', () => {
   })
 })
 
+const READY_CHECK_IDS: ContextReadinessCheckId[] = [
+  'row_store_coverage', 'turn_entry_points', 'write_inheritance', 'session_isolation',
+  'teamspace_agent_access', 'connectors', 'ingest', 'background_lanes',
+  'derived_writes', 'delegation', 'operation_separation', 'replay_delivery',
+  'grant_expiry', 'org_references', 'scope_review',
+]
+
 /** Real JWT verification, revocable session ledger, route, and canonical insert. */
 async function restFixture(mode: 'simple' | 'departments' = 'simple') {
   const f = await fixture(mode)
@@ -208,7 +216,10 @@ async function restFixture(mode: 'simple' | 'departments' = 'simple') {
         (await pool.query('SELECT role FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [workspaceId, userId])).rows[0]?.role ?? null } as never,
       // Activation/review is a separate precondition, covered by route unit
       // tests. This fixture tests already-ready authoring without activating.
-      getContextReadiness: async () => ({ enforcementVersion: 2, readyForActivation: true, checks: [], legacyGeneral: {} } as never),
+      // The binding gate requires each blocking check by id (96aae4a27), not
+      // the aggregate flag, so the fixture supplies complete ready evidence.
+      getContextReadiness: async () => ({ enforcementVersion: 2, readyForActivation: true, legacyGeneral: {},
+        checks: READY_CHECK_IDS.map(id => ({ id, ready: true, blocking: true, detail: 'Fixture evidence' })) }),
       resolveAuthoringAuthority: (params, captureInTransaction) => legacyCapture({ ...params, assistantId: f.assistant }, captureInTransaction),
       jobStore: { create: jobCreate } as never, resolvePrimary: async () => f.assistant,
     }))
@@ -633,7 +644,12 @@ describe('authenticated workflow REST authoring (real JWT + PostgreSQL)', () => 
       // only ever returns a receipt to the actor it was minted for.
       await app.query('BEGIN')
       await app.query("SELECT set_config('app.current_user_id',$1,true)", [f.owner])
-      expect((await app.query('SELECT * FROM workflow_schedule_edit_reviews')).rowCount).toBe(0)
+      // Migration 647 revokes every app_user privilege on the receipt table
+      // (and gives it no permissive policy for a later blanket grant), so a
+      // direct read is refused outright.
+      await app.query('SAVEPOINT direct_receipt_read')
+      await expect(app.query('SELECT * FROM workflow_schedule_edit_reviews')).rejects.toMatchObject({ code: '42501' })
+      await app.query('ROLLBACK TO SAVEPOINT direct_receipt_read')
       expect((await app.query('SELECT * FROM workflow_schedule_review_claim($1,$2,$3)', [review.body.reviewId, created.body.id, f.session.id])).rowCount).toBe(0)
       await expect(app.query('SELECT workflow_schedule_review_mark_applied($1)', [review.body.reviewId])).rejects.toThrow(/workflow_schedule_review_stale/)
     } finally { await app.query('ROLLBACK'); app.release() }

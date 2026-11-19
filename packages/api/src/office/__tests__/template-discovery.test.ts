@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createOfficeTemplateDiscovery } from '../template-discovery.js'
 import type { OfficeDbQuery } from '../../db/office-artifacts.js'
-import type { ToolContext } from '@use-brian/core'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const context = { userId: 'user', workspaceId: 'workspace', clearance: 'internal', compartments: ['team:sales'], projectIds: ['project'] } as ToolContext
 const scope = { sensitivity: 'internal', compartments: ['team:sales'], projectIds: ['project'] }

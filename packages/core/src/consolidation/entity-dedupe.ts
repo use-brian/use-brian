@@ -61,8 +61,8 @@ import {
   clusterEntityAliases,
   type AliasCluster,
 } from './alias-clusterer.js'
-import type { AccessContext } from '../security/access-context.js'
-import type { LLMProvider } from '../providers/types.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
 
 /**
  * Priority order for cross-kind survivor selection. Higher index = lower

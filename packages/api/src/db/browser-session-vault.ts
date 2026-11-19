@@ -3,7 +3,8 @@
  *
  * [COMP:sandbox/session-vault]
  */
-import type { BrowserProfileAuthority, SessionBundle, SessionVault, VaultSessionInfo } from '@use-brian/core'
+import type { BrowserProfileAuthority } from '@use-brian/core/sandbox/profiles.js'
+import type { SessionBundle, SessionVault, VaultSessionInfo } from '@use-brian/core/sandbox/types.js'
 import type { PoolClient } from 'pg'
 import { query } from './client.js'
 import { decryptCredentials, encryptCredentials } from './credential-crypto.js'

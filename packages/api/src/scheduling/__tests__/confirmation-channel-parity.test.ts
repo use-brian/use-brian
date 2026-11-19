@@ -16,7 +16,7 @@ import { findSchedulerChannelConfirmations, registerSchedulerResolver, unregiste
 import { maybeHandleChannelWorkflowContext, type ChannelWorkflowContextParams } from '../../routes/channel-workflow-context.js'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
 import type { DeferredConfirmationStore } from '../../db/deferred-confirmation-store.js'
-import type { ToolConfirmationRequest } from '@use-brian/core'
+import type { ToolConfirmationRequest } from '@use-brian/agent-runtime/mcp/types.js'
 const req: ToolConfirmationRequest = { toolCallId: 'call', toolName: 'send', serverName: 'connector', description: 'Send', input: {}, classification: null }
 const questionStore = { isQuestionMessage: vi.fn(async () => false), find: vi.fn(async () => []) } as unknown as NonNullable<ChannelWorkflowContextParams['questionStore']>
 function fixture(channelType: ChannelWorkflowContextParams['channelType'] = 'slack', shared = false, notifications = false) {

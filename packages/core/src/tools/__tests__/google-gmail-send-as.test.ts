@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { createGmailTools, type GmailApi } from '../base/google-gmail.js'
 import type { FilesApi } from '../../workspace-files/api.js'
 import type { WorkspaceFile } from '../../workspace-files/types.js'
-import type { ToolContext } from '../types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 // ── Fixtures ─────────────────────────────────────────────────
 

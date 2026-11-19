@@ -2,7 +2,9 @@ import {crmImportJobFloor,crmKeyBindingScope} from './retention-authority.js'
 import { assertCrmDeliveryScope } from './delivery-source-authority.js'
 /** Shared contact and Association privacy authority. [COMP:crm/privacy-previews] */
 import type {PoolClient} from 'pg'
-import {deriveResourceScope,resourceScopeKey,CrmOperationsError,type ResourceScope,type ScopeSource,type CrmOperationsContext,type AssociationActor} from '@use-brian/core'
+import type {AssociationActor} from '@use-brian/core/association/domain.js'
+import {CrmOperationsError, type CrmOperationsContext} from '@use-brian/core/crm/operations-types.js'
+import {deriveResourceScope, resourceScopeKey, type ResourceScope, type ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
 import {assertAssociationOrderAuthority,assertAssociationSourceAuthority,loadAssociationOrderScope} from '../association/source-scope.js'
 import {CRM_PRIVACY_COVERAGE} from './privacy-coverage.js'
 import {prepareCrmPrivacyCopies} from './privacy-copy-resolver.js'
@@ -267,6 +269,14 @@ export async function assertCrmPrivacyWorkspaceAuthority(client:PoolClient,conte
       if(!row.live)throw unavailable()
       return null
     }],
+    // Delivery oversight rows carry their source's saved audience floor (migration 767).
+    ...(['crm_delivery_commitments','crm_delivery_observations'] as const).map(table=>[table,async (id:string)=>{
+      const row=(await client.query<{scope:ResourceScope}>(`SELECT jsonb_build_object('workspaceId',t.workspace_id,'userId',t.user_id,
+          'assistantId',t.assistant_id,'sensitivity',t.sensitivity,'compartments',to_jsonb(t.compartments),'projectIds',to_jsonb(t.project_ids)) AS scope
+        FROM ${table} t WHERE t.workspace_id=$1 AND t.id=$2 FOR SHARE OF t`,[context.workspaceId,id])).rows[0]
+      if(!row)throw unavailable()
+      return {scope:row.scope,sources:[]}
+    }] as [string,(id:string)=>Promise<{scope:ResourceScope;sources:ScopeSource[]}|null>]),
   ]
   for(const [table,authority] of families) {
     let after:string|null=null

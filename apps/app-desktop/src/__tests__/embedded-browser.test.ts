@@ -60,7 +60,7 @@ const deferred = <T,>() => { let resolve!: (value: T) => void; const promise = n
 const claims = { kind: 'browser-ext-pair', exp: 4_000_000_000, userId: 'user', workspaceId: 'workspace', browserProfileId: 'profile' };
 const input = (overrides = {}, relayUrl = 'wss://relay.example/browser') => ({ relayUrl, pairingToken: `header.${Buffer.from(JSON.stringify({ ...claims, ...overrides })).toString('base64url')}.signature` });
 let browser: EmbeddedBrowser;
-let approvals: { has: ReturnType<typeof vi.fn>; grant: ReturnType<typeof vi.fn> };
+let preferences: { enabled: ReturnType<typeof vi.fn>; setEnabled: ReturnType<typeof vi.fn> };
 const identity = { workspaceId: 'workspace', browserProfileId: 'profile' };
 let sequence = 0;
 const host = () => mocks.hosts.at(-1)!;
@@ -80,9 +80,9 @@ async function command(op: string, args: unknown = {}, controlMode = 'task_tabs'
 beforeEach(() => {
   vi.useFakeTimers(); vi.stubGlobal('WebSocket', Socket);
   Socket.all = []; mocks.hosts.length = 0; mocks.consent.mockReset().mockResolvedValue({ response: 1 });
-  const grants = new Set<string>();
-  approvals = { has: vi.fn((key: string) => grants.has(key)), grant: vi.fn((key: string) => { grants.add(key); }) };
-  browser = new EmbeddedBrowser({ approvals }); sequence = 0;
+  let enabled = true;
+  preferences = { enabled: vi.fn(() => enabled), setEnabled: vi.fn((value: boolean) => { enabled = value; }) };
+  browser = new EmbeddedBrowser({ preferences }); sequence = 0;
 });
 afterEach(() => { browser.dispose(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
@@ -208,22 +208,17 @@ describe('[COMP:app-desktop/embedded-browser] native pairing lifecycle with the 
     socket().message({ type: 'ready' }); expect(await pending).toBe(true);
     expect(host().partition).toBe(browserPairing(input(), 'account').partition);
     expect(host().show).toHaveBeenCalledOnce();
-    expect(mocks.consent).toHaveBeenCalledWith(expect.objectContaining({
-      detail: expect.stringContaining('all in-app tabs, including tabs you open manually'),
-    }));
+    expect(mocks.consent).not.toHaveBeenCalled();
   });
-  it('resolves the injected dock window only after consent and relay ready', async () => {
+  it('resolves the injected dock window only after relay ready', async () => {
     const dockWindow = {} as BrowserWindow;
     const getDockWindow = vi.fn(() => dockWindow);
-    browser = new EmbeddedBrowser({ getDockWindow, approvals });
-    const consent = deferred<{ response: number }>();
-    mocks.consent.mockReturnValueOnce(consent.promise);
+    browser = new EmbeddedBrowser({ getDockWindow, preferences });
     const pending = browser.pair(input(), 'account');
     await flush();
     expect(getDockWindow).not.toHaveBeenCalled();
-    expect(Socket.all).toHaveLength(0);
+    expect(Socket.all).toHaveLength(1);
     expect(mocks.hosts).toHaveLength(0);
-    consent.resolve({ response: 1 });
     await flush(); socket().open(); await flush();
     expect(getDockWindow).not.toHaveBeenCalled();
     expect(mocks.hosts).toHaveLength(0);
@@ -245,15 +240,9 @@ describe('[COMP:app-desktop/embedded-browser] native pairing lifecycle with the 
     expect(browser.isDockedFocused()).toBe(false);
     expect(current.isDockedFocused).toHaveBeenCalledTimes(2);
   });
-  it.each(['stop', 'dispose', 'cancelPending'] as const)('%s during pending consent or ready never resolves a dock or creates a late host', async action => {
+  it.each(['stop', 'dispose', 'cancelPending'] as const)('%s during pending relay ready never resolves a dock or creates a late host', async action => {
     const getDockWindow = vi.fn(() => ({} as BrowserWindow));
-    browser = new EmbeddedBrowser({ getDockWindow, approvals });
-    const consent = deferred<{ response: number }>();
-    mocks.consent.mockReturnValueOnce(consent.promise);
-    const consenting = browser.pair(input(), 'account');
-    browser[action](); consent.resolve({ response: 1 });
-    expect(await consenting).toBe(false);
-    expect(Socket.all).toHaveLength(0);
+    browser = new EmbeddedBrowser({ getDockWindow, preferences });
     const pending = browser.pair(input(), 'account');
     await flush(); socket().open();
     const oldSocket = socket();
@@ -264,34 +253,23 @@ describe('[COMP:app-desktop/embedded-browser] native pairing lifecycle with the 
     expect(getDockWindow).not.toHaveBeenCalled();
     expect(mocks.hosts).toHaveLength(0);
     expect(browser.status()).toEqual(action === 'stop'
-      ? { controlEpoch: 4, connected: false, automaticBlocked: true, ...identity }
-      : { controlEpoch: 4, connected: false, automaticBlocked: false });
+      ? { browserEnabled: true, controlEpoch: 2, connected: false, automaticBlocked: true, ...identity }
+      : { browserEnabled: true, controlEpoch: 2, connected: false, automaticBlocked: false });
   });
   it('reports pending identity, retains it after Stop, and clears it on disposal', async () => {
-    expect(browser.status()).toEqual({ controlEpoch: 0, connected: false, automaticBlocked: false });
+    expect(browser.status()).toEqual({ browserEnabled: true, controlEpoch: 0, connected: false, automaticBlocked: false });
     const pending = browser.pair(input(), 'account');
-    expect(browser.status()).toEqual({ controlEpoch: 1, connected: false, automaticBlocked: false, ...identity });
+    expect(browser.status()).toEqual({ browserEnabled: true, controlEpoch: 1, connected: false, automaticBlocked: false, ...identity });
     await flush(); socket().open(); socket().message({ type: 'ready' });
     expect(await pending).toBe(true);
-    expect(browser.status()).toEqual({ controlEpoch: 1, connected: true, automaticBlocked: false, ...identity });
+    expect(browser.status()).toEqual({ browserEnabled: true, controlEpoch: 1, connected: true, automaticBlocked: false, ...identity });
     browser.stop();
-    expect(browser.status()).toEqual({ controlEpoch: 2, connected: false, automaticBlocked: true, ...identity });
+    expect(browser.status()).toEqual({ browserEnabled: true, controlEpoch: 2, connected: false, automaticBlocked: true, ...identity });
     await connect(); browser.dispose();
-    expect(browser.status()).toEqual({ controlEpoch: 4, connected: false, automaticBlocked: false });
+    expect(browser.status()).toEqual({ browserEnabled: true, controlEpoch: 4, connected: false, automaticBlocked: false });
   });
-  it('native refusal creates neither socket nor host', async () => {
-    mocks.consent.mockResolvedValue({ response: 0 });
-    expect(await browser.pair(input(), 'account')).toBe(false);
-    expect(Socket.all).toHaveLength(0); expect(mocks.hosts).toHaveLength(0);
-    expect(mocks.consent.mock.calls[0][0]).toMatchObject({ defaultId: 0, cancelId: 0 });
-  });
-  it('disposal during consent prevents a late approval and concurrent pairing', async () => {
-    const consent = deferred<{ response: number }>(); mocks.consent.mockReturnValue(consent.promise);
-    const pending = browser.pair(input(), 'account');
-    expect(await browser.pair(input(), 'account')).toBe(false);
-    browser.dispose(); consent.resolve({ response: 1 });
-    expect(await pending).toBe(false); expect(Socket.all).toHaveLength(0);
-  });
+
+
   it('disposal while ready is pending closes the socket and ignores late ready', async () => {
     const pending = browser.pair(input(), 'account'); await flush(); socket().open();
     browser.dispose(); socket().message({ type: 'ready' });
@@ -308,7 +286,7 @@ describe('[COMP:app-desktop/embedded-browser] native pairing lifecycle with the 
     await connect(); await command('openTab', { url: 'https://example.com' });
     const wc = host().tabs()[0].contents;
     socket().drop(4000); await vi.advanceTimersByTimeAsync(60000);
-    expect(browser.status()).toEqual({ controlEpoch: 2, connected: false, automaticBlocked: true, ...identity });
+    expect(browser.status()).toEqual({ browserEnabled: true, controlEpoch: 2, connected: false, automaticBlocked: true, ...identity });
     expect(wc.stop).toHaveBeenCalled(); expect(wc.debugger.isAttached()).toBe(false);
     expect(Socket.all).toHaveLength(1); expect(host().destroy).toHaveBeenCalledOnce();
   });
@@ -321,7 +299,7 @@ describe('[COMP:app-desktop/embedded-browser] native pairing lifecycle with the 
     await vi.advanceTimersByTimeAsync(60000);
     expect(Socket.all).toHaveLength(2);
     socket().open(); socket().message({ type: 'ready', sessionToken: 'session-secret-2' }); await flush();
-    expect(browser.status()).toEqual({ controlEpoch: 1, connected: true, automaticBlocked: false, ...identity });
+    expect(browser.status()).toEqual({ browserEnabled: true, controlEpoch: 1, connected: true, automaticBlocked: false, ...identity });
     expect(pane.setStatus).toHaveBeenLastCalledWith('');
     expect(pane.destroy).not.toHaveBeenCalled(); expect(mocks.hosts).toHaveLength(1);
     expect(await command('currentUrl')).toMatchObject({ ok: true, data: { url: 'https://example.com/' } });
@@ -349,52 +327,49 @@ describe('[COMP:app-desktop/embedded-browser] native pairing lifecycle with the 
 });
 
 describe('[COMP:app-desktop/embedded-browser] profile name in native chrome', () => {
-  it('names the profile in the consent dialog and hands it to the browser toolbar', async () => {
+  it('names the profile in the browser toolbar without a dialog', async () => {
     const pending = browser.pair(input({ browserProfileName: 'Work Twitter' }), 'account');
     await flush(); socket().open(); socket().message({ type: 'ready', sessionToken: 'session-secret' });
     expect(await pending).toBe(true);
-    const dialog = mocks.consent.mock.calls[0][0];
-    expect(dialog.message).toContain('"Work Twitter"');
-    expect(dialog.detail).toMatch(/^Browser profile: Work Twitter\n/);
+    expect(mocks.consent).not.toHaveBeenCalled();
     expect(host().options?.profileName).toBe('Work Twitter');
   });
-  it('falls back to the generic copy when the server sent no name', async () => {
+  it('omits the profile chip when the server sent no name', async () => {
     await connect();
-    expect(mocks.consent.mock.calls[0][0].message).toBe('Allow this browser profile to start automatically?');
+    expect(mocks.consent).not.toHaveBeenCalled();
     expect(host().options?.profileName).toBeNull();
   });
 });
 
-describe('[COMP:app-desktop/embedded-browser] standing approval and automatic lifecycle', () => {
+describe('[COMP:app-desktop/embedded-browser] prompt-free pairing and automatic lifecycle', () => {
   const automatic = (overrides = {}, relay?: string) => ({ ...input(overrides, relay), automatic: true });
   async function ready(pending: Promise<boolean>) {
     await flush(); socket().open(); socket().message({ type: 'ready' });
     expect(await pending).toBe(true);
   }
-  it('reuses injected profile approval across instances and token renewal for manual tabs too', async () => {
+  it('pairs across restarts and token renewal without prompting for manual tabs', async () => {
     await connect();
-    expect(approvals.grant).toHaveBeenCalledExactlyOnceWith(browserPairing(input(), 'account').partition);
-    browser.dispose(); browser = new EmbeddedBrowser({ approvals });
+    browser.dispose(); browser = new EmbeddedBrowser({ preferences });
     await ready(browser.pair(automatic({ exp: claims.exp + 10 }), 'account'));
-    expect(mocks.consent).toHaveBeenCalledOnce();
+    expect(mocks.consent).not.toHaveBeenCalled();
     browser.show();
     await host().createTab('https://manual.example/', false);
     expect(await command('currentUrl')).toMatchObject({ ok: true, data: { url: 'https://manual.example/' } });
-    expect(mocks.consent).toHaveBeenCalledOnce();
+    expect(mocks.consent).not.toHaveBeenCalled();
   });
-  it.each(['account', 'relay', 'userId', 'workspaceId', 'browserProfileId'])('requires fresh consent for a different %s', async dimension => {
-    await connect(); browser.dispose(); browser = new EmbeddedBrowser({ approvals });
+  it.each(['account', 'relay', 'userId', 'workspaceId', 'browserProfileId'])('keeps separate cookie partitions for a different %s', async dimension => {
+    await connect(); const firstPartition = host().partition; browser.dispose(); browser = new EmbeddedBrowser({ preferences });
     const next = automatic(['userId', 'workspaceId', 'browserProfileId'].includes(dimension) ? { [dimension]: 'other' } : {},
       dimension === 'relay' ? 'wss://other.example/browser' : undefined);
     await ready(browser.pair(next, dimension === 'account' ? 'other-account' : 'account'));
-    expect(mocks.consent).toHaveBeenCalledTimes(2);
-    expect(new Set(approvals.grant.mock.calls.map(([key]) => key)).size).toBe(2);
+    expect(mocks.consent).not.toHaveBeenCalled();
+    browser.show(); expect(host().partition).not.toBe(firstPartition);
   });
   it('automatic pairing arms the relay without opening the pane until Brian or the user does', async () => {
     await connect(); browser.dispose(); mocks.hosts.length = 0;
     await ready(browser.pair(automatic(), 'account'));
     expect(mocks.hosts).toHaveLength(0);
-    expect(browser.status()).toEqual({ controlEpoch: 3, connected: true, automaticBlocked: false, ...identity });
+    expect(browser.status()).toEqual({ browserEnabled: true, controlEpoch: 3, connected: true, automaticBlocked: false, ...identity });
     // An armed relay is a live session: another automatic pair must not replace it.
     expect(await browser.pair(automatic({ browserProfileId: 'other' }), 'account')).toBe(false);
     expect(Socket.all).toHaveLength(2);
@@ -411,50 +386,33 @@ describe('[COMP:app-desktop/embedded-browser] standing approval and automatic li
     expect(await command('navigate', { url: 'https://example.com' })).toMatchObject({ ok: true });
     expect(mocks.hosts).toHaveLength(1); expect(host().show).toHaveBeenCalledOnce();
   });
-  it('denial blocks repeated automatic attempts until explicit resume', async () => {
-    mocks.consent.mockResolvedValueOnce({ response: 0 });
-    expect(await browser.pair(automatic(), 'account')).toBe(false);
-    for (let i = 0; i < 3; i++) expect(await browser.pair(automatic(), 'account')).toBe(false);
-    expect(browser.status()).toEqual({ controlEpoch: 1, connected: false, automaticBlocked: true, ...identity });
-    expect(mocks.consent).toHaveBeenCalledOnce();
-    expect(approvals.grant).not.toHaveBeenCalled();
-    expect(Socket.all).toHaveLength(0); expect(mocks.hosts).toHaveLength(0);
-    await connect();
-    expect(browser.status().automaticBlocked).toBe(false);
-  });
+
   it('automatic pairing cannot replace an active host, even for another profile', async () => {
     await connect(); const activeHost = host(); const activeSocket = socket();
     for (const profile of ['profile', 'other']) expect(await browser.pair(automatic({ browserProfileId: profile }), 'account')).toBe(false);
     expect(activeHost.destroy).not.toHaveBeenCalled(); expect(activeSocket.close).not.toHaveBeenCalled();
     expect(mocks.hosts).toHaveLength(1); expect(Socket.all).toHaveLength(1);
-    expect(mocks.consent).toHaveBeenCalledOnce();
-    expect(browser.status()).toEqual({ controlEpoch: 1, connected: true, automaticBlocked: false, ...identity });
+    expect(mocks.consent).not.toHaveBeenCalled();
+    expect(browser.status()).toEqual({ browserEnabled: true, controlEpoch: 1, connected: true, automaticBlocked: false, ...identity });
   });
   it('explicit pairing can replace the active profile and updates pending identity', async () => {
     await connect(); const previousHost = host(); const previousSocket = socket();
     const pending = browser.pair(input({ workspaceId: 'next-workspace', browserProfileId: 'next-profile' }), 'account');
     expect(previousHost.destroy).toHaveBeenCalledOnce(); expect(previousSocket.close).toHaveBeenCalledOnce();
-    expect(browser.status()).toEqual({ controlEpoch: 2, connected: false, automaticBlocked: false, workspaceId: 'next-workspace', browserProfileId: 'next-profile' });
+    expect(browser.status()).toEqual({ browserEnabled: true, controlEpoch: 2, connected: false, automaticBlocked: false, workspaceId: 'next-workspace', browserProfileId: 'next-profile' });
     await ready(pending);
-    expect(browser.status()).toEqual({ controlEpoch: 2, connected: true, automaticBlocked: false, workspaceId: 'next-workspace', browserProfileId: 'next-profile' });
+    expect(browser.status()).toEqual({ browserEnabled: true, controlEpoch: 2, connected: true, automaticBlocked: false, workspaceId: 'next-workspace', browserProfileId: 'next-profile' });
   });
-  it('disposal clears the denial latch so a new automatic session asks again', async () => {
-    mocks.consent.mockResolvedValueOnce({ response: 0 });
-    expect(await browser.pair(automatic(), 'account')).toBe(false);
-    browser.dispose();
-    expect(browser.status()).toEqual({ controlEpoch: 2, connected: false, automaticBlocked: false });
-    await ready(browser.pair(automatic(), 'account'));
-    expect(mocks.consent).toHaveBeenCalledTimes(2);
-  });
+
   it('Stop destroys the browser and blocks repeated automatic pairs until explicit resume', async () => {
     await connect(); const stoppedHost = host(); browser.stop();
     for (let i = 0; i < 3; i++) expect(await browser.pair(automatic(), 'account')).toBe(false);
-    expect(browser.status()).toEqual({ controlEpoch: 2, connected: false, automaticBlocked: true, ...identity });
+    expect(browser.status()).toEqual({ browserEnabled: true, controlEpoch: 2, connected: false, automaticBlocked: true, ...identity });
     expect(stoppedHost.destroy).toHaveBeenCalledOnce(); expect(Socket.all).toHaveLength(1);
     await connect();
     expect(stoppedHost.destroy).toHaveBeenCalledOnce();
-    expect(mocks.consent).toHaveBeenCalledOnce();
-    expect(browser.status()).toEqual({ controlEpoch: 3, connected: true, automaticBlocked: false, ...identity });
+    expect(mocks.consent).not.toHaveBeenCalled();
+    expect(browser.status()).toEqual({ browserEnabled: true, controlEpoch: 3, connected: true, automaticBlocked: false, ...identity });
   });
   it.each(['during minting', 'immediately before pair'])('rejects explicit Resume after a newer Stop %s without recreating the closed host', async timing => {
     await connect(); browser.stop();
@@ -473,41 +431,41 @@ describe('[COMP:app-desktop/embedded-browser] standing approval and automatic li
     const dispose = vi.spyOn(browser, 'dispose');
     expect(await pending).toBe(false);
     expect(dispose).not.toHaveBeenCalled();
-    expect(browser.status()).toEqual({ connected: false, automaticBlocked: true, controlEpoch: 3, ...identity });
+    expect(browser.status()).toEqual({ browserEnabled: true, connected: false, automaticBlocked: true, controlEpoch: 3, ...identity });
     expect(pausedHost.destroy).toHaveBeenCalledOnce();
     expect(Socket.all).toHaveLength(1); expect(mocks.hosts).toHaveLength(1);
-    expect(mocks.consent).toHaveBeenCalledOnce();
+    expect(mocks.consent).not.toHaveBeenCalled();
     expect(await browser.pair(automatic({ browserProfileId: 'replacement' }), 'account')).toBe(false);
-    expect(browser.status()).toEqual({ connected: false, automaticBlocked: true, controlEpoch: 3, ...identity });
+    expect(browser.status()).toEqual({ browserEnabled: true, connected: false, automaticBlocked: true, controlEpoch: 3, ...identity });
   });
   it('accepts explicit Resume at the same control epoch and clears the Stop latch', async () => {
     await connect(); browser.stop();
     const pausedHost = host();
-    expect(browser.status()).toEqual({ connected: false, automaticBlocked: true, controlEpoch: 2, ...identity });
+    expect(browser.status()).toEqual({ browserEnabled: true, connected: false, automaticBlocked: true, controlEpoch: 2, ...identity });
     const expectedControlEpoch = browser.status().controlEpoch;
     await ready(browser.pair({ ...input(), expectedControlEpoch }, 'account'));
-    expect(browser.status()).toEqual({ connected: true, automaticBlocked: false, controlEpoch: 3, ...identity });
+    expect(browser.status()).toEqual({ browserEnabled: true, connected: true, automaticBlocked: false, controlEpoch: 3, ...identity });
     expect(pausedHost.destroy).toHaveBeenCalledOnce();
     expect(Socket.all).toHaveLength(2); expect(mocks.hosts).toHaveLength(2);
-    expect(mocks.consent).toHaveBeenCalledOnce();
+    expect(mocks.consent).not.toHaveBeenCalled();
   });
   it('disconnect disposal clears identity but retains Stop across profiles until ordinary disposal', async () => {
     await connect(); browser.stop();
     const pausedHost = host();
-    expect(browser.status()).toEqual({ connected: false, automaticBlocked: true, controlEpoch: 2, ...identity });
+    expect(browser.status()).toEqual({ browserEnabled: true, connected: false, automaticBlocked: true, controlEpoch: 2, ...identity });
     browser.dispose(true);
-    expect(browser.status()).toEqual({ connected: false, automaticBlocked: true, controlEpoch: 3 });
+    expect(browser.status()).toEqual({ browserEnabled: true, connected: false, automaticBlocked: true, controlEpoch: 3 });
     expect(pausedHost.destroy).toHaveBeenCalledOnce();
     expect(await browser.pair(automatic({ browserProfileId: 'other' }), 'account')).toBe(false);
-    expect(browser.status()).toEqual({ connected: false, automaticBlocked: true, controlEpoch: 3 });
+    expect(browser.status()).toEqual({ browserEnabled: true, connected: false, automaticBlocked: true, controlEpoch: 3 });
     expect(Socket.all).toHaveLength(1); expect(mocks.hosts).toHaveLength(1);
-    expect(mocks.consent).toHaveBeenCalledOnce();
+    expect(mocks.consent).not.toHaveBeenCalled();
     browser.dispose();
-    expect(browser.status()).toEqual({ connected: false, automaticBlocked: false, controlEpoch: 4 });
+    expect(browser.status()).toEqual({ browserEnabled: true, connected: false, automaticBlocked: false, controlEpoch: 4 });
     await ready(browser.pair(automatic({ browserProfileId: 'other' }), 'account'));
-    expect(browser.status()).toEqual({ connected: true, automaticBlocked: false, controlEpoch: 5,
+    expect(browser.status()).toEqual({ browserEnabled: true, connected: true, automaticBlocked: false, controlEpoch: 5,
       workspaceId: 'workspace', browserProfileId: 'other' });
-    expect(mocks.consent).toHaveBeenCalledTimes(2);
+    expect(mocks.consent).not.toHaveBeenCalled();
   });
   it('cancelPending leaves active control intact and show delegates only to a live host', async () => {
     browser.show(); browser.cancelPending(); await connect();
@@ -517,15 +475,7 @@ describe('[COMP:app-desktop/embedded-browser] standing approval and automatic li
     expect(socket().close).not.toHaveBeenCalled(); expect(browser.status().connected).toBe(true);
     browser.dispose(); browser.show(); expect(activeHost.show).toHaveBeenCalledOnce();
   });
-  it('does not persist consent before ready, or after cancelled consent', async () => {
-    const consent = deferred<{ response: number }>(); mocks.consent.mockReturnValueOnce(consent.promise);
-    const pending = browser.pair(automatic(), 'account'); browser.cancelPending(); consent.resolve({ response: 1 });
-    expect(await pending).toBe(false); expect(approvals.grant).not.toHaveBeenCalled();
-    const retry = browser.pair(automatic(), 'account'); await flush(); socket().open();
-    expect(approvals.grant).not.toHaveBeenCalled(); browser.cancelPending();
-    expect(await retry).toBe(false); socket().message({ type: 'ready' }); await flush();
-    expect(approvals.grant).not.toHaveBeenCalled(); expect(mocks.hosts).toHaveLength(0);
-  });
+
 });
 
 describe('[COMP:app-desktop/embedded-browser] a stop releases control and keeps the tabs (chat-parity T8, D10)', () => {
@@ -659,7 +609,7 @@ describe('[COMP:app-desktop/embedded-browser] operations and revocation with the
     expect(host().tabs()[1].contents.debugger.sendCommand).toHaveBeenCalledWith('Input.insertText', { text: 'x' });
     expect(host().tabs().map((t: any) => t.taskOwned)).toEqual([true, false]);
     expect(await command('closeTab', { tabId: 'tab-2' }, controlMode)).toMatchObject({ ok: true, data: { closed: true, activeTabId: 'tab-1' } });
-    expect(mocks.consent).toHaveBeenCalledOnce();
+    expect(mocks.consent).not.toHaveBeenCalled();
   });
   it.each(['file:///secret', 'javascript:alert(1)', 'data:text/html,x', 'https://u:p@example.com'])('blocks unsafe URL %s across all navigation operations', async url => {
     await connect();
@@ -717,5 +667,44 @@ describe('[COMP:app-desktop/embedded-browser] operations and revocation with the
     expect(oldHost.destroy).toHaveBeenCalledOnce();
     expect(browser.status().connected).toBe(false);
     expect(socket().sent.find(m => m.id === 'pending')).toBeUndefined();
+  });
+});
+
+describe('[COMP:app-desktop/embedded-browser] device opt-out', () => {
+  it('blocks automatic and explicit pairing across disposal and fresh instances', async () => {
+    browser.setEnabled(false);
+    for (const automatic of [true, false]) expect(await browser.pair({ ...input(), automatic }, 'account')).toBe(false);
+    browser.dispose(); browser = new EmbeddedBrowser({ preferences });
+    expect(await browser.pair(input(), 'other-account')).toBe(false);
+    expect(browser.status()).toMatchObject({ browserEnabled: false, connected: false, automaticBlocked: true });
+    expect(Socket.all).toHaveLength(0); expect(mocks.hosts).toHaveLength(0);
+    expect(mocks.consent).not.toHaveBeenCalled();
+    browser.setEnabled(true); await connect();
+  });
+  it('fences control without closing tabs and resumes the same tabs only after re-enabling', async () => {
+    await connect(); await command('openTab', { url: 'https://example.com/form' });
+    const current = host(); const tab = current.entries[0];
+    browser.setEnabled(false);
+    expect(current.destroy).not.toHaveBeenCalled(); expect(tab.taskOwned).toBe(false);
+    expect(tab.contents.debugger.isAttached()).toBe(false);
+    expect(await command('openTab', { url: 'https://blocked.example/' })).toMatchObject({ ok: false, code: 'user_stopped' });
+    expect(current.entries).toHaveLength(1);
+    expect(await browser.pair(input(), 'account')).toBe(false);
+    browser.setEnabled(true);
+    expect(await command('currentUrl')).toMatchObject({ ok: true, data: { url: 'https://example.com/form' } });
+    expect(host()).toBe(current); expect(current.destroy).not.toHaveBeenCalled();
+  });
+  it('cancels pending relay admission and ignores a late ready after disabling', async () => {
+    const pending = browser.pair(input(), 'account'); await flush(); socket().open();
+    browser.setEnabled(false);
+    expect(await pending).toBe(false);
+    socket().message({ type: 'ready' }); await flush();
+    expect(mocks.hosts).toHaveLength(0); expect(browser.status().browserEnabled).toBe(false);
+  });
+  it('does not recreate a dormant browser from show or relay traffic while disabled', async () => {
+    const pending = browser.pair({ ...input(), automatic: true }, 'account'); await flush(); socket().open(); socket().message({ type: 'ready' });
+    expect(await pending).toBe(true); browser.setEnabled(false); browser.show();
+    expect(await command('navigate', { url: 'https://example.com' })).toMatchObject({ ok: false });
+    expect(mocks.hosts).toHaveLength(0);
   });
 });

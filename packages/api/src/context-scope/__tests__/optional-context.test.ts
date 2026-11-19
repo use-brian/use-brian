@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { ContextScopeAccumulator, createExecutionContext, type ScopeSource } from '@use-brian/core'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { createExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { readOptionalContext } from '../optional-context.js'
 
 const source: ScopeSource = {

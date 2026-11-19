@@ -19,7 +19,7 @@ import { Router } from 'express'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { createEngineTools, type EnginesEnv } from './tools.js'
-import type { ExternalCredentialPool } from '@use-brian/core'
+import type { ExternalCredentialPool } from '@use-brian/agent-runtime/providers/credential-pool.js'
 
 /** Constant-time bearer check (hash both sides so length never leaks). */
 export function authorizeEnginesRequest(

@@ -27,7 +27,7 @@ import type {
   IntrospectionSessionSummary,
   IntrospectionTranscriptMessage,
 } from '../types.js'
-import type { Tool, ToolContext } from '../../tools/types.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 // ── Fixtures ─────────────────────────────────────────────────────────
 

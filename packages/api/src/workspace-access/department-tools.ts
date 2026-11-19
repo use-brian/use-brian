@@ -7,7 +7,7 @@
  * management and home departments (v2, migration 651)".
  */
 import { z } from 'zod'
-import { buildTool, type Tool, type ToolContext } from '@use-brian/core'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { createDepartmentStore, type DepartmentStore } from '../db/department-store.js'
 import { WorkspaceAccessError } from './policy.js'
 

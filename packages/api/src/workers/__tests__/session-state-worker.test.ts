@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { ContextScopeAccumulator, type SessionContextAuthority, type LLMProvider, type SessionStateStore } from '@use-brian/core'
+import type { SessionContextAuthority, SessionStateStore } from '@use-brian/core/memory/session-state-types.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import { createAuthorityLease } from '../../context-scope/authority-lease.js'
 import { backgroundSessionStateStore, createSessionStateWorker, restrictStateJobAuthority } from '../session-state-worker.js'
 import type { SessionStateJob } from '../../db/session-state-jobs.js'

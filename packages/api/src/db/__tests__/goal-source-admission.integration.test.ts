@@ -1,4 +1,8 @@
-import { advanceWorkflowRun,executionToolContext,type ExecutorDeps,type WorkflowDefinition } from '@use-brian/core'
+import { advanceWorkflowRun, type ExecutorDeps } from '@use-brian/core/workflow/executor.js'
+import type { WorkflowDefinition } from '@use-brian/core/workflow/types.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
+import { bindToolsToAgentAccess } from '../../context-scope/agent-access-tools.js'
 import {createDbWorkflowStore,createDbWorkflowRunStore} from '../workflow-store.js'
 import {createDbJobStore} from '../job-store.js'
 import {createGoalWorkTools} from '../../goals/work-tools.js'
@@ -16,7 +20,9 @@ import {createWorkspaceStore} from '../workspace-store.js'
 import * as goalNotifications from '../../brain-stream/notify.js'
 import { randomUUID } from 'node:crypto'
 import pg from 'pg'
-import { createGoalTools,ContextScopeAccumulator,createExecutionContext } from '@use-brian/core'
+import { createGoalTools } from '@use-brian/core/goals/tools.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { createExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { createSessionAuthorityLease,assertCurrentAuthority } from '../../context-scope/authority-lease.js'
 import { resolveGoalAuthoritySystem } from '../../context-scope/workflow-authority.js'
 import { resolveLiveAccessCeilingSystem } from '../../context-scope/resolve-turn-scope.js'
@@ -634,6 +640,31 @@ describe('[COMP:api/task-responsibility] actual retained Goal deterministic work
   expect((await pool.query("SELECT count(*)::int AS n FROM scheduled_jobs WHERE channel_id=$1",[runId])).rows[0].n).toBe(0)
  })
 
+ // m1-shared-room-lease-defect.md: the advance lease renews the saved authoring
+ // scope under the same (no) caller projection it was pinned under, so a nested
+ // tool's narrower projection is not revocation; a real contraction still is.
+ it.each(['narrowing','contraction'] as const)('a retained task-goal workflow advance with a nested narrowing tool (%s)',async kind=>{
+  const f=await retainedWaitFixture('branch-wait'),persist=f.runs.updateRun
+  const stop=vi.spyOn(f.runs,'updateRun').mockImplementationOnce(async(...args)=>{await persist(...args);throw new Error('Fictional stop after initial running')})
+  expect((await f.work()).isError).toBe(true);stop.mockRestore()
+  const runId=(await pool.query('SELECT id FROM workflow_runs WHERE source_goal_id=$1',[f.goal.id])).rows[0].id
+  const runtime=(await resolveRetainedGoalWorkflowRuntime(runId))!
+  let effects=0
+  const probe:Tool={name:'fictionalNestedProbe',description:'Fictional nested read',inputSchema:{type:'object',properties:{}},isReadOnly:true,
+   async execute(){
+    effects++
+    if(kind==='contraction')await pool.query('DELETE FROM workspace_group_members WHERE group_id=$1 AND user_id=$2',[f.teamId,f.userId])
+    return {data:'nested result'}
+   }} as unknown as Tool
+  // A nested tool (a callee lane) narrows clearance, labels and Projects below the advance.
+  const nested=bindToolsToAgentAccess(new Map([[probe.name,probe]]),{clearance:'public',compartments:[],mutationCompartments:[],projectIds:[],visibilityAssistantIds:[f.assistantId]}).get(probe.name)!
+  const context=executionToolContext(runtime.authority.execution,{appId:'native'})
+  const advance=runtime.executeWithAuthority(()=>nested.execute({},context))
+  if(kind==='narrowing')await expect(advance).resolves.toMatchObject({data:'nested result'})
+  else await expect(advance).rejects.toMatchObject({reason:'authority_changed',operationMayHaveExecuted:true})
+  expect(effects).toBe(1)
+  if(kind==='contraction')await expect(runtime.executeWithAuthority(async()=>'revived')).rejects.toMatchObject({reason:'authority_changed'})
+ })
  it('starts through workTask, persists a due wait job and resumes only the saved successor frontier',async()=>{
   const f=await retainedWaitFixture(),attempts=await Promise.allSettled([f.work(),f.work()])
   const result=attempts.flatMap(value=>value.status==='fulfilled'?[value.value]:[]).find(value=>(value.data as {status:string}).status==='paused')

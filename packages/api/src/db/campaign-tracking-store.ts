@@ -2,12 +2,12 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import type { PoolClient } from 'pg'
 import {
-  CampaignError,
   classifyCampaignRequest,
   normalizeBrowserOccurredAt,
   selectCampaignAttribution,
   type CampaignTouch,
-} from '@use-brian/core'
+} from '@use-brian/core/campaigns/attribution.js'
+import { CampaignError } from '@use-brian/core/campaigns/types.js'
 import {
   CAMPAIGN_LIMITS,
   campaignBrowserEventSchema,

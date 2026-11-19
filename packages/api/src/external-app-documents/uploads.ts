@@ -1,5 +1,12 @@
-import JSZip from 'jszip'
+import type JSZip from 'jszip'
+import { lazyImplementation } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
 import { DocumentError } from './service.js'
+
+// The ZIP library loads on the first archive, not at boot (M4 step 5); it is
+// loaded before the archive's own error mapping, so a failed load is the
+// honest `ImplementationUnavailableError`, never "not a readable zip".
+const loadJSZip = lazyImplementation('The ZIP library (jszip)', () => import('jszip').then((m) => m.default))
+
 /** Format validation complements, and never replaces, the configured malware scanner. */
 export async function verifyUploadFormat(bytes:Uint8Array,mime:string):Promise<void> {
  const b=Buffer.from(bytes)
@@ -8,7 +15,8 @@ export async function verifyUploadFormat(bytes:Uint8Array,mime:string):Promise<v
  if(mime==='image/png'){if(!b.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])))bad();return}
  if(mime==='image/jpeg'){if(b.length<4||b[0]!==255||b[1]!==216||b[b.length-2]!==255||b[b.length-1]!==217)bad();return}
  if(mime.includes('officedocument')){
-  let zip:JSZip;try{zip=await JSZip.loadAsync(b)}catch{return bad()}
+  const JSZipImpl=await loadJSZip()
+  let zip:JSZip;try{zip=await JSZipImpl.loadAsync(b)}catch{return bad()}
   const files=Object.keys(zip.files)
   if(files.length>10000||files.some(name=>/vbaproject|activex|\.exe$/i.test(name))||!zip.file('[Content_Types].xml'))bad()
   if(!zip.file(mime.includes('wordprocessingml')?'word/document.xml':'xl/workbook.xml'))bad()

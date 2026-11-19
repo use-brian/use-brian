@@ -1,4 +1,4 @@
-import { WorkspaceCredentialDelegationSchema } from '../security/workspace-delegation.js'
+import { WorkspaceCredentialDelegationSchema } from '@use-brian/agent-runtime/security/workspace-delegation.js'
 /**
  * Chat tools for the workflow primitive.
  *
@@ -27,11 +27,11 @@ import { WorkspaceCredentialDelegationSchema } from '../security/workspace-deleg
 import { z } from 'zod'
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { deflateRawSync, inflateRawSync } from 'node:zlib'
-import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
-import { isAttendedTurn } from '../tools/capability-gate.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { isAttendedTurn } from '@use-brian/agent-runtime/tools/capability-gate.js'
 import { accessCeilingContains, pinToolAuthoringAuthority, type AuthoringAuthority } from '../security/index.js'
-import { NO_TOOL_TIMEOUT } from '../engine/tool-executor.js'
-import { CrmDomainEventTypeSchema } from '../crm/operations-types.js'
+import { NO_TOOL_TIMEOUT } from '@use-brian/agent-runtime/engine/tool-executor.js'
+import { CrmDomainEventTypeSchema } from '../application-platform/operation-contract.js'
 import {
   CURRENT_CHAT_CHANNEL_ID,
   WorkflowDefinitionSchema,

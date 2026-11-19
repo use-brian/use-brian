@@ -5,7 +5,8 @@ import { spawn } from 'node:child_process'
 import type { Server } from 'node:http'
 import express from 'express'
 import { afterAll, describe, expect, it } from 'vitest'
-import { CrmOperationsCommandSchema, type CrmIntegrationGrant } from '@use-brian/core'
+import type { CrmIntegrationGrant } from '@use-brian/core/crm/integration-authority.js'
+import { CrmOperationsCommandSchema } from '@use-brian/core/crm/operations-types.js'
 import { getPool, getAppPool } from '../client.js'
 import { createCrmIntegrationStore } from '../crm-integration-store.js'
 import { createDbCrmIntakeReadStore } from '../crm-intake-store.js'
@@ -42,7 +43,7 @@ async function fixture(selected = grants, gate?: (req: express.Request, res: exp
   const key = await keys.create(workspaceId, userId, { label: 'Manifest fixture', expiresAt: '2099-01-01T00:00:00Z', grants: selected })
   const app = express(); app.use(express.json())
   if (gate) app.use(async (req, res, next) => { if (!await gate(req, res)) next() })
-  app.use('/api/crm/integration', crmIntegrationRoutes({ credentials: keys, service, association: { execute: async () => { throw new Error('No commerce in manifest') } } }))
+  app.use('/api/crm/integration', crmIntegrationRoutes({ credentials: keys, service,}))
   app.use((req, _res, next) => { req.userId = userId; next() })
   app.use('/api/crm', crmOperationsRoutes({ workspaceStore: createWorkspaceStore(), service, readStore: createDbCrmIntakeReadStore() }))
   const server = app.listen(0, '127.0.0.1'); servers.push(server)

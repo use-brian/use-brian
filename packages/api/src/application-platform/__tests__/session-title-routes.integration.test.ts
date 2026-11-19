@@ -3,7 +3,7 @@ import {createDbCommentThreadStore} from '../../db/comment-thread-store.js'
 import {afterAll,afterEach,describe,expect,it,vi} from 'vitest'
 import express from 'express'
 import request from 'supertest'
-import {boundScopeSources} from '@use-brian/core'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {sessionRoutes} from '../../routes/sessions.js'
 import {requireAuth} from '../../auth/middleware.js'
 import {createTokens} from '../../auth/jwt.js'
@@ -11,10 +11,10 @@ import {authSessionStore} from '../../db/auth-session-store.js'
 import {getPool,getAppPool} from '../../db/client.js'
 import {addSessionMessage,createPersonalWebSession} from '../../db/sessions.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
-import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
-import * as sessionQueries from '../../db/session-query-reader.js'
+import {readAdmittedSessionQuery} from '../../db/conversation-store.js'
+import * as sessionQueries from '../../db/conversation-store.js'
 import * as executionContexts from '../../context-scope/execution-context.js'
-import * as modelSources from '../model-source-authority.js'
+import * as modelSources from '../../context-scope/admission.js'
 import {publishSessionTitle} from '../../db/session-title-store.js'
 import {pinSessionTitleClaims,readCurrentSessionTitle,renameCurrentSessionTitle,resolveSessionTitleAuthority,sessionTitleProjection,sessionTitleProjections} from '../../routes/session-title-authority.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
@@ -107,7 +107,7 @@ describe.sequential('[COMP:api/application-persistence] actual browser title DTO
   await addSessionMessage({sessionId:c.session.id,role:'user',content:[{type:'text',text:'Fictional bounded preview'}],scope:{...c.f.envelope,userId:c.f.ownerId}})
   for(let n=0;n<9;n++)await addSessionMessage({sessionId:c.session.id,role:'assistant',content:[{type:'text',text:'Fictional later response'}],scope:{...c.f.envelope,userId:c.f.ownerId}})
   // Observe the real admitted SQL path without replacing any authority check.
-  const reads=vi.spyOn(sessionQueries,'readAdmittedSessionQuery'),outputs=vi.spyOn(modelSources,'assertSourceModelOutputAuthority'),resolve=vi.spyOn(executionContexts,'resolveExecutionContextSystem')
+  const reads=vi.spyOn(sessionQueries,'readAdmittedSessionQuery'),outputs=vi.spyOn(modelSources,'admitModelOutput'),resolve=vi.spyOn(executionContexts,'resolveExecutionContextSystem')
   const response=await c.list()
   expect(response.status,JSON.stringify(response.body)).toBe(200)
   expect(response.body.find((row:{id:string})=>row.id===c.session.id)).toMatchObject({title:'Fictional bounded preview',titleRevisionId:null})

@@ -13,16 +13,16 @@ import type { PoolClient, QueryResultRow } from 'pg'
 import {
   CrmCommercialFieldsSchema,
   CrmFieldBindingSchema,
-  CrmOperationsError,
   resolveCrmCommercialFields,
   CrmOverrideNotPermittedError,
-  type AccessContext,
   type CrmCommercialContextReadPort,
   type CrmCommercialFields,
   type CrmCommercialProfileSnapshot,
   type CrmCommercialViewer,
   type CrmFieldBinding,
-} from '@use-brian/core'
+} from '@use-brian/core/crm/commercial-context.js'
+import { CrmOperationsError } from '@use-brian/core/crm/operations-types.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import { z } from 'zod'
 import { query } from './client.js'
 import { buildAccessPredicate, buildCurrentMemberSourcePredicate, mutationActorAccess } from './access-predicate.js'

@@ -9,7 +9,8 @@
  */
 
 import { createHash } from 'node:crypto'
-import { parseFileContent, type FilesApi, type FilesContext } from '@use-brian/core'
+import { parseFileContent } from '@use-brian/core/files/parsers.js'
+import type { FilesApi, FilesContext } from '@use-brian/core/workspace-files/api.js'
 import { getConnectorConfig } from '../connector-config.js'
 import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
 import {

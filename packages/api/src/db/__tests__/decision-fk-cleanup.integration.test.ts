@@ -2,11 +2,16 @@ import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { Pool, type PoolClient } from 'pg'
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { bootstrapConnectionString, connectionRole } from '../../__tests__/fixtures/bootstrap-role.js'
 
 // Explicit opt-in; all objects are confined to a disposable schema. No migrated
 // application database is needed: use the real decision DDL from migration 471.
 const url = process.env.DECISION_TEST_DATABASE_URL
-const pool = url ? new Pool({ connectionString: url }) : null
+// Sessions log in as the fixture bootstrap role but act as the URL's own role
+// (the ordinary owner). Only disposable role creation, the switch to that role
+// and its removal use the bootstrap session user.
+const owner = url ? `"${connectionRole(url).replaceAll('"', '""')}"` : ''
+const pool = url ? new Pool({ connectionString: await bootstrapConnectionString(url) }) : null
 const migration = (name: string) => readFileSync(new URL(`../../../migrations/${name}`, import.meta.url), 'utf8')
 const original = migration('471_human_decision_learning.sql')
 const fix = migration('562_decision_fk_cleanup.sql')
@@ -49,6 +54,7 @@ async function nestedClear() {
 describe.skipIf(!pool)('decision append-only FK cleanup (PostgreSQL)', () => {
   beforeEach(async () => {
     client = await pool!.connect()
+    await client.query(`SET ROLE ${owner}`)
     schema = `decision_fk_${randomUUID().replaceAll('-', '')}`
     await client.query(`CREATE SCHEMA ${schema}; SET search_path TO ${schema}, public;
       CREATE TABLE users (id uuid PRIMARY KEY);
@@ -65,7 +71,7 @@ describe.skipIf(!pool)('decision append-only FK cleanup (PostgreSQL)', () => {
   })
   afterEach(async () => {
     if (!client) return
-    await client.query(`RESET ROLE; RESET search_path; DROP SCHEMA IF EXISTS ${schema} CASCADE`)
+    await client.query(`SET ROLE ${owner}; RESET search_path; DROP SCHEMA IF EXISTS ${schema} CASCADE`)
     client.release()
   })
   afterAll(async () => { await pool?.end() })
@@ -153,7 +159,7 @@ describe.skipIf(!pool)('decision append-only FK cleanup (PostgreSQL)', () => {
   it('allows a non-owner session deletion with RLS enabled', async () => {
     const id = await event()
     const role = `${schema}_role`
-    await client.query(`CREATE ROLE ${role};
+    await client.query(`RESET ROLE; CREATE ROLE ${role}; SET ROLE ${owner};
       GRANT USAGE ON SCHEMA ${schema} TO ${role};
       GRANT SELECT, DELETE ON sessions TO ${role};
       ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
@@ -165,8 +171,8 @@ describe.skipIf(!pool)('decision append-only FK cleanup (PostgreSQL)', () => {
       // owner, not as this role (which cannot update/read decision evidence).
       await client.query('DELETE FROM sessions WHERE id = $1', [session])
     } finally {
-      await client.query(`RESET ROLE; DROP POLICY session_owner ON sessions;
-        DROP OWNED BY ${role}; DROP ROLE ${role}`)
+      await client.query(`SET ROLE ${owner}; DROP POLICY session_owner ON sessions;
+        RESET ROLE; DROP OWNED BY ${role}; DROP ROLE ${role}; SET ROLE ${owner}`)
     }
     expect((await row(id)).session_id).toBeNull()
   })
@@ -182,7 +188,7 @@ describe.skipIf(!pool)('decision append-only FK cleanup (PostgreSQL)', () => {
     await event()
     await nestedClear()
     const role = `${schema}_role`
-    await client.query(`CREATE ROLE ${role};
+    await client.query(`RESET ROLE; CREATE ROLE ${role}; SET ROLE ${owner};
       GRANT USAGE ON SCHEMA ${schema} TO ${role};
       GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA ${schema} TO ${role};
       ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
@@ -191,7 +197,7 @@ describe.skipIf(!pool)('decision append-only FK cleanup (PostgreSQL)', () => {
       expect((await client.query('SELECT * FROM sessions')).rowCount).toBe(0)
       await expect(client.query('INSERT INTO nested_update VALUES (1)')).rejects.toMatchObject({ code: '42501' })
     } finally {
-      await client.query(`RESET ROLE; DROP OWNED BY ${role}; DROP ROLE ${role}`)
+      await client.query(`RESET ROLE; DROP OWNED BY ${role}; DROP ROLE ${role}; SET ROLE ${owner}`)
     }
   })
 })

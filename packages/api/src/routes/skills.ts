@@ -40,22 +40,21 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { query } from '../db/client.js'
 import {
-  loadBuiltinSkills,
-  createRateLimiter,
-  shouldInline,
   extractionSpecSchema,
   extractionSpecToBlocks,
+} from '@use-brian/core/doc/custom-template-types.js'
+import { shouldInline } from '@use-brian/core/files/parsers.js'
+import {
   transcribeFirstAudio,
   voiceUnavailableNote,
   TRANSCRIPTION_DISABLED_REASON,
-} from '@use-brian/core'
-import type {
-  SkillContent,
-  LLMProvider,
-  FileStore,
-  ContentBlock,
-  PreflightOptions,
-} from '@use-brian/core'
+} from '@use-brian/core/media/preflight.js'
+import { createRateLimiter } from '@use-brian/core/security/rate-limiter.js'
+import { loadBuiltinSkills } from '@use-brian/core/skills/loader.js'
+import type { FileStore } from '@use-brian/core/files/types.js'
+import type { PreflightOptions } from '@use-brian/core/media/preflight.js'
+import type { SkillContent } from '@use-brian/core/skills/types.js'
+import type { LLMProvider, ContentBlock } from '@use-brian/agent-runtime/providers/types.js'
 import type { SkillStore, WorkspaceSkillStore, WorkspaceSkill } from '../db/skill-store.js'
 import type { PageTemplateStore } from '../db/page-templates-store.js'
 import { getWorkspacePlan as getWorkspacePlanDb, type WorkspaceStore } from '../db/workspace-store.js'
@@ -112,7 +111,7 @@ const SENSITIVITIES = new Set(['public', 'internal', 'confidential'])
 
 type SkillRouteOptions = {
   skillStore: SkillStore
-  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
+  decisionRuntime?: import('@use-brian/core/decisions/hydra.js').DecisionExecutionPort
   syncNativeSlashCommands?: (userId: string, workspaceId: string) => Promise<void>
   communityRegistry?: SkillContent[]
   /**

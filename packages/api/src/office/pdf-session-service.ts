@@ -2,13 +2,10 @@ import {pdfIntakeHash} from '../db/office-pdf-intake.js'
 /** Transactional PDF intake, protected assets, and flattened outputs.
  * [COMP:api/office-pdf-sessions] */
 import { createHash, randomUUID } from 'node:crypto'
-import {
-  createPdfWriterPort,
-  parsePdfSession,
-  renderPdfApprovalPage,
-  validateRenderedPdf,
-  type PdfWriterResult,
-} from '@use-brian/core'
+import { parsePdfSession } from '@use-brian/core/office/pdf/parse.js'
+import { renderPdfApprovalPage } from '@use-brian/core/office/pdf/preview.js'
+import { validateRenderedPdf } from '@use-brian/core/office/pdf/validate.js'
+import { createPdfWriterPort, type PdfWriterResult } from '@use-brian/core/office/pdf/writer.js'
 import {
   encodeOfficeState,
   applyOfficeCommand,

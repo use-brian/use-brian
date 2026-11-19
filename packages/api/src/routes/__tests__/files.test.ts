@@ -37,8 +37,8 @@ vi.mock('../../db/sessions.js', () => ({
   findOrCreateSession: vi.fn(),
   findSessionById: vi.fn(),
 }))
-vi.mock('@use-brian/core', async () => {
-  const actual = await vi.importActual<typeof import('@use-brian/core')>('@use-brian/core')
+vi.mock('@use-brian/core/files/parsers.js', async () => {
+  const actual = await vi.importActual<typeof import('@use-brian/core/files/parsers.js')>('@use-brian/core/files/parsers.js')
   return {
     ...actual,
     parseFileContent: vi.fn(),
@@ -63,7 +63,7 @@ import { getWorkspaceFileById } from '../../db/workspace-files.js'
 import { enqueueFileIngestJob, getFileIngestJob } from '../../db/file-ingest-jobs-store.js'
 import { setFileIndexing } from '../../files/artifact-index.js'
 import { resolveRecordingForFile } from '../../recordings/recording-for-file.js'
-import { parseFileContent, shouldInline } from '@use-brian/core'
+import { parseFileContent, shouldInline } from '@use-brian/core/files/parsers.js'
 
 const mockFindOrCreateUser = vi.mocked(findOrCreateUser)
 const mockGetDefaultAssistant = vi.mocked(getDefaultAssistant)

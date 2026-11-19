@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import { inspect } from 'node:util'
 import { describe, expect, it, vi } from 'vitest'
-import { ContextScopeAccumulator, createExecutionContext, executionToolContext } from '@use-brian/core'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { createExecutionContext, executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { SourceProtocolError } from '@use-brian/brian-app/connector'
-import { assertSourceModelInputAuthority, assertSourceModelOutputAuthority } from '../model-source-authority.js'
+import { admitModelInput, admitModelOutput } from '../../context-scope/admission.js'
 import { chatTurnErrorEvent } from '../../routes/chat.js'
 
 function fixture(cause: unknown) {
@@ -25,7 +26,7 @@ function fixture(cause: unknown) {
 }
 
 describe('[COMP:api/external-source-access] private source failure diagnostics', () => {
-  it.each([assertSourceModelInputAuthority, assertSourceModelOutputAuthority])(
+  it.each([admitModelInput, admitModelOutput])(
     'preserves the cause for server logs without exposing it on the chat wire or allowing another admission', async guard => {
       const databaseError = Object.assign(new Error('Fictional private database timeout'), { code: '57014' })
       const cause = new Error('Fictional verification failed', { cause: databaseError })
@@ -48,7 +49,7 @@ describe('[COMP:api/external-source-access] private source failure diagnostics',
     const original = new SourceProtocolError('source_access_denied')
     Object.defineProperty(original, 'cause', { value: new Error('Fictional original refusal') })
     const f = fixture(original)
-    await expect(assertSourceModelInputAuthority(f.context)).rejects.toBe(original)
+    await expect(admitModelInput(f.context)).rejects.toBe(original)
     expect(original.cause).toBeInstanceOf(Error)
   })
 })

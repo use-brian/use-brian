@@ -6,7 +6,7 @@
  * See docs/architecture/integrations/wordpress.md.
  */
 
-import type { WordPressApi } from '@use-brian/core'
+import type { WordPressApi } from '@use-brian/core/tools/base/wordpress.js'
 import { validateUrlAsync } from '../routes/doc-og.js'
 
 const BRIDGE_NAMESPACE = '/wp-json/use-brian/v1'

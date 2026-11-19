@@ -2,10 +2,21 @@ import { readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import {
-  createCrmOperationsTools, createCrmTools, createTaskTools, WorkflowDefinitionSchema, WorkflowTriggerSchema,
-  interpolateValue, evaluateBoolean,
-  type CrmOperationsReadPort, type CrmOperationsServicePort, type CrmStore, type TaskStore, type Tool, type ToolContext,
-} from '@use-brian/core'
+  createCrmOperationsTools,
+  type CrmOperationsReadPort,
+} from '@use-brian/core/crm/operations-tools.js'
+import type { CrmOperationsServicePort } from '@use-brian/core/crm/operations-types.js'
+import { createCrmTools } from '@use-brian/core/crm/tools.js'
+import type { CrmStore } from '@use-brian/core/crm/types.js'
+import { createTaskTools } from '@use-brian/core/tasks/tools.js'
+import type { TaskStore } from '@use-brian/core/tasks/types.js'
+import { evaluateBoolean } from '@use-brian/core/workflow/condition.js'
+import { interpolateValue } from '@use-brian/core/workflow/interpolation.js'
+import {
+  WorkflowDefinitionSchema,
+  WorkflowTriggerSchema,
+} from '@use-brian/core/workflow/schemas.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 const fixture = JSON.parse(readFileSync(new URL('../../../../../scripts/crm/fixtures/association-workflows.json', import.meta.url), 'utf8'))
 type Recipe = { key: string; enabled: boolean; trigger: unknown; definition: { startStepId: string; steps: Array<Record<string, any>> }; sampleInput: Record<string, any>; sampleVars: Record<string, any> }
 const recipes = fixture.recipes as Recipe[]

@@ -62,6 +62,7 @@ describe('[COMP:api/room-mechanics] shared live activity (T13)', () => {
       kind: 'turn_activity',
       sessionId: 'room-1',
       payload: {
+        turnId: null,
         event: 'status',
         senderUserId: 'user-1',
         phase: 'research_starting',
@@ -71,6 +72,7 @@ describe('[COMP:api/room-mechanics] shared live activity (T13)', () => {
       kind: 'turn_activity',
       sessionId: 'room-1',
       payload: {
+        turnId: null,
         event: 'worker_start',
         senderUserId: 'user-1',
         workerId: 'worker-2',
@@ -95,6 +97,7 @@ describe('[COMP:api/room-mechanics] shared live activity (T13)', () => {
       kind: 'turn_activity',
       sessionId: 'room-1',
       payload: {
+        turnId: null,
         event: 'tool_input',
         senderUserId: 'user-1',
         id: 'tool-1',
@@ -371,10 +374,12 @@ describe('[COMP:api/room-mechanics] multi-assistant rooms (T9)', () => {
     expect(second).toContain('add distinct knowledge instead of repeating')
   })
 
-  it('an assistant may answer at or below the room clearance, never above', () => {
+  it('an assistant may answer only at the room clearance: never above, never below', () => {
     expect(mayAssistantAnswerInRoom({ assistantClearance: 'internal', roomClearance: 'internal' })).toBe(true)
-    expect(mayAssistantAnswerInRoom({ assistantClearance: 'public', roomClearance: 'internal' })).toBe(true)
-    expect(mayAssistantAnswerInRoom({ assistantClearance: 'internal', roomClearance: 'confidential' })).toBe(true)
+    // Below the room it cannot read the room's envelope or transcript, so
+    // every lane would refuse its turn (M5Q-7 variant A): refused up front.
+    expect(mayAssistantAnswerInRoom({ assistantClearance: 'public', roomClearance: 'internal' })).toBe(false)
+    expect(mayAssistantAnswerInRoom({ assistantClearance: 'internal', roomClearance: 'confidential' })).toBe(false)
     // A confidential-cleared assistant answering an internal room would draw
     // on data the room's readers may not see — refused.
     expect(mayAssistantAnswerInRoom({ assistantClearance: 'confidential', roomClearance: 'internal' })).toBe(false)
@@ -478,10 +483,11 @@ describe('[COMP:api/turn-stop] turnStopOutcome', () => {
 describe('[COMP:api/room-mechanics] Assistant-row attribution (source guard)', () => {
   const source = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8')
 
-  /** Every `addSessionMessage({ … })` call, brace-balanced from the literal. */
-  function addSessionMessageCalls(src: string): string[] {
+  /** Every `addSessionMessage({ … })` call, brace-balanced from the literal.
+   * Assistant rows now publish through the turn owner (`ownedTurn.publish({ … })`,
+   * turn-kernel.md "Reply publication"), so those calls are scanned the same way. */
+  function addSessionMessageCalls(src: string, OPEN = 'addSessionMessage({'): string[] {
     const calls: string[] = []
-    const OPEN = 'addSessionMessage({'
     let from = 0
     for (;;) {
       const start = src.indexOf(OPEN, from)
@@ -504,17 +510,24 @@ describe('[COMP:api/room-mechanics] Assistant-row attribution (source guard)', (
     // A parser that silently matches nothing would make every assertion
     // below vacuously pass — the failure mode this whole guard exists to
     // prevent. Pin a floor instead of trusting the scan.
-    const calls = addSessionMessageCalls(source)
-    expect(calls.length).toBeGreaterThanOrEqual(5)
+    const calls = [...addSessionMessageCalls(source), ...addSessionMessageCalls(source, 'ownedTurn.publish({')]
+    expect(calls.length).toBeGreaterThanOrEqual(8)
     expect(calls.filter((c) => /role: 'assistant'/.test(c)).length).toBeGreaterThanOrEqual(3)
+    // The buffered reply's rows come from the shared assembly, stamped once.
+    expect(addSessionMessageCalls(source, 'assembleTurnPublication(pendingAssistantTurns, {')).toHaveLength(1)
   })
 
   it('stamps senderAssistantId on every assistant-role write', () => {
-    const unstamped = addSessionMessageCalls(source)
+    const unstamped = [...addSessionMessageCalls(source), ...addSessionMessageCalls(source, 'ownedTurn.publish({')]
       .filter((call) => /role: 'assistant'/.test(call))
       .filter((call) => !/senderAssistantId/.test(call))
     // Name the offenders — a bare count tells the next session nothing.
     expect(unstamped.map((c) => c.replace(/\s+/g, ' ').slice(0, 120))).toEqual([])
+    for (const assembly of addSessionMessageCalls(source, 'assembleTurnPublication(pendingAssistantTurns, {')) {
+      expect(assembly).toMatch(/sender: \{ senderAssistantId: assistant\.id \}/)
+      // Host-observation lead rows are assistant rows too.
+      expect(assembly).toMatch(/role: 'assistant'[^}]*senderAssistantId: assistant\.id/)
+    }
   })
 })
 
@@ -577,6 +590,15 @@ describe('[COMP:api/room-mechanics] crossAssistantSendPolicy — per-turn addres
         sessionClearance: 'internal',
       }),
     ).toBe('clearance_refused')
+    // Cleared below the room: it could not read it (M5Q-7 variant A).
+    expect(
+      crossAssistantSendPolicy({
+        ...base,
+        isSharedSession: true,
+        assistantClearance: 'internal',
+        sessionClearance: 'confidential',
+      }),
+    ).toBe('clearance_below')
   })
 
   it('a session that is BOTH shared and doc-surface gets the stricter room rule', () => {

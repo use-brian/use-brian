@@ -1,6 +1,6 @@
 import {randomUUID} from 'node:crypto'
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
-import {boundScopeSources} from '@use-brian/core'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {createWorkspaceChatSession} from '../../db/sessions.js'
 import {sessionContextGeneration,writeSessionContextRevision,type SessionContextKind} from '../../db/session-context-revisions.js'

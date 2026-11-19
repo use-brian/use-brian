@@ -22,7 +22,7 @@
  * [COMP:workflow/auto-title]
  */
 
-import type { LLMProvider, TokenUsage } from '../providers/types.js'
+import type { LLMProvider, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
 import type { StructuredSchedule } from '../scheduling/schedule.js'
 
 const AUTO_TITLE_MODEL = 'gemini-3.5-flash-lite'

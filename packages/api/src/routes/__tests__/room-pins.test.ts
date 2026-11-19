@@ -422,7 +422,7 @@ describe('[COMP:api/room-pins] GET resolves assistant attribution (migration 421
 // ── Tool-half: the assistant's write access (room pin tools) ────
 
 import { createSessionPinTools } from '../../session-pin-tools.js'
-import type { ToolContext } from '@use-brian/core'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const toolCtx = {
   userId: 'u-2',

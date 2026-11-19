@@ -1,6 +1,6 @@
 /** [COMP:api/channel-recording] Genuine recording provenance for owned PG fixtures. */
 import {randomUUID} from 'node:crypto'
-import type {SessionContextAuthority} from '@use-brian/core'
+import type {SessionContextAuthority} from '@use-brian/core/memory/session-state-types.js'
 import {expect} from 'vitest'
 import {query,runWithAgentAccess} from '../../db/client.js'
 import {createDbWorkspaceFilesStore} from '../../db/workspace-files-store.js'

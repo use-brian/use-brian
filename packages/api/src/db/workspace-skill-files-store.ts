@@ -14,7 +14,7 @@
  * [COMP:api/workspace-skill-files-store]
  */
 
-import { normalizeSkillResourcePath, sha256, skillResourceKindFromPath } from '@use-brian/core'
+import { normalizeSkillResourcePath, sha256, skillResourceKindFromPath } from '@use-brian/core/skills/bundle.js'
 import { query, queryWithRLS } from './client.js'
 
 export type SkillFileKind = 'reference' | 'asset' | 'template' | 'script'

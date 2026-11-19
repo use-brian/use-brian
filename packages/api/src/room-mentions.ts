@@ -27,8 +27,8 @@
  * [COMP:api/room-mentions]
  */
 
-import type { Sensitivity } from '@use-brian/core'
-import { canRead } from '@use-brian/core'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { canRead } from '@use-brian/agent-runtime/security/sensitivity.js'
 import {
   resolveMentionSpans,
   MAX_ROOM_RESPONDERS,

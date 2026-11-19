@@ -1,6 +1,6 @@
 /** Protected file persistence for draft anchors. [COMP:api/office-suggestions] */
 import { randomUUID } from 'node:crypto'
-import type { FilesApi } from '@use-brian/core'
+import type { FilesApi } from '@use-brian/core/workspace-files/api.js'
 import type { OfficeArtifactRow } from '../db/office-artifacts.js'
 import type { getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
 

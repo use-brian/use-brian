@@ -1,6 +1,9 @@
 /** Immutable operation/context consent for native workspace connections. [COMP:api/workspace-mcp] */
 import { z } from 'zod'
-import { filterToolsByCapabilities, minSensitivity, type AccessCeiling, type Tool, type ToolContext } from '@use-brian/core'
+import type { AccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import { minSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { filterToolsByCapabilities } from '@use-brian/agent-runtime/tools/capability-gate.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const names = z.array(z.string().min(1).max(200)).max(4096)
 export const workspaceMcpConsentSchema = z.object({

@@ -25,7 +25,9 @@
       "dependsOn": ["^build"]
     },
     "test": {
-      "dependsOn": ["^build"]
+      "dependsOn": ["^build"],
+      "env": ["BRIAN_TEST_PARTITION"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/scripts/testing/unit-partition.mjs", "$TURBO_ROOT$/packages/shared/src/department-isolation-coverage.ts"]
     },
     "test:integration": {
       "cache": false,

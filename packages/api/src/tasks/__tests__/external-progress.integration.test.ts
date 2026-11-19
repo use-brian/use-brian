@@ -7,7 +7,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
-import type { ToolContext } from '@use-brian/core'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { getAppPool, getPool } from '../../db/client.js'
 import { getPoolSystem } from '../../db/task-execution-store.js'
 import { updateTask } from '../../db/tasks.js'

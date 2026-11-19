@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { defaultDrawingLibrary, parseLibrary, describeDrawing, drawingActionSchema,
   type DrawingAction, type DrawingLibraryItem } from '@use-brian/shared/drawing'
-import { buildTool, type ToolContext } from '../tools/types.js'
+import { buildTool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import type { DocToolDeps } from './tools.js'
 import { actorFromContext } from '../retrieval/tools.js'
 

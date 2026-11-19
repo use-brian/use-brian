@@ -1,4 +1,4 @@
-import { filterToolsByCapabilities } from '../tools/capability-gate.js'
+import { filterToolsByCapabilities } from '@use-brian/agent-runtime/tools/capability-gate.js'
 /**
  * Context-clean Doc edit runner.
  *
@@ -14,12 +14,12 @@ import { filterToolsByCapabilities } from '../tools/capability-gate.js'
  */
 
 import { z } from 'zod'
-import { NOOP_TURN_LEDGER } from '../engine/turn-ledger.js'
-import { queryLoop, type TerminalStopReason } from '../engine/query-loop.js'
-import { DEFAULT_STALL_IDLE_MS, isStalledError } from '../engine/stall-watchdog.js'
-import { NO_TOOL_TIMEOUT } from '../engine/tool-executor.js'
-import type { LLMProvider, TokenUsage } from '../providers/types.js'
-import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
+import { NOOP_TURN_LEDGER } from '@use-brian/agent-runtime/engine/turn-ledger.js'
+import { queryLoop, assertModelInputAuthority, type TerminalStopReason } from '@use-brian/agent-runtime/engine/query-loop.js'
+import { DEFAULT_STALL_IDLE_MS, isStalledError } from '@use-brian/agent-runtime/engine/stall-watchdog.js'
+import { NO_TOOL_TIMEOUT } from '@use-brian/agent-runtime/engine/tool-executor.js'
+import type { LLMProvider, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 export const DOC_EDIT_GATEWAY_TOOL = 'delegateDocEdit'
 
@@ -195,8 +195,8 @@ export function isolateDocEditToolContext(parent: ToolContext): ToolContext {
     executionContext: parent.executionContext,
     authority: parent.authority,
     scopeAccumulator: parent.scopeAccumulator,
-    assertModelInputAuthority: parent.assertModelInputAuthority,
-    assertModelOutputAuthority: parent.assertModelOutputAuthority,
+    admitModelInput: parent.admitModelInput,
+    admitModelOutput: parent.admitModelOutput,
     sessionPersisted: parent.sessionPersisted,
     mutationCompartments: parent.mutationCompartments,
     projectIds: parent.projectIds,
@@ -247,11 +247,9 @@ async function runAttempt(
   model: string,
   attempt: DocEditAttemptUsage['attempt'],
 ): Promise<AttemptResult> {
-  await options.context.authority?.assertCurrent()
-  await options.context.assertModelInputAuthority?.(options.context)
+  await assertModelInputAuthority(options.context)
   const pageContext = await options.loadPageContext(options.instruction)
-  await options.context.authority?.assertCurrent()
-  await options.context.assertModelInputAuthority?.(options.context)
+  await assertModelInputAuthority(options.context)
   const mutationTools = new Set<string>()
   const pageIds = new Set<string>()
   let latestText = ''

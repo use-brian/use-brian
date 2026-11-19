@@ -28,7 +28,7 @@
  * [COMP:api/ingest-external-relay]
  */
 
-import { sanitize } from '@use-brian/core'
+import { sanitize } from '@use-brian/core/analytics/logger.js'
 import {
   INGEST_APPEND_CONTRACT_V1,
   INGEST_APPEND_CONTRACT_V2,

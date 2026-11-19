@@ -1,7 +1,10 @@
+import { expect } from 'vitest'
 import { createPublicKey, randomBytes, randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { createConnectorActorVerifier } from '@use-brian/brian-app/connector'
-import { ContextScopeAccumulator, boundScopeSources, type ScopeSource } from '@use-brian/core'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { applyRLSGucs, getAppPool, runWithAgentAccess } from '../../../db/client.js'
 import { createMemory } from '../../../db/memories.js'
 import { addSessionMessage, getSessionMessages, type SessionMessage } from '../../../db/sessions.js'
@@ -15,17 +18,37 @@ import type { persistentContextFixture } from './persistent-context.js'
 /** A distinct persisted source installation; SQL and ACL boundaries are real. */
 export async function persistentSourceFixture(f: Awaited<ReturnType<typeof persistentContextFixture>>) {
   const role = `persistence_${randomBytes(8).toString('hex')}`, password = randomBytes(32).toString('hex')
-  await f.pool.query(`CREATE ROLE ${role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD '${password}'`)
-  await f.pool.query(`CREATE SCHEMA ${role} AUTHORIZATION ${role}`)
+  const { assertLocalFixture } = await import(new URL('../../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
+  const marker = await assertLocalFixture()
+  const provision = async (create: boolean) => {
+    await assertLocalFixture()
+    const url = new URL(process.env.DATABASE_URL!)
+    if (marker.bootstrapRole) url.username = marker.bootstrapRole
+    const client = new pg.Client({ connectionString: url.href }); await client.connect()
+    try {
+      await client.query('BEGIN')
+      if (create) {
+        await client.query(`CREATE ROLE ${role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD '${password}'`)
+        await client.query(`CREATE SCHEMA ${role} AUTHORIZATION ${role}`)
+      } else {
+        await client.query(`DROP SCHEMA IF EXISTS ${role} CASCADE`); await client.query(`DROP ROLE IF EXISTS ${role}`)
+      }
+      await client.query('COMMIT')
+    } catch (error) { await client.query('ROLLBACK'); throw error } finally { await client.end() }
+  }
+  await provision(true)
   const sourceUrl = new URL(process.env.DATABASE_URL!)
   sourceUrl.username = role; sourceUrl.password = password
   const pool = new pg.Pool({ connectionString: sourceUrl.href, options: `-c search_path=${role},pg_catalog`, max: 3 })
   let source: Awaited<ReturnType<typeof startIndependentSource>> | undefined
   async function cleanup() {
     await source?.close(); await pool.end()
-    await f.pool.query(`DROP SCHEMA ${role} CASCADE`); await f.pool.query(`DROP ROLE ${role}`)
+    await provision(false)
   }
   try {
+    expect((await pool.query('SELECT rolsuper,rolbypassrls,rolcreatedb,rolcreaterole FROM pg_roles WHERE rolname=current_user')).rows[0])
+      .toEqual({ rolsuper: false, rolbypassrls: false, rolcreatedb: false, rolcreaterole: false })
+    await expect(pool.query('SELECT id FROM public.users')).rejects.toMatchObject({ code: '42501' })
     await pool.query(independentSourceSchema)
     await pool.query('INSERT INTO assistants(id) VALUES($1)', [f.assistantId])
     for (const user of [f.ownerId, f.secondId]) await pool.query("INSERT INTO accounts(kind,id) VALUES('human',$1)", [user])
@@ -58,10 +81,10 @@ export async function persistentSourceFixture(f: Awaited<ReturnType<typeof persi
     await runtime.call('readRecord', { id: 'fixture-record', fields: ['description'] })
     const observations = accumulator.evidence.sources!
     const prepared = await coordinator.prepare(execution, observations, 'retain')
-    const tx = await f.pool.connect()
+    const tx = await getAppPool().connect()
     let derivative
     try {
-      await tx.query('BEGIN'); await applyRLSGucs(tx, f.ownerId)
+      await tx.query('BEGIN'); await runWithAgentAccess(execution.security.access, () => applyRLSGucs(tx, f.ownerId, execution.assistant.id))
       await pinPreparedExternalSourceAuthority(tx, execution, prepared)
       derivative = await createMemory({ workspaceId: f.workspaceId, assistantId: f.assistantId, userId: null,
         createdByUserId: f.ownerId, summary: 'Fictional retained independent content', sensitivity: 'internal',

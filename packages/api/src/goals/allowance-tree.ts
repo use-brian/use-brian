@@ -19,7 +19,8 @@
  * Spec: docs/architecture/features/goals.md -> "Resumable task execution".
  * [COMP:goals/allowance-tree]
  */
-import type { ExecutionCheckpoint, ExecutionPlan, ExecutionSourceRef, ExecutionStreaks, UsageStore } from '@use-brian/core'
+import type { ExecutionCheckpoint, ExecutionPlan, ExecutionSourceRef, ExecutionStreaks } from '@use-brian/core/goals/execution.js'
+import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
 import {
   beginIterationSystem,
   deriveChildExecutionSystem,

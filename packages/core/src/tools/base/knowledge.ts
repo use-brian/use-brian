@@ -13,16 +13,16 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool, type ToolContext } from '../types.js'
-import { notFoundMessage, toolFailure } from '../tool-failure.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { notFoundMessage, toolFailure } from '@use-brian/agent-runtime/tools/tool-failure.js'
 import type {
   KnowledgeStoreInterface,
   KnowledgeRepoWriter,
   KnowledgeRepoWriteResult,
 } from '../../knowledge/types.js'
 import { unifiedDiffLines } from '../../knowledge/text-diff.js'
-import { RANK, researchWriteFloor, type Sensitivity } from '../../security/sensitivity.js'
-import { ContextScopeAccumulator, resolveWriteScope, scopeEvidenceFromRows } from '../../security/context-scope.js'
+import { RANK, researchWriteFloor, type Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { ContextScopeAccumulator, resolveWriteScope, scopeEvidenceFromRows } from '@use-brian/agent-runtime/security/context-scope.js'
 
 export type KnowledgeToolOptions = {
   /** Whether any sync source is connected for this workspace. */

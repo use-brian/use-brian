@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LiveSessionItem, LiveWorkItem } from "@/lib/api/live";
-import { beginChatSendFeedback, useChatLiveCount } from "../chat-send-feedback";
+import { beginChatSendFeedback, settleChatSessionFeedback, useChatLiveCount } from "../chat-send-feedback";
 
 const viewer = vi.hoisted(() => ({ id: "viewer-1" }));
 vi.mock("@/lib/user", () => ({ getUserInfo: () => viewer }));
@@ -87,4 +87,33 @@ describe("[COMP:app-web/chat-send-feedback] immediate Live badge", () => {
     await act(async () => send.release());
     expect(container.textContent).toBe("1");
   });
+});
+
+
+it("[COMP:app-web/chat-send-feedback] never hides a successor roster row with an old completion", async () => {
+  const first = "a".repeat(64), successor = "b".repeat(64);
+  const send = begin("chat-1");
+  const current = { ...row(), turnId: first, statusReadStartedAt: Date.now() - 1000 };
+  await render([current]);
+  await act(async () => send.complete(first));
+  expect(container.textContent).toBe("0");
+  await render([{ ...current, turnId: successor }]);
+  expect(container.textContent).toBe("1");
+  await act(async () => settleChatSessionFeedback("workspace-1", "chat-1", first));
+  expect(container.textContent).toBe("1");
+  await act(async () => settleChatSessionFeedback("workspace-1", "chat-1"));
+  expect(container.textContent).toBe("1");
+});
+
+
+it("[COMP:app-web/chat-send-feedback] a delayed older completion cannot resurrect a newer completed row", async () => {
+  const first = "c".repeat(64), successor = "d".repeat(64);
+  const old = begin("chat-1");
+  await act(async () => old.complete(first));
+  const newer = begin("chat-1");
+  await render([{ ...row(), turnId: successor, statusReadStartedAt: Date.now() - 1000 }]);
+  await act(async () => newer.complete(successor));
+  expect(container.textContent).toBe("0");
+  await act(async () => settleChatSessionFeedback("workspace-1", "chat-1", first));
+  expect(container.textContent).toBe("0");
 });

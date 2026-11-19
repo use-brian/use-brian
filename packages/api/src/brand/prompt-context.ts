@@ -32,7 +32,8 @@
  * [COMP:brand/prompt-context]
  */
 
-import { buildBrandContext, type BrandStore } from '@use-brian/core'
+import { buildBrandContext } from '@use-brian/core/brand/context-builder.js'
+import type { BrandStore } from '@use-brian/core/brand/types.js'
 import { getBrandStore } from '../db/brand-store.js'
 
 export async function resolveBrandContext(params: {

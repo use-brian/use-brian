@@ -2,7 +2,9 @@
 import { createHmac } from 'node:crypto'
 import { z } from 'zod'
 import type { PoolClient, QueryResult, QueryResultRow } from 'pg'
-import { CrmOperationsError, type CrmDeliveryChannel, type CrmOperationsCommand, type CrmOperationsContext, type CrmPageQuery } from '@use-brian/core'
+import { CrmOperationsError, type CrmOperationsCommand, type CrmOperationsContext } from '@use-brian/core/crm/operations-types.js'
+import type { CrmPageQuery } from '@use-brian/core/crm/pagination.js'
+import type { CrmDeliveryChannel } from '@use-brian/core/crm/sendability.js'
 import { readCrmPrivacyPolicy } from './privacy-policy.js'
 import { queryCrmPage } from './pagination.js'
 

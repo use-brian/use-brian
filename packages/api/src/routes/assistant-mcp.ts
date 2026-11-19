@@ -27,17 +27,14 @@ import type { WorkspaceMcpProfile } from '../workspace-mcp/profile.js'
  */
 
 import { randomUUID } from 'node:crypto'
-import { Router } from 'express'
+import { Router, type Response } from 'express'
 import { serveStatelessMcp } from '../brain-mcp/stateless.js'
-import {
-  SensitivityAccumulator,
-  ContextScopeAccumulator,
-  CONFIGURE_CAPABILITY,
-  executionToolContext,
-  type CapabilityStore,
-  type Tool,
-  type ToolContext,
-} from '@use-brian/core'
+import { memoryConnectionRequired, memoryConnectionUnavailable, type MemoryAllowance } from '../brain-mcp/memory-allowance.js'
+import { CONFIGURE_CAPABILITY, type CapabilityStore } from '@use-brian/core/authorization/types.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { SensitivityAccumulator } from '@use-brian/agent-runtime/security/sensitivity.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { parseAuthToken, verifySecret, type ApiKeyStore } from '../db/api-key-store.js'
 import { findAssistantById } from '../db/users.js'
 import { query } from '../db/client.js'
@@ -51,6 +48,7 @@ import {
 
 type Options = {
   workspaceProfile?: WorkspaceMcpProfile
+  contextOnly?: MemoryAllowance['contextOnly']
   authorizationStoreFor?: (assistantId: string) => OAuthAuthorizationStore
   apiUrl?: string
   apiKeyStore: ApiKeyStore
@@ -94,6 +92,17 @@ const INVALID_KEY_MESSAGE =
 
 export function assistantMcpRoutes(opts: Options): Router {
   const router = Router()
+  const rejectContextOnly = async (workspaceId: string | null, res: Response): Promise<boolean> => {
+    if (!workspaceId || !opts.contextOnly) return false
+    try {
+      if (!await opts.contextOnly(workspaceId)) return false
+    } catch {
+      res.status(503).json(memoryConnectionUnavailable)
+      return true
+    }
+    res.status(403).json(memoryConnectionRequired)
+    return true
+  }
 
   router.post<{ assistantId: string }>('/assistants/:assistantId/mcp', async (req, res) => {
     if (opts.apiUrl && /^[0-9a-f-]{36}$/i.test(req.params.assistantId)) {
@@ -117,6 +126,7 @@ export function assistantMcpRoutes(opts: Options): Router {
         || !await getWorkspaceRoleSystem(auth.actingUserId,auth.workspaceId)) {
         res.status(401).json({ error: 'invalid_api_key' }); return
       }
+      if (await rejectContextOnly(auth.workspaceId, res)) return
       const ownerUserId = await resolveOwnerUserId(assistant)
       if (!ownerUserId) { res.status(401).json({ error: 'invalid_api_key' }); return }
       try {
@@ -247,6 +257,7 @@ export function assistantMcpRoutes(opts: Options): Router {
       res.status(401).json({ error: 'invalid_api_key', message: INVALID_KEY_MESSAGE })
       return
     }
+    if (await rejectContextOnly(assistant.workspaceId, res)) return
     const activeCapabilities = new Set(await opts.capabilityStore.listActive(assistant.id))
     let resolved
     try {

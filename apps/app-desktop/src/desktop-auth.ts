@@ -349,6 +349,23 @@ function localCookieSession(response: LocalSessionResponse, requireUser: boolean
     refreshTokenExpiresIn: jwtExpSeconds(refreshToken) - now };
 }
 
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * True when `destination` is the target's own origin, or a loopback alias of a
+ * loopback target (`localhost`, `127.0.0.1`, `[::1]`) with the same scheme and
+ * port. The app route redirects to its configured `APP_URL` origin (auth.md
+ * "Public-origin invariant"), so a server reached as `127.0.0.1:<port>` answers
+ * with `localhost:<port>`; both name the one process the request reached. A
+ * non-loopback host is never an alias. Spec: app-desktop.md "Landing, probe,
+ * and the local-owner mint" (loopback origin rule).
+ */
+export function isSameLocalServerOrigin(destination: URL, target: URL): boolean {
+  if (destination.origin === target.origin) return true;
+  return destination.protocol === target.protocol && destination.port === target.port &&
+    LOOPBACK_HOSTS.has(destination.hostname) && LOOPBACK_HOSTS.has(target.hostname);
+}
+
 /**
  * The app-origin route owns the remote owner gate. Electron stops at its
  * redirect and imports the fresh HttpOnly cookie trio into safeStorage.
@@ -362,7 +379,7 @@ export async function mintLocalDesktopSession(
   });
   const destination = res.location ? new URL(res.location, appUrl) : null;
   if (![302, 303, 307, 308].includes(res.status) || !destination ||
-      destination.origin !== new URL(appUrl).origin || destination.pathname === "/login") {
+      !isSameLocalServerOrigin(destination, new URL(appUrl)) || destination.pathname === "/login") {
     throw new Error(`Local desktop session failed (HTTP ${res.status})`);
   }
   return localCookieSession(res, true);

@@ -1,6 +1,6 @@
 /** [COMP:goals/live-activity] Safe normal-event projection for goal SSE. */
 import { describe, expect, it } from 'vitest'
-import type { QueryEvent } from '@use-brian/core'
+import type { QueryEvent } from '@use-brian/agent-runtime/engine/query-loop.js'
 import {
   compactGoalActivityEnvelope,
   goalActivityFramesFromQueryEvent,

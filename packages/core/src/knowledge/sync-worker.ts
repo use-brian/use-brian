@@ -14,7 +14,7 @@
 import { parseMarkdownFile } from './parser.js'
 import { buildPathIndex, resolveWikilink } from './wikilink-resolver.js'
 import { buildLintIndex, runAllChecks, type Finding, type LintInputEntry } from '@use-brian/brian-kb'
-import type { Sensitivity } from '../security/sensitivity.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { promises as fs } from 'node:fs'
 import * as nodePath from 'node:path'
 import { createHash } from 'node:crypto'

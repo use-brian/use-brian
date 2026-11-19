@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { collectStream } from '../../../../core/src/providers/accumulator.js'
-import { createGeminiProvider } from '../../../../core/src/providers/gemini.js'
-import type { Message } from '../../../../core/src/providers/types.js'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
+import { createGeminiProvider } from '@use-brian/agent-runtime/providers/gemini.js'
+import type { Message } from '@use-brian/agent-runtime/providers/types.js'
 import { LAYER_1_SYSTEM_PROMPT } from '../../../../core/src/system-prompt.js'
 import {
-  attachUserVisibleContext,
   buildSplitSystemPrompt,
   formatPrivateRuntimeContext,
 } from '../_prompt-builder.js'
+import { attachUserVisibleContext } from '../../turn/user-visible-context.js'
 
 const apiKey = process.env.GEMINI_API_KEY
 const describeIf = apiKey ? describe : describe.skip

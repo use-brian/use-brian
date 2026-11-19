@@ -14,8 +14,8 @@
  * no goal row is minted. A missing draft is benign; a slop draft is the
  * failure mode v2 exists to remove.
  */
-import type { LLMProvider, TokenUsage } from '../providers/types.js'
-import { collectStream } from '../providers/accumulator.js'
+import type { LLMProvider, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
 import type { GoalLlmRuntime, GoalLlmUsageContext } from './clarity.js'
 import type { DecisionExecutionPort } from '../decisions/index.js'
 

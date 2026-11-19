@@ -10,10 +10,10 @@
  * via onEvent so the frontend shows live tool activity during pre-flight.
  */
 
-import type { LLMProvider, TokenUsage } from '../providers/types.js'
-import type { Tool, ToolContext } from '../tools/types.js'
-import type { QueryEvent } from '../engine/query-loop.js'
-import { createWorkerManager, type WorkerRunsStore } from './worker.js'
+import type { LLMProvider, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import type { QueryEvent } from '@use-brian/agent-runtime/engine/query-loop.js'
+import { createWorkerManager, type WorkerRunsStore, type WorkerOptions } from './worker.js'
 import { classifySplit, type SplitResult } from './splitter.js'
 
 /**
@@ -46,6 +46,8 @@ export type PreflightOptions = {
   onStatus?: (msg: string) => void
   /** Forward worker query loop events to the caller for live streaming. Includes workerId and description for grouping. */
   onEvent?: (event: QueryEvent, workerId: string, description?: string) => void
+  /** Original host COGS callback; the worker awaits it on every exit. */
+  onUsage?: WorkerOptions['onUsage']
   /** Max turns per worker. Default 3, extended thinking uses 10. */
   maxWorkerTurns?: number
   /**
@@ -82,12 +84,14 @@ export type PreflightOptions = {
  * to inject into the system prompt.
  */
 export async function runPreflight(options: PreflightOptions): Promise<PreflightResult> {
-  const { provider, model, message, tools, context, onStatus, onEvent } = options
+  const { provider, model, message, tools, context, onStatus, onEvent, onUsage } = options
+  context.abortSignal?.throwIfAborted()
 
   // Step 1: Classify — does this message need splitting? Classifier usage is
   // returned on the result so the caller can record it as `overhead:splitter`.
-  const { tasks, usage, model: classifierModel } = await (options.classify ? options.classify() : classifySplit({ provider, message }))
+  const { tasks, usage, model: classifierModel } = await (options.classify ? options.classify() : classifySplit({ provider, message, signal: context.abortSignal }))
   const classifierUsage: PreflightClassifierUsage = { usage, model: classifierModel }
+  if (context.abortSignal?.aborted) return { type: 'passthrough', ...classifierUsage }
   // A workflow research step always researches: if the splitter declines to
   // split, fall back to a single worker on the whole prompt. Chat preflight
   // (forceResearch absent) keeps the historical passthrough.
@@ -103,6 +107,7 @@ export async function runPreflight(options: PreflightOptions): Promise<Preflight
     tools: new Map([...tools].filter(([_, t]) => t.isReadOnly)),
     maxTurns: options.maxWorkerTurns ?? 2, // 1 search + 1 URL read = 2 turns max
     preserveExecutionContext: true,
+    onUsage,
   })
   // Workflow research steps persist each worker (worker_runs rows) and run the
   // research-mode discipline on the research-tier model. Chat preflight leaves
@@ -115,6 +120,7 @@ export async function runPreflight(options: PreflightOptions): Promise<Preflight
   }
 
   for (const taskPrompt of tasksToRun) {
+    if (context.abortSignal?.aborted) break
     manager.spawn(taskPrompt, context, tools)
   }
 

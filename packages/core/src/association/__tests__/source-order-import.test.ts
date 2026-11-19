@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { AssociationSourceOrderImportSchema } from '../../index.js'
+import { AssociationSourceOrderImportSchema } from '../domain.js'
 
 const id = (digit: number) => `00000000-0000-4000-8000-00000000000${digit}`
 const sourceOrder = {

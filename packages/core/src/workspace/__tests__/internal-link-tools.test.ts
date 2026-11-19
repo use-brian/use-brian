@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createInternalLinkTools, type InternalLinkToolsPort } from '../internal-link-tools.js'
-import type { ToolContext } from '../../tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const WORKSPACE_ID = '00000000-0000-4000-8000-000000000001'
 const PAGE_ID = '00000000-0000-4000-8000-000000000002'

@@ -1,5 +1,5 @@
-import { canRead } from '../../security/sensitivity.js'
-import { scopeGrantContains } from '../../security/context-scope.js'
+import { canRead } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { scopeGrantContains } from '@use-brian/agent-runtime/security/context-scope.js'
 /** Durable-stage Office generation engine. [COMP:office/generation] */
 import {
   assertOfficeArtifactSnapshot,

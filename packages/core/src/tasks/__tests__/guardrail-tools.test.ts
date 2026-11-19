@@ -10,7 +10,7 @@ import { createTaskGuardrailTools, type TaskGuardrailStore } from '../guardrail-
 import { createTaskTools } from '../tools.js'
 import type { TaskAdmissionPort } from '../admission.js'
 import type { TaskRecord, TaskStore } from '../types.js'
-import type { ToolContext } from '../../tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const ctx: ToolContext = {
   assistantId: 'assistant_1',

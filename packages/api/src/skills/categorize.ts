@@ -23,11 +23,9 @@
  * [COMP:api/skill-categorize]
  */
 
-import {
-  collectStream,
-  type DecisionExecutionPort,
-  type LLMProvider,
-} from '@use-brian/core'
+import type { DecisionExecutionPort } from '@use-brian/core/decisions/hydra.js'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
 import {
   BUILTIN_SKILL_GROUPS,
   UNSORTED_SKILL_GROUP,

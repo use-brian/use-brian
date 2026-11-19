@@ -1,7 +1,9 @@
 /** Actual configuration, intake, questions, Task control, Goal writers and app-role RLS. */
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it, vi } from 'vitest'
-import { buildOneStepReminderWorkflow, createTaskTools, type ExecutionPlanDraft } from '@use-brian/core'
+import type { ExecutionPlanDraft } from '@use-brian/core/goals/execution.js'
+import { createTaskTools } from '@use-brian/core/tasks/tools.js'
+import { buildOneStepReminderWorkflow } from '@use-brian/core/workflow/one-step.js'
 import { getAppPool, getPool, queryWithRLS } from '../../db/client.js'
 import { createTask, getTaskByIdSystem, updateTask } from '../../db/tasks.js'
 import { createDbTaskStore } from '../../db/tasks-store.js'
@@ -25,7 +27,7 @@ import { createGoalBriefBoundary } from '../../briefs/context.js'
 import { resolveGoalAuthoritySystem } from '../../context-scope/workflow-authority.js'
 import { armQualifiedTaskGoal, readExecutionSources, resumeAssignedExecution, type EntryDeps } from '../../goals/execution-qualification.js'
 import { buildWorkflowToolRegistry } from '../../workflow/mcp-bridge.js'
-import { advanceWorkflowRun } from '@use-brian/core'
+import { advanceWorkflowRun } from '@use-brian/core/workflow/executor.js'
 import { createDbWorkflowRunStore } from '../../db/workflow-store.js'
 import { advanceRoutineIntake, answerRoutineQuestion, ensureRoutineQuestion, noteRoutinePlanningUsage,
   routineExecutionDeps, routineManifestScope, verifyRoutineExecution } from '../routine-execution.js'
@@ -229,9 +231,12 @@ describe('[COMP:api/routine-intake-execution] native receipt-backed entry and co
     const s = await executionFixture({ waiting: true })
     const result = (await s.intake())!
     const state = (await findActiveNativeExecutionSystem({ taskId: result.taskId }))!
+    const question = (await approvals.listPendingForWorkspace(s.actor.userId, s.f.workspaceId))[0]
+    expect(await approvals.findBlockingQuestion(s.actor.userId, s.f.workspaceId, question.blockingSessionId!)).toHaveProperty('id', question.id)
     await pool.query('UPDATE tasks SET scope_held=true WHERE id=$1', [s.source.id])
     expect(await queryWithRLS(s.actor.userId, 'SELECT id FROM task_execution_states WHERE id=$1', [state.id])).toMatchObject({ rows: [] })
     expect(await approvals.listPendingForWorkspace(s.actor.userId, s.f.workspaceId)).toHaveLength(0)
+    expect(await approvals.findBlockingQuestion(s.actor.userId, s.f.workspaceId, question.blockingSessionId!)).toBeNull()
     expect(await verifyRoutineExecution((await getTaskByIdSystem(result.taskId))!, state.authoringRef as never)).toBeNull()
     expect(await resumeAssignedExecution(state.id, (await getTaskByIdSystem(result.taskId))!, s.deps)).toMatchObject({ kind: 'not_entered' })
     expect(s.planner).not.toHaveBeenCalled()

@@ -28,14 +28,8 @@
  *
  * [COMP:goals/rollup-runner]
  */
-import {
-  rollupHost,
-  type GoalHostRef,
-  type GoalRecord,
-  type GoalStore,
-  type RollupDeps,
-  type RollupOutcome,
-} from '@use-brian/core'
+import { rollupHost, type RollupDeps, type RollupOutcome } from '@use-brian/core/goals/rollup.js'
+import type { GoalHostRef, GoalRecord, GoalStore } from '@use-brian/core/goals/types.js'
 import { buildGoalResolvers, finishGoal,type GoalTerminalCommit } from './writeback.js'
 
 export type GoalRollupDeps = {

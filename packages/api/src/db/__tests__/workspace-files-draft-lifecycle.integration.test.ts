@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import pg from 'pg'
 import { randomUUID } from 'node:crypto'
-import { workspaceFileStatus } from '@use-brian/core'
+import { workspaceFileStatus } from '@use-brian/core/workspace-files/types.js'
 
 /**
  * Integration test for the SV(2) draft lifecycle conventions on
@@ -69,7 +69,7 @@ async function addMember(client: pg.PoolClient, workspaceId: string, userId: str
 }
 
 describeIf('[COMP:files/draft-lifecycle] workspace_files draft lifecycle (integration)', () => {
-  let store: import('@use-brian/core').WorkspaceFilesStore
+  let store: import('@use-brian/core/workspace-files/types.js').WorkspaceFilesStore
 
   beforeAll(async () => {
     process.env.DATABASE_URL ??= 'postgres:///sidanclaw'

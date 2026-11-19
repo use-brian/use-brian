@@ -18,7 +18,7 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '../tools/types.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import type { EntityLinksStore, EntityStore } from '../entities/types.js'
 import {
   applyExplicitCloses,
@@ -28,7 +28,7 @@ import {
   formatClosesSummary,
   formatLinksSummary,
 } from '../entities/explicit-links.js'
-import { resolveWriteScope } from '../security/context-scope.js'
+import { resolveWriteScope } from '@use-brian/agent-runtime/security/context-scope.js'
 
 const PROFILE_SCHEMA = z.object({
   // The model passes typed top-level fields. Anything not listed here

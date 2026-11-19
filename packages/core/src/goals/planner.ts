@@ -14,8 +14,8 @@
  * [COMP:goals/execution-qualification]
  */
 import { z } from 'zod'
-import { collectStream } from '../providers/accumulator.js'
-import type { LLMProvider, TokenUsage } from '../providers/types.js'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
+import type { LLMProvider, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
 import type { GoalLlmRuntime, GoalLlmUsageContext } from './clarity.js'
 import type { ExecutionPlanDraft } from './execution.js'
 

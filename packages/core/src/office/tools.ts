@@ -8,9 +8,12 @@
  */
 import { z } from 'zod'
 import { AssistantOfficePlanSchema } from './command-input.js'
-import { canEnableOfficeCreation } from './templates/compiler.js'
-import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
-import { ContextScopeAccumulator, resolveWriteScope, scopeEvidenceFromRows, type ScopeEvidence } from '../security/context-scope.js'
+// The creation barrier lives with the renderers (templates/compiler.ts imports
+// every family's export/reparse); it loads on the first createOfficeArtifact
+// call, not when the Office tool roster is built (M4 step 5, D13).
+const loadOfficeCreationBarrier = () => import('./templates/compiler.js')
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { ContextScopeAccumulator, resolveWriteScope, scopeEvidenceFromRows, type ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
 
 export const OfficeGenerationTemplateSelection = z.object({
   artifactId: z.string().uuid(), jobId: z.string().uuid(), templateVersionId: z.string().uuid(),
@@ -234,6 +237,17 @@ export function createOfficeTools(params: {
           isError: true,
         }
       }
+      const barrier = await loadOfficeCreationBarrier().catch((error: unknown) => {
+        console.error('[office] creation barrier failed to load:', error)
+        return null
+      })
+      if (!barrier) {
+        return {
+          data: `createOfficeArtifact did not create the ${input.family}: the Office creation runtime could not be loaded on this server, so nothing was created. This is a temporary server-side availability problem, not a problem with the arguments; do not retry with different arguments. Tell the user Office creation is unavailable right now.`,
+          isError: true,
+        }
+      }
+      const { canEnableOfficeCreation } = barrier
       if (!canEnableOfficeCreation(input.family)) {
         return {
           data:

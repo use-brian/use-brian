@@ -1,5 +1,6 @@
 /** Shared command service for human UI, Brian and live notes. [COMP:recordings/meeting-tags] */
-import { blocksToMarkdown, type SavedViewStore } from '@use-brian/core'
+import { blocksToMarkdown } from '@use-brian/core/doc/to-markdown.js'
+import type { SavedViewStore } from '@use-brian/core/views/types.js'
 import { meetingTagsStore, type MeetingTagsStore } from '../db/meeting-tags-store.js'
 import { applyTagRules, changeRules, meetingTagCommand, setManualTags, suggestTagRules } from './meeting-tags.js'
 

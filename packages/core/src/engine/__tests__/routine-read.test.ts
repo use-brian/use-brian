@@ -1,16 +1,19 @@
 import {buildToolIndex,createMcpSearchTools} from '../../mcp/tool-search.js'
 import {describe,it,expect,vi} from 'vitest'
 import {createGoogleCalendarTools,type GoogleCalendarApi} from '../../tools/base/google-calendar.js'
-import {ContextScopeAccumulator} from '../../security/context-scope.js'
-import type {ToolContext,Tool} from '../../tools/types.js'
-import type {LLMProvider,Message} from '../../providers/types.js'
+import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
+import type {ToolContext,Tool} from '@use-brian/agent-runtime/tools/types.js'
+import type {LLMProvider,Message} from '@use-brian/agent-runtime/providers/types.js'
 import {executionFixture,fixtureDecisionProvider} from '../../decisions/__tests__/execution-fixture.js'
 import type {DecisionRequest,DecisionAnswer} from '../../decisions/types.js'
 import {planRoutineCalendarRead,executeRoutineCalendarRead,consumeHostReadObservation} from '../routine-read.js'
-import {createLoopDetector} from '../loop-detector.js'
-import {NOOP_TURN_LEDGER} from '../turn-ledger.js'
-import {queryLoop,type QueryEvent} from '../query-loop.js'
-import {inheritRoutineCalendarRead} from '../routine-read-ownership.js'
+import {createLoopDetector} from '@use-brian/agent-runtime/engine/loop-detector.js'
+import {NOOP_TURN_LEDGER} from '@use-brian/agent-runtime/engine/turn-ledger.js'
+import {queryLoop} from '../query-loop-defaults.js'
+import type {QueryEvent} from '@use-brian/agent-runtime/engine/query-loop.js'
+import {inheritRoutineCalendarRead,registerLazyCanonicalCalendarRead,type RoutineCalendarActivation} from '../routine-read-ownership.js'
+import {ROUTINE_READ_UNAVAILABLE_NOTICE} from '../routine-read.js'
+import {jsonSchemaFromZod} from '@use-brian/agent-runtime/engine/query-loop.js'
 
 const now=Date.parse('2031-06-02T00:00:00Z')
 const range={timeMin:'2031-06-02T00:00:00Z',timeMax:'2031-06-30T00:00:00Z'}
@@ -22,7 +25,7 @@ function setup(options:{page?:unknown;choose?:(request:DecisionRequest)=>string;
  const authority={assertCurrent:lease,execute:async<T>(fn:()=>Promise<T>)=>fn()}
  const execution={security:{authority,ceiling:{clearance:'public'},provenance:{}},lifecycle:{abortSignal:controller.signal}} as unknown as NonNullable<ToolContext['executionContext']>
  const context:ToolContext={userId:'fictional-user',assistantId:'fictional-assistant',sessionId:'fictional-session',appId:'fixture',channelType:'web',channelId:'fixture',
-  abortSignal:controller.signal,authority,executionContext:execution,scopeAccumulator:new ContextScopeAccumulator(),assertModelInputAuthority:full}
+  abortSignal:controller.signal,authority,executionContext:execution,scopeAccumulator:new ContextScopeAccumulator(),admitModelInput:full}
  const list=vi.fn(async(_input:unknown)=>options.page??{items:[]})
  const canonical=createGoogleCalendarTools({listEvents:list} as unknown as GoogleCalendarApi).find(tool=>tool.name==='googleCalendarListEvents')!
  const tool=options.extra?inheritRoutineCalendarRead(canonical,{...canonical,...options.extra}):canonical
@@ -43,7 +46,7 @@ function setup(options:{page?:unknown;choose?:(request:DecisionRequest)=>string;
  const input={...config,systemPrompt:'Honor all fictional instructions.',messages:structuredClone(history),tools,context,assertInputAuthority:full,now}
  return{input,config,context,execution,tools,tool,canonical,list,lease,full,evaluate,provider,stream,controller}
 }
-async function runHost(f:ReturnType<typeof setup>,onEvent?:(event:QueryEvent)=>void,extra:Partial<import('../query-loop.js').QueryLoopOptions>={}){
+async function runHost(f:ReturnType<typeof setup>,onEvent?:(event:QueryEvent)=>void,extra:Partial<import('@use-brian/agent-runtime/engine/query-loop.js').QueryLoopOptions>={}){
  const options={provider:f.provider,model:'fixture',systemPrompt:f.input.systemPrompt,messages:f.input.messages,tools:f.tools,context:f.context,
   ledger:NOOP_TURN_LEDGER,routineCalendarRead:f.config,maxTurns:1,...extra}
  const iterator=executeRoutineCalendarRead({options,tools:f.tools,loopDetector:createLoopDetector({hardLimit:10}),deniedTools:new Set(),
@@ -358,5 +361,70 @@ describe('[COMP:engine/routine-read] full-context host calendar reads',()=>{
   expect(f.provider.createSession).toHaveBeenCalledWith(expect.objectContaining({tools:undefined}))
   expect(JSON.stringify(f.stream.mock.calls)).toContain('Host-executed read observation')
   expect(events.some(event=>event.type==='assistant_turn')).toBe(true)
+ })
+})
+
+/** A still-lazy catalog entry's guarded read adapter, certified with an activator (M3 late activation). */
+function lazySetup(options:{choose?:(request:DecisionRequest)=>string;activate?:(canonical:Tool)=>Promise<RoutineCalendarActivation>;resolveTo?:(canonical:Tool)=>Tool}={}){
+ const f=setup({choose:options.choose})
+ const descriptor={name:f.canonical.name,description:f.canonical.description,inputSchema:jsonSchemaFromZod(f.canonical.inputSchema) as unknown as Record<string,unknown>,isReadOnly:true}
+ const resolve=vi.fn(async(_name:string)=>options.resolveTo?.(f.canonical)??f.canonical)
+ const settings={getPolicy:async()=>null,setPolicy:async()=>{},recordUsage:async()=>{},recordUsageAndGetCount:async()=>({timesAllowed:0,timesDenied:0})}
+ const adapter=createMcpSearchTools({index:buildToolIndex([{kind:'local',serverName:'gcal',tools:[],descriptors:[descriptor],resolve}]),settingsStore:settings,
+  assistantId:'fictional-assistant',userId:'fictional-user',exposeLocalReadTools:true}).find(tool=>tool.name===f.canonical.name)!
+ const activate=vi.fn(async(_context:ToolContext):Promise<RoutineCalendarActivation>=>options.activate?options.activate(f.canonical):{status:'ready',tool:await resolve(f.canonical.name)})
+ registerLazyCanonicalCalendarRead(adapter,activate)
+ const bound=inheritRoutineCalendarRead(adapter,{...adapter,execute:(input,context)=>adapter.execute(input,context)})
+ const tools=new Map([[bound.name,bound]]),onActivation=vi.fn()
+ const config={...f.config,calendarTools:tools,onActivation}
+ return{...f,tools,config,input:{...f.input,tools,calendarTools:tools},adapter,bound,activate,resolve,onActivation}
+}
+describe('[COMP:engine/routine-read] late activation of the routine read',()=>{
+ it('plans over an unactivated adapter and activates nothing when the plan is ordinary',async()=>{
+  const f=lazySetup({choose:()=>'ordinary'})
+  const {events,result}=await runHost(f)
+  expect(result).toEqual({messages:[],complete:false,records:[],calls:0});expect(events).toEqual([])
+  expect(f.activate).not.toHaveBeenCalled();expect(f.resolve).not.toHaveBeenCalled();expect(f.list).not.toHaveBeenCalled();expect(f.onActivation).not.toHaveBeenCalled()
+ })
+ it('activates exactly the planned read once, with fresh authority, and dispatches through the bound adapter',async()=>{
+  const f=lazySetup(),order:string[]=[]
+  f.full.mockImplementation(async()=>{order.push('authority')})
+  f.activate.mockImplementation(async()=>{order.push('activate');return{status:'ready',tool:await f.resolve(f.canonical.name)}})
+  const {events,result}=await runHost(f)
+  expect(f.activate).toHaveBeenCalledOnce();expect(f.activate.mock.calls[0][0]).toBe(f.context)
+  expect(f.list).toHaveBeenCalledOnce();expect(f.list.mock.calls[0][0]).toMatchObject({calendarId:'fictional-calendar',...range})
+  expect(result.complete).toBe(true);expect(result.calls).toBe(1)
+  expect(f.onActivation).toHaveBeenCalledWith({status:'ready',activated:1})
+  const activation=order.indexOf('activate');expect(order[activation-1]).toBe('authority');expect(order[activation+1]).toBe('authority')
+  expect(events.findIndex(event=>event.type==='tool_start')).toBeGreaterThanOrEqual(0)
+ })
+ it('reports an unavailable activation honestly and dispatches nothing',async()=>{
+  const f=lazySetup({activate:async()=>({status:'unavailable',reason:'activation is not available on this surface'})})
+  const {events,result}=await runHost(f)
+  expect(f.list).not.toHaveBeenCalled();expect(events.some(event=>event.type==='tool_start')).toBe(false)
+  expect(result).toEqual({messages:[{role:'user',content:[{type:'text',text:ROUTINE_READ_UNAVAILABLE_NOTICE}]}],complete:false,records:[],calls:0})
+  expect(f.onActivation).toHaveBeenCalledWith({status:'unavailable',reason:'unavailable'})
+ })
+ it('treats a provider failure as activation_failed and a lookalike result as not_canonical',async()=>{
+  const failed=lazySetup({activate:async()=>{throw new Error('Fictional provider outage')}})
+  expect((await runHost(failed)).result.messages).toHaveLength(1);expect(failed.onActivation).toHaveBeenCalledWith({status:'unavailable',reason:'activation_failed'})
+  expect(failed.list).not.toHaveBeenCalled()
+  const lookalike=lazySetup({activate:async canonical=>({status:'ready',tool:{...canonical}})})
+  expect((await runHost(lookalike)).result.messages).toHaveLength(1);expect(lookalike.onActivation).toHaveBeenCalledWith({status:'unavailable',reason:'not_canonical'})
+  expect(lookalike.list).not.toHaveBeenCalled()
+ })
+ it('propagates authority loss during activation',async()=>{
+  const f=lazySetup({activate:async()=>{throw Object.assign(new Error('Fictional authority change'),{reason:'authority_changed'})}})
+  await expect(runHost(f)).rejects.toThrow('Fictional authority change')
+  expect(f.list).not.toHaveBeenCalled();expect(f.onActivation).not.toHaveBeenCalled()
+ })
+ it('refuses a dispatch that resolves to a different canonical read than the activation',async()=>{
+  const otherList=vi.fn(async()=>({items:[]}))
+  const other=createGoogleCalendarTools({listEvents:otherList} as unknown as GoogleCalendarApi).find(tool=>tool.name==='googleCalendarListEvents')!
+  const f=lazySetup({resolveTo:()=>other,activate:async canonical=>({status:'ready',tool:canonical})})
+  const outcome=await runHost(f).then(value=>({value}),error=>({error:error as {reason?:string}}))
+  expect(f.list).not.toHaveBeenCalled();expect(otherList).not.toHaveBeenCalled()
+  if('value' in outcome){expect(outcome.value.result.complete).toBe(false);expect(outcome.value.result.records.every(record=>record.isError)).toBe(true)}
+  else expect(outcome.error.reason).toBe('authority_changed')
  })
 })

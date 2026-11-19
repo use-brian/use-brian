@@ -1,11 +1,24 @@
 /** Candidate-only compatibility validation. Never writes/promotes an artifact head. */
 import { createHash } from 'node:crypto'
 import {
-  convertToPdfWithLibreOffice, renderedPdfPageCount, fitOfficeArtifact, preflightSpreadsheetPdf,
-  exportOfficeDocument, exportOfficePresentation, exportOfficeSpreadsheet,
-  reparseOfficeDocument, reparseOfficePresentation, reparseOfficeSpreadsheet, officeSemanticHash,
-  type OfficeResourceResolver, type SpreadsheetPdfRequest,
-} from '@use-brian/core'
+  convertToPdfWithLibreOffice,
+  renderedPdfPageCount,
+} from '@use-brian/core/files/libreoffice.js'
+import { exportOfficeDocument, reparseOfficeDocument } from '@use-brian/core/office/docx/index.js'
+import { fitOfficeArtifact } from '@use-brian/core/office/index.js'
+import { officeSemanticHash, type OfficeResourceResolver } from '@use-brian/core/office/package.js'
+import {
+  exportOfficePresentation,
+  reparseOfficePresentation,
+} from '@use-brian/core/office/pptx/index.js'
+import {
+  exportOfficeSpreadsheet,
+  reparseOfficeSpreadsheet,
+} from '@use-brian/core/office/xlsx/index.js'
+import {
+  preflightSpreadsheetPdf,
+  type SpreadsheetPdfRequest,
+} from '@use-brian/core/office/xlsx/pdf.js'
 import type { OfficeArtifactSnapshot } from '@use-brian/office-model'
 
 export type OfficeRenderValidationPort = {

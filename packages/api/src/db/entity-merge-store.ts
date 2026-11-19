@@ -40,8 +40,9 @@ import type {
   ReconciliationOverride,
   SpecializationCascadeRepository,
   SpecializationPointer,
-} from '@use-brian/core'
-import { EntityMergeError, UndoMergeError, maxSensitivity, type Sensitivity } from '@use-brian/core'
+} from '@use-brian/core/corrections/entity-merge.js'
+import { EntityMergeError, UndoMergeError } from '@use-brian/core/corrections/entity-merge.js'
+import { maxSensitivity, type Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { applyRLSGucs, getPool, query, queryWithRLS } from './client.js'
 import {
   appendDecisionEvent,

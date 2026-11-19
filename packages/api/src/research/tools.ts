@@ -9,7 +9,7 @@
  */
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
-import { buildTool, type Tool, type ToolContext } from '@use-brian/core'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import * as research from './commands.js'
 
 export function researchActorFromTool(context: ToolContext): research.ResearchActor {

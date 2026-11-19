@@ -12,14 +12,12 @@ import {
   documentMimeType,
   documentFormatFromMetadata,
   DOCUMENT_FORMATS,
-  parseFileContent,
-  shouldInline,
-  probePdfPageCount,
-  convertToPdfWithLibreOffice,
-  LibreOfficeError,
-  PDF_CONFIRM_PAGE_THRESHOLD,
-  type FileStore,
-} from '@use-brian/core'
+} from '@use-brian/core/files/document-formats.js'
+import { convertToPdfWithLibreOffice, LibreOfficeError } from '@use-brian/core/files/libreoffice.js'
+import { parseFileContent, shouldInline } from '@use-brian/core/files/parsers.js'
+import { PDF_CONFIRM_PAGE_THRESHOLD } from '@use-brian/core/files/pdf-distill.js'
+import { probePdfPageCount } from '@use-brian/core/files/pdf-pages.js'
+import type { FileStore } from '@use-brian/core/files/types.js'
 import { FileIngestError } from '../files/ingest-error.js'
 import { MAX_INGEST_PARSE_BYTES } from '../files/file-ingest-worker.js'
 import { setFileIndexing } from '../files/artifact-index.js'

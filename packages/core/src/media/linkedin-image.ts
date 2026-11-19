@@ -1,9 +1,10 @@
 /** Bounded deterministic image derivative for the Feed LinkedIn projection. */
-import sharp from 'sharp'
 import { createHash } from 'node:crypto'
 export async function prepareLinkedInImage(source: Uint8Array, mime: string) {
   const maxBytes=20*1024*1024, maxPixels=36_152_319
   if(!source.length || source.length>maxBytes)throw new Error('linkedin_image_size')
+  // sharp loads at first use, never at module evaluation (M4 step 5: the chat path must not load image codecs).
+  const { default: sharp } = await import('sharp')
   const image=sharp(source,{animated:true,failOn:'error',limitInputPixels:maxPixels})
   const metadata=await image.metadata()
   const expected:Record<string,string>={'image/png':'png','image/jpeg':'jpeg','image/gif':'gif','image/webp':'webp'}

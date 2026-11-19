@@ -2,8 +2,8 @@ import type {
   ActiveGrantRow,
   CapabilityGrant,
   CapabilityStore,
-} from '@use-brian/core'
-import { DuplicateGrantError } from '@use-brian/core'
+} from '@use-brian/core/authorization/types.js'
+import { DuplicateGrantError } from '@use-brian/core/authorization/types.js'
 import { query } from './client.js'
 
 type GrantRow = {

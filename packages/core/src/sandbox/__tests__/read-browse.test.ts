@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { createComputerTools, type ComputerToolProfiles } from '../tools.js'
 import { createInMemoryBrowserProfileStore } from '../profiles.js'
-import type { Tool, ToolContext } from '../../tools/types.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import type { BrowserCallContext, BrowserProvider } from '../types.js'
 
 function toolContext(overrides: Partial<ToolContext> = {}): ToolContext {

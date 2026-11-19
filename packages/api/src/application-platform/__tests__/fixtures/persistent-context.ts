@@ -1,10 +1,24 @@
 import { randomUUID } from 'node:crypto'
-import { ContextScopeAccumulator, pinAccessCeiling, type ExecutionIdentity, type ResourceScope, type Sensitivity } from '@use-brian/core'
+import { pinAccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ResourceScope } from '@use-brian/agent-runtime/security/derived-scope.js'
+import type { ExecutionIdentity } from '@use-brian/agent-runtime/security/execution-context.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { getAppPool, getPool } from '../../../db/client.js'
 import { createMemory } from '../../../db/memories.js'
 import { findAssistantById } from '../../../db/users.js'
 import { addSessionMessage, createWorkspaceChatSession, getSessionMessages, type Session } from '../../../db/sessions.js'
 import { resolveExecutionContextSystem } from '../../../context-scope/execution-context.js'
+
+/** These historical classifier cases use the predecessor's private transcript port. */
+export async function fixtureHasNativeTurnRecord(): Promise<boolean> {
+  const { rows } = await getAppPool().query<{ installed: boolean }>(
+    `SELECT coalesce(has_function_privilege(current_user,
+      to_regprocedure('public.capture_native_turn_conversation_record(uuid,uuid,uuid,uuid,uuid,integer,uuid,boolean,boolean,uuid,integer,integer,integer)'),
+      'EXECUTE'),false) AS installed`,
+  )
+  return rows[0].installed
+}
 
 /** Synthetic rows only, after the calling suite verifies its disposable DB marker. */
 export async function persistentContextFixture(clearance: Sensitivity = 'internal') {

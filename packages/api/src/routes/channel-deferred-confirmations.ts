@@ -1,4 +1,4 @@
-import { confirmationDecisionLabel, interpretConfirmationEvent, type NormalizedConfirmationEvent } from '@use-brian/core'
+import { confirmationDecisionLabel, interpretConfirmationEvent, type NormalizedConfirmationEvent } from '@use-brian/core/mcp/confirmation-events.js'
 import type { DeferredConfirmationStore } from '../db/deferred-confirmation-store.js'
 import { schedulerCallbackDeliveryScope, findSchedulerChannelConfirmations, tryResolveSchedulerConfirmation, type SchedulerChannelScope } from '../scheduling/confirmation-registry.js'
 import { isInboxSentinel } from '../session-kind.js'

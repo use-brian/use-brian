@@ -4,6 +4,7 @@ import request from 'supertest'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { getPool } from '../../db/client.js'
 import { workspaceAccessRoutes } from '../../routes/workspace-access.js'
+import { withTableTriggersSuspended } from '../../__tests__/fixtures/bootstrap-role.js'
 // Only unrelated route dependencies are mocked; mode projection uses real SQL.
 vi.mock('../../workspace-access/access-inspection.js', () => ({ explainWorkspaceAccess: vi.fn(), getWorkspaceAccessEvents: vi.fn(), getWorkspaceDepartmentRegistry: vi.fn() }))
 vi.mock('../../workspace-access/organization-command-review.js', () => ({ prepareOrganizationCommand: vi.fn(), applyOrganizationCommand: vi.fn() }))
@@ -51,12 +52,13 @@ describe('mode GET real PostgreSQL projection', () => {
   it('projects missing policy metadata as legacy Departments without creating policy or authorizing outsiders', async () => {
     const f = await fixture()
     // Emulate a pre-metadata upgrade snapshot. Production correctly forbids
-    // deleting policy rows; bypass triggers only in this disposable PG fixture.
+    // deleting policy rows; the owner suspends only this table's own triggers,
+    // by name, for this one disposable-fixture transaction.
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
-      await client.query('SET LOCAL session_replication_role = replica')
-      await client.query('DELETE FROM workspace_access_policies WHERE workspace_id=$1', [f.w])
+      await withTableTriggersSuspended(client, ['workspace_access_policies'], () =>
+        client.query('DELETE FROM workspace_access_policies WHERE workspace_id=$1', [f.w]))
       await client.query('COMMIT')
     } catch (error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
     for (const user of [f.owner, f.member]) {

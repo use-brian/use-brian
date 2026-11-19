@@ -4,7 +4,9 @@
  */
 import { createHash } from 'node:crypto'
 import type { PoolClient } from 'pg'
-import { routineConfigurationShape, type ScopeEvidence, type WorkflowDefinition, type WorkflowTrigger } from '@use-brian/core'
+import { routineConfigurationShape } from '@use-brian/core/tasks/routine-intake.js'
+import type { WorkflowDefinition, WorkflowTrigger } from '@use-brian/core/workflow/types.js'
+import type { ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
 import { getPool } from './client.js'
 
 export type RoutineConfiguration = {

@@ -22,6 +22,9 @@ vi.mock('../../db/account-teardown.js', async (orig) => ({
   ...(await orig<typeof import('../../db/account-teardown.js')>()),
   deleteAccountFootprint: vi.fn(),
 }))
+vi.mock('../../db/account-departure.js', () => ({
+  reassignDepartingAssignments: vi.fn(async () => ({ reassigned: 0, unassigned: 0 })),
+}))
 vi.mock('../../db/users.js', () => ({
   findUserById: vi.fn(),
   getDefaultAssistant: vi.fn(),

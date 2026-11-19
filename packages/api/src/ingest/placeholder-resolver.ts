@@ -23,7 +23,7 @@
  * [COMP:api/ingest-placeholder-resolver]
  */
 
-import type { IngestContext } from '@use-brian/core'
+import type { IngestContext } from '@use-brian/core/ingest/engine.js'
 import { query } from '../db/client.js'
 
 /** Lowercased emails of every CRM contact in the workspace. Contacts are

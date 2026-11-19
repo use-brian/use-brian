@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
-import type { ScopeSource } from '@use-brian/core'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { applyRLSGucs, getAppPool, getPool, query, queryWithRLS, rollbackAndRelease } from '../client.js'
 import { createDbWorkspaceGroupStore } from '../workspace-group-store.js'
 import { createDbWorkspaceFilesStore } from '../workspace-files-store.js'

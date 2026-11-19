@@ -2,7 +2,8 @@
  * [COMP:goals/acknowledgement] Structural acceptance receipts.
  */
 import { describe, expect, it } from 'vitest'
-import type { ContentBlock, ToolResultMeta } from '@use-brian/core'
+import type { ContentBlock } from '@use-brian/agent-runtime/providers/types.js'
+import type { ToolResultMeta } from '@use-brian/agent-runtime/tools/types.js'
 import {
   acceptedGoalIdsFromToolResults,
   goalAcceptedMeta,

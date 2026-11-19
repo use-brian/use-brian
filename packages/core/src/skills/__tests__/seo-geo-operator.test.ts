@@ -5,7 +5,7 @@ import { ENGINE_PROVIDER_COST_PER_1K } from '../../billing/engine-provider-rates
 import { SEARCH_PROVIDER_COST_PER_1K } from '../../billing/search-provider-rates.js'
 import { createWorkflowTools } from '../../workflow/tools.js'
 import type { WorkflowDefinition, WorkflowTrigger } from '../../workflow/types.js'
-import type { ToolContext } from '../../tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { loadBuiltinSkills, _resetBuiltinCache } from '../loader.js'
 
 const WORKSPACE_ID = '00000000-0000-4000-8000-000000000001'

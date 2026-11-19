@@ -12,9 +12,9 @@
  * unparseable verdict never blocks a confirmation) — it is a quality guard, not
  * a security gate.
  */
-import type { LLMProvider, TokenUsage } from '../providers/types.js'
-import { collectStream } from '../providers/accumulator.js'
-import {assertInputAuthority,isInputAuthorityError} from '../providers/input-authority.js'
+import type { LLMProvider, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
+import {assertInputAuthority,isInputAuthorityError} from '@use-brian/agent-runtime/providers/input-authority.js'
 
 export type GoalClarityVerdict = {
   clear: boolean

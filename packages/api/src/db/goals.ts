@@ -1,4 +1,6 @@
-import { WorkflowDefinitionSchema,runtimeSuccessors,accessCeilingContains,pinAccessCeiling,type AuthoringAuthority } from '@use-brian/core'
+import { runtimeSuccessors } from '@use-brian/core/workflow/executor.js'
+import { WorkflowDefinitionSchema } from '@use-brian/core/workflow/schemas.js'
+import { accessCeilingContains, pinAccessCeiling, type AuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { resolveGoalAuthoritySystem,resolveWorkflowAuthoringScope } from '../context-scope/workflow-authority.js'
 import { readWorkflowRunInTransaction } from './workflow-store.js'
 import { readExternalSourceAncestors } from '../application-platform/external-source-ancestry.js'
@@ -6,7 +8,7 @@ import { readLegacyCanonicalCrmPoint } from './crm-reader.js'
 import { taskNeedsIndependentSourceAuthoritySql } from './task-reader.js'
 import { randomUUID } from 'node:crypto'
 import {isDeepStrictEqual} from 'node:util'
-import {boundScopeSources} from '@use-brian/core'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {WorkspaceAccessError} from '../workspace-access/policy.js'
 import { admitGoalSource, bindTaskGoalSource,assertTaskGoalSourceCompatible,retainedTaskGoalWrite,readRetainedTaskGoal,writeRetainedTaskGoal,resolveRetainedTaskGoalAuthority,unboundNativeTaskGoalHost } from '../workspace-access/goal-source-admission.js'
 import { admitOperationalAuthoring, type OperationalHumanAuthor } from '../workspace-access/operational-admission.js'
@@ -19,7 +21,10 @@ import { admitOperationalAuthoring, type OperationalHumanAuthor } from '../works
  * authorization gate; user reads go through the app pool (`queryWithRLS`),
  * confined by the `goals_workspace_member` policy.
  */
-import type { DoneWhenNode, EventSubscription, GoalBrief, GoalCompletionClaim, GoalCreateParams, GoalHostRef, GoalListFilters, GoalListRow, GoalMeans, GoalRecord, GoalStatus, SessionContextAuthority } from '@use-brian/core'
+import type { DoneWhenNode } from '@use-brian/core/goals/done-when.js'
+import type { GoalBrief, GoalCompletionClaim, GoalCreateParams, GoalHostRef, GoalListFilters, GoalListRow, GoalMeans, GoalRecord, GoalStatus } from '@use-brian/core/goals/types.js'
+import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
+import type { EventSubscription } from '@use-brian/core/workflow/types.js'
 import { applyRLSGucs,getAppPool,rollbackAndRelease,query, queryWithRLS, getPool } from './client.js'
 import type pg from 'pg'
 import { updateTask } from './tasks.js'

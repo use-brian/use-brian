@@ -1,8 +1,8 @@
 /** Existing Home HMAC + exact live viewer binding; never an iframe session JWT. [COMP:api/application-auth] */
 import type { AppManifest } from '@use-brian/brian-app'
 import { parseManifest } from '@use-brian/brian-app'
-import type { Sensitivity } from '@use-brian/core'
-import { isSensitivity, minSensitivity } from '@use-brian/core'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { isSensitivity, minSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { query, queryWithRLS } from '../db/client.js'
 import { parseBridgeToken } from '../home-apps/tokens.js'
 

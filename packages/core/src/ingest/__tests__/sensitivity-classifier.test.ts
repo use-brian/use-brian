@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from 'vitest'
 
 import { AnalyticsLogger, type AnalyticsEvent, type AnalyticsStore } from '../../analytics/logger.js'
-import type { LLMProvider, StreamChunk } from '../../providers/types.js'
-import type { Sensitivity } from '../../security/sensitivity.js'
+import type { LLMProvider, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import {
   classifySensitivity,
   type SensitivityClassifierInput,

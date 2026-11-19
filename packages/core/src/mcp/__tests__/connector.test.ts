@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { wrapMcpTools } from '../connector.js'
-import type { McpSettingsStore, McpServerConfig, McpToolSetting } from '../types.js'
+import type { McpSettingsStore, McpServerConfig, McpToolSetting } from '@use-brian/agent-runtime/mcp/types.js'
 
 function makeFakeSettingsStore(overrides: Map<string, McpToolSetting> = new Map()): McpSettingsStore {
   return {

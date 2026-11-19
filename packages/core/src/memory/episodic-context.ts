@@ -1,5 +1,5 @@
-import { boundScopeSources } from '../security/source-evidence.js'
-import { DerivedScopeError } from '../security/derived-scope.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
+import { DerivedScopeError } from '@use-brian/agent-runtime/security/derived-scope.js'
 import type { SessionContextAuthority } from './session-state-types.js'
 /**
  * Episodic-memory retrieval + system-prompt formatting.

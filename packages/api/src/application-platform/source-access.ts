@@ -1,6 +1,7 @@
 /** Fresh authenticated sidecar checks. No provider ACL vocabulary and no positive cache. [COMP:api/external-source-access] */
 import { randomUUID } from 'node:crypto'
-import type { ExecutionContext, McpServerConfig } from '@use-brian/core'
+import type { McpServerConfig } from '@use-brian/agent-runtime/mcp/types.js'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { SOURCE_PROTOCOL_VERSION, SOURCE_TIMEOUT_MS, SourceProtocolError,

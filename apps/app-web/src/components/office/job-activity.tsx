@@ -16,10 +16,10 @@
  * [COMP:app-web/office-iteration-panel]
  */
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowUp, CheckCircle2, ChevronRight, CircleAlert, CircleDashed, Crosshair, Sparkles, X } from "lucide-react";
-import { ChatComposer, createSSEBuffer, parseSSEStream, useMessageStream, type PendingConfirmation, type ToolUsed } from "@use-brian/chat-ui";
+import { ChatComposer, type PendingConfirmation, type ToolUsed } from "@use-brian/chat-ui";
 import type { OfficeArtifactSnapshot } from "@use-brian/office-model";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
@@ -27,14 +27,14 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import { MessageBubble, mapSessionRows, type MessageWithViews } from "@/components/chrome/chat-message-bubble";
 import { ChatConfirmationCard } from "@/components/chrome/chat-confirmation-card";
 import { ComposerControls, useComposerControls } from "@/components/doc/composer-controls";
-import { authFetch } from "@/lib/auth-fetch";
-import { publicRuntimeConfig } from "@/lib/runtime-public-config";
-import { fetchSessionMessages } from "@/lib/api/sessions";
+import type { ConversationState } from "@/lib/chat/conversation-controller";
+import { provisionalConversationKey } from "@/lib/chat/conversation-registry";
+import { useConversation } from "@/lib/chat/use-conversation";
+import { describeToolFromInput } from "@/lib/tool-narration";
 import { docPagePath } from "@/lib/doc-page-url";
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { getUserInfo } from "@/lib/user";
-import { createVisibilityGate, reconnectDelayMs } from "@/lib/workspace-events";
 import {
   getOfficeConversation,
   officeJobFailureKind,
@@ -50,9 +50,7 @@ import { officeEventLabel, officeJobStateLabel } from "@/lib/office/job-labels";
 import { useOfficePanelIdentity } from "@/lib/office/surface-cache";
 import { OfficeEditCard, officeEditResult } from "./office-edit-card";
 
-const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
-const chatFetch = (input: RequestInfo | URL, init?: RequestInit) => authFetch(String(input), init);
 const GENERATION_KINDS = new Set(["create", "import", "template_compile"]);
 
 export type OfficeBrianScope =
@@ -106,30 +104,54 @@ export function OfficeJobActivity(props: OfficeJobActivityProps) {
 type LiveTurn = { text: string; tools: ToolUsed[]; own: boolean };
 type SteeringNote = { id: string; text: string };
 
+/** The rail's slice of the conversation snapshot. */
+type RailView = {
+  messages: MessageWithViews[];
+  ownStreaming: boolean;
+  ownText: string;
+  ownTools: ToolUsed[];
+  teammateRunning: boolean;
+  teammateText: string;
+  confirmations: PendingConfirmation[];
+  errorCode: string | null;
+};
+const ACTIVE_PHASES = new Set(["running", "suspended"]);
+const selectRail = (state: ConversationState): RailView => {
+  const ownStreaming = state.transcript.isStreaming;
+  const error = state.notices.find((notice) => notice.code === "error");
+  return {
+    messages: state.transcript.messages as MessageWithViews[],
+    ownStreaming,
+    ownText: state.transcript.streamingText,
+    ownTools: state.activity.tools,
+    // A followed turn this renderer did not start (a teammate's, or another tab's).
+    teammateRunning: !ownStreaming && (state.mirror.active || ACTIVE_PHASES.has(state.run.phase)),
+    teammateText: state.mirror.active ? state.mirror.text : "",
+    confirmations: state.transcript.pendingConfirmations.filter((row) => row.status === "pending" || row.status === "approving"),
+    errorCode: error?.code === "error" ? error.errorCode : null,
+  };
+};
+
 function OfficeJobActivityContent({ workspaceId, artifactId, jobId, snapshot, targetIds, sendDisabledReason, onRevisionCompleted, onOpenHistory, prefix }: OfficeJobActivityProps & { prefix: string | null }) {
   const tChat = useT().chat;
+  const tChatApp = useT().chatApp;
   const t = useT().office;
   const router = useRouter();
   const controls = useComposerControls(workspaceId);
-  const messageStream = useMessageStream();
   const currentUserId = getUserInfo()?.id ?? null;
+  const presentationId = `office-rail:${useId()}`;
 
   // The file's own job, by push (generation progress, input questions).
   const jobStream = useOfficeJobStream(jobId);
   const job = jobStream.job;
 
   const [conversation, setConversation] = useState<OfficeConversation | null>(null);
-  const [messages, setMessages] = useState<MessageWithViews[]>([]);
-  const [live, setLive] = useState<LiveTurn | null>(null);
-  const [remoteRunning, setRemoteRunning] = useState(false);
-  const [confirmations, setConfirmations] = useState<PendingConfirmation[]>([]);
   const [steering, setSteering] = useState<SteeringNote[]>([]);
   const [instruction, setInstruction] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [focusDismissed, setFocusDismissed] = useState(false);
   const [templateVersionId, setTemplateVersionId] = useState("");
-  const ownTurn = useRef(false);
   const owner = useRef<object | null>(null);
   useLayoutEffect(() => { owner.current = {}; return () => { owner.current = null; }; }, [artifactId]);
   const onRevisionCompletedRef = useRef(onRevisionCompleted);
@@ -149,84 +171,49 @@ function OfficeJobActivityContent({ workspaceId, artifactId, jobId, snapshot, ta
   const targetKey = targetIds.join(",");
   useEffect(() => { setFocusDismissed(false); }, [targetKey]);
 
-  const sessionId = conversation?.sessionId ?? null;
-  const reload = useCallback(async (id: string | null = sessionId) => {
-    if (!id) return;
-    const rows = await fetchSessionMessages(id);
-    setMessages(mapSessionRows(rows, tChat.toolNarration));
-  }, [sessionId, tChat.toolNarration]);
-
   useEffect(() => {
     let cancelled = false;
-    void getOfficeConversation(artifactId).then((value) => {
-      if (cancelled) return;
-      setConversation(value);
-      if (value.sessionId) void fetchSessionMessages(value.sessionId).then((rows) => { if (!cancelled) setMessages(mapSessionRows(rows, tChat.toolNarration)); });
-    }).catch(() => { if (!cancelled) setConversation(null); });
+    void getOfficeConversation(artifactId).then((value) => { if (!cancelled) setConversation(value); })
+      .catch(() => { if (!cancelled) setConversation(null); });
     return () => { cancelled = true; };
-  }, [artifactId, tChat.toolNarration]);
+  }, [artifactId]);
 
-  // Follow the shared thread live: other senders' messages, their turns'
-  // streamed text, and turn boundaries. The server cycles the stream; the
-  // loop reconnects, and a hidden rail releases it (workspace-events rule).
+  // The file's shared thread as a dock-profile room presentation of the
+  // conversation controller: follow, history, send, mid-turn and approvals.
+  const sessionId = conversation?.sessionId ?? null;
+  const narration = tChat.toolNarration;
+  const { controller, value: view } = useConversation({
+    workspaceId,
+    sessionId,
+    // Never sent on: the first send creates the thread first.
+    provisionalKey: provisionalConversationKey("office", artifactId),
+    presentationId,
+    room: true,
+    capabilities: {
+      profile: "dock",
+      mapHistoryRows: (rows) => mapSessionRows(rows, narration),
+      describeTool: (name, input) => describeToolFromInput(name, input, narration),
+    },
+  }, selectRail);
+
+  // Visibility release (office.md): the controller lets go of the follow
+  // transport after 60 s hidden and reopens it when the rail is visible.
   useEffect(() => {
-    if (!sessionId || typeof document === "undefined") return;
-    let disposed = false;
-    let inner: AbortController | null = null;
-    const follow = async (signal: AbortSignal) => {
-      let attempt = 0;
-      while (!signal.aborted && !disposed) {
-        let opened = false;
-        try {
-          const response = await authFetch(`${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/stream`, { signal });
-          if (!response.ok || !response.body) throw new Error("office_thread_follow_unavailable");
-          opened = true;
-          attempt = 0;
-          const reader = response.body.getReader();
-          const decoder = new TextDecoder();
-          const buffer = createSSEBuffer();
-          while (!signal.aborted) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            for (const frame of parseSSEStream(decoder.decode(value, { stream: true }), buffer)) {
-              const data = (frame.data ?? {}) as Record<string, unknown>;
-              if (frame.event === "status") setRemoteRunning(data.status === "running" && !ownTurn.current);
-              else if (frame.event === "turn_started" && !ownTurn.current) setRemoteRunning(true);
-              else if (frame.event === "snapshot" && !ownTurn.current) setLive({ text: typeof data.text === "string" ? data.text : "", tools: [], own: false });
-              else if (frame.event === "turn_completed") {
-                if (!ownTurn.current) { setRemoteRunning(false); setLive(null); }
-                void reload(sessionId);
-              } else if (frame.event === "user_message_saved" || frame.event === "assistant_message_saved") {
-                if (!ownTurn.current) void reload(sessionId);
-              }
-            }
-          }
-        } catch {
-          if (signal.aborted) return;
-        }
-        if (signal.aborted || disposed) return;
-        // A clean server cycle reconnects after a short floor; a failure backs off.
-        await new Promise((resolve) => setTimeout(resolve, opened ? 1_000 : reconnectDelayMs(attempt++)));
-      }
-    };
-    const connect = () => {
-      if (disposed || inner) return;
-      const controller = new AbortController();
-      inner = controller;
-      void follow(controller.signal).finally(() => { if (inner === controller) inner = null; });
-    };
-    const disconnect = () => { inner?.abort(); inner = null; };
-    const gate = createVisibilityGate({ connect, disconnect });
-    const onVisibility = () => gate.onVisibility(document.visibilityState === "hidden" ? "hidden" : "visible");
-    document.addEventListener("visibilitychange", onVisibility);
-    onVisibility();
-    return () => {
-      disposed = true;
-      document.removeEventListener("visibilitychange", onVisibility);
-      gate.dispose();
-      disconnect();
-    };
-  }, [sessionId, reload]);
+    if (!controller || typeof document === "undefined") return;
+    const update = () => controller.setVisible(presentationId, document.visibilityState !== "hidden");
+    update();
+    document.addEventListener("visibilitychange", update);
+    return () => document.removeEventListener("visibilitychange", update);
+  }, [controller, presentationId]);
+
+  // After its own turn the rail reads the canonical rows, so edit cards and
+  // sender labels come from history rather than the streamed copy.
+  const ownStreaming = view?.ownStreaming ?? false;
+  const wasStreaming = useRef(false);
+  useEffect(() => {
+    if (wasStreaming.current && !ownStreaming) void controller?.reloadHistory();
+    wasStreaming.current = ownStreaming;
+  }, [controller, ownStreaming]);
 
   const generationOpen = officeGenerationOpen(job);
   const templateNeeded = job?.status === "needs_input" && job.errorCode === "template_ambiguous";
@@ -234,84 +221,51 @@ function OfficeJobActivityContent({ workspaceId, artifactId, jobId, snapshot, ta
   const canSend = Boolean(prefix) && (generationOpen ? job?.status !== "needs_input" || answerNeeded : Boolean(conversation?.canSend)) && !sendDisabledReason;
   const focusIds = focusDismissed ? [] : targetIds;
 
+  type PendingSend = { sessionId: string; text: string; focusIds: string[]; model: string | undefined; assistantId: string | null };
+  const pendingSend = useRef<PendingSend | null>(null);
+  const post = useCallback((target: NonNullable<typeof controller>, request: Omit<PendingSend, "sessionId">) => {
+    const state = target.getSnapshot();
+    // Another sender's turn is running: hand this message to it (the room
+    // mid-turn post) instead of racing it for the session's turn lease.
+    const teammate = !state.transcript.isStreaming && ACTIVE_PHASES.has(state.run.phase);
+    return target.send({
+      presentationId,
+      text: request.text,
+      assistantId: request.assistantId,
+      bodyExtras: {
+        ...(request.focusIds.length ? { officeSelection: { targetIds: request.focusIds } } : {}),
+        ...(request.model ? { model: request.model } : {}),
+        ...(teammate ? { midTurn: true } : {}),
+      },
+      userMessage: { senderUserId: currentUserId },
+      onRejected: () => setInstruction((current) => current || request.text),
+    });
+  }, [currentUserId, presentationId]);
+
+  // A send that created the thread is posted once this rail is attached to
+  // that session's controller (the hook attaches in a layout effect first).
+  useEffect(() => {
+    const request = pendingSend.current;
+    if (!request || !controller || controller.getSessionId() !== request.sessionId) return;
+    pendingSend.current = null;
+    void post(controller, request);
+  }, [controller, post]);
+
   const runTurn = useCallback(async (text: string) => {
     const started = owner.current;
-    const current = () => Boolean(started && started === owner.current);
     let thread = conversation;
+    const request = { text, focusIds, model: controls.model || undefined, assistantId: thread?.assistant?.id ?? null };
     if (!thread?.sessionId) {
       const created = await startOfficeConversation(artifactId);
-      if (!current()) return;
+      if (!started || started !== owner.current) return;
       thread = { sessionId: created.sessionId, canSend: true, role: thread?.role ?? "comment", assistant: created.assistant };
+      pendingSend.current = { ...request, sessionId: created.sessionId, assistantId: created.assistant?.id ?? request.assistantId };
       setConversation(thread);
-    }
-    const session = thread.sessionId!;
-    setMessages((rows) => [...rows, { id: `local-${Date.now()}`, role: "user", text, timestamp: new Date(), senderUserId: currentUserId }]);
-    const body = {
-      message: text,
-      sessionId: session,
-      workspaceId,
-      ...(thread.assistant ? { assistantId: thread.assistant.id } : {}),
-      ...(focusIds.length ? { officeSelection: { targetIds: focusIds } } : {}),
-      ...(controls.model ? { model: controls.model } : {}),
-    };
-    if (remoteRunning) {
-      // Another sender's turn is running: hand this message to it (mid-turn
-      // input) instead of racing it for the session's turn lease.
-      await messageStream.sideStream({ url: `${API_URL}/api/chat`, body: { ...body, midTurn: true }, authFetch: chatFetch, onEvent: () => undefined });
       return;
     }
-    ownTurn.current = true;
-    let text_ = "";
-    let tools: ToolUsed[] = [];
-    setLive({ text: "", tools: [], own: true });
-    const settle = () => {
-      ownTurn.current = false;
-      if (!current()) return;
-      setLive(null);
-      void reload(session);
-    };
-    await messageStream.start({
-      url: `${API_URL}/api/chat`,
-      body,
-      authFetch: chatFetch,
-      onEvent: (event) => {
-        if (!current()) return;
-        const data = (event.data ?? {}) as Record<string, unknown>;
-        if (event.event === "text_delta") {
-          text_ += typeof data.text === "string" ? data.text : "";
-          setLive({ text: text_, tools, own: true });
-        } else if (event.event === "tool_start" && typeof data.id === "string" && typeof data.name === "string" && !tools.some((tool) => tool.id === data.id)) {
-          // Prose before a tool call is the model narrating its step, not its answer.
-          text_ = "";
-          tools = [...tools, { id: data.id, name: data.name, status: "running" }];
-          setLive({ text: text_, tools, own: true });
-        } else if (event.event === "tool_result" && typeof data.id === "string") {
-          const failed = data.isError === true;
-          tools = tools.map((tool) => tool.id === data.id ? { ...tool, status: failed ? "retried" : "done", ...(typeof data.output === "string" && data.output ? { output: data.output } : {}) } : tool);
-          setLive({ text: text_, tools, own: true });
-        } else if (event.event === "tool_confirmation_required" && typeof data.toolCallId === "string" && data.toolName !== "askQuestion") {
-          setConfirmations((rows) => [...rows, {
-            toolCallId: data.toolCallId as string,
-            approvalId: typeof data.approvalId === "string" ? data.approvalId : undefined,
-            toolName: typeof data.toolName === "string" ? data.toolName : "",
-            displayName: typeof data.displayName === "string" ? data.displayName : undefined,
-            input: data.input && typeof data.input === "object" ? data.input as Record<string, unknown> : {},
-            description: typeof data.description === "string" ? data.description : undefined,
-            displayLines: Array.isArray(data.displayLines) ? data.displayLines as string[] : undefined,
-            sessionId: session,
-            status: "pending",
-          } as PendingConfirmation]);
-        } else if (event.event === "error") {
-          const code = typeof data.code === "string" ? data.code : "";
-          setError(code === "office_chat_read_only" ? t.chatReadOnly : code === "office_generation_active" ? t.iterationActiveHint : t.chatTurnFailed);
-        }
-      },
-      onDone: settle,
-      // The turn keeps running server-side; the follow stream reports the rest.
-      onDisconnect: () => { ownTurn.current = false; if (current()) { setLive(null); setRemoteRunning(true); } },
-      onError: () => { if (current()) setError(t.chatTurnFailed); settle(); },
-    });
-  }, [artifactId, controls.model, conversation, currentUserId, focusIds, messageStream, reload, remoteRunning, t.chatReadOnly, t.chatTurnFailed, t.iterationActiveHint, workspaceId]);
+    if (!controller || controller.getSessionId() !== thread.sessionId) throw new Error("office_thread_unavailable");
+    await post(controller, request);
+  }, [artifactId, controller, controls.model, conversation, focusIds, post]);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -321,6 +275,7 @@ function OfficeJobActivityContent({ workspaceId, artifactId, jobId, snapshot, ta
     if (!current() || !text || submitting || !canSend || templateNeeded) return;
     setSubmitting(true);
     setError(null);
+    controller?.dismissNotice("error");
     try {
       if (generationOpen && jobId) {
         // During generation a send steers the job: no model turn, no charge.
@@ -356,16 +311,13 @@ function OfficeJobActivityContent({ workspaceId, artifactId, jobId, snapshot, ta
   }
 
   async function decide(toolCallId: string, decision: "allow" | "deny", comment?: string) {
-    const confirmation = confirmations.find((row) => row.toolCallId === toolCallId);
-    if (!confirmation || !sessionId) return;
-    setConfirmations((rows) => rows.filter((row) => row.toolCallId !== toolCallId));
-    await authFetch(`${API_URL}/api/chat/confirm`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId, toolCallId, decision, ...(comment ? { comment } : {}) }),
-    }).catch(() => setError(t.chatTurnFailed));
+    if (!controller) return;
+    const result = await controller.respondConfirmation(toolCallId, decision === "allow" ? "approve" : "deny", comment);
+    if (result === "forbidden") setError(tChatApp.confirmNotAllowed);
+    else if (result === "failed") setError(t.chatTurnFailed);
   }
 
+  const messages = view?.messages ?? [];
   const restoreDraft = (messageId: string) => {
     // Non-destructive retry in a shared thread: the text returns to the
     // composer; nobody's messages are truncated.
@@ -373,6 +325,15 @@ function OfficeJobActivityContent({ workspaceId, artifactId, jobId, snapshot, ta
     const source = messages[index]?.role === "user" ? messages[index] : [...messages.slice(0, Math.max(0, index))].reverse().find((row) => row.role === "user");
     if (source?.text) setInstruction(source.text);
   };
+
+  const live: LiveTurn | null = view?.ownStreaming
+    ? { text: view.ownText, tools: view.ownTools, own: true }
+    : view?.teammateText ? { text: view.teammateText, tools: [], own: false } : null;
+  const remoteRunning = Boolean(view?.teammateRunning);
+  const noticeError = view?.errorCode
+    ? view.errorCode === "office_chat_read_only" ? t.chatReadOnly
+      : view.errorCode === "office_generation_active" ? t.iterationActiveHint : t.chatTurnFailed
+    : null;
 
   return <OfficeJobActivityView
     job={generationOpen || (job && (!job.jobKind || GENERATION_KINDS.has(job.jobKind))) ? job : null}
@@ -384,7 +345,7 @@ function OfficeJobActivityContent({ workspaceId, artifactId, jobId, snapshot, ta
     live={live}
     remoteRunning={remoteRunning}
     steering={steering}
-    confirmations={confirmations}
+    confirmations={view?.confirmations ?? []}
     currentUserId={currentUserId}
     workspaceId={workspaceId}
     instruction={instruction}
@@ -393,7 +354,7 @@ function OfficeJobActivityContent({ workspaceId, artifactId, jobId, snapshot, ta
     canSend={canSend}
     sendDisabledReason={sendDisabledReason}
     submitting={submitting}
-    error={error}
+    error={error ?? noticeError}
     controls={<ComposerControls model={controls.model} onModelChange={controls.setModel} plan={controls.plan} researchMode={controls.researchMode} onResearchModeChange={controls.setResearchMode} researchQuota={controls.researchQuota} researchExhausted={controls.researchExhausted} />}
     onInstructionChange={setInstruction}
     onSubmit={submit}

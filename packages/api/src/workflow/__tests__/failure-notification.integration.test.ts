@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
-import { advanceWorkflowRun } from '@use-brian/core'
+import { advanceWorkflowRun } from '@use-brian/core/workflow/executor.js'
 import { getAppPool, getPool } from '../../db/client.js'
 import { createDbWorkflowRunStore, createDbWorkflowStore } from '../../db/workflow-store.js'
 import { captureAuthoringAuthoritySystem, resolveWorkflowRunScope } from '../../context-scope/workflow-authority.js'

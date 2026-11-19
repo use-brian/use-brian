@@ -16,8 +16,10 @@
 // row, and the channel lane never called it.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import type { AnalyticsLogger, ContentBlock, UsageStore } from '@use-brian/core'
-import { encodeExternalCostMeta } from '@use-brian/core'
+import type { AnalyticsLogger } from '@use-brian/core/analytics/logger.js'
+import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
+import type { ContentBlock } from '@use-brian/agent-runtime/providers/types.js'
+import { encodeExternalCostMeta } from '@use-brian/core/billing/external-cost.js'
 
 // The realtime repaint is a fire-and-forget LISTEN/NOTIFY against the pool;
 // mocked so the suite asserts the call without touching a database.

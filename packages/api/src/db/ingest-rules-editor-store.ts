@@ -16,17 +16,16 @@
  * [COMP:api/ingest-rules-editor-store]
  */
 
+import type { IngestSourceProvider } from '@use-brian/core/ingest/default-rules.js'
+import type { RoutingMode, RuleEpisodeSensitivity } from '@use-brian/core/ingest/engine.js'
 import type {
   AddIngestRuleInput,
   ConnectorInstanceSummary,
   IngestRuleEditorStore,
   IngestRuleSummary,
-  IngestSourceProvider,
-  RoutingMode,
-  RuleEpisodeSensitivity,
   UpdateIngestRuleInput,
-} from '@use-brian/core'
-import { INGEST_SOURCE_PROVIDERS } from '@use-brian/core'
+} from '@use-brian/core/ingest/tools.js'
+import { INGEST_SOURCE_PROVIDERS } from '@use-brian/core/ingest/default-rules.js'
 import { queryWithRLS } from './client.js'
 
 const PUBLIC_COLS = `

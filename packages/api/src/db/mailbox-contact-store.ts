@@ -5,7 +5,8 @@
  * [COMP:api/mailbox-contact-import-store]
  */
 
-import { isMachineSenderAddress, type AccessContext } from '@use-brian/core'
+import { isMachineSenderAddress } from '@use-brian/core/ingest/adapters/mailbox/filters.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import { buildAccessPredicate } from './access-predicate.js'
 import { queryGated, queryWithRLS } from './client.js'
 import { bareEmailAddress } from '../mailbox/send-as.js'

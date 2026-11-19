@@ -24,9 +24,9 @@
 import type {
   BlueprintRecordFields,
   BlueprintRecordStatus,
-  ExtractionField,
-  FieldCitation,
-} from '@use-brian/core'
+} from '@use-brian/core/doc/blueprint-record.js'
+import type { ExtractionField } from '@use-brian/core/doc/custom-template-types.js'
+import type { FieldCitation } from '@use-brian/core/media/index.js'
 
 import { queryWithRLS } from './client.js'
 

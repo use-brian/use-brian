@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  addPageLinks,
   collectPageWrites,
   pageIdsFromToolResult,
   pageLinksForRow,
@@ -51,9 +50,5 @@ describe("[COMP:app-web/chat-page-links] Pages written by a Chat turn", () => {
     expect([...writes.entries()]).toEqual([["tu-1", ["page-a"]]]);
     expect(pageLinksForRow(assistantRow.content, writes)).toEqual(["page-a"]);
     expect(pageLinksForRow("plain text", writes)).toEqual([]);
-  });
-
-  it("appends live ids in order without repeats", () => {
-    expect(addPageLinks(["a"], ["b", "a", "c"])).toEqual(["a", "b", "c"]);
   });
 });

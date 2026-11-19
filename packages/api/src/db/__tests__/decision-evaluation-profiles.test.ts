@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { DecisionEvaluationProfile } from '@use-brian/core'
+import type { DecisionEvaluationProfile } from '@use-brian/core/decisions/hydra.js'
 
 vi.mock('../client.js', () => ({ query: vi.fn() }))
 

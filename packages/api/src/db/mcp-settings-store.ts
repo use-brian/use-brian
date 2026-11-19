@@ -1,4 +1,4 @@
-import type { McpSettingsStore, McpToolSetting } from '@use-brian/core'
+import type { McpSettingsStore, McpToolSetting } from '@use-brian/agent-runtime/mcp/types.js'
 import { query } from './client.js'
 
 export function createDbMcpSettingsStore(): McpSettingsStore {

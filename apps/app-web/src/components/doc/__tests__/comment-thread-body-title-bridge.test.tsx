@@ -38,6 +38,10 @@ vi.mock("@/lib/api/sessions", async (orig) => ({
   fetchSessionMessages: mockFetchMessages,
 }));
 vi.mock("@/lib/auth-fetch", () => ({ authFetch: mockAuthFetch }));
+// The reply turn runs on the viewer's scoped conversation controller.
+vi.mock("@/lib/offline/application-write-authority", () => ({
+  currentOfflineWriteAuthority: () => ({ apiOrigin: "https://api.example", viewerId: "u1", workspaceId: "ws1" }),
+}));
 
 import { CommentThreadBody, type CommentSeed } from "../comment-thread-body";
 
@@ -125,7 +129,9 @@ describe("[COMP:app-web/comment-thread-body] mutation stream bridges", () => {
                 `event: text_delta\ndata: {"text":"Done."}\n\n`,
             ),
           )
-        : Promise.resolve({ ok: false, json: () => Promise.resolve({}) }),
+        : /\/api\/sessions\/[^/]+$/.test(String(url))
+          ? Promise.resolve(Response.json({ status: "idle", turnId: null }))
+          : Promise.resolve({ ok: false, json: () => Promise.resolve({}) }),
     );
 
     container = document.createElement("div");
@@ -150,9 +156,8 @@ describe("[COMP:app-web/comment-thread-body] mutation stream bridges", () => {
         </I18nProvider>,
       ),
     );
-    // Let the seed auto-send's stream read + dispatch settle.
-    await act(async () => {});
-    await act(async () => {});
+    // Let the seed auto-send's attach, stream read and dispatch settle.
+    for (let i = 0; i < 10; i++) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 
     window.removeEventListener("doc:title-updated", listener);
     window.removeEventListener("sidan:recording-participants-updated", recordingListener);

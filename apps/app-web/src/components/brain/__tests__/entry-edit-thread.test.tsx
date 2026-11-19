@@ -7,30 +7,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean })
   .IS_REACT_ACT_ENVIRONMENT = true;
 
-const chat = vi.hoisted(() => ({
-  state: {
-    messages: [],
-    pendingConfirmations: [],
-    isStreaming: false,
-    streamingText: "",
-  },
-  dispatch: vi.fn(),
-  setSession: vi.fn(),
-  appendMessage: vi.fn(),
-  addConfirmation: vi.fn(),
-  updateConfirmation: vi.fn(),
-  clearConfirmations: vi.fn(),
-}));
-const stream = vi.hoisted(() => ({
-  start: vi.fn(),
-  abort: vi.fn(),
-}));
-
-vi.mock("@use-brian/chat-ui", async () => {
+vi.mock("@use-brian/chat-ui", async (importOriginal) => {
   const React = await import("react");
   return {
-    useChatSession: () => chat,
-    useMessageStream: () => stream,
+    ...(await importOriginal<typeof import("@use-brian/chat-ui")>()),
     ChatMarkdown: ({ text }: { text: string }) =>
       React.createElement("div", null, text),
   };
@@ -76,6 +56,7 @@ vi.mock("@/lib/api/brain-inbox", () => ({
 }));
 vi.mock("@/lib/brain-events", () => ({ requestBrainRefresh: vi.fn() }));
 
+import { createBrainEditSession } from "@/lib/api/brain-inbox";
 import { EntryEditThread } from "../entry-edit-thread";
 
 let root: Root | null = null;
@@ -111,6 +92,7 @@ describe("[COMP:app-web/brain-entry-edit-thread] separate edit surface", () => {
       "Nothing changes until you apply it",
     );
     expect(container.textContent).not.toContain("Ask about this entry");
-    expect(stream.start).not.toHaveBeenCalled();
+    // Opening the entry costs nothing: no edit session, no turn.
+    expect(createBrainEditSession).not.toHaveBeenCalled();
   });
 });

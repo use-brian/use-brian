@@ -1,5 +1,6 @@
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
-import {boundScopeSources,type AccessContext} from '@use-brian/core'
+import type {AccessContext} from '@use-brian/agent-runtime/security/access-context.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {createDbKnowledgeStore,type KnowledgeEntry} from '../../db/knowledge-store.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'

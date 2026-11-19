@@ -1,7 +1,9 @@
 /** Admit optional context before either its text or its evidence joins a turn.
  * [COMP:api/optional-context]
  */
-import { ContextScopeAccumulator, type ExecutionContext, type ScopeEvidence, type SessionContextAuthority } from '@use-brian/core'
+import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
+import { ContextScopeAccumulator, type ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import type { DeliveryAudienceDecision } from './delivery-authority.js'
 
 export async function readOptionalContext<T>(input: {

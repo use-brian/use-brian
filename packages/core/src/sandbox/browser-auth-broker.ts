@@ -1,6 +1,6 @@
-import type { AuthoritySource } from '../security/authority-source.js'
-import type { AuthoringAuthority } from '../security/access-ceiling.js'
-import type { CurrentAuthorityBoundary } from '../tools/types.js'
+import type { AuthoritySource } from '@use-brian/agent-runtime/security/authority-source.js'
+import type { AuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import type { CurrentAuthorityBoundary } from '@use-brian/agent-runtime/tools/types.js'
 /**
  * Host-owned, model-free browser authentication. Plaintext credentials are
  * resolved only inside this module, used in a separate task-ledgered sandbox,

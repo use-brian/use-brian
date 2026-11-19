@@ -4,15 +4,15 @@ import { createViewTools, createRenderChartTool } from '../../views/tools.js'
 import { HOME_APP_TOOL_CONFIG, homeAppToolSetCapability } from '@use-brian/shared'
 import { describe, it, expect } from 'vitest'
 import { z } from 'zod'
-import { buildTool } from '../types.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
 import {
   filterToolsByCapabilities,
   isAttendedTurn,
   provenanceSessionId,
   toolTransport,
-} from '../capability-gate.js'
-import { createExecutionContext, executionToolContext } from '../../security/execution-context.js'
-import type { Tool } from '../types.js'
+} from '@use-brian/agent-runtime/tools/capability-gate.js'
+import { createExecutionContext, executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 
 function makeTool(name: string, requiresCapability?: string): Tool {
   return buildTool({

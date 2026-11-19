@@ -5,7 +5,7 @@ import { createInMemoryBrowserProfileStore } from '../profiles.js'
 import { browserFileName, MAX_BROWSER_DOWNLOAD, MAX_BROWSER_UPLOAD, BROWSER_DOWNLOAD_CHUNK } from '../browser-files.js'
 import { minimalPdf } from '../../files/__tests__/pdf-fixture.js'
 import type { BrowserProvider, BrowserCallContext } from '../types.js'
-import type { ToolContext, Tool } from '../../tools/types.js'
+import type { ToolContext, Tool } from '@use-brian/agent-runtime/tools/types.js'
 
 const context: ToolContext = { userId: 'u', workspaceId: 'w', assistantId: 'a', sessionId: 's', appId: 'app', channelType: 'web', attended: true, channelId: 'c', abortSignal: new AbortController().signal }
 const ctx: BrowserCallContext = { ...context, workspaceId: 'w', profileId: 'p' }

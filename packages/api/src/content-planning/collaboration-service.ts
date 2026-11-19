@@ -1,10 +1,10 @@
 /** Feed's authorized UI/assistant adapter. [COMP:feed/draft-comments] */
 import { classifySession } from '../session-kind.js'
 import { feedChatTargetSchema, type FeedChatTarget, type FeedCommandRequest } from '@use-brian/shared'
-import { feedTargetQuote } from '@use-brian/doc-model'
+import { feedTargetQuote } from '@use-brian/doc-model/feed.js'
 import { query } from '../db/client.js'
 import { executeFeedCommands, getFeedCollaboration, FeedCollaborationError, type FeedActor } from '../db/feed-collaboration-store.js'
-import { resolvePlanningAccess } from '../routes/content-planning.js'
+import { resolvePlanningAccess } from './access.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import { getFeedRun } from '../db/feed-editorial-runs-store.js'
 import { loadFeedReviewContext, type FeedReviewContextLoader } from './review-context.js'

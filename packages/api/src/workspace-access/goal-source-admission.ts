@@ -1,24 +1,32 @@
-import { workspaceCredentialDelegation, bindWorkspaceCredentialDelegation, intersectWorkspaceCredentialDelegations } from '@use-brian/core'
+import { workspaceCredentialDelegation, bindWorkspaceCredentialDelegation, intersectWorkspaceCredentialDelegations } from '@use-brian/agent-runtime/security/workspace-delegation.js'
 import { restoreWorkspaceMcpDelegation } from '../workspace-mcp/delegation.js'
 import { createDbCapabilityStore } from '../db/capability-store.js'
 import { hasWorkspaceMcpRetainedAuthority, bindWorkspaceMcpPublication, bindWorkspaceMcpWorkflowPublication } from '../db/session-context-revisions.js'
-import { assertSourceModelInputAuthority,assertSourceModelOutputAuthority } from '../application-platform/model-source-authority.js'
+import { admitModelInput,admitModelOutput } from '../context-scope/admission.js'
 import { assertCurrentAuthority,runWithAuthorityLease,executeWithCurrentAuthority,createAuthorityLease } from '../context-scope/authority-lease.js'
-import { crmOperationsSha256 } from '@use-brian/core'
+import { crmOperationsSha256 } from '@use-brian/core/application-platform/operation-contract.js'
 import { isDeepStrictEqual } from 'node:util'
 import type { PoolClient } from 'pg'
-import { bindScopeSources, ContextScopeAccumulator, AuthoritySourceSchema, createExecutionContext, executionToolContext, boundScopeSources, intersectAccessCeilings, type AuthoritySource, type ScopeSource, type ScopeEvidence, type SessionContextAuthority, type GoalRecord } from '@use-brian/core'
+import type { GoalRecord } from '@use-brian/core/goals/types.js'
+import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
+import { intersectAccessCeilings } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import { AuthoritySourceSchema, type AuthoritySource } from '@use-brian/agent-runtime/security/authority-source.js'
+import { ContextScopeAccumulator, type ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { createExecutionContext, executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { readRetainedContextFrame, writeRetainedContextFrame,writeRetainedGoalWorkflowContextFrame } from '../db/session-context-revisions.js'
 import { readLegacyCanonicalCrmPoint } from '../db/crm-reader.js'
 import { resolveBrowserTaskExecutionAuthority } from '../sandbox/task-execution-authority.js'
 import { readExternalSourceAncestors } from '../application-platform/external-source-ancestry.js'
 import { readApplicationFieldAncestors } from '../application-platform/field-evidence.js'
-import { accessCeilingContains, pinAccessCeiling, pinAuthoringAuthority, parseAuthoringAuthority, type AuthoringAuthority, type GoalCreateParams } from '@use-brian/core'
+import type { GoalCreateParams } from '@use-brian/core/goals/types.js'
+import { accessCeilingContains, pinAccessCeiling, pinAuthoringAuthority, parseAuthoringAuthority, type AuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { getPool } from '../db/client.js'
 import {taskNeedsIndependentSourceAuthoritySql} from '../db/task-reader.js'
 import { currentAgentAccess, runWithAgentAccess } from '../db/agent-access-context.js'
 import { buildAccessPredicate, buildCurrentMemberSourcePredicate, mutationActorAccess } from '../db/access-predicate.js'
-import { resolveWorkflowAuthoringScope } from '../context-scope/workflow-authority.js'
+import { resolveWorkflowAuthoringMetadataSystem, resolveWorkflowAuthoringScope } from '../context-scope/workflow-authority.js'
 import { lockOperationalPolicy } from './operational-admission.js'
 import { WorkspaceAccessError } from './policy.js'
 
@@ -182,9 +190,9 @@ export function executeTaskGoalProducer<T>(token: object, producer: (task: Retur
   if(retained)return (async()=>{
     await assertRetainedTaskGoalCurrent(proof,retained)
     const context={...executionToolContext(retained.execution,{appId:'native'}),scopeAccumulator:new ContextScopeAccumulator({sources:proof.retained!.sources})}
-    await assertSourceModelInputAuthority(context)
+    await admitModelInput(context)
     const result=await runWithAgentAccess(proof.authority.ceiling,()=>producer(taskGoalProducerInput(token)))
-    await assertSourceModelInputAuthority(context)
+    await admitModelInput(context)
     await assertRetainedTaskGoalCurrent(proof,retained)
     return result
   })()
@@ -331,7 +339,7 @@ export async function admitRetainedGoalBoundary(authority:SessionContextAuthorit
  if(!original)throw denied()
  authority.accumulator.note({sources:boundScopeSources(value)})
  const context={...executionToolContext(authority.execution,{appId:'native-goal-review'}),scopeAccumulator:authority.accumulator}
- await(action==='context'?assertSourceModelInputAuthority(context):assertSourceModelOutputAuthority(context))
+ await(action==='context'?admitModelInput(context):admitModelOutput(context))
  await original.assertCurrent()
  await authority.execution.security.authority.assertCurrent()
 }
@@ -393,7 +401,8 @@ export async function resolveRetainedGoalWorkflowRuntime(runId:string){
   const current=await retainedGoalRunMetadata(runId)
   if(!current?.current||!isDeepStrictEqual(current.stored,frozen))return null
   if((await getPool().query("SELECT id FROM assistants WHERE id=$1 AND workspace_id=$2 AND kind='primary'",[saved.assistantId,saved.workspaceId])).rows.length!==1)return null
-  const scope=await resolveWorkflowAuthoringScope({userId:saved.actor,workspaceId:saved.workspaceId,assistantId:saved.assistantId,
+  // Renew under the same scope as the pin: never a nested callee's projection.
+  const scope=await resolveWorkflowAuthoringMetadataSystem({userId:saved.actor,workspaceId:saved.workspaceId,assistantId:saved.assistantId,
    authoringAuthority:saved.workflowAuthority,contextGroupId:saved.contextGroupId,contextProjectId:saved.contextProjectId})
   return intersectAccessCeilings(pinAccessCeiling(scope.access),ceiling)
  }
@@ -443,9 +452,9 @@ export async function retainedGoalWorkflowFrame<T>(runId:string,retaining:boolea
  await assertCurrentAuthority();return result
 }
 
-const retainedWorkflowWriteContexts=new WeakMap<import('@use-brian/core').ExecutionContext,{runId:string;taskId:string;assistantId:string;sources:ScopeSource[]}>()
+const retainedWorkflowWriteContexts=new WeakMap<import('@use-brian/agent-runtime/security/execution-context.js').ExecutionContext,{runId:string;taskId:string;assistantId:string;sources:ScopeSource[]}>()
 /** Canonical SQL, never caller-supplied verifier. Only exact host-minted live objects qualify. */
-export async function admitRetainedGoalWorkflowWrite(execution:import('@use-brian/core').ExecutionContext,sources:readonly ScopeSource[],client:PoolClient){
+export async function admitRetainedGoalWorkflowWrite(execution:import('@use-brian/agent-runtime/security/execution-context.js').ExecutionContext,sources:readonly ScopeSource[],client:PoolClient){
  const bound=retainedWorkflowWriteContexts.get(execution)
  if(!bound||!isDeepStrictEqual(bound.sources,sources))throw denied()
  await client.query("SELECT set_config('app.retained_task_goal',$1,true),set_config('app.v2_assistant_id',$2,true)",[bound.taskId,bound.assistantId])

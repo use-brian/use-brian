@@ -5,7 +5,7 @@
  * Spec: structural-synthesis.md -> Recording blueprint resolution.
  * [COMP:recordings/blueprint-resolution]
  */
-import type { CustomPageTemplateSummary } from '@use-brian/core'
+import type { CustomPageTemplateSummary } from '@use-brian/core/doc/custom-template-types.js'
 import type { PageTemplateStore } from '../db/page-templates-store.js'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { dispatchPersistedWebInput } from '../_incoming-chat-event.js'
 import { setMessageEventDispatcher } from '../../message-events.js'
-import { createWorkflowEventDispatcher } from '../../../../core/src/workflow/event-trigger.js'
+import { createWorkflowEventDispatcher } from '@use-brian/core/workflow/event-trigger.js'
 import { isWorkspaceWideWebChat, type WebChatEventScope } from '../_web-chat-event-scope.js'
 
 const input = () => ({

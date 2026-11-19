@@ -5,7 +5,7 @@ import { createInMemoryBrowserProfileStore } from '../profiles.js'
 import { createSkillRunnerTools } from '../skill-runner.js'
 import { validateLocalRecording } from '../local-skill-runner.js'
 import type { BrowserProvider } from '../types.js'
-import type { Tool, ToolContext } from '../../tools/types.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 function context(): ToolContext {
   return {

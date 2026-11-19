@@ -27,25 +27,26 @@
 
 import { Router,type Request,type Response,type NextFunction } from 'express'
 import {SourceProtocolError} from '@use-brian/brian-app/connector'
-import {DerivedScopeError} from '@use-brian/core'
+import {DerivedScopeError} from '@use-brian/agent-runtime/security/derived-scope.js'
 import {isAuthorityChangedError} from '../context-scope/authority-lease.js'
 import {WorkspaceAccessError} from '../workspace-access/policy.js'
-import {ContextScopeAccumulator,type SessionContextAuthority} from '@use-brian/core'
+import type {SessionContextAuthority} from '@use-brian/core/memory/session-state-types.js'
+import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
 import {resolveNativeApplicationModuleExecution} from '../application-platform/native-module-runtime.js'
 import {retainedTaskGoalCaller,retainedTaskGoalForHost,admitRetainedGoalBoundary} from '../workspace-access/goal-source-admission.js'
 import { z } from 'zod'
+import type { GoalClarityAssessor } from '@use-brian/core/goals/clarity.js'
 import {
   GOAL_HOST_TYPES,
   GOAL_STATUSES,
-  scopeGrantContains,
   type GoalBrief,
-  type GoalClarityAssessor,
   type GoalHostType,
   type GoalListRow,
   type GoalRecord,
   type GoalStatus,
   type GoalStore,
-} from '@use-brian/core'
+} from '@use-brian/core/goals/types.js'
+import { scopeGrantContains } from '@use-brian/agent-runtime/security/context-scope.js'
 import {
   getGoalById,
   GOAL_TERMINAL_STATUSES,

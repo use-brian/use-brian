@@ -28,7 +28,7 @@ import {
 } from './segment-coverage.js'
 import { buildLexicalMatch, fuseByReciprocalRank, tokenizeSearchTerms } from './segment-lexical.js'
 import { MAX_CHARS, splitLongText } from './text-chunking.js'
-import type { MailboxSearchHit, MailboxSearchParams } from '@use-brian/core'
+import type { MailboxSearchHit, MailboxSearchParams } from '@use-brian/core/tools/base/mailbox.js'
 
 export type EmailArchiveMessageInput = {
   instanceId: string

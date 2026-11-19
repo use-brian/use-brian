@@ -16,7 +16,7 @@ import {
   snapshotFromUpdate,
   canonicalizePage,
 } from '@use-brian/doc-model'
-import type { Page } from '@use-brian/core/dist/views/blocks.js'
+import type { Page } from '@use-brian/core/views/blocks.js'
 
 export type ConvertResult = {
   /** Encoded Y.Doc initial state for `documents.ydoc`. */

@@ -3,15 +3,13 @@
  * Component tag: [COMP:api/search-provider-costs].
  *
  * Verifies estimateSearchCostUsd — the per-1k rate scaled by call
- * count — and the re-exported SEARCH_PROVIDER_COST_PER_1K table that
- * the admin search-cost dashboard reads.
+ * count — against the core SEARCH_PROVIDER_COST_PER_1K table that the
+ * admin search-cost dashboard reads.
  */
 
 import { describe, it, expect } from 'vitest'
-import {
-  estimateSearchCostUsd,
-  SEARCH_PROVIDER_COST_PER_1K,
-} from '../search-provider-costs.js'
+import { SEARCH_PROVIDER_COST_PER_1K } from '@use-brian/core/billing/search-provider-rates.js'
+import { estimateSearchCostUsd } from '../search-provider-costs.js'
 
 describe('[COMP:api/search-provider-costs] estimateSearchCostUsd', () => {
   it('scales the per-1k rate by the call count', () => {

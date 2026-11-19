@@ -1,7 +1,7 @@
 import { isTrivialChatMessage } from '../classification/trivial-chat.js'
-import { boundScopeSources } from '../security/source-evidence.js'
-import { DerivedScopeError } from '../security/derived-scope.js'
-import { assertInputAuthority, isInputAuthorityError } from '../providers/input-authority.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
+import { DerivedScopeError } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { assertInputAuthority, isInputAuthorityError } from '@use-brian/agent-runtime/providers/input-authority.js'
 /**
  * Post-turn session-state diff pass.
  *
@@ -24,8 +24,8 @@ import { assertInputAuthority, isInputAuthorityError } from '../providers/input-
  * See `docs/architecture/context-engine/session-state.md`.
  */
 
-import type { LLMProvider, Message, TokenUsage } from '../providers/types.js'
-import { collectStream } from '../providers/accumulator.js'
+import type { LLMProvider, Message, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
 import type {
   SessionStateRecord,
   SessionStateStore,

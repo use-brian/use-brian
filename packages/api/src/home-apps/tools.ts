@@ -25,7 +25,7 @@
  */
 
 import { z } from 'zod'
-import type { FilesApi } from '@use-brian/core'
+import type { FilesApi } from '@use-brian/core/workspace-files/api.js'
 import { MANIFEST_FILENAME, contentTypeFor, lintBundle, validateBundle } from '@use-brian/brian-app'
 import {
   applyHomeAppManifest,

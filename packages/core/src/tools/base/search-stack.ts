@@ -17,7 +17,7 @@
  */
 
 import { searchFiltersSchema, hasSearchFilters, unsupportedSearchFilters, matchesSearchDomains, type SearchFilters } from './search-filters.js'
-import { sanitizeDeep } from '../../security/sanitize.js'
+import { sanitizeDeep } from '@use-brian/agent-runtime/security/sanitize.js'
 import { SearchProviderError, type SearchFailureKind } from './_fetch-error.js'
 
 // ── Shared search utilities ──────────────────────────────────────

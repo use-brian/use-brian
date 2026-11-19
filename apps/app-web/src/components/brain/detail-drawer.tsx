@@ -37,6 +37,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import Markdown from "react-markdown";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
@@ -168,6 +169,7 @@ import {
 } from "@/components/operator/resizable-peek";
 import { loadWorkspaceRoster } from "@/lib/api/workspace-roster";
 import { isPhoneViewport } from "@/lib/viewport";
+import { memoryContextPath } from "@/lib/memory-context-path";
 
 // (The NEXT_PUBLIC_CHAT_HOME_ENABLED inline-actions rollback flag retired
 // with the Notion-style entry page: all page actions live in the drawer's
@@ -879,6 +881,12 @@ export function BrainDetailDrawer({
           aria-disabled={readOnly || undefined}
           className="m-0 flex min-w-0 flex-1 flex-col gap-4 overflow-y-auto border-0 px-4 py-6 sm:px-6"
         >
+          {!loading && !notFound && viewedActionPrim === "memory" && (
+            <Link href={memoryContextPath(workspaceId, primitive?.id ?? displayRow.id)} onClick={onClose}
+              className="inline-flex min-h-8 w-fit items-center rounded-md border border-border px-3 text-sm text-muted-foreground hover:bg-muted hover:text-foreground max-md:min-h-11">
+              {t.brainPage.memoryContext.action}
+            </Link>
+          )}
           {actionError && (
             <p className="text-xs text-red-500" role="alert">
               {actionError}

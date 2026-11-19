@@ -1,4 +1,8 @@
 import { randomUUID } from 'node:crypto'
+import express from 'express'
+import request from 'supertest'
+import { sessionRoutes } from '../../routes/sessions.js'
+import { findOrCreateChannelRoom } from '../../channel-room/room.js'
 import { afterAll, describe, expect, it } from 'vitest'
 import { getPool, getAppPool, applyRLSGucs } from '../client.js'
 import { createWorkspaceChatSession, findOrCreateSession } from '../sessions.js'
@@ -6,8 +10,8 @@ import { runWithAgentAccess } from '../agent-access-context.js'
 import { admitSessionCreate } from '../../workspace-access/session-create-admission.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
-// This suite asserts the legacy (pre-v2) model, which workspaces.department_read_v2=false still
-// serves as the cutover's rollback path (migration 650, decision D22); its workspaces are pinned to it.
+// Classic cases pin the rollback model (migration 650, D22); explicit v2
+// receiving controls below exercise the current ready-workspace admission.
 await assertLocalFixture()
 const pool = getPool()
 async function fixture(mode: 'simple' | 'departments' = 'simple') {
@@ -40,9 +44,11 @@ async function fixture(mode: 'simple' | 'departments' = 'simple') {
 // Matching receipt/row labels (and permissive execution GUCs) are not grants.
 async function pairedSharedInsert(f: Awaited<ReturnType<typeof fixture>>, patch: {
   team?: string | null; compartments?: string[]; project?: string | null;
-  sensitivity?: string; actor?: string
+  sensitivity?: string; actor?: string; ownerPolicyProbe?: true
 } = {}) {
-  const client = await getAppPool().connect(), channelId = randomUUID()
+  // Current RLS allows no direct shared INSERT by app_user. Explicit owner
+  // probes isolate the trigger's independent scope proof, never product access.
+  const client = await (patch.ownerPolicyProbe ? pool : getAppPool()).connect(), channelId = randomUUID()
   const actor = patch.actor ?? f.member, groupId = patch.team === undefined ? f.common.id : patch.team
   const compartments = patch.compartments ?? (groupId === null ? [] : [f.common.key])
   const projectId = patch.project ?? null, sensitivity = patch.sensitivity ?? 'internal'
@@ -53,7 +59,7 @@ async function pairedSharedInsert(f: Awaited<ReturnType<typeof fixture>>, patch:
     await client.query("SELECT set_config('app.session_creation_admission',$1,true)", [JSON.stringify({
       protocol:'1',provenance:'authenticated_chat_root',workspaceId:f.w,policyRevision:revision,actor,
       userId:actor,assistantId:f.assistant,channelType:'web',channelId,appId:'Use Brian',appOrigin:'chat',
-      visibility:'workspace',mode:null,sensitivity,groupId,projectId,compartments,
+      visibility:'workspace',mode:null,anchorKind:'none',sensitivity,groupId,projectId,compartments,
     })])
     const row = (await client.query(`INSERT INTO sessions(assistant_id,user_id,workspace_id,channel_type,channel_id,app_id,app_origin,
       visibility,effective_clearance,context_group_id,context_project_id,context_compartments)
@@ -66,13 +72,55 @@ async function pairedSharedInsert(f: Awaited<ReturnType<typeof fixture>>, patch:
 
 describe('ordinary shared session admission (real PostgreSQL)', () => {
   afterAll(async () => { await getAppPool().end(); await pool.end() })
+  it('[COMP:api/context-scope-resolver] ready v2 shared Chat POST commits its authenticated receipt and exact destination', async () => {
+    const f = await fixture('departments')
+    await pool.query('UPDATE workspaces SET department_read_v2=true WHERE id=$1', [f.w])
+    await pool.query("UPDATE assistants SET kind='primary' WHERE id=$1", [f.assistant])
+    const app = express(); app.use(express.json())
+    app.use((req, _res, next) => { req.userId = f.owner; next() })
+    app.use('/api/sessions', sessionRoutes())
+    const general = await request(app).post('/api/sessions/workspace').send({ workspaceId: f.w })
+    expect(general.status, JSON.stringify(general.body)).toBe(201)
+    expect(general.body).toMatchObject({ assistantId: f.assistant, contextGroupId: null })
+    expect((await pool.query('SELECT visibility,effective_clearance,context_group_id,context_compartments FROM sessions WHERE id=$1', [general.body.id])).rows[0])
+      .toEqual({ visibility: 'workspace', effective_clearance: 'internal', context_group_id: null, context_compartments: [] })
+    const selected = await f.create({ starterUserId: f.owner, contextGroupId: f.common.id })
+    expect(selected).toMatchObject({ contextGroupId: f.common.id, contextCompartments: [f.common.key] })
+    await pool.query('UPDATE assistants SET default_workspace_group_id=$2 WHERE id=$1', [f.assistant, f.common.id])
+    expect(await f.create({ starterUserId: f.owner })).toMatchObject({ contextGroupId: f.common.id })
+    expect(await f.create({ starterUserId: f.owner, contextGroupId: null })).toMatchObject({ contextGroupId: null, contextCompartments: [] })
+    const count = async () => Number((await pool.query('SELECT count(*) FROM sessions WHERE workspace_id=$1', [f.w])).rows[0].count)
+    const before = await count()
+    await expect(f.create({ authenticatedHuman: undefined })).rejects.toMatchObject({ code: 'session_admission_unsupported' })
+    await expect(f.create({ starterUserId: randomUUID() })).rejects.toMatchObject({ code: 'context_not_available' })
+    await expect(f.create({ starterUserId: f.owner, expectedPolicyRevision: '0' })).rejects.toMatchObject({ code: 'access_policy_conflict' })
+    expect(await count()).toBe(before)
+    await expect(pool.query(`INSERT INTO sessions(assistant_id,user_id,workspace_id,channel_type,channel_id,app_origin,visibility,effective_clearance)
+      VALUES($1,$2,$3,'web',$4,'chat','workspace','internal')`, [f.assistant,f.owner,f.w,randomUUID()]))
+      .rejects.toMatchObject({ code: '42501', message: 'workspace_creation_admission_required' })
+  })
+  it('[COMP:api/channel-room] ready v2 provider room retains actual integration and public guest audience', async () => {
+    const f = await fixture('departments')
+    await pool.query('UPDATE workspaces SET department_read_v2=true WHERE id=$1', [f.w])
+    const channel = (await pool.query("INSERT INTO channels(workspace_id,channel_type,display_name) VALUES($1,'slack','Fictional channel') RETURNING id", [f.w])).rows[0].id
+    const integration = (await pool.query("INSERT INTO channel_integrations(channel_id,channel_type,credentials) VALUES($1,'slack',decode('00','hex')) RETURNING id", [channel])).rows[0].id
+    const guest = randomUUID()
+    await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [guest])
+    const input = { workspaceId:f.w,channelIntegrationId:integration,assistantId:f.assistant,channelType:'slack',channelId:randomUUID(),starterUserId:guest }
+    const { room, created } = await findOrCreateChannelRoom(input)
+    expect(created).toBe(true)
+    expect(room).toMatchObject({ visibility:'workspace',anchorKind:'channel',effectiveClearance:'public',contextGroupId:null,contextCompartments:[] })
+    expect((await findOrCreateChannelRoom(input)).room.id).toBe(room.id)
+    await expect(findOrCreateChannelRoom({ ...input, channelId:randomUUID(),channelIntegrationId:randomUUID() })).rejects.toMatchObject({ code:'context_not_available' })
+  })
   it('app-role paired forgeries cannot choose unauthorized same-workspace Team/Project or bypass assistant caps', async () => {
     const f = await fixture('departments')
     const role = (await getAppPool().query('SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')).rows[0]
     expect(role).toEqual({rolsuper:false,rolbypassrls:false})
     await expect(pairedSharedInsert(f,{project:f.project})).rejects.toMatchObject({code:'42501',message:'workspace_creation_scope_unavailable'})
     await expect(pairedSharedInsert(f,{team:f.other.id,compartments:[f.other.key]})).rejects.toMatchObject({code:'42501'})
-    expect(await pairedSharedInsert(f,{team:null})).toMatchObject({visibility:'workspace',context_group_id:null,context_compartments:[]})
+    await expect(pairedSharedInsert(f,{team:null})).rejects.toMatchObject({code:'42501'})
+    expect(await pairedSharedInsert(f,{team:null,ownerPolicyProbe:true})).toMatchObject({visibility:'workspace',context_group_id:null,context_compartments:[]})
     expect(await f.create({contextGroupId:f.common.id})).toMatchObject({visibility:'workspace',contextGroupId:f.common.id,effectiveClearance:'internal'})
     await pool.query('INSERT INTO workspace_project_members(project_id,user_id) VALUES($1,$2)',[f.project,f.member])
     await pool.query("UPDATE assistants SET project_scope_mode='assigned',team_scope_mode='assigned' WHERE id=$1",[f.assistant])
@@ -80,7 +128,7 @@ describe('ordinary shared session admission (real PostgreSQL)', () => {
     await pool.query('INSERT INTO workspace_group_assistants(group_id,assistant_id) VALUES($1,$2)',[f.common.id,f.assistant])
     await expect(pairedSharedInsert(f,{project:f.project})).rejects.toMatchObject({code:'42501'})
     await pool.query('INSERT INTO assistant_project_grants(project_id,assistant_id) VALUES($1,$2)',[f.project,f.assistant])
-    expect(await pairedSharedInsert(f,{project:f.project})).toMatchObject({context_project_id:f.project,visibility:'workspace'})
+    expect(await pairedSharedInsert(f,{project:f.project,ownerPolicyProbe:true})).toMatchObject({context_project_id:f.project,visibility:'workspace'})
     expect(await f.create({contextGroupId:f.common.id,contextProjectId:f.project})).toMatchObject({contextProjectId:f.project,contextGroupId:f.common.id})
     await pool.query("UPDATE assistants SET compartments='{}' WHERE id=$1",[f.assistant])
     await expect(pairedSharedInsert(f)).rejects.toMatchObject({code:'42501'})
@@ -97,7 +145,8 @@ describe('ordinary shared session admission (real PostgreSQL)', () => {
   it('app-role paired receipts cannot bypass Simple placement, current sensitivity, or nonready policy', async () => {
     const f = await fixture()
     expect(await f.create()).toMatchObject({visibility:'workspace',contextGroupId:f.common.id,effectiveClearance:'internal'})
-    expect(await pairedSharedInsert(f)).toMatchObject({context_group_id:f.common.id})
+    await expect(pairedSharedInsert(f)).rejects.toMatchObject({code:'42501'})
+    expect(await pairedSharedInsert(f,{ownerPolicyProbe:true})).toMatchObject({context_group_id:f.common.id})
     // Owner has authority over both Teams; Simple still only permits its default.
     await expect(pairedSharedInsert(f,{actor:f.owner,team:f.other.id,compartments:[f.other.key]})).rejects.toMatchObject({code:'42501'})
     await expect(pairedSharedInsert(f,{team:null})).rejects.toMatchObject({code:'42501'})
@@ -114,7 +163,7 @@ describe('ordinary shared session admission (real PostgreSQL)', () => {
     const old = await f.create()
     const sql = `INSERT INTO sessions(assistant_id,user_id,workspace_id,channel_type,channel_id,app_origin,visibility,mode)
       VALUES($1,$2,$3,'web',$4,'chat',$5,$6)
-      ON CONFLICT(assistant_id,user_id,channel_type,channel_id,app_id) DO UPDATE SET last_active_at=now()`
+      ON CONFLICT(assistant_id,user_id,channel_type,channel_id,app_id) WHERE visibility='personal' DO UPDATE SET last_active_at=now()`
     for (const [channel, visibility, mode] of [[randomUUID(), 'workspace', null], [old.channelId, 'workspace', null], [randomUUID(), 'owner', 'draft']]) {
       await expect(pool.query(sql, [f.assistant, f.member, f.w, channel, visibility, mode])).rejects.toMatchObject({ code: '42501' })
     }
@@ -205,7 +254,7 @@ describe('ordinary shared session admission (real PostgreSQL)', () => {
     await pool.query("UPDATE workspace_access_policies SET setup_state='legacy' WHERE workspace_id=$1", [f.w])
     const personal = await findOrCreateSession(identity)
     await pool.query("UPDATE workspace_access_policies SET setup_state='ready' WHERE workspace_id=$1", [f.w])
-    expect(personal).toMatchObject({ visibility: 'owner', contextGroupId: null })
+    expect(personal).toMatchObject({ visibility: 'personal', contextGroupId: null })
     for (const starterUserId of [f.member, f.owner]) {
       await expect(f.create({ authenticatedHuman: undefined, starterUserId })).rejects.toMatchObject({ code: 'session_admission_unsupported' })
     }
@@ -218,7 +267,7 @@ describe('ordinary shared session admission (real PostgreSQL)', () => {
     expect(await findOrCreateSession({ ...sharedIdentity, contextGroupId: f.common.id, expectedPolicyRevision: 'stale-resume' })).toMatchObject({ id: old.id, contextGroupId: null, contextCompartments: [] })
     expect(await findOrCreateSession(identity)).toMatchObject({ id: personal.id, contextGroupId: null })
     for (const channelType of ['telegram', 'public_api']) {
-      expect(await findOrCreateSession({ ...identity, channelType, contextGroupId: null })).toMatchObject({ contextGroupId: null, visibility: 'owner' })
+      expect(await findOrCreateSession({ ...identity, channelType, contextGroupId: null })).toMatchObject({ contextGroupId: null, visibility: 'personal' })
     }
   })
   it('does not borrow a foreign legacy assistant policy for a ready output workspace', async () => {
@@ -237,7 +286,7 @@ describe('ordinary shared session admission (real PostgreSQL)', () => {
     await pool.query("UPDATE workspace_access_policies SET setup_state='legacy' WHERE workspace_id=$1", [target.w])
     const historical = await findOrCreateSession(identity)
     await pool.query("UPDATE workspace_access_policies SET setup_state='ready' WHERE workspace_id=$1", [target.w])
-    expect(await findOrCreateSession(identity)).toMatchObject({ id: historical.id, contextGroupId: null })
+    expect(await findOrCreateSession({ ...identity, channelType: historical.channelType, appOrigin: historical.appOrigin })).toMatchObject({ id: historical.id, contextGroupId: null })
   })
   it('locks a resumed identity so deletion cannot turn compatibility replay into a new INSERT', async () => {
     const f = await fixture()

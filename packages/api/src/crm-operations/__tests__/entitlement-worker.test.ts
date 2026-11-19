@@ -1,5 +1,5 @@
 import {describe,it,expect,vi} from 'vitest'
-import {CrmOperationsCommandSchema,assertCrmOperationsAuthority,type CrmOperationsContext} from '@use-brian/core'
+import {CrmOperationsCommandSchema, assertCrmOperationsAuthority, type CrmOperationsContext} from '@use-brian/core/crm/operations-types.js'
 import {createCrmEntitlementWorker} from '../entitlement-worker.js'
 
 const id='00000000-0000-4000-8000-000000000001'

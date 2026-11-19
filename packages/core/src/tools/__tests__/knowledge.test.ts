@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { createKnowledgeTools } from '../base/knowledge.js'
 import type { KnowledgeStoreInterface, KnowledgeRepoWriter } from '../../knowledge/types.js'
-import type { Tool, ToolContext } from '../types.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const mockStore: KnowledgeStoreInterface = {
   search: vi.fn(),
@@ -306,7 +306,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
     })
 
     it('stamps the entry at the accumulator max when it exceeds the requested tier', async () => {
-      const { SensitivityAccumulator } = await import('../../security/sensitivity.js')
+      const { SensitivityAccumulator } = await import('@use-brian/agent-runtime/security/sensitivity.js')
       const accumulator = new SensitivityAccumulator()
       accumulator.note('confidential')
 
@@ -324,7 +324,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
     it('stamps research-mode findings public despite internal brain-first reads', async () => {
       // Research provenance is the public web. The brain-first orientation
       // reads (default internal) must not over-restrict the finding.
-      const { SensitivityAccumulator } = await import('../../security/sensitivity.js')
+      const { SensitivityAccumulator } = await import('@use-brian/agent-runtime/security/sensitivity.js')
       const accumulator = new SensitivityAccumulator()
       accumulator.note('internal')
 
@@ -340,7 +340,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
     })
 
     it('keeps confidential a hard floor even in research mode', async () => {
-      const { SensitivityAccumulator } = await import('../../security/sensitivity.js')
+      const { SensitivityAccumulator } = await import('@use-brian/agent-runtime/security/sensitivity.js')
       const accumulator = new SensitivityAccumulator()
       accumulator.note('confidential')
 
@@ -494,7 +494,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
     })
 
     it('stamps the accumulator max into the generated frontmatter', async () => {
-      const { SensitivityAccumulator } = await import('../../security/sensitivity.js')
+      const { SensitivityAccumulator } = await import('@use-brian/agent-runtime/security/sensitivity.js')
       const accumulator = new SensitivityAccumulator()
       accumulator.note('confidential')
 
@@ -655,7 +655,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
     })
 
     it('refuses to update a lower-tier entry after higher-tier reads (no laundering)', async () => {
-      const { SensitivityAccumulator } = await import('../../security/sensitivity.js')
+      const { SensitivityAccumulator } = await import('@use-brian/agent-runtime/security/sensitivity.js')
       const accumulator = new SensitivityAccumulator()
       accumulator.note('confidential')
 

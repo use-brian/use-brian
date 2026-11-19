@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 
 import { describe, expect, it } from 'vitest'
+import { bootCompositionSource } from '../../boot/__tests__/composition-source.js'
 
 function source(relative: string): string {
   return readFileSync(new URL(relative, import.meta.url), 'utf8')
@@ -25,7 +26,7 @@ describe('[COMP:api/decision-playbook-context] prompt-path wiring', () => {
 
   it('loads scoped rules for workflow assistant calls and returns attribution out of band', () => {
     const executor = source('../../inter-assistant/executor.ts')
-    const boot = source('../../boot.ts')
+    const boot = bootCompositionSource()
     expect(executor).toContain("operationKind: 'workflow_assistant_call'")
     expect(executor).toContain('params.onDecisionApplication?.(playbook.decisionApplicationId)')
     expect(boot).toContain("name: 'decision-playbook-application'")

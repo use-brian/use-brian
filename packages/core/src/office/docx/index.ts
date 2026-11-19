@@ -1,41 +1,9 @@
 /** Safe Brian-owned DOCX import/export/reparse adapter. [COMP:office/docx-engine] */
 import { createHash } from 'node:crypto'
-import sharp from 'sharp'
 import type JSZip from 'jszip'
-import {
-  AlignmentType,
-  type IRunOptions,
-  BorderStyle,
-  Document,
-  ExternalHyperlink,
-  Footer,
-  Header,
-  HeightRule,
-  LineRuleType,
-  HeadingLevel,
-  ImageRun,
-  type IBorderOptions,
-  type ITableBordersOptions,
-  type ITableCellBorders,
-  Packer,
-  PageBreak,
-  PageNumber,
-  Paragraph,
-  ShadingType,
-  Table,
-  TableCell,
-  XmlComponent,
-  ImportedXmlComponent,
-  type ITableCellOptions,
-  TableLayoutType,
-  TableRow,
-  TextRun,
-  Tab,
-  CarriageReturn,
-  VerticalAlignTable,
-  WidthType,
-  UnderlineType,
-} from 'docx'
+import type * as Docx from 'docx'
+import type { IRunOptions, IBorderOptions, ITableBordersOptions, ITableCellBorders, ITableCellOptions } from 'docx'
+import { lazyImplementation } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
 import {
   assertOfficeArtifactSnapshot,
   officeTableColumnCount,
@@ -67,14 +35,69 @@ import {
   type OfficeResourceResolver,
 } from '../package.js'
 
-const headingLevels = {
-  1: HeadingLevel.HEADING_1,
-  2: HeadingLevel.HEADING_2,
-  3: HeadingLevel.HEADING_3,
-  4: HeadingLevel.HEADING_4,
-  5: HeadingLevel.HEADING_5,
-  6: HeadingLevel.HEADING_6,
-} as const
+// The Word writer (docx) and the SVG rasterizer (sharp) load on the first DOCX
+// export, not with the Office modules (M4 step 5). Every docx value below is
+// bound by `loadDocx()`, which `exportOfficeDocument` awaits before building
+// anything; the import and reparse paths parse XML text and never need it.
+let AlignmentType!: typeof Docx.AlignmentType
+let BorderStyle!: typeof Docx.BorderStyle
+let Document!: typeof Docx.Document
+let ExternalHyperlink!: typeof Docx.ExternalHyperlink
+let Footer!: typeof Docx.Footer
+let Header!: typeof Docx.Header
+let HeightRule!: typeof Docx.HeightRule
+let LineRuleType!: typeof Docx.LineRuleType
+let HeadingLevel!: typeof Docx.HeadingLevel
+let ImageRun!: typeof Docx.ImageRun
+let Packer!: typeof Docx.Packer
+let PageBreak!: typeof Docx.PageBreak
+let PageNumber!: typeof Docx.PageNumber
+let Paragraph!: typeof Docx.Paragraph
+let ShadingType!: typeof Docx.ShadingType
+let Table!: typeof Docx.Table
+let TableCell!: typeof Docx.TableCell
+let XmlComponent!: typeof Docx.XmlComponent
+let ImportedXmlComponent!: typeof Docx.ImportedXmlComponent
+let TableLayoutType!: typeof Docx.TableLayoutType
+let TableRow!: typeof Docx.TableRow
+let TextRun!: typeof Docx.TextRun
+let Tab!: typeof Docx.Tab
+let CarriageReturn!: typeof Docx.CarriageReturn
+let VerticalAlignTable!: typeof Docx.VerticalAlignTable
+let WidthType!: typeof Docx.WidthType
+let UnderlineType!: typeof Docx.UnderlineType
+type ExternalHyperlink = Docx.ExternalHyperlink
+type ImageRun = Docx.ImageRun
+type Paragraph = Docx.Paragraph
+type Table = Docx.Table
+type TextRun = Docx.TextRun
+type XmlComponent = Docx.XmlComponent
+const headingLevelsOf = (levels: typeof Docx.HeadingLevel) => ({
+  1: levels.HEADING_1,
+  2: levels.HEADING_2,
+  3: levels.HEADING_3,
+  4: levels.HEADING_4,
+  5: levels.HEADING_5,
+  6: levels.HEADING_6,
+}) as const
+let headingLevels!: ReturnType<typeof headingLevelsOf>
+type OfficeDocxTableCellClass = new (options: ITableCellOptions, wrapText?: boolean) => Docx.TableCell
+let OfficeDocxTableCell!: OfficeDocxTableCellClass
+const loadDocx = lazyImplementation('The Word document writer (docx)', async () => {
+  const docx = await import('docx')
+  ;({ AlignmentType, BorderStyle, Document, ExternalHyperlink, Footer, Header, HeightRule, LineRuleType, HeadingLevel, ImageRun, Packer, PageBreak, PageNumber, Paragraph, ShadingType, Table, TableCell, XmlComponent, ImportedXmlComponent, TableLayoutType, TableRow, TextRun, Tab, CarriageReturn, VerticalAlignTable, WidthType, UnderlineType } = docx)
+  headingLevels = headingLevelsOf(docx.HeadingLevel)
+  /** docx exposes no noWrap option; extend its cell property component rather
+   * than dropping the canonical wrapping policy from the native package. */
+  OfficeDocxTableCell = class extends docx.TableCell {
+    constructor(options: ITableCellOptions, wrapText?: boolean) {
+      super(options)
+      if (wrapText === false) (this.root[0] as XmlComponent).addChildElement(new docx.ImportedXmlComponent('w:noWrap'))
+    }
+  }
+  return docx
+})
+const loadSharp = lazyImplementation('The DOCX image rasterizer (sharp)', () => import('sharp').then((m) => m.default))
 
 function color(value: string): string {
   return value.replace('#', '').slice(0, 6)
@@ -101,7 +124,7 @@ function richChildren(runs: readonly OfficeRichTextRun[]): Array<TextRun | Exter
 async function headerImageRun(image: NonNullable<DocumentSnapshot['sections'][number]['headerImage']>, resolveResource: OfficeResourceResolver): Promise<ImageRun> {
   const payload = await resolveResource(image.resourceId)
   if (!payload) throw new Error(`Missing or unsupported header image resource ${image.resourceId}`)
-  const normalized = payload.mime === 'image/svg+xml' ? { type: 'png' as const, data: await sharp(payload.bytes).png().toBuffer() } : { type: imageType(payload.mime), data: payload.bytes }
+  const normalized = payload.mime === 'image/svg+xml' ? { type: 'png' as const, data: await (await loadSharp())(payload.bytes).png().toBuffer() } : { type: imageType(payload.mime), data: payload.bytes }
   if (!normalized.type) throw new Error(`Missing or unsupported header image resource ${image.resourceId}`)
   return new ImageRun({
     type: normalized.type,
@@ -154,15 +177,6 @@ function docxCellMargins(value: OfficeTableCellMargins | undefined): { marginUni
 function evenColumnsDxa(count: number, totalDxa: number): number[] {
   const base = Math.floor(totalDxa / count)
   return Array.from({ length: count }, (_u, index) => (index === 0 ? totalDxa - base * (count - 1) : base))
-}
-
-/** docx exposes no noWrap option; extend its cell property component rather
- * than dropping the canonical wrapping policy from the native package. */
-class OfficeDocxTableCell extends TableCell {
-  constructor(options: ITableCellOptions, wrapText?: boolean) {
-    super(options)
-    if (wrapText === false) (this.root[0] as XmlComponent).addChildElement(new ImportedXmlComponent('w:noWrap'))
-  }
 }
 
 function tableFromNode(node: Extract<DocumentFlowNode, { kind: 'table' }>, contentWidthDxa: number): Table {
@@ -232,7 +246,7 @@ async function nodeChildren(node: DocumentFlowNode, resolveResource: OfficeResou
   if (node.kind === 'image') {
     const payload = await resolveResource(node.resourceId)
     if (!payload) throw new Error(`Missing or unsupported image resource ${node.resourceId}`)
-    const normalized = payload.mime === 'image/svg+xml' ? { type: 'png' as const, data: await sharp(payload.bytes).png().toBuffer() } : { type: imageType(payload.mime), data: payload.bytes }
+    const normalized = payload.mime === 'image/svg+xml' ? { type: 'png' as const, data: await (await loadSharp())(payload.bytes).png().toBuffer() } : { type: imageType(payload.mime), data: payload.bytes }
     if (!normalized.type) throw new Error(`Missing or unsupported image resource ${node.resourceId}`)
     return [new Paragraph({ children: [new ImageRun({ type: normalized.type, data: normalized.data, altText: { title: node.altText || 'Decorative image', description: node.altText, name: node.altText || 'Decorative image' }, transformation: { width: Math.round(node.widthPt * 96 / 72), height: Math.round(node.heightPt * 96 / 72) } })] })]
   }
@@ -240,7 +254,7 @@ async function nodeChildren(node: DocumentFlowNode, resolveResource: OfficeResou
     if (!node.recipientAccessibleUrl) throw new Error(`DOCX video ${node.id} requires a recipient-accessible HTTPS link`)
     const poster = await resolveResource(node.posterResourceId)
     if (!poster) throw new Error(`Missing video poster resource ${node.posterResourceId}`)
-    const normalizedPoster = poster.mime === 'image/svg+xml' ? { type: 'png' as const, data: await sharp(poster.bytes).png().toBuffer() } : { type: imageType(poster.mime), data: poster.bytes }
+    const normalizedPoster = poster.mime === 'image/svg+xml' ? { type: 'png' as const, data: await (await loadSharp())(poster.bytes).png().toBuffer() } : { type: imageType(poster.mime), data: poster.bytes }
     if (!normalizedPoster.type) throw new Error(`Missing video poster resource ${node.posterResourceId}`)
     return [
       new Paragraph({ children: [new ImageRun({ type: normalizedPoster.type, data: normalizedPoster.data, altText: { title: node.altText, description: node.altText, name: node.altText }, transformation: { width: 640, height: 360 } })] }),
@@ -293,6 +307,7 @@ export async function exportOfficeDocument(
   const diagnostics = [...preflight.diagnostics, ...layout.issues.map((issue) => ({ severity: 'error' as const, code: `layout.${issue.code}`, path: issue.objectId, message: issue.message }))]
   if (diagnostics.some((diagnostic) => diagnostic.severity === 'error')) throw new Error(`DOCX preflight failed: ${diagnostics.map((diagnostic) => `${diagnostic.path}: ${diagnostic.message}`).join('; ')}`)
 
+  await loadDocx()
   const sections = []
   for (const section of snapshot.sections) {
     const children: Array<Paragraph | Table> = []

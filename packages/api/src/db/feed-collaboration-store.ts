@@ -9,12 +9,13 @@ import {
   feedCommandRequestSchema, feedMediaSchema, type FeedCommandRequest, type FeedCollaborationReceipt,
   type FeedComposition, type FeedEdit, type FeedAnchor, type FeedLinkedInContext,
 } from '@use-brian/shared'
-import { applyFeedEdits, locateFeedNode, canonicalFeedValue, createFeedAnchor, importLegacyFeed, projectFeed, validateFeedComposition, walkFeed, FeedCompositionError } from '@use-brian/doc-model'
+import { applyFeedEdits, locateFeedNode, canonicalFeedValue, createFeedAnchor, importLegacyFeed, projectFeed, validateFeedComposition, walkFeed, FeedCompositionError } from '@use-brian/doc-model/feed.js'
 import { getPool } from './client.js'
 import { canMemberDraftRole } from './workspace-store.js'
 import { appendDecisionEvent } from './decision-event-store.js'
 import { appendDecisionDerivation, type DecisionDerivationRelation } from './decision-provenance-store.js'
 import type { PostWorkingContent, PostWorkingCopy } from './post-working-copies.js'
+import { conversationAnchorWriteAdmissionActive } from './conversation-visibility.js'
 
 export class FeedCollaborationError extends Error {
   constructor(public status: number, public code: string) { super(code) }
@@ -24,7 +25,18 @@ export type StructuredFeedContent = PostWorkingContent & { schemaVersion: 2; com
 export type FeedThread = { id: string; transcriptSessionId: string; anchor: FeedAnchor; resolved: boolean; authorUserId: string; authorName?: string | null; authorKind: 'user' | 'assistant'; createdAt: Date }
 export type FeedSuggestion = { sourceRunId?: string | null; id: string; sourceRevision: number; edits: FeedEdit[]; rationale: string; status: string; threadId: string | null; parentId: string | null; authorUserId: string; authorName?: string | null; authorKind: 'user' | 'assistant'; acceptanceReceipt: FeedCollaborationReceipt | null; applicationId: string | null }
 export type FeedScope = { workspaceId: string; clearance: string; compartments: string[] | null; role: 'owner' | 'admin' | 'member'; canDraft: boolean; memberClearance: string; memberCompartments?: string[] | null }
+export async function lockFeedDraftWorkspace(client: pg.PoolClient, actor: FeedActor, write: boolean): Promise<void> {
+  if (!conversationAnchorWriteAdmissionActive()) return
+  // Match the anchor's workspace-first order. A comment can create a child
+  // session in this transaction and would otherwise upgrade a shared lock.
+  await client.query(`SELECT w.id FROM workspaces w JOIN sessions s ON s.workspace_id=w.id
+    WHERE s.id=$1 AND s.assistant_id=$2 AND ${sessionKindSql.anchored('s', 'feed_draft')}
+    AND EXISTS(SELECT 1 FROM workspace_members m WHERE m.workspace_id=w.id AND m.user_id=$3)
+    FOR ${write ? 'UPDATE' : 'SHARE'} OF w`, [actor.sessionId, actor.assistantId, actor.userId])
+}
 export async function lockFeedAccess(client: pg.PoolClient, actor: FeedActor, write = true): Promise<FeedScope> {
+  const native = conversationAnchorWriteAdmissionActive()
+  await lockFeedDraftWorkspace(client,actor,write)
   const row = (await client.query<FeedScope>(
     `SELECT a.workspace_id AS "workspaceId", a.clearance, a.compartments FROM sessions s JOIN assistants a ON a.id=s.assistant_id
      WHERE s.id=$1 AND a.id=$2 AND ${sessionKindSql.anchored('s', 'feed_draft')}
@@ -37,7 +49,10 @@ export async function lockFeedAccess(client: pg.PoolClient, actor: FeedActor, wr
     [row.workspaceId, actor.userId],
   )).rows[0]
   if (!member || (write && !canMemberDraftRole(member.role, member.canDraft))) throw new FeedCollaborationError(403, 'draft_access_required')
-  if (!(await client.query('SELECT feed_draft_audience_allowed($1) AS allowed', [actor.sessionId])).rows[0]?.allowed) throw new FeedCollaborationError(403, 'draft_source_access_required')
+  const access = native
+    ? await client.query<{ allowed: boolean }>('SELECT public.lock_conversation_member_read($1,$2,$3) AS allowed', [row.workspaceId, actor.sessionId, actor.userId])
+    : await client.query<{ allowed: boolean }>('SELECT public.feed_draft_audience_allowed($1) AS allowed', [actor.sessionId])
+  if (access.rows[0]?.allowed !== true) throw new FeedCollaborationError(403, 'draft_source_access_required')
   return { ...row, ...member }
 }
 export async function withFeedTransaction<T>(actor: FeedActor, work: (client: pg.PoolClient, scope: FeedScope) => Promise<T>, write = true): Promise<T> {
@@ -45,6 +60,20 @@ export async function withFeedTransaction<T>(actor: FeedActor, work: (client: pg
   try { await client.query('BEGIN'); const scope = await lockFeedAccess(client, actor, write); const result = await work(client, scope); await client.query('COMMIT'); return result }
   catch (error) { await client.query('ROLLBACK'); if (error instanceof FeedCompositionError) throw new FeedCollaborationError(409, error.code); throw error }
   finally { client.release() }
+}
+
+/** A new Feed draft's authored seed is published in its creation transaction. */
+export async function insertFeedDraftSeed(client: pg.PoolClient, actor: FeedActor, text: string): Promise<void> {
+  const native = conversationAnchorWriteAdmissionActive()
+  if (native) await lockFeedAccess(client,actor)
+  const body = JSON.stringify([{type:'text',text}])
+  const result = await client.query(native ? `INSERT INTO public.session_messages
+    (session_id,role,content,sequence_num,sender_user_id,workspace_id,sensitivity,compartments,project_ids,scope_version,scope_held)
+    SELECT e.session_id,'user',$2,1,$3,e.workspace_id,e.cap,e.compartments,public.conversation_hard_project_ids(e.compartments),1,false
+    FROM public.conversation_envelopes e WHERE e.session_id=$1`
+    : `INSERT INTO public.session_messages(session_id,role,content,sequence_num,sender_user_id) VALUES($1,'user',$2,1,$3)`,
+  [actor.sessionId,body,actor.userId])
+  if (result.rowCount !== 1) throw new FeedCollaborationError(403,'draft_source_access_required')
 }
 const COPY_COLUMNS = 'revision,mutation_id AS "mutationId",content,discussion_sequence::int AS sequence'
 export type FeedReader = { query: typeof import('./client.js').query }
@@ -55,8 +84,69 @@ export function requireFeedComposition(content: PostWorkingContent): StructuredF
   if (content.schemaVersion !== 2 || !content.composition) throw new FeedCollaborationError(409, 'upgrade_required')
   validateFeedComposition(content.composition); return content as StructuredFeedContent
 }
-async function threads(client: pg.PoolClient, sessionId: string): Promise<FeedThread[]> {
-  return (await client.query<FeedThread>(`SELECT (SELECT name FROM users WHERE id=author_user_id) AS "authorName",id,transcript_session_id AS "transcriptSessionId",anchor,resolved,author_user_id AS "authorUserId",author_kind AS "authorKind",created_at AS "createdAt" FROM feed_comment_threads WHERE session_id=$1 ORDER BY created_at,id`, [sessionId])).rows
+async function threads(client: pg.PoolClient, sessionId: string, viewer?: string): Promise<FeedThread[]> {
+  const filtered = viewer !== undefined && conversationAnchorWriteAdmissionActive()
+  return (await client.query<FeedThread>(`SELECT (SELECT name FROM users WHERE id=author_user_id) AS "authorName",id,transcript_session_id AS "transcriptSessionId",anchor,resolved,author_user_id AS "authorUserId",author_kind AS "authorKind",created_at AS "createdAt"
+    FROM feed_comment_threads WHERE session_id=$1
+    ${filtered ? 'AND public.conversation_member_read_allowed(workspace_id,transcript_session_id,$2)' : ''}
+    ORDER BY created_at,id`, filtered ? [sessionId,viewer] : [sessionId])).rows
+}
+async function assertFeedThreadAccess(client: pg.PoolClient, actor: FeedActor, scope: FeedScope, transcriptId: string): Promise<void> {
+  if (!conversationAnchorWriteAdmissionActive()) return
+  const pin = await client.query<{ allowed: boolean }>('SELECT public.lock_conversation_member_read($1,$2,$3) AS allowed',
+    [scope.workspaceId,transcriptId,actor.userId])
+  if (pin.rows[0]?.allowed !== true) throw new FeedCollaborationError(404, 'thread_not_found')
+}
+/** Used only after the trusted Feed owner proves the exact anchor and viewer.
+ * Wholly unstamped typed text preserves old Feed discussions that predate the
+ * canonical append stamp. A partially stamped, held or derived row cannot use
+ * that continuity path. */
+export function feedVisibleMessageSql(viewer: '$2' | '$3'): string {
+  return `AND m.role IN ('user','assistant')
+    AND CASE jsonb_typeof(m.content) WHEN 'array' THEN NOT EXISTS (
+      SELECT 1 FROM jsonb_array_elements(m.content) block WHERE CASE jsonb_typeof(block) WHEN 'object' THEN
+        block->>'type' IS DISTINCT FROM 'text' OR jsonb_typeof(block->'text') IS DISTINCT FROM 'string'
+        OR block-ARRAY['type','text']<>'{}'::jsonb ELSE true END) ELSE false END
+    AND lower(m.content::text) NOT LIKE '%<attached_file%'
+    AND (EXISTS(SELECT 1 FROM public.conversation_envelopes envelope
+      CROSS JOIN LATERAL public.conversation_record_rows(envelope,m.sequence_num-1,m.sequence_num,false,${viewer},true) message
+      WHERE envelope.session_id=m.session_id AND message.id=m.id) OR (
+      m.workspace_id IS NULL AND m.user_id IS NULL AND m.assistant_id IS NULL AND m.sensitivity IS NULL
+      AND m.compartments IS NULL AND m.project_ids IS NULL AND m.scope_version IS NULL AND m.scope_held IS NULL
+      AND public.scope_review_state_held('session_message',m.id) IS NOT TRUE
+      AND NOT EXISTS(SELECT 1 FROM public.conversation_message_quarantine q WHERE q.message_id=m.id AND q.reason<>'missing_stamp')
+      AND NOT EXISTS(SELECT 1 FROM public.scope_derivations d WHERE d.resource_kind='session_message' AND d.resource_id=m.id)))`
+}
+async function appendFeedDiscussion(client: pg.PoolClient, actor: FeedActor, scope: FeedScope, transcriptId: string,
+  content: StructuredFeedContent, text: string): Promise<void> {
+  const body = JSON.stringify([{ type: 'text', text }])
+  const sender = actor.kind === 'user' ? actor.userId : null
+  if (!conversationAnchorWriteAdmissionActive()) {
+    await client.query(`INSERT INTO session_messages(session_id,role,content,sequence_num,sender_user_id)
+      SELECT $1,$2,$3,coalesce(max(sequence_num),0)+1,$4 FROM session_messages WHERE session_id=$1`, [transcriptId,actor.kind,body,sender])
+    return
+  }
+  await assertFeedThreadAccess(client,actor,scope,transcriptId)
+  const result = await client.query(`WITH floor AS MATERIALIZED (
+    SELECT child.workspace_id,child.session_id,$7::text AS sensitivity,
+      ARRAY(SELECT DISTINCT label FROM unnest(parent.compartments||$8::text[]) label ORDER BY label) compartments,
+      ARRAY(SELECT DISTINCT id FROM unnest(public.conversation_hard_project_ids(parent.compartments)||$9::uuid[]) id ORDER BY id) project_ids,
+      child.cap,child.compartments AS audience_labels,parent.cap AS parent_cap,parent.compartments AS parent_labels
+    FROM public.conversation_envelopes child JOIN public.feed_comment_threads link ON link.transcript_session_id=child.session_id
+    JOIN public.conversation_envelopes parent ON parent.session_id=link.session_id AND parent.workspace_id=child.workspace_id
+    WHERE child.workspace_id=$5 AND link.session_id=$6 AND child.session_id=$1
+  ) INSERT INTO public.session_messages(session_id,role,content,sequence_num,sender_user_id,
+       workspace_id,sensitivity,compartments,project_ids,scope_version,scope_held)
+    SELECT floor.session_id,$2,$3,(SELECT coalesce(max(sequence_num),0)+1 FROM public.session_messages WHERE session_id=$1),$4,
+       floor.workspace_id,floor.sensitivity,floor.compartments,floor.project_ids,1,false
+    FROM floor WHERE floor.sensitivity IN ('public','internal','confidential')
+      AND public.sensitivity_rank(floor.sensitivity)<=least(public.sensitivity_rank(floor.cap),public.sensitivity_rank(floor.parent_cap))
+      AND floor.compartments <@ floor.audience_labels AND floor.compartments <@ floor.parent_labels
+      AND floor.project_ids <@ public.conversation_hard_project_ids(floor.audience_labels)
+      AND floor.project_ids <@ public.conversation_hard_project_ids(floor.parent_labels)`,
+    [transcriptId,actor.kind,body,sender,scope.workspaceId,actor.sessionId,content.sourceSensitivity ?? 'public',
+      content.sourceCompartments ?? [],content.sourceProjectIds ?? []])
+  if (result.rowCount !== 1) throw new FeedCollaborationError(403, 'draft_source_access_required')
 }
 const SUGGESTION_COLUMNS = 'id,source_run_id AS "sourceRunId",source_proposal AS "sourceProposal",source_revision AS "sourceRevision",edits,rationale,status,thread_id AS "threadId",parent_id AS "parentId",author_user_id AS "authorUserId",author_kind AS "authorKind",acceptance_receipt AS "acceptanceReceipt",application_id AS "applicationId"'
 export async function assertFeedFiles(client: pg.PoolClient, actor: FeedActor, scope: FeedScope, composition: FeedComposition, historicalFileIds: readonly string[] = [], linkedin?: FeedLinkedInContext): Promise<void> {
@@ -185,16 +275,23 @@ export async function executeFeedCommands(actor: FeedActor, raw: FeedCommandRequ
         const anchor = await mapFeedHistoricalAnchor(client, actor.sessionId, createFeedAnchor(source.composition, command.target, sourceRevision), currentRevision, source.composition); const transcript = randomUUID()
         // The draft anchors the discussion: admitted by its anchor (L12).
         const admitted = await admitAnchoredSession(client, { assistantId: actor.assistantId, userId: actor.userId, channelType: 'web', channelId: `feed-thread:${command.threadId}`, workspaceId: scope.workspaceId, anchorKind: 'feed_thread', anchorRef: command.threadId })
-        await client.query(`INSERT INTO sessions(id,assistant_id,user_id,channel_type,channel_id,workspace_id,visibility,title,anchor_kind,anchor_ref,effective_clearance) VALUES($1,$2,$3,'web',$4,$5,'workspace','Draft discussion','feed_thread',$6,$7)`, [transcript, actor.assistantId, actor.userId, `feed-thread:${command.threadId}`, scope.workspaceId, command.threadId, admitted.effectiveClearance])
+        await client.query(`INSERT INTO sessions(id,assistant_id,user_id,channel_type,channel_id,workspace_id,visibility,title,anchor_kind,anchor_ref,effective_clearance,context_compartments)
+          VALUES($1,$2,$3,'web',$4,$5,'workspace','Draft discussion','feed_thread',$6,$7,
+            ${conversationAnchorWriteAdmissionActive() ? '(SELECT compartments FROM public.conversation_envelopes WHERE session_id=$8 AND workspace_id=$5)' : 'ARRAY[]::text[]'})`,
+        [transcript,actor.assistantId,actor.userId,`feed-thread:${command.threadId}`,scope.workspaceId,command.threadId,admitted.effectiveClearance,
+          ...(conversationAnchorWriteAdmissionActive() ? [actor.sessionId] : [])])
         await client.query(`INSERT INTO feed_comment_threads(id,session_id,workspace_id,assistant_id,transcript_session_id,anchor,author_user_id,author_kind) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, [command.threadId, actor.sessionId, scope.workspaceId, actor.assistantId, transcript, JSON.stringify(anchor), actor.userId, actor.kind])
-        await client.query(`INSERT INTO session_messages(session_id,role,content,sequence_num,sender_user_id) VALUES($1,$2,$3,1,$4)`, [transcript, actor.kind === 'user' ? 'user' : 'assistant', JSON.stringify([{ type: 'text', text: command.text }]), actor.kind === 'user' ? actor.userId : null])
+        await appendFeedDiscussion(client,actor,scope,transcript,structured,command.text)
         receipt.threadIds.push(command.threadId); sequence++
       } else if (command.kind === 'reply' || command.kind === 'resolve' || command.kind === 'reattach') {
-        const thread = (await threads(client, actor.sessionId)).find(t => t.id === command.threadId)
+        const thread = (await threads(client, actor.sessionId, actor.userId)).find(t => t.id === command.threadId)
         if (!thread) throw new FeedCollaborationError(404, 'thread_not_found')
-        if (command.kind === 'reply') await client.query(`INSERT INTO session_messages(session_id,role,content,sequence_num,sender_user_id) SELECT $1,$2,$3,coalesce(max(sequence_num),0)+1,$4 FROM session_messages WHERE session_id=$1`, [thread.transcriptSessionId, actor.kind === 'user' ? 'user' : 'assistant', JSON.stringify([{ type: 'text', text: command.text }]), actor.kind === 'user' ? actor.userId : null])
-        else if (command.kind === 'resolve') await client.query('UPDATE feed_comment_threads SET resolved=$3,updated_at=now() WHERE session_id=$1 AND id=$2', [actor.sessionId, command.threadId, command.resolved])
-        else await client.query('UPDATE feed_comment_threads SET anchor=$3,updated_at=now() WHERE session_id=$1 AND id=$2', [actor.sessionId, command.threadId, JSON.stringify(createFeedAnchor(structured.composition, command.target, currentRevision))])
+        if (command.kind === 'reply') await appendFeedDiscussion(client,actor,scope,thread.transcriptSessionId,structured,command.text)
+        else {
+          await assertFeedThreadAccess(client,actor,scope,thread.transcriptSessionId)
+          if (command.kind === 'resolve') await client.query('UPDATE feed_comment_threads SET resolved=$3,updated_at=now() WHERE session_id=$1 AND id=$2', [actor.sessionId, command.threadId, command.resolved])
+          else await client.query('UPDATE feed_comment_threads SET anchor=$3,updated_at=now() WHERE session_id=$1 AND id=$2', [actor.sessionId, command.threadId, JSON.stringify(createFeedAnchor(structured.composition, command.target, currentRevision))])
+        }
         sequence++
       } else if (command.kind === 'propose') {
         await assertSameReference(client, 'feed_comment_threads', actor.sessionId, command.threadId)
@@ -273,12 +370,28 @@ export async function executeFeedCommands(actor: FeedActor, raw: FeedCommandRequ
 }
 
 export async function getFeedCollaboration(actor: FeedActor) {
-  return withFeedTransaction(actor, async client => ({ runs: (await client.query(`SELECT id,kind,CASE WHEN kind IN ('text_generation','image_generation') THEN jsonb_build_object('slotId',context#>>'{slot,id}','segmentId',context->>'segmentId','briefRevision',context#>'{slot,briefRevision}','estimate',context->'estimate') END AS generation,context->>'month' AS month,context#>>'{dimensions,post_goal,sources,0,title}' AS \"goalTitle\",source_revision AS revision,status,attempts,last_error AS error,created_at AS \"createdAt\",coverage,summary_thread_id AS \"summaryThreadId\",model FROM feed_editorial_runs WHERE session_id=$1 ORDER BY created_at DESC LIMIT 30`, [actor.sessionId])).rows, reviewFindings: (await client.query(`SELECT DISTINCT ON(thread_id) thread_id AS \"threadId\",run_id AS \"runId\",finding FROM feed_review_findings WHERE session_id=$1 ORDER BY thread_id,created_at DESC`, [actor.sessionId])).rows, copy: await readFeedCopy(client, actor.sessionId), threads: await threads(client, actor.sessionId), suggestions: (await client.query<FeedSuggestion>(`SELECT ${SUGGESTION_COLUMNS} FROM feed_draft_suggestions WHERE session_id=$1 ORDER BY created_at,id`, [actor.sessionId])).rows }), false)
+  return withFeedTransaction(actor, async client => {
+    const visibleThreads = await threads(client,actor.sessionId,actor.userId)
+    const threadIds = new Set(visibleThreads.map(thread => thread.id))
+    const runs = (await client.query(`SELECT id,kind,CASE WHEN kind IN ('text_generation','image_generation') THEN jsonb_build_object('slotId',context#>>'{slot,id}','segmentId',context->>'segmentId','briefRevision',context#>'{slot,briefRevision}','estimate',context->'estimate') END AS generation,context->>'month' AS month,context#>>'{dimensions,post_goal,sources,0,title}' AS "goalTitle",source_revision AS revision,status,attempts,last_error AS error,created_at AS "createdAt",coverage,summary_thread_id AS "summaryThreadId",model FROM feed_editorial_runs WHERE session_id=$1 ORDER BY created_at DESC LIMIT 30`, [actor.sessionId])).rows
+    const reviewFindings = (await client.query(`SELECT DISTINCT ON(thread_id) thread_id AS "threadId",run_id AS "runId",finding FROM feed_review_findings WHERE session_id=$1 ORDER BY thread_id,created_at DESC`, [actor.sessionId])).rows
+    const suggestions = (await client.query<FeedSuggestion>(`SELECT ${SUGGESTION_COLUMNS} FROM feed_draft_suggestions WHERE session_id=$1 ORDER BY created_at,id`,[actor.sessionId])).rows
+    return { runs:runs.map(run => run.summaryThreadId && !threadIds.has(run.summaryThreadId) ? {...run,summaryThreadId:null} : run),
+      reviewFindings:reviewFindings.filter(finding => threadIds.has(finding.threadId)), copy:await readFeedCopy(client,actor.sessionId),
+      threads:visibleThreads,suggestions:suggestions.filter(suggestion => suggestion.threadId === null || threadIds.has(suggestion.threadId)) }
+  }, false)
 }
 export async function getFeedThreadMessages(actor: FeedActor, threadId: string, beforeSequence = 2_000_000_000) {
-  return withFeedTransaction(actor, async client => {
-    const thread = (await threads(client, actor.sessionId)).find(t => t.id === threadId)
+  return withFeedTransaction(actor, async (client,scope) => {
+    const thread = (await threads(client, actor.sessionId, actor.userId)).find(t => t.id === threadId)
     if (!thread) throw new FeedCollaborationError(404, 'thread_not_found')
+    await assertFeedThreadAccess(client,actor,scope,thread.transcriptSessionId)
+    if (conversationAnchorWriteAdmissionActive()) {
+      return (await client.query(`SELECT (SELECT name FROM users WHERE id=m.sender_user_id) AS "senderName",m.id,m.role,m.content,
+        m.sequence_num AS sequence,m.sender_user_id AS "senderUserId",m.created_at AS "createdAt"
+      FROM public.session_messages m WHERE m.session_id=$1 AND m.sequence_num<$2 ${feedVisibleMessageSql('$3')}
+      ORDER BY m.sequence_num DESC LIMIT 50`, [thread.transcriptSessionId,beforeSequence,actor.userId])).rows.reverse()
+    }
     return (await client.query(`SELECT (SELECT name FROM users WHERE id=sender_user_id) AS "senderName",id,role,content,sequence_num AS sequence,sender_user_id AS "senderUserId",created_at AS "createdAt" FROM session_messages WHERE session_id=$1 AND sequence_num<$2 ORDER BY sequence_num DESC LIMIT 50`, [thread.transcriptSessionId, beforeSequence])).rows.reverse()
   }, false)
 }

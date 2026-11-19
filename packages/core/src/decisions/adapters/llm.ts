@@ -1,10 +1,10 @@
-import { assertProviderInputPreparation, captureInputAdmissionProvider, isInputAuthorityError } from '../../providers/input-authority.js'
+import { assertProviderInputPreparation, captureInputAdmissionProvider, isInputAuthorityError } from '@use-brian/agent-runtime/providers/input-authority.js'
 import { assertClassifierBookkeeping } from '../authority-ownership.js'
 import { registryRowForPricing } from '@use-brian/shared/model-registry'
 /** Existing-LLM adapter for provider-neutral decision questions. [COMP:decisions/llm] */
 
-import { collectStream } from '../../providers/accumulator.js'
-import type { LLMProvider } from '../../providers/types.js'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
 import type {
   DecisionAnswer,
   DecisionCapabilities,

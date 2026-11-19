@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { createPlanTools } from '../../memory/plan-tools.js'
 import type { PlanStore } from '../../memory/plan-types.js'
-import type { Tool } from '../../tools/types.js'
-import { NOOP_TURN_LEDGER } from '../turn-ledger.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
+import { NOOP_TURN_LEDGER } from '@use-brian/agent-runtime/engine/turn-ledger.js'
 import type {
   LLMProvider,
   ProviderSession,
@@ -10,8 +10,8 @@ import type {
   SessionOptions,
   StreamChunk,
   Message,
-} from '../../providers/types.js'
-import { queryLoop, type QueryEvent } from '../query-loop.js'
+} from '@use-brian/agent-runtime/providers/types.js'
+import { queryLoop, type QueryEvent } from '@use-brian/agent-runtime/engine/query-loop.js'
 
 type SendCall = { messages: Message[] }
 

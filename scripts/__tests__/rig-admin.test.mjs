@@ -1,3 +1,4 @@
+import ts from 'typescript'
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync, spawn } from 'node:child_process'
@@ -102,7 +103,7 @@ describe('[COMP:platform/local-rig] no-paid administrative fixture', () => {
     assert.match(rig,/--verify-composition "\$ROOT" "\$APPLICATION_COMPOSITION" "\$pid"/)
   })
 
-  it('wires the opt-in into the real composition without changing readiness', () => {
+  it('wires the opt-in into the real composition without changing readiness', async () => {
     const source = path => readFileSync(new URL(path, import.meta.url), 'utf8')
     const launcher = source('../launch.mjs')
     assert.match(launcher, /adminRigEnvironment\(ROOT, process.env\)/)
@@ -112,7 +113,42 @@ describe('[COMP:platform/local-rig] no-paid administrative fixture', () => {
     assert.match(api, /startLocalSubscriptionProvider: !adminOnly/)
     assert.match(api, /if \(!adminOnly\) dotenv.config/)
     const boot = source('../../packages/api/src/boot.ts')
-    assert.match(boot, /isSelfHostedOssEnv\(\) && opts.startLocalSubscriptionProvider !== false/)
+    const tree = ts.createSourceFile('boot.ts', boot, ts.ScriptTarget.Latest, true)
+    let guard
+    const findGuard = node => {
+      if (ts.isIfStatement(node) && node.expression.getText(tree).includes('opts.startLocalSubscriptionProvider')) guard = node
+      ts.forEachChild(node, findGuard)
+    }
+    findGuard(tree)
+    assert.ok(guard, 'boot must retain the administrative subscription-runtime opt-out')
+    // Edition eligibility is independently exercised by edition.test.ts. Execute
+    // this actual boot branch with either eligibility result and a fake manager;
+    // its predicate's spelling does not define the administrative contract.
+    const eligibilityCalls = []
+    const findEligibility = node => {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) eligibilityCalls.push(node.expression.text)
+      ts.forEachChild(node, findEligibility)
+    }
+    findEligibility(guard.expression)
+    assert.equal(eligibilityCalls.length, 1)
+    const run = new Function(eligibilityCalls[0], 'opts', 'startCodexProviderManager', 'configuredProviders',
+      'saveLocalProviderPreference', 'wrapProvider', 'providerInstances', 'console',
+      ts.transpileModule('return (async () => { let codexProviderManager;\n' + guard.getText(tree) +
+        '\nreturn codexProviderManager })()', { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText)
+    for (const eligible of [false, true]) for (const optIn of [undefined, false, true]) {
+      const starts = [], providerInstances = {}, provider = { name: 'fixture-provider' }, manager = { provider }
+      const availability = { setModelCatalog() { assert.fail('no startup failure expected') } }
+      const savePreference = () => {}, wrapped = { provider }
+      const actual = await run(() => eligible, { startLocalSubscriptionProvider: optIn }, async options => {
+        starts.push(options); return manager
+      }, availability, savePreference, value => { assert.equal(value, provider); return wrapped }, providerInstances,
+      { warn() { assert.fail('no startup warning expected') } })
+      const shouldStart = eligible && optIn !== false
+      assert.equal(starts.length, shouldStart ? 1 : 0, `eligible=${eligible}, optIn=${optIn}`)
+      assert.equal(actual, shouldStart ? manager : undefined)
+      assert.deepEqual(providerInstances, shouldStart ? { 'openai-codex': wrapped } : {})
+      if (shouldStart) assert.deepEqual(starts[0], { availability, savePreferredProvider: savePreference })
+    }
   })
 
   it('prepares the canonical role before migration and activates only after success', () => {
@@ -201,3 +237,37 @@ describe('[COMP:platform/local-rig] canonical runtime verification',()=>{
 })
 
 function expectOrder(source,before,after){assert.ok(source.indexOf(before)>=0&&source.indexOf(before)<source.indexOf(after))}
+
+
+it('[COMP:platform/local-rig] preserves exact launcher arguments for empty and populated flags under strict system Bash', () => {
+  const rig = readFileSync(new URL('../rig-up.sh', import.meta.url), 'utf8')
+  const start = rig.indexOf('  launch_env=(')
+  const launch = rig.slice(start, rig.indexOf('  echo $!', start))
+  const directory = mkdtempSync(join(tmpdir(), 'rig-launch-argv-'))
+  try {
+    for (const shell of [...new Set(['/bin/bash', process.env.BASH ?? 'bash'])]) {
+      for (const [mode, core, admin, reference, flags] of [
+        ['core', 1, 0, 0, []], ['full', 0, 0, 0, []],
+        ['admin', 1, 1, 0, ['--admin-only']],
+        ['reference', 1, 1, 1, ['--admin-only', '--reference-applications']],
+      ]) {
+        const capture = join(directory, 'arguments')
+        const result = spawnSync(shell, ['-e', '-u', '-o', 'pipefail', '-c',
+          'nohup() { printf "%s\\0" "$@" >"$CAPTURE"; }\n' + launch + '\nlaunch_pid=$!; wait "$launch_pid"\n'], {
+          env: { PATH: process.env.PATH, ROOT: '/fixture repo/open tree', CAPTURE: capture,
+            LOG: join(directory, 'stack.log'), RIG_DB_URL: 'postgres://owner:fixture@127.0.0.1/brain',
+            RIG_APP_DB_URL: 'postgres://app_user:fixture@127.0.0.1/brain', API_PORT: '4100', API_PORT_FILE: '/dev/null',
+            CORE_ONLY: String(core), ADMIN_ONLY: String(admin), REFERENCE_APPLICATIONS: String(reference) },
+          encoding: 'utf8',
+        })
+        assert.equal(result.status, 0, `${shell} ${mode}: ${result.stderr}`)
+        assert.deepEqual(readFileSync(capture, 'utf8').split('\0').slice(0, -1), [
+          'env', 'DATABASE_URL=postgres://owner:fixture@127.0.0.1/brain',
+          'DATABASE_URL_APP=postgres://app_user:fixture@127.0.0.1/brain', 'MIGRATION_DIRS=',
+          'USEBRIAN_NO_BROWSER=1', 'USEBRIAN_API_PORT=4100', ...(core ? ['USEBRIAN_CORE_ONLY=1'] : []),
+          'node', '/fixture repo/open tree/scripts/launch.mjs', ...flags,
+        ], `${shell} ${mode}`)
+      }
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})

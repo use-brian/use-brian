@@ -1,4 +1,5 @@
-import { summarizeProviderError, type ContentBlock } from '@use-brian/core'
+import { summarizeProviderError } from '@use-brian/agent-runtime/providers/provider-error-summary.js'
+import type { ContentBlock } from '@use-brian/agent-runtime/providers/types.js'
 
 /** No model/tool work: keep the original evidence in its existing paired rows. */
 export async function closeProviderError(options: {

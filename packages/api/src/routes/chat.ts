@@ -1,76 +1,133 @@
-import { canPrepareStandardSplit, settleChatAssessments } from './chat-split-preparation.js'
+import { routeAttendedTurn, type AttendedTurnRoute } from './attended-turn-routing.js'
 import {resumePrivateLegacySession,PRIVATE_TRANSCRIPT_INSTRUCTION} from '../db/private-transcript.js'
 import { attachWorkspaceFiles } from '../files/workspace-attachments.js'
-import { bindWorkspaceCredentialDelegation, workspaceCredentialDelegation } from '@use-brian/core'
+import { bindWorkspaceCredentialDelegation, workspaceCredentialDelegation } from '@use-brian/agent-runtime/security/workspace-delegation.js'
 import { createWorkspaceTurnSink, type NativeChatRequest, type NativeChatSink, type WorkspaceTurnInput, type WorkspaceTurnResult, type WorkspaceTurnBinding } from '../workspace-mcp/native-turn.js'
 import { bindWorkspaceMcpPublication, hasWorkspaceMcpRetainedAuthority } from '../db/session-context-revisions.js'
-import { resolveCurrentRecordingId } from '../recordings/recovery.js'
-import { memoryActivityFromText } from '@use-brian/core'
-import {consumeHostReadObservation,combineHostReadObservations,inheritRoutineCalendarRead,type RoutineCalendarCall} from '@use-brian/core'
+import { memoryActivityFromText } from '@use-brian/core/memory/learning.js'
+import {inheritRoutineCalendarRead} from '@use-brian/core/engine/routine-read-ownership.js'
+import {consumeHostReadObservation, combineHostReadObservations, type RoutineCalendarCall} from '@use-brian/core/engine/routine-read.js'
 import {parseHostObservation,type HostObservation} from '@use-brian/shared'
-import {boundScopeSources} from '@use-brian/core'
-import {generateAttendedSessionTitle} from './attended-session-title.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
+import {generateAttendedSessionTitle,prepareAttendedRecordTitle} from './attended-session-title.js'
 import {readSessionTitle} from '../db/session-title-store.js'
 import { pinSessionTitleClaims } from './session-title-authority.js'
 import {authSessionStore} from '../db/auth-session-store.js'
-import {assertSourceModelInputAuthority} from '../application-platform/model-source-authority.js'
-import { publishNativeSessionMessageBatch } from '../db/session-message-publication.js'
-import { topicEvidenceFromHistory, captureAttendedSessionClassification, forkAttendedSessionClassification, prepareAttendedSplitMessage, assessAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory, readClassifiedSessionHistory, attendedSessionTurnCount } from './attended-session-context.js'
-import type { PoolClient } from 'pg'
-import { withSessionMessagePublication } from '../db/session-context-revisions.js'
+import {admitModelInput} from '../context-scope/admission.js'
+import { assembleTurnPublication } from '../turn/publication.js'
+import {createBufferedWebPublication} from '../db/conversation-publication-recovery.js'
+import type { CapturedTurnHistory } from '../turn/history.js'
 import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/attended-audience.js'
-import { bindScopeSources } from '@use-brian/core'
+import { bindScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { runTurnSessionStateDiff } from '../turn/session-state.js'
-import { RESEARCH_EFFORT_BUDGETS, researchEffortInstruction, type ResearchEffort } from '@use-brian/core'
+import { RESEARCH_EFFORT_BUDGETS, researchEffortInstruction, type ResearchEffort } from '@use-brian/core/workers/research-effort.js'
 import { withTurnInference } from '../turn/runtime.js'
 import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
 import { dispatchPersistedWebInput } from './_incoming-chat-event.js'
 import { filterCoordinatorTools, COORDINATOR_DOCUMENT_WORKFLOW_ADDENDUM } from './chat-coordinator-tools.js'
-import { debugDocumentFlow, executionToolContext, pinAccessCeiling, summarizeProviderError } from '@use-brian/core'
+import { debugDocumentFlow } from '@use-brian/agent-runtime/engine/document-flow-debug.js'
+import { summarizeProviderError } from '@use-brian/agent-runtime/providers/provider-error-summary.js'
+import { pinAccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { closeProviderError } from './chat-provider-error.js'
-import { createChatPostReplyBoundary, afterReplyPublication } from './chat-post-reply.js'
 import type { FeedGenerationService } from '../content-planning/generation.js'
 import { resolveFeedTurnContext, formatFeedTurnContext } from '../content-planning/collaboration-service.js'
 import { loadFeedReviewContext, recordFeedContextApplication } from '../content-planning/review-context.js'
 import { buildFeedCollaborationTools } from '../content-planning/collaboration-tools.js'
 import { createHash } from 'node:crypto'
-import { renderSystemContext } from '@use-brian/core'
+import { renderSystemContext } from '@use-brian/agent-runtime/providers/system-context.js'
 import { Router } from 'express'
 import { z } from 'zod'
-import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, getUserProfilesByIds, updateUserLastSeenTz, resolveAssistantAccess } from '../db/users.js'
-import { charterNeedsIntake, createSaveCharterTool, CHARTER_INTAKE_ADDENDUM } from '../intake/charter-intake.js'
+import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, getUserProfilesByIds, readAttendedChatIdentity, updateUserLastSeenTz, resolveAssistantAccess } from '../db/users.js'
+import { ConversationVisibilityError, conversationReadersActive, promoteNativeConversationLegacyHistory, readConversationMemberTiers, readConversationVisibility } from '../db/conversation-visibility.js'
+import { charterNeedsIntake, CHARTER_INTAKE_ADDENDUM } from '../charter-intake-contract.js'
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
-import { createPersonalWebSession, findOrCreateSession, findSessionByChannel, findSessionById, findSessionTurnLeaseState, countSessionHumans, addSessionMessage, readSessionMessageScopeSource, toStampedMessages, getSessionMessages, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, coalesceConsecutiveUserMessages, touchTurnLease, isTurnLeaseSuperseded, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, type SessionMessage } from '../db/sessions.js'
+import { createPersonalWebSession, findOrCreateSession, findSessionByChannel, findSessionById, findSessionTurnLeaseState, countSessionHumans, addSessionMessage, readSessionMessageScopeSource, toStampedMessages, getSessionMessages, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, coalesceConsecutiveUserMessages, touchTurnLease, isTurnLeaseSuperseded, releaseTurnOutcome, captureTurnCancellation, reclaimStaleTurnOutcome, type SessionMessage,type RecoveredTurn } from '../db/sessions.js'
 import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { query, getPool } from '../db/client.js'
 import { createTurnTiming, markTurnEnd } from './turn-timings.js'
-import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
-import { createRequestPermissionContext, type RequestPermissionContext } from '../context-scope/admission.js'
-import { createExecutionPermissionSnapshots } from '../context-scope/execution-permission-snapshots.js'
+import { createTurnDeliveryAdmission, type TurnDeliveryAdmission } from '../context-scope/admission.js'
 import {
   resolvePinnedContext,
   type ResolvedPinnedPageTarget,
 } from '../resolve-session-pins.js'
 import { getSelfEntityId } from '../db/memories.js'
 import { getRecording, type Recording } from '../db/recordings-store.js'
-import { isConnectionDropError, isEndpointUnreachableError, streamErrorCode, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, interpretConfirmationEvent, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, buildUploadPolicyBlock, SensitivityAccumulator, CompartmentAccumulator, ContextScopeAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, latestWorkflowProposalReceipt, buildTool, prepareSlashCommand, resolveNativeSlashCommand, buildSlashCommandBlock, buildWorkflowSlashCommandBlock, buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
+import { sanitize } from '@use-brian/core/analytics/logger.js'
+import { runLocalMatchCheck } from '@use-brian/core/brain/retrieval-match.js'
+import { buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext } from '@use-brian/core/context/email-draft.js'
+import { sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS } from '@use-brian/core/doc/auto-title.js'
+import { measureDocContext } from '@use-brian/core/doc/context-meter.js'
+import { buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock } from '@use-brian/core/doc/soul.js'
+import { elideStaleDocToolResults } from '@use-brian/core/engine/doc-history.js'
+import { shouldInline } from '@use-brian/core/files/inline-content.js'
+import { estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH } from '@use-brian/core/media/pdf-contract.js'
+import { interpretConfirmationEvent } from '@use-brian/core/mcp/confirmation-events.js'
+import type { MediaBackend } from '@use-brian/core/media/backend.js'
+import { transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON } from '@use-brian/core/media/preflight.js'
+import { buildMemoryContext, voicePlatformFromDraftTitle } from '@use-brian/core/memory/context-builder.js'
+import { fetchEpisodicContext } from '@use-brian/core/memory/episodic-context.js'
+import { runMemoryNudge } from '@use-brian/core/memory/nudge.js'
+import { buildActivePlanBlock } from '@use-brian/core/memory/plan-context.js'
+import { createPlanTools, seedPlanFromTasks } from '@use-brian/core/memory/plan-tools.js'
+import { createMemoryRecallBuffer } from '@use-brian/core/memory/recall-buffer.js'
+import { createSelfProfileTool } from '@use-brian/core/memory/self-profile-tool.js'
+import { buildSessionStateBlock } from '@use-brian/core/memory/session-state-context.js'
+import { createSessionStateTools } from '@use-brian/core/memory/session-state-tools.js'
+import { createMemoryTools } from '@use-brian/core/memory/tools.js'
+import { createRetrievalTools } from '@use-brian/core/retrieval/tools.js'
+import { createSkillInvocationBuffer } from '@use-brian/core/skills/invocation-buffer.js'
+import { prepareSlashCommand, resolveNativeSlashCommand, buildSlashCommandBlock, buildWorkflowSlashCommandBlock } from '@use-brian/core/skills/slash-command.js'
+import { COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM } from '@use-brian/core/system-prompt.js'
+import { parsePresentedDocumentInput, type PresentedDocumentInput } from '@use-brian/core/tools/base/present-document.js'
+import { runPreflight, buildPreflightPrompt } from '@use-brian/core/workers/preflight.js'
+import { detectOperateSiteIntent } from '@use-brian/core/workers/research-classifier.js'
+import { latestWorkflowProposalReceipt } from '@use-brian/core/workflow/tools.js'
+import { AttachmentCollector } from '@use-brian/core/workspace-files/attachments.js'
+import { buildWorkspaceFilesContext } from '@use-brian/core/workspace-files/context-builder.js'
+import { buildUploadPolicyBlock } from '@use-brian/core/workspace-files/upload-policy-block.js'
+import { calculateCost } from '@use-brian/agent-runtime/billing/cost-tracker.js'
+import { modelToCompactionTier } from '@use-brian/agent-runtime/compaction/compact.js'
+import { matchesDisputedFigure, buildDisputeContextNote } from '@use-brian/agent-runtime/engine/grounding-gate.js'
+import { isConnectionDropError, isEndpointUnreachableError, streamErrorCode } from '@use-brian/agent-runtime/engine/query-loop.js'
+import { ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, synthesizeMissingToolResults } from '@use-brian/agent-runtime/engine/tool-pairing.js'
+import { createConfirmationResolver } from '@use-brian/agent-runtime/mcp/types.js'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
+import { CompartmentAccumulator } from '@use-brian/agent-runtime/security/compartments.js'
+import { ContextScopeAccumulator, type ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
+import { EvidenceAccumulator } from '@use-brian/agent-runtime/security/evidence.js'
+import { isSensitivity, minSensitivity, SensitivityAccumulator } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { filterToolsByCapabilities } from '@use-brian/agent-runtime/tools/capability-gate.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
 import { classifySession, isPersonalChat, policyFor, sessionPolicy } from '../session-kind.js'
-import { abortLocalTurn, precheckTurnAdmission, registerTurnAbort, releaseTurn, takeTurnLease, unregisterTurnAbort, waitForTurnSlot, TURN_SLOT_WAIT_TIMEOUT_MS } from '../turn/lease.js'
-import { runAssistantTurn, turnUsageIdentity } from '../turn/kernel.js'
+import { abortLocalTurn, waitForTurnSlot, TURN_SLOT_WAIT_TIMEOUT_MS, TurnStoppedError } from '../turn/lease.js'
+import { finalizedTurnOutput, openAssistantTurn, openTurnSqlScope, TurnRefusal, turnUsageIdentity, type AssistantTurn, type TurnSqlScope } from '../turn/kernel.js'
+import { createBufferedTurnOutput } from './buffered-turn-output.js'
 import { resolveTurnBilling } from '../turn/billing.js'
-import { acknowledgeTurnInputs, awaitTurnInputOutcome, deliverTurnInput, localTurnInboxAssistant, registerTurnInbox, roomInputAdmission } from '../turn-inbox.js'
+import { acknowledgeTurnInputs, awaitTurnInputOutcome, deliverTurnInput, localTurnInboxAssistant, roomInputAdmission } from '../turn-inbox.js'
 import { insertClaimProvenance, getClaimsForLatestAssistantMessage } from '../db/claim-provenance-store.js'
-import type { SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface, CrmEmailDraftStore } from '@use-brian/core'
+import type { CrmEmailDraftStore } from '@use-brian/core/crm/email-drafts.js'
+import type { AmbientSurface } from '@use-brian/core/doc/soul.js'
+import type { PlanStore } from '@use-brian/core/memory/plan-types.js'
+import type { SessionStateStore, SessionStateRecord } from '@use-brian/core/memory/session-state-types.js'
 import { runProactiveCompaction } from './proactive-compaction.js'
 import { gateSessionRead } from './sessions.js'
 import { toolErrorExcerpt, toolOutputExcerpt } from './tool-result-excerpt.js'
 import { renderArtifactManifest } from '../files/artifact-manifest.js'
 import { promotePastedText, shouldPromotePaste } from '../files/paste-promotion.js'
 import type { ArtifactPromoter } from '../files/artifact-promote.js'
-import { mayAssistantAnswerInRoom, crossAssistantSendPolicy } from './_room-binding.js'
+import {
+  mayAssistantAnswerInRoom,
+  crossAssistantSendPolicy,
+  roomClearanceFit,
+  mayCeilingReadLabel,
+  ASSISTANT_CLEARANCE_BELOW_CONVERSATION,
+  clearanceBelowConversationCopy,
+  clearanceBelowRoomDefaultCopy,
+} from './_room-binding.js'
 import { recordRoomMentionsForMessage, type RecordRoomMentionsResult } from '../room-mentions.js'
-import type { Sensitivity } from '@use-brian/core'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { resolveMentionSpans } from '@use-brian/shared/mention-matching'
 import { recordOverheadUsage } from './_overhead-usage.js'
 import { composeRecoveryMessage } from './_recovery-message.js'
@@ -78,13 +135,12 @@ import { composeEmptyTurnSynthesis } from './_empty-turn-synthesis.js'
 import { resolveReplyText } from './_reply-context.js'
 import { resolveBrandContext } from '../brand/prompt-context.js'
 import {
-  attachUserVisibleContext,
   buildSplitSystemPrompt,
   formatPrivateRuntimeContext,
-  formatUserVisibleContext,
   maybeAppendFollowupChips,
   resolveLayer1Prompt,
 } from './_prompt-builder.js'
+import { attachUserVisibleContext } from '../turn/user-visible-context.js'
 import { type PublishSessionEvent, noopPublishSessionEvent } from '../session-event-port.js'
 import { createTurnStreamPublisher, publishRoomTurnActivity } from '../session-live-publisher.js'
 import { createSessionPinTools } from '../session-pin-tools.js'
@@ -105,7 +161,20 @@ import { acceptedGoalIdsFromToolResults } from '../goals/acknowledgement.js'
 // WebChatOptions so the chat route depends on no platform-specific code. The
 // composition root passes the real impls; the open build uses the inline
 // no-op/false/null/unset defaults in chatRoutes(). See oss §12.5.
-import type { Message, LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, FileStore, ContentBlock, CacheStore, McpSettingsStore, ConfirmationDecision, ConfirmationResolver, TopicClassification, ClassifierRecentTurn, EpisodicStore, CapabilityStore, RetrievalStore, TranscribeResult, TokenUsage, WorkerResult, EngineHooks } from '@use-brian/core'
+import type { AnalyticsLogger } from '@use-brian/core/analytics/logger.js'
+import type { CapabilityStore } from '@use-brian/core/authorization/types.js'
+import type { FileStore } from '@use-brian/core/files/types.js'
+import type { TranscribeResult } from '@use-brian/core/media/transcribe.js'
+import type { EpisodicStore } from '@use-brian/core/memory/episodic-types.js'
+import type { TopicClassification } from '@use-brian/core/memory/topic-classifier.js'
+import type { MemoryStore } from '@use-brian/core/memory/types.js'
+import type { RetrievalStore } from '@use-brian/core/retrieval/types.js'
+import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
+import type { CacheStore } from '@use-brian/agent-runtime/compaction/cache-tool.js'
+import type { EngineHooks } from '@use-brian/agent-runtime/engine/hooks.js'
+import type { McpSettingsStore, ConfirmationDecision, ConfirmationResolver } from '@use-brian/agent-runtime/mcp/types.js'
+import type { Message, LLMProvider, ContentBlock, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
+import type { Tool, WorkerResult } from '@use-brian/agent-runtime/tools/types.js'
 
 import { resolveModel, ensureServableModel, backgroundModelFor, isStandardTier, chatTierBudget, planNudgeCap, tierForModel, isExplicitMeteredModelSelection } from '../model-resolution.js'
 import { isRegistryModelAvailable, registryRow } from '@use-brian/shared/model-registry'
@@ -118,7 +187,7 @@ import {
   CUSTOM_MODEL_IMAGE_REJECTION,
 } from './_channel-error-text.js'
 import { decideImageTurnRoute, turnHasInlineImage } from '../custom-llm-runtime.js'
-import { resolveUser, buildBrowserEscalationPrompt, buildUnavailableCapabilitiesPrompt, injectSkills, isSkillOfferable, checkUsageBudget, applyMcpInjection, type CreditBudgetGate } from './route-helpers.js'
+import { resolveUser, buildBrowserEscalationPrompt, buildUnavailableCapabilitiesPrompt, injectSkills, isSkillOfferable, checkUsageBudget, type CreditBudgetGate } from './route-helpers.js'
 import { createDocRunClient } from '../doc/run-presence-client.js'
 import type { AssistantRunChannel } from '@use-brian/doc-model'
 import {
@@ -141,18 +210,18 @@ import {
 } from '../context-scope/resolve-turn-scope.js'
 import { resolveExecutionContextSystem, type ResolveExecutionContextInput } from '../context-scope/execution-context.js'
 import { readOptionalContext } from '../context-scope/optional-context.js'
-import { prepareAssistantRun } from '../turn/prepare.js'
 import { assertContextActivationReady } from '../context-scope/context-readiness.js'
 import { getEvolution as getWorkspaceMemoryEvolution } from '../db/workspace-memory-evolution-store.js'
 import { getBrainEvolution } from '../db/workspace-brain-evolution-store.js'
 import { tryResolveSchedulerConfirmation } from '../scheduling/confirmation-registry.js'
 import { detectAndResolveNags } from '../scheduling/nag-resolver.js'
 import type { DeferredConfirmationStore } from '../db/deferred-confirmation-store.js'
-import type { JobStore } from '@use-brian/core'
+import type { JobStore } from '@use-brian/core/scheduling/types.js'
 import type { PendingApprovalsStore, ApprovalKind } from '../db/pending-approvals-store.js'
 import { appendDecisionEvent } from '../db/decision-event-store.js'
 import type { SessionResumeStore } from '../db/session-resume-store.js'
 import type { WorkspaceSkillStore } from '../db/skill-store.js'
+import { createUpdateViewedSkillTool, workspaceSkillRevision } from '../skills/update-viewed-skill-tool.js'
 import { deploymentCapabilities } from '../edition.js'
 import { buildWorkspaceNativeSlashCommands } from './native-slash-commands.js'
 import { connectorAuthorizationEntry } from '../agent-surface/connector-authorization.js'
@@ -224,14 +293,15 @@ export function routineCalendarReadDeclineReason(input: {
   document: boolean
   modelRoute: Pick<import('../custom-llm-runtime.js').ResolvedWorkspaceCustomLlm, 'routeKind'> | null
   calendarTools: ReadonlyMap<string, Tool>
-  preparedTools: ReadonlyMap<string, Tool>
+  /** The original owner's identity query; the adopted tool Map is never exposed. */
+  adoptsTool: (name: string, candidate: Tool) => boolean
 }): string | null {
   if (!input.nativeOutput || !input.nativeTranscript) return 'native_boundary'
   if (!input.decisionRuntime) return 'decision_runtime'
   if (input.research || input.coordinator || input.site || input.document) return 'specialized_mode'
   if (input.modelRoute && input.modelRoute.routeKind !== 'managed') return 'custom_model'
   if (!input.calendarTools.size) return 'calendar_tools'
-  if (![...input.calendarTools].every(([name, tool]) => input.preparedTools.get(name) === tool)) return 'tool_identity'
+  if (![...input.calendarTools].every(([name, tool]) => input.adoptsTool(name, tool))) return 'tool_identity'
   return null
 }
 
@@ -426,7 +496,7 @@ type WebChatOptions = {
   feedGeneration?: FeedGenerationService
   provider: LLMProvider
   /** Shared provider-neutral classifier cascade; absent preserves legacy calls. */
-  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
+  decisionRuntime?: import('@use-brian/core/decisions/hydra.js').DecisionExecutionPort
   /**
    * Workspace BYO LLM key store. When set together with `buildWorkspaceProvider`
    * and the turn's assistant has a workspace, the chat path resolves the
@@ -544,7 +614,7 @@ type WebChatOptions = {
   connectorSourceRuntimeFactory?: import('../application-platform/source-runtime.js').ConnectorSourceRuntimeFactory
   /** Shared workspace tool policy (migration 312) — governs team-owned connector tool allow/ask/block. */
   workspaceToolPolicyStore?: import('../db/workspace-tool-policy-store.js').WorkspaceToolPolicyStore
-  workerManager?: import('@use-brian/core').WorkerManager
+  workerManager?: import('@use-brian/core/workers/worker.js').WorkerManager
   /**
    * Phase 3 of askQuestion suspend-resume — persisted worker_runs store.
    * When set together with `workerManager`, each turn calls
@@ -553,7 +623,7 @@ type WebChatOptions = {
    * same store. Optional; absent in worker / scheduled-job / smoke contexts.
    * See docs/architecture/engine/askquestion-suspend-resume.md.
    */
-  workerRunsStore?: import('@use-brian/core').WorkerRunsStore
+  workerRunsStore?: import('@use-brian/core/workers/worker.js').WorkerRunsStore
   /**
    * Metered model lane (docs/architecture/platform/model-registry.md → the
    * L8/L15 lane). All optional — the OPEN build serves metered-class picks
@@ -581,7 +651,7 @@ type WebChatOptions = {
   estimateMeteredTurn?: (modelAlias: string, toolRounds: number) => { modelAlias: string; toolRounds: number; minCredits: number; maxCredits: number } | null
   checkMeteredSpendCap?: (workspaceId: string) => Promise<{ allowed: boolean; usedCredits: number; capCredits: number }>
   chargeMeteredSurcharge?: (params: { workspaceId: string; requestId: string; modelAlias: string; profileId?: string | null; toolRounds?: number | null; modelCostUsd: number; chargedByUserId?: string | null }) => Promise<{ charged: boolean; credits: number }>
-  knowledgeStore?: import('@use-brian/core').KnowledgeStoreInterface & {
+  knowledgeStore?: import('@use-brian/core/knowledge/types.js').KnowledgeStoreInterface & {
     /**
      * Optional source read backing the Studio ▸ Knowledge chat panel's
      * `kbSourceId` scope anchor. The db store carries it; a narrower
@@ -595,7 +665,7 @@ type WebChatOptions = {
       branch: string
       rootPath: string
       lastSyncedAt: Date | null
-      defaultSensitivity?: import('@use-brian/core').Sensitivity
+      defaultSensitivity?: import('@use-brian/agent-runtime/security/sensitivity.js').Sensitivity
     } | null>
   }
   /**
@@ -603,12 +673,12 @@ type WebChatOptions = {
    * interactive, confirmation-capable surface, so this route passes
    * `allowKnowledgeWrites: true` to `applyMcpInjection`.
    */
-  knowledgeRepoWriter?: import('@use-brian/core').KnowledgeRepoWriter
+  knowledgeRepoWriter?: import('@use-brian/core/knowledge/types.js').KnowledgeRepoWriter
   /** Workspace capture categories; absent/empty keeps interactive KB writes dark. */
   knowledgeCaptureRuleStore?: import('../knowledge/capture-rules.js').KnowledgeCaptureRuleStore
-  gdriveFilesStore?: import('@use-brian/core').GDriveFilesStore
+  gdriveFilesStore?: import('@use-brian/core/tools/base/gdrive-files.js').GDriveFilesStore
   skillStore?: import('../db/skill-store.js').SkillStore
-  workflowStore?: import('@use-brian/core').WorkflowStore
+  workflowStore?: import('@use-brian/core/workflow/types.js').WorkflowStore
   /**
    * CL-8 workspace-scoped skill counters. Optional today — when set
    * together with `assistant.workspaceId`, the chat route builds a
@@ -625,7 +695,7 @@ type WebChatOptions = {
   workspaceSkillEnablementStore?: import('../db/workspace-skill-enablement-store.js').WorkspaceSkillEnablementStore
   /** Backs load-time `{{kind:name}}` pointer expansion in `useSkill`. */
   workspaceSkillFilesStore?: import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore
-  communitySkills?: import('@use-brian/core').SkillContent[]
+  communitySkills?: import('@use-brian/core/skills/types.js').SkillContent[]
   deferredConfirmationStore?: DeferredConfirmationStore
   /**
    * Q10 unification (WU-6.3). Required. Backs `kind='tool_invocation'`
@@ -700,8 +770,8 @@ type WebChatOptions = {
    * pre-warmed turn distills once, not twice.
    */
   pdfPreflight?: {
-    distill: import('@use-brian/core').DocumentDistillPort
-    cache?: import('@use-brian/core').DistillateCachePort
+    distill: import('@use-brian/agent-runtime/providers/document-adaptation.js').DocumentDistillPort
+    cache?: import('@use-brian/agent-runtime/providers/document-adaptation.js').DistillateCachePort
     /** Backend bills nothing per token (a ChatGPT subscription) — no confirm. */
     freeRated?: boolean
   }
@@ -710,11 +780,11 @@ type WebChatOptions = {
    *  capability + `assistant.workspaceId` is bound, the `# Workspace Files`
    *  L1 block is injected. Optional so smoke tests / dev runs without GCS
    *  still work. */
-  workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
+  workspaceFilesStore?: import('@use-brian/core/workspace-files/types.js').WorkspaceFilesStore
   /** Workspace-files byte layer — forwarded via `applyMcpInjection` so
    *  `gmailSendMessage` can attach workspace files as real MIME parts
    *  (`docs/architecture/integrations/gmail.md` → "Attachments"). */
-  filesApi?: import('@use-brian/core').FilesApi
+  filesApi?: import('@use-brian/core/workspace-files/api.js').FilesApi
   /**
    * Company-brain read surface (WS-5). When set, the 6 retrieval tools
    * (`getEntity`, `search`, `recentEpisodes`, `provenance`, `markUseful`,
@@ -731,7 +801,7 @@ type WebChatOptions = {
    * this" affordance). Built at boot from `createInspectionTools` over
    * a DB-backed inspection store. See docs/architecture/brain/corrections.md.
    */
-  inspectionTools?: Record<string, import('@use-brian/core').Tool>
+  inspectionTools?: Record<string, import('@use-brian/agent-runtime/tools/types.js').Tool>
   /** Existing Brain-entry discovery + confirmed mutation seam. */
   brainEntryMutator?: import('../brain-entry-mutation.js').BrainEntryMutator
   /** Generate mode as a chat tool (fill a blueprint from the brain). Built at
@@ -773,8 +843,8 @@ type WebChatOptions = {
    * the surface that wires these: it also injects the retrieval tools the
    * model uses to discover the `entityId`.
    */
-  entitiesStore?: import('@use-brian/core').EntityStore
-  entityLinksStore?: import('@use-brian/core').EntityLinksStore
+  entitiesStore?: import('@use-brian/core/entities/types.js').EntityStore
+  entityLinksStore?: import('@use-brian/core/entities/types.js').EntityLinksStore
   /**
    * Self-healing reclassifier candidate store (Q5 of the brain-
    * ingestion-classification design thread). When set together with
@@ -784,7 +854,7 @@ type WebChatOptions = {
    * a `mentioned` edge + audit row. Optional; absent disables the
    * hook (the explicit `healMemories` chat tool still works).
    */
-  brainCandidateStore?: import('@use-brian/core').BrainCandidateStore
+  brainCandidateStore?: import('@use-brian/core/brain/candidates-types.js').BrainCandidateStore
   /**
    * Company-brain ingest (WU-3.6). When set, the chat compaction
    * checkpoint hands the just-compacted conversation window to this
@@ -806,70 +876,6 @@ type WebChatOptions = {
   memoryRecallEventsStore?: import('../db/memory-recall-events-store.js').MemoryRecallEventsStore
 }
 
-export async function resolveWorkspaceTurnLlm(params: {
-  workspaceId: string
-  requestedModel?: string
-  requestedTier: string
-  platformProvider: LLMProvider
-  resolveWorkspaceCustomLlm: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver | null
-  resolveLegacyByoKey: (() => Promise<string | null>) | null
-  buildLegacyByoProvider: ((apiKey: string) => LLMProvider) | null
-}): Promise<{
-  customRuntime: import('../custom-llm-runtime.js').ResolvedWorkspaceCustomLlm | null
-  provider: LLMProvider
-  providerKeySource: 'user' | 'platform'
-  usedLegacyByoKey: boolean
-}> {
-  const customRuntime = params.resolveWorkspaceCustomLlm
-    ? await params.resolveWorkspaceCustomLlm({
-        workspaceId: params.workspaceId,
-        requestedModel: params.requestedModel,
-        requestedTier: params.requestedTier,
-        allowDefault: true,
-        // This is the main user-facing web turn, and it has a `notice` lane
-        // to announce a fallback on. Background lanes below must NOT pass
-        // this - see the resolver's `allowFailureFallback` docs.
-        allowFailureFallback: true,
-      })
-    : null
-  if (customRuntime) {
-    return {
-      customRuntime,
-      provider: customRuntime.provider,
-      providerKeySource: 'user',
-      usedLegacyByoKey: false,
-    }
-  }
-  if (params.requestedModel) {
-    return {
-      customRuntime: null,
-      provider: params.platformProvider,
-      providerKeySource: 'platform',
-      usedLegacyByoKey: false,
-    }
-  }
-
-  // Legacy Gemini settings are consulted only when no workspace custom
-  // endpoint applies. A stale encrypted legacy row must not block a valid
-  // custom selection, while legacy decrypt failures remain fail-closed here.
-  if (params.resolveLegacyByoKey && params.buildLegacyByoProvider) {
-    const byoKey = await params.resolveLegacyByoKey()
-    if (byoKey) {
-      return {
-        customRuntime: null,
-        provider: params.buildLegacyByoProvider(byoKey),
-        providerKeySource: 'user',
-        usedLegacyByoKey: true,
-      }
-    }
-  }
-  return {
-    customRuntime: null,
-    provider: params.platformProvider,
-    providerKeySource: 'platform',
-    usedLegacyByoKey: false,
-  }
-}
 
 /**
  * Extract plain text from a session_messages content column
@@ -1119,16 +1125,23 @@ export function buildAttachedRecordingContext(
 /**
  * A bare file attachment is context, not an instruction to mutate the brain.
  * Keep this separate from the file contents so every attachment format gets
- * the same intent guard. Exported for the chat-route regression test.
+ * the same intent guard. A voice note's transcript is the user's spoken
+ * instruction, so a transcribed voice note is never "without instructions".
+ *
+ * Model-facing only: the route hands it to the turn's trusted runtime context,
+ * never to the stored or displayed user row, which keeps exactly what the user
+ * sent (M5Q-15; doc.md "File attachments in chat"). Exported for the chat-route
+ * regression test.
  */
 export function buildUnscopedFileAttachmentInstruction(
   hasReadableAttachments: boolean,
   message: string | null | undefined,
+  spokenInstructions: readonly string[] = [],
 ): string {
-  if (!hasReadableAttachments || message?.trim()) return ''
+  if (!hasReadableAttachments || message?.trim() || spokenInstructions.some(text => text.trim())) return ''
 
   return (
-    '[The user attached one or more files without instructions. Treat the files as context only, not as consent to create tasks, save memories, durably ingest them, or take other downstream actions. Do not infer the purpose from the file contents or filename. Ask what outcome the user wants before taking action.]\n\n'
+    'The user\'s newest message attaches one or more files without instructions. Treat the files as context only, not as consent to create tasks, save memories, durably ingest them, or take other downstream actions. Do not infer the purpose from the file contents or filename. Ask what outcome the user wants before taking action.'
   )
 }
 
@@ -1333,158 +1346,6 @@ export function buildViewingSkillBlock(skill: {
   )
 }
 
-export function workspaceSkillRevision(skill: {
-  name: string
-  description: string
-  whenToUse?: string
-  content: string
-}): string {
-  return createHash('sha256')
-    .update(JSON.stringify([skill.name, skill.description, skill.whenToUse ?? null, skill.content]))
-    .digest('hex')
-}
-
-/**
- * A visible instance is scoped to the skill already resolved through the
- * editor's RLS read and rejects any mismatched row id. The hidden boot instance
- * accepts the frozen, approved id only for restart-safe replay. Confirmation is
- * load-bearing: the store treats a human-approved name/body edit as certification.
- */
-export function createUpdateViewedSkillTool(args: {
-  workspaceSkillStore: Pick<WorkspaceSkillStore, 'getByIdSystem' | 'update'>
-  workspaceId?: string
-  skillRowId?: string
-  skillName?: string
-  expectedRevision?: string
-  assistantClearance?: 'public' | 'internal' | 'confidential'
-}): Tool {
-  const scoped = Boolean(args.workspaceId && args.skillRowId && args.skillName)
-  return buildTool({
-    name: 'updateViewedSkill',
-    description:
-      `Update the workspace skill currently open in the user's editor${args.skillName ? ` (${JSON.stringify(args.skillName)})` : ''}. ` +
-      'Pass only fields the user asked to change; omitted fields remain unchanged. This tool is scoped ' +
-      'to the open skill and asks the user to approve before saving.',
-    inputSchema: z
-      .object({
-        skillRowId: z.string().min(1).describe('The row id shown in the currently-viewing skill context.'),
-        expectedRevision: z.string().length(64).describe('The revision shown in the currently-viewing skill context.'),
-        name: z.string().trim().min(1).max(100).optional(),
-        description: z.string().trim().max(250).optional(),
-        whenToUse: z.string().trim().max(300).nullable().optional(),
-        content: z.string().trim().min(1).max(5000).optional(),
-      })
-      .refine(
-        ({ skillRowId: _skillRowId, expectedRevision: _expectedRevision, ...updates }) =>
-          Object.values(updates).some((value) => value !== undefined),
-        { message: 'Provide at least one field to update.' },
-      ),
-    hiddenFromModel: !scoped,
-    requiresConfirmation: true,
-    async describeConfirmation(input) {
-      const { skillRowId, expectedRevision: _expectedRevision, ...updates } = input as Record<string, unknown>
-      const lines = [`Skill: ${args.skillName ?? String(skillRowId)}`]
-      const labels: Record<string, string> = {
-        name: 'Name',
-        description: 'Description',
-        whenToUse: 'When to use',
-        content: 'Instructions',
-      }
-      for (const [field, value] of Object.entries(updates)) {
-        lines.push(`${labels[field] ?? field}: ${value === null ? '(clear)' : String(value)}`)
-      }
-      if ('name' in updates || 'content' in updates) {
-        lines.push('Effect: Approving verifies and activates this skill at certified confidence.')
-      }
-      return lines
-    },
-    async execute(input, ctx) {
-      // Failure copy contract (docs/architecture/engine/tool-executor.md →
-      // "Failure copy"): every refusal below names the skill, why the write did
-      // not happen, where a correct rowId/revision comes from (the
-      // "Currently viewing — workspace skill" block is the ONLY source — there
-      // is no skill-listing tool on this surface), and whether a retry can work.
-      const openSkill = args.skillName ? JSON.stringify(args.skillName) : `skill ${input.skillRowId}`
-      const VIEWING_BLOCK = 'the "Currently viewing — workspace skill" block in this conversation'
-      if (!ctx.workspaceId || (args.workspaceId && ctx.workspaceId !== args.workspaceId)) {
-        return {
-          data:
-            `${openSkill} was NOT updated: this conversation is not running in the workspace that owns the open skill, so the update was refused before it touched anything. ` +
-            'Ask the user to reopen the skill in the Brain skill editor of that workspace and repeat the change there. ' +
-            'Retrying updateViewedSkill from this conversation will be refused the same way.',
-          isError: true,
-        }
-      }
-      if (args.skillRowId && input.skillRowId !== args.skillRowId) {
-        return {
-          data:
-            `Nothing was saved: skillRowId ${input.skillRowId} is not the skill open in the editor (${args.skillRowId}). ` +
-            'This tool can only edit the ONE skill the user currently has open - it cannot reach any other skill, and there is no tool here that lists skills. ' +
-            `Re-issue with the exact row id from ${VIEWING_BLOCK}. If the user meant a different skill, tell them to open that one first. Do NOT retry this row id.`,
-          isError: true,
-        }
-      }
-      if (args.expectedRevision && input.expectedRevision !== args.expectedRevision) {
-        return {
-          data:
-            `${openSkill} was NOT updated: the expectedRevision you sent (${input.expectedRevision.slice(0, 12)}…) is not the revision of the skill open in the editor. ` +
-            'The revision is the guard that stops an approved edit from overwriting a newer version, so a mismatch is refused rather than applied. ' +
-            `Copy the revision verbatim from ${VIEWING_BLOCK} and re-issue with it. Do NOT retry this revision - it will be refused every time.`,
-          isError: true,
-        }
-      }
-      const current = await args.workspaceSkillStore.getByIdSystem(input.skillRowId)
-      if (!current || current.workspaceId !== ctx.workspaceId || current.state === 'archived') {
-        return {
-          data:
-            `${openSkill} was NOT updated: workspace skill ${input.skillRowId} is no longer editable - it has been deleted, archived, or moved to another workspace since the editor opened it. Nothing was saved. ` +
-            'Tell the user the skill is gone from this workspace; an archived skill has to be restored in the Brain skill editor before it can be changed. ' +
-            'Do NOT retry this row id.',
-          isError: true,
-        }
-      }
-      const assistantClearance = args.assistantClearance ?? ctx.assistantClearance ?? ctx.clearance ?? 'public'
-      if (!isSkillOfferable(current, { assistantClearance })) {
-        return {
-          data:
-            `${JSON.stringify(current.name)} was NOT updated: the skill is classified ${current.sensitivity} and this assistant's clearance is ${assistantClearance}, so it may not write it. Nothing was saved. ` +
-            'No wording of this call gets past a clearance gate. Tell the user the skill is above this assistant\'s clearance, and that either the skill\'s sensitivity or the assistant\'s clearance has to be changed in Studio.',
-          isError: true,
-        }
-      }
-      if (workspaceSkillRevision(current) !== input.expectedRevision) {
-        return {
-          data:
-            `${JSON.stringify(current.name)} was NOT updated: someone else edited the skill while this change waited for the user's approval, so the approved revision no longer matches what is saved and the write was refused rather than clobbering their edit. Nothing was saved. ` +
-            'Read the skill again, show the user what changed, and propose the update against the current text. Re-sending the same expectedRevision will keep failing.',
-          isError: true,
-        }
-      }
-      const { skillRowId, expectedRevision: _expectedRevision, ...updates } = input
-      const updated = await args.workspaceSkillStore.update(
-        ctx.userId,
-        ctx.workspaceId,
-        skillRowId,
-        updates,
-        {
-          name: current.name,
-          description: current.description,
-          whenToUse: current.whenToUse,
-          content: current.content,
-        },
-      )
-      if (!updated) {
-        return {
-          data:
-            `${JSON.stringify(current.name)} was NOT updated: another editor saved the skill in the moment between the revision check and this write, so the approved change was dropped instead of being applied on top of theirs. Nothing was saved. ` +
-            'Read the skill again, confirm the user\'s change still makes sense against the new text, and propose it once more. Retrying this exact call will fail the same way.',
-          isError: true,
-        }
-      }
-      return { data: `Saved the approved changes to ${JSON.stringify(updated.name)}.` }
-    },
-  })
-}
 
 /**
  * The user-visible-context helper lives in `_prompt-builder.ts` so channel
@@ -1620,7 +1481,6 @@ export function turnInputAdmission(params: {
   return 'queue'
 }
 
-export { liveTurnAdmission, type LiveTurnAdmission } from '../turn/lease.js'
 
 export type RoomTurnAdmission = 'run' | 'wait' | 'fold'
 export function roomTurnAdmission(params: {
@@ -1656,6 +1516,30 @@ export function roomTurnAdmission(params: {
  * every SSE parser (`packages/chat-ui/src/sse.ts` yields only `data:` lines).
  */
 export const SSE_KEEPALIVE_INTERVAL_MS = 15_000
+
+/**
+ * The direct stream's keepalive, started as soon as the SSE headers are
+ * flushed. Preparation (admission, audience check, history, prompt) writes
+ * nothing, and on a long doc thread it has taken minutes; an idle cut in a
+ * proxy (Cloudflare at 100 s) must not drop a healthy turn while it prepares.
+ * Comment frames only, so no client frame contract changes. Stops on the
+ * returned call (every exit path through the route's `finally`) and on its own
+ * when the response ends or the client goes away. [COMP:api/chat-route]
+ */
+export function startSseKeepalive(
+  res: { write(chunk: string): unknown; readonly writableEnded: boolean; readonly destroyed?: boolean; on(event: string, listener: () => void): unknown },
+  clientGone: () => boolean,
+  intervalMs = SSE_KEEPALIVE_INTERVAL_MS,
+): () => void {
+  let timer: ReturnType<typeof setInterval> | null = null
+  const stop = () => { if (timer) { clearInterval(timer); timer = null } }
+  timer = setInterval(() => {
+    if (clientGone() || res.writableEnded || res.destroyed) { stop(); return }
+    res.write(': keepalive\n\n')
+  }, intervalMs)
+  res.on('close', stop)
+  return stop
+}
 
 export type TurnStopOutcome = 'not_running' | 'aborted' | 'reclaimed' | 'cancel_requested'
 export function turnStopOutcome(params: {
@@ -1944,7 +1828,7 @@ export type ResumeReplayParams = {
   /** Exact durable worker runs captured with this suspension checkpoint. */
   workerRunIds?: string[]
   /** Pinned original authoring/security principal for durable replay. */
-  startingAccessCeiling?: import('@use-brian/core').AccessCeiling
+  startingAccessCeiling?: import('@use-brian/agent-runtime/security/access-ceiling.js').AccessCeiling
   approvalStatus: ResumeReplayApprovalStatus
   rejectReason: string | null
   /**
@@ -2136,7 +2020,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
   const getTitleChannelPrefix = options.getTitleChannelPrefix ?? (() => null)
   const router = Router()
 
-  const runTurn = async (req: NativeChatRequest, res: NativeChatSink, programmatic?: WorkspaceTurnBinding) => {
+  const runFramedTurn = async (req: NativeChatRequest, res: NativeChatSink, programmatic: WorkspaceTurnBinding | undefined, sqlScope: TurnSqlScope) => {
     const maximum = programmatic ? new Set(programmatic.consent.operationNames) : undefined
     const options = maximum ? { ...baseOptions, tools: new Map([...baseOptions.tools].filter(([name]) => maximum.has(name))) } : baseOptions
     // Inference wiring through the turn kernel's boot registration.
@@ -2346,9 +2230,12 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
     // must no-op — writing to the dead socket would otherwise throw and tear
     // down the still-running turn. The bus mirrors take over from here.
     let clientGone = false
+    let turnOwner: AssistantTurn | undefined
     const sendEvent = (event: string, data: unknown) => {
       if (clientGone || res.writableEnded) return
-      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+      const payload=['session','status','done','reply_complete','error'].includes(event)&&data&&typeof data==='object'
+        ?{...data,turnId:turnOwner?.turnId??null}:data
+      res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`)
     }
     if (roomResponseGroupInvalid) {
       sendEvent('error', {
@@ -2370,7 +2257,6 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
     // the outer catch to send a clean `done` event instead of the
     // generic `error`, since the user already saw a useful message.
     let recoveryDelivered = false
-    const postReply = createChatPostReplyBoundary()
     // Set when this turn opened an assistant-run presence entry on a doc
     // page (see below) so the outer `finally` can close it on every exit path.
     let docRunPageId: string | null = null
@@ -2379,21 +2265,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
     // the success-path cleanup never runs on those, and each missed eviction
     // is a permanent entry in a process-lifetime Map.
     let turnResolver: ConfirmationResolver | null = null
-    // Open while the query loop runs so a message sent mid-turn has somewhere
-    // to land. Closed on every exit path.
-    let turnInboxHandle: { close(): void } | null = null
-    // This turn's lease on the session's `status='running'` lock (migration
-    // 424), tracked outside the try so the outer `finally` can release it on
-    // EVERY exit path. Before the lease, `status` was released only on the
-    // happy path and in the catch, so any other exit pinned the session
-    // forever — the 2026-08-08 room that showed "Working" for 31 minutes with
-    // no turn in flight. The token makes the release ownership-guarded: a turn
-    // whose lease was already reclaimed must not unlock its successor.
-    let turnLeaseToken: string | null = null
-    let turnReleased = false
+    // The kernel owner survives preparation, publication and catch recovery.
     let turnCompletionPublished = false
-    let leaseSessionId: string | null = null
-    let sseKeepalive: ReturnType<typeof setInterval> | null = null
     // Per-phase wall-clock of this turn, reported once from `finally` as the
     // `turn_timings` analytics event (docs/architecture/platform/analytics.md)
     // so a slow turn names its phase instead of being inferred from logs.
@@ -2401,18 +2274,21 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
     const requestStartedAt = new Date()
     let turnTimingIdentity: { userId: string; assistantId: string; sessionId: string } | null = null
     let turnTimingOutcome = 'completed'
-    // The token this turn registered in `activeTurnAborts`, kept SEPARATE from
-    // `turnLeaseToken` because the success and catch paths null that one once
-    // they have released the lock — leaving the `finally` unable to identify
-    // its own entry, and the Map leaking one row per turn for the process's
-    // lifetime. Set once at registration, never cleared.
-    let abortRegistryToken: string | null = null
-    let requestPermissions: RequestPermissionContext | undefined
+    let requestPermissions: TurnDeliveryAdmission | undefined
+    // From the header flush, before preparation (M5Q-17 follow-up): nothing
+    // above awaits, and the `finally` below stops it on every exit.
+    const stopSseKeepalive = startSseKeepalive(res, () => clientGone)
 
     try {
       const jwtUserId = programmatic?.context.userId ?? req.userId
       const credentialClaims = !programmatic && jwtUserId ? Object.freeze({userId:jwtUserId,sessionId:req.authSessionId,authVersion:req.authVersion}) : undefined
-      const user = await resolveUser(jwtUserId)
+      const detectedClientTz = req.clientTimezone ?? clientTimezone
+      const requestIdentity = requestedAssistantId && credentialClaims?.sessionId && credentialClaims.authVersion !== undefined
+        && (!detectedClientTz || detectedClientTz === 'UTC') && conversationReadersActive()
+        ? await readAttendedChatIdentity({userId:credentialClaims.userId,sessionId:credentialClaims.sessionId,
+            authVersion:credentialClaims.authVersion},requestedAssistantId,requestedWorkspaceId)
+        : undefined
+      const user = requestIdentity === undefined ? await resolveUser(jwtUserId) : requestIdentity?.user
       if (!user) {
         sendEvent('error', { error: 'User not found' })
         res.end()
@@ -2434,7 +2310,6 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // the scheduling anchor. Auto-overwriting on every mismatch
       // would make the detector's "observed tz != users.timezone"
       // precondition unreachable — the two would always match.
-      const detectedClientTz = req.clientTimezone ?? clientTimezone
       const hasUnsetTz = !user.timezone || user.timezone === 'UTC'
       if (detectedClientTz && detectedClientTz !== 'UTC' && hasUnsetTz) {
         const { updateUserTimezone } = await import('../db/users.js')
@@ -2469,11 +2344,12 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       //   3. Neither provided → legacy default (the user's Personal
       //      workspace primary). Preserved for non-web channels and
       //      older clients that don't send workspaceId.
-      const assistant = requestedAssistantId
-        ? await getUserAssistant(user.id, requestedAssistantId)
-        : requestedWorkspaceId
-          ? await getWorkspacePrimaryAssistant(user.id, requestedWorkspaceId)
-          : await getDefaultAssistant(user.id)
+      const assistant = requestIdentity ? requestIdentity.assistant
+        : requestedAssistantId
+          ? await getUserAssistant(user.id, requestedAssistantId)
+          : requestedWorkspaceId
+            ? await getWorkspacePrimaryAssistant(user.id, requestedWorkspaceId)
+            : await getDefaultAssistant(user.id)
       if (!assistant) {
         sendEvent('error', { error: 'No assistant found' })
         options.analytics?.logEvent({
@@ -2527,7 +2403,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
 
       // Resolve the workspace plan — governs model tier + budget gate.
       if (assistant.workspaceId) {
-        userPlan = await getWorkspacePlan(assistant.workspaceId)
+        userPlan = requestIdentity?.plan ?? await getWorkspacePlan(assistant.workspaceId)
       }
 
       // Workspace BYO LLM key resolution. When the workspace has set its own
@@ -2543,33 +2419,13 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // it (invalid/quota), the error surfaces to the user via the normal
       // query-loop error path — we deliberately do NOT fall back to the
       // platform key, which would silently charge them.
-      let turnProvider: LLMProvider = options.provider
-      let usedByoKey = false
-      let usedLegacyByoKey = false
-      let customLlmRuntime: import('../custom-llm-runtime.js').ResolvedWorkspaceCustomLlm | null = null
-      // Resolve workspace-attributable auxiliary work independently from the
-      // final response tier. Background work is logically Standard; if that
-      // tier has no custom default, one configured custom endpoint still stays
-      // authoritative for the workspace.
-      const backgroundLlmRuntime = assistant.workspaceId && turnOptions.resolveWorkspaceCustomLlm
-        ? await turnOptions.resolveWorkspaceCustomLlm({
-            workspaceId: assistant.workspaceId,
-            requestedTier: 'standard',
-            allowDefault: true,
-            allowAnyDefault: true,
-          })
-        : null
-      const backgroundProvider = backgroundLlmRuntime?.provider ?? options.provider
-      const backgroundModel = backgroundLlmRuntime?.selector
-        ?? backgroundModelFor(turnOptions.configuredProviders)
-      const backgroundUsageAttribution = {
-        modelTier: 'standard',
-        providerKeySource: backgroundLlmRuntime?.providerKeySource ?? 'platform' as const,
-      }
-
       // Eligibility and explicit quota denial precede session creation. Actual
       // assessment waits for this request's canonical execution and admitted
       // authored/history query; no owner-read transcript reaches a provider.
+      // The quota read happens only when adaptive entry is otherwise possible;
+      // turn routing receives the same fact (`researchQuotaAvailable`).
+      const researchQuotaAvailable = researchMode || !message || !assistant.workspaceId || !deploymentCapabilities().researchPlanGate
+        || userPlan !== 'free' || (await getWorkspaceResearchUsed(assistant.workspaceId!)) < FREE_RESEARCH_QUOTA
       const adaptiveResearchEligible =
         !researchMode &&
         !!message &&
@@ -2579,8 +2435,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           userPlan,
           assistantKind: assistant.kind,
           researchPlanGate: deploymentCapabilities().researchPlanGate,
-          researchQuotaAvailable: !assistant.workspaceId || !deploymentCapabilities().researchPlanGate || userPlan !== 'free' ||
-            (await getWorkspaceResearchUsed(assistant.workspaceId!)) < FREE_RESEARCH_QUOTA,
+          researchQuotaAvailable,
         })
       // Adaptive research entry. When the request didn't pin a mode, run a
       // cheap Gemini-Flash-Lite classifier to decide whether this message
@@ -2593,7 +2448,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // need, so silent auto-entry would break their core job).
       //
       // Assessment runs below after canonical session and authored-input
-      // admission. Its usage is recorded through `adaptiveResearchOverhead`.
+      // admission, as one turn route (`routeAttendedTurn`), which records its
+      // classifier usage once.
       // Operate-site override (docs/architecture/engine/coordinator-pattern.md
       // → "Adaptive entry and the operate-site override"): a request to open /
       // browse / log into / act on ONE named site or URL must keep the normal
@@ -2608,11 +2464,6 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // splitter, the Flash standard preflight) — the explicit research
       // API override wins, which the `!researchMode` guard encodes.
       let operateSiteIntent = !researchMode && !!message && detectOperateSiteIntent(message)
-      let adaptiveResearchOverhead: {
-        model: string | null
-        usage: TokenUsage | null
-        reason: string | null
-      } | null = null
       // Research-mode quota gate (mig 185_workspace_research_quota).
       //
       // `mode: 'research'` is the brain empty-state's deep-research entry
@@ -2721,7 +2572,35 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       }
       if (session && !session.workspaceId && session.userId === user.id && session.assistantId === assistant.id && assistant.workspaceId
         && credentialClaims?.userId === user.id && credentialClaims.sessionId && credentialClaims.authVersion !== undefined) {
-        if (await resumePrivateLegacySession(assistant.workspaceId,session.id,
+        if (conversationReadersActive()) {
+          const actor = { userId: user.id, authSessionId: credentialClaims.sessionId, authVersion: credentialClaims.authVersion }
+          try {
+            const reviewed = await readConversationVisibility(actor, session.id)
+            if (reviewed?.conversationVisibility !== 'private_by_kind') throw new ConversationVisibilityError('conversation_access_denied', 403)
+            // Resolve the original legacy receipt in the same checked reader
+            // ordinary history uses before the explicit promotion transaction.
+            if ((await readConversationMemberTiers(actor.userId, [session.id])).get(session.id) !== 'full') {
+              throw new ConversationVisibilityError('conversation_access_denied', 403)
+            }
+            try {
+              const receipt = await promoteNativeConversationLegacyHistory(actor, session.id, reviewed.conversationVisibilityVersion)
+              if (!receipt.readable) throw new ConversationVisibilityError('conversation_access_denied', 403)
+            } catch (error) {
+              if (!(error instanceof ConversationVisibilityError) || error.code !== 'conversation_visibility_conflict') throw error
+              // A concurrent continuation may already have committed. The next
+              // re-read must see the same conversation in its bound workspace.
+              const current = await readConversationVisibility(actor, session.id)
+              if (current?.conversationVisibility !== 'private_by_kind') throw error
+            }
+            session = await findSessionById(session.id)
+            if (!session || session.workspaceId !== assistant.workspaceId) throw new ConversationVisibilityError('conversation_access_denied', 403)
+          } catch (error) {
+            if (!(error instanceof ConversationVisibilityError)) throw error
+            sendEvent('error', { code: error.code, error: 'This conversation is unavailable.' })
+            res.end()
+            return
+          }
+        } else if (await resumePrivateLegacySession(assistant.workspaceId,session.id,
           {userId:user.id,sessionId:credentialClaims.sessionId,authVersion:credentialClaims.authVersion})) {
           session = await findSessionById(session.id)
         }
@@ -2886,16 +2765,30 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             },
           })
         }
-        if (verdict === 'clearance_refused') {
-          sendEvent('error', {
-            code: 'assistant_clearance_exceeds_room',
-            error: 'That assistant is cleared above this room and cannot answer here.',
-          })
-          logSendRefusal('assistant_clearance_exceeds_room')
+        // Clearance is checked at invitation and never widened (M5Q-7
+        // variant A, session-messages.md "Response groups and the native
+        // conversation reader"). An assistant cleared above the room would
+        // widen it; one cleared below cannot read it, so every lane would
+        // refuse its turn. A single mention of either is rejected here; a
+        // response-group member cleared below the room is refused on its own
+        // request by the group gate below (skipped, or rejected when it is
+        // the first member, since no message is saved yet).
+        if (verdict === 'clearance_refused' || (verdict === 'clearance_below' && !requestedRoomResponseGroup)) {
+          const clearanceRefusal = verdict === 'clearance_refused'
+            ? {
+                code: 'assistant_clearance_exceeds_room',
+                error: 'That assistant is cleared above this room and cannot answer here.',
+              }
+            : {
+                code: ASSISTANT_CLEARANCE_BELOW_CONVERSATION,
+                error: clearanceBelowConversationCopy({ assistantName: assistant.name, conversation: 'room', skipped: false }),
+              }
+          sendEvent('error', clearanceRefusal)
+          logSendRefusal(clearanceRefusal.code)
           res.end()
           return
         }
-        if (verdict !== 'allow') {
+        if (verdict === 'reject') {
           sendEvent('error', {
             code: 'session_assistant_mismatch',
             error: 'Session does not belong to this assistant',
@@ -2904,6 +2797,38 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           res.end()
           return
         }
+      } else if (
+        policyFor(session).crossAssistantSend === 'room'
+        && policyFor(session).read.rule !== 'owner'
+        && !requestedRoomResponseGroup
+        && roomClearanceFit({
+          assistantClearance: assistant.clearance ?? null,
+          roomClearance: session.effectiveClearance,
+        }) === 'below'
+      ) {
+        // The room's own default voice is below its floor: a rebind the old
+        // rule admitted. It cannot read the room, so its turn would fail in
+        // the lane; refuse it up front, before anything is written, and
+        // point at choosing another default. (A response group naming it is
+        // settled by the group gate below.)
+        sendEvent('error', {
+          code: ASSISTANT_CLEARANCE_BELOW_CONVERSATION,
+          error: clearanceBelowRoomDefaultCopy(assistant.name),
+        })
+        options.analytics?.logEvent({
+          userId: user.id,
+          assistantId: assistant.id,
+          sessionId: session.id,
+          eventName: 'chat_setup_error', channelType: 'web',
+          metadata: {
+            error_type: sanitize(ASSISTANT_CLEARANCE_BELOW_CONVERSATION),
+            stage: sanitize('session_binding'),
+            session_channel_type: sanitize(session.channelType),
+            session_app_origin: sanitize(session.appOrigin ?? ''),
+          },
+        })
+        res.end()
+        return
       }
 
       // Per-user ownership/clearance gate on the resolved session. For a
@@ -3032,12 +2957,24 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           :{credentialCurrent:credentialClaims?()=>credentialClaims.userId===user.id
             ?authSessionStore.validateAccess(credentialClaims):Promise.resolve(false):undefined}),
         sessionAuthority: session,
+        existingAttendedSession: !isNewSession,
         ...(officeLane ? officeLaneExecutionBounds(officeLane, user.id, officeLaneDeps) : {}),
       }
       const resolvedExecution = await resolveExecutionContextSystem(executionInput)
       const turnScope = resolvedExecution.turnScope
       const executionContext = resolvedExecution.executionContext
       const authority = executionContext.security.authority
+      const conversationWriteFloor = !programmatic && conversationReadersActive()
+        && session.workspaceId === assistant.workspaceId && !!session.workspaceId
+        && executionContext.identity.kind === 'attended' && executionContext.identity.principal.kind === 'workspace_member'
+        && executionContext.identity.principal.authenticationKind === 'native_session'
+      const associatedProject = conversationWriteFloor && policyFor(session).read.rule === 'owner'
+        && session.contextProjectId && !session.contextCompartments?.includes(`project:${session.contextProjectId}`)
+        ? session.contextProjectId : null
+      const writeProjectIds = associatedProject ? turnScope.writeProjectIds.filter(id => id !== associatedProject) : turnScope.writeProjectIds
+      const writeCompartments = associatedProject ? turnScope.writeCompartments.filter(label => label !== `project:${associatedProject}`)
+        : turnScope.writeCompartments
+      const sessionCap = isSensitivity(session.effectiveClearance) ? session.effectiveClearance : 'public'
       if (programmatic) {
         bindWorkspaceMcpPublication(executionContext)
         const parent = workspaceCredentialDelegation(programmatic.context.executionContext)
@@ -3054,8 +2991,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           workspaceId: assistant.workspaceId,
           actingUserId: user.id,
           assistantId: assistant.id,
-          compartments: turnScope.writeCompartments,
-          projectIds: turnScope.writeProjectIds,
+          compartments: writeCompartments,
+          projectIds: writeProjectIds,
           promote: options.artifactPromoter,
         }).catch((err) => {
           console.error('[chat] paste promotion failed (keeping original text):', err)
@@ -3076,6 +3013,10 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // one follow-up turn and claims the slot atomically; a personal
       // session rejects while its lease is live and reclaims a stale one.
       const roomAdmission = turnPolicy.admission === 'room'
+      const notifyReclaimed=(recovered:RecoveredTurn)=>{
+        options.analytics?.logEvent({userId:user.id,assistantId:assistant.id,sessionId:session.id,eventName:'turn_lease_reclaimed',channelType:'web',metadata:{via:sanitize('admission')}})
+        publishSessionEvent({kind:'turn_completed',sessionId:session.id,payload:{senderUserId:null,turnId:recovered.turnId,reason:recovered.reason}})
+      }
       // D2: a workspace session bills the workspace pool, with this member
       // recorded as the actor; a personal session bills its human.
       const turnBilling = await resolveTurnBilling({
@@ -3084,11 +3025,12 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         actorUserId: user.id,
       })
       const scopeAccumulator = programmatic?.context.scopeAccumulator ?? new ContextScopeAccumulator({
-        compartments: turnScope.writeCompartments,
-        projectIds: turnScope.writeProjectIds,
+        compartments: writeCompartments,
+        projectIds: writeProjectIds,
       })
       const inputMessageScope = sessionMessageInputScope({
-        scope: turnScope,
+        scope: conversationWriteFloor ? { ...turnScope, writeProjectIds, writeCompartments,
+          access: { ...turnScope.access, clearance: minSensitivity(turnScope.access.clearance ?? 'internal', sessionCap) } } : turnScope,
         workspaceId: assistant.workspaceId,
         userId: user.id,
         sharedAudience: !policyFor(session).context.personalMemory,
@@ -3101,26 +3043,15 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           && executionContext.identity.principal.kind === 'workspace_member')
         && (session.workspaceId === undefined || session.workspaceId === executionContext.ownership.workspaceId)
         ? { execution: executionContext, accumulator: scopeAccumulator } : undefined
-      const permissionContext = nativeTranscriptAuthority && !programmatic
-        ? createRequestPermissionContext(resolvedExecution, scopeAccumulator, session, {
-            createActionSnapshots: () => createExecutionPermissionSnapshots(executionInput),
-          })
-        : undefined
-      requestPermissions = permissionContext
-      const currentTurnWrite = () => ({
-        ...turnOutputWrite({
-          producer: 'turn:web',
-          accumulator: scopeAccumulator,
-          envelope: inputMessageScope,
-        }),
-        ...(nativeTranscriptAuthority ? { authority: nativeTranscriptAuthority } : {}),
-      })
+      // The owner's publication takes the native authority separately from the write.
+      const publicationWrite = () => turnOutputWrite({ producer: 'turn:web', accumulator: scopeAccumulator, envelope: inputMessageScope })
       const authorizeDeliveryAudience = nativeTranscriptAuthority || classifySession(session).anchor.kind === 'doc_thread'
         ? createAttendedDeliveryAudienceAuthorizer(executionContext)
         : createDeliveryAudienceAuthorizer()
-      const assertDeliveryAudience = (): Promise<void> => turnTiming.time('audience_check', async () => {
+      const readLegacyDeliveryAudience = async (evidence: ScopeEvidence): Promise<ScopeEvidence> => {
         // The native authorizer owns the same original lease at entry and return.
         if (!nativeTranscriptAuthority) await authority.assertCurrent()
+        const evidenceBefore=JSON.stringify(scopeAccumulator.evidence)
         const decision = await authorizeDeliveryAudience({
           workspaceId: assistant.workspaceId ?? '',
           assistantId: assistant.id,
@@ -3129,23 +3060,40 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           channelId: session.channelId,
           sessionId: session.id,
           recipientType: turnPolicy.deliveryCeiling.recipientType,
-          scopeEvidence: scopeAccumulator.evidence,
+          scopeEvidence: evidence,
         })
+        if(JSON.stringify(scopeAccumulator.evidence)!==evidenceBefore)throw new DeliveryAudienceUnverifiedError(undefined,'source_unverifiable')
         if (!decision.allowed) throw new DeliveryAudienceUnverifiedError(decision.detail, decision.diagnostic)
         // A source that changed since it was read passed on its CURRENT labels;
         // those labels now belong to this turn's floor, so later writes and
         // the transcript row carry them (labels only - no new lineage).
-        if (classifySession(session).anchor.kind === 'doc_thread') scopeAccumulator.note(decision.evidence)
-        scopeAccumulator.note({
+        if (classifySession(session).anchor.kind === 'doc_thread') return decision.evidence
+        return {
           sensitivity: decision.evidence.sensitivity,
           compartments: decision.evidence.compartments,
           projectIds: decision.evidence.projectIds,
-        })
+        }
+      }
+      const permissionContext = nativeTranscriptAuthority && !programmatic
+        ? createTurnDeliveryAdmission(executionContext, scopeAccumulator, session,
+            pageBoundTurn && conversationWriteFloor ? readLegacyDeliveryAudience : undefined)
+        : undefined
+      requestPermissions = permissionContext
+      const assertLegacyDeliveryAudience = (): Promise<void> => turnTiming.time('audience_check', async () => {
+        scopeAccumulator.note(await readLegacyDeliveryAudience(scopeAccumulator.evidence))
       })
+      const assertDeliveryAudience = (): Promise<void> => {
+        // Stop disposes streaming authority. Saved-output reconciliation uses
+        // its independent completion admission below.
+        if (!requestPermissions || abortController.signal.aborted) return assertLegacyDeliveryAudience()
+        return turnTiming.time('audience_check', () => requestPermissions!.authorizeDelivery({
+          ...executionToolContext(executionContext, { appId:'turn-delivery' }), scopeAccumulator,
+        }))
+      }
       // Candidate readers use an isolated accumulator. Rejected optional context
       // must never contaminate the evidence for required Page work.
       const optionalContext = <T>(
-        read: (candidate: import('@use-brian/core').SessionContextAuthority | undefined) => Promise<T>,
+        read: (candidate: import('@use-brian/core/memory/session-state-types.js').SessionContextAuthority | undefined) => Promise<T>,
         fallback: T,
         rows: (value: T) => readonly unknown[] = value => [value, ...(Array.isArray(value) ? value : [])],
         contributes: (value: T) => boolean = value => value != null
@@ -3173,7 +3121,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         data: Record<string, unknown>,
       ) => publishRoomTurnActivity({
         mirror: true,
-        sessionId: session.id,
+        sessionId: session.id,turnId:turnOwner?.turnId??null,
         senderUserId: programmatic ? null : user.id,
         event,
         data,
@@ -3200,53 +3148,12 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         sendEvent(event, data)
         publishRoomTurnActivity({
           mirror: true,
-          sessionId: session.id,
+          sessionId: session.id,turnId:turnOwner?.turnId??null,
           senderUserId: programmatic ? null : user.id,
           event,
           data: relayData,
           publishSessionEvent,
         })
-      }
-
-      // ── Live-turn guard (migration 424 lease) ─────────────────────
-      // Before an ordinary send may take the slot, prove nobody alive holds
-      // it. A fresh heartbeat means a turn is working right now and this
-      // client merely lost its stream; blind-claiming would mint a new lease
-      // and that turn would abort itself as an "orphan" at its next tick
-      // (2026-08-18: page builds killed 30-90s in). A stale lease is a dead
-      // holder - reclaim it so the end reason is recorded, then run.
-      {
-        const liveAdmission = await precheckTurnAdmission({
-          sessionId: session.id,
-          status: session.status,
-          admission: turnPolicy.admission,
-          clientMidTurn: requestedMidTurn === true,
-        })
-        if (liveAdmission === 'reject') {
-          sendEvent('error', {
-            code: 'turn_in_flight',
-            error:
-              'Your assistant is still working on the previous message in this chat. ' +
-              'Wait for it to finish (or press Stop), then send again.',
-          })
-          res.end()
-          options.analytics?.logEvent({
-            userId: user.id, assistantId: assistant.id, sessionId: session.id,
-            eventName: 'turn_in_flight_rejected', channelType: 'web',
-            metadata: { via: sanitize('live_lease') },
-          })
-          return
-        }
-        if (liveAdmission === 'reclaim' && await reclaimStaleTurn(session.id)) {
-          console.warn(
-            `[chat] reclaimed stale turn lease on session ${session.id} at admission; running this message now`,
-          )
-          options.analytics?.logEvent({
-            userId: user.id, assistantId: assistant.id, sessionId: session.id,
-            eventName: 'turn_lease_reclaimed', channelType: 'web',
-            metadata: { via: sanitize('admission') },
-          })
-        }
       }
 
       // ── Mid-turn input (queue / steer) ────────────────────────────
@@ -3328,6 +3235,39 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         sourceMessageId?: string
       } | null = null
 
+      // A response-group member whose ceiling cannot read the conversation
+      // (below the room floor, or below the authored row's label in a
+      // personal chat) is refused on its own request: nothing is written, no
+      // turn starts, and the client gets a notice naming the mismatch plus
+      // `done`, so it moves on to the next member and the cleared members
+      // answer. The row's label is never lowered to fit a member.
+      const logResponseGroupClearanceRefusal = () => {
+        options.analytics?.logEvent({
+          userId: user.id,
+          assistantId: assistant.id,
+          sessionId: session.id,
+          eventName: 'chat_setup_error', channelType: 'web',
+          metadata: {
+            error_type: sanitize(ASSISTANT_CLEARANCE_BELOW_CONVERSATION),
+            stage: sanitize('response_group'),
+            session_channel_type: sanitize(session.channelType),
+            session_app_origin: sanitize(session.appOrigin ?? ''),
+          },
+        })
+      }
+      const skipResponseGroupMember = (conversation: 'room' | 'message') => {
+        sendEvent('session', { sessionId: session.id })
+        sendEvent('notice', {
+          code: ASSISTANT_CLEARANCE_BELOW_CONVERSATION,
+          message: clearanceBelowConversationCopy({ assistantName: assistant.name, conversation, skipped: true }),
+          assistantId: assistant.id,
+          assistantName: assistant.name,
+        })
+        sendEvent('done', {})
+        logResponseGroupClearanceRefusal()
+        res.end()
+      }
+
       if (requestedRoomResponseGroup) {
         if (!isRoomSession || !assistant.workspaceId) {
           sendEvent('error', {
@@ -3356,14 +3296,20 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           orderedRows.length === requestedRoomResponseGroup.assistantIds.length &&
           orderedRows.every((row) => row.workspaceId === assistant.workspaceId)
         const currentIndex = requestedRoomResponseGroup.assistantIds.indexOf(assistant.id)
-        // A personal chat's only reader is its owner (chat-parity T3): each
-        // responder reads under its own clearance, so no room cap applies.
-        const clearanceOk = groupIsValid && (turnPolicy.read.rule === 'owner' || orderedRows.every((row) =>
-          mayAssistantAnswerInRoom({
-            assistantClearance: row.clearance,
-            roomClearance: session.effectiveClearance,
-          }),
-        ))
+        // A room's members must each be cleared exactly to the room
+        // (`roomClearanceFit`). One cleared ABOVE refuses the whole group (it
+        // would widen the room); one cleared BELOW cannot read the room and is
+        // refused on its own request below, while the cleared members answer.
+        // A personal chat's only reader is its owner (chat-parity T3), so no
+        // room floor applies; its later members are checked against the
+        // authored row's label once that row is loaded.
+        const roomFits = orderedRows.map((row) => turnPolicy.read.rule === 'owner'
+          ? 'fits' as const
+          : roomClearanceFit({
+              assistantClearance: row.clearance,
+              roomClearance: session.effectiveClearance,
+            }))
+        const clearanceOk = groupIsValid && roomFits.every((fit) => fit !== 'exceeds')
         const continuationShapeOk = requestedRoomResponseGroup.sourceMessageId
           ? currentIndex > 0
           : currentIndex === 0
@@ -3376,6 +3322,22 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
               : 'The multi-assistant response group does not match this room.',
           })
           res.end()
+          return
+        }
+        if (roomFits[currentIndex] === 'below') {
+          if (currentIndex === 0) {
+            // The first member saves the message; with nothing saved there is
+            // no row for later members to continue from, so the mention is
+            // rejected before any write.
+            sendEvent('error', {
+              code: ASSISTANT_CLEARANCE_BELOW_CONVERSATION,
+              error: clearanceBelowConversationCopy({ assistantName: assistant.name, conversation: 'room', skipped: false }),
+            })
+            logResponseGroupClearanceRefusal()
+            res.end()
+            return
+          }
+          skipResponseGroupMember('room')
           return
         }
         roomResponseGroupContext = {
@@ -3391,7 +3353,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
        *  below then reuses it instead of inserting twice. */
       let prePersistedUserMsg: SessionMessage | null = null
       if (roomResponseGroupContext?.sourceMessageId) {
-        const source = await query<SessionMessage>(
+        const source = await query<SessionMessage & { sourceSensitivity: string | null }>(
           `SELECT id, session_id AS "sessionId", role, content,
                   sequence_num AS "sequenceNum", created_at AS "createdAt",
                   reply_to_text AS "replyToText", topic_label AS "topicLabel",
@@ -3399,14 +3361,14 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
                   channel_message_id AS "channelMessageId",
                   sender_user_id AS "senderUserId",
                   sender_assistant_id AS "senderAssistantId",
-                  attachments
+                  attachments, sensitivity AS "sourceSensitivity"
              FROM session_messages
             WHERE id = $1 AND session_id = $2 AND role = 'user'
               AND sender_user_id = $3`,
           [roomResponseGroupContext.sourceMessageId, session.id, user.id],
         )
-        prePersistedUserMsg = source.rows[0] ?? null
-        if (!prePersistedUserMsg) {
+        const sourceRow = source.rows[0]
+        if (!sourceRow) {
           sendEvent('error', {
             code: 'invalid_room_response_group',
             error: 'The original room message could not be reused.',
@@ -3414,6 +3376,20 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           res.end()
           return
         }
+        const { sourceSensitivity, ...sourceMessage } = sourceRow
+        // Personal response group: the authored row keeps the label the first
+        // member's turn stamped (`sessionMessageInputScope`, that member's
+        // ceiling). A later member whose current ceiling cannot read it is
+        // skipped rather than failed by the reader, and the row is never
+        // relabelled. Rooms were settled against the room floor above.
+        if (
+          turnPolicy.read.rule === 'owner'
+          && !mayCeilingReadLabel({ ceiling: turnScope.access.clearance, label: sourceSensitivity })
+        ) {
+          skipResponseGroupMember('message')
+          return
+        }
+        prePersistedUserMsg = sourceMessage
       }
       if (roomAdmission && typeof message === 'string' && message.trim()) {
         // A `const` alias so the narrowed `string` type survives into the
@@ -3535,35 +3511,21 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           return
         }
 
-        // Self-heal, cheapest path first (migration 424). `status='running'`
-        // only means "somebody claimed the slot"; whether anyone still HOLDS it
-        // is the lease's answer. A stale lease is reclaimed right here, so a
-        // user's own next message repairs the room instantly instead of
-        // queueing behind a lock nobody owns — which is what a member did three
-        // times on 2026-08-08 while the room stayed silent for half an hour.
-        // The sweeper still covers the case where nobody sends anything.
-        let liveStatus = session.status
-        if (liveStatus === 'running' && await reclaimStaleTurn(session.id)) {
-          liveStatus = 'timeout'
-          console.warn(
-            `[chat] reclaimed stale turn lease on room ${session.id} at admission; running this message now`,
-          )
-          options.analytics?.logEvent({
-            userId: user.id, assistantId: assistant.id, sessionId: session.id,
-            eventName: 'turn_lease_reclaimed', channelType: 'web',
-            metadata: { via: sanitize('admission') },
+        // The existing owner decides live/idle/stale atomically. A successful
+        // claim is retained through preparation; a loser keeps room post/queue
+        // semantics without running a second route-owned recovery mutation.
+        try {
+          turnOwner = await openAssistantTurn({
+            sessionId: session.id, policy: turnPolicy, abortController,
+            startedAt: requestStartedAt, assistantId: assistant.id,
+            onReclaimed:notifyReclaimed, sqlScope,
           })
-          // Tell every viewer the phantom turn is over, so their Live card
-          // clears instead of showing "Working" beside a turn that is gone.
-          publishSessionEvent({
-            kind: 'turn_completed',
-            sessionId: session.id,
-            payload: { senderUserId: programmatic ? null : user.id, reason: 'stalled_reclaimed' },
-          })
+        } catch (error) {
+          if (!(error instanceof TurnRefusal) || error.code !== 'turn_in_flight') throw error
         }
 
         let admission: RoomTurnAdmission | 'inbox' = roomInputAdmission({
-          status: liveStatus,
+          status: turnOwner ? 'idle' : 'running',
           waiterArmed: roomQueueWaiters.has(session.id),
           clientMidTurn: requestedMidTurn === true && !roomResponseGroupContext,
           queue: turnPolicy.queue,
@@ -3661,7 +3623,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           roomQueueWaiters.add(session.id)
           sendEvent('queued', {})
           try {
-            const freed = await waitForTurnSlot(session.id)
+            const freed = await waitForTurnSlot(session.id,{signal:abortController.signal})
             if (!freed) {
               sendEvent('error', {
                 code: 'room_turn_wait_timeout',
@@ -3679,6 +3641,53 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         }
       }
 
+      // The existing owner serializes preparation as well as the model loop.
+      try {
+        turnOwner ??= await openAssistantTurn({
+          sessionId: session.id, policy: turnPolicy, abortController,
+          startedAt: requestStartedAt, assistantId: assistant.id,
+          ...(roomAdmission ? { waitForSlot: waitForTurnSlot } : {}),onReclaimed:notifyReclaimed, sqlScope,
+        })
+      } catch (error) {
+        if (!(error instanceof TurnRefusal)) throw error
+        sendEvent('error', error.code === 'room_turn_wait_timeout'
+          ? {
+              code: 'room_turn_wait_timeout',
+              error: 'The in-flight turn did not finish in time. Your message is posted; mention the assistant again to get a reply.',
+            }
+          : {
+              code: 'turn_in_flight',
+              error: 'Your assistant is still working on the previous message in this chat. ' +
+                'Wait for it to finish (or press Stop), then send again.',
+            })
+        res.end()
+        return
+      }
+
+      const ownedTurn = turnOwner
+      // Numeric SQL accounting for this owner (recording on only).
+      turnTiming.attachSqlLedger(ownedTurn.sqlTurnId)
+      const originalLegacyResolver = options.resolveWorkspaceByoGeminiKey?.bind(options)
+      const originalLegacyKeyStore = options.llmProviderSettingsStore?.getPlaintextKeySystem.bind(options.llmProviderSettingsStore)
+      const resolveOriginalLegacyKey = options.buildWorkspaceProvider && (originalLegacyResolver || originalLegacyKeyStore)
+        ? originalLegacyResolver ?? ((workspaceId: string) => originalLegacyKeyStore!({ workspaceId, provider: 'gemini' })) : null
+      ownedTurn.bindModelPreparation({ kind: 'execution', toolProfile: 'web', execution: executionContext, assertCurrent: assertDeliveryAudience },
+        { provider: options.provider, configuredProviders: turnOptions.configuredProviders,
+          resolveWorkspaceCustomLlm: turnOptions.resolveWorkspaceCustomLlm?.bind(turnOptions) ?? null,
+          resolveLegacyByoKey: resolveOriginalLegacyKey,
+          buildLegacyByoProvider: options.buildWorkspaceProvider?.bind(options) ?? null })
+      const background = await ownedTurn.prepareBackgroundModel({ configuredDefault: true })
+      const backgroundLlmRuntime = background.customLlm
+      const backgroundProvider = background.provider
+      const backgroundModel = background.model!
+      const backgroundUsageAttribution = { modelTier: 'standard', providerKeySource: background.providerKeySource }
+      let turnProvider: LLMProvider = options.provider
+      let usedByoKey = false
+      let usedLegacyByoKey = false
+      let customLlmRuntime: import('../custom-llm-runtime.js').ResolvedWorkspaceCustomLlm | null = null
+
+      const turnInbox = ownedTurn.openInput()
+
       // askQuestion suspend-resume guard (Phase 2). If this session is
       // currently suspended on a pending question, reject the new
       // message with a structured 409-equivalent SSE event so the
@@ -3686,12 +3695,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // fresh turn. See docs/architecture/engine/askquestion-suspend-resume.md.
       if (assistant.workspaceId) {
         try {
-          const pending = await options.pendingApprovalsStore.listPendingForWorkspace(
-            user.id,
-            assistant.workspaceId,
-          )
-          const pendingQuestion = pending.find(
-            (r) => r.kind === 'question' && r.blockingSessionId === session.id,
+          const pendingQuestion = await options.pendingApprovalsStore.findBlockingQuestion(
+            user.id, assistant.workspaceId, session.id,
           )
           if (pendingQuestion) {
             sendEvent('error', {
@@ -3824,17 +3829,19 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
            */
           const prewarmPdf = async (bytes: Buffer, fileName: string): Promise<void> => {
             const preflight = options.pdfPreflight!
+            const { probePdfPageCount } = await import('@use-brian/core/files/pdf-pages.js')
             const pages = await probePdfPageCount(bytes)
             if (pages !== null && pages > PDF_CONFIRM_PAGE_THRESHOLD && !preflight.freeRated) {
               const est = estimateDistillTokens(pages, DASHSCOPE_RENDER_WIDTH)
               sendEvent('notice', {
+                code: 'pdf_large_document',
                 kind: 'pdf_large_document',
                 fileName,
                 pages,
                 estimatedTokens: est.inputTokens + est.outputTokens,
               })
             }
-            sendEvent('notice', { kind: 'pdf_reading', fileName, ...(pages !== null ? { pages } : {}) })
+            sendEvent('notice', { code: 'pdf_reading', kind: 'pdf_reading', fileName, ...(pages !== null ? { pages } : {}) })
 
             const contentHash = createHash('sha256').update(bytes).digest('hex')
             const configKey = preflight.distill.configKey
@@ -3861,6 +3868,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
               // hears about it either way, so a pre-warm failure is only ever a
               // lost optimisation.
               sendEvent('notice', {
+                code: 'distillation_unavailable',
                 kind: 'distillation_unavailable',
                 message: err instanceof Error ? err.message : String(err),
               })
@@ -3949,7 +3957,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
                   : `<attached_file id="${file.id}" name="${file.fileName}" type="${file.mimeType}">${voiceUnavailableNote(transcribeFailure)}</attached_file>`,
               )
               if (!transcription && transcribeFailure) {
-                sendEvent('notice', { kind: 'transcription_unavailable', message: transcribeFailure })
+                sendEvent('notice', { code: 'transcription_unavailable', kind: 'transcription_unavailable', message: transcribeFailure })
               }
             } else if (file.artifactFileId) {
               // The upload was silently promoted to a durable artifact
@@ -3994,11 +4002,14 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         )
       }
 
+      // Model-facing intent guard: a trusted runtime contribution below, never
+      // part of the user's stored words (M5Q-15).
       const fileIntentContext = buildUnscopedFileAttachmentInstruction(
         attachmentContext.length > 0,
         message,
+        transcriptions.map(transcription => transcription.text),
       )
-      const userMessageText = recordingContext + fileIntentContext + attachmentContext + (message ?? '')
+      const userMessageText = recordingContext + attachmentContext + (message ?? '')
 
       // Add text block after image blocks so images are seen in context
       if (userMessageText) {
@@ -4075,6 +4086,10 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           }))
         : undefined
       if (earlyStoredUserMsg && !prePersistedUserMsg) turnTiming.observe('authored_input_saved')
+      const bufferedWebPublication=!programmatic&&nativeTranscriptAuthority&&earlyStoredUserMsg
+        &&policyFor(session).durableBufferedPublication
+        ?createBufferedWebPublication(nativeTranscriptAuthority,earlyStoredUserMsg.id,ownedTurn.token):undefined
+      if(bufferedWebPublication&&nativeTranscriptAuthority)ownedTurn.bindBufferedPublication(bufferedWebPublication,nativeTranscriptAuthority)
       const activeCapabilities = new Set(await options.capabilityStore.listActive(assistant.id))
       const sensitivityAccumulator = new SensitivityAccumulator()
       const compartmentAccumulator = new CompartmentAccumulator()
@@ -4096,7 +4111,15 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           : undefined
       const connectorUserId = await getConnectorUserId(user.id, assistant.workspaceId)
       const preparedConnectorTools = new Map(filterToolsByCapabilities(options.tools, activeCapabilities))
-      const preparedConnectors = await turnTiming.time('connector_prepare', () => applyMcpInjection({
+      // Routine Calendar planning needs the native owner-delivery boundary; the
+      // same predicate gates preparation below and the routine decline reason.
+      const routineNativeOutput = Boolean(!programmatic && !permissionContext && nativeTranscriptAuthority
+        && turnPolicy.deliveryCeiling.ceiling === 'owner' && !executionContext.security.access.sharedAudience
+        && classifySession(session).surface === 'chat')
+      // The roster is prepared by the original turn owner through the M3
+      // capability surface (`web` profile, catalog-only until a call).
+      const preparedConnectors = await turnTiming.time('connector_prepare', () => ownedTurn.prepareCapabilities({
+        profile: 'web', composition: { kind: 'route-params', params: {
         scope: 'chat',
         ...(programmatic ? { bindingMaximum: programmatic.consent.connectorBindings,
           restrictSearchToToolNames: programmatic.consent.operationNames, keepToolsDirect: true } : {}),
@@ -4118,8 +4141,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         // in channel-pipeline. Resolved server-side from the session — never
         // model output. Opted-in connectors receive X-Sidanclaw-Actor-*.
         actorIdentity: { channel: session.channelType ?? 'web', id: user.email, email: user.email, userId: user.id },
-        // Forwarded to `injectGoogleTools` → Gmail `sendMessage` audit
-        // wrap. Shared with the host extra-tool inject above.
+        // Forwarded to the Google provider's Gmail `sendMessage` audit wrap.
+        // Shared with the host extra-tool inject above.
         connectorActionAudit,
         // Workspace domain is null today — workspaces don't carry an
         // email_domain column. The GCal audit hook falls back to
@@ -4127,8 +4150,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         // Future migration adds the column.
         workspaceDomain: null,
         // Interactive chat has a live Approve/Deny loop, so the KB write
-        // tools may exist here (D2 — chat-only). The public API shares
-        // `applyMcpInjection` and must NOT set this.
+        // tools may exist here (D2 — chat-only). The public API shares the
+        // route parameter block and must NOT set this.
         allowKnowledgeWrites: true,
         knowledgeCaptureText: message ?? '',
         discoveryQuery: rawMessage ?? undefined,
@@ -4144,158 +4167,91 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           assistant.kind === 'primary' && assistant.workspaceId
             ? options.introspectionTools
             : undefined,
-      }))
+        // T1: the late-activated Calendar read adapters are requested only when
+        // routine planning can be eligible on this turn (the necessary
+        // conditions of `routineCalendarReadDeclineReason` known now); the
+        // routine port activates exactly the planned read after planning.
+        routineCalendarRead: Boolean(options.decisionRuntime) && routineNativeOutput && Boolean(nativeTranscriptAuthority)
+          && !researchMode && !operateSiteIntent,
+      } } }))
 
-      // Assess after the original canonical invocation and authored input exist.
-      // Quota races retain this real request and its denial in the same thread.
-      const classificationCapture=!pageBoundTurn&&adaptiveResearchEligible&&message&&nativeTranscriptAuthority&&earlyStoredUserMsg
-        ?await turnTiming.time('classification_capture',()=>captureAttendedSessionClassification({
-          authority:nativeTranscriptAuthority,session,message:earlyStoredUserMsg,
-        })):undefined
-      const researchAssessment = classificationCapture && nativeTranscriptAuthority && earlyStoredUserMsg
-        ? forkAttendedSessionClassification({ authority: nativeTranscriptAuthority, session, message: earlyStoredUserMsg, capture: classificationCapture }) : undefined
-      const topicAssessmentBranch = classificationCapture && nativeTranscriptAuthority && earlyStoredUserMsg
-        ? forkAttendedSessionClassification({ authority: nativeTranscriptAuthority, session, message: earlyStoredUserMsg, capture: classificationCapture }) : undefined
-      const splitAssessmentBranch = classificationCapture && nativeTranscriptAuthority && earlyStoredUserMsg
-        && canPrepareStandardSplit({ message, requestedModel, userPlan, researchMode, operateSiteIntent,
-          assistantKind: assistant.kind, docSurface: !!turnPolicy.docSurface })
-        ? forkAttendedSessionClassification({ authority: nativeTranscriptAuthority, session, message: earlyStoredUserMsg, capture: classificationCapture }) : undefined
-      const splitPreparationAbort = new AbortController()
-      // Independent classifications share data, never permission receipts. Only
-      // the invariant Standard legacy splitter route may overlap here. All three
-      // settle before any later quota refusal, worker or publication effects.
-      // A research/site verdict cancels the now-unneeded speculative splitter.
-      const assessments = await settleChatAssessments(
-        async () => {
-          if (pageBoundTurn || !adaptiveResearchEligible || !message) return undefined
-          if (!nativeTranscriptAuthority || !earlyStoredUserMsg) {
-            throw Object.assign(new Error('The assessment context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
-          }
-          const result = await turnTiming.time('research_classify', () => classifyAttendedResearchMessage({
-            authority: researchAssessment?.authority ?? nativeTranscriptAuthority, session, message: earlyStoredUserMsg,
-            provider: backgroundProvider, model: backgroundModel, decisionRuntime: options.decisionRuntime,
-            toolCandidates: options.decisionRuntime ? [...filterToolsByCapabilities(preparedConnectorTools, activeCapabilities).values()]
-              .filter(tool => !tool.hiddenFromModel).map(tool => ({ name: tool.name, description: tool.description })) : undefined,
-            capture: researchAssessment?.capture ?? classificationCapture,
-            measure: turnTiming.time,
-          }))
-          if (result.research || result.operateSite) splitPreparationAbort.abort()
-          return result
+      // One turn route decides research, topic and split after the original
+      // canonical invocation and authored input exist (research.md "Adapter
+      // switch"). Quota races retain this real request and its denial in the
+      // same thread. Classifier usage is recorded once by the route; a legacy
+      // turn's authored row does not exist yet, so its records wait for it.
+      const pendingRoutingUsage: import('@use-brian/core/workers/turn-routing.js').TurnRoutingUsageRecord[] = []
+      const recordRoutingUsage = (record: import('@use-brian/core/workers/turn-routing.js').TurnRoutingUsageRecord, userMessageId: string) => recordOverheadUsage({
+        usageStore: options.usageStore, userId: user.id, assistantId: assistant.id, sessionId: session.id,
+        userMessageId, model: record.model, usage: record.usage ?? undefined, source: record.source,
+        ...(record.triggerKey ? { triggerKey: record.triggerKey } : {}), ...backgroundUsageAttribution,
+      })
+      const requestedCustom = !!requestedModel?.startsWith('custom:')
+      const standardWhenOk = isStandardTier(resolveModel(requestedModel, userPlan, 'ok'))
+      const standardWhenDowngraded = isStandardTier(resolveModel(requestedModel, userPlan, 'downgraded'))
+      const routingNative = !pageBoundTurn && nativeTranscriptAuthority && earlyStoredUserMsg ? {
+        authority: nativeTranscriptAuthority, session, message: earlyStoredUserMsg,
+        reply: { channelType: 'web' as const, replyToMessageId: replyTo?.id ?? null, clientSnippet: replyTo?.text },
+      } : undefined
+      // A legacy transcript (no native authority) routes over its pre-turn history.
+      const legacyReply = !pageBoundTurn && !nativeTranscriptAuthority ? await resolveReplyText({
+        channelType: 'web', replyToMessageId: replyTo?.id ?? null, session, clientSnippet: replyTo?.text,
+      }) : undefined
+      const routingLegacy = !pageBoundTurn && !nativeTranscriptAuthority ? {
+        history: await getSessionMessages(session.id, { excludeHeld: true }), replyToText: legacyReply?.text ?? null,
+        topicText: userMessageText, research: 'refuse' as const,
+      } : undefined
+      const routing: AttendedTurnRoute = await routeAttendedTurn({
+        facts: {
+          profile: 'web', requestedMode, workspaceId: assistant.workspaceId ?? null, assistantKind: assistant.kind,
+          researchQuotaAvailable, pageBound: pageBoundTurn, docSurface: !!turnPolicy.docSurface,
+          // The ordinary tier before the budget gate. Whether a split is taken
+          // never depends on it; the prepared main model picks the consumer.
+          tier: standardWhenOk && standardWhenDowngraded ? 'standard' : 'pro_max',
+          model: { custom: requestedCustom, explicitMetered: isExplicitMeteredModelSelection(requestedModel), standardWhenOk, standardWhenDowngraded },
         },
-        async () => !pageBoundTurn && nativeTranscriptAuthority && earlyStoredUserMsg
-        ? await turnTiming.time('topic_classify', () => assessAttendedSessionMessage({
-            authority: topicAssessmentBranch?.authority ?? nativeTranscriptAuthority, session, message: earlyStoredUserMsg,
-            provider: backgroundProvider, model: backgroundModel, decisionRuntime: options.decisionRuntime,
-            capture: topicAssessmentBranch?.capture ?? classificationCapture,
-            measure: turnTiming.time,
-            reply: { channelType: 'web', replyToMessageId: replyTo?.id ?? null, clientSnippet: replyTo?.text },
-          }))
-        : undefined,
-        async () => {
-          if (!splitAssessmentBranch || !earlyStoredUserMsg || !message) return undefined
-          const rawMessage = message
-          try {
-            return await turnTiming.time('split_classify', () => prepareAttendedSplitMessage({
-              authority: splitAssessmentBranch.authority, session, message: earlyStoredUserMsg,
-              provider: backgroundProvider, rawMessage, capture: splitAssessmentBranch.capture, decisionRuntime: options.decisionRuntime,
-              signal: AbortSignal.any([abortController.signal, splitPreparationAbort.signal]), measure: turnTiming.time,
-            }))
-          } catch (error) {
-            if (splitPreparationAbort.signal.aborted && error === splitPreparationAbort.signal.reason && !abortController.signal.aborted) return undefined
-            throw error
-          }
+        message: message ?? '',
+        ...(routingNative ? { native: routingNative } : {}),
+        ...(routingLegacy ? { legacy: routingLegacy } : {}),
+        // The research classifier owns tool selection only with a decision runtime.
+        ...(options.decisionRuntime ? { roster: filterToolsByCapabilities(preparedConnectorTools, activeCapabilities) } : {}),
+        provider: backgroundProvider, model: backgroundModel, decisionRuntime: options.decisionRuntime,
+        workspaceId: assistant.workspaceId ?? undefined, runId: earlyStoredUserMsg?.id ?? crypto.randomUUID(),
+        split: { concurrent: 'admitted', late: !appAssistantForbidsCoordinator(assistant.kind) && !turnPolicy.docSurface
+          && !(standardWhenOk && standardWhenDowngraded) ? 'coordinator' : 'preflight' },
+        recordUsage: async record => {
+          if (earlyStoredUserMsg) await recordRoutingUsage(record, earlyStoredUserMsg.id)
+          else pendingRoutingUsage.push(record)
         },
-        async preparation => {
-          if (preparation) await recordOverheadUsage({
-            usageStore: options.usageStore, userId: user.id, assistantId: assistant.id, sessionId: session.id,
-            userMessageId: earlyStoredUserMsg!.id, model: preparation.model, usage: preparation.usage,
-            source: 'overhead:splitter', triggerKey: 'parallel_split_classifier', ...backgroundUsageAttribution,
-          })
-        },
-      )
-      const standardSplitPreparation = assessments[2].status === 'fulfilled' ? assessments[2].value : undefined
-      researchAssessment?.mergeEvidence()
-      splitAssessmentBranch?.mergeEvidence()
-      topicAssessmentBranch?.mergeEvidence()
-      for (const assessment of assessments) if (assessment.status === 'rejected') throw assessment.reason
-      const adaptive = assessments[0].status === 'fulfilled' ? assessments[0].value : undefined
-      const topicAssessment = assessments[1].status === 'fulfilled' ? assessments[1].value : undefined
-      if (adaptive) {
-        adaptiveResearchOverhead = {
-          model: adaptive.model,
-          usage: adaptive.usage,
-          reason: adaptive.reason,
-        }
-        operateSiteIntent = operateSiteIntent || adaptive.operateSite
-        if (adaptive.research) {
-          if (!(await authority.execute(admitResearchQuota))) return
-          await assertDeliveryAudience()
-          researchMode = true
-          assessedResearchEffort = 'effort' in adaptive ? adaptive.effort ?? 'standard' : 'standard'
-          // `phase` is a stable, client-localizable code; `message` stays for
-          // non-web consumers and logs. The web client renders a research
-          // banner off `phase` (see chat-experience.tsx `case "status"`).
-          sendEvent('status', { phase: 'research_detected', message: 'Detected deep-research intent…' })
-        }
+        attribution: backgroundUsageAttribution, signal: abortController.signal, measure: turnTiming.time,
+      })
+      const route = routing.route
+      operateSiteIntent = operateSiteIntent || route.research.operateSite
+      if (route.research.active && route.research.entry === 'adaptive') {
+        if (!(await authority.execute(admitResearchQuota))) return
+        await assertDeliveryAudience()
+        researchMode = true
+        assessedResearchEffort = route.research.effort ?? 'standard'
+        // `phase` is a stable, client-localizable code; `message` stays for
+        // non-web consumers and logs. The web client renders a research
+        // banner off `phase` (see chat-experience.tsx `case "status"`).
+        sendEvent('status', { phase: 'research_detected', message: 'Detected deep-research intent…' })
       }
 
-      const nativeClassification = topicAssessment
-        ? await turnTiming.time('topic_annotation', () => topicAssessment.defer())
+      const nativeClassification = routing.topic
+        ? await turnTiming.time('topic_annotation', () => routing.topic!.defer())
         : undefined
-      topicAssessmentBranch?.mergeEvidence()
 
       // ── Reply resolution + topic classification ────────────────
-      // Resolve the replied-to message text (if any) and classify the
-      // current turn's topic. Classifier input: recent user turns, known
-      // topics in the session, the reply target's text as a strong prior.
-      const replyResolved = nativeClassification ? nativeClassification.reply : await resolveReplyText({
+      // The routed topic carries the resolved reply target; a page-bound turn
+      // (no topic lane) resolves it here, a legacy turn resolved it for routing.
+      const replyResolved = nativeClassification ? nativeClassification.reply : legacyReply !== undefined ? legacyReply : await resolveReplyText({
         channelType: 'web',
         replyToMessageId: replyTo?.id ?? null,
         session,
         clientSnippet: replyTo?.text,
       })
-
-      const preExistingDbMessages = pageBoundTurn ? [] : nativeClassification && earlyStoredUserMsg
-        ? nativeClassification.history.filter(row => row.sequenceNum < earlyStoredUserMsg.sequenceNum)
-        : await getSessionMessages(session.id, { excludeHeld: true })
-      const recentUserTurns: ClassifierRecentTurn[] = preExistingDbMessages
-        .filter((m) => m.role === 'user' && Array.isArray(m.content))
-        .slice(-8)
-        .map((m) => {
-          const blocks = m.content as Array<{ type?: string; text?: string }>
-          const text = blocks
-            .filter((b) => b?.type === 'text' && typeof b.text === 'string')
-            .map((b) => b.text as string)
-            .join(' ')
-            .trim()
-          return { text, topicLabel: m.topicLabel }
-        })
-        .filter((t) => t.text.length > 0)
-
-      const topicEvidence = topicEvidenceFromHistory(preExistingDbMessages)
-
-      let classification: TopicClassification | null = nativeClassification?.classification ?? null
-      if (!nativeClassification && !pageBoundTurn) {
-        try {
-          classification = await classifyTopic({
-            provider: backgroundProvider,
-            // Background lane — a per-turn classifier is exactly the invisible
-            // work cost-and-pricing.md → "Standard-tier routing" pins to Flash
-            // Lite (its sibling classifiers already do). Had drifted onto the
-            // Flash 3 chat alias at 2x the rate.
-            model: backgroundModel,
-            recentUserTurns,
-            replyToText: replyResolved?.text ?? null,
-            currentMessage: userMessageText,
-            ...topicEvidence,
-            decisionRuntime: options.decisionRuntime,
-            workspaceId: assistant.workspaceId ?? undefined,
-            runId: `memory-topic-${earlyStoredUserMsg?.id ?? crypto.randomUUID()}`,
-          })
-        } catch (err) {
-          console.error('[chat] topic classifier failed:', err)
-        }
-      }
+      const classification: TopicClassification | null = nativeClassification?.classification ?? routing.legacyClassification
 
       // Execution-plan lifecycle (anti-leak). Reuse the topic-classifier
       // verdict (decision E): a clean topic SHIFT demotes the active attempt
@@ -4309,7 +4265,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         const recentDormantAttemptId = planStore.recentDormantAttemptId.bind(planStore)
         const setAttemptState = planStore.setAttemptState.bind(planStore)
         const effect = async <T>(run: () => Promise<T>): Promise<T> => {
-          await topicAssessment?.assertCurrent()
+          await routing.topic?.assertCurrent()
           return run()
         }
         try {
@@ -4368,11 +4324,6 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         stored: storedUserMsg, text: rawMessage ?? '',
         replay: !!prePersistedUserMsg || !!truncateFromMessageId,
       })
-      const storedUserSource = await readSessionMessageScopeSource(
-        assistant.workspaceId,
-        storedUserMsg.id,
-      )
-      if (storedUserSource) scopeAccumulator.noteSource(storedUserSource)
       // Research follow-up capture and the research activity manifest
       // (features/research.md). Capture never blocks the reply; a missed one
       // is recovered by the next turn's replay. The activity opens only for an
@@ -4446,23 +4397,9 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         }
       }
 
-      // Adaptive research-classifier overhead — the Gemini call happened
-      // earlier in this turn (before session existed), so we deferred the
-      // usage record to here. Skipped when the classifier didn't run.
-      if (adaptiveResearchOverhead) {
-        await recordOverheadUsage({
-          usageStore: options.usageStore,
-          userId: user.id,
-          assistantId: assistant.id,
-          sessionId: session.id,
-          userMessageId: storedUserMsg.id,
-          model: adaptiveResearchOverhead.model,
-          usage: adaptiveResearchOverhead.usage,
-          source: 'overhead:classifier',
-          triggerKey: 'adaptive_research_classifier',
-          ...backgroundUsageAttribution,
-        })
-      }
+      // Turn-routing classifier overhead of a legacy turn waited for its
+      // authored row; a native turn's records were written by the route.
+      for (const record of pendingRoutingUsage.splice(0)) await recordRoutingUsage(record, storedUserMsg.id)
       // Mirror to the session-event bus so other watchers of a live shared
       // session — a draft-mode session, or a workspace-shared chat — see the
       // new user turn appear live. Without this a teammate's message only
@@ -4484,22 +4421,9 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         publishSessionEvent({
           kind: 'turn_started',
           sessionId: session.id,
-          payload: { senderUserId: programmatic ? null : user.id, assistantId: assistant.id },
+          payload: { senderUserId: programmatic ? null : user.id, assistantId: assistant.id,turnId:ownedTurn.turnId },
         })
       }
-
-      // Attribute classifier tokens as overhead (excluded from budget).
-      await recordOverheadUsage({
-        usageStore: options.usageStore,
-        userId: user.id,
-        assistantId: assistant.id,
-        sessionId: session.id,
-        userMessageId: storedUserMsg.id,
-        model: classification?.model ?? null,
-        usage: classification?.usage,
-        source: 'overhead:classifier',
-        ...backgroundUsageAttribution,
-      })
 
       // Attribute voice transcription tokens as overhead. One row per audio
       // attachment — the Gemini call is separate per file.
@@ -4560,15 +4484,25 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // "Provider signatures".
       // `fromSequence` skips rows already compacted into the most recent
       // boundary; null (never compacted) loads full history.
-      const dbMessages = await turnTiming.time('history_read', async () => pageBoundTurn ? [storedUserMsg] : nativeTranscriptAuthority
-        ? nativeClassification
-          ? await readClassifiedSessionHistory(nativeTranscriptAuthority, session.id, nativeClassification.history, session.compactBoundarySequence)
-          : await readAttendedSessionHistory(nativeTranscriptAuthority, session.id, session.compactBoundarySequence)
-        : await getSessionMessages(session.id, {
-            fromSequence: session.compactBoundarySequence,
-            excludeHeld: true,
-          }))
-      noteAutomaticScopeEvidence(scopeAccumulator, dbMessages)
+      // The original turn owner selects and performs the main-turn history read
+      // (native admitted reader, the classifier's captured continuation, or the
+      // stored transcript) and notes its automatic scope evidence.
+      let preparedHistory: CapturedTurnHistory | undefined
+      const dbMessages = await turnTiming.time('history_read', async () => {
+        if (pageBoundTurn) {
+          noteAutomaticScopeEvidence(scopeAccumulator, [storedUserMsg])
+          return [storedUserMsg]
+        }
+        preparedHistory = await ownedTurn.prepareHistory({ native: nativeTranscriptAuthority ?? null,
+          fromSequence: session.compactBoundarySequence, evidence: scopeAccumulator,
+          ...(nativeClassification ? { classified: nativeClassification } : {}) })
+        return preparedHistory.messages
+      })
+      // Reuse the exact authored row in the admitted delivered record. Reads
+      // without that manifest still need the original independent row proof.
+      const recordUserSource = preparedHistory?.sourceForCurrentInput?.(storedUserMsg)
+      const storedUserSource = recordUserSource ?? await readSessionMessageScopeSource(assistant.workspaceId, storedUserMsg.id)
+      if (storedUserSource && !recordUserSource) scopeAccumulator.noteSource(storedUserSource)
       const workflowProposalReceipt = latestWorkflowProposalReceipt(dbMessages)
 
       // Speaker attribution for a workspace-shared chat (chat-app.md →
@@ -4641,6 +4575,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         : await turnTiming.time('compaction', () => runProactiveCompaction({
         modelContext: { execution: executionContext, accumulator: scopeAccumulator },
         sessionMessages: dbMessages,
+        conversationFrame: preparedHistory?.frame,
+        readCompleteRecord: preparedHistory?.readCompleteRecord,
         timezone: user.timezone ?? 'UTC',
         senderNames: sharedSenderNames,
         assistantVoices: roomAssistantVoices,
@@ -4667,8 +4603,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         // the compacted window. Both gate on a workspace-scoped assistant.
         workspaceId: assistant.workspaceId ?? undefined,
         chatEpisodeIngestor: options.chatEpisodeIngestor,
-        compartments: turnScope.writeCompartments,
-        projectIds: turnScope.writeProjectIds,
+        compartments: writeCompartments,
+        projectIds: writeProjectIds,
         authority,
       }))
       // Gate on the serving provider: the signature strip is a Gemini-only
@@ -4757,19 +4693,61 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       const readCompartments = turnScope.effectiveCompartments
       // Automatic context reads only the bound shared Project (D18 relevance).
       const viewerCtx = { ...automaticContextAccess(turnScope.access, turnScope.activeProjectId), memoryContext: { ...(turnScope.activeProjectId ? {projectId:turnScope.activeProjectId} : {}), activity:memoryActivityFromText(typeof message === "string" ? message : undefined) } }
+      let promptIndexes: ReturnType<NonNullable<typeof options.memoryStore.getPairedPromptIndexes>> | undefined
+      let nativePromptMemory: ReturnType<NonNullable<typeof options.memoryStore.getPromptMemoryContext>> | undefined
+      const privatePromptShape = !executionContext.security.access.sharedAudience && session.channelType==='web'
+        && session.appOrigin==='chat' && session.anchorKind==='none' && session.workspaceId===assistant.workspaceId
+        && (session.visibility==='owner' || session.visibility==='personal') && session.mode!=='draft'
+        && session.userId===user.id && session.assistantId===assistant.id
+      const auxiliaryPrompt = nativeTranscriptAuthority && privatePromptShape
+        ? options.memoryStore.getPromptAuxiliaryContext?.(viewerCtx,'Use Brian',nativeTranscriptAuthority) : undefined
+      const readNativePromptMemory = (candidate: typeof nativeTranscriptAuthority) =>
+        candidate && privatePromptShape
+          ? (nativePromptMemory ??= options.memoryStore.getPromptMemoryContext?.(viewerCtx,PER_TURN_INDEX_CAP,candidate))
+          : undefined
+      const readPromptIndexes = (candidate: typeof nativeTranscriptAuthority) =>
+        candidate && assistant.workspaceId && (!executionContext.security.access.sharedAudience
+          || conversationReadersActive() && session.channelType==='web'
+          && (session.appOrigin==='chat' && session.anchorKind==='none' || pageBoundTurn)
+          && session.visibility==='workspace'
+          && session.workspaceId===assistant.workspaceId && session.assistantId===assistant.id
+          && turnScope.activeProjectId===null)
+          ? (promptIndexes ??= options.memoryStore.getPairedPromptIndexes?.(viewerCtx,PER_TURN_INDEX_CAP,candidate))
+          : undefined
+      const indexValue = <T>(result: PromiseSettledResult<T>) => {
+        if (result.status === 'rejected') throw result.reason
+        return result.value
+      }
       turnTiming.mark('admission')
       const [soulContext, identityMemories, rankedIndex, preferredChannel, selfEntityId] = await Promise.all([
         optionalContext(async () => {
+          const auxiliary = await auxiliaryPrompt
+          if (auxiliary) return auxiliary.soul
           const value = await (options.memoryStore.getSoulContext?.(viewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} }))
           if (executionContext.security.access.sharedAudience && value.content && !value.evidence.sources?.length) {
             return { content: null, evidence: {} }
           }
           return value
         }, { content: null, evidence: {} }, value => value.evidence.sources?.map(scopeSource => ({ scopeSource })) ?? [], value => !!value.content),
-        optionalContext(candidate => options.memoryStore.getIdentity(viewerCtx, candidate), []),
-        optionalContext(candidate => options.memoryStore.getIndexRanked(viewerCtx, PER_TURN_INDEX_CAP, candidate), { rows: [], totalCount: 0 }, value => [value, value.rows, ...value.rows], value => value.rows.length > 0 || value.totalCount > 0),
-        getPreferredChannel(assistant.id, user.id),
-        turnScope.access.sharedAudience ? Promise.resolve(null) : getSelfEntityId(viewerCtx),
+        optionalContext(async candidate => {
+          const auxiliary = await auxiliaryPrompt
+          return auxiliary?.identity ?? options.memoryStore.getIdentity(viewerCtx,candidate)
+        }, []),
+        optionalContext(async candidate => {
+          const packed = await readNativePromptMemory(candidate)
+          if (packed) return indexValue(packed.indexes.ranked)
+          const paired = readPromptIndexes(candidate)
+          return paired ? indexValue((await paired).ranked) : options.memoryStore.getIndexRanked(viewerCtx,PER_TURN_INDEX_CAP,candidate)
+        }, { rows: [], totalCount: 0 }, value => [value, value.rows, ...value.rows], value => value.rows.length > 0 || value.totalCount > 0),
+        (async () => {
+          const auxiliary = await auxiliaryPrompt
+          return auxiliary ? auxiliary.preferred : getPreferredChannel(assistant.id, user.id)
+        })(),
+        (async () => {
+          if(turnScope.access.sharedAudience)return null
+          const packed=await readNativePromptMemory(nativeTranscriptAuthority)
+          return packed?.selfEntityId===undefined?getSelfEntityId(viewerCtx):packed.selfEntityId
+        })(),
       ])
       noteAutomaticScopeEvidence(scopeAccumulator,[identityMemories,...identityMemories])
       const soul = soulContext.content
@@ -4811,19 +4789,39 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
 
       // Fetch team memories + identity (name + purpose) when assistant is team-owned.
       // Team name is surfaced into the L1 soul; purpose grounds the team-vs-user
-      // routing decision for saveMemory and the ## Team Context block. Voice
-      // rules (category='voice') ride a parallel fetch so they can render in
-      // their own L1 section.
+      // routing decision for saveMemory and the ## Team Context block. Identity
+      // memories and voice rules share a read and retain separate admission.
       let workspaceIdentityMemories: Awaited<ReturnType<typeof options.memoryStore.getWorkspaceIdentity>> = []
       let teamMemoryIndex: Awaited<ReturnType<typeof options.memoryStore.getWorkspaceIndex>> = []
       let teamVoiceRules: Awaited<ReturnType<typeof options.memoryStore.getWorkspaceMemoriesByCategory>> = []
       let workspaceIdentity: { name: string; purpose: string } | null = null
       if (assistant.workspaceId) {
+        let promptMemories: ReturnType<NonNullable<typeof options.memoryStore.getWorkspacePromptMemories>> | undefined
+        const readPromptMemories = () => (promptMemories ??= options.memoryStore.getWorkspacePromptMemories?.(viewerCtx, 'voice'))
         ;[workspaceIdentityMemories, teamMemoryIndex, teamVoiceRules, workspaceIdentity] = await Promise.all([
-          optionalContext(() => options.memoryStore.getWorkspaceIdentity(viewerCtx), []),
-          optionalContext(candidate => options.memoryStore.getWorkspaceIndex(viewerCtx, undefined, candidate), []),
-          optionalContext(() => options.memoryStore.getWorkspaceMemoriesByCategory(viewerCtx, 'voice'), []),
-          turnScope.access.sharedAudience ? Promise.resolve(null) : getWorkspaceIdentity(assistant.workspaceId),
+          optionalContext(async candidate => {
+            const packed = await readNativePromptMemory(candidate)
+            if (packed) return packed.team.identity
+            const paired = readPromptMemories()
+            return paired ? (await paired).identity : options.memoryStore.getWorkspaceIdentity(viewerCtx)
+          }, []),
+          optionalContext(async candidate => {
+            const packed = await readNativePromptMemory(candidate)
+            if (packed) return indexValue(packed.indexes.workspace)
+            const paired = readPromptIndexes(candidate)
+            return paired ? indexValue((await paired).workspace) : options.memoryStore.getWorkspaceIndex(viewerCtx,undefined,candidate)
+          }, []),
+          optionalContext(async candidate => {
+            const packed = await readNativePromptMemory(candidate)
+            if (packed) return packed.team.tagged
+            const paired = readPromptMemories()
+            return paired ? (await paired).tagged : options.memoryStore.getWorkspaceMemoriesByCategory(viewerCtx, 'voice')
+          }, []),
+          (async () => {
+            const auxiliary = await auxiliaryPrompt
+            if (auxiliary) return auxiliary.workspace
+            return turnScope.access.sharedAudience ? null : getWorkspaceIdentity(assistant.workspaceId)
+          })(),
         ])
       }
       const teamPurpose = workspaceIdentity?.purpose ?? null
@@ -4841,7 +4839,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
 
       const voiceTitle = nativeTranscriptAuthority && classifySession(session).anchor.kind === 'feed_draft'
         ? await readSessionTitle(session.id,nativeTranscriptAuthority) : null
-      if(voiceTitle)await assertSourceModelInputAuthority({...executionToolContext(executionContext,{appId:'native-session-voice-title'}),scopeAccumulator})
+      if(voiceTitle)await admitModelInput({...executionToolContext(executionContext,{appId:'native-session-voice-title'}),scopeAccumulator})
       const memoryContext = buildMemoryContext({
         soul,
         identityMemories: identityMemories.map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
@@ -5012,7 +5010,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           episodicContext = await optionalContext(candidate => fetchEpisodicContext({
             authority: candidate ?? { execution: executionContext, accumulator: scopeAccumulator },
             store: { ...store, fetchByTopic: async query => {
-              await topicAssessment?.assertCurrent()
+              await routing.topic?.assertCurrent()
               return fetchByTopic(query)
             } },
             sessionId: session.id,
@@ -5122,8 +5120,9 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // Failure mode = no snippet injected; never blocks prompt
       // assembly. See docs/architecture/brain/corrections.md →
       // "Workspace-level prompt evolution".
-      let workspaceEvolutionSnippet: string | null = null
-      if (assistant.workspaceId && !turnScope.access.sharedAudience) {
+      const auxiliary = await auxiliaryPrompt
+      let workspaceEvolutionSnippet: string | null = auxiliary?.evolution ?? null
+      if (!auxiliary && assistant.workspaceId && !turnScope.access.sharedAudience) {
         try {
           // Two snippets: memory-side (scope/sensitivity bias from
           // memory_verifications, mig 166) and brain-side (per-primitive
@@ -5386,16 +5385,15 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         requestedDocViewId
       ) {
         try {
-          const [{ createDbDocPageStore }, { buildOutline, renderActivePageOutline }] =
+          const [{ createDbDocPageStore }, { buildOutline }, { renderActivePageOutline }] =
             await Promise.all([
               import('../db/doc-page-store.js'),
-              import('@use-brian/core'),
+              import('@use-brian/core/doc/outline.js'),
+              import('@use-brian/core/doc/page-retrieval.js'),
             ])
-          const current = await createDbDocPageStore().getVersionedPage(
-            user.id,
-            requestedDocViewId,
-            { ...executionToolContext(executionContext, { appId: assistant.id }), scopeAccumulator },
-          )
+          const pageContext = { ...executionToolContext(executionContext, { appId: assistant.id }), scopeAccumulator }
+          const current = await permissionContext?.readPageAnchor?.(pageContext, requestedDocViewId)
+            ?? await createDbDocPageStore().getVersionedPage(user.id, requestedDocViewId, pageContext)
           if (!current && classifySession(session).anchor.kind === 'doc_thread') {
             throw new ChatTurnRefusal('page_context_unavailable', 'Brian could not access the Page needed to complete this request.')
           }
@@ -5434,6 +5432,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
                   ? recordingIdFromAnchorKey(pageMeta.anchorKey) ?? pageMeta.linkedRecordingId
                   : null
                 if (activeRecordingId && pageMeta) {
+                  // Recording recovery loads only inside the recording branch (chat import graph).
+                  const { resolveCurrentRecordingId } = await import('../recordings/recovery.js')
                   const currentRecordingId = await resolveCurrentRecordingId({ actorUserId: user.id }, pageMeta.workspaceId, activeRecordingId)
                   if (currentRecordingId) activeRecordingBlock = `\n\n${buildActiveRecordingInstruction(currentRecordingId)}`
                 }
@@ -5494,7 +5494,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
               const [{ getPageTreeNeighborhood }, { formatPageTreeContext }] =
                 await Promise.all([
                   import('../db/saved-views-store.js'),
-                  import('@use-brian/core'),
+                  import('@use-brian/core/doc/page-tree-context.js'),
                 ])
               const hood = turnScope.access.sharedAudience ? null : await getPageTreeNeighborhood(user.id, requestedDocViewId)
               const treeBlock = hood
@@ -5525,7 +5525,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         try {
           const [{ createDbCommentThreadStore }, { formatThreadDiscovery }] = await Promise.all([
             import('../db/comment-thread-store.js'),
-            import('@use-brian/core'),
+            import('@use-brian/core/doc/comment-discovery.js'),
           ])
           const summaries = turnScope.access.sharedAudience ? [] : await createDbCommentThreadStore().listThreadSummariesForPage(
             user.id,
@@ -5961,6 +5961,9 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // on the tool means the owner taps to approve the exact drafted
       // charter before it lands.
       if (charterIntakeMode) {
+        // Loaded only on an intake turn: ordinary chat never loads the intake
+        // implementation (chat import graph, M4 frontier).
+        const { createSaveCharterTool } = await import('../intake/charter-intake.js')
         const saveCharterTool = createSaveCharterTool({ assistantId: assistant.id })
         allTools.set(saveCharterTool.name, saveCharterTool)
       }
@@ -6296,7 +6299,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // toggle), so stacking the global addendum here would give it
       // contradictory worker instructions.
       if (researchMode && !docCtx) {
-        const { RESEARCH_MODE_ADDENDUM } = await import('@use-brian/core')
+        const { RESEARCH_MODE_ADDENDUM } = await import('@use-brian/core/system-prompt.js')
         systemAddenda += `\n\n${RESEARCH_MODE_ADDENDUM}`
       }
 
@@ -6322,16 +6325,17 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             resetsAt: gate.resetsAt,
           })
           res.end()
-          // No slot was claimed yet: the budget gate runs before admission,
-          // so there is no lock to release here.
+          // The owner releases its preparation lease in the outer finally.
           // turn_started has already fired for shared sessions (above the
           // budget gate). Pair it with turn_completed so watchers don't
           // see the input dimmed forever.
-          if (turnPolicy.liveFollow) {
+          await ownedTurn.finish()
+          if (turnPolicy.liveFollow&&ownedTurn.released) {
             publishSessionEvent({
               kind: 'turn_completed',
               sessionId: session.id,
-              payload: { senderUserId: programmatic ? null : user.id },
+              payload: { senderUserId: programmatic ? null : user.id,turnId:turnOwner?.turnId??null,
+            ...(turnOwner?.completionReason&&turnOwner.completionReason!=='completed'?{reason:turnOwner.completionReason}:{}) },
             })
           }
           options.analytics?.logEvent({
@@ -6438,128 +6442,24 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             // Metered turns always run the platform routing provider — a
             // workspace BYO Gemini key cannot serve a DashScope model, and
             // the meter (not the BYO $0 convention) is the honest billing.
-            turnProvider = options.provider
-            usedByoKey = false
           }
         }
       }
 
-      const explicitCustomSelector = requestedModel?.startsWith('custom:')
-        ? requestedModel
-        : undefined
-      const policyRequestedModel = explicitCustomSelector ? undefined : requestedModel
-      const logicalModel = meteredTurn
-        ? meteredTurn.alias
-        : researchMode && budgetStatus !== 'downgraded'
-          ? resolveModel('research', 'max_5x', budgetStatus)
-          : resolveModel(policyRequestedModel, userPlan, budgetStatus)
-      const logicalTier = tierForModel(logicalModel)
-      // Substitute a configured model when the default (Gemini) has no key —
-      // lets a Qwen-only deployment serve chat by default. No-op when Gemini
-      // is configured, or when the caller doesn't pass configuredProviders.
-      const model = turnOptions.configuredProviders
-        ? ensureServableModel(logicalModel, turnOptions.configuredProviders)
-        : logicalModel
-
-      if (assistant.workspaceId && !meteredTurn) {
-        const legacyByoKeyResolver = options.buildWorkspaceProvider && (options.resolveWorkspaceByoGeminiKey || options.llmProviderSettingsStore)
-          ? () => options.resolveWorkspaceByoGeminiKey
-              ? options.resolveWorkspaceByoGeminiKey(assistant.workspaceId!)
-              : options.llmProviderSettingsStore!.getPlaintextKeySystem({
-                  workspaceId: assistant.workspaceId!,
-                  provider: 'gemini',
-                })
-          : null
-        const resolvedTurnLlm = await resolveWorkspaceTurnLlm({
-          workspaceId: assistant.workspaceId,
-          requestedModel: explicitCustomSelector,
-          requestedTier: logicalTier,
-          platformProvider: options.provider,
-          resolveWorkspaceCustomLlm: turnOptions.resolveWorkspaceCustomLlm ?? null,
-          resolveLegacyByoKey: legacyByoKeyResolver,
-          buildLegacyByoProvider: options.buildWorkspaceProvider ?? null,
-        })
-        if (explicitCustomSelector && !resolvedTurnLlm.customRuntime) {
-          throw new ChatTurnRefusal(
-            'custom_model_unavailable',
-            'This custom model endpoint is unavailable in this workspace.',
-          )
-        }
-        // Whether the route can READ an image is decided BEFORE any of its
-        // fields are adopted. Resolving first and un-resolving afterwards
-        // would leave `turnProvider`, `usedByoKey` and the recorded
-        // `custom:<id>` selector pointing at an endpoint this turn never
-        // reached, so the usage row would name the wrong model.
-        //
-        // A deployment whose only working model IS the custom endpoint (an
-        // OSS self-host with no platform key) has nothing to fall back to.
-        // Refusing there is honest; handing the turn to an unconfigured
-        // provider would trade a clear sentence for a mid-stream crash.
-        const imageRoute = decideImageTurnRoute({
-          route: resolvedTurnLlm.customRuntime,
-          turnHasImage: turnHasInlineImage(userContentBlocks),
-          explicitCustomSelection: Boolean(explicitCustomSelector),
-          builtInServable: !turnOptions.configuredProviders
-            || (() => {
-              const row = registryRow(model)
-              return row ? isRegistryModelAvailable(row, turnOptions.configuredProviders) : false
-            })(),
-        })
-        if (imageRoute === 'refuse') {
-          // An explicit `custom:<id>` pick is a choice this turn made, so the
-          // turn is the right thing to refuse: the next message can choose a
-          // built-in model and leave the rest of the workspace alone.
-          // Substituting a model the user just declined would be worse.
-          throw customModelMediaRefusal(Boolean(explicitCustomSelector))
-        }
-        if (imageRoute === 'fall_back_to_builtin') {
-          // A TIER ROUTE is workspace configuration, not this message's
-          // choice, and it captures every built-in in the picker - so
-          // refusing here dead-ends a user whose only exit is a setting they
-          // may not own. The turn falls back to the flow this workspace
-          // would have had with no custom route at all, which is also how it
-          // picks up a legacy workspace Gemini key when one is configured.
-          //
-          // The fallback is ANNOUNCED, never silent. byo-llm-key.md forbids a
-          // silent one because it would move workspace content to a provider
-          // the admin did not choose; the notice is what keeps that promise
-          // while still answering the question that was asked.
-          const fallbackTurnLlm = await resolveWorkspaceTurnLlm({
-            workspaceId: assistant.workspaceId,
-            requestedTier: logicalTier,
-            platformProvider: options.provider,
-            resolveWorkspaceCustomLlm: null,
-            resolveLegacyByoKey: legacyByoKeyResolver,
-            buildLegacyByoProvider: options.buildWorkspaceProvider ?? null,
-          })
-          customLlmRuntime = null
-          turnProvider = fallbackTurnLlm.provider
-          usedByoKey = fallbackTurnLlm.providerKeySource === 'user'
-          usedLegacyByoKey = fallbackTurnLlm.usedLegacyByoKey
-          sendEvent('notice', {
-            code: 'custom_model_image_fallback',
-            message: CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE,
-          })
-          options.analytics?.logEvent({
-            userId: user.id, assistantId: assistant.id, sessionId: session.id,
-            eventName: 'custom_model_image_fallback', channelType: 'web',
-            metadata: { model_tier: sanitize(logicalTier) },
-          })
-        } else {
-          customLlmRuntime = resolvedTurnLlm.customRuntime
-          turnProvider = resolvedTurnLlm.provider
-          usedByoKey = resolvedTurnLlm.providerKeySource === 'user'
-          usedLegacyByoKey = resolvedTurnLlm.usedLegacyByoKey
-          if (customLlmRuntime) {
-            // A selected custom endpoint is authoritative for everything it
-            // can serve. It supersedes both the platform provider and a
-            // workspace Gemini key, and never falls back to either if its
-            // request FAILS - the image case above is a capability the route
-            // does not have, decided before any request, not a failed one.
-            turnProvider = customLlmRuntime.provider
-            usedByoKey = customLlmRuntime.providerKeySource === 'user'
-          }
-        }
+      const preparedModel = await ownedTurn.prepareMainModel({ kind: 'web', requestedModel, plan: userPlan,
+        budgetStatus, researchMode, metered: meteredTurn, hasImage: turnHasInlineImage(userContentBlocks) })
+      const { logicalModel, logicalTier, model } = preparedModel
+      if (preparedModel.refusal === 'custom_model_unavailable') throw new ChatTurnRefusal(
+        'custom_model_unavailable', 'This custom model endpoint is unavailable in this workspace.')
+      if (preparedModel.imageRoute === 'refuse') throw customModelMediaRefusal(Boolean(requestedModel?.startsWith('custom:')))
+      customLlmRuntime = preparedModel.customLlm
+      turnProvider = preparedModel.provider
+      usedByoKey = preparedModel.providerKeySource === 'user'
+      usedLegacyByoKey = preparedModel.usedLegacyByoKey
+      if (preparedModel.imageRoute === 'fall_back_to_builtin') {
+        sendEvent('notice', { code: 'custom_model_image_fallback', message: CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE })
+        options.analytics?.logEvent({ userId: user.id, assistantId: assistant.id, sessionId: session.id,
+          eventName: 'custom_model_image_fallback', channelType: 'web', metadata: { model_tier: sanitize(logicalTier) } })
       }
 
       // Reset only this session's stale worker state. The manager is shared
@@ -6638,56 +6538,31 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           !onDocSurface &&
           (researchMode || isProMode)
         ) {
-          // Pro/Max: check if this qualifies for coordinator mode.
-          // Import classifySplit to check — if it would split, enable coordinator mode
-          // and let the model itself drive delegation via spawnWorker + Phase 4b.
+          // Pro/Max: the routed split decides coordinator mode (one turn route
+          // made the split call, research.md "Adapter switch"); the model then
+          // drives delegation via spawnWorker + Phase 4b.
           //
-          // Research mode skips the classifier entirely (the user already
-          // asked for deep mode; running Gemini just to confirm is waste)
-          // and seeds the coordinator path unconditionally.
+          // Research mode takes no split (the user already asked for deep
+          // mode) and seeds the coordinator path unconditionally.
           let splitterDecidedCoordinator = false
-          // Operate-site turns never consult the splitter — a browse of one
-          // named site must not be decomposed into search workers that cannot
-          // browse (see the operateSiteIntent block above). researchMode
-          // being true here means the explicit toggle: splitter is moot.
+          // Operate-site turns never take a split — a browse of one named site
+          // must not be decomposed into search workers that cannot browse (see
+          // the operateSiteIntent block above).
           if (!researchMode && !operateSiteIntent) {
-            const { classifySplit } = await import('@use-brian/core')
-            const splitResult = await classifySplit({
-              provider: backgroundProvider,
-              message,
-              model: backgroundModel,
-              decisionRuntime: options.decisionRuntime,
-              workspaceId: assistant.workspaceId ?? undefined,
-              runId: `research-split-${storedUserMsg.id}`,
-            })
-              .catch(() => ({ tasks: null, usage: null, model: null }))
-            // Attribute splitter tokens as overhead. Recorded regardless of
-            // whether the classifier chose to split — the Gemini call happened.
-            await recordOverheadUsage({
-              usageStore: options.usageStore,
-              userId: user.id,
-              assistantId: assistant.id,
-              sessionId: session.id,
-              userMessageId: storedUserMsg.id,
-              model: splitResult.model,
-              usage: splitResult.usage,
-              source: 'overhead:splitter',
-              triggerKey: 'parallel_split_classifier',
-              ...backgroundUsageAttribution,
-            })
-            splitterDecidedCoordinator = !!splitResult.tasks
+            const routedTasks = await routing.consumeSplit()
+            splitterDecidedCoordinator = !!routedTasks
 
-            // Auto-seed (Phase 3): the splitter just decomposed this message
+            // Auto-seed (Phase 3): the routed split decomposed this message
             // into ≤3 sub-tasks — turn them into an execution plan so the
             // completeness gate has something to enforce (and the # Active
             // plan block surfaces it from the next turn). No-ops if a plan is
-            // already active or the store is absent. Reuses the splitter
-            // signal only; no new LLM call. See execution-plan.md → "Auto-seed".
-            if (options.planStore && splitResult.tasks && splitResult.tasks.length > 0) {
+            // already active or the store is absent. Reuses the split signal
+            // only; no new LLM call. See execution-plan.md → "Auto-seed".
+            if (options.planStore && routedTasks && routedTasks.length > 0) {
               await seedPlanFromTasks(
                 options.planStore,
                 { sessionId: session.id, userId: user.id, assistantId: assistant.id },
-                splitResult.tasks,
+                routedTasks,
               ).catch((err) => console.error('[chat] plan auto-seed failed:', err))
             }
           }
@@ -6800,28 +6675,39 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           // wastes worker calls and biases the turn toward synthesis-from-
           // snippets instead of the browse the user asked for.
           try {
-            const preparedSplit = standardSplitPreparation?.matches(message, backgroundProvider, options.decisionRuntime) ? standardSplitPreparation : undefined
+            const preflightTools = turnOwner.prepareTools(allTools)
             const preflight = await runPreflight({
               provider: backgroundProvider,
               model: backgroundModel,
               message,
-              ...(preparedSplit ? { classify: preparedSplit.read } : {}),
-              tools: allTools,
+              // The turn route already made the split call; preflight takes it
+              // after a fresh split-lane proof and never classifies again.
+              classify: async () => ({ tasks: await routing.consumeSplit(), usage: null, model: null }),
+              tools: preflightTools,
               context: {
-                userId: user.id,
-                assistantId: assistant.id,
-                sessionId: session.id,
-                appId: 'Use Brian',
-                channelType: session.channelType,
-                channelId: session.channelId,
-                abortSignal: new AbortController().signal,
-                requestTools: allTools,
+                ...executionToolContext(executionContext, { appId: 'Use Brian' }),
+                scopeAccumulator,
+                abortSignal: abortController.signal,
+                requestTools: preflightTools,
               },
+              // A local preflight worker is real COGS, separate from splitter
+              // overhead and the main-loop owner's cumulative response charge.
+              onUsage: options.usageStore ? async u => {
+                const providerKeySource=u.providerKeySource??backgroundUsageAttribution.providerKeySource
+                await options.usageStore!.recordUsage({
+                  ...turnUsageIdentity(turnBilling),assistantId:assistant.id,sessionId:session.id,
+                  model:u.model,modelTier:u.modelTier??backgroundUsageAttribution.modelTier,
+                  inputTokens:u.usage.inputTokens,outputTokens:u.usage.outputTokens,
+                  cacheReadTokens:u.usage.cacheReadTokens,cacheWriteTokens:u.usage.cacheWriteTokens,
+                  actualCostUsd:providerKeySource==='user'?0:calculateCost(u.model,u.usage),
+                  source:'included',triggerKey:'worker_run',providerKeySource,
+                }).catch(error=>console.error('[chat] preflight worker usage tracking failed:',error))
+              } : undefined,
               onStatus: (msg) => sendActivityEvent('status', { message: msg }),
               onEvent: (() => {
                 const seenWorkers = new Set<string>()
                 const seenCitationUrls = new Set<string>()
-                return (event: import('@use-brian/core').QueryEvent, workerId: string, description?: string) => {
+                return (event: import('@use-brian/agent-runtime/engine/query-loop.js').QueryEvent, workerId: string, description?: string) => {
                   if (!seenWorkers.has(workerId)) {
                     seenWorkers.add(workerId)
                     sendActivityEvent('worker_start', { workerId, description })
@@ -6893,20 +6779,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             if (preflight.type === 'researched') {
               preflightContext = preflight.context
             }
-            // An early prepared result was already charged once, even if the
-            // preflight chooses passthrough. The late fallback retains its charge.
-            if (!preparedSplit) await recordOverheadUsage({
-              usageStore: options.usageStore,
-              userId: user.id,
-              assistantId: assistant.id,
-              sessionId: session.id,
-              userMessageId: storedUserMsg.id,
-              model: preflight.model,
-              usage: preflight.usage,
-              source: 'overhead:splitter',
-              triggerKey: 'parallel_split_classifier',
-              ...backgroundUsageAttribution,
-            })
+            // The routed split call was charged once by the turn route.
           } catch (err) {
             if (isAuthorityChangedError(err) || abortController.signal.aborted) throw err
             console.error('[chat] pre-flight failed, continuing without:', err)
@@ -6992,55 +6865,6 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         )
       }
 
-      // Run query loop — stream events to client.
-      // Rooms CLAIM the turn slot atomically instead of blind-setting it
-      // (multiplayer chat T5): two addressed sends racing from idle both
-      // reach here, and the claim serializes them — the loser waits for the
-      // slot (its history was assembled pre-claim, so this window is kept
-      // rare, not impossible; the early queue path catches the common
-      // mid-turn case with a fresh post-wait assembly).
-      // The turn kernel's admission (D11): a workspace session claims the slot
-      // atomically and waits for it; a personal session takes it after the
-      // precheck above (refusing if a live turn raced us there).
-      const slot = await takeTurnLease({
-        sessionId: session.id,
-        startedAt: requestStartedAt,
-        admission: turnPolicy.admission,
-        // The answering assistant: a doc-dock or room send may re-address the
-        // turn away from the session's binding (live-work.md "Voice label").
-        assistantId: assistant.id,
-        ...(roomAdmission ? { waitForSlot: waitForTurnSlot } : {}),
-      })
-      if (!slot.taken) {
-        sendEvent('error', slot.code === 'room_turn_wait_timeout'
-          ? {
-              code: 'room_turn_wait_timeout',
-              error: 'The in-flight turn did not finish in time. Your message is posted; mention the assistant again to get a reply.',
-            }
-          : {
-              code: 'turn_in_flight',
-              error:
-                'Your assistant is still working on the previous message in this chat. ' +
-                'Wait for it to finish (or press Stop), then send again.',
-            })
-        res.end()
-        return
-      }
-
-      // The slot is ours, with the lease that proves we still hold it
-      // (migration 424). From here every exit path MUST release it, including
-      // the ones that reach neither the happy path nor the catch: that is what
-      // the `finally` below is for, and what its absence cost on 2026-08-08.
-      turnLeaseToken = slot.token
-      leaseSessionId = session.id
-
-      // Open the mid-turn inbox now that the slot is ours. Everything sent
-      // into this session from here until the outer `finally` lands in the
-      // running loop instead of starting a second turn.
-      // See docs/architecture/engine/mid-turn-input.md.
-      const turnInbox = registerTurnInbox(session.id, { assistantId: assistant.id })
-      turnInboxHandle = turnInbox
-
       // Assistant-run presence — announce to every tab viewing this doc page
       // that a run just opened, attributed to this member + the channel they
       // came from (works for Telegram/Slack/web triggers with no browser open).
@@ -7099,7 +6923,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // clientGone therefore cannot be the gate for reconnect publication.
       // The shared publisher throttles at 150ms and caps text/reasoning tails.
       const turnStream = createTurnStreamPublisher({
-        sessionId: session.id,
+        sessionId: session.id,turnId:()=>ownedTurn.turnId,
         publishSessionEvent,
         attribution: () =>
           ({ senderUserId: programmatic ? null : user.id, assistantId: assistant.id }),
@@ -7118,12 +6942,9 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // drained. Every buffered entry is already paired — no cross-turn
       // claim logic needed. Intermediate tool-use turns land in the buffer
       // too (unlike `turn_complete`, which is terminal-only).
-      type PendingTurn = {
-        content: ContentBlock[]          // assistant message's content blocks
-        toolResults: ContentBlock[]      // the tool_results for this turn's tool_use blocks
-        stopReason: string               // diagnostic for empty-turn logging
-      }
-      const pendingAssistantTurns: PendingTurn[] = []
+      const bufferedOutput = createBufferedTurnOutput()
+      const pendingAssistantTurns = bufferedOutput.turns
+      let finalizedOutput: ReturnType<typeof finalizedTurnOutput> = null
       const pendingHostObservations:HostObservation[][]=[]
       let lastAssistantMessageId: string | null = null
       // Settle the research activity from what the turn actually did
@@ -7153,7 +6974,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // persisted once the final assistant message id is known. See
       // docs/architecture/engine/grounding-gate.md → "Claim ledger".
       let pendingClaimLedger: Extract<
-        import('@use-brian/core').QueryEvent,
+        import('@use-brian/agent-runtime/engine/query-loop.js').QueryEvent,
         { type: 'claim_ledger' }
       >['claims'] | null = null
       const acknowledgedGoalIds = new Set<string>()
@@ -7171,8 +6992,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         // rewrote it, often deleting the very message this turn answered.
         // Saving its partial reply would interleave a stale answer after the
         // new question, so it ends quietly - never as a delivery refusal.
-        if (abortController.signal.aborted && turnLeaseToken
-          && await isTurnLeaseSuperseded(session.id, turnLeaseToken)) {
+        if (abortController.signal.aborted && ownedTurn.token
+          && await isTurnLeaseSuperseded(session.id, ownedTurn.token)) {
           flushed = true
           console.log(
             `[chat] superseded stopped turn: not persisting ${pendingAssistantTurns.length} buffered turn(s) for session ${session.id}`,
@@ -7180,7 +7001,12 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           return
         }
         turnTiming.mark('loop')
-        await assertDeliveryAudience()
+        const stoppedNativeBuffer = nativeTranscriptAuthority && ownedTurn.abortKind === 'stop'
+        // Stop closes the live output port. The native writer independently
+        // admits retention of frames already delivered under the stopped token.
+        const recordPublicationFloor = !stoppedNativeBuffer && nativeTranscriptAuthority && pendingAssistantTurns.length>0
+          && requestPermissions?.checkRecordPublicationFloor({...executionToolContext(executionContext,{appId:'turn-delivery'}),scopeAccumulator})
+        if (!stoppedNativeBuffer && !recordPublicationFloor) await assertDeliveryAudience()
         flushed = true
 
         console.log(
@@ -7192,15 +7018,9 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         // double-attach.
         const outboundAttachments = outboundAttachmentCollector.drain()
 
-        const lastNonEmptyIdx = (() => {
-          for (let i = pendingAssistantTurns.length - 1; i >= 0; i--) {
-            if (pendingAssistantTurns[i].content.length > 0) return i
-          }
-          return -1
-        })()
-
-        // ONE transaction for every buffered row (scoped-context.md → "Live
-        // authority for interactive and public turns"). The native transaction
+        // ONE owner publication for every buffered row (turn-kernel.md "Reply
+        // publication"; scoped-context.md → "Live authority for interactive
+        // and public turns"). The native transaction
         // freshly admits retention and derives each stored scope. Lease and
         // recipient authority are checked again after the actual commit.
         // A refusal before the transaction persists nothing; one after it
@@ -7212,162 +7032,77 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         // the transaction holds one would starve under load and lose the
         // reply. Client-facing events are emitted only after COMMIT, so a
         // rolled-back row is never announced as saved.
-        type SavedTurn = {
-          stored: SessionMessage
-          isLast: boolean
-          attachments: typeof outboundAttachments
-        }
-        const savedTurns: SavedTurn[] = []
-        const batchWrite = currentTurnWrite()
-        const publish = async (tx: PoolClient) => {
-          const nativeRows: Array<Parameters<typeof publishNativeSessionMessageBatch>[0]['messages'][number]> = []
-          const nativeSaved = new Map<number, { isLast: boolean; attachments: typeof outboundAttachments }>()
-          if(pendingHostObservations.length){
-            if(!nativeTranscriptAuthority || !('derivation' in batchWrite))throw new Error('Host reads require native publication')
-            nativeSaved.set(nativeRows.length,{isLast:false,attachments:[]})
-            nativeRows.push({role:'assistant',content:combineHostReadObservations(pendingHostObservations,executionContext),senderAssistantId:assistant.id})
-          }
-          for (let turnIdx = 0; turnIdx < pendingAssistantTurns.length; turnIdx++) {
-            const turn = pendingAssistantTurns[turnIdx]
-            // Pure empty response (safety filter / MAX_TOKENS with zero
-            // content). Nothing to persist for this turn — the loop just
-            // exits without appending a blank message.
-            if (turn.content.length === 0) continue
+        const batchWrite = publicationWrite()
+        if(pendingHostObservations.length&&(!nativeTranscriptAuthority || !('derivation' in batchWrite)))throw new Error('Host reads require native publication')
+        // `app` assistants (doc / feed) author their own soul and are never
+        // served the FOLLOW_UP_QUESTIONS_ADDENDUM, but the model can still
+        // volunteer a `<followup>[...]</followup>` chip tag or a confabulated
+        // `<comment-thread-reply pageId=...>` wrapper. Strip them before they
+        // land in session_messages (follow-up-questions.md "app surfaces",
+        // doc-comments.md "Reply routing"). Pure empty rounds and chip-only
+        // rounds persist nothing; the owner's assembly keeps tool pairing.
+        const assembled = assembleTurnPublication(pendingAssistantTurns, {
+          reason: synthesisReason, sender: { senderAssistantId: assistant.id }, attachments: outboundAttachments,
+          lead: pendingHostObservations.length
+            ? [{ role: 'assistant', content: combineHostReadObservations(pendingHostObservations, executionContext), senderAssistantId: assistant.id }] : [],
+          ...(assistant.kind === 'app' ? { transform: (content: ContentBlock[]) => content
+            .map((block) => block.type === 'text' ? { ...block, text: stripCommentThreadReplyTag(stripFollowUps(block.text)) } : block)
+            .filter((block) => !(block.type === 'text' && block.text.length === 0)) } : {}),
+        })
+        // Validate exact identity-projected membership; no durable terminal fact is emitted in Unit A.
+        const selectedOrdinals=bufferedOutput.selectedOrdinals(assistant.kind === 'app' || abortController.signal.aborted ? null : finalizedOutput,
+          assembled.ordinals, assembled.rows)
+        const replyRow=[...assembled.assistantRows].find(([,row])=>row.isLast)?.[0] ?? null
+        await turnTiming.time('reply_publication', () => ownedTurn.publish({ disposition: 'reply', rows: assembled.rows, write: batchWrite,
+          native: nativeTranscriptAuthority, execute: operation => authority.execute(operation), measure: turnTiming.time,
+          pendingAnnotation: nativeClassification?.pendingAnnotation, replyRowIndex: replyRow,
+          // The durable completion header (8277): this turn's answer to its authored input.
+          completion: { lane: 'web', input: { kind: 'session_message', ref: storedUserMsg.id }, assistantId: assistant.id },
+          ...(bufferedWebPublication ? { buffered: { root: bufferedWebPublication, selectedOrdinals } } : {}),
+          afterCommit: async (rows) => {
+          const savedTurns = [...assembled.assistantRows].flatMap(([index, row]) => rows[index]
+            ? [{ stored: rows[index]!, isLast: row.isLast, attachments: row.isLast ? outboundAttachments : [] }] : [])
+          if (savedTurns.length > 0 && !stoppedNativeBuffer) await assertDeliveryAudience()
+          for (const saved of savedTurns) {
+            lastAssistantMessageId = saved.stored.id
+            turnLedgerHandle.bindAssistantMessageId(saved.stored.id)
+            if (stoppedNativeBuffer) continue
 
-            // `app` assistants (doc / feed) author their own soul and are
-            // never served the FOLLOW_UP_QUESTIONS_ADDENDUM — but the model
-            // can still *volunteer* a `<followup>[...]</followup>` chip tag,
-            // and once it's persisted raw it (1) renders as literal text on
-            // these surfaces and (2) re-teaches itself via history replay on
-            // the next turn. Strip it from text blocks before it lands in
-            // session_messages. See
-            // docs/architecture/features/follow-up-questions.md → "app surfaces".
-            //
-            // Same defense for the confabulated `<comment-thread-reply pageId=…>`
-            // wrapper a doc assistant sometimes invents around a comment-thread
-            // reply (no prompt defines it) — left raw it renders as tag soup
-            // and leaks an internal page UUID on the comment surfaces.
-            // See docs/architecture/features/doc-comments.md → "Reply routing".
-            const content =
-              assistant.kind === 'app'
-                ? turn.content
-                    .map((block) =>
-                      block.type === 'text'
-                        ? { ...block, text: stripCommentThreadReplyTag(stripFollowUps(block.text)) }
-                        : block,
-                    )
-                    .filter((block) => !(block.type === 'text' && block.text.length === 0))
-                : turn.content
-            // The turn was nothing but a chip tag (no real answer / tool calls).
-            if (content.length === 0) continue
-
-            const isLast = turnIdx === lastNonEmptyIdx
-            const attachments = isLast && outboundAttachments.length > 0 ? outboundAttachments : []
-            if (nativeTranscriptAuthority && 'derivation' in batchWrite) {
-              nativeSaved.set(nativeRows.length, { isLast, attachments })
-              nativeRows.push({role:'assistant',content,senderAssistantId:assistant.id,
-                attachments:attachments.length>0?attachments:undefined})
-            } else {
-              const storedAssistantMsg = await addSessionMessage({
+            // The UI uses `assistant_message_saved` to attach retry/edit/
+            // feedback actions to the most recent bubble. Only emit for the
+            // last non-empty turn — intermediate tool_use turns render as
+            // timeline entries, not message bubbles, so the UI doesn't need
+            // their ids.
+            if (saved.isLast) {
+              turnTiming.observe('assistant_message_saved')
+              sendActivityEvent('assistant_message_saved', { id: saved.stored.id })
+              turnStream.setReplyPhase('finishing')
+              // File cards (sendFile) — the streaming client renders these
+              // at turn end; refetches read them from the persisted row.
+              if (saved.attachments.length > 0) {
+                sendEvent('attachments', {
+                  messageId: saved.stored.id,
+                  attachments: saved.attachments,
+                })
+              }
+            }
+            // Live broadcast for multi-watcher sessions (draft-mode, and the
+            // Chat app's workspace-shared threads). We send every turn (not just
+            // the final one) because a host's per-turn tool upserts can ride on
+            // intermediate tool_use turns.
+            if (turnPolicy.liveFollow) {
+              publishSessionEvent({
+                kind: 'assistant_message_saved',
                 sessionId: session.id,
-                role: 'assistant',
-                content,
-                // The ANSWERING assistant (T9) — in a multi-assistant room this
-                // may differ from the session's binding; per-reply avatars and
-                // foreign-voice assembly labels read it.
-                senderAssistantId: assistant.id,
-                attachments: attachments.length > 0 ? attachments : undefined,
-                ...batchWrite,
-              }, tx)
-              savedTurns.push({ stored: storedAssistantMsg, isLast, attachments })
-            }
-
-            // Synthesise stubs for any tool_use in this turn's content that
-            // the executor failed to produce a real result for.
-            const missing = synthesizeMissingToolResults(
-              turn.content,
-              turn.toolResults,
-              synthesisReason,
-            )
-            const allResults = [...turn.toolResults, ...missing]
-            if (allResults.length > 0) {
-              if (nativeTranscriptAuthority && 'derivation' in batchWrite) nativeRows.push({role:'user',content:allResults})
-              else await addSessionMessage({
-                sessionId: session.id,
-                role: 'user',
-                content: allResults,
-                ...batchWrite,
-              }, tx)
-            }
-          }
-          if (nativeRows.length && nativeTranscriptAuthority && 'derivation' in batchWrite) {
-            const rows=await publishNativeSessionMessageBatch({sessionId:session.id,messages:nativeRows,
-              derivation:batchWrite.derivation,derivationTarget:batchWrite.derivationTarget,authority:nativeTranscriptAuthority,measure:turnTiming.time},tx)
-            for (const [index,stored] of rows.entries()) {
-              const metadata=nativeSaved.get(index)
-              if(metadata)savedTurns.push({stored,...metadata})
-            }
-          }
-        }
-        await turnTiming.time('reply_publication', () => authority.execute(async () => {
-          if (nativeTranscriptAuthority && 'derivation' in batchWrite) {
-            return withSessionMessagePublication(nativeTranscriptAuthority, batchWrite.derivation.sources, publish,
-              {measure:turnTiming.time,pendingAnnotation:nativeClassification?.pendingAnnotation,
-                ...(turnLeaseToken ? abortController.signal.aborted ? { stoppedTurnToken: turnLeaseToken } : { turnToken: turnLeaseToken } : {})})
-          }
-          const tx = await getPool().connect()
-          try {
-            await tx.query('BEGIN')
-            await publish(tx)
-            await tx.query('COMMIT')
-          } catch (error) {
-            await tx.query('ROLLBACK').catch(() => {})
-            throw error
-          } finally {
-            tx.release()
-          }
-        }))
-        if (savedTurns.length > 0) await assertDeliveryAudience()
-
-        for (const saved of savedTurns) {
-          lastAssistantMessageId = saved.stored.id
-          turnLedgerHandle.bindAssistantMessageId(saved.stored.id)
-
-          // The UI uses `assistant_message_saved` to attach retry/edit/
-          // feedback actions to the most recent bubble. Only emit for the
-          // last non-empty turn — intermediate tool_use turns render as
-          // timeline entries, not message bubbles, so the UI doesn't need
-          // their ids.
-          if (saved.isLast) {
-            turnTiming.observe('assistant_message_saved')
-            sendActivityEvent('assistant_message_saved', { id: saved.stored.id })
-            turnStream.setReplyPhase('finishing')
-            // File cards (sendFile) — the streaming client renders these
-            // at turn end; refetches read them from the persisted row.
-            if (saved.attachments.length > 0) {
-              sendEvent('attachments', {
-                messageId: saved.stored.id,
-                attachments: saved.attachments,
+                payload: {
+                  id: saved.stored.id,
+                  sequenceNum: saved.stored.sequenceNum,
+                  content: saved.stored.content,
+                },
               })
             }
           }
-          // Live broadcast for multi-watcher sessions (draft-mode, and the
-          // Chat app's workspace-shared threads). We send every turn (not just
-          // the final one) because a host's per-turn tool upserts can ride on
-          // intermediate tool_use turns.
-          if (turnPolicy.liveFollow) {
-            publishSessionEvent({
-              kind: 'assistant_message_saved',
-              sessionId: session.id,
-              payload: {
-                id: saved.stored.id,
-                sequenceNum: saved.stored.sequenceNum,
-                content: saved.stored.content,
-              },
-            })
-          }
-          if (saved.isLast) postReply.recordPublishedReply(saved.stored.content as ContentBlock[])
-        }
+        } }))
 
         // Flush the per-turn memory recall buffer once the final assistant
         // message id is known. All buffered recalls (index_inject + tool_call)
@@ -7428,19 +7163,12 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       }
 
       // Only content represented on a visible client surface may prefix the
-      // newest user turn. The persisted DB row remains untouched. Rare resume
-      // shapes without a trailing plain user message retain the marker in the
-      // system channel instead.
+      // newest user turn. The persisted DB row remains untouched. The original
+      // turn owner's `prepareRun` places it exactly once, including the tagged
+      // system-channel fallback for rare resume shapes.
       const userVisibleContext = userVisibleContextParts
         .filter((s) => s.trim().length > 0)
         .join('\n\n')
-      const enveloped = attachUserVisibleContext(messages, userVisibleContext)
-      if (enveloped) {
-        messages = enveloped
-      } else if (userVisibleContext) {
-        runtimeSystemContext =
-          `${runtimeSystemContext}\n\n${formatUserVisibleContext(userVisibleContext)}`
-      }
 
       // ── Reply evidence (grounding gate) ──
       // Figures observed in successful tool results this turn (fed by the
@@ -7449,50 +7177,24 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // against. Prior ASSISTANT turns are deliberately not seeded (a
       // confabulated figure must not launder itself into next-turn
       // evidence). Accumulate-only: no gatedTools, so the identifier
-      // write-gate stays a workflow-lane behavior.
+      // write-gate stays a workflow-lane behavior. Seeded from the prepared
+      // run's grounding below, after placement (the web ordering).
       const replyEvidence = new EvidenceAccumulator()
-      const systemPromptWithPreflight = renderSystemContext({
-        systemPrompt: splitPrompt.stablePrompt, runtimeSystemContext,
-      })
-      replyEvidence.note(systemPromptWithPreflight)
-      replyEvidence.note(userVisibleContext)
-      if (typeof message === 'string') replyEvidence.note(message)
 
       const confirmationResolver = programmatic ? undefined : createConfirmationResolver()
       if (confirmationResolver) activeResolvers.set(session.id, confirmationResolver)
       turnResolver = confirmationResolver ?? null
 
-      // ── Turn lease heartbeat (migration 424) ──
-      // Refreshes the lease so the sweeper and the admission-time heal can tell
-      // this turn apart from a dead one, and reads back any stop request in the
-      // SAME statement — that is how a stop reaches a turn running in another
-      // process without giving the turn a bus subscription (subscribing would
-      // join it to the room's presence set as a phantom viewer).
-      //
-      // Deliberately a wall-clock interval, not something driven by loop
-      // progress: a turn suspended on a tool confirmation is alive and must
-      // keep its lease. Liveness is not progress. Whether the user is seeing
-      // anything happen is a separate question, answered in the client.
       // ── SSE keepalive ──
-      // A long tool call (a delegated page build on a slow provider ran 60-77s
-      // per model call) writes NOTHING to the stream while it runs, and an
+      // Already running since the header flush (`startSseKeepalive`). A long
+      // tool call (a delegated page build on a slow provider ran 60-77s per
+      // model call) or a slow preparation writes NOTHING to the stream, and an
       // HTTP proxy in front of us (Cloudflare closes an idle response after
-      // 100s) then drops the client's connection while the turn is alive. The
-      // client sees a dead stream, the user re-sends, and the live-turn guard
-      // above has to refuse them. A comment line every 15s keeps the response
+      // 100s) would then drop the client's connection while the turn is alive.
+      // The client sees a dead stream, the user re-sends, and the live-turn
+      // guard has to refuse them. A comment line every 15s keeps the response
       // non-idle; SSE parsers ignore lines starting with ':' (ours does).
-      sseKeepalive = setInterval(() => {
-        if (clientGone || res.writableEnded) return
-        res.write(': keepalive\n\n')
-      }, SSE_KEEPALIVE_INTERVAL_MS)
 
-      if (turnLeaseToken) {
-        const heldToken = turnLeaseToken
-        abortRegistryToken = heldToken
-        registerTurnAbort(session.id, heldToken, () => abortController.abort())
-        // The lease heartbeat (lost lease or stop request -> abort) runs in
-        // the turn kernel for the life of the loop.
-      }
       // Room turns record WHO addressed the assistant this turn — the only
       // member (besides a workspace admin) who may resolve this turn's write
       // confirmations (multiplayer chat T11/D8).
@@ -7529,41 +7231,35 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             return tool.execute(input, context)
           } })
         }
-        const preparedRun = await prepareAssistantRun({
-          executionContext,
-          beforeAssembly: assertDeliveryAudience,
-          model: {
-            provider: turnProvider,
-            model,
-            maxTokens: customLlmRuntime?.maxTokens,
-            inputTokenLimit: customLlmRuntime?.inputTokenLimit,
-          },
-          candidateTools: loopTools,
-          bindTools: (candidateTools, execution) => {
-            const bound=bindToolsToAgentAccess(candidateTools, {
-              clearance: execution.security.access.clearance, compartments: execution.security.access.compartments,
-              mutationCompartments: execution.security.access.mutationCompartments, projectIds: execution.security.access.projectIds,
-              sharedAudience: execution.security.access.sharedAudience,
-            })
-            for(const [name,tool] of preparedConnectors.routineCalendarTools??[]){
-              if(candidateTools.get(name)===tool && bound.has(name))boundRoutineCalendarTools.set(name,inheritRoutineCalendarRead(tool,bound.get(name)!))
-            }
-            return bound
-          },
-          trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }, ...(pageDiscussion ? [{
+        const scopedTools = turnOwner.prepareTools(loopTools)
+        for (const [name, tool] of preparedConnectors.routineCalendarTools ?? []) {
+          if (loopTools.get(name) === tool && scopedTools.has(name)) {
+            boundRoutineCalendarTools.set(name, inheritRoutineCalendarRead(tool, scopedTools.get(name)!))
+          }
+        }
+        const preparedRun = await ownedTurn.prepareRun({
+          systemPrompt: splitPrompt.stablePrompt,
+          messages,
+          candidateTools: scopedTools,
+          trustedContributions: [{ name: 'runtime', content: runtimeSystemContext },
+            ...(fileIntentContext ? [{ name: 'attachment_intent', content: fileIntentContext }] : []), ...(pageDiscussion ? [{
             name: 'page_discussion', content: `This turn starts with the current Page and newest comment. Earlier discussion remains available through getCommentThread({threadId: ${JSON.stringify(pageDiscussion.id)}}). If the request refers to earlier comments, choices or decisions, read that discussion before answering or editing. Do not ask the person to repeat it.`,
           }] : [])],
           userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
         })
+        const systemPromptWithPreflight = renderSystemContext({
+          systemPrompt: splitPrompt.stablePrompt, runtimeSystemContext: preparedRun.grounding.runtimeContext,
+        })
+        replyEvidence.note(systemPromptWithPreflight)
+        replyEvidence.note(preparedRun.grounding.userVisibleContext)
+        if (typeof message === 'string') replyEvidence.note(message)
         const routineDeclineReason = routineCalendarReadDeclineReason({
           // Preserve the selector's supported profile independently of admission ownership.
-          nativeOutput: Boolean(!programmatic && !permissionContext && nativeTranscriptAuthority
-            && turnPolicy.deliveryCeiling.ceiling === 'owner' && !executionContext.security.access.sharedAudience
-            && classifySession(session).surface === 'chat'),
+          nativeOutput: routineNativeOutput,
           nativeTranscript: Boolean(nativeTranscriptAuthority),
           decisionRuntime: Boolean(options.decisionRuntime), research: researchMode, coordinator: coordinatorMode,
           site: Boolean(operateSiteIntent), document: Boolean(docCtx), modelRoute: customLlmRuntime,
-          calendarTools: boundRoutineCalendarTools, preparedTools: preparedRun.tools,
+          calendarTools: boundRoutineCalendarTools, adoptsTool: preparedRun.adoptsTool,
         })
         console.info('[chat] routine eligibility', {
           reason: routineDeclineReason ?? 'eligible',
@@ -7579,32 +7275,57 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         // Tool executions arrive as `tool_start` per call and ONE `tool_result`
         // per batch; the batch's wall-clock is what the turn waited for.
         let toolBatchStartedAt: number | null = null
-        const turnLoopResult = await runAssistantTurn({
-          sessionId: session.id,
-          policy: turnPolicy,
-          abortController,
-          lease: { mode: 'held', token: turnLeaseToken },
+        let completedForMetering=false
+        const reportUsageError = options.analytics?.logEvent.bind(options.analytics)
+        const originalUsageIdentity = { userId: user.id, assistantId: assistant.id, sessionId: session.id }
+        const turnUsedByoKey = usedByoKey && (!customLlmRuntime || customLlmRuntime.providerKeySource === 'user')
+        const originalMetered = meteredTurn ? { ...meteredTurn } : null
+        const originalWorkspaceId = assistant.workspaceId
+        const originalUserMessageId = storedUserMsg.id
+        const chargeOriginalSurcharge = options.chargeMeteredSurcharge?.bind(options)
+        if (options.usageStore) ownedTurn.registerUsageBilling({
+          metadata: {
+            ...turnUsageIdentity(turnBilling), assistantId: assistant.id, sessionId: session.id,
+            modelTier: logicalTier, source: userPlan === 'free' ? 'free' : 'included',
+            userMessageId: storedUserMsg.id, triggerKey: 'main_response',
+            providerKeySource: turnUsedByoKey ? 'user' : 'platform',
+          },
+          costPolicy: 'calculate', recordUsage: options.usageStore.recordUsage.bind(options.usageStore),
+          onError: error => {
+            console.error('Usage tracking failed:', error)
+            reportUsageError?.({ ...originalUsageIdentity, eventName: 'usage_tracking_error', channelType: 'web',
+              metadata: { error_type: sanitize((error as Error)?.name ?? 'unknown') } })
+          },
+          afterSettlement: async row => {
+            // Keep the existing completion-only, message-idempotent surcharge.
+            if (!completedForMetering || !originalMetered || !originalWorkspaceId || !chargeOriginalSurcharge) return
+            await chargeOriginalSurcharge({
+              workspaceId: originalWorkspaceId, requestId: originalUserMessageId,
+              modelAlias: originalMetered.alias, profileId: originalMetered.profileId,
+              toolRounds: originalMetered.toolRounds, modelCostUsd: row.actualCostUsd,
+              chargedByUserId: originalUsageIdentity.userId,
+            }).then(({ credits }) => {
+              reportUsageError?.({ ...originalUsageIdentity, eventName: 'metered_turn_charged', channelType: 'web',
+                metadata: { model: sanitize(originalMetered.alias), tool_rounds: originalMetered.toolRounds,
+                  credits, cost_usd_micro: Math.round(row.actualCostUsd * 1_000_000) } })
+            }).catch(error => {
+              console.error('[chat] metered surcharge failed:', error)
+              reportUsageError?.({ ...originalUsageIdentity, eventName: 'metered_charge_error', channelType: 'web',
+                metadata: { error_type: sanitize((error as Error)?.name ?? 'unknown') } })
+            })
+          },
+        })
+        const turnLoopResult = await ownedTurn.run({
           // BYO-aware: when the workspace set its own Gemini key, the main
           // response runs against that provider (else the platform provider).
-          model: {
-            provider: preparedRun.model.provider,
-            model: preparedRun.model.model,
-            configuredProviders: turnOptions.configuredProviders,
-            customLlm: customLlmRuntime,
-          },
+
           loop: {
           ledger: turnLedgerHandle.ledger,
-          maxTokens: preparedRun.model.maxTokens,
-          inputTokenLimit: preparedRun.model.inputTokenLimit,
-          systemPrompt: splitPrompt.stablePrompt,
-          runtimeSystemContext: preparedRun.trustedContext,
-          messages,
-          tools: preparedRun.tools,
           // Presentation-only opt-in: capable drivers use the registration plan;
           // legacy/custom and eager fallback drivers retain the complete tools list.
           deferToolSchemas: true,
           routineCalendarRead: routineDeclineReason === null && options.decisionRuntime ? {
-              runtime:options.decisionRuntime, llm:{provider:preparedRun.model.provider,modelId:preparedRun.model.model},
+              runtime:options.decisionRuntime, llm:{provider:preparedModel.provider,modelId:preparedModel.model},
               workspaceId:assistant.workspaceId??undefined, calendarTools:boundRoutineCalendarTools,historyCalls:routineHistoryCalls,
               onResult:async result=>{
                 turnTiming.add('routine_planning',result.durationMs)
@@ -7617,10 +7338,10 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             } : undefined,
           toolSelection: options.decisionRuntime && storedUserSource && rawMessage?.trim() ? {
             runtime: options.decisionRuntime, workspaceId: assistant.workspaceId ?? undefined,
-            preselected: adaptive?.toolNames,
+            preselected: route.research.toolNames,
             input: {
               messages: [bindScopeSources<Message>({ role: 'user', content: rawMessage }, [storedUserSource])],
-              assertInputAuthority: () => assertSourceModelInputAuthority({
+              assertInputAuthority: () => admitModelInput({
                 ...executionToolContext(executionContext, { appId: 'native-tool-selection' }), scopeAccumulator: selectionScope,
               }),
             },
@@ -7636,7 +7357,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           } : undefined,
           context: {
             ...(classifySession(session).anchor.kind === 'doc_thread'
-              ? { assertModelInputAuthority: async () => { await assertDeliveryAudience() } } : {}),
+              ? { admitModelInput: assertLegacyDeliveryAudience } : {}),
             ...executionToolContext(executionContext, { appId: 'Use Brian' }),
             workerRuntime: customLlmRuntime
               ? {
@@ -7717,7 +7438,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
                         description,
                         displayLines,
                         allowPersistentApproval,
-                        ...(turnLeaseToken ? { turnLeaseToken } : {}),
+                        ...(ownedTurn.token ? { turnLeaseToken: ownedTurn.token } : {}),
                         ...(decisionPlaybookContext.decisionApplicationId
                           ? { decisionApplicationId: decisionPlaybookContext.decisionApplicationId }
                           : {}),
@@ -7894,15 +7615,16 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           turnInbox: turnInbox.port,
           },
           sink: { kind: 'sse', ...(permissionContext
-            ? { permissionContext, assertOutputAuthority: permissionContext.authorizeDelivery,
+            ? { permissionContext, admitOutput: permissionContext.authorizeDelivery,
                 onOutputAuthorityTiming: (ms: number) => turnTiming.add('audience_check', ms) }
-            : nativeTranscriptAuthority || classifySession(session).anchor.kind === 'doc_thread' ? { assertOutputAuthority:assertDeliveryAudience } : {}),
-          onReplyTextComplete: () => postReply.announceTextCompletion(() => {
+            : nativeTranscriptAuthority || classifySession(session).anchor.kind === 'doc_thread' ? { admitOutput:() => assertDeliveryAudience() } : {}),
+          onReplyTextComplete: () => ownedTurn.announceTextCompletion(() => {
             sendActivityEvent('reply_text_complete', {})
             turnStream.setReplyPhase('saving')
           }), afterLoop: async (result) => {
-            if (postReply.beginFinalization(result, !!queryLoopError, abortController.signal)) {
-              postReply.announceTextCompletion(() => {
+            finalizedOutput = !queryLoopError ? finalizedTurnOutput(result) : null
+            if (ownedTurn.beginFinalization(result, !!queryLoopError)) {
+              ownedTurn.announceTextCompletion(() => {
                 sendActivityEvent('reply_text_complete', {})
                 turnStream.setReplyPhase('saving')
               })
@@ -7920,7 +7642,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
               && session.assistantId === assistant.id && !roomResponseGroupContext
               && !(docToolsTurn && docWrittenPageIds.size > 0)) {
               await publishReply()
-              if (postReply.isPublishedReply() && lastAssistantMessageId) {
+              if (turnOwner?.isPublishedReply() && lastAssistantMessageId) {
                 try {
                   const queued = await options.enqueueSessionStateJob({ authority: nativeTranscriptAuthority,
                     claims: pinSessionTitleClaims(req), userMessageId: storedUserMsg.id, assistantMessageId: lastAssistantMessageId })
@@ -7942,7 +7664,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
               accumulator: new ContextScopeAccumulator(structuredClone(scopeAccumulator.evidence)) }
             let publicationFailed = false
             try {
-              const result = await afterReplyPublication(async () => {
+              const result = await ownedTurn.afterReplyPublication(async () => {
                 try { await publishReply() } catch (error) { publicationFailed = true; throw error }
               }, () => turnTiming.time('session_state_diff', () => runTurnSessionStateDiff({
                 authority: diffAuthority,
@@ -7978,9 +7700,10 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
               if (publicationFailed || isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) throw err
               console.debug('[chat] session-state diff unavailable')
             }
-          }, onEvent: async (event) => {
+          }, onEvent: async (event, provenance) => {
           if (!nativeTranscriptAuthority) await assertDeliveryAudience()
           researchObserver?.observe(event)
+          bufferedOutput.observe(event, provenance)
 
           if (event.type === 'text_delta') {
             turnTiming.observe('first_text')
@@ -8368,11 +8091,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             // to claim-across-turns. Intermediate tool_use turns reach the
             // buffer here — `turn_complete` would skip them because it's
             // terminal-only.
-            pendingAssistantTurns.push({
-              content: event.response.content,
-              toolResults: event.toolResults,
-              stopReason: event.response.stopReason ?? 'unknown',
-            })
+            // The private output observer already inserted/revised the exact origin.
           }
           if (event.type === 'tool_confirmation_required') {
             const enrichedInput = await enrichConfirmation(event.request.toolName, event.request.input)
@@ -8461,6 +8180,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             }
           }
           if (event.type === 'turn_complete') {
+            completedForMetering=true
             // Track cost (fires once — terminal event).
             // Use totalUsage (accumulated across ALL query-loop turns) rather
             // than response.usage (last turn only) so intermediate tool-use
@@ -8504,64 +8224,6 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
               const cost = turnUsedByoKey
                 ? 0
                 : calculateCost(event.response.model, usage)
-              options.usageStore.recordUsage({
-                ...turnUsageIdentity(turnBilling),
-                assistantId: assistant.id,
-                sessionId: session.id,
-                model: event.response.model,
-                modelTier: logicalTier,
-                inputTokens: usage.inputTokens,
-                outputTokens: usage.outputTokens,
-                cacheReadTokens: usage.cacheReadTokens,
-                cacheWriteTokens: usage.cacheWriteTokens,
-                actualCostUsd: cost,
-                source: userPlan === 'free' ? 'free' : 'included',
-                userMessageId: storedUserMsg.id,
-                triggerKey: 'main_response',
-                providerKeySource: turnUsedByoKey ? 'user' : 'platform',
-              }).catch((err) => {
-                console.error('Usage tracking failed:', err)
-                options.analytics?.logEvent({
-                  userId: user.id, assistantId: assistant.id, sessionId: session.id,
-                  eventName: 'usage_tracking_error', channelType: 'web',
-                  metadata: { error_type: sanitize((err as Error)?.name ?? 'unknown') },
-                })
-              })
-
-              // Metered lane debit (L8): 5 + ceil(cost/$0.040), charged on
-              // COMPLETION at actual measured cost, idempotent on the stored
-              // user message id (a stream retry can't double-charge). A
-              // failed turn never reaches here, so it charges nothing.
-              if (meteredTurn && assistant.workspaceId && options.chargeMeteredSurcharge) {
-                const chargedMetered = meteredTurn
-                options.chargeMeteredSurcharge({
-                  workspaceId: assistant.workspaceId,
-                  requestId: storedUserMsg.id,
-                  modelAlias: chargedMetered.alias,
-                  profileId: chargedMetered.profileId,
-                  toolRounds: chargedMetered.toolRounds,
-                  modelCostUsd: cost,
-                  chargedByUserId: user.id,
-                }).then(({ credits }) => {
-                  options.analytics?.logEvent({
-                    userId: user.id, assistantId: assistant.id, sessionId: session.id,
-                    eventName: 'metered_turn_charged', channelType: 'web',
-                    metadata: {
-                      model: sanitize(chargedMetered.alias),
-                      tool_rounds: chargedMetered.toolRounds,
-                      credits,
-                      cost_usd_micro: Math.round(cost * 1_000_000),
-                    },
-                  })
-                }).catch((err) => {
-                  console.error('[chat] metered surcharge failed:', err)
-                  options.analytics?.logEvent({
-                    userId: user.id, assistantId: assistant.id, sessionId: session.id,
-                    eventName: 'metered_charge_error', channelType: 'web',
-                    metadata: { error_type: sanitize((err as Error)?.name ?? 'unknown') },
-                  })
-                })
-              }
 
               options.analytics?.logEvent({
                 userId: user.id, assistantId: assistant.id, sessionId: session.id,
@@ -8592,7 +8254,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
                   liveOutline: docLiveOutlineStr,
                   outlineBlockCount: docOutlineBlockCount,
                   memoryContext,
-                  messages,
+                  messages: preparedRun.messageSnapshot(),
                   pageBlockCount: docPageBlockCount,
                   pageVersion: docPageVersion,
                   usage,
@@ -8678,6 +8340,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           abortController.signal.aborted || !!queryLoopError,
           turnLoopResult.selection.kind === 'question',
         )
+        if (ownedTurn.abortKind === 'stop') throw new TurnStoppedError()
 
         if (queryLoopError && !recoveryDelivered) {
           let closingPersisted = false
@@ -8692,20 +8355,16 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
               signal: abortController.signal,
               canWrite: async () => {
                 await assertDeliveryAudience()
-                if (!turnLeaseToken) return false
-                const { held, cancelRequested } = await touchTurnLease(session.id, turnLeaseToken)
+                if (!ownedTurn.token) return false
+                const { held, cancelRequested } = await touchTurnLease(session.id, ownedTurn.token)
                 if (!held || cancelRequested) abortController.abort()
                 return held && !cancelRequested
               },
               persist: async (text) => {
                 await assertDeliveryAudience()
-                const saved = await authority.execute(() => addSessionMessage({
-                  sessionId: session.id,
-                  role: 'assistant',
-                  content: [{ type: 'text', text }],
-                  senderAssistantId: assistant.id,
-                  ...currentTurnWrite(),
-                }))
+                const [saved] = await ownedTurn.publish({ disposition: 'closing', write: publicationWrite(),
+                  native: nativeTranscriptAuthority, execute: operation => authority.execute(operation),
+                  rows: [{ role: 'assistant', content: [{ type: 'text', text }], senderAssistantId: assistant.id }] })
                 await assertDeliveryAudience()
                 closingPersisted = true
                 lastAssistantMessageId = saved.id
@@ -8854,8 +8513,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             if (synthesised) {
               await assertDeliveryAudience()
               sendEvent('text_delta', { text: synthesised })
-              await authority.execute(() => addSessionMessage({
-                sessionId: session.id,
+              await ownedTurn.publish({ disposition: 'closing', write: publicationWrite(),
+                native: nativeTranscriptAuthority, execute: operation => authority.execute(operation), rows: [{
                 role: 'assistant',
                 content: [{ type: 'text', text: synthesised }],
                 // Stamp the ANSWERING assistant, exactly like the normal
@@ -8868,8 +8527,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
                 // @CFO turn and then inherited "I'd need QuickBooks" as its
                 // own position. See db/sessions.ts → `assistantVoices`.
                 senderAssistantId: assistant.id,
-                ...currentTurnWrite(),
-              }))
+              }] })
             } else {
               await assertDeliveryAudience()
               sendEvent('text_delta', {
@@ -8928,14 +8586,13 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             // without this the chat scroll-back would show
             // tool_use + tool_result with no narration, exactly the
             // ambiguous state the helper was added to avoid.
-            await authority.execute(() => addSessionMessage({
-              sessionId: session.id,
+            await ownedTurn.publish({ disposition: 'closing', write: publicationWrite(),
+              native: nativeTranscriptAuthority, execute: operation => authority.execute(operation), rows: [{
               role: 'assistant',
               content: [{ type: 'text', text: recovered.text }],
               // Same attribution contract as the empty-turn synthesis above.
               senderAssistantId: assistant.id,
-              ...currentTurnWrite(),
-            }))
+            }] })
             await recordOverheadUsage({
               usageStore: options.usageStore,
               userId: user.id,
@@ -8962,16 +8619,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // SSE event is emitted inside the flush.
       void lastAssistantMessageId
 
-      // Release the lease we took at claim time, recording that this turn
-      // ended the way it was meant to. Token-guarded inside, so if our lease
-      // was reclaimed mid-turn this is a no-op rather than an unlock of
-      // whoever owns the session now. The `finally` is idempotent behind this.
-      if (turnLeaseToken) {
-        turnReleased = await releaseTurn(session.id, turnLeaseToken, 'completed')
-        if (turnReleased) turnLeaseToken = null
-      }
+      await ownedTurn.finish()
       activeResolvers.delete(session.id)
-      if (abortRegistryToken) unregisterTurnAbort(session.id, abortRegistryToken)
       roomTurnAddressers.delete(session.id)
       // WU-6.4 — drop any fast-path index entries for this session. If an
       // approval is still genuinely pending at stream close (rare — the
@@ -8985,11 +8634,12 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // re-enable their input boxes — draft sessions and workspace-shared
       // chats both take one turn at a time, so this event is what clears the
       // other viewers' busy state. No-op for personal sessions.
-      if (turnReleased && (turnPolicy.liveFollow || (isBackgroundTurn && clientGone))) {
+      if (turnOwner?.released && (turnPolicy.liveFollow || (isBackgroundTurn && clientGone))) {
         publishSessionEvent({
           kind: 'turn_completed',
           sessionId: session.id,
-          payload: { senderUserId: programmatic ? null : user.id },
+          payload: { senderUserId: programmatic ? null : user.id,turnId:turnOwner?.turnId??null,
+            ...(turnOwner?.completionReason&&turnOwner.completionReason!=='completed'?{reason:turnOwner.completionReason}:{}) },
         })
         turnCompletionPublished = true
       }
@@ -8997,8 +8647,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // The reply is durable and the turn is released. Keep metadata work
       // awaited under the original authority, but let ordinary chat clients
       // settle their reply before that work. Doc turns still owe page effects.
-      if (turnReleased && !docCtx && !(docToolsTurn && docWrittenPageIds.size > 0) && !roomResponseGroupContext && postReply.isPublishedReply()) {
-        turnInboxHandle?.close()
+      if (turnOwner?.released && !docCtx && !(docToolsTurn && docWrittenPageIds.size > 0) && !roomResponseGroupContext && turnOwner?.isPublishedReply()) {
         sendEvent('reply_complete', {})
         turnTiming.add('reply_ready', turnTiming.snapshot().total_ms)
       }
@@ -9009,8 +8658,9 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // → Model routing (extraction / classification / structured-output bucket).
       const nudgeModel = backgroundModel
       try {
-        const nudgeResult = await authority.execute(() => runMemoryNudge({
+        const nudgeResult = await runMemoryNudge({
           turns: pendingAssistantTurns,
+          execute: operation => authority.execute(operation),
           callModel: async (prompt, llm) => {
             const nudgeProvider = llm?.provider ?? backgroundProvider
             const resolvedNudgeModel = llm?.modelId ?? nudgeModel
@@ -9031,8 +8681,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         llm: { provider: backgroundProvider, modelId: nudgeModel },
         workspaceId: assistant.workspaceId ?? undefined,
         runId: `memory-usefulness-${storedUserMsg.id}`,
-        }))
-        await authority.execute(() => recordOverheadUsage({
+        })
+        if (options.usageStore && nudgeResult.model && nudgeResult.usage) await authority.execute(() => recordOverheadUsage({
           usageStore: options.usageStore,
           userId: user.id,
           assistantId: assistant.id,
@@ -9053,7 +8703,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // this request's live execution or transcript in a detached promise.
       let titleQueued = false
       const metadataKind = classifySession(session)
-      if (!programmatic && options.enqueueSessionTitleJob && nativeTranscriptAuthority && turnReleased && postReply.isPublishedReply()
+      if (!programmatic && options.enqueueSessionTitleJob && nativeTranscriptAuthority && turnOwner?.released && turnOwner?.isPublishedReply()
         && metadataKind.anchor.kind === 'none' && metadataKind.transport === 'web' && metadataKind.lane === 'conversation'
         && session.assistantId === assistant.id
         && !roomResponseGroupContext && !(docToolsTurn && docWrittenPageIds.size > 0)) {
@@ -9075,13 +8725,16 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // title as an auto-generated placeholder to replace (isPlaceholderTitle —
       // open default false), or every ~10 human turns. The NULL check is robust
       // against tool-use inflating the message count.
-      const currentTitle = !pageBoundTurn && !titleQueued && nativeTranscriptAuthority ? await readSessionTitle(session.id,nativeTranscriptAuthority) : null
+      const recordTitle = !pageBoundTurn && !titleQueued && nativeTranscriptAuthority && preparedHistory?.source === 'record'
+        ? await prepareAttendedRecordTitle(nativeTranscriptAuthority, pinSessionTitleClaims(req)) : null
+      const currentTitle = recordTitle ? recordTitle.previous : !pageBoundTurn && !titleQueued && nativeTranscriptAuthority
+        ? await readSessionTitle(session.id,nativeTranscriptAuthority) : null
       const needsFirstTitle = !currentTitle || isPlaceholderTitle(currentTitle.title)
       const isNotification = classifySession(session).anchor.kind === 'inbox'
       let shouldTitle = !pageBoundTurn && !titleQueued && needsFirstTitle && !isNotification && !currentTitle?.manual
       if (!pageBoundTurn && !titleQueued && !shouldTitle && !isNotification && !currentTitle?.manual) {
-        const turnCount = nativeTranscriptAuthority
-          ? await attendedSessionTurnCount(nativeTranscriptAuthority,dbMessages)
+        const turnCount = recordTitle ? recordTitle.turnCount : nativeTranscriptAuthority
+          ? await preparedHistory!.readTurnCount!(nativeTranscriptAuthority)
           : Math.floor(await authority.execute(() => countSessionTurns(session.id)) / 2)
         shouldTitle = turnCount > 1 && turnCount % 10 === 0
       }
@@ -9092,7 +8745,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         const autoTitleModel = backgroundModel
         const autoTitle = (async () => {
           try {
-            const titleResult = nativeTranscriptAuthority
+            const titleResult = recordTitle ? await recordTitle.generate(backgroundProvider,autoTitleModel,getTitleChannelPrefix) : nativeTranscriptAuthority
               ? await generateAttendedSessionTitle({authority:nativeTranscriptAuthority,provider:backgroundProvider,model:autoTitleModel,channelPrefix:getTitleChannelPrefix})
               : await (async()=>{
                 const freshDbMessages = await authority.execute(() => getSessionMessages(session.id, { limit: 10, excludeHeld: true }))
@@ -9127,7 +8780,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             const written = nativeTranscriptAuthority ? titleResult.written
               : await authority.execute(() => updateSessionTitle(session.id, finalTitle))
             if (written && !res.writableEnded) {
-              await assertDeliveryAudience()
+              if (!recordTitle) await assertDeliveryAudience()
               sendEvent('title_update', { sessionId: session.id, title: finalTitle })
             }
             await recordOverheadUsage({
@@ -9309,8 +8962,14 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       sendEvent('done', {})
       res.end()
     } catch (err) {
-      const postReplyNotice = postReply.notice(err)
-      turnTimingOutcome = postReplyNotice ? 'completed_follow_up_interrupted' : 'error'
+      const postReplyNotice = turnOwner?.notice(err) ?? null
+      // A confirmed Stop is an outcome, never a failure (chat-app.md "Stopping
+      // a turn", M5Q-1): whatever the aborted preparation threw (the kernel's
+      // TurnStoppedError, an aborted classifier's refused context), the stream
+      // ends as a stopped turn and the owner settles `stopped_by_user`.
+      const stoppedByUser = !postReplyNotice && !recoveryDelivered
+        && (turnOwner?.abortKind === 'stop' || err instanceof TurnStoppedError)
+      turnTimingOutcome = postReplyNotice ? 'completed_follow_up_interrupted' : stoppedByUser ? 'stopped' : 'error'
       // A `ChatTurnRefusal` is not a crash — it is this route declining the
       // turn after the SSE headers went out, and it arrives here only
       // because the catch owns the cleanup (see the class doc). It carries
@@ -9318,6 +8977,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // not the generic banner, so it must not be flattened into one.
       const refusal = err instanceof ChatTurnRefusal ? err : null
       if (postReplyNotice) console.info('[chat] post-reply processing stopped: authority_changed')
+      else if (stoppedByUser) console.info('[chat] turn stopped by user before completion')
       else if (!refusal) console.error('Chat error:', err)
       // When the inner catch already delivered a context-aware recovery
       // message, surface a clean `done` so the client treats the turn
@@ -9331,41 +8991,21 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         sendEvent('done', {})
       } else if (recoveryDelivered) {
         sendEvent('done', {})
+      } else if (stoppedByUser) {
+        sendEvent('done', { stopped: true, reason: 'stopped_by_user', turnId: turnOwner?.turnId ?? null })
       } else {
         sendEvent('error', chatTurnErrorEvent(err, { sharedAudience: sharedAudienceForError }))
       }
-      // If a turn_started was broadcast for a draft session before the
-      // crash, pair it with turn_completed so collaborators don't see the
-      // input dimmed forever. We don't know the senderUserId from outer
-      // scope here, so the SSE consumers should treat any turn_completed
-      // as "the lock is released" rather than per-user.
-      if (sessionIdForError && userIdForError) {
-        try {
-          // A metadata failure after release belongs to this old turn. It must
-          // not clear a successor's activity on the session-only event bus.
-          if (!turnReleased && !turnCompletionPublished) {
-            // Best-effort — failure here must not mask the original error.
-            publishSessionEvent({
-              kind: 'turn_completed',
-              sessionId: sessionIdForError,
-              // Mirror the outcome, never the private exception or diagnostic.
-              // A returning viewer no longer owns the POST error stream.
-              payload: { senderUserId: userIdForError,
-                ...(!postReplyNotice && !recoveryDelivered ? { reason: 'failed' as const } : {}),
-              },
-            })
-            turnCompletionPublished = true
+      // Only a confirmed exact-owner settlement emits lifecycle completion.
+      if(sessionIdForError&&userIdForError){
+        try{
+          await turnOwner?.finish(stoppedByUser?'stopped_by_user':!postReplyNotice&&!recoveryDelivered&&(err as Error)?.name!=='AbortError'?'failed':'completed')
+          if(turnOwner?.released&&!turnCompletionPublished){
+            publishSessionEvent({kind:'turn_completed',sessionId:sessionIdForError,payload:{senderUserId:userIdForError,
+              turnId:turnOwner.turnId,...turnOwner.completionReason&&turnOwner.completionReason!=='completed'?{reason:turnOwner.completionReason}:{}}})
+            turnCompletionPublished=true
           }
-        } catch { /* ignore */ }
-        // Also flip status back to idle so subsequent turns aren't blocked
-        // by the concurrent-turn guard. Token-guarded when we hold a lease.
-        try {
-          if (turnLeaseToken) {
-            await releaseTurn(sessionIdForError, turnLeaseToken,
-              !postReplyNotice && !recoveryDelivered && (err as Error)?.name !== 'AbortError' ? 'failed' : 'completed')
-            turnLeaseToken = null
-          }
-        } catch { /* ignore */ }
+        }catch{/* cleanup cannot replace the original failure */}
       }
       // Only log if we have at least user context — earlier failures (e.g.
       // user lookup crash) go to console only since analytics_events requires
@@ -9392,7 +9032,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           eventName: 'chat_turn_refused', channelType: 'web',
           metadata: { reason: sanitize(refusal.code) },
         })
-      } else if (userIdForError) {
+      } else if (userIdForError && !stoppedByUser) {
         options.analytics?.logEvent({
           userId: userIdForError,
           assistantId: assistantIdForError ?? undefined,
@@ -9436,24 +9076,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // Stop the lease heartbeat before anything else — a tick that fires
       // after the release would resurrect nothing (it is token-guarded) but
       // would keep a timer alive past the turn.
-      if (sseKeepalive) {
-        clearInterval(sseKeepalive)
-        sseKeepalive = null
-      }
-      // RELEASE THE LOCK. This is the exit path the pre-424 code did not have,
-      // and its absence is the whole 2026-08-08 incident: `status` was cleared
-      // only on the happy path and in the catch, so an exit reaching neither
-      // (process death, an abort that severs the handler, an escaping
-      // rejection) pinned the session at `running` permanently. Token-guarded,
-      // so a turn whose lease was already reclaimed cannot unlock the
-      // successor that now owns this session. Idempotent: the success and
-      // catch paths null the token after their own release.
-      if (leaseSessionId && turnLeaseToken) {
-        // `releaseTurn` logs a failure; the sweeper then reads the lease we
-        // failed to clear, so it WILL fire.
-        await releaseTurn(leaseSessionId, turnLeaseToken, 'completed')
-        turnLeaseToken = null
-      }
+      stopSseKeepalive()
+      await turnOwner?.finish()
       // Evict this turn's confirmation state on error/abort exits — the
       // success path already cleared it before `done`. Identity-guarded:
       // the catch above flips the session back to idle, so a successor turn
@@ -9467,11 +9091,6 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           if (entry.sessionId === sessionIdForError) approvalResolverIndex.delete(approvalId)
         }
       }
-      // Same identity guard for the abort handle, on `abortRegistryToken`
-      // rather than `turnLeaseToken` — the success and catch paths null the
-      // latter once they release, and guarding on it would silently skip this
-      // eviction on exactly the paths that reach here with work to do.
-      if (leaseSessionId && abortRegistryToken) unregisterTurnAbort(leaseSessionId, abortRegistryToken)
       // Close the assistant-run presence entry on every exit path (success,
       // error, client-disconnect abort). Best-effort + idempotent; the
       // doc-sync TTL sweeper is the backstop if this POST never lands.
@@ -9481,8 +9100,13 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // Stop holding mid-turn messages for a turn that is over. Identity-
       // guarded inside, so a crashed turn's late close can't evict its
       // successor's inbox.
-      turnInboxHandle?.close()
     }
+  }
+  /** The request's SQL ledger spans the adapter and the owner (turn-kernel.md
+   * "Per-turn SQL accounting phases"); recording off, it enters no frame. */
+  const runTurn = (req: NativeChatRequest, res: NativeChatSink, programmatic?: WorkspaceTurnBinding) => {
+    const sqlScope = openTurnSqlScope()
+    return sqlScope.run(() => runFramedTurn(req, res, programmatic, sqlScope))
   }
   router.post('/', (req, res) => runTurn(req, res))
 
@@ -9507,7 +9131,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
   //
   // Spec: docs/architecture/features/chat-app.md → "Stopping a turn".
   router.post('/stop', async (req, res) => {
-    const { sessionId } = req.body as { sessionId?: string }
+    const { sessionId,turnId } = req.body as { sessionId?: string;turnId?:string|null }
+    if(turnId!==undefined&&turnId!==null&&(typeof turnId!=='string'||!/^[a-f0-9]{64}$/.test(turnId))){res.status(400).json({error:'Invalid turnId'});return}
     if (!sessionId) {
       res.status(400).json({ error: 'Missing sessionId' })
       return
@@ -9521,61 +9146,30 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       const denied = await gateSessionRead(jwtUserId, session)
       if (denied) { res.status(denied.status).json({ error: denied.error }); return }
 
-      if (session.status !== 'running') {
-        res.json({ stopped: false, via: turnStopOutcome({
-          status: session.status, abortedLocally: false, reclaimedStale: false,
-        }) })
-        return
+      const target=await captureTurnCancellation(sessionId,turnId)
+      if(target?.state==='stopped_legacy'){
+        publishSessionEvent({kind:'turn_completed',sessionId,payload:{senderUserId:jwtUserId,turnId:null,reason:'stopped_by_user'}})
+        res.json({stopped:true,via:'reclaimed',turnId:null,reason:'stopped_by_user'});return
       }
-
-      const stopper = await resolveUser(jwtUserId)
-      const stoppedByName = stopper?.name ?? null
-
-      // 1. Same-process turn: abort immediately.
-      const abortedLocally = abortLocalTurn(sessionId)
-
-      // 2. Any process: record the intent. The holder's next heartbeat tick
-      //    picks it up (<= TURN_HEARTBEAT_INTERVAL_MS) and aborts itself. Set
-      //    even when we aborted locally — belt and braces cost one UPDATE.
-      await requestTurnCancel(sessionId)
-
-      // 3. Phantom check. If the lease is already stale nobody is coming to
-      //    honour that cancel, so release the lock right now rather than
-      //    leaving the room blocked until the sweeper's next tick.
-      const reclaimedStale = await reclaimStaleTurn(sessionId)
-
-      const outcome = turnStopOutcome({
-        status: session.status,
-        abortedLocally,
-        reclaimedStale,
-      })
-
-      if (outcome === 'reclaimed') {
-        // No turn will ever publish a completion for this session, so publish
-        // it ourselves or every Live card keeps spinning.
-        publishSessionEvent({
-          kind: 'turn_completed',
-          sessionId,
-          payload: { senderUserId: jwtUserId, reason: 'stalled_reclaimed', stoppedByName },
-        })
-      } else if (outcome === 'aborted') {
-        await releaseTurnLease(sessionId, 'stopped_by_user', null)
-        publishSessionEvent({
-          kind: 'turn_completed',
-          sessionId,
-          payload: { senderUserId: jwtUserId, reason: 'stopped_by_user', stoppedByName },
-        })
+      if(target?.state!=='cancel_requested'){
+        res.json({stopped:false,via:'not_running',turnId:turnId??null,
+          ...(target?.state==='superseded'?{outcome:'superseded'}:{})});return
       }
-      // `cancel_requested`: the turn is alive in another process and is still
-      // writing. It releases its own lease and publishes its own completion —
-      // freeing the slot from here would let a second turn claim a session the
-      // first is mid-reply on.
+      const stopper=await resolveUser(jwtUserId),stoppedByName=stopper?.name??null
+      // Capture precedes abort. Every subsequent operation compares T, so an
+      // intervening successor cannot be aborted or administratively released.
+      const abortedLocally=abortLocalTurn(sessionId,target.token)
+      const reclaimed=await reclaimStaleTurnOutcome(sessionId,undefined,target.token)
+      const released=reclaimed??(abortedLocally?await releaseTurnOutcome(sessionId,'stopped_by_user',target.token):null)
+      const outcome=turnStopOutcome({status:'running',abortedLocally,reclaimedStale:!!reclaimed})
+      if(released)publishSessionEvent({kind:'turn_completed',sessionId,payload:{senderUserId:jwtUserId,
+        turnId:released.turnId,reason:released.reason==='completed'?undefined:released.reason,stoppedByName}})
 
       options.analytics?.logEvent({
         userId: jwtUserId, sessionId, eventName: 'turn_stopped', channelType: 'web',
         metadata: { via: sanitize(outcome) },
       })
-      res.json({ stopped: true, via: outcome, stoppedByName })
+      res.json({ stopped: true, via: outcome, stoppedByName,turnId:target.turnId,reason:released?.reason??null })
     } catch (err) {
       console.error('Turn stop error:', err)
       res.status(500).json({ error: 'Failed to stop the turn' })

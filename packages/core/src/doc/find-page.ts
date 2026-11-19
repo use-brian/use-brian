@@ -34,7 +34,7 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '../tools/types.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import type { SavedViewListRow, SavedViewStore } from '../views/types.js'
 import type { DocPageStore } from './tools.js'
 import { pageToMarkdown } from './to-markdown.js'

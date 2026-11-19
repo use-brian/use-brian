@@ -5,7 +5,7 @@ import { createOfficeReleaseRuntime } from '../../office/release-runtime.js'
 import { createOfficeTemplateStore } from '../../db/office-templates.js'
 import { artifactReadableForViewer } from '../../db/research-store.js'
 import { createDbFileStore, getFileCachePreviewProjection } from '../../db/file-store.js'
-import { scopeEvidenceFromRows } from '@use-brian/core'
+import { scopeEvidenceFromRows } from '@use-brian/agent-runtime/security/context-scope.js'
 import { createOfficeReleaseStore } from '../../db/office-release.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
@@ -19,9 +19,10 @@ import { produceTaskGoalDraft } from '../../db/goal-task-producer.js'
 import { resolveRetainedTaskGoalAuthority } from '../../workspace-access/goal-source-admission.js'
 import { getRetainedGoalById, confirmRetainedGoal } from '../../db/goals.js'
 import { resolveBrowserTaskExecutionAuthority } from '../../sandbox/task-execution-authority.js'
-import { assertSourceModelInputAuthority } from '../../application-platform/model-source-authority.js'
-import { ContextScopeAccumulator, executionToolContext } from '@use-brian/core'
-import { createOfficeTools } from '@use-brian/core'
+import { admitModelInput } from '../../context-scope/admission.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { createOfficeTools } from '@use-brian/core/office/tools.js'
 import { createOfficeService } from '../../office/service.js'
 import { officeArtifactStore } from '../../db/office-artifacts.js'
 import { officeGenerationStore } from '../../db/office-generation.js'
@@ -29,7 +30,7 @@ import { createOfficeLiveStore } from '../../db/office-live.js'
 import { resolveOfficeAccess, resolveDurableOfficeAccess } from '../../office/access.js'
 import { withOfficeWorkspaceAuthority } from '../../office/workspace-authority.js'
 import { Writable } from 'node:stream'
-import { createFileTools } from '@use-brian/core'
+import { createFileTools } from '@use-brian/core/workspace-files/tools.js'
 import { createFilesApi } from '../../files/files-api.js'
 import { createChunkedFileUploadService, CHUNKED_UPLOAD_PART_BYTES } from '../../files/chunked-upload.js'
 import { createDbWorkspaceFilesStore } from '../../db/workspace-files-store.js'
@@ -38,7 +39,8 @@ import { createWorkspaceAuditStore } from '../../db/workspace-audit-store.js'
 import type { GcsFilesClient } from '../../files/gcs-client.js'
 import { createDbWorkflowStore, createDbWorkflowRunStore } from '../../db/workflow-store.js'
 import { resolveWorkflowRunScope } from '../../context-scope/workflow-authority.js'
-import { pinToolAuthoringAuthority, workspaceCredentialDelegation } from '@use-brian/core'
+import { pinToolAuthoringAuthority } from '@use-brian/core/security/tool-authority.js'
+import { workspaceCredentialDelegation } from '@use-brian/agent-runtime/security/workspace-delegation.js'
 import { createDbOAuthAuthorizationStore, parseOAuthBearerToken } from '../../db/oauth-authorization-store.js'
 import { createDbOAuthClientStore } from '../../db/oauth-client-store.js'
 import { oauthRoutes } from '../../brain-mcp/oauth/routes.js'
@@ -48,7 +50,10 @@ import express from 'express'
 import request from 'supertest'
 import { z } from 'zod'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { buildTool, createMemoryTools, createDocTools, type LLMProvider } from '@use-brian/core'
+import { createDocTools } from '@use-brian/core/doc/tools.js'
+import { createMemoryTools } from '@use-brian/core/memory/tools.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
 import { getAppPool, getPool, queryWithRLS } from '../../db/client.js'
 import { createDbDocPageStore } from '../../db/doc-page-store.js'
 import { createDbMemoryStore } from '../../db/memory-store.js'
@@ -402,9 +407,9 @@ describe('[COMP:api/workspace-mcp] explicit native workspace profiles', () => {
     expect(resolved.executionContext.security.provenance).toEqual(resolved.inputScopeEvidence)
     expect(resolved.executionContext.security.access.sharedAudience).toBe(true)
     const context={...executionToolContext(resolved.executionContext,{appId:assistant}),scopeAccumulator:new ContextScopeAccumulator(resolved.inputScopeEvidence)}
-    await assertSourceModelInputAuthority(context)
+    await admitModelInput(context)
     await pool.query("UPDATE memories SET sensitivity='confidential' WHERE id=$1",[memory])
-    await expect(assertSourceModelInputAuthority(context)).rejects.toThrow()
+    await expect(admitModelInput(context)).rejects.toThrow()
     await expect(resolveWorkflowRunScope({userId:actor,assistantId:assistant,workspaceId:workspace,run})).rejects.toThrow()
   },120_000)
 
@@ -482,7 +487,7 @@ describe('[COMP:api/workspace-mcp] explicit native workspace profiles', () => {
       expect(job).not.toBeNull()
       expect(job!.authorityProjection).toMatchObject({workspaceDelegation:{credentialId:key.id},creationBinding:{actorUserId:actor}})
       expect((job!.authorityProjection as {creationBinding:{authSessionId?:string}}).creationBinding.authSessionId).toBeUndefined()
-      expect((await pool.query("SELECT workspace_mcp_parent_current(authority_projection->'workspaceDelegation') AS current FROM office_generation_jobs WHERE id=$1",[job!.id])).rows[0].current).toBe(true)
+      expect((await queryWithRLS(actor,"SELECT workspace_mcp_parent_current(authority_projection->'workspaceDelegation') AS current FROM office_generation_jobs WHERE id=$1",[job!.id])).rows[0].current).toBe(true)
       const claimed=await officeGenerationStore.claim({userId:actor,leaseToken:randomUUID(),leaseMs:60_000,jobKinds:['create']})
       expect(claimed?.id).toBe(job!.id)
       await expect(withOfficeWorkspaceAuthority(claimed!,async()=> 'permitted')).resolves.toBe('permitted')
@@ -491,7 +496,7 @@ describe('[COMP:api/workspace-mcp] explicit native workspace profiles', () => {
     const last=await officeGenerationStore.latestForArtifact(actor,(await pool.query("SELECT artifact_id FROM office_generation_jobs WHERE authority_projection->'workspaceDelegation'->>'credentialId'=$1 ORDER BY created_at DESC LIMIT 1",[key.id])).rows[0].artifact_id)
     if(surface==='brain')await brainStore.revoke(actor,key.id);else await apiStore.revokeForUser(actor,key.id)
     await expect(withOfficeWorkspaceAuthority(last!,async()=> 'forbidden')).rejects.toThrow()
-    expect((await pool.query("SELECT workspace_mcp_parent_current(authority_projection->'workspaceDelegation') AS current FROM office_generation_jobs WHERE id=$1",[last!.id])).rows[0].current).toBe(false)
+    expect((await queryWithRLS(actor,"SELECT workspace_mcp_parent_current(authority_projection->'workspaceDelegation') AS current FROM office_generation_jobs WHERE id=$1",[last!.id])).rows[0].current).toBe(false)
   })
 
   it.each(['brain', 'assistant'] as const)('%s resolves and reopens native Office comments with assistant attribution and current sharing', async surface => {

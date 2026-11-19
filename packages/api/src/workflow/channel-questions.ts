@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto'
-import type { AssistantQuestion, DeliverToChannel } from '@use-brian/core'
+import type { DeliverToChannel } from '@use-brian/core/workflow/executor.js'
+import type { AssistantQuestion } from '@use-brian/agent-runtime/tools/base/ask-question.js'
 import { query } from '../db/client.js'
 
 type ResponseBinding = NonNullable<Parameters<DeliverToChannel>[0]['questionResponse']>

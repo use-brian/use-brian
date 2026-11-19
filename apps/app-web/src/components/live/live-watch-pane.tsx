@@ -8,19 +8,20 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
  * (docs/architecture/features/live-work.md §5.1).
  *
  * Reuse, not invention: transcript history loads once through the existing
- * `GET /api/sessions/:id/messages` (same `gateSessionRead` gate), then
- * exactly ONE `GET /api/sessions/:id/stream` reconnect relay streams the
- * in-flight turn (`status` → `snapshot` → `activity` → `turn_completed` →
- * `done`). Stream budget discipline (D7): one stream for the focused item,
- * closed on defocus/unmount (abort), on tab hide (`createVisibilityGate` —
- * the same 60s grace the workspace stream uses), and on `done`; a personal
- * session's ended stream is never reopened (§5.1 — the server closed it, a
- * new focus opens a new one).
+ * `GET /api/sessions/:id/messages` (same `gateSessionRead` gate). The pane is
+ * a presentation of the shared conversation controller (M5 WP-E): the
+ * controller's one hydrate follow is the watch stream, `releaseOnDetach` ends
+ * it on defocus/unmount, `setVisible` releases it after 60 s hidden, and a
+ * personal stream ended at `done` is never reopened (D7, §5.1). Stop,
+ * confirmations and the pending question are the controller's; the pane keeps
+ * rendering (`reduceWatchEvent` over observed frames) and the steering-only
+ * legacy queue (live-work.md → "Shared conversation controller").
  *
  * [COMP:app-web/live-watch-pane]
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   Activity,
   CheckCircle2,
@@ -30,54 +31,72 @@ import {
   Square,
   Wrench,
 } from "lucide-react";
-import {
-  createSSEBuffer,
-  parseSSEStream,
-  useMessageStream,
-  type PendingConfirmation,
-} from "@use-brian/chat-ui";
-import { authFetch } from "@/lib/auth-fetch";
+import type { PendingConfirmation } from "@use-brian/chat-ui";
+import { useConversation } from "@/lib/chat/use-conversation";
+import type {
+  ConversationController,
+  ConversationState,
+  PresentationCapabilities,
+} from "@/lib/chat/conversation-controller";
+import type { ClassifiedTurnFrame } from "@/lib/chat/turn-frames";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import { requestApprovalsRefresh } from "@/lib/approvals-events";
-import { respondByKind } from "@/lib/api/approvals";
-import {
-  fetchPendingSessionInput,
-  toRestoredConfirmation,
-  type PendingQuestion,
-} from "@/lib/api/pending-questions";
 import {
   extractMessageText,
   fetchSessionMessages,
-  stopTurn,
   stripAttachmentMarkup,
   type DocSessionMessage,
 } from "@/lib/api/sessions";
 import type { LiveWorkState } from "@/lib/api/live";
 import {
-  joinQueuedInputs,
-  useMidTurnQueue,
-} from "@/lib/use-mid-turn-queue";
-import {
-  appliedInputIdFromWatchActivity,
-  confirmationFromWatchActivity,
   initialWatchState,
   reduceWatchEvent,
-  resolvedConfirmationIdFromWatchActivity,
   type WatchState,
 } from "@/lib/live-roster";
-import { createVisibilityGate } from "@/lib/workspace-events";
 import { ChatConfirmationCard } from "@/components/chrome/chat-confirmation-card";
 import { PendingQuestionPanel } from "@/components/chrome/pending-question-panel";
 import { QueuedInputs } from "@/components/ui/queued-inputs";
 
-const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
-
 /** How much settled history the pane shows above the live turn. */
 const HISTORY_TAIL = 8;
 
-function coercePayload(data: unknown): Record<string, unknown> {
-  return data && typeof data === "object" ? (data as Record<string, unknown>) : {};
+const ACTIVE_PHASES = new Set(["running", "suspended"]);
+
+/** The slices this presentation renders; the controller owns everything else. */
+export function selectWatch(state: ConversationState) {
+  return {
+    live: state.mirror.active || ACTIVE_PHASES.has(state.run.phase),
+    stopRequested: state.run.stopRequested,
+    confirmation: state.transcript.pendingConfirmations.find(
+      (card) => card.status === "pending" || card.status === "approving",
+    ) ?? null,
+    // Its own field (C15): a restored approval card shows beside it.
+    question: state.question,
+    queued: state.queued,
+    unsentCount: state.unsent.length,
+  };
+}
+
+/**
+ * The pane's presentation capabilities: no transcript preset is rendered
+ * (`page` is the neutral default), the watch stream ends on defocus, and the
+ * observer feeds the pane's own reducer.
+ */
+export function liveWatchCapabilities(onFrame: (frame: ClassifiedTurnFrame) => void): PresentationCapabilities {
+  // `return`: steering left at the end of a turn comes back to the field and
+  // never becomes an ordinary turn (live-work.md "Steer now").
+  return { profile: "page", releaseOnDetach: true, queueDrain: "return", onFrame };
+}
+
+/** Force-stop outcome to this pane's copy keys. */
+export function liveStopCopy(result: Awaited<ReturnType<ConversationController["stop"]>>): "stopRequested" | "alreadyStopped" | "stopFailed" {
+  return result === "stopped" ? "stopRequested" : result === "failed" ? "stopFailed" : "alreadyStopped";
+}
+
+/** Confirmation outcome to this pane's copy (null when resolved). */
+export function liveDecisionError(result: Awaited<ReturnType<ConversationController["respondConfirmation"]>>): "confirmNotAllowed" | "decisionFailed" | null {
+  return result === "resolved" ? null : result === "forbidden" ? "confirmNotAllowed" : "decisionFailed";
 }
 
 function SignalBars({ active }: { active: boolean }) {
@@ -100,7 +119,6 @@ function SignalBars({ active }: { active: boolean }) {
     </div>
   );
 }
-
 export function LiveWatchPane({
   sessionId,
   workspaceId,
@@ -114,259 +132,132 @@ export function LiveWatchPane({
 }) {
   const t = useT();
   const tl = t.liveApp;
+  const presentationId = `live-watch:${useId()}`;
   const [history, setHistory] = useState<DocSessionMessage[]>([]);
   const [watch, setWatch] = useState<WatchState>(initialWatchState());
-  const [streaming, setStreaming] = useState(false);
-  const [confirmation, setConfirmation] = useState<PendingConfirmation | null>(null);
-  const [pendingQuestion, setPendingQuestion] = useState<PendingQuestion | null>(null);
   const [steerDraft, setSteerDraft] = useState("");
   const [stopping, setStopping] = useState(false);
   const [controlError, setControlError] = useState<string | null>(null);
   const [controlNotice, setControlNotice] = useState<string | null>(null);
   const cancelledRef = useRef(false);
-  const pendingRequestEpochRef = useRef(0);
-  const interventionStream = useMessageStream();
-  const midTurn = useMidTurnQueue({
-    stream: interventionStream,
-    getSessionId: () => sessionId,
+  // The controller observes each admitted follow frame once; the pane folds
+  // it into its own watch view. Steering is the controller's queue: a mirrored
+  // `input_applied` retires an entry, and leftovers return as unsent text.
+  const controllerRef = useRef<ReturnType<typeof useConversation>["controller"]>(null);
+  const observe = (frame: ClassifiedTurnFrame) => {
+    if (frame.stream !== "follow") return;
+    const data = frame.payload;
+    if (frame.event === "done") void controllerRef.current?.refreshPendingInput();
+    setWatch((prev) => reduceWatchEvent(prev, { event: frame.event, data }));
+  };
+
+  const { controller, value } = useConversation({
     workspaceId,
-  });
-  const takeQueuedInput = midTurn.take;
-  const drainQueuedInputs = midTurn.drain;
+    sessionId,
+    provisionalKey: `live:${sessionId}`,
+    presentationId,
+    capabilities: liveWatchCapabilities(observe),
+  }, selectWatch);
+  controllerRef.current = controller;
+  const live = value?.live ?? false;
+  const confirmation: PendingConfirmation | null = value?.confirmation ?? null;
+  const pendingQuestion = value?.question ?? null;
+  const queued = value?.queued ?? [];
+  const unsentCount = value?.unsentCount ?? 0;
 
-  const refreshPendingInput = useCallback(async () => {
-    const epoch = ++pendingRequestEpochRef.current;
-    try {
-      const pending = await fetchPendingSessionInput(sessionId);
-      if (pendingRequestEpochRef.current !== epoch) return;
-      setPendingQuestion(pending.pending);
-      setConfirmation(
-        pending.toolConfirmation
-          ? toRestoredConfirmation(pending.toolConfirmation, sessionId)
-          : null,
-      );
-    } catch {
-      // The live activity mirror can still supply a new confirmation. A
-      // failed recovery probe must not take down the watch stream.
-    }
-  }, [sessionId]);
-
+  // Steering the turn never took comes back to the field, never resent.
   useEffect(() => {
-    setConfirmation(null);
-    setPendingQuestion(null);
-    void refreshPendingInput();
-    return () => {
-      pendingRequestEpochRef.current += 1;
-    };
-  }, [refreshPendingInput]);
-
-  const restoreUnappliedSteering = useCallback(() => {
-    const unapplied = drainQueuedInputs(sessionId);
-    if (unapplied.length === 0) return;
-    const restored = joinQueuedInputs(unapplied);
+    if (!controller || unsentCount === 0) return;
+    const restored = controller.takeUnsent().join("\n\n");
+    if (!restored) return;
     setSteerDraft((current) => [restored, current].filter(Boolean).join("\n\n"));
     setControlNotice(null);
     setControlError(tl.steerNotApplied);
-  }, [drainQueuedInputs, sessionId, tl.steerNotApplied]);
+  }, [controller, unsentCount, tl.steerNotApplied]);
+
+  useEffect(() => { setWatch(initialWatchState()); }, [sessionId]);
 
   // Transcript history — one authed fetch under the same read gate.
   useEffect(() => {
     cancelledRef.current = false;
-    const controller = new AbortController();
-    void fetchSessionMessages(sessionId, { signal: controller.signal }).then(
+    const abort = new AbortController();
+    void fetchSessionMessages(sessionId, { signal: abort.signal }).then(
       (messages) => {
         if (!cancelledRef.current) setHistory(messages.slice(-HISTORY_TAIL));
       },
     );
     return () => {
       cancelledRef.current = true;
-      controller.abort();
+      abort.abort();
     };
   }, [sessionId]);
 
-  // The ONE watch stream. Visibility-gated; closed on defocus via unmount
-  // (the parent keys this component by sessionId).
+  // A hidden tab releases the watch stream after the shared 60 s grace.
   useEffect(() => {
-    let cancelled = false;
-    let sawDone = false;
-    let controller: AbortController | null = null;
-
-    setWatch(initialWatchState());
-
-    const connect = () => {
-      if (cancelled || sawDone || controller) return;
-      const local = new AbortController();
-      controller = local;
-      setStreaming(true);
-      void (async () => {
-        try {
-          const res = await authFetch(
-            `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/stream`,
-            { signal: local.signal },
-          );
-          if (!res.ok || !res.body) return;
-          const reader = res.body.getReader();
-          const decoder = new TextDecoder();
-          const buf = createSSEBuffer();
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done || cancelled) break;
-            for (const ev of parseSSEStream(decoder.decode(value, { stream: true }), buf)) {
-              const frame = { event: ev.event, data: coercePayload(ev.data) };
-              if (frame.event === "done") sawDone = true;
-              if (frame.event === "activity") {
-                const appliedInputId = appliedInputIdFromWatchActivity(frame.data);
-                if (appliedInputId) takeQueuedInput(appliedInputId, sessionId);
-
-                const liveConfirmation = confirmationFromWatchActivity(
-                  frame.data,
-                  sessionId,
-                );
-                if (liveConfirmation) {
-                  pendingRequestEpochRef.current += 1;
-                  if (liveConfirmation.toolName === "askQuestion") {
-                    void refreshPendingInput();
-                  } else {
-                    setConfirmation(liveConfirmation);
-                    setPendingQuestion(null);
-                  }
-                }
-
-                const resolvedId = resolvedConfirmationIdFromWatchActivity(frame.data);
-                if (resolvedId) {
-                  setConfirmation((current) =>
-                    current?.toolCallId === resolvedId ? null : current,
-                  );
-                  void refreshPendingInput();
-                }
-              }
-              if (frame.event === "turn_completed") {
-                setConfirmation(null);
-                setPendingQuestion(null);
-                restoreUnappliedSteering();
-              }
-              if (frame.event === "done") {
-                restoreUnappliedSteering();
-                void refreshPendingInput();
-              }
-              setWatch((prev) => reduceWatchEvent(prev, frame));
-            }
-            if (sawDone) break;
-          }
-        } catch {
-          // Abort / transport error — the gate or unmount owns recovery.
-        } finally {
-          if (controller === local) controller = null;
-          if (!cancelled) setStreaming(false);
-        }
-      })();
-    };
-
-    const disconnect = () => {
-      controller?.abort();
-      controller = null;
-    };
-
-    const gate = createVisibilityGate({ connect, disconnect });
-    const onVisibility = () => {
-      if (cancelled) return;
-      gate.onVisibility(document.visibilityState === "hidden" ? "hidden" : "visible");
-    };
-    document.addEventListener("visibilitychange", onVisibility);
-    if (document.visibilityState !== "hidden") connect();
-
-    return () => {
-      cancelled = true;
-      document.removeEventListener("visibilitychange", onVisibility);
-      gate.dispose();
-      disconnect();
-    };
-  }, [refreshPendingInput, restoreUnappliedSteering, sessionId, takeQueuedInput]);
+    if (!controller || typeof document === "undefined") return;
+    const report = () => controller.setVisible(presentationId, document.visibilityState !== "hidden");
+    report();
+    document.addEventListener("visibilitychange", report);
+    return () => document.removeEventListener("visibilitychange", report);
+  }, [controller, presentationId]);
 
   useEffect(() => {
     if (watch.ended) setStopping(false);
   }, [watch.ended]);
 
-  const active = sessionState !== "settled" && !watch.ended;
+  useEffect(() => {
+    setStopping(false);
+    setControlNotice(null);
+    setControlError(null);
+  }, [watch.turnId]);
+
+  const active = (watch.status === "running" || sessionState !== "settled") && !watch.ended;
 
   const forceStop = useCallback(async () => {
-    if (stopping || !active) return;
+    if (stopping || !active || !controller) return;
     setStopping(true);
     setControlError(null);
     setControlNotice(null);
-    try {
-      const result = await stopTurn(sessionId);
-      setControlNotice(result.stopped ? tl.stopRequested : tl.alreadyStopped);
-    } catch {
-      setControlError(tl.stopFailed);
-    } finally {
-      setStopping(false);
-    }
-  }, [active, sessionId, stopping, tl.alreadyStopped, tl.stopFailed, tl.stopRequested]);
+    // The controller's compare-and-set Stop names the watched turn; the turn
+    // still ends on the authoritative `turn_completed`.
+    const copy = liveStopCopy(await controller.stop());
+    if (copy === "stopFailed") setControlError(tl.stopFailed);
+    else setControlNotice(tl[copy]);
+    setStopping(false);
+  }, [active, controller, stopping, tl.alreadyStopped, tl.stopFailed, tl.stopRequested]);
 
   const steerNow = useCallback(() => {
     if (!active || !canSteer) return;
-    if (!midTurn.queue(steerDraft, true)) {
+    // Queued under this pane, so its `return` drain policy applies to it.
+    if (!controller?.queue(steerDraft, true, { presentationId })) {
       setControlError(tl.steerFailed);
       return;
     }
     setSteerDraft("");
     setControlError(null);
     setControlNotice(tl.steerQueued);
-  }, [active, canSteer, midTurn, steerDraft, tl.steerFailed, tl.steerQueued]);
+  }, [active, canSteer, controller, presentationId, steerDraft, tl.steerFailed, tl.steerQueued]);
 
   const resolveConfirmation = useCallback(
     async (toolCallId: string, action: "approve" | "deny", comment?: string) => {
-      if (!confirmation || confirmation.toolCallId !== toolCallId) return;
+      if (!controller || confirmation?.toolCallId !== toolCallId) return;
       setControlError(null);
-      setConfirmation((current) =>
-        current ? { ...current, status: action === "approve" ? "approving" : "denied" } : current,
-      );
-      try {
-        let ok = false;
-        let forbidden = false;
-        if (confirmation.restored && confirmation.approvalId) {
-          const result = await respondByKind(
-            { id: confirmation.approvalId, kind: "tool_invocation" },
-            action === "approve" ? "approved" : "rejected",
-            comment,
-          );
-          ok = result.ok;
-        } else {
-          const res = await authFetch(`${API_URL}/api/chat/confirm`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              sessionId,
-              toolCallId,
-              decision: action === "approve" ? "allow" : "deny",
-              ...(action === "deny" && comment ? { comment } : {}),
-            }),
-          });
-          ok = res.ok;
-          forbidden = res.status === 403;
-        }
-        if (!ok) {
-          setConfirmation((current) =>
-            current ? { ...current, status: "pending" } : current,
-          );
-          setControlError(forbidden ? t.chatApp.confirmNotAllowed : tl.decisionFailed);
-          return;
-        }
-        setConfirmation(null);
+      const failure = liveDecisionError(await controller.respondConfirmation(toolCallId, action, comment));
+      if (!failure) {
         requestApprovalsRefresh(workspaceId);
-        void refreshPendingInput();
-      } catch {
-        setConfirmation((current) =>
-          current ? { ...current, status: "pending" } : current,
-        );
-        setControlError(tl.decisionFailed);
-      }
+        void controller.refreshPendingInput();
+      } else setControlError(failure === "confirmNotAllowed" ? t.chatApp.confirmNotAllowed : tl.decisionFailed);
     },
-    [confirmation, refreshPendingInput, sessionId, t.chatApp.confirmNotAllowed, tl.decisionFailed, workspaceId],
+    [confirmation?.toolCallId, controller, t.chatApp.confirmNotAllowed, tl.decisionFailed, workspaceId],
   );
 
-  const streamActive = streaming && !watch.ended;
+  const settleQuestion = (approvalId: string) => {
+    controller?.questionSettled(approvalId);
+    requestApprovalsRefresh(workspaceId);
+  };
+
+  const streamActive = (live || stopping || !!value?.stopRequested) && !watch.ended;
+  const abnormalEnd = watch.endReason !== null && !["completed", "publication_recovered"].includes(watch.endReason);
 
   return (
     <div className="mx-auto grid w-full max-w-6xl items-start gap-4 xl:grid-cols-[minmax(0,1fr)_260px]">
@@ -398,7 +289,7 @@ export function LiveWatchPane({
           </div>
         ) : null}
 
-        {!watch.ended && (watch.text || watch.activity || watch.reasoning || streaming) ? (
+        {!watch.ended && (watch.text || watch.activity || watch.reasoning || streamActive) ? (
           <div className="relative overflow-hidden rounded-2xl border border-primary/25 bg-card px-4 py-3 text-sm shadow-sm">
             <span
               className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/70 to-transparent motion-safe:animate-pulse motion-reduce:animate-none"
@@ -423,12 +314,12 @@ export function LiveWatchPane({
 
         {watch.ended ? (
           <div className="flex items-center gap-2 rounded-2xl border border-border/70 bg-card px-4 py-3 text-sm text-muted-foreground shadow-sm">
-            {watch.endReason ? (
+            {abnormalEnd ? (
               <CircleAlert className="size-4 text-amber-500" aria-hidden />
             ) : (
               <CheckCircle2 className="size-4 text-emerald-500" aria-hidden />
             )}
-            {watch.endReason ? tl.turnEndedAbnormally : tl.turnEnded}
+            {abnormalEnd ? tl.turnEndedAbnormally : tl.turnEnded}
           </div>
         ) : null}
 
@@ -451,23 +342,15 @@ export function LiveWatchPane({
             sessionId={sessionId}
             approvalId={pendingQuestion.approvalId}
             dict={t.chat.pendingQuestion}
-            onAnswered={() => {
-              setPendingQuestion(null);
-              requestApprovalsRefresh(workspaceId);
-              void refreshPendingInput();
-            }}
-            onCancelled={() => {
-              setPendingQuestion(null);
-              requestApprovalsRefresh(workspaceId);
-              void refreshPendingInput();
-            }}
+            onAnswered={() => settleQuestion(pendingQuestion.approvalId)}
+            onCancelled={() => settleQuestion(pendingQuestion.approvalId)}
           />
         ) : null}
 
         <QueuedInputs
-          inputs={midTurn.queued}
+          inputs={[...queued]}
           dict={t.chat.queue}
-          onSteer={midTurn.steer}
+          onSteer={(inputId) => { controller?.steer(inputId); }}
         />
       </div>
 

@@ -20,7 +20,7 @@ import {
   type ApprovalReviewScopeKind,
   type AssignReviewerInput,
   type ChangeAssignmentInput,
-} from '@use-brian/core'
+} from '@use-brian/core/approval-review/contracts.js'
 import { getPool, queryWithRLS } from '../db/client.js'
 import { createPendingApprovalsStore } from '../db/pending-approvals-store.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'

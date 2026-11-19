@@ -11,7 +11,7 @@ import {
   setGlobalMailboxArchiveDeps,
   getGlobalMailboxArchiveDeps,
 } from '../archive-search-tool.js'
-import type { ToolContext } from '@use-brian/core'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const CTX = {} as unknown as ToolContext
 

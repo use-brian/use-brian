@@ -64,13 +64,13 @@
  * Spec: docs/architecture/media/transcription.md §Architecture(b).
  */
 
-import type { TokenUsage } from '../providers/types.js'
-import { geminiSamplingConfig } from '../providers/gemini.js'
+import type { TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
+import { geminiSamplingConfig } from '@use-brian/agent-runtime/providers/gemini.js'
 import {
   aiStudioTransport,
   authorizeGoogleRequest,
   type GoogleTransport,
-} from '../providers/google-transport.js'
+} from '@use-brian/agent-runtime/providers/google-transport.js'
 
 const FILES_BASE = 'https://generativelanguage.googleapis.com'
 const DEFAULT_MODEL = 'gemini-3.6-flash'

@@ -76,7 +76,7 @@ async function addMember(client: pg.PoolClient, workspaceId: string, userId: str
 }
 
 describeIf('[COMP:files/supersession] workspace_files supersession (integration)', () => {
-  let store: import('@use-brian/core').WorkspaceFilesStore
+  let store: import('@use-brian/core/workspace-files/types.js').WorkspaceFilesStore
 
   beforeAll(async () => {
     process.env.DATABASE_URL ??= 'postgres:///sidanclaw'

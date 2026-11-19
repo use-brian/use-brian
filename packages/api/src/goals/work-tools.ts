@@ -17,9 +17,15 @@ import type {RetainedGoalWorkflowClaim} from '../db/goals.js'
  * [COMP:goals/work-tools]
  */
 import { z } from 'zod'
-import {ContextScopeAccumulator} from '@use-brian/core'
+import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
 import {retainedTaskGoalCaller,admitRetainedGoalBoundary} from '../workspace-access/goal-source-admission.js'
-import { buildTool, EventSubscriptionSchema, notFoundFailure, pinToolAuthoringAuthority, type GoalClarityAssessor, type GoalRecord, type GoalVerifier, type Tool } from '@use-brian/core'
+import type { GoalClarityAssessor } from '@use-brian/core/goals/clarity.js'
+import type { GoalRecord } from '@use-brian/core/goals/types.js'
+import type { GoalVerifier } from '@use-brian/core/goals/verify.js'
+import { pinToolAuthoringAuthority } from '@use-brian/core/security/tool-authority.js'
+import { EventSubscriptionSchema } from '@use-brian/core/workflow/schemas.js'
+import { notFoundFailure } from '@use-brian/agent-runtime/tools/tool-failure.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { armRetainedGoalWorkflow,getRetainedGoalById,confirmRetainedGoal,getGoalByIdSystem, setGoalAwaitingEventSystem, stampGoalCompletionSystem, updateGoalSystem } from '../db/goals.js'
 import { goalAcceptedMeta } from './acknowledgement.js'
 

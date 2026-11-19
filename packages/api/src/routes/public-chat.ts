@@ -25,6 +25,7 @@
 import { Router, type Request, type Response, type NextFunction } from 'express'
 import { z } from 'zod'
 import type { ChatLinkStore } from '../db/chat-link-store.js'
+import { publicChatLinkCredential } from '../db/public-conversation.js'
 import {
   executePublicTurn,
   handlePublicHistory,
@@ -120,6 +121,7 @@ export function publicChatRoutes(options: PublicChatRouteOptions): Router {
         {
           assistantId: link.assistantId,
           identityNamespace: `chatlink:${link.linkId}`,
+          credential: publicChatLinkCredential(link.linkId, req.params.token),
           externalUserId: parsed.data.visitorId,
           sessionId: parsed.data.sessionId,
           limit: 100,
@@ -165,6 +167,7 @@ export function publicChatRoutes(options: PublicChatRouteOptions): Router {
         {
           assistantId: link.assistantId,
           identityNamespace: `chatlink:${link.linkId}`,
+          credential: publicChatLinkCredential(link.linkId, req.params.token),
           body: {
             externalUserId: body.visitorId,
             sessionId: body.sessionId,

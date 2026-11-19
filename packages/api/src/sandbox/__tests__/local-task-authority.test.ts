@@ -1,9 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { BrowserProfileAuthoritySchema, createInMemoryBrowserProfileStore, createLocalBrowserProvider, type AuthoringAuthority, type CurrentAuthorityBoundary, type DepartmentReadGrant } from '@use-brian/core'
+import { createLocalBrowserProvider } from '@use-brian/core/sandbox/local-browser-provider.js'
+import { BrowserProfileAuthoritySchema, createInMemoryBrowserProfileStore } from '@use-brian/core/sandbox/profiles.js'
+import type { AuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import type { DepartmentReadGrant } from '@use-brian/agent-runtime/security/department-read.js'
+import type { CurrentAuthorityBoundary } from '@use-brian/agent-runtime/tools/types.js'
 import { createInMemoryLocalComputerTaskStore } from '../../routes/computer.js'
 import { createLocalTaskAdmission } from '../local-task-authority.js'
-import { browserInputScope } from '@use-brian/core'
-import type { RelayCommandTransport } from '@use-brian/core'
+import { browserInputScope } from '@use-brian/core/sandbox/input-scope.js'
+import type { RelayCommandTransport } from '@use-brian/core/sandbox/types.js'
 
 describe('[COMP:sandbox/local-task-authority] local browser source and result authority', () => {
   const ctx = { userId: 'owner', workspaceId: 'workspace', sessionId: 'session', profileId: '' }

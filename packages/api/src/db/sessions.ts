@@ -1,22 +1,26 @@
-import { publishNativeSessionMessage } from './session-message-publication.js'
+import {z} from 'zod'
+import { publishNativeSessionMessage } from './conversation-store.js'
+import { publicConversationBindingValues, type PublicTurnConversationBinding } from './public-conversation.js'
 import { hostObservationReplay } from '@use-brian/shared'
 import { readSessionContextRevisions, writeSessionContextRevision, type SessionContextRevision } from './session-context-revisions.js'
 import { classifySession, sessionKindSql } from '../session-kind.js'
 import type pg from 'pg'
+import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
 import {
-  bindScopeSource,
-  bindScopeSources,
-  boundScopeSources,
   deriveResourceScope,
   deriveWriteScope,
   DerivedScopeError,
-  maxSensitivity,
   resourceScopeKey,
   type DerivedWriteEvidence,
   type ResourceScope,
   type ScopeSource,
-  type SessionContextAuthority,
-} from '@use-brian/core'
+} from '@use-brian/agent-runtime/security/derived-scope.js'
+import { maxSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import {
+  bindScopeSource,
+  bindScopeSources,
+  boundScopeSources,
+} from '@use-brian/agent-runtime/security/source-evidence.js'
 import { getPool, getAppPool, applyRLSGucs, query } from './client.js'
 import { readCurrentScopeSources, recordDerivedResource, validateDerivedMemoryInputs, validateDerivedWriteInputs } from './derived-scope-store.js'
 import { admitAnchoredSession, admitSessionCreate, admitPersonalWebSession, type PersonalWebSessionPrincipal } from '../workspace-access/session-create-admission.js'
@@ -104,6 +108,8 @@ export type Session = {
   status: string
   /** Current lease's start, unchanged by heartbeat or reconnect reads. */
   turnStartedAt?: Date | null
+  turnId?: string | null
+  turnEndReason?: TurnEndReason | null
   /** Deprecated scalar slot; semantic reads require readCompactSummary. Always null in native DTOs. */
   compactSummary: string | null
   compactionCount: number
@@ -384,6 +390,7 @@ export async function findOrCreateSession(params: CreateSessionParams): Promise<
 export async function createPersonalWebSession(params: Omit<CreateSessionParams, 'visibility' | 'effectiveClearance' | 'contextCompartments'>,
   principal: PersonalWebSessionPrincipal, transactionClient?: pg.PoolClient): Promise<Session> {
   const client = transactionClient ?? await getAppPool().connect()
+  let savepoint = false
   try {
     if (!transactionClient) await client.query('BEGIN')
     if (transactionClient) {
@@ -392,13 +399,23 @@ export async function createPersonalWebSession(params: Omit<CreateSessionParams,
         WHERE r.rolname IN(session_user,current_user) AND (r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE'))
       ) AS allowed`)
       if (role.rows[0]?.allowed !== true) throw new DerivedScopeError('scope_evidence_missing')
+      await client.query('SAVEPOINT personal_web_session_create')
+      savepoint = true
     }
     await applyRLSGucs(client, principal.actorUserId)
     const admitted = await admitPersonalWebSession(client, params, principal)
-    const session = await insertSession({ ...admitted, visibility: 'personal' }, (sql, values) => client.query(sql, values), true)
+    const session = await insertSession({ ...admitted, visibility: 'personal' }, (sql, values) => client.query(sql, values), true, true)
+    if (savepoint) await client.query('RELEASE SAVEPOINT personal_web_session_create')
     if (!transactionClient) await client.query('COMMIT')
     return session
-  } catch (error) { if (!transactionClient) await client.query('ROLLBACK'); throw error }
+  } catch (error) {
+    if (!transactionClient) await client.query('ROLLBACK')
+    if (savepoint) {
+      await client.query('ROLLBACK TO SAVEPOINT personal_web_session_create')
+      await client.query('RELEASE SAVEPOINT personal_web_session_create')
+    }
+    throw error
+  }
   finally { if (!transactionClient) client.release() }
 }
 
@@ -427,7 +444,16 @@ async function findOrCreateSessionInternal(params: CreateSessionParams, authenti
   } finally { client.release() }
 }
 
-async function insertSession(params: CreateSessionParams, execute: typeof query, resumeFirst = false): Promise<Session> {
+const SESSION_CREATE_PROJECTION = `id, assistant_id as "assistantId", user_id as "userId",
+ channel_type as "channelType", channel_id as "channelId", app_id as "appId", app_origin as "appOrigin",
+ status, NULL::text as "compactSummary", compaction_count as "compactionCount", compact_boundary_sequence as "compactBoundarySequence",
+ NULL::text AS title, downgrade_notice_sent as "downgradeNoticeSent", downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
+ mode, visibility, effective_clearance as "effectiveClearance", workspace_id as "workspaceId", anchor_kind as "anchorKind",
+ anchor_ref as "anchorRef", clearance_source as "clearanceSource", context_group_id as "contextGroupId",
+ context_project_id as "contextProjectId", context_compartments as "contextCompartments", context_locked_at as "contextLockedAt",
+ created_at as "createdAt", last_active_at as "lastActiveAt"`
+
+async function insertSession(params: CreateSessionParams, execute: typeof query, resumeFirst = false, readAfterInsert = false): Promise<Session> {
   const appId = params.appId ?? 'Use Brian'
   const appOrigin = params.appOrigin ?? null
   const visibility = params.visibility ?? 'personal'
@@ -439,31 +465,17 @@ async function insertSession(params: CreateSessionParams, execute: typeof query,
   const contextProjectId = params.contextProjectId ?? null
   const contextCompartments = params.contextCompartments ?? null
 
-  // BEFORE INSERT runs even for ON CONFLICT. Never exempt a proposed row
-  // merely because its identity matches history: resume the locked row instead.
-  if (resumeFirst) {
-    const resumed = await execute<Session>(
+  const identity = [params.assistantId, params.userId, params.channelType, params.channelId, appId, visibility]
+  const identityPredicate='assistant_id=$1 AND user_id=$2 AND channel_type=$3 AND channel_id=$4 AND app_id=$5 AND visibility=$6'
+  const resume = async () => (await execute<Session>(
       `UPDATE sessions SET last_active_at=now()
-       WHERE assistant_id=$1 AND user_id=$2 AND channel_type=$3 AND channel_id=$4 AND app_id=$5
-         AND visibility=$6
-       RETURNING id, assistant_id as "assistantId", user_id as "userId",
-               channel_type as "channelType", channel_id as "channelId",
-               app_id as "appId", app_origin as "appOrigin", status, NULL::text as "compactSummary",
-               compaction_count as "compactionCount",
-               compact_boundary_sequence as "compactBoundarySequence", NULL::text AS title,
-               downgrade_notice_sent as "downgradeNoticeSent",
-               downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
-               mode, visibility, effective_clearance as "effectiveClearance",
-               workspace_id as "workspaceId",
-               anchor_kind as "anchorKind", anchor_ref as "anchorRef", clearance_source as "clearanceSource",
-               context_group_id as "contextGroupId",
-               context_project_id as "contextProjectId",
-               context_compartments as "contextCompartments",
-               context_locked_at as "contextLockedAt",
-               created_at as "createdAt", last_active_at as "lastActiveAt"`,
-      [params.assistantId, params.userId, params.channelType, params.channelId, appId, visibility],
-    )
-    if (resumed.rows[0]) return resumed.rows[0]
+       WHERE ${identityPredicate}
+       RETURNING ${SESSION_CREATE_PROJECTION}`, identity)).rows[0]
+
+  // The existing row resumes before proposing a fresh creation receipt.
+  if (resumeFirst) {
+    const resumed=await resume()
+    if (resumed) return resumed
   }
 
   const result = await execute<Session>(
@@ -488,24 +500,10 @@ async function insertSession(params: CreateSessionParams, execute: typeof query,
        ) selected
        LEFT JOIN workspace_groups g ON g.id = selected.context_group_id
       WHERE a.id = $1
-     ON CONFLICT ${sessionKindSql.personalIdentityConflict()} DO UPDATE
+     ${readAfterInsert ? 'ON CONFLICT DO NOTHING' : `ON CONFLICT ${sessionKindSql.personalIdentityConflict()} DO UPDATE
        SET last_active_at = now(),
            workspace_id = COALESCE(sessions.workspace_id, EXCLUDED.workspace_id)
-     RETURNING id, assistant_id as "assistantId", user_id as "userId",
-               channel_type as "channelType", channel_id as "channelId",
-               app_id as "appId", app_origin as "appOrigin", status, NULL::text as "compactSummary",
-               compaction_count as "compactionCount",
-               compact_boundary_sequence as "compactBoundarySequence", NULL::text AS title,
-               downgrade_notice_sent as "downgradeNoticeSent",
-               downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
-               mode, visibility, effective_clearance as "effectiveClearance",
-               workspace_id as "workspaceId",
-               anchor_kind as "anchorKind", anchor_ref as "anchorRef", clearance_source as "clearanceSource",
-               context_group_id as "contextGroupId",
-               context_project_id as "contextProjectId",
-               context_compartments as "contextCompartments",
-               context_locked_at as "contextLockedAt",
-               created_at as "createdAt", last_active_at as "lastActiveAt"`,
+     RETURNING ${SESSION_CREATE_PROJECTION}`}`,
     [
       params.assistantId,
       params.userId,
@@ -526,7 +524,14 @@ async function insertSession(params: CreateSessionParams, execute: typeof query,
     ],
   )
 
-  return result.rows[0]
+  if (!readAfterInsert) return result.rows[0]
+  // The INSERT and its envelope initializer settle before the app role reads
+  // the row through its SELECT policy. The caller owns this same transaction.
+  const session=result.rowCount===1
+    ? (await execute<Session>(`SELECT ${SESSION_CREATE_PROJECTION} FROM sessions WHERE ${identityPredicate}`,identity)).rows[0]
+    : await resume()
+  if (!session) throw new DerivedScopeError('scope_source_changed')
+  return session
 }
 
 /**
@@ -681,7 +686,7 @@ export async function readSessionById(id: string): Promise<Session | null> {
             workspace_id as "workspaceId",
             provider_conversation_context AS "providerConversationContext", provider_context_identity AS "providerContextIdentity", provider_context_generation AS "providerContextGeneration", room_capture AS "roomCapture",
             channel_type as "channelType", channel_id as "channelId",
-            app_id as "appId", app_origin as "appOrigin", status, turn_started_at as "turnStartedAt", NULL::text as "compactSummary",
+            app_id as "appId", app_origin as "appOrigin", status, turn_started_at as "turnStartedAt", native_session_public_turn_id(workspace_id,id,last_turn_lease_token) AS "turnId", turn_end_reason AS "turnEndReason", NULL::text as "compactSummary",
             compaction_count as "compactionCount",
             compact_boundary_sequence as "compactBoundarySequence", NULL::text AS title,
             downgrade_notice_sent as "downgradeNoticeSent",
@@ -708,15 +713,16 @@ export async function findSessionById(id: string): Promise<Session | null> {
 
 /** Read-only session identity/binding snapshot for per-boundary authority renewal. */
 export async function findSessionAuthorityById(id: string): Promise<Pick<Session,
-  'id' | 'assistantId' | 'userId' | 'contextGroupId' | 'contextProjectId' | 'contextLockedAt'
+  'id' | 'assistantId' | 'userId' | 'contextGroupId' | 'contextProjectId' | 'contextLockedAt' | 'visibility' | 'effectiveClearance' | 'contextCompartments' | 'channelType' | 'channelId' | 'appOrigin' | 'anchorKind' | 'anchorRef' | 'mode'
 > | null> {
   const result = await query<Pick<Session,
-    'id' | 'assistantId' | 'userId' | 'contextGroupId' | 'contextProjectId' | 'contextLockedAt'
+    'id' | 'assistantId' | 'userId' | 'contextGroupId' | 'contextProjectId' | 'contextLockedAt' | 'visibility' | 'effectiveClearance' | 'contextCompartments' | 'channelType' | 'channelId' | 'appOrigin' | 'anchorKind' | 'anchorRef' | 'mode'
   >>(
     `SELECT id, assistant_id as "assistantId", user_id as "userId",
             context_group_id as "contextGroupId",
             context_project_id as "contextProjectId",
-            context_locked_at as "contextLockedAt"
+            context_locked_at as "contextLockedAt", visibility,
+            effective_clearance as "effectiveClearance", context_compartments as "contextCompartments", channel_type as "channelType", channel_id as "channelId", app_origin as "appOrigin", anchor_kind as "anchorKind", anchor_ref as "anchorRef", mode
        FROM sessions WHERE id = $1 AND session_recording_read_allowed(id)`,
     [id],
   )
@@ -816,60 +822,47 @@ export const TURN_LEASE_STALE_AFTER_MS = 90_000
 /** Why a turn's lock was released. Persisted so a heal can explain itself. */
 export type TurnEndReason =
   | 'completed'
+  | 'publication_recovered'
   | 'failed'
   | 'stopped_by_user'
   | 'stalled_reclaimed'
   | 'timeout'
 
-/**
- * Claim the turn slot atomically: only when nothing holds it. Room admission
- * (every workspace session, D11) serializes concurrent addressed sends on
- * this. Returns false when another turn holds the slot.
- */
-export async function claimTurnSlot(sessionId: string): Promise<boolean> {
-  const result = await query(
-    `UPDATE sessions SET status = 'running', last_active_at = now()
-      WHERE id = $1 AND status <> 'running'`,
-    [sessionId],
-  )
-  if ((result.rowCount ?? 0) > 0) notifySessionChange(sessionId)
-  return (result.rowCount ?? 0) > 0
+/** Atomically claim an idle/stale session and create its owner token. There is
+ * no intermediate running-without-token state and no personal-session race. */
+const publicTurnId=z.string().regex(/^[a-f0-9]{64}$/).nullable()
+const endReason=z.enum(['completed','publication_recovered','failed','stopped_by_user','stalled_reclaimed','timeout'])
+const recoveredTurn=z.object({turnId:publicTurnId,reason:z.enum(['publication_recovered','stalled_reclaimed','stopped_by_user'])}).strict()
+export type RecoveredTurn=z.infer<typeof recoveredTurn>
+export type TurnClaim=Readonly<{token:string;turnId:string|null;recovered?:RecoveredTurn}>
+const transition=z.discriminatedUnion('state',[
+ z.object({state:z.literal('claimed'),token:z.string().uuid(),turnId:publicTurnId,recovered:recoveredTurn.nullable()}).strict(),
+ z.object({state:z.literal('recovered'),recovered:recoveredTurn}).strict(),
+ z.object({state:z.literal('cancel_requested'),token:z.string().uuid(),turnId:publicTurnId,stale:z.boolean()}).strict(),
+ z.object({state:z.literal('busy')}).strict(),z.object({state:z.literal('not_running')}).strict(),
+ z.object({state:z.literal('superseded')}).strict(),
+ z.object({state:z.literal('stopped_legacy'),turnId:z.null(),reason:z.literal('stopped_by_user')}).strict(),
+]).nullable()
+async function turnTransition(sessionId:string,action:'claim'|'reclaim'|'cancel',assistantId:string|null,startedAt:Date|null,
+ staleAfterMs:number,expectedToken:string|null|undefined,expectedTurnId:string|null=null){
+ if(!Number.isSafeInteger(staleAfterMs)||staleAfterMs<1||staleAfterMs>2147483647)throw new Error('Invalid turn lease duration')
+ const raw=(await query<{value:unknown}>('SELECT native_session_turn_transition($1,$2,$3,$4,$5,$6,$7,$8) AS value',
+  [sessionId,action,assistantId,startedAt,String(staleAfterMs),expectedToken??null,expectedTurnId,expectedToken!==undefined])).rows[0]?.value
+ const result=transition.parse(raw)
+ return result
 }
-
-/**
- * Take the turn slot for a personal session after admission proved no live
- * turn holds it (a stale holder has been reclaimed).
- */
-export async function takeTurnSlot(sessionId: string): Promise<void> {
-  await updateSessionStatus(sessionId, 'running')
+/** One SQL-owned locked claim, including exact original recovered outcome. */
+export async function claimTurnLeaseOutcome(sessionId:string,assistantId:string|null=null,startedAt:Date|null=null):Promise<TurnClaim|null>{
+ const result=await turnTransition(sessionId,'claim',assistantId,startedAt,TURN_LEASE_STALE_AFTER_MS,undefined)
+ if(result?.state!=='claimed')return null
+ notifySessionChange(sessionId)
+ return{token:result.token,turnId:result.turnId,...result.recovered?{recovered:result.recovered}:{}}
 }
-
-/**
- * Take the lease for a turn that has just claimed `status='running'`. Returns
- * the token every later lease operation must present. Clears any stale cancel
- * request and end reason left by the previous turn.
- *
- * `assistantId` is the turn's ANSWERING assistant, stamped on
- * `turn_assistant_id` so the Live roster names the voice of a re-addressed
- * turn rather than the session's binding. Omitted (NULL) means the bound
- * assistant answers.
- */
-export async function startTurnLease(sessionId: string, assistantId: string | null = null, startedAt: Date | null = null): Promise<string> {
-  const result = await query<{ turn_lease_token: string }>(
-    `UPDATE sessions
-        SET turn_lease_token = gen_random_uuid(),
-            turn_started_at = COALESCE($3::timestamptz, now()),
-            turn_heartbeat_at = now(),
-            cancel_requested_at = NULL,
-            turn_end_reason = NULL,
-            turn_assistant_id = $2
-      WHERE id = $1
-      RETURNING turn_lease_token`,
-    [sessionId, assistantId, startedAt],
-  )
-  const token = result.rows[0]?.turn_lease_token
-  if (!token) throw new Error(`startTurnLease: session ${sessionId} not found`)
-  return token
+/** Compatibility for existing callers; the underlying transition is shared. */
+export async function claimTurnLease(sessionId:string,assistantId:string|null=null,startedAt:Date|null=null,onReclaimed?:(outcome:RecoveredTurn)=>void):Promise<string|null>{
+ const result=await claimTurnLeaseOutcome(sessionId,assistantId,startedAt)
+ if(result?.recovered)onReclaimed?.(result.recovered)
+ return result?.token??null
 }
 
 /**
@@ -918,56 +911,33 @@ export async function isTurnLeaseSuperseded(sessionId: string, token: string): P
  * process; the same-process path aborts its `AbortController` directly and does
  * not wait for this. No-op when nothing is running.
  */
-export async function requestTurnCancel(sessionId: string): Promise<boolean> {
-  const result = await query(
-    `UPDATE sessions
-        SET cancel_requested_at = now()
-      WHERE id = $1 AND status = 'running'`,
-    [sessionId],
-  )
-  return (result.rowCount ?? 0) > 0
+/** Capture/cancel before local abort. The private token never enters a DTO. */
+export async function captureTurnCancellation(sessionId:string,expectedTurnId?:string|null){
+ const result=await turnTransition(sessionId,'cancel',null,null,TURN_LEASE_STALE_AFTER_MS,expectedTurnId===null?null:undefined,
+  expectedTurnId===undefined?null:publicTurnId.parse(expectedTurnId))
+ if(result?.state==='cancel_requested'||result?.state==='stopped_legacy')notifySessionChange(sessionId)
+ return result
+}
+export async function requestTurnCancel(sessionId:string):Promise<boolean>{
+ return(await captureTurnCancellation(sessionId))?.state==='cancel_requested'
 }
 
-/**
- * Resting status for a released lock. A clean end (finished, or a human who
- * chose to stop it) rests at `idle`; an abnormal end rests at `timeout`, which
- * blocks nothing but preserves the debugging signal that this turn did not end
- * the way it was supposed to.
- */
-function restingStatusFor(reason: TurnEndReason): 'idle' | 'timeout' | 'failed' {
-  if (reason === 'failed') return 'failed'
-  return reason === 'completed' || reason === 'stopped_by_user' ? 'idle' : 'timeout'
+/** Exact-token release cannot clear a successor; SQL owns resting status. */
+export type ReleasedTurn=Readonly<{turnId:string|null;reason:TurnEndReason}>
+/** Exact owner release; canonical SQL preserves a recorded Stop over completed. */
+export async function releaseTurnOutcome(sessionId:string,reason:TurnEndReason,token:string):Promise<ReleasedTurn|null>{
+ if(reason==='publication_recovered'||!token)throw new Error('Invalid requested turn release')
+ const released=(await query<{value:unknown;workspaceId:string|null}>(`WITH settled AS MATERIALIZED (
+  SELECT native_session_release_turn($1,$2,$3) AS value
+ ) SELECT settled.value,CASE WHEN settled.value IS NOT NULL THEN (
+  SELECT a.workspace_id FROM sessions s JOIN assistants a ON a.id=s.assistant_id WHERE s.id=$1
+ ) END AS "workspaceId" FROM settled`,[sessionId,token,reason])).rows[0]
+ const result=z.object({turnId:publicTurnId,reason:endReason}).strict().nullable().parse(released?.value)
+ if(result)notifyWorkspaceChange(released?.workspaceId,'session','update',sessionId)
+ return result
 }
-
-/**
- * Release the lock, recording why. Token-guarded: a turn whose lease was
- * already reclaimed must not flip a SUCCESSOR turn back to idle. Pass
- * `token: null` for an administrative release (the stop route), which releases
- * whoever holds it.
- */
-export async function releaseTurnLease(
-  sessionId: string,
-  reason: TurnEndReason,
-  token: string | null,
-): Promise<boolean> {
-  const result = await query(
-    `UPDATE sessions
-        SET status = $1,
-            turn_lease_token = NULL,
-            turn_heartbeat_at = NULL,
-            cancel_requested_at = NULL,
-            turn_end_reason = $2,
-            last_active_at = now()
-      WHERE id = $3
-        AND status = 'running'
-        ${token === null ? '' : 'AND turn_lease_token = $4'}`,
-    token === null
-      ? [restingStatusFor(reason), reason, sessionId]
-      : [restingStatusFor(reason), reason, sessionId, token],
-  )
-  const released = (result.rowCount ?? 0) > 0
-  if (released) notifySessionChange(sessionId)
-  return released
+export async function releaseTurnLease(sessionId:string,reason:TurnEndReason,token:string):Promise<boolean>{
+ return !!await releaseTurnOutcome(sessionId,reason,token)
 }
 
 /**
@@ -983,55 +953,14 @@ export async function releaseTurnLease(
  * A NULL heartbeat is a pre-migration-424 row: fall back to `last_active_at`
  * so those still recover, accepting that reads refresh it.
  */
-export async function reclaimStaleTurn(
-  sessionId: string,
-  staleAfterMs: number = TURN_LEASE_STALE_AFTER_MS,
-): Promise<boolean> {
-  const result = await query(
-    `UPDATE sessions
-        SET status = 'timeout',
-            turn_lease_token = NULL,
-            turn_heartbeat_at = NULL,
-            cancel_requested_at = NULL,
-            turn_end_reason = 'stalled_reclaimed'
-      WHERE id = $1
-        AND status = 'running'
-        AND COALESCE(turn_heartbeat_at, last_active_at)
-              < now() - ($2 || ' milliseconds')::interval`,
-    [sessionId, String(staleAfterMs)],
-  )
-  const reclaimed = (result.rowCount ?? 0) > 0
-  if (reclaimed) notifySessionChange(sessionId)
-  return reclaimed
+export async function reclaimStaleTurnOutcome(sessionId:string,staleAfterMs:number=TURN_LEASE_STALE_AFTER_MS,
+ expectedToken?:string|null):Promise<RecoveredTurn|null>{
+ const result=await turnTransition(sessionId,'reclaim',null,null,staleAfterMs,expectedToken)
+ if(result?.state!=='recovered')return null
+ notifySessionChange(sessionId);return result.recovered
 }
-
-/**
- * Is a turn PROVABLY alive on this session right now? True only when the row
- * is `running`, holds a lease token, and that lease was heartbeaten within
- * `staleAfterMs`. This is the admission-time proof of life the ordinary chat
- * path needs before it may take the slot: a client's `midTurn` flag says
- * whether ITS stream is open, not whether the turn is; a client whose stream
- * was cut (proxy idle timeout, reload, second tab) sends an ordinary turn
- * while the previous one is still working, and blind-claiming the slot then
- * mints a new lease and the live turn aborts itself as an "orphan" at its next
- * heartbeat (2026-08-18: page builds killed 30-90s in, three times in one
- * session). A pre-migration-424 row (NULL heartbeat) is never "live" here, so
- * legacy rows keep the old behaviour; a stale lease is not live either - the
- * caller reclaims it (`reclaimStaleTurn`) and proceeds.
- */
-export async function isTurnLeaseLive(
-  sessionId: string,
-  staleAfterMs: number = TURN_LEASE_STALE_AFTER_MS,
-): Promise<boolean> {
-  const result = await query(
-    `SELECT 1 FROM sessions
-      WHERE id = $1
-        AND status = 'running'
-        AND turn_lease_token IS NOT NULL
-        AND turn_heartbeat_at >= now() - ($2 || ' milliseconds')::interval`,
-    [sessionId, String(staleAfterMs)],
-  )
-  return (result.rowCount ?? 0) > 0
+export async function reclaimStaleTurn(sessionId:string,staleAfterMs:number=TURN_LEASE_STALE_AFTER_MS):Promise<boolean>{
+ return !!await reclaimStaleTurnOutcome(sessionId,staleAfterMs)
 }
 
 /**
@@ -1047,41 +976,19 @@ export async function isTurnLeaseLive(
  * `docs/architecture/context-engine/session-messages.md` →
  * "Turn lease and recovery".
  */
-export async function sweepStuckSessions(
-  staleAfterMs: number,
-): Promise<Array<{ id: string; mode: string | null; userId: string; visibility: string; channelType: string; anchorKind: string }>> {
-  const result = await query<{
-    id: string
-    mode: string | null
-    user_id: string
-    visibility: string
-    channel_type: string
-    anchor_kind: string
-  }>(
-    `UPDATE sessions
-        SET status = 'timeout',
-            turn_lease_token = NULL,
-            turn_heartbeat_at = NULL,
-            cancel_requested_at = NULL,
-            turn_end_reason = 'stalled_reclaimed',
-            last_active_at = now()
-      WHERE status = 'running'
-        AND COALESCE(turn_heartbeat_at, last_active_at)
-              < now() - ($1 || ' milliseconds')::interval
-      RETURNING id, mode, user_id, visibility, channel_type, anchor_kind`,
-    [String(staleAfterMs)],
-  )
-  // Per-row emission: the coalescer folds a multi-workspace sweep into one
-  // signal per (workspace, primitive) anyway.
-  for (const r of result.rows) notifySessionChange(r.id)
-  return result.rows.map((r) => ({
-    id: r.id,
-    mode: r.mode,
-    userId: r.user_id,
-    visibility: r.visibility,
-    channelType: r.channel_type,
-    anchorKind: r.anchor_kind,
-  }))
+export async function sweepStuckSessions(staleAfterMs:number):Promise<Array<{
+ id:string;mode:string|null;userId:string;visibility:string;channelType:string;anchorKind:string;turnId:string|null;reason:RecoveredTurn['reason']
+}>>{
+ const candidates=await query<{id:string;token:string|null;mode:string|null;userId:string;visibility:string;channelType:string;anchorKind:string}>(
+  `SELECT id,turn_lease_token AS token,mode,user_id AS "userId",visibility,channel_type AS "channelType",anchor_kind AS "anchorKind"
+   FROM sessions WHERE status='running' AND coalesce(turn_heartbeat_at,last_active_at)<clock_timestamp()-($1||' milliseconds')::interval
+   ORDER BY workspace_id,id LIMIT 100`,[String(staleAfterMs)])
+ const recovered=[]
+ for(const row of candidates.rows){
+  const outcome=await reclaimStaleTurnOutcome(row.id,staleAfterMs,row.token)
+  if(outcome){const {token:_privateToken,...publicRow}=row;recovered.push({...publicRow,...outcome})}
+ }
+ return recovered
 }
 
 /** Exact admitted compact-summary payload; its trusted binding is process-private. */
@@ -1258,6 +1165,8 @@ export async function getSessionMessages(
      * never reach the turn's writes or delivery check.
      */
     excludeHeld?: boolean
+    /** A public turn uses its addressed record, under the original live credential. */
+    publicConversation?: PublicTurnConversationBinding
   },
   /** Host-owned current app transaction; its source receipts never travel on the wire. */
   admittedClient?: pg.PoolClient,
@@ -1300,10 +1209,25 @@ export async function getSessionMessages(
 
   const limitClause = opts?.limit ? `LIMIT $${paramIdx}` : ''
   if (opts?.limit) values.push(opts.limit)
+  let relation = 'session_messages'
+  let cte = ''
+  if (opts?.publicConversation) {
+    const binding = opts.publicConversation
+    if (admittedClient || binding.sessionId !== sessionId) throw new DerivedScopeError('scope_source_changed')
+    const credentials = publicConversationBindingValues(binding, binding.version)
+    const markers = credentials.map((_, index) => `$${values.length + index + 1}`)
+    values.push(...credentials)
+    relation = 'public_record_history'
+    cte = `WITH public_record_history AS MATERIALIZED (
+      SELECT message.* FROM public.public_conversation_session_current(${markers.join(',')}) envelope
+      CROSS JOIN LATERAL public.conversation_record_rows(envelope,$${values.length + 1},NULL,false,envelope.starter_user_id,false) message
+    )`
+    values.push(Math.max(0, opts.fromSequence == null ? 0 : opts.fromSequence - 1, opts.afterSequence ?? 0))
+  }
 
   const execute = admittedClient ? <T extends pg.QueryResultRow>(sql: string, params: unknown[]) => admittedClient.query<T>(sql, params) : query
   const result = await execute<ScopedSessionMessageRow>(
-    `SELECT id, session_id as "sessionId", role, content,
+    `${cte} SELECT id, session_id as "sessionId", role, content,
             sequence_num as "sequenceNum", created_at as "createdAt",
             reply_to_text as "replyToText",
             topic_label as "topicLabel",
@@ -1321,7 +1245,7 @@ export async function getSessionMessages(
             project_ids as "scopeProjectIds",
             scope_version::text as "scopeVersion",
             scope_held as "scopeHeld"
-     FROM session_messages WHERE ${conditions.join(' AND ')}
+     FROM ${relation} WHERE ${conditions.join(' AND ')}
      ORDER BY sequence_num ASC ${limitClause}`,
     values,
   )
@@ -1746,13 +1670,11 @@ export async function addSessionMessage(params: {
   }
 
   if (client) return write(client)
-  // Legacy/non-workspace callers need no multi-statement transaction. Keep
-  // the existing one-query path for those surfaces and their lightweight
-  // store tests; canonical scoped rows use the transaction below.
-  if (!params.scope && !params.derivation) {
-    // The shared query wrapper implements the text/values overload used by
-    // this legacy single statement; pg's stream overload makes the structural
-    // type wider than the wrapper even though this call shape is identical.
+  // An authored input is a single INSERT, including the scope and sequence
+  // triggers. Its implicit transaction commits before returning the saved row.
+  // A caller-owned transaction or derived output can also write ancestry.
+  if (!params.derivation && (!params.scope || params.role === 'user')) {
+    // The wrapper supports the text/values overload used by this statement.
     return write({ query } as unknown as Pick<pg.ClientBase, 'query'>)
   }
   const tx = await getPool().connect()
@@ -1975,13 +1897,15 @@ export async function findSlackVisibleMessageByChannelId(params: {
 export async function truncateMessagesFrom(
   messageId: string,
   expectedSessionId?: string,
+  client?: Pick<pg.ClientBase, 'query'>,
 ): Promise<{
   deleted: number
   sessionId: string | null
   deletedMessages: SessionMessage[]
 }> {
+  const execute = client ? <T extends pg.QueryResultRow>(sql: string, values: unknown[]) => client.query<T>(sql, values) : query
   // Find the message to get session + sequence
-  const info = await query<{ sessionId: string; sequenceNum: number }>(
+  const info = await execute<{ sessionId: string; sequenceNum: number }>(
     `SELECT session_id as "sessionId", sequence_num as "sequenceNum"
      FROM session_messages WHERE id = $1 AND session_recording_read_allowed(session_id)`,
     [messageId],
@@ -2001,7 +1925,7 @@ export async function truncateMessagesFrom(
   }
 
   // Capture what we're about to delete
-  const deletedMessages = await query<SessionMessage>(
+  const deletedMessages = await execute<SessionMessage>(
     `SELECT id, session_id as "sessionId", role, content,
             sequence_num as "sequenceNum", created_at as "createdAt",
             reply_to_text as "replyToText",
@@ -2015,7 +1939,7 @@ export async function truncateMessagesFrom(
     [sessionId, sequenceNum],
   )
 
-  const result = await query(
+  const result = await execute(
     `DELETE FROM session_messages
      WHERE session_id = $1 AND sequence_num >= $2`,
     [sessionId, sequenceNum],
@@ -2042,7 +1966,17 @@ export async function getPreferredChannel(
   userId: string,
 ): Promise<{ channelType: string; channelId: string } | null> {
   const result = await query<{ channelType: string; channelId: string }>(
-    `SELECT channel_type as "channelType", channel_id as "channelId"
+    preferredDeliveryChannelSql(), [assistantId, userId],
+  )
+  const row = result.rows[0]
+  return row
+    ? { ...row, channelId: providerChannelIdFromSession(row.channelType, row.channelId) }
+    : null
+}
+
+/** The preferred transport selector used by both prompt readers. */
+export function preferredDeliveryChannelSql(): string {
+  return `SELECT channel_type as "channelType", channel_id as "channelId"
      FROM sessions
      WHERE session_recording_read_allowed(id) AND assistant_id = $1 AND user_id = $2
        AND ${sessionKindSql.proactiveDeliveryTransport('sessions')}
@@ -2050,13 +1984,7 @@ export async function getPreferredChannel(
        AND channel_id <> 'default'
        AND (channel_type != 'whatsapp' OR channel_id LIKE '%@%')
      ORDER BY last_active_at DESC
-     LIMIT 1`,
-    [assistantId, userId],
-  )
-  const row = result.rows[0]
-  return row
-    ? { ...row, channelId: providerChannelIdFromSession(row.channelType, row.channelId) }
-    : null
+     LIMIT 1`
 }
 
 // ── Introspection: workspace session history (audit §6-a) ────────────

@@ -20,6 +20,7 @@ import { createDbWorkspaceGroupStore } from '../workspace-group-store.js'
 import { createDbWorkspaceFilesStore } from '../workspace-files-store.js'
 import { admitRecordingIntakeParent, captureRecordingIntakeParent, recordingIntakeTransaction } from '../recording-intake-admission.js'
 import { admitWorkspaceResource } from '../../workspace-access/resource-admission.js'
+import { authSessionStore } from '../auth-session-store.js'
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 // This suite asserts the legacy (pre-v2) model, which workspaces.department_read_v2=false still
 // serves as the cutover's rollback path (migration 650, decision D22); its workspaces are pinned to it.
@@ -309,8 +310,12 @@ describe('recording producer review regressions', () => {
   it('enforces live Office ACL in direct-app SQL publication and derived segment delivery', async () => {
     const f = await fixture(), artifact = await createOfficeArtifactStore().createShell({ userId: f.otherId, workspaceId: f.workspaceId, family: 'document', title: 'Office parent', templateVersionId: null, capabilityVersion: 1, sensitivity: 'confidential' }, { provenance: { kind: 'human_authored_root', actorUserId: f.otherId, workspaceId: f.workspaceId } })
     const jobId = randomUUID(), hash = 'a'.repeat(64), parentPath = `/office/artifacts/${artifact.id}/versions`, name = `1-${hash}.json`
+    // Migration 8173 binds an output only to a job whose creation binding names
+    // its actor, workspace and a live auth session of that actor.
+    const authSession = await authSessionStore.create(f.otherId, { deviceLabel: 'fixture', userAgent: null, ipAddress: null })
+    const creationBinding = { protocol: 'office_prompt_only_v1', actorUserId: f.otherId, workspaceId: f.workspaceId, authSessionId: authSession!.id }
     await pool.query(`INSERT INTO office_generation_jobs(id,workspace_id,artifact_id,initiated_by_user_id,brief,authority_projection,idempotency_key,status,lease_expires_at)
-      VALUES($1::uuid,$2,$3,$4,'{}','{"creationBinding":{"protocol":"office_prompt_only_v1"}}',$1::text,'running',now()+interval '1 hour')`, [jobId, f.workspaceId, artifact.id, f.otherId])
+      VALUES($1::uuid,$2,$3,$4,'{}',$5::jsonb,$1::text,'running',now()+interval '1 hour')`, [jobId, f.workspaceId, artifact.id, f.otherId, JSON.stringify({ creationBinding })])
     await pool.query(`UPDATE workspace_files SET path=$2,parent_path=$3,name=$4,mime='application/json',user_id=NULL,created_by_user_id=$5,compartments=$6,metadata=$7::jsonb WHERE id=$1`, [f.file.id, `${parentPath}/${name}`, parentPath, name, f.otherId, artifact.compartments, JSON.stringify({ noIndex: true, contentSha256: hash, officeGenerationJobId: jobId })])
     await recordingIntakeTransaction({ actorUserId: f.otherId }, async client => {
       await client.query('INSERT INTO office_generation_file_bindings(file_id,artifact_id,workspace_id,job_id,snapshot_hash) VALUES($1,$2,$3,$4,$5)', [f.file.id, artifact.id, f.workspaceId, jobId, hash])

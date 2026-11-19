@@ -22,7 +22,7 @@
  * [COMP:api/session-resume-store]
  */
 
-import { intersectAccessCeilings, type AccessCeiling } from '@use-brian/core'
+import { intersectAccessCeilings, type AccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { query } from './client.js'
 
 export type SessionResumePoint = {
@@ -227,4 +227,44 @@ export function createDbSessionResumeStore(): SessionResumeStore {
       return (result.rowCount ?? 0) > 0
     },
   }
+}
+
+/** The session's lease as seen by a resume job continuing `approvalId`. */
+export type ResumePredecessorLease = {
+  running: boolean
+  /** The running lease token, only when it is the one this resume point names. */
+  predecessorToken: string | null
+  /** The running lease's heartbeat is older than the staleness window. */
+  stale: boolean
+}
+
+/**
+ * Read the session lease for the resume of `approvalId`: whether a turn is
+ * running, whether its token is the suspended turn's own lease (named by the
+ * approval of THIS session's resume point), and whether that lease is stale.
+ * The token stays server-side; see askquestion-suspend-resume.md → "Resumed turn
+ * execution (D9)", step 1.
+ *
+ * [COMP:api/session-resume-store]
+ */
+export async function readResumePredecessorLease(
+  sessionId: string,
+  approvalId: string,
+  staleAfterMs: number,
+): Promise<ResumePredecessorLease | null> {
+  const result = await query<{ status: string; predecessorToken: string | null; stale: boolean }>(
+    `SELECT s.status,
+            CASE WHEN s.turn_lease_token IS NOT NULL
+                  AND s.turn_lease_token::text = p.approval_payload->>'turnLeaseToken'
+                 THEN s.turn_lease_token::text END AS "predecessorToken",
+            coalesce(s.turn_heartbeat_at, s.last_active_at) < clock_timestamp() - ($3 || ' milliseconds')::interval AS stale
+       FROM sessions s
+       LEFT JOIN session_resume_points r ON r.session_id = s.id AND r.approval_id = $2
+       LEFT JOIN pending_approvals p ON p.id = r.approval_id
+      WHERE s.id = $1`,
+    [sessionId, approvalId, String(staleAfterMs)],
+  )
+  const row = result.rows[0]
+  if (!row) return null
+  return { running: row.status === 'running', predecessorToken: row.predecessorToken ?? null, stale: row.stale === true }
 }

@@ -32,7 +32,7 @@
  * [COMP:core/inbox-types]
  */
 
-import type { Sensitivity } from '../security/sensitivity.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 
 // ── Retention window (migration 426) ───────────────────────────
 

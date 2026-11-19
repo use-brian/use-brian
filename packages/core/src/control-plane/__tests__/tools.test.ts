@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
-import type { ToolContext } from '../../tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { createControlPlaneTools } from '../tools.js'
 import type { ControlPlaneReader } from '../types.js'
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
-import type { AccessContext } from '@use-brian/core'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import pg from 'pg'
 
 function ctxOf(userId: string, workspaceId: string, assistantId: string = userId): AccessContext {

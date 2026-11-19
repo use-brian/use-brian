@@ -1,11 +1,15 @@
-import { bindWorkspaceCredentialDelegation } from '@use-brian/core'
-import { assertSourceModelInputAuthority, assertSourceModelOutputAuthority } from '../application-platform/model-source-authority.js'
+import { bindWorkspaceCredentialDelegation } from '@use-brian/agent-runtime/security/workspace-delegation.js'
+import { admitModelSourceEvidence } from '../application-platform/model-source-authority.js'
 import { createWorkspaceMcpContextTools, readWorkspaceMcpSelection, workspaceContextControlNames } from './contexts.js'
 /** Native registry composition and verified issuance for workspace MCP. [COMP:api/workspace-mcp] */
 import { executeWorkspaceMcpOperation, getWorkspaceOperation } from './operations.js'
 import { randomUUID } from 'node:crypto'
-import { ContextScopeAccumulator, executionToolContext, filterToolsByCapabilities, minSensitivity,
-  type CapabilityStore, type Tool, type ToolContext } from '@use-brian/core'
+import type { CapabilityStore } from '@use-brian/core/authorization/types.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { minSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { filterToolsByCapabilities } from '@use-brian/agent-runtime/tools/capability-gate.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { findOrCreateWorkspaceMcpSession } from '../db/sessions.js'
 import { queryWithRLS, runWithAgentAccess } from '../db/client.js'
 import { findAssistantById, getWorkspacePrimaryAssistant } from '../db/users.js'
@@ -109,7 +113,8 @@ export function createWorkspaceMcpProfile(deps: {
         credentialCurrent: async () => { try { await original.security.authority.assertCurrent(); return true } catch { return false } },
       })
       const prepared: ToolContext = { ...base, ...executionToolContext(executionContext, { appId: base.appId }),
-        assertModelInputAuthority: assertSourceModelInputAuthority, assertModelOutputAuthority: assertSourceModelOutputAuthority,
+        admitModelInput: current => admitModelSourceEvidence(current, 'context'),
+        admitModelOutput: current => admitModelSourceEvidence(current, 'deliver'),
         scopeAccumulator: new ContextScopeAccumulator({ compartments: turnScope.writeCompartments, projectIds: turnScope.writeProjectIds }),
         sessionId: session.id, sessionPersisted: true, activeGroupId: turnScope.activeGroupId, activeProjectId: turnScope.activeProjectId }
       bindWorkspaceCredentialDelegation(executionContext, await captureWorkspaceMcpDelegation(prepared))

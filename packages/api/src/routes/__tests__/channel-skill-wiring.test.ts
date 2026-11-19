@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { bootCompositionSource } from '../../boot/__tests__/composition-source.js'
 
 const routesDir = join(dirname(fileURLToPath(import.meta.url)), '..')
 const skillStoreNames = [
@@ -45,7 +46,7 @@ describe('[COMP:api/channel-pipeline] shared store wiring', () => {
   })
 
   it('supplies shared stores at every boot channel mount', () => {
-    const boot = readFileSync(join(routesDir, '..', 'boot.ts'), 'utf8')
+    const boot = bootCompositionSource()
     const mounts = [
       'telegramByoRoutes({',
       'slackRoutes({',

@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { PoolClient } from 'pg'
-import type { WorkspaceFileCreateInput,WorkspaceFile } from '@use-brian/core'
+import type { WorkspaceFileCreateInput, WorkspaceFile } from '@use-brian/core/workspace-files/types.js'
 
 type Renewal = (fileId: string) => Promise<void>
 type Admission = (client: PoolClient, actor: string, input: WorkspaceFileCreateInput) => Promise<void | Renewal>

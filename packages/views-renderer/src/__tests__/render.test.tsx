@@ -9,7 +9,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { createElement, type ReactElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import type { A2UIWidget, ViewPayload } from '@use-brian/core'
+import type { A2UIWidget, ViewPayload } from '@use-brian/core/views/a2ui.js'
 import { ViewRenderer, renderWidget } from '../render.js'
 
 function elementType(el: ReactElement): string {

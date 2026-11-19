@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
-import { appendOfficeCommand, encodeOfficeState, snapshotToYDoc, type OfficeCommand } from '@use-brian/office-model'
+import { appendOfficeCommand, encodeOfficeState, snapshotToYDoc, yDocToSnapshot, type OfficeCommand } from '@use-brian/office-model'
 import { completePresentationSnapshot, id } from '../../../../core/src/office/__tests__/fixtures.js'
 import { createOfficeLiveStore } from '../office-live.js'
 import type { OfficeDbQuery } from '../office-artifacts.js'
@@ -27,6 +28,21 @@ function fakeDb(initialCommands: OfficeCommand[] = []) {
 }
 
 describe('[COMP:api/office-store] atomic offline command admission', () => {
+  it.each(['initialize', 'initializeIfMissing'] as const)('binds %s to the materialized collaboration snapshot', async method => {
+    const input = completePresentationSnapshot()
+    const { title, ...fields } = input
+    const snapshot = { title, ...fields }
+    const digest = (value: typeof snapshot) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+    const materializedHash = digest(yDocToSnapshot(snapshotToYDoc(snapshot)) as typeof snapshot)
+    expect(materializedHash).not.toEqual(digest(snapshot))
+    const db: OfficeDbQuery = async <T>(_actor: string, sql: string, params: unknown[]) => {
+      expect(sql).toContain('canonical_hash')
+      expect(params[3]).toBe(materializedHash)
+      return { rows: [{ artifactId: snapshot.artifactId }] as T[] }
+    }
+    await createOfficeLiveStore(db)[method]({ userId: id(900), artifactId: snapshot.artifactId, snapshot })
+  })
+
   it('persists all commands in one write or none when a later command is invalid', async () => {
     const state = fakeDb()
     const first = command(state.snapshot.artifactId, id(901))

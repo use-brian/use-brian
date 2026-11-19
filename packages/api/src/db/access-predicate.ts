@@ -23,7 +23,11 @@
  * reused here.
  */
 
-import { departmentReadGrantJson,intersectDepartmentReadGrants,intersectScopeGrants,minSensitivity,scopeGrantContains,RANK,type ResourceScope,type AccessContext,type DepartmentReadGrant } from '@use-brian/core'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import { intersectScopeGrants, scopeGrantContains } from '@use-brian/agent-runtime/security/context-scope.js'
+import { departmentReadGrantJson, intersectDepartmentReadGrants, type DepartmentReadGrant } from '@use-brian/agent-runtime/security/department-read.js'
+import type { ResourceScope } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { minSensitivity, RANK } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { currentAgentAccess } from './agent-access-context.js'
 
 /**

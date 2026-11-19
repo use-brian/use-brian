@@ -27,18 +27,19 @@
 
 import { Router } from 'express'
 import {
-  boundScopeSource,
   matchInducedSkill,
-  type DerivedWriteEvidence,
   type ExistingSkillForMatch,
-} from '@use-brian/core'
+} from '@use-brian/core/skills/rederivation-match.js'
+import type { DerivedWriteEvidence } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { boundScopeSource } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { query } from '../db/client.js'
 import type { PendingApprovalsStore } from '../db/pending-approvals-store.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import type { WorkspaceSkillStore } from '../db/skill-store.js'
 import type { WorkspaceSkillFilesStore } from '../db/workspace-skill-files-store.js'
 import type { WorkspaceSkillEnablementStore } from '../db/workspace-skill-enablement-store.js'
-import type { EntityLinksStore, WorkflowStore } from '@use-brian/core'
+import type { EntityLinksStore } from '@use-brian/core/entities/types.js'
+import type { WorkflowStore } from '@use-brian/core/workflow/types.js'
 import type { ValidatedDefinitionEditor } from './workflows.js'
 import {
   applyDerivedSkillPatch,

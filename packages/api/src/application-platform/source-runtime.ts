@@ -1,6 +1,8 @@
 /** Attended native read adapter for exact-instance protected MCP dispatch. [COMP:api/external-source-access] */
 import { createHash } from 'node:crypto'
-import { ContextScopeAccumulator, type ExecutionContext, type McpServerConfig } from '@use-brian/core'
+import type { McpServerConfig } from '@use-brian/agent-runtime/mcp/types.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { SourceProtocolError } from '@use-brian/brian-app/connector'
 import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
 import { getAppPool, getPool, applyRLSGucs, runWithAgentAccess } from '../db/client.js'
@@ -22,7 +24,7 @@ export type ConnectorSourceRuntime = {
   discover: (name: string) => Promise<McpServerConfig>
   call: (tool: string, input: Record<string, unknown>, overrides?: Record<string, string>) => Promise<unknown>
   assertCurrent: () => Promise<void>
-  read?: (tool: string, input: Record<string, unknown>, retentionMode?: 'governed' | 'released_snapshot') => Promise<{ result: import('@modelcontextprotocol/sdk/types.js').CallToolResult; sources: import('@use-brian/core').ScopeSource[] }>
+  read?: (tool: string, input: Record<string, unknown>, retentionMode?: 'governed' | 'released_snapshot') => Promise<{ result: import('@modelcontextprotocol/sdk/types.js').CallToolResult; sources: import('@use-brian/agent-runtime/security/derived-scope.js').ScopeSource[] }>
   /** Host-only operation proof; never exposed as a model-callable tool or serialized catalog. */
   authorize: SourceAccessClient['authorize']
   authorizeRelease?: (request:import('@use-brian/brian-app/connector').SourceAuthorizationRequest,intent:SourceServiceReleaseIntent)=>Promise<import('./source-access.js').SourceOperationProof>

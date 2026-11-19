@@ -23,7 +23,7 @@ import {
   type ResearchFeedbackKind,
   type ResearchFeedbackOrigin,
   type ResearchSourceRef,
-} from '@use-brian/core'
+} from '@use-brian/core/research/contracts.js'
 import { applyRLSGucs, getAppPool, getPool, rollbackAndRelease } from './client.js'
 import { appendDecisionEvent } from './decision-event-store.js'
 import { classifySession, sessionPolicy, type SessionKindRow } from '../session-kind.js'
@@ -184,11 +184,9 @@ export function researchSourceUnavailable(): Error & { code: string } {
   return Object.assign(new Error('Research source is not currently available'), { code: 'research_source_unavailable' })
 }
 
-/** Current native policies are inherited by this app-client SELECT. Never run
- * inside readAdmissionPolicy's temporary metadata elevation or an owner query. */
+/** Current native policies must run on the actual viewer's app transaction. */
 export async function readResearchDefaultPageSource(client: pg.PoolClient, refs: ResearchDefaultPageRefs): Promise<ResearchDefaultPageSource> {
-  const elevated = (await client.query<{ value: string | null }>("SELECT current_setting('app.system_bypass',true) AS value")).rows[0]?.value
-  if (elevated === 'true' || !refs.requestMessageId) throw researchSourceUnavailable()
+  if (!refs.requestMessageId) throw researchSourceUnavailable()
   const r = await client.query<ResearchPageSourceRow>(`SELECT s.id AS "sessionId",s.user_id AS "sessionOwner",
     s.visibility,s.mode,s.channel_type AS "channelType",s.channel_id AS "channelId",s.anchor_kind AS "anchorKind",
     s.anchor_ref AS "anchorRef",s.app_origin AS "appOrigin",s.transient,
@@ -200,6 +198,10 @@ export async function readResearchDefaultPageSource(client: pg.PoolClient, refs:
     JOIN session_messages m ON m.id=a.request_message_id AND m.session_id=s.id
     JOIN workspace_members wm ON wm.workspace_id=a.workspace_id AND wm.user_id=$1
     WHERE a.id=$2 AND a.workspace_id=$3 AND a.actor_user_id=$1 AND a.planned_page_id=$4
+      AND session_user=current_user AND current_setting('app.current_user_id',true)=$1::uuid::text
+      AND pg_catalog.row_security_active('public.research_activities'::regclass)
+      AND pg_catalog.row_security_active('public.sessions'::regclass)
+      AND pg_catalog.row_security_active('public.session_messages'::regclass)
       AND a.request_message_id=$5 AND s.workspace_id=a.workspace_id AND s.assistant_id=a.assistant_id
       AND m.workspace_id=a.workspace_id AND m.assistant_id=a.assistant_id AND m.role='user'`,
   [refs.userId,refs.activityId,refs.workspaceId,refs.pageId,refs.requestMessageId])

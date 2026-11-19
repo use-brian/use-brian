@@ -17,7 +17,7 @@ import type { SearchProvider, SearchResult } from './search-stack.js'
 import { compileSearchFilters } from './search-filters.js'
 import { retryAfterMs, SearchProviderError } from './_fetch-error.js'
 import { clampResultCount } from './search-stack.js'
-import type { ExternalCredentialPool } from '../../providers/credential-pool.js'
+import type { ExternalCredentialPool } from '@use-brian/agent-runtime/providers/credential-pool.js'
 import { flatSearchCostUsd } from '../../billing/search-provider-rates.js'
 import { recordToolSpend, resolveToolCredential } from './provider-credential.js'
 

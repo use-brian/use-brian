@@ -24,6 +24,7 @@ import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { promptDialog } from "@/components/ui/prompt-dialog";
 import { Button } from "@/components/ui/button";
 import { LiveInteractionSettings } from "./live-interaction-settings";
+import { DesktopBrowserSettings } from "./desktop-browser-settings";
 import { SiriSetupCard } from "./siri-setup-card";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
@@ -145,6 +146,7 @@ export function GeneralSection() {
         </Row>
       </Section>
 
+      <DesktopBrowserSettings />
       <SiriSetupCard />
       <LiveInteractionSettings />
     </div>

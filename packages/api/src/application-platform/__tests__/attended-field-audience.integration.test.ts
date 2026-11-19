@@ -1,7 +1,8 @@
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
-import {boundScopeSources,type ScopeSource} from '@use-brian/core'
+import type {ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {applyRLSGucs,getAppPool,getPool,rollbackAndRelease,runWithAgentAccess} from '../../db/client.js'
-import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
+import {readAdmittedSessionQuery} from '../../db/conversation-store.js'
 import {bindSessionContextRetainedAuthority} from '../../db/session-context-revisions.js'
 import {createAttendedDeliveryAudienceAuthorizer,validateAttendedAudienceEvidence} from '../../context-scope/attended-audience.js'
 import {roomAudienceCeiling} from '../../routes/_room-binding.js'
@@ -65,12 +66,15 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/delivery-autho
  it('keeps a wider original empty domain held instead of rewriting its bounds for a narrower audience',async()=>{
   fixture=await persistentContextFixture();const f=fixture,authority=await f.modelContext(),client=await getAppPool().connect()
   let wide:ReturnType<typeof boundScopeSources>=[]
-  try{await runWithAgentAccess(authority.execution.security.access,async()=>{
+  // Capture the real owner's confidential domain before testing the internal room.
+  const widerAccess={...authority.execution.security.access,clearance:'confidential' as const,departmentRead:authority.execution.security.access.departmentRead?{...authority.execution.security.access.departmentRead,cap:'confidential' as const}:undefined}
+  try{await runWithAgentAccess(widerAccess,async()=>{
    await client.query('BEGIN');await applyRLSGucs(client,f.ownerId)
-   const result=(await client.query<{value:{sources:ReturnType<typeof boundScopeSources>}}>('SELECT value FROM read_native_application_session_history($1,$2,0)',[f.workspaceId,f.session.id])).rows
+   const result=(await client.query<{value:{sources:ReturnType<typeof boundScopeSources>}}>('SELECT jsonb_array_elements(capture_conversation_query($1,$2,0,NULL) #> ARRAY[\'history\']) AS value',[f.workspaceId,f.session.id])).rows
    wide=result[0].value.sources;await client.query('COMMIT')
   })}finally{await rollbackAndRelease(client)}
   const frozen=(await f.pool.query('SELECT domain FROM application_query_domains WHERE workspace_id=$1 ORDER BY id',[f.workspaceId])).rows
+  expect(frozen.some(row=>row.domain.bounds?.tier===3)).toBe(true)
   await expect(validateAttendedAudienceEvidence(authority.execution,{sources:wide},roomAudienceCeiling(f.workspaceId,f.session))).rejects.toMatchObject({reason:'delivery_audience_unverified'})
   expect((await f.pool.query('SELECT domain FROM application_query_domains WHERE workspace_id=$1 ORDER BY id',[f.workspaceId])).rows).toEqual(frozen)
   const current=await readAdmittedSessionQuery({sessionId:f.session.id,throughSequence:0,authority})

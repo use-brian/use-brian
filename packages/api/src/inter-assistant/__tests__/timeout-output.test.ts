@@ -21,8 +21,17 @@ vi.mock('../../context-scope/execution-context.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../../context-scope/execution-context.js')>()
   return { ...actual,resolveExecutionContextSystem: (input: Parameters<typeof actual.resolveExecutionContextSystem>[0],
     deps: Parameters<typeof actual.resolveExecutionContextSystem>[1] = {}) => actual.resolveExecutionContextSystem(input,{
-      ...deps,pinPolicyEpoch: async () => async () => true,resolveAssistant: async () => input.assistant,
+      ...deps,pinPolicyEpoch: async () => ({isCurrent: async () => true, matches: () => true}),resolveAssistant: async () => input.assistant,
     }) }
+})
+// Legacy fake rows have no database authority facts. This fixture boundary
+// retains ambient caller leases; owner.test.ts exercises the canonical session lease.
+vi.mock('../../context-scope/authority-lease.js', async original => {
+  const actual = await original<typeof import('../../context-scope/authority-lease.js')>()
+  return { ...actual, createSessionAuthorityLease: () => ({
+    assertCurrent: async () => {}, execute: async <T>(operation: () => Promise<T>) => operation(),
+    markOperationMayHaveExecuted() {},
+  }) }
 })
 import { z } from 'zod'
 
@@ -33,14 +42,20 @@ const mockLoadDecisionPlaybookContext = vi.fn()
 // Override queryLoop + runPreflight; everything else (buildPreflightPrompt,
 // prompt/memory-context builders, MODEL_MAP) runs for real so the system-prompt
 // injection + model resolution are exercised end to end.
-vi.mock('@use-brian/core', async (io) => ({
-  ...(await io<typeof import('@use-brian/core')>()),
-  queryLoop: async function* (options: import('@use-brian/core').QueryLoopOptions) {
+vi.mock('@use-brian/core/engine/query-loop-defaults.js', async (io) => ({
+  ...(await io<typeof import('@use-brian/core/engine/query-loop-defaults.js')>()),
+  queryLoop: async function* (options: import('@use-brian/agent-runtime/engine/query-loop.js').QueryLoopOptions) {
     for await (const event of mockQueryLoop(options)) {
+      if (event.type === 'turn_complete' && event.totalUsage) {
+        options.observeUsage?.({model:event.response.model,totalUsage:event.totalUsage})
+      }
       if (options.dispatchOutput) await options.dispatchOutput(options.context, event)
       else yield event
     }
   },
+}))
+vi.mock('@use-brian/core/workers/preflight.js', async (io) => ({
+  ...(await io<typeof import('@use-brian/core/workers/preflight.js')>()),
   runPreflight: (...a: unknown[]) => mockRunPreflight(...a),
 }))
 vi.mock('../../db/users.js', () => ({
@@ -66,13 +81,12 @@ vi.mock('../../db/sessions.js', () => ({
   // unless a test seeds it.
   listSessionsByChannelForWorkspaceSystem: vi.fn().mockResolvedValue([]),
   // Turn-kernel lease (every callee turn holds one).
-  isTurnLeaseLive: vi.fn().mockResolvedValue(false),
   reclaimStaleTurn: vi.fn().mockResolvedValue(false),
-  takeTurnSlot: vi.fn().mockResolvedValue(undefined),
-  claimTurnSlot: vi.fn().mockResolvedValue(true),
-  startTurnLease: vi.fn().mockResolvedValue('lease-token'),
+  claimTurnLease: vi.fn().mockResolvedValue('lease-token'),
+  claimTurnLeaseOutcome:vi.fn().mockResolvedValue({token:'lease-token',turnId:null}),
   touchTurnLease: vi.fn().mockResolvedValue({ held: true, cancelRequested: false }),
   releaseTurnLease: vi.fn().mockResolvedValue(true),
+  releaseTurnOutcome:vi.fn(async(_id:string,reason:string)=>({turnId:null,reason})),
   TURN_HEARTBEAT_INTERVAL_MS: 20_000,
 }))
 vi.mock('../../billing-party.js', () => ({
@@ -82,7 +96,7 @@ vi.mock('../../db/workspace-store.js', () => ({
   getConnectorUserId: vi.fn().mockResolvedValue('owner-1'),
   getWorkspacePlan: vi.fn().mockResolvedValue('pro'),
   getWorkspaceRoleSystem: vi.fn().mockResolvedValue('member'),
-  // injectMcpTools gates the owner-personal base load on this; `true`
+  // The retired injector gated the owner-personal base load on this; `true`
   // (solo workspace) preserves the pre-gate load behavior these tests expect.
   isSoloWorkspaceSystem: vi.fn().mockResolvedValue(true),
   // Read-ceiling resolver for the brain retrieval actor. Returned shape mirrors
@@ -92,13 +106,22 @@ vi.mock('../../db/workspace-store.js', () => ({
     .fn()
     .mockResolvedValue({ clearance: 'confidential', compartments: null, mutationCompartments: null }),
 }))
-vi.mock('../../mcp/inject.js', () => ({
-  injectMcpTools: vi.fn().mockResolvedValue({
-    enrichConfirmation: async (_t: string, i: unknown) => i,
+// The callee's capability surface (`turn/capabilities.ts` → `mcp/surface.ts`):
+// `composeCallee` records the callee's parameter block, `surfaces` the surface id.
+const surfaceMocks = vi.hoisted(() => ({
+  surfaces: [] as string[],
+  composeCallee: vi.fn<(params: SurfaceCapabilityOptions) => Promise<SurfaceCapabilities>>(async () => ({
+    enrichConfirmation: async (_t: string, i: Record<string, unknown>) => i,
     unavailable: [],
     searchableSources: [],
     restrictedSearchToolNames: [],
-  }),
+  })),
+}))
+vi.mock('../../mcp/surface.js', () => ({
+  composeSurfaceCapabilities: (surface: string, params: SurfaceCapabilityOptions) => {
+    surfaceMocks.surfaces.push(surface)
+    return surfaceMocks.composeCallee(params)
+  },
 }))
 vi.mock('../../routes/proactive-compaction.js', () => ({
   runProactiveCompaction: vi.fn().mockResolvedValue({ messages: [], compacted: false, episodes: [] }),
@@ -116,28 +139,32 @@ import { createCalleeExecutor } from '../../inter-assistant/executor.js'
 import * as callerEvidence from '../../context-scope/caller-evidence.js'
 import * as externalAncestry from '../../application-platform/external-source-ancestry.js'
 import * as fieldEvidence from '../../application-platform/field-evidence.js'
-// Real (unmocked) core factories — the '@use-brian/core' mock above spreads the
-// actual module, so everything but queryLoop/runPreflight resolves for real.
+// Real (unmocked) core factories — the query-loop and preflight mocks above
+// spread the actual modules, so everything but queryLoop/runPreflight resolves for real.
 // Used by the goal-path browser-surface describes at the bottom of this file.
 import {
-  createComputerTools,
-  buildTool,
-  createSkillRunnerTools,
-  createBuFallbackTool,
-  createLocalBrowserProvider,
-  createCloudBrowserProvider,
-  StubSandboxProvider,
-  createSandboxOrchestrator,
-  createInMemorySandboxTaskStore,
-  createInMemoryBrowserProfileStore,
-  createInMemorySessionVault,
   createInMemoryBrowserSkillStore,
   createInMemoryBrowserSkillGrantStore,
   createInMemoryBlockApprovals,
-  extractEffectContract,
-  RESULT_PATH,
-  AuthoritySourceSchema,
-} from '@use-brian/core'
+} from '@use-brian/core/sandbox/browser-skills.js'
+import { createBuFallbackTool } from '@use-brian/core/sandbox/bu-fallback.js'
+import { createCloudBrowserProvider } from '@use-brian/core/sandbox/cloud-browser-provider.js'
+import { extractEffectContract } from '@use-brian/core/sandbox/effect-contract.js'
+import { createLocalBrowserProvider } from '@use-brian/core/sandbox/local-browser-provider.js'
+import {
+  createSandboxOrchestrator,
+  createInMemorySandboxTaskStore,
+} from '@use-brian/core/sandbox/orchestrator.js'
+import {
+  createInMemoryBrowserProfileStore,
+  createInMemorySessionVault,
+} from '@use-brian/core/sandbox/profiles.js'
+import { StubSandboxProvider } from '@use-brian/core/sandbox/providers/stub.js'
+import { RESULT_PATH } from '@use-brian/core/sandbox/runner-shim.js'
+import { createSkillRunnerTools } from '@use-brian/core/sandbox/skill-runner.js'
+import { createComputerTools } from '@use-brian/core/sandbox/tools.js'
+import { AuthoritySourceSchema } from '@use-brian/agent-runtime/security/authority-source.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
 import {
   findAssistantById,
   findOrCreateUser,
@@ -147,6 +174,7 @@ import {
 } from '../../db/users.js'
 import {
   findOrCreateSession,
+  readSessionById,
   addSessionMessage,
   listSessionsByChannelForWorkspaceSystem,
 } from '../../db/sessions.js'
@@ -154,16 +182,17 @@ import { billingPartyForAssistant } from '../../billing-party.js'
 import { resolveOperationCeilingsSystem, getWorkspaceRoleSystem } from '../../db/workspace-store.js'
 import { runProactiveCompaction } from '../../routes/proactive-compaction.js'
 import { injectDocTools } from '../../doc/inject.js'
-import { injectMcpTools } from '../../mcp/inject.js'
+import type { SurfaceCapabilities, SurfaceCapabilityOptions } from '../../mcp/surface.js'
+const composeCallee = surfaceMocks.composeCallee
 import {
-  encodeExternalCostMeta,
   engineCostModel,
   flatEngineCostUsd,
-  flatSearchCostUsd,
-} from '@use-brian/core'
+} from '@use-brian/core/billing/engine-provider-rates.js'
+import { encodeExternalCostMeta } from '@use-brian/core/billing/external-cost.js'
+import { flatSearchCostUsd } from '@use-brian/core/billing/search-provider-rates.js'
 
 const mockInjectDoc = vi.mocked(injectDocTools)
-const mockInjectMcp = vi.mocked(injectMcpTools)
+const mockInjectMcp = vi.mocked(composeCallee)
 
 const mockFindAssistant = vi.mocked(findAssistantById)
 const mockFindUser = vi.mocked(findUserById)
@@ -283,7 +312,12 @@ beforeEach(() => {
     mutationCompartments: compartments === undefined ? [] : compartments,
   }))
   mockBilling.mockResolvedValue('owner-1')
-  mockSession.mockResolvedValue({ id: 'sess-1' } as never)
+  mockSession.mockImplementation(async params => ({ id:'sess-1',visibility:'personal',mode:null,
+    anchorKind:'none',anchorRef:null,appOrigin:null,contextLockedAt:null,effectiveClearance:null,
+    contextCompartments:[], ...params }) as never)
+  vi.mocked(readSessionById).mockImplementation(async () => ({ id:'sess-1',visibility:'personal',mode:null,
+    anchorKind:'none',anchorRef:null,appOrigin:null,contextLockedAt:null,effectiveClearance:null,
+    contextCompartments:[],...mockSession.mock.lastCall?.[0] }) as never)
   vi.spyOn(console, 'error').mockImplementation(() => {})
 })
 

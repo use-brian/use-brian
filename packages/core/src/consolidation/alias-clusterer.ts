@@ -24,8 +24,8 @@
  */
 
 import { z } from 'zod'
-import { collectStream } from '../providers/accumulator.js'
-import type { LLMProvider } from '../providers/types.js'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
 import type { EntityKind, EntityRecord } from '../entities/types.js'
 import type { DecisionExecutionPort } from '../decisions/index.js'
 

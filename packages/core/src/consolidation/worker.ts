@@ -47,7 +47,7 @@ import {
 } from './reclassifier.js'
 import type { BrainCandidateStore } from '../brain/candidates-types.js'
 import type { EntityLinksStore, EntityStore } from '../entities/types.js'
-import type { LLMProvider } from '../providers/types.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
 import type { TaskStore } from '../tasks/types.js'
 
 /**
@@ -177,7 +177,7 @@ export type ReclassificationScope = {
     model: string
     modelTier?: string
     providerKeySource?: 'user' | 'platform'
-    usage: import('../providers/types.js').TokenUsage
+    usage: import('@use-brian/agent-runtime/providers/types.js').TokenUsage
   }) => void | Promise<void>
   /** Resolve the workspaceId an assistant belongs to. Returns null
    *  when the assistant has no workspace partition (legacy rows). */

@@ -1,5 +1,5 @@
 import {randomUUID} from 'node:crypto'
-import type {LLMProvider,Message,StreamChunk} from '@use-brian/core'
+import type {LLMProvider, Message, StreamChunk} from '@use-brian/agent-runtime/providers/types.js'
 import {chatRoutes} from '../../routes/chat.js'
 import {createDbMemoryStore} from '../memory-store.js'
 import {createDbCapabilityStore} from '../capability-store.js'

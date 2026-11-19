@@ -3,7 +3,8 @@ import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it, vi } from 'vitest'
-import { runReflectionConsolidation, type ScopeSource } from '@use-brian/core'
+import { runReflectionConsolidation } from '@use-brian/core/consolidation/phases.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 // Native loading preserves the maintained fixture's import.meta.resolve in Node22.
 const { assertLocalFixture,createLocalFixture,cloneLocalFixture,cleanRuntimeEnvironment,runCommand } = createRequire(import.meta.url)(
   fileURLToPath(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url)))

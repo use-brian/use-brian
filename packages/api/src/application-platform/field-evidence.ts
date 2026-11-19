@@ -3,7 +3,10 @@ import { isDeepStrictEqual } from 'node:util'
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { PoolClient } from 'pg'
-import { bindScopeSources, boundScopeSources, resourceScopeKey, validateApplicationValues, type ApplicationOperationContext, type ScopeSource } from '@use-brian/core'
+import type { ApplicationOperationContext } from '@use-brian/core/application-platform/contracts.js'
+import { validateApplicationValues } from '@use-brian/core/application-platform/values.js'
+import { resourceScopeKey, type ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { ApplicationPlatformError, applicationJsonSchema, type ApplicationRecordProjection,type ApplicationResourceDefinition } from '@use-brian/shared'
 import { getPool } from '../db/client.js'
 import { currentApplicationReadTransaction,getApplicationExecutionBinding } from './execution-context.js'
@@ -88,10 +91,29 @@ export function canonicalNativeAmountEncoding(projection: ApplicationRecordProje
 export async function readCanonicalNativeRecord(context:CanonicalGenericReadContext,
   definition:ApplicationResourceDefinition,id:string,fields?:readonly string[]):Promise<ApplicationRecordProjection> {
   if(definition.origin.kind!=='native' || definition.origin.moduleKey!=='native') unavailable()
-  const captured=captureSchema.extend({id:z.string().uuid(),recordVersion:z.string().min(1),
-    valueEncodings:z.object({amount:z.enum(['number','string','null','invalid']).optional()}).strict().optional()}).safeParse(
-    (await runCanonicalReadLease(context,()=>context.transaction.query<{value:unknown}>('SELECT read_native_application_record($1,$2,$3,$4) AS value',
-      [context.workspaceId,definition.typeKey,id,fields?[...fields]:null]))).rows[0]?.value)
+  const response = await runCanonicalReadLease(context, () => context.transaction.query<{value: unknown}>(
+    'SELECT read_native_application_record($1,$2,$3,$4) AS value',
+    [context.workspaceId, definition.typeKey, id, fields ? [...fields] : null]))
+  return projectNativeRecord(context, definition, id, fields, response.rows[0]?.value)
+}
+
+/** Resolve these exact IDs in input order under one statement snapshot and the ordinary record/field policy. */
+export async function readCanonicalNativeRecords(context: CanonicalGenericReadContext,
+  definition: ApplicationResourceDefinition, ids: readonly string[], fields: readonly string[]): Promise<ApplicationRecordProjection[]> {
+  if(definition.origin.kind !== 'native' || definition.origin.moduleKey !== 'native' || ids.length > 101) unavailable()
+  const response = await runCanonicalReadLease(context, () => context.transaction.query<{value: unknown}>(
+    `SELECT read_native_application_record($1, $2, requested.id, $4) AS value
+       FROM unnest($3::uuid[]) WITH ORDINALITY AS requested(id, position) ORDER BY requested.position`,
+    [context.workspaceId, definition.typeKey, ids, [...fields]]))
+  if(response.rows.length !== ids.length) unavailable()
+  return response.rows.map((row, index) => projectNativeRecord(context, definition, ids[index], fields, row.value))
+}
+
+const nativeRecordCapture = captureSchema.extend({id:z.string().uuid(),recordVersion:z.string().min(1),
+    valueEncodings:z.object({amount:z.enum(['number','string','null','invalid']).optional()}).strict().optional()})
+function projectNativeRecord(context: CanonicalGenericReadContext, definition: ApplicationResourceDefinition,
+  id: string, fields: readonly string[] | undefined, raw: unknown): ApplicationRecordProjection {
+  const captured = nativeRecordCapture.safeParse(raw)
   if(!captured.success || captured.data.id!==id.toLowerCase() || captured.data.sources[0].resourceKind!=='application_field'
     || captured.data.sources.some(source=>source.workspaceId!==context.workspaceId)
     || Object.keys(captured.data.values).some(field=>!definition.fields.some(candidate=>candidate.key===field))

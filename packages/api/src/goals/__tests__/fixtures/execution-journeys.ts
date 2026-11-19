@@ -5,7 +5,7 @@
  * through scripts/crm/local-fixture.mjs.
  */
 import { randomUUID } from 'node:crypto'
-import type { ExecutionCheckpoint } from '@use-brian/core'
+import type { ExecutionCheckpoint } from '@use-brian/core/goals/execution.js'
 import { getPool } from '../../../db/client.js'
 import { createRootExecution, type ExecutionActor } from '../../../db/task-execution-store.js'
 import { createTask } from '../../../db/tasks.js'

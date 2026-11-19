@@ -5,7 +5,8 @@
  */
 import { Router } from 'express'
 import { z } from 'zod'
-import type { AccessContext, IngestSourceProvider } from '@use-brian/core'
+import type { IngestSourceProvider } from '@use-brian/core/ingest/default-rules.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import { OFFICIAL_CONNECTORS } from '@use-brian/shared'
 import { listUsableWorkspaceConnectors } from '../connectors/usable-connectors.js'
 import type {

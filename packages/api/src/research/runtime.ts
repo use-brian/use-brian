@@ -7,7 +7,9 @@
  * [COMP:api/research-delivery] [COMP:api/research-feedback]
  */
 import { createHash, randomUUID } from 'node:crypto'
-import { markdownToBlocks, normalizeMarkdownBlocks, interpretResearchFollowup, resolveResearchFollowupTarget, type SavedViewStore } from '@use-brian/core'
+import { markdownToBlocks, normalizeMarkdownBlocks } from '@use-brian/core/doc/markdown.js'
+import { interpretResearchFollowup, resolveResearchFollowupTarget } from '@use-brian/core/research/contracts.js'
+import type { SavedViewStore } from '@use-brian/core/views/types.js'
 import {
   artifactReadableForViewer,
   findSessionMessageByChannelIdSystem,
@@ -24,7 +26,8 @@ import {
   type ResearchSensitivity,
 } from '../db/research-store.js'
 import { getPool } from '../db/client.js'
-import { readFeedbackFrame, readFeedbackMessage, replyActivity, discoverFeedbackMessages, claimFeedbackRetries, prepareFeedbackAttempt, releaseFeedbackAttempt, renewFeedbackAttempt, feedbackTargetExists, readFeedbackReceipt, rejectFeedbackSelection, type FeedbackAttempt, type FeedbackFrame, type AttemptLease } from '../db/research-feedback-attempt-store.js'
+import { admitFeedbackWrite, readFeedbackFrame, readFeedbackMessage, readFeedbackCaptureSnapshot, replyActivity, discoverFeedbackMessages, claimFeedbackRetries, prepareFeedbackAttempt, releaseFeedbackAttempt, renewFeedbackAttempt, feedbackTargetExists, readFeedbackReceipt, rejectFeedbackSelection, type FeedbackAttempt, type FeedbackFrame, type AttemptLease } from '../db/research-feedback-attempt-store.js'
+import { conversationReadersActive } from '../db/conversation-visibility.js'
 import { createDbSavedViewStore } from '../db/saved-views-store.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import { publishPageLifecycle } from '../page-event-fanout.js'
@@ -180,7 +183,8 @@ async function captureStoredFeedback(params: FeedbackCaptureParams, message: Fol
     if (!intent) throw new Error('research_feedback_attempt_busy')
     const lease = leaseFor(intent)
     try {
-      const result = await recordResearchFeedbackSystem({ ...input,association:pending?.association ?? input.association,attemptLease:lease })
+      const attemptLease = await admitFeedbackWrite(input,lease)
+      const result = await recordResearchFeedbackSystem({ ...input,association:pending?.association ?? input.association,attemptLease })
       if (result.inserted) notifyWorkspaceChange(workspace,'research','update',input.activityId)
       return result
     } catch (error) { await releaseFeedbackAttempt(lease); throw error }
@@ -277,16 +281,31 @@ export async function captureResearchFollowupForMessage(params: {
   onError?: (error: unknown) => void
 }): Promise<FollowupCaptureResult | null> {
   if (!params.workspaceId || !params.actorUserId || params.externalPrincipal) return null
+  if(!params.selectedActivityId&&!params.replyToMessageId&&!params.replyToChannelMessageId){
+    const canonical = conversationReadersActive()
+    let snapshot:Awaited<ReturnType<typeof readFeedbackCaptureSnapshot>>|undefined
+    try{
+      snapshot=await readFeedbackCaptureSnapshot(params.actorUserId,params.workspaceId,params.sessionId,params.assistantId,params.messageId,{implicit:true})
+    }catch(error){
+      params.onError?.(error)
+      if (canonical) return null
+    }
+    if(snapshot===null)return null
+    if(snapshot&&!snapshot.pendingRetries&&snapshot.discoveryIds.length===0){
+      if(!snapshot.message)return null
+      try{return await captureStoredFeedback(params,snapshot.message,snapshot.frame)}
+      catch(error){params.onError?.(error);return null}
+    }
+  }
   try {
     await replayDurableFeedback({ workspaceId:params.workspaceId,sessionId:params.sessionId,assistantId:params.assistantId,
       actorUserId:params.actorUserId,excludeMessageId:params.messageId },params.onError)
   } catch (error) { params.onError?.(error) }
   try {
-    const frame = await readFeedbackFrame(params.actorUserId,params.workspaceId,params.sessionId,params.assistantId)
-    const message = await readFeedbackMessage(params.actorUserId,params.workspaceId,params.sessionId,params.assistantId,params.messageId)
-    if (!frame || !message) return null
+    const snapshot = await readFeedbackCaptureSnapshot(params.actorUserId,params.workspaceId,params.sessionId,params.assistantId,params.messageId)
+    if (!snapshot?.message) return null
     const replyToMessageId = params.replyToMessageId
       ?? (params.replyToChannelMessageId ? await findSessionMessageByChannelIdSystem(params.sessionId,params.replyToChannelMessageId) : null)
-    return await captureStoredFeedback({ ...params,replyToMessageId },message,frame)
+    return await captureStoredFeedback({ ...params,replyToMessageId },snapshot.message,snapshot.frame)
   } catch (error) { params.onError?.(error); return null }
 }

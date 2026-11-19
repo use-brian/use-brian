@@ -7,6 +7,7 @@
   "include": ["src"],
   "references": [
     { "path": "../../packages/shared" },
+    { "path": "../../packages/agent-runtime" },
     { "path": "../../packages/core" },
     { "path": "../../packages/api" },
     { "path": "../../packages/doc-model" },

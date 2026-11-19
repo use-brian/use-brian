@@ -16,8 +16,8 @@ import { pinToolAuthoringAuthority } from '../security/tool-authority.js'
  * (Barrier 2), L1/L2 policy, metadata-only audit events.
  */
 import { z } from 'zod'
-import { buildTool, type Tool, type ToolContext, type ToolResult } from '../tools/types.js'
-import { isAttendedTurn } from '../tools/capability-gate.js'
+import { buildTool, type Tool, type ToolContext, type ToolResult } from '@use-brian/agent-runtime/tools/types.js'
+import { isAttendedTurn } from '@use-brian/agent-runtime/tools/capability-gate.js'
 import type { SandboxTaskBinding } from './cloud-browser-provider.js'
 import type { SandboxProvider } from './types.js'
 import type { ComputerToolPolicy, ResolveComputerToolPolicy } from './tools.js'

@@ -1,9 +1,9 @@
-import { bindWorkspaceCredentialDelegation, workspaceCredentialDelegation } from '../workspace-delegation.js'
-import { parseAuthoringAuthority } from '../access-ceiling.js'
+import { bindWorkspaceCredentialDelegation, workspaceCredentialDelegation } from '@use-brian/agent-runtime/security/workspace-delegation.js'
+import { parseAuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { describe, expect, it } from 'vitest'
-import { createExecutionContext, executionToolContext } from '../execution-context.js'
+import { createExecutionContext, executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { pinToolAuthoringAuthority } from '../tool-authority.js'
-import type { ToolContext } from '../../tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 function context(): ToolContext {
   const execution = createExecutionContext({

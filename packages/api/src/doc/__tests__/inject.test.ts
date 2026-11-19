@@ -19,22 +19,21 @@ vi.mock('../../db/client.js', () => ({
 }))
 
 import { injectDocTools } from '../inject.js'
+import type { CrmStore } from '@use-brian/core/crm/types.js'
+import type { DocPageStore } from '@use-brian/core/doc/tools.js'
+import type { EntityStore as DocEntityStore } from '@use-brian/core/entities/doc-types.js'
+import type { TaskStore } from '@use-brian/core/tasks/types.js'
+import type { SavedViewStore } from '@use-brian/core/views/types.js'
+import type { WorkflowRunStore } from '@use-brian/core/workflow/types.js'
+import type { WorkspaceDirectoryStore } from '@use-brian/core/workspace/types.js'
 import type {
-  DocEntityStore,
-  DocPageStore,
-  CrmStore,
-  SavedViewStore,
-  TaskStore,
-  Tool,
-  WorkflowRunStore,
-  WorkspaceDirectoryStore,
   LLMProvider,
   Message,
   ProviderRequest,
   ProviderSession,
   StreamChunk,
-  ToolContext,
-} from '@use-brian/core'
+} from '@use-brian/agent-runtime/providers/types.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 // ── Minimal store stubs ─────────────────────────────────────────────
 //
@@ -194,7 +193,7 @@ describe('[COMP:api/doc-inject] injectDocTools', () => {
     const result = await injectDocTools({
       ...baseOpts,
       tools: wired,
-      filesApi: noopStore<import('@use-brian/core').FilesApi>(),
+      filesApi: noopStore<import('@use-brian/core/workspace-files/api.js').FilesApi>(),
     })
     expect(wired.has('fetchSiteIcon')).toBe(true)
     expect(result.injectedCount).toBe(13)

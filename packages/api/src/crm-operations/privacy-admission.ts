@@ -1,6 +1,6 @@
 /** Transaction guard for privacy validation and mutation. [COMP:crm/privacy-admission] */
 import type {PoolClient} from 'pg'
-import {CrmOperationsError} from '@use-brian/core'
+import {CrmOperationsError} from '@use-brian/core/crm/operations-types.js'
 
 /** Call before domain row locks. All covered DML takes shared admission in SQL. */
 export async function acquireCrmPrivacyAdmission(client:PoolClient,workspaceId:string):Promise<void> {

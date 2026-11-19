@@ -1,7 +1,7 @@
 /** Views row delete and `deleteBrainRow` soft-delete only rows their actor may mutate. */
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
-import { softDelete, SoftDeleteError } from '@use-brian/core'
+import { softDelete, SoftDeleteError } from '@use-brian/core/corrections/soft-delete.js'
 import { getAppPool, getPool, query, runWithAgentAccess } from '../client.js'
 import { createSoftDeleteStore } from '../soft-delete-store.js'
 import { authorizeBrainRowMutation } from '../brain-inbox-store.js'

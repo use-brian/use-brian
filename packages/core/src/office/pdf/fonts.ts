@@ -1,8 +1,11 @@
 import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
-import fontkit from '@cantoo/fontkit'
 import type { PDFDocument, PDFFont } from '@cantoo/pdf-lib'
 import { PdfEngineError } from './errors.js'
+import { lazyImplementation } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
+
+// The font engine loads with the first PDF text run, not with the Office modules (M4 step 5).
+const loadFontkit = lazyImplementation('The PDF font engine (fontkit)', () => import('@cantoo/fontkit').then((m) => m.default))
 
 type FontPackage = 'noto-sans' | 'noto-sans-sc' | 'noto-sans-jp'
 
@@ -80,7 +83,7 @@ export async function resolvePdfFontRuns(
   locale: string,
 ): Promise<PdfFontRun[]> {
   if (!text) return []
-  document.registerFontkit(fontkit)
+  document.registerFontkit(await loadFontkit())
   const selected: Array<{ text: string; shard: UnicodeShard }> = []
   for (const character of text) {
     const codePoint = character.codePointAt(0)

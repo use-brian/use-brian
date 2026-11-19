@@ -33,7 +33,7 @@ import type {
   ConsultTransport,
   Task,
 } from './types.js'
-import type { ScopeEvidence } from '../security/context-scope.js'
+import type { ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
 
 export type RunConsultParams = {
   request: ConsultRequest
@@ -41,7 +41,7 @@ export type RunConsultParams = {
 
 export type RunConsultResult = {
   /** Notification completed; the human answer is a subsequent chat turn, not task resume. */
-  question?: import('../tools/base/ask-question.js').AssistantQuestion
+  question?: import('@use-brian/agent-runtime/tools/base/ask-question.js').AssistantQuestion
   /** Response text from the destination's query loop. */
   text: string
   /** Optional structured artifacts (restricted-mode capability invocations may surface these). */

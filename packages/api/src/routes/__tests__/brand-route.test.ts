@@ -35,7 +35,7 @@ vi.mock('../../db/workspace-store.js', async (io) => ({
 
 import { brandRoutes } from '../brand.js'
 import { getWorkspaceMembershipWithClearanceSystem } from '../../db/workspace-store.js'
-import type { BrandDetail, BrandStore } from '@use-brian/core'
+import type { BrandDetail, BrandStore } from '@use-brian/core/brand/types.js'
 
 const USER = 'u-1'
 const WORKSPACE = 'ws-1'

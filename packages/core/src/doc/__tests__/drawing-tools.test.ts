@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { createDrawingTools } from '../drawing-tools.js'
 import { DOC_MUTATION_TOOLS } from '../edit-agent.js'
 import type { DocToolDeps } from '../tools.js'
-import type { ToolContext } from '../../tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 const context: ToolContext = { userId: 'user', assistantId: 'assistant', sessionId: 'session', appId: 'test', channelType: 'web', channelId: 'web', workspaceId: 'workspace', clearance: 'internal', compartments: [], projectIds: [], abortSignal: new AbortController().signal }
 const live = { namespace: 'drawing:diagram:epoch:base', scene: { version: 1, elements: [{ id: 'a', type: 'rectangle', x: 10, y: 20, width: 50, height: 50 }], files: {}, appState: { viewBackgroundColor: '#fff' } }, changedElementIds: ['a'] }
 function tools(over: Partial<DocToolDeps> = {}) {

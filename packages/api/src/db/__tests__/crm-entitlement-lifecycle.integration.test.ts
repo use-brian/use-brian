@@ -1,7 +1,7 @@
 import {randomUUID} from 'node:crypto'
 import {setImmediate} from 'node:timers/promises'
 import {afterAll,describe,expect,it} from 'vitest'
-import type {CrmOperationsContext} from '@use-brian/core'
+import type {CrmOperationsContext} from '@use-brian/core/crm/operations-types.js'
 import {getPool} from '../client.js'
 import {createWorkspaceModulesStore} from '../workspace-modules-store.js'
 import {createDbCrmOperationsStore} from '../crm-operations-store.js'
@@ -31,8 +31,11 @@ async function fixture() {
 }
 describe('[COMP:crm/entitlement-lifecycle] Actual canonical expiry and row races',()=>{
   afterAll(async()=>{_resetCoalescerForTests();await pool.end()})
-  it('expires all 105 due manual grants independently of the disabled module and emits one event each',async()=>{
-    const f=await fixture();expect((await createWorkspaceModulesStore().get(f.workspaceId, 'association')).state).toBe('disabled')
+  it('expires all 105 due manual grants independently of the retired module and emits one event each',async()=>{
+    // Migration 8270 retired the Association module: it is no longer a registered
+    // module and no lifecycle row can exist, so expiry cannot depend on it.
+    const f=await fixture();await expect(createWorkspaceModulesStore().get(f.workspaceId, 'association')).rejects.toMatchObject({code:'invalid_input'})
+    expect((await pool.query("SELECT 1 FROM workspace_modules WHERE workspace_id=$1 AND module_key='association'",[f.workspaceId])).rows).toEqual([])
     for(let i=0;i<105;i++)await f.grant()
     await createCrmEntitlementWorker().tick()
     expect((await pool.query("SELECT count(*)::int count FROM association_memberships WHERE workspace_id=$1 AND status='expired'",[f.workspaceId])).rows[0].count).toBe(105)

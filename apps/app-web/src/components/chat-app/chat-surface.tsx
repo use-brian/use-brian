@@ -2,6 +2,8 @@
 import { useDurableDraft } from "@/lib/offline/use-durable-draft";
 
 import styles from "./chat-surface.module.css";
+import { ChatRetainedHistoryNotice } from "./chat-retained-history-notice";
+import { ConversationVisibilityControl } from "./conversation-visibility-control";
 import { RoutineChatPickup } from "@/components/workflow/routine-intake";
 
 
@@ -23,11 +25,11 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
  * client stays a single ordinary chat transport and renders the resulting Page
  * link in the transcript. Attachment pick/drop/paste, research, citations,
  * outbound files, retry/copy, and per-code-block copy reuse the dock's shared seams.
- * This surface is built on
- * the `@use-brian/chat-ui` primitives instead (`useChatSession` for state,
- * `useMessageStream` for the SSE-over-POST loop, `ChatComposer`,
- * `ChatMarkdown`), which is exactly what that package exists for
- * (chat-miniapp-home-config.md T4). The ambient dock stays mounted by the
+ * This surface is a presentation of the shared conversation controller
+ * (`lib/chat/use-conversation.ts`, page profile: send, follow, reconnect,
+ * Stop, approvals and the mid-turn queue, M5) over the `@use-brian/chat-ui`
+ * primitives (`ChatComposer`, `ChatMarkdown`, the turn transcript), which is
+ * exactly what that package exists for (chat-miniapp-home-config.md T4). The ambient dock stays mounted by the
  * persistent workspace chrome, but is hidden on this route: showing a second
  * chat launcher over the full-page composer duplicates the affordance and can
  * cover Send at narrower viewport sizes.
@@ -90,13 +92,8 @@ import {
 import {
   ChatComposer,
   ChatMarkdown,
-  useChatSession,
-  useMessageStream,
-  type ActivityNote,
-  type ChatFileAttachment,
-  type CitationSource,
-  type DocumentAttachment,
-  type PendingConfirmation,
+  initialChatState,
+  initialTurnTranscript,
   type ReplyTo,
   type ToolUsed,
 } from "@use-brian/chat-ui";
@@ -124,12 +121,20 @@ import {
   X,
 } from "lucide-react";
 import { auditTurnUrl } from "@/lib/turn-audit";
-import { createSSEBuffer, parseSSEStream } from "@use-brian/chat-ui";
-import {
-  useMidTurnQueue,
-  joinQueuedInputs,
-} from "@/lib/use-mid-turn-queue";
-import { useChatController } from "@/lib/chat/use-chat-controller";
+import type {
+  ConversationController,
+  ConversationNotice,
+  ConversationQuestion,
+  ConversationSendResult,
+  ConversationState,
+  PresentationCapabilities,
+} from "@/lib/chat/conversation-controller";
+import { conversationRegistry, provisionalConversationKey } from "@/lib/chat/conversation-registry";
+import { conversationAttachmentTray, moveConversationAttachments } from "@/lib/chat/conversation-attachments";
+import type { ClassifiedTurnFrame } from "@/lib/chat/turn-frames";
+import { useConversation } from "@/lib/chat/use-conversation";
+import { currentOfflineWriteAuthority } from "@/lib/offline/application-write-authority";
+import type { Dictionary } from "@/lib/i18n";
 import { QueuedInputs } from "@/components/ui/queued-inputs";
 import { ChatContextBar, useChatVisibleViewport } from "./chat-responsive-controls";
 import { ChatAudienceMenu } from "./chat-audience-menu";
@@ -147,7 +152,6 @@ import {
   ChatActivityFeed,
   ChatActivitySummary,
   ChatCitationList,
-  type ResearchPhase,
 } from "@/components/chrome/chat-activity";
 import { ChatCodeBlock } from "@/components/chrome/chat-code-block";
 import { ChatFileAttachments } from "@/components/chrome/chat-file-attachment";
@@ -176,7 +180,6 @@ import {
 import { describeToolFromInput } from "@/lib/tool-narration";
 import {
   collectToolResults,
-  finalizeActivityNotes,
   restoreAssistantActivity,
 } from "@/lib/activity-receipt";
 import { authFetch } from "@/lib/auth-fetch";
@@ -195,14 +198,12 @@ import {
   evictTranscriptCache,
   isAuthoritativeRosterDenial,
   useChatSessionsData,
+  useCurrentChatSummary,
   writeTranscriptCache,
 } from "@/lib/chat-surface-data";
 import {
   dispatchChatSessionActivity,
   dispatchChatSessionsRefresh,
-  shouldAcceptRoomMirror,
-  shouldOpenSessionStream,
-  shouldReopenSessionStream,
 } from "@/lib/chat-session-events";
 import {
   createWorkspaceSession,
@@ -215,7 +216,6 @@ import {
   postRoomMessage,
   editRoomMessage,
   fetchMentionableRoster,
-  stopTurn,
   postSessionTyping,
   getChatSessionSummary,
   type ChatSessionSummary,
@@ -254,12 +254,7 @@ import {
 } from "@/lib/chat-last-location";
 import { personalChatHandoffPath } from "@/lib/chat-handoff";
 import { accelEnterLabel } from "@/lib/surface-shortcuts";
-import {
-  fetchPendingSessionInput,
-  toRestoredConfirmation,
-  type ExternalActionConfirmation as ExternalRequest,
-} from "@/lib/api/pending-questions";
-import { respondByKind } from "@/lib/api/approvals";
+import type { ExternalActionConfirmation as ExternalRequest } from "@/lib/api/pending-questions";
 import { APPROVALS_REFRESH_EVENT, requestApprovalsRefresh, type ApprovalsRefreshDetail } from "@/lib/approvals-events";
 import { PendingQuestionPanel } from "@/components/chrome/pending-question-panel";
 import { ChatConfirmationCard } from "@/components/chrome/chat-confirmation-card";
@@ -344,7 +339,6 @@ import { announceResearchChanged, ChatResearchCard, useSessionResearch } from "@
 import { ApprovalReviewAttention } from "@/components/chat-app/approval-review-attention";
 import {
   PAGE_WRITING_TOOLS,
-  addPageLinks,
   collectPageWrites,
   pageIdsFromToolResult,
   pageLinksForRow,
@@ -381,22 +375,153 @@ const TYPING_IDLE_OFF_MS = 5_000;
 const MARKDOWN_CLS =
   "chat-markdown prose prose-sm dark:prose-invert max-w-none text-[16px] @[560px]/chat-reading:text-[15px] leading-[1.65] text-foreground [overflow-wrap:anywhere]";
 
-/** Narrow an SSE `data` payload to an object without trusting its shape. */
-function coercePayload(data: unknown): Record<string, unknown> {
-  return data && typeof data === "object" ? (data as Record<string, unknown>) : {};
-}
+/** The whole conversation snapshot (the page renders most of it). */
+const selectConversation = (state: ConversationState) => state;
+const EMPTY_TOOLS: ToolUsed[] = [];
+const EMPTY_TYPERS: ConversationState["room"]["typers"] = [];
+const EMPTY_NOTICES: readonly ConversationNotice[] = [];
+const EMPTY_IDS: ReadonlySet<string> = new Set();
+/** Frames that feed the chronological activity log (replayed on return). */
+const FEED_FRAMES: ReadonlySet<string> = new Set([
+  "input_applied", "reasoning", "tool_start", "tool_dropped", "tool_input", "turn_started", "snapshot", "activity",
+]);
 
-/** A pending write confirmation observed by a room VIEWER (T11/D8 — mirrored
- *  off the per-session bus; the server gates who may act on it). */
-type RemoteConfirmation = {
-  toolCallId: string;
-  approvalId?: string;
-  toolName: string;
-  displayName?: string;
-  input: Record<string, unknown>;
-  description?: string;
-  displayLines?: string[];
-  addresserUserId: string | null;
+/**
+ * Coalesce persisted assistant rows into replies. One reply is persisted as
+ * one row per tool round, so adjacent rows merge (`coalesceAssistantRunMessages`).
+ * A text-only row (no tool round) finished its reply, so the next assistant
+ * row starts another one: a queued input the running turn took splits it into
+ * two replies, persisted after both user rows, and both must stay visible.
+ */
+const coalesceTranscriptReplies = (rows: SurfaceMessage[]): SurfaceMessage[] => {
+  const replies: SurfaceMessage[][] = [[]];
+  let previous: SurfaceMessage | undefined;
+  for (const row of rows) {
+    const finished = previous?.role === "assistant" && !previous.toolsUsed?.length && previous.text.trim().length > 0;
+    if (finished && row.role === "assistant") replies.push([]);
+    replies[replies.length - 1].push(row);
+    previous = row;
+  }
+  return replies.flatMap((reply) => coalesceAssistantRunMessages(reply));
+};
+
+/** The page's own send the conversation is painting, for frames that need
+ *  its context (session adoption, recency rollback, send feedback). */
+type PageSendContext = {
+  /** The navigation epoch the send started in; a moved pane adopts nothing. */
+  epoch: number;
+  owningSessionId: string | null;
+  text: string;
+  assistantId: string;
+  channelId: string | undefined;
+  contextGroupId: string | null;
+  contextProjectId: string | null;
+  inputSaved: boolean;
+  localSend: ReturnType<typeof beginChatSendFeedback>;
+  rollbackRecency: () => void;
+};
+
+/** The page copy for the conversation controller's typed notice codes
+ *  (chat-app.md → "Shared client controller ownership": copy stays in the
+ *  presentation). Existing keys only; `slot` names where the page shows it. */
+type PageNoticeCopy = {
+  chatApp: Pick<Dictionary["chatApp"],
+    | "turnReconnecting" | "errorGeneric" | "turnReclaimed" | "turnFailed" | "turnStoppedBy" | "turnStopped"
+    | "turnStoppedByYou" | "queuedNotice" | "stopTurnFailed" | "confirmNotAllowed" | "assistantClearanceBlocked"
+    | "deliveryAudienceBlocked" | "upstreamConnectionReset" | "upstreamConnectionResetCustom" | "upstreamUnreachable"
+    | "upstreamUnreachableCustom" | "clearanceBelowRejectedRoom" | "clearanceBelowRejectedMessage"
+    | "clearanceBelowSkippedRoom" | "clearanceBelowSkippedMessage">;
+  chat: Pick<Dictionary["chat"],
+    | "turnReconnectFailed" | "noticePostReplyAuthorityChanged" | "noticeCustomModelImageFallback"
+    | "noticeCustomModelEndpointFallback" | "noticeBudgetDowngraded">;
+};
+export type PageNoticeSlot = "error" | "turnNotice" | "turnEnd" | "reconnect" | "queued";
+/** Server-authored `message` shows only for codes this build does not
+ *  translate; `sharedChat` marks a withheld shared-chat answer. */
+export const pageNoticeCopy = (
+  notice: ConversationNotice,
+  copy: PageNoticeCopy,
+  context: {
+    viewerId: string | null;
+    ownsDirectRun: boolean;
+    stoppedByViewer?: boolean;
+    /** The assistant a clearance refusal or skip is about (the copy names it,
+     *  never a clearance level), and whether the chat is a room. */
+    clearanceNames?: { rejected: string | null; skipped: string | null };
+    conversation?: "room" | "message";
+  },
+): { slot: PageNoticeSlot; text: string } | null => {
+  const serverText = "message" in notice && typeof notice.message === "string" && notice.message ? notice.message : null;
+  switch (notice.code) {
+    case "reconnecting":
+      return { slot: "reconnect", text: copy.chatApp.turnReconnecting };
+    case "reconnectFailed":
+      return { slot: "error", text: copy.chat.turnReconnectFailed };
+    case "turnEnd": {
+      if (notice.reason === "stalled_reclaimed" || notice.reason === "timeout") return { slot: "turnEnd", text: copy.chatApp.turnReclaimed };
+      // The sender's own failed POST already shows its error.
+      if (notice.reason === "failed") return context.ownsDirectRun ? null : { slot: "turnEnd", text: copy.chatApp.turnFailed };
+      if (notice.reason === "stopped_by_user") {
+        return {
+          slot: "turnEnd",
+          // This tab asked for the Stop: the viewer is the stopper, whatever
+          // display name the server attached.
+          text: context.stoppedByViewer
+            ? copy.chatApp.turnStoppedByYou
+            : notice.stoppedByName
+            ? format(copy.chatApp.turnStoppedBy, { name: notice.stoppedByName })
+            // A system cancellation without a named human never reads as "you".
+            : notice.senderUserId !== null && notice.senderUserId === context.viewerId
+              ? copy.chatApp.turnStoppedByYou : copy.chatApp.turnStopped,
+        };
+      }
+      return null;
+    }
+    case "queued":
+      return { slot: "queued", text: copy.chatApp.queuedNotice };
+    case "turnNotice": {
+      const known: Record<string, string> = {
+        post_reply_authority_changed: copy.chat.noticePostReplyAuthorityChanged,
+        custom_model_image_fallback: copy.chat.noticeCustomModelImageFallback,
+        custom_model_endpoint_fallback: copy.chat.noticeCustomModelEndpointFallback,
+        budget_downgraded: copy.chat.noticeBudgetDowngraded,
+      };
+      if (notice.notice === "assistant_clearance_below_conversation") {
+        // A response-group member skipped because it cannot read the chat.
+        const name = context.clearanceNames?.skipped;
+        const text = name
+          ? format(context.conversation === "message" ? copy.chatApp.clearanceBelowSkippedMessage : copy.chatApp.clearanceBelowSkippedRoom, { name })
+          : serverText;
+        return text ? { slot: "turnNotice", text } : null;
+      }
+      const text = Object.hasOwn(known, notice.notice) ? known[notice.notice] : serverText;
+      return text ? { slot: "turnNotice", text } : null;
+    }
+    case "stopTurnFailed":
+      return { slot: "error", text: copy.chatApp.stopTurnFailed };
+    case "confirmNotAllowed":
+      return { slot: "error", text: copy.chatApp.confirmNotAllowed };
+    case "error": {
+      const custom = notice.customEndpoint === true;
+      if (notice.errorCode === "assistant_clearance_exceeds_room") return { slot: "error", text: copy.chatApp.assistantClearanceBlocked };
+      if (notice.errorCode === "assistant_clearance_below_conversation") {
+        // A mention rejected because that assistant cannot read the chat.
+        const name = context.clearanceNames?.rejected;
+        return {
+          slot: "error",
+          text: name
+            ? format(context.conversation === "message" ? copy.chatApp.clearanceBelowRejectedMessage : copy.chatApp.clearanceBelowRejectedRoom, { name })
+            : serverText ?? copy.chatApp.errorGeneric,
+        };
+      }
+      if (notice.errorCode === "delivery_audience_unverified" && notice.sharedChat === true) return { slot: "error", text: copy.chatApp.deliveryAudienceBlocked };
+      if (notice.errorCode === "upstream_connection_reset") return { slot: "error", text: custom ? copy.chatApp.upstreamConnectionResetCustom : copy.chatApp.upstreamConnectionReset };
+      if (notice.errorCode === "upstream_unreachable") return { slot: "error", text: custom ? copy.chatApp.upstreamUnreachableCustom : copy.chatApp.upstreamUnreachable };
+      return { slot: "error", text: serverText ?? copy.chatApp.errorGeneric };
+    }
+    case "servedBy":
+      return null;
+  }
 };
 
 export function ChatSurface({ workspaceId }: { workspaceId: string }) {
@@ -467,6 +592,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     personal: cachedPersonalSessions,
     shared: cachedSharedSessions,
     refreshShared,
+    retainedSyncedAt,
   } = useChatSessionsData(workspaceId);
   /** The room's clearance-filtered `@mention` roster (T-H4) — assistants plus
    *  ONLY the members who can read THIS room. Null until fetched (a fresh
@@ -522,34 +648,6 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   /** The composer's Ask affordance (D1/T3): arms address intent for the next
    *  send in a room without typing a mention. Reset after each send. */
   const [askArmed, setAskArmed] = useState(false);
-  /** Quiet "will reply after this" line (T5) — set by the server's `queued`
-   *  SSE event, cleared when a turn settles. */
-  const [queuedNotice, setQueuedNotice] = useState(false);
-  /**
-   * Why the last turn ended, when it ended for a reason nobody in this tab
-   * asked for: it stalled and was reclaimed, or a member stopped it. An
-   * ordinary completion sets nothing. Cleared on the next send and on a
-   * session switch — it explains one event, it is not a status line.
-   */
-  const [turnEndNotice, setTurnEndNotice] = useState<string | null>(null);
-  /**
-   * The session whose running turn this surface wants to re-attach to over
-   * `GET /api/sessions/:id/stream` (reconnect mode). Set when the direct
-   * `POST /api/chat` body closed with no terminal event (the turn kept
-   * running server-side, 2026-08-24) and once on hydrating a personal
-   * session, so a reload mid-turn finds its turn again. Cleared by the
-   * stream's `done`. Rooms hold a follow stream regardless of this.
-   */
-  const [reconnectSessionId, setReconnectSessionId] = useState<string | null>(null);
-  /** Shown while a turn that lost its direct stream is being carried by the
-   *  mirror. Cleared by `done` and on a session switch; never set by the
-   *  hydrate probe (no connection dropped there). */
-  const [reconnectNotice, setReconnectNotice] = useState(false);
-  // A server `notice` about how THIS turn was served (e.g. the workspace's
-  // model endpoint cannot read images, so a built-in model answered). Not an
-  // error - the answer is right there - but it must be visible, because an
-  // unannounced substitution is exactly what byo-llm-key.md forbids.
-  const [turnNotice, setTurnNotice] = useState<string | null>(null);
   /** The user message open in the inline editor, and its working text. */
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
@@ -568,16 +666,6 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     top: number;
     left: number;
   } | null>(null);
-  /** A suspended askQuestion in the open room / thread (T11/D8). */
-  const [pendingQuestion, setPendingQuestion] = useState<{
-    approvalId: string;
-    question: string;
-    expiresAt: string | null;
-    sessionId: string;
-  } | null>(null);
-  /** A teammate-turn write confirmation, mirrored to every viewer (T11). */
-  const [remoteConfirmation, setRemoteConfirmation] = useState<RemoteConfirmation | null>(null);
-
   /** The open thread — URL state, so it is linkable and survives navigation. */
   const urlSessionId = searchParams?.get("s") ?? null;
   /** Which view is open. URL state too, so "the shared chats" is a link. */
@@ -621,11 +709,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       null,
     [sharedSessions, personalSessions, activeSessionId],
   );
-  /** The open thread's session read (chat-parity T1) for a thread no list
-   *  holds with a policy yet: a deep link, a room created a moment ago, a chat
-   *  this send just minted, a row from an older cache. */
+  /** The selected session supplies its current policy and settings capability
+   *  projection when the rail only has the list row. */
   const [activeSummary, setActiveSummary] = useState<ChatSessionSummary | null>(null);
-  const summaryWanted = !!activeSessionId && !activeRow?.policy;
+  const summaryWanted = !!activeSessionId && (!activeRow?.policy || !activeRow.capabilities);
   useEffect(() => {
     if (!activeSessionId || !summaryWanted) return;
     const controller = new AbortController();
@@ -634,8 +721,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     });
     return () => controller.abort();
   }, [activeSessionId, summaryWanted]);
-  const paneSummary = activeSummary?.id === activeSessionId ? activeSummary : null;
-  const activeContextSession = activeRow ?? paneSummary;
+  const paneSummary = useCurrentChatSummary(workspaceId, activeSummary?.id === activeSessionId ? activeSummary : null);
+  const activeContextSession = paneSummary?.capabilities ? paneSummary : activeRow ?? paneSummary;
   /** An open room's starter ("Started by"); a personal chat has none. */
   const activeStartedByName =
     (activeRow as Partial<WorkspaceSession> | null)?.startedByName ??
@@ -749,8 +836,72 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     onChange: setEditingText,
   });
 
-  const chat = useChatSession();
-  const stream = useMessageStream();
+  // ── The conversation (M5 WP-B) ──────────────────────────────────────
+  // The page is a presentation of the scoped conversation controller
+  // (`lib/chat/conversation-controller.ts`): send, follow, reconnect, Stop,
+  // approvals, pending input and the mid-turn queue live there and outlive
+  // this surface, so a turn keeps running across a chat switch (A -> B -> A)
+  // and a route change. This surface keeps URL selection, history display,
+  // rooms UI, the Work Bench and the composer. Contract: chat-app.md →
+  // "Shared client controller ownership".
+  const presentationIdRef = useRef<string | null>(null);
+  presentationIdRef.current ??= `page:${crypto.randomUUID()}`;
+  /** A fresh pane's provisional conversation; every new chat mints another. */
+  const [freshPaneKey, setFreshPaneKey] = useState(() => crypto.randomUUID());
+  const freshPaneKeyRef = useRef(freshPaneKey);
+  freshPaneKeyRef.current = freshPaneKey;
+  /** The conversation whose turn this viewer asked to stop: the server names
+   *  the stopper, but only this tab knows the stopper is the viewer. */
+  const [stopRequestedHere, setStopRequestedHere] = useState<ConversationController | null>(null);
+  /** The frame observer, assigned below once its handlers exist. */
+  const pageFrameRef = useRef<(frame: ClassifiedTurnFrame) => void>(() => {});
+  const replayFrameRef = useRef<(frame: ClassifiedTurnFrame) => void>(() => {});
+  const pageCapabilities = useMemo<PresentationCapabilities>(() => ({
+    profile: "page",
+    describeTool: (name, toolInput) => describeToolFromInput(name, toolInput, tChat.toolNarration),
+    pageIdsFromToolResult: (toolName, output, isError) =>
+      PAGE_WRITING_TOOLS.has(toolName) ? pageIdsFromToolResult(output, isError) : [],
+    parseDocument: (payload) => parsePresentedDocumentPayload(payload),
+    onFrame: (frame) => pageFrameRef.current(frame),
+  }), [tChat.toolNarration]);
+  const conversation = useConversation({
+    workspaceId,
+    sessionId: activeSessionId,
+    provisionalKey: provisionalConversationKey("page", freshPaneKey),
+    presentationId: presentationIdRef.current,
+    capabilities: pageCapabilities,
+    // A room holds its whole-life follow stream once its policy says so; the
+    // policy can land after the conversation exists (a deep link, a new room).
+    room: panePolicy === PENDING_POLICY ? undefined : panePolicy.presence,
+  }, selectConversation);
+  const controller = conversation.controller;
+  const controllerRef = useRef(controller);
+  controllerRef.current = controller;
+  const convo = conversation.value;
+  const transcript = convo?.transcript ?? initialChatState;
+  /** The transcript as this page reads and edits it: the conversation's own. */
+  const chat = useMemo(() => ({
+    state: transcript,
+    loadMessages: (messages: SurfaceMessage[]) => controllerRef.current?.loadMessages(messages),
+    appendMessage: (message: SurfaceMessage) => controllerRef.current?.appendMessage(message),
+  }), [transcript]);
+  /** Whether the conversation's direct POST is painting a turn, read live. */
+  const stream = useMemo(() => ({
+    inFlight: () => !!controllerRef.current?.getSnapshot().transcript.isStreaming,
+  }), []);
+  /**
+   * The entry a send targets: the selected session's, or this fresh pane's
+   * provisional one. Acquired directly (the same registry key the hook binds),
+   * so a send right after creating a room does not wait for a render.
+   */
+  const conversationFor = useCallback((sessionId: string | null): ConversationController | null => {
+    const authority = currentOfflineWriteAuthority(workspaceId);
+    if (!authority) return null;
+    return conversationRegistry().acquire(
+      { apiOrigin: authority.apiOrigin, viewerId: authority.viewerId, workspaceId: authority.workspaceId },
+      sessionId ? { sessionId } : { provisional: provisionalConversationKey("page", freshPaneKeyRef.current) },
+    );
+  }, [workspaceId]);
   /** Humans taking part as this client sees them now (D2): the server's count
    *  raised by any new sender the transcript shows, so a second human's first
    *  post switches the room rules on without a reload. */
@@ -772,27 +923,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // The hook returns a fresh object every render; roster + ensureRoster are
     // its stable parts, so depending on those (not the object) keeps this quiet.
   }, [chat.state.messages, slashCommands.roster, slashCommands.ensureRoster]);
-  /**
-   * Mid-turn input (queue + steer), every Chat conversation (D3). A personal
-   * chat's message is held here until the running turn takes it; a room's is
-   * a durable post the server saved first, held here only for its tray
-   * (`serverHeld`), never re-sent. See docs/architecture/engine/mid-turn-input.md.
-   */
-  /** The id the next turn should resume, read by the queue during render. */
+  /** The selected session, read by callbacks that outlive a render. */
   const sessionIdRef = useRef<string | null>(null);
-  const chatController = useChatController(() => sessionIdRef.current);
-  const midTurn = useMidTurnQueue({
-    stream,
-    getSessionId: () => sessionIdRef.current,
-    workspaceId,
-    getAssistantId: () => activeAssistantIdRef.current,
-  });
-  /** `send` is called from inside its own `onDone` (the mid-turn flush). */
-  const sendRef = useRef<((text: string) => void) | null>(null);
-  /** The room whose original POST stream this mounted surface is painting.
-   *  Cleared as soon as that ownership ends so the persistent room-follow
-   *  stream can take over, including for turns started by this same user. */
-  const directTurnSessionRef = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const followTranscriptRef = useRef(true);
   const scrolledSessionRef = useRef<string | null | undefined>(undefined);
@@ -824,185 +956,109 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // Strict Mode's effect replay must hydrate again after cancelling its read.
     hydratedRef.current = null;
   }, []);
-  const pendingInputRequestRef = useRef(0);
   // Upload and first send share this identity until the server ID is adopted.
   const freshChannelIdRef = useRef<string | null>(null);
   /** The thread currently painted. Guards the hydrate effect from re-fetching
    *  (and wiping a live stream) when WE are the ones who just put the id in
    *  the URL — a fresh session adopts its server id mid-turn. */
   const hydratedRef = useRef<string | null>(null);
-  /** Accumulated assistant text for the turn, so `stream/finalize` has a body. */
-  const turnTextRef = useRef("");
-  /** The assistant ANSWERING my in-flight turn (T9 — `@Name` may pick a
-   *  non-bound assistant); drives the streaming reply's avatar. */
-  const turnAssistantRef = useRef<string | null>(null);
-  /** Stop applies to the whole explicit multi-assistant response group, not
-   *  just whichever serialized assistant is currently streaming. */
-  const responseGroupAbortRef = useRef(false);
-
-  // ── Per-turn activity state (the dock's streaming model, trimmed) ───
-  // The chronological build-event log (reasoning runs + tool steps in true
-  // SSE order) drives <ChatActivityFeed>; the tool timeline carries per-step
-  // status/duration and becomes the committed message's receipt.
-  const [toolTimeline, setToolTimeline] = useState<ToolUsed[]>([]);
+  // ── The chronological activity feed ─────────────────────────────────
+  // The conversation keeps each turn's tools, notes, citations, documents
+  // and page links (`[COMP:chat-ui/turn-transcript]`, FULL_PAGE preset). The
+  // feed's chronological log of reasoning runs and tool steps
+  // (build-events.ts) is this presentation's, rebuilt from the frame
+  // observer in arrival order for the direct turn and for the mirror.
   const [streamingEvents, setStreamingEvents] = useState<BuildEvent[]>([]);
-  const [researchPhase, setResearchPhase] = useState<ResearchPhase | null>(null);
-  const [citations, setCitations] = useState<CitationSource[]>([]);
-  const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
-  const turnToolsRef = useRef<ToolUsed[]>([]);
-  // The receipt's intermediate prose: each segment the answer-reset is about
-  // to discard, captured at `tool_start` against the tool it preceded.
-  const turnNotesRef = useRef<ActivityNote[]>([]);
-  const turnDocumentsRef = useRef<DocumentAttachment[]>([]);
-  // Pages the turn created or edited (live `page_created` + page-writing
-  // tool results) — linked under the reply. See lib/chat-page-links.ts.
-  const turnPageLinksRef = useRef<string[]>([]);
-  // The research activity this turn settled (live `research_saved`).
-  const turnResearchRef = useRef<SurfaceMessage["research"] | null>(null);
-  const turnCitationsRef = useRef<CitationSource[]>([]);
-  const turnFileAttachmentsRef = useRef<ChatFileAttachment[]>([]);
-  const turnWorkerDescriptionsRef = useRef<Map<string, string>>(new Map());
   const eventLogRef = useRef<EventLog>(EMPTY_LOG);
   const eventSeqRef = useRef(0);
+  const eventToolIdsRef = useRef<Set<string>>(new Set());
   const eventedToolIdsRef = useRef<Set<string>>(new Set());
-  const toolStartTimesRef = useRef<Map<string, number>>(new Map());
-  const turnStartedAtRef = useRef<number | null>(null);
-  // Accumulates the live `reasoning` SSE text (verbatim model thinking) —
-  // `appendReasoning` takes the full run and paints its last non-empty line.
   const turnReasoningRef = useRef("");
-  // A multi-step turn streams text in segments separated by tool activity:
-  // prose the model emits alongside an intermediate tool step is step
-  // narration, NOT the answer — the answer is the LAST text segment.
-  // `tool_start` arms this flag and clears the live stream buffer; the next
-  // `text_delta` then discards the prior segment from the finalized buffer.
-  // Lazy on purpose: an answer-then-bookkeeping-tool turn with no trailing
-  // text keeps its answer. (The dock's `pendingAnswerResetRef`, verbatim.)
-  const pendingAnswerResetRef = useRef(false);
   const mintEventId = useCallback(() => `ev-${eventSeqRef.current++}`, []);
-
-  const resetTurnActivity = useCallback(() => {
-    turnToolsRef.current = [];
-    turnNotesRef.current = [];
-    turnDocumentsRef.current = [];
-    turnPageLinksRef.current = [];
-    turnResearchRef.current = null;
-    turnCitationsRef.current = [];
-    turnFileAttachmentsRef.current = [];
-    turnWorkerDescriptionsRef.current = new Map();
+  const resetEventLog = useCallback(() => {
     eventLogRef.current = EMPTY_LOG;
     eventSeqRef.current = 0;
+    eventToolIdsRef.current.clear();
     eventedToolIdsRef.current.clear();
-    toolStartTimesRef.current.clear();
-    pendingAnswerResetRef.current = false;
     turnReasoningRef.current = "";
-    turnStartedAtRef.current = null;
-    setToolTimeline([]);
     setStreamingEvents([]);
-    setResearchPhase(null);
-    setCitations([]);
-    setTurnStartedAt(null);
   }, []);
-
-  /**
-   * Freeze what the turn has streamed so far into a message. Returns null when
-   * the segment carried nothing worth a bubble.
-   *
-   * Two callers: the end of the turn, and the mid-turn split below — a queued
-   * message the running turn takes has to land BETWEEN the text written before
-   * it and the text written after, or the earlier reply reads as its answer.
-   */
-  const buildStreamedTurnMessage = useCallback(
-    (assistantId: string | null): SurfaceMessage | null => {
-      const finalText = turnTextRef.current.trim();
-      const finalDocuments = turnDocumentsRef.current;
-      const finalPageLinks = turnPageLinksRef.current;
-      const finalCitations = turnCitationsRef.current;
-      const finalFileAttachments = turnFileAttachmentsRef.current;
-      // Close any step the server never resolved, so the receipt shows a
-      // finished turn rather than a spinner frozen mid-flight.
-      const tools = turnToolsRef.current.map((tool) =>
-        tool.status === "running" ? { ...tool, status: "done" as const } : tool,
-      );
-      if (
-        !finalText &&
-        tools.length === 0 &&
-        finalDocuments.length === 0 &&
-        finalPageLinks.length === 0 &&
-        finalFileAttachments.length === 0
-      ) {
-        return null;
-      }
-      const activityDurationMs =
-        turnStartedAtRef.current != null
-          ? Date.now() - turnStartedAtRef.current
-          : undefined;
-      const activityNotes =
-        tools.length > 0 ? finalizeActivityNotes(turnNotesRef.current, finalText) : undefined;
-      const activityReasoning =
-        tools.length > 0 ? turnReasoningRef.current.trim() || undefined : undefined;
-      return {
-        id: `assistant-${Date.now()}`,
-        role: "assistant",
-        text: finalText,
-        timestamp: new Date(),
-        ...(assistantId ? { senderAssistantId: assistantId } : {}),
-        ...(tools.length > 0 ? { toolsUsed: tools } : {}),
-        ...(activityNotes ? { activityNotes } : {}),
-        ...(activityReasoning ? { activityReasoning } : {}),
-        ...(finalDocuments.length > 0 ? { documents: finalDocuments } : {}),
-        ...(finalPageLinks.length > 0 ? { pageLinks: finalPageLinks } : {}),
-        ...(turnResearchRef.current ? { research: turnResearchRef.current } : {}),
-        ...(activityDurationMs != null ? { activityDurationMs } : {}),
-        ...(finalCitations.length > 0 ? { citations: finalCitations } : {}),
-        ...(finalFileAttachments.length > 0
-          ? { fileAttachments: finalFileAttachments }
-          : {}),
-      };
-    },
-    [],
+  const [remoteEvents, setRemoteEvents] = useState<BuildEvent[]>([]);
+  const remoteLogRef = useRef<EventLog>(EMPTY_LOG);
+  const remoteSeqRef = useRef(0);
+  const remoteToolIdsRef = useRef<Set<string>>(new Set());
+  const remoteNarratedRef = useRef<Set<string>>(new Set());
+  const mintRemoteId = useCallback(() => `rev-${remoteSeqRef.current++}`, []);
+  const resetRemoteLog = useCallback(() => {
+    remoteLogRef.current = EMPTY_LOG;
+    remoteSeqRef.current = 0;
+    remoteToolIdsRef.current.clear();
+    remoteNarratedRef.current.clear();
+    setRemoteEvents([]);
+  }, []);
+  // The live turn, as the conversation publishes it.
+  const activity = convo?.activity ?? initialTurnTranscript;
+  const toolTimeline: ToolUsed[] = activity.tools;
+  const citations = activity.citations;
+  const researchPhase = convo?.researchPhase ?? null;
+  const turnStartedAt = activity.startedAt;
+  /** A followed turn this tab is not painting directly: a teammate's, or its
+   *  own after the direct stream dropped (the mirror, chat-app.md →
+   *  "Disconnect is not a stop"). */
+  const mirror = convo?.mirror ?? null;
+  const remoteActive = !!mirror?.active;
+  const remoteText = mirror?.text ?? "";
+  const remoteReplyPhase = mirror?.replyPhase ?? "generating";
+  const remoteResearchPhase = mirror?.researchPhase ?? null;
+  const remoteStartedAt = mirror?.startedAt ?? null;
+  const remoteTools: ToolUsed[] = mirror?.activity.tools ?? EMPTY_TOOLS;
+  const remoteAssistantId = mirror?.assistantId ?? null;
+  /** This tab's own personal turn, re-attached after a reload or a dropped
+   *  direct stream: no direct POST paints it, yet the conversation's turn is
+   *  live (`turnLive`, the same test that makes `send` answer busy and `queue`
+   *  accept). Mid-turn input joins it exactly as it joins a direct turn. */
+  const reattachedTurnLive = !transcript.isStreaming && !panePolicy.presence && !!convo?.turnLive;
+  /** The conversation is re-attaching after a dropped connection. */
+  const reattachPendingRef = useRef(false);
+  /** Who the latest clearance refusal (`error`) or skip (`notice`) named. */
+  const clearanceNamesRef = useRef<{ rejected: string | null; skipped: string | null }>({ rejected: null, skipped: null });
+  /** The open conversation's stopped line is current (a confirmed Stop). */
+  const stoppedTurnRef = useRef(false);
+  /** The banner on screen is this page's own transient history-read failure. */
+  const transientErrorRef = useRef(false);
+  /** Messages handed to the running turn and not yet taken (the tray). */
+  const queuedInputs = useMemo(
+    () => (convo?.queued ?? []).filter((item) => item.sessionId === activeSessionId).map((item) => ({ ...item })),
+    [convo?.queued, activeSessionId],
   );
-
-  /**
-   * The running turn took one of our queued messages: close the segment
-   * written before it arrived, drop the user's bubble in, start a fresh one.
-   */
-  const applyQueuedInput = useCallback(
-    (inputId: string, messageId: string, owningSessionId: string) => {
-      const entry = midTurn.take(inputId, owningSessionId);
-      if (!entry) return;
-      const segment = buildStreamedTurnMessage(turnAssistantRef.current);
-      if (segment) chat.dispatch({ type: "message/append", message: segment });
-      chat.dispatch({ type: "stream/reset" });
-      turnTextRef.current = "";
-      resetTurnActivity();
-      chat.appendMessage({
-        id: messageId,
-        role: "user",
-        text: entry.text,
-        timestamp: new Date(),
-      });
-    },
-    [buildStreamedTurnMessage, chat, midTurn, resetTurnActivity],
-  );
-
-  /**
-   * The stream ended with messages still queued — the running turn never took
-   * them. Send them as one ordinary turn, which is what the user wanted.
-   * Deferred a tick: `sendRef` refuses to start while the stream's abort
-   * registration is still live inside `onDone`.
-   */
-  const flushQueuedInputs = useCallback((owningSessionId: string | null) => {
-    const epoch = sessionEpochRef.current;
-    if (!owningSessionId || sessionIdRef.current !== owningSessionId) return;
-    setTimeout(() => {
-      // Do not drain until the deferred send can actually use this owner.
-      // Switching away abandons its retry queue, never forwards it elsewhere.
-      if (sessionEpochRef.current !== epoch || sessionIdRef.current !== owningSessionId) return;
-      if (!sendRef.current) return;
-      const stillWaiting = midTurn.drain(owningSessionId);
-      if (stillWaiting.length) sendRef.current(joinQueuedInputs(stillWaiting));
-    }, 0);
-  }, [midTurn]);
+  /** Teammates currently composing, from the room's presence frames. */
+  const roomTypers = convo?.room.typers ?? EMPTY_TYPERS;
+  /** A suspended askQuestion in the open room / thread (T11/D8). */
+  const pendingInteraction = convo?.interaction.pending ?? null;
+  const pendingQuestion = pendingInteraction?.kind === "question"
+    ? (pendingInteraction.payload as ConversationQuestion)
+    : null;
+  // The controller's typed notices, in this page's existing copy.
+  const noticeCopy = useMemo(() => ({ chatApp: t, chat: tChat }), [t, tChat]);
+  const conversationNotices = convo?.notices ?? EMPTY_NOTICES;
+  stoppedTurnRef.current = conversationNotices.some((notice) => notice.code === "turnEnd" && notice.reason === "stopped_by_user");
+  reattachPendingRef.current = conversationNotices.some((notice) => notice.code === "reconnecting")
+    || convo?.run.connection === "reconnecting" || convo?.run.connection === "disconnected";
+  const pageNotices = conversationNotices.map((notice) => pageNoticeCopy(notice, noticeCopy, {
+    viewerId: meId,
+    stoppedByViewer: !!controller && stopRequestedHere === controller,
+    clearanceNames: clearanceNamesRef.current,
+    conversation: panePolicy.post ? "room" : "message",
+    ownsDirectRun: transcript.isStreaming || conversationNotices.some((item) => item.code === "error"),
+  }));
+  const pageNoticeText = (slot: PageNoticeSlot) => pageNotices.find((notice) => notice?.slot === slot)?.text ?? null;
+  const turnNotice = pageNoticeText("turnNotice");
+  const queuedNotice = pageNoticeText("queued") !== null;
+  const turnEndNotice = pageNoticeText("turnEnd");
+  const reconnectNotice = pageNoticeText("reconnect") !== null;
+  const noticeError = pageNoticeText("error");
+  /** This page's own error line first, then the conversation's. */
+  const shownError = error ?? noticeError;
 
   const buildHref = useCallback(
     (id: string | null, nextView: ChatView) => {
@@ -1235,7 +1291,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    * one? A personal chat hands it over and holds it until taken; a room saves
    * it as a post first and hands an addressed one over too (chat-parity §6).
    */
-  const canQueueMidTurn = chat.state.isStreaming && midTurnRoute !== "none";
+  const canQueueMidTurn = midTurnRoute !== "none" && (chat.state.isStreaming || reattachedTurnLive);
   /**
    * Live voice interaction belongs to a personal chat: an open one whose
    * policy says nobody else reads it, or a fresh pane that will create one
@@ -1254,9 +1310,16 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     activeAssistant?.id ?? "",
   );
   const [pendingRecordings, setPendingRecordings] = useState<StagedRecording[]>([]);
+  // Chips live in the conversation's tray beside the registry, so they survive
+  // leaving /chat (chat-app.md -> "Conversation attachment trays"). A fresh
+  // pane has one stable tray per view; an adopted session reads its own.
+  const trayPartFor = (sessionId: string | null, forView: ChatView) =>
+    sessionId ? { sessionId } : { provisional: provisionalConversationKey("page", `fresh:${forView}`) };
+  const attachmentTray = conversationAttachmentTray(workspaceId, trayPartFor(activeSessionId ?? sessionIdRef.current, view));
   const att = useFileAttachments(
     () => sessionIdRef.current ?? undefined,
     {
+      tray: attachmentTray,
       getUploadContext: () => {
         if (sessionIdRef.current || view !== "personal") return undefined;
         if (!activeAssistant) throw new Error(t.errorGeneric);
@@ -1274,11 +1337,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           },
           onSessionReady: (id: string) => {
             if (freshChannelIdRef.current !== channelId) return;
-            // Adopt before routing so hydration does NOT clear the draft/tray.
+            // Adopt before routing so hydration does NOT clear the draft/tray;
+            // the fresh pane's tray becomes the session's.
+            moveConversationAttachments(workspaceId, trayPartFor(null, "personal"), { sessionId: id });
             sessionIdRef.current = id;
             hydratedRef.current = id;
             sessionAssistantRef.current.set(id, assistantId);
-            chat.setSession(id);
             selectSession(id, "personal", true);
             dispatchChatSessionsRefresh(workspaceId);
           },
@@ -1294,10 +1358,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         : undefined,
     },
   );
+  // The tray is keyed by workspace and view, so a change shows that tray.
   useEffect(() => {
     freshChannelIdRef.current = null;
-    att.clear();
-  }, [workspaceId, view, att.clear]);
+  }, [workspaceId, view]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const drop = useFileDrop((files) => void att.upload(files), {
     disabled: !!pendingQuestion || recordingUpload.busy,
@@ -1372,7 +1436,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           (m.documents?.length ?? 0) > 0 ||
           (m.pageLinks?.length ?? 0) > 0,
       );
-    return coalesce ? coalesceAssistantRunMessages(persistedRows) : persistedRows;
+    return coalesce ? coalesceTranscriptReplies(persistedRows) : persistedRows;
   }, [tChat.toolNarration, t.displayHistory.unavailableMessage]);
 
   /** Load a thread's persisted transcript into the reducer through the
@@ -1384,33 +1448,31 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const loadTranscript = useCallback(
     async (sessionId: string, options?: { force?: boolean }) => {
       const epoch = sessionEpochRef.current;
+      // The conversation's own direct POST owns its optimistic transcript.
       if (sessionIdRef.current !== sessionId || stream.inFlight()) return;
-      const controllerRun = chatController.capture();
       const request = ++transcriptRequestRef.current;
       transcriptAbortRef.current?.abort();
       const controller = new AbortController();
       transcriptAbortRef.current = controller;
-      // A send can supersede history without changing the selected session.
-      // Release the cold placeholder immediately and cancel the old read;
-      // even a transport that resolves after abort must not erase the prompt.
-      const unregisterRead = chatController.registerCleanup(controllerRun, () => {
-        controller.abort();
-        if (sessionEpochRef.current === epoch && sessionIdRef.current === sessionId
-          && transcriptRequestRef.current === request) {
-          transcriptAbortRef.current = null;
-          setTranscriptCold(false);
-        }
-      });
+      // A send supersedes history without changing the selected session
+      // (`supersedeHistoryRead`): it bumps the request and aborts this read,
+      // so even a transport that resolves after abort cannot erase the prompt.
       // Fetch outside the cache loader: it publishes before returning, which
       // would let a superseded force refresh overwrite a newer cached turn.
-      // Publish to the shared cache only after both ownership checks pass.
+      // Publish to the shared cache only after the ownership checks pass.
       try {
-        const persisted = await fetchChatTranscript(sessionId, { ...options, signal: controller.signal });
+        const persisted = await fetchChatTranscript(sessionId, { ...options, signal: controller.signal, onCached: cached => {
+          if (sessionEpochRef.current === epoch && sessionIdRef.current === sessionId
+            && transcriptRequestRef.current === request && !controller.signal.aborted && !stream.inFlight()) {
+            const rows = mapTranscriptRows(cached);
+            writeTranscriptCache(sessionId, rows); chat.loadMessages(rows); setTranscriptCold(false);
+          }
+        } });
         if (
           sessionEpochRef.current !== epoch ||
           sessionIdRef.current !== sessionId ||
           transcriptRequestRef.current !== request || controller.signal.aborted ||
-          !chatController.isCurrent(controllerRun)
+          stream.inFlight()
         ) return;
         const rows = mapTranscriptRows(persisted);
         writeTranscriptCache(sessionId, rows);
@@ -1419,8 +1481,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         return rows;
       } catch (error) {
         if (sessionEpochRef.current === epoch && sessionIdRef.current === sessionId
-          && transcriptRequestRef.current === request && !controller.signal.aborted
-          && chatController.isCurrent(controllerRun)) {
+          && transcriptRequestRef.current === request && !controller.signal.aborted) {
           // Transient failures preserve the painted history. Actual access
           // denial must clear protected content instead of retaining it.
           const denied = isAuthoritativeRosterDenial(error);
@@ -1428,12 +1489,24 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             evictTranscriptCache(sessionId);
             chat.loadMessages([]);
           }
-          setError(denied ? t.historyUnavailable : t.errorGeneric);
+          // A transient failure while the conversation is re-attaching (the
+          // connection dropped) shows only the reconnecting line; the banner
+          // it would raise is cleared once the re-attach succeeds.
+          if (denied) setError(t.historyUnavailable);
+          else if (stoppedTurnRef.current) {
+            // After a confirmed Stop the read is a transient failure of that
+            // read, never the turn's outcome: keep the stopped line and the
+            // painted partial reply, and let the conversation retry it with
+            // its backoff as a further `historyEpoch` bump (M5D-2).
+            controllerRef.current?.reportHistoryFailure();
+          } else if (!reattachPendingRef.current) {
+            transientErrorRef.current = true;
+            setError(t.errorGeneric);
+          }
           setHistoryRecoverySessionId(isSessionHistoryUnavailable(error) ? sessionId : null);
         }
         return undefined;
       } finally {
-        unregisterRead();
         if (sessionEpochRef.current === epoch && sessionIdRef.current === sessionId
           && transcriptRequestRef.current === request && !controller.signal.aborted) {
           transcriptAbortRef.current = null;
@@ -1441,10 +1514,19 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         }
       }
     },
-    // `chat.loadMessages` is a stable useCallback from the hook.
+    // `chat.loadMessages` and `stream.inFlight` read the bound conversation live.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [chatController, stream.inFlight, mapTranscriptRows, t.errorGeneric, t.historyUnavailable],
+    [mapTranscriptRows, t.errorGeneric, t.historyUnavailable],
   );
+
+  /** A send supersedes a slow history read of the same chat: release the cold
+   *  placeholder at once and cancel the read, so it cannot erase the prompt. */
+  const supersedeHistoryRead = useCallback(() => {
+    transcriptRequestRef.current += 1;
+    transcriptAbortRef.current?.abort();
+    transcriptAbortRef.current = null;
+    setTranscriptCold(false);
+  }, []);
 
   /** True from a switch onto a session with NO cached transcript until its
    *  fetch settles: the transcript pane paints the skeleton rather than the
@@ -1469,97 +1551,63 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     transcriptAbortRef.current?.abort();
     transcriptAbortRef.current = null;
     sessionEpochRef.current += 1;
-    setPendingQuestion(null);
     setStartingShared(false);
     setHistoryRecoverySessionId(null);
-    // Thread switches now arrive from the sidebar panel via the URL, so the
-    // in-flight stream (if any) belongs to the OLD thread — kill it before
-    // painting the new one, exactly what the old in-surface rail did on
-    // row click.
-    responseGroupAbortRef.current = true;
-    directTurnSessionRef.current = null;
-    stream.abort();
-    chat.dispatch({ type: "stream/abort" });
-    chat.dispatch({ type: "confirmation/clear" });
-    resetTurnActivity();
-    att.clear();
+    // Thread switches arrive from the sidebar panel via the URL. The turn of
+    // the chat being left keeps running in its own conversation entry (the
+    // registry holds it above this surface), so nothing is aborted or
+    // stopped here; returning to it shows that turn live again.
+    resetEventLog();
+    resetRemoteLog();
+    // Each chat keeps its own attachment tray; the one being left stays there.
     setError(null);
     // The side pane is per chat (T6): switching chats shows that chat's pane.
-    // A quote points at a row in the thread being left. `session/set` only
-    // moves the id, so nothing else clears this.
+    // A quote points at a row in the thread being left.
     setReplyTo(null);
     setSelectionQuote(null);
     freshChannelIdRef.current = null;
     hydratedRef.current = activeSessionId;
     sessionIdRef.current = activeSessionId;
-    chat.setSession(activeSessionId);
-    // A personal session opened from the outside (deep link, rail row,
-    // reload) may have a turn running that no stream in this tab is
-    // painting. Want a re-attach once: the route answers `status` then
-    // `done` and closes when idle (one cheap GET), and `status: running`
-    // paints the mirror. A presence conversation (a room) holds its follow
-    // stream regardless; a policy still pending reads as "no presence" here
-    // and the stream effect simply re-opens in follow mode once it lands.
-    setReconnectSessionId(activeSessionId && !panePolicy.presence ? activeSessionId : null);
     if (!activeSessionId) {
-      chat.loadMessages([]);
+      // Back on a fresh pane: a new provisional conversation, and the
+      // assistant pick is per chat, so it resets to the primary default
+      // rather than sticking as a preference.
+      setFreshPaneKey(crypto.randomUUID());
       setTranscriptCold(false);
-      // Back on a fresh pane: the assistant pick is per chat, so it resets
-      // to the primary default rather than sticking as a preference.
       setPickedAssistantId(handoffAssistantRef.current);
       return;
     }
-    // Paint what the cache holds for THIS session synchronously (its own
-    // last transcript, never the previous thread's), then revalidate. A cold
-    // session clears the pane and shows the transcript skeleton until the
-    // fetch settles.
-    const cached = readCachedTranscript<SurfaceMessage>(activeSessionId);
-    chat.loadMessages(cached ?? []);
-    setTranscriptCold(!cached);
+    // A conversation the registry still holds (its turn kept running while
+    // another chat was open) already paints its own transcript. Otherwise
+    // paint what the cache holds for THIS session synchronously (its own last
+    // transcript, never the previous thread's), then revalidate. A cold
+    // session shows the transcript skeleton until the fetch settles. A
+    // personal session's hydrate probe (reload or restart mid-turn) belongs
+    // to the conversation's attach.
+    const bound = controllerRef.current;
+    const holding = bound?.getSessionId() === activeSessionId && bound.getSnapshot().transcript.messages.length > 0;
+    const cached = holding ? null : readCachedTranscript<SurfaceMessage>(activeSessionId);
+    if (!holding) chat.loadMessages(cached ?? []);
+    setTranscriptCold(!holding && !cached);
     // The request owns cold-state completion. An effect dependency update
     // must not cancel that completion while keeping the same selected chat.
     void loadTranscript(activeSessionId);
-    // `chat.*` and `stream.abort` are stable callbacks from their hooks.
+    // `chat.*` reads the bound conversation through its ref.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSessionId, loadTranscript, resetTurnActivity]);
+  }, [activeSessionId, loadTranscript, resetEventLog, resetRemoteLog]);
 
   // ── Live room follow (T13) ──────────────────────────────────────────
-  // Every open viewer of a room holds ONE persistent subscription to the
-  // per-session stream (follow mode): teammate posts fan in live, a
-  // teammate's turn paints through the SAME feed pipeline the sender uses
-  // (build-events + tool-narration), suspended turns surface, and settle
-  // refetches the persisted transcript — events are signals, never data.
-  // This client's OWN turn is filtered out only while this mounted surface's
-  // exact-room POST is still painting it. Navigation/re-entry releases that
-  // ownership, so the follow stream becomes the returning sender's live view.
-  const [remoteActive, setRemoteActive] = useState(false);
-  /** The assistant answering the REMOTE turn (from the turn_started /
-   *  snapshot mirror) — viewers render the right avatar live. */
-  const [remoteAssistantId, setRemoteAssistantId] = useState<string | null>(null);
-  const [remoteText, setRemoteText] = useState("");
-  const [remoteReplyPhase, setRemoteReplyPhase] = useState<"generating" | "saving" | "finishing">("generating");
-  const [remoteEvents, setRemoteEvents] = useState<BuildEvent[]>([]);
-  const [remoteTools, setRemoteTools] = useState<ToolUsed[]>([]);
-  const [remoteResearchPhase, setRemoteResearchPhase] =
-    useState<ResearchPhase | null>(null);
-  const [remoteStartedAt, setRemoteStartedAt] = useState<number | null>(null);
-  const remoteLogRef = useRef<EventLog>(EMPTY_LOG);
-  const remoteToolsRef = useRef<ToolUsed[]>([]);
-  const remoteSeqRef = useRef(0);
-  const remoteNarratedRef = useRef<Set<string>>(new Set());
-  const remoteToolStartTimesRef = useRef<Map<string, number>>(new Map());
-  const remoteWorkerDescriptionsRef = useRef<Map<string, string>>(new Map());
-  /** Teammates currently composing (typing indicators) — fed by the follow
-   *  stream's `presence` events; never includes this viewer. */
-  const [roomTypers, setRoomTypers] = useState<
-    Array<{ userId: string; name: string | null }>
-  >([]);
-  /** Bumped to re-open the stream after a server close (deploy, restart). */
-  const [subscribeEpoch, setSubscribeEpoch] = useState(0);
+  // Every open viewer of a room holds ONE persistent follow subscription,
+  // owned by the conversation (`setRoom` below): teammate posts fan in live,
+  // a teammate's turn paints through the SAME feed pipeline the sender uses,
+  // suspended turns surface, and settle refetches the persisted transcript
+  // (events are signals, never data). The conversation suppresses this
+  // client's own turn while its direct POST paints it.
   /** Bumped by the room stream's `pins_changed` signal — Work Bench
    *  refetches through its own loader (signals, never data). */
-  const [pinsEpoch, setPinsEpoch] = useState(0);
+  const [localPinsEpoch, setPinsEpoch] = useState(0);
   const bumpPins = useCallback(() => setPinsEpoch((n) => n + 1), []);
+  const pinsEpoch = localPinsEpoch + (convo?.room.pinsEpoch ?? 0);
   /** Pinned tabs are the chat's pins (D7): restored first, synced on `pins_changed`. */
   const panePins = useChatPanePins({
     workspaceId,
@@ -1638,77 +1686,16 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     [workspaceId],
   );
 
-  const resetRemoteTurn = useCallback(() => {
-    setRemoteAssistantId(null);
-    remoteLogRef.current = EMPTY_LOG;
-    remoteToolsRef.current = [];
-    remoteNarratedRef.current.clear();
-    remoteToolStartTimesRef.current.clear();
-    remoteWorkerDescriptionsRef.current.clear();
-    setRemoteActive(false);
-    setRemoteText("");
-    setRemoteReplyPhase("generating");
-    setRemoteEvents([]);
-    setRemoteTools([]);
-    setRemoteResearchPhase(null);
-    setRemoteStartedAt(null);
+  /** Re-probe `GET /pending` for the open chat through its conversation:
+   *  a suspended question or a restored tool confirmation is presented there
+   *  (deduped against the live card), and the external confirmations land in
+   *  its `pendingInput` (kept on an indeterminate read, replaced on a
+   *  definitive one). A probe for a chat no longer open does nothing. */
+  const refreshPendingInput = useCallback((sessionId: string) => {
+    const owner = controllerRef.current;
+    if (sessionIdRef.current !== sessionId || !owner || owner.getSessionId() !== sessionId) return;
+    void owner.refreshPendingInput();
   }, []);
-
-  const [externalRequests, setExternalRequests] = useState<{ workspaceId: string; sessionId: string; items: ExternalRequest[] } | null>(null);
-
-  const refreshPendingInput = useCallback(
-    (sessionId: string) => {
-      const epoch = sessionEpochRef.current;
-      if (sessionIdRef.current !== sessionId) return;
-      const controllerProbe = chatController.capture();
-      const request = ++pendingInputRequestRef.current;
-      void fetchPendingSessionInput(sessionId)
-        .then(({ pending, toolConfirmation, externalConfirmations }) => {
-          if (
-            sessionEpochRef.current !== epoch ||
-            sessionIdRef.current !== sessionId ||
-            pendingInputRequestRef.current !== request
-          ) return;
-          // Independent of the current Brian turn; transient read failures
-          // omit this field so mounted requests are not mistaken for an empty list.
-          if (externalConfirmations) setExternalRequests({ workspaceId, sessionId, items: externalConfirmations });
-          if (!chatController.isCurrent(controllerProbe)) return;
-          setPendingQuestion(
-            pending
-              ? {
-                  approvalId: pending.approvalId,
-                  question: pending.question ?? "",
-                  expiresAt: pending.expiresAt,
-                  sessionId,
-                }
-              : null,
-          );
-          if (pending) {
-            chatController.presentInteraction(controllerProbe, {
-              kind: "question",
-              approvalId: pending.approvalId,
-              source: "restored",
-              status: "pending",
-              payload: pending,
-            });
-          }
-          if (toolConfirmation) {
-            const confirmation = toRestoredConfirmation(toolConfirmation, sessionId);
-            chatController.presentInteraction(controllerProbe, {
-              kind: "tool-confirmation",
-              approvalId: toolConfirmation.approvalId,
-              toolCallId: confirmation.toolCallId,
-              source: "restored",
-              status: "pending",
-              payload: confirmation,
-            });
-            chat.addConfirmation(confirmation);
-          }
-        })
-        .catch(() => {});
-    },
-    [workspaceId, chat.addConfirmation, chatController],
-  );
 
   // External approvals delivered into this chat restore as confirmation cards
   // via GET /pending. Re-probe when the workspace approval signal fires.
@@ -1723,476 +1710,75 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     return () => window.removeEventListener(APPROVALS_REFRESH_EVENT, onRefresh);
   }, [workspaceId, refreshPendingInput]);
 
-  // A turn-end explanation belongs to the room it happened in; switching
-  // rooms must not carry it across.
+  // Opening a chat reads it: stamp a room's unread watermark (T7). A room
+  // probes pending input on open (a room found suspended surfaces its answer
+  // panel at once; any member with read access may answer, D8); a personal
+  // chat's conversation runs that probe in its hydrate attach and publishes
+  // the external confirmations from the same response.
   useEffect(() => {
-    setTurnEndNotice(null);
-    setTurnNotice(null);
-    setReconnectNotice(false);
-  }, [activeSessionId]);
+    if (!activeSessionId || panePolicy === PENDING_POLICY) return;
+    if (panePolicy.post) markRoomSeen(workspaceId, activeSessionId);
+    if (panePolicy.presence) refreshPendingInput(activeSessionId);
+  }, [activeSessionId, panePolicy, refreshPendingInput, workspaceId]);
+  /** External confirmations delivered into this chat, from the conversation's
+   *  pending-input probe (the hydrate attach or a re-probe). */
+  const pendingInput = convo?.pendingInput ?? null;
+  const externalRequests = pendingInput && pendingInput.sessionId === activeSessionId
+    ? { workspaceId, sessionId: pendingInput.sessionId, items: [...pendingInput.externalConfirmations] }
+    : null;
 
+  // The conversation asks for authorized history to be re-read (a teammate's
+  // post, a settled or recovered turn, an uncertain queued input). This page
+  // owns that read: its cache, cold skeleton and access-denial handling.
+  const historyEpoch = convo?.historyEpoch ?? 0;
+  const seenHistoryEpochRef = useRef<{ controller: ConversationController; epoch: number } | null>(null);
   useEffect(() => {
-    const reconnectWanted =
-      !!activeSessionId && reconnectSessionId === activeSessionId;
-    if (
-      !activeSessionId ||
-      !shouldOpenSessionStream({ isRoom: panePolicy.presence, reconnectWanted })
-    ) {
-      resetRemoteTurn();
-      setRemoteConfirmation(null);
-      setRoomTypers([]);
-      return;
-    }
-    let cancelled = false;
-    // Reconnect-mode bookkeeping (personal sessions), read at close time:
-    // `sawDone` decides the reopen; `sawRunning` / `sawTurnCompleted` decide
-    // what `done` still owes (see `case "done"`). A room never sees `done`.
-    let sawDone = false;
-    let sawRunning = false;
-    let sawTurnCompleted = false;
-    // Whether the user was told the connection dropped. Read from this
-    // render's closure on purpose: the notice and `reconnectSessionId` are
-    // always set in the same batch, so the value matches the stream this
-    // effect run opens.
-    const noticeShowing = reconnectNotice;
-    const controller = new AbortController();
-    const sessionId = activeSessionId;
-    const controllerRun = chatController.capture();
-    if (reconnectWanted) chatController.reconnect(controllerRun);
-    const epoch = sessionEpochRef.current;
-    const followObserver = createChatStreamObserver(workspaceId);
-    const unregisterControllerCleanup = chatController.registerCleanup(
-      controllerRun,
-      () => {
-        followObserver.release();
-        cancelled = true;
-        controller.abort();
-      },
-    );
-    const ownsFollow = () =>
-      !cancelled && sessionEpochRef.current === epoch && sessionIdRef.current === sessionId;
-    const mintRemoteId = () => `rev-${remoteSeqRef.current++}`;
-    // A fresh room starts with a clean typing set; the stream's initial
-    // presence frame repopulates it.
-    setRoomTypers([]);
+    const seen = seenHistoryEpochRef.current;
+    if (!controller) return;
+    seenHistoryEpochRef.current = { controller, epoch: historyEpoch };
+    if (!seen || seen.controller !== controller || seen.epoch === historyEpoch) return;
+    const sessionId = controller.getSessionId();
+    if (sessionId && sessionId === sessionIdRef.current) void loadTranscript(sessionId, { force: true });
+  }, [controller, historyEpoch, loadTranscript]);
 
-    // Opening a room reads it — stamp the unread watermark (T7).
-    if (panePolicy.post) markRoomSeen(workspaceId, sessionId);
+  // A successful re-attach (`reattachEpoch`) ends the outage, so a transient
+  // failure banner this page raised during it no longer applies.
+  const reattachEpoch = convo?.reattachEpoch ?? 0;
+  const seenReattachRef = useRef<{ controller: ConversationController | null; epoch: number }>({ controller: null, epoch: 0 });
+  useEffect(() => {
+    const seen = seenReattachRef.current;
+    seenReattachRef.current = { controller, epoch: reattachEpoch };
+    if (seen.controller !== controller || seen.epoch === reattachEpoch || !transientErrorRef.current) return;
+    transientErrorRef.current = false;
+    setError((current) => (current === t.errorGeneric ? null : current));
+  }, [controller, reattachEpoch, t.errorGeneric]);
 
-    // A room found suspended on open surfaces its answer panel immediately
-    // (any member with read access may answer — D8).
-    refreshPendingInput(sessionId);
+  // A Stop failure explains one attempt on a running turn; once the turn has
+  // ended the line is stale (the notice is operation-local).
+  const runLive = convo?.run.phase === "running" || convo?.run.phase === "suspended";
+  const stopFailureShown = conversationNotices.some((notice) => notice.code === "stopTurnFailed");
+  useEffect(() => {
+    if (controller && stopFailureShown && !runLive && !remoteActive && !transcript.isStreaming) controller.dismissNotice("stopTurnFailed");
+  }, [controller, stopFailureShown, runLive, remoteActive, transcript.isStreaming]);
 
-    const handleRoomEvent = (event: string, payload: Record<string, unknown>) => {
-      if (!ownsFollow()) return;
-      const sender = typeof payload.senderUserId === "string" ? payload.senderUserId : null;
-      const acceptsMirror = shouldAcceptRoomMirror({
-        senderUserId: sender,
-        viewerUserId: meId,
-        sessionId,
-        directTurnSessionId: directTurnSessionRef.current,
-        directStreamInFlight: stream.inFlight(),
-      });
-      const ownsDirectStream =
-        directTurnSessionRef.current === sessionId && stream.inFlight();
-      switch (event) {
-        case "status": {
-          const working = payload.status === "running";
-          if (!ownsDirectStream && payload.status === "timeout") setTurnEndNotice(t.turnReclaimed);
-          if (!ownsDirectStream && payload.status === "failed") setTurnEndNotice(t.turnFailed);
-          if (working) sawRunning = true;
-          if (reconnectWanted && working) chatController.connected(controllerRun);
-          // A GET opened just before this page's POST may carry a stale `idle`
-          // frame after the optimistic start signal. Never let it erase live
-          // direct ownership; a returning page has no such owner and trusts
-          // the server status in both directions.
-          if (working || !ownsDirectStream) {
-            dispatchChatSessionActivity({ workspaceId, sessionId, working });
-          }
-          if (working && acceptsMirror) {
-            setRemoteActive(true);
-            // Re-entry mounts a new surface, not a new turn. Restore the
-            // lease's start rather than timing from this subscription.
-            const startedAt = typeof payload.startedAt === "number" &&
-              Number.isFinite(payload.startedAt) && payload.startedAt > 0
-              ? Math.min(payload.startedAt, Date.now()) : null;
-            setRemoteStartedAt((current) => startedAt === null
-              ? current ?? Date.now()
-              : Math.min(current ?? startedAt, startedAt));
-          }
-          break;
-        }
-        case "user_message_saved": {
-          if (!acceptsMirror) break;
-          void loadTranscript(sessionId, { force: true });
-          markRoomSeen(workspaceId, sessionId);
-          break;
-        }
-        case "turn_started": {
-          sawRunning = true;
-          dispatchChatSessionActivity({ workspaceId, sessionId, working: true });
-          if (!acceptsMirror) break;
-          resetRemoteTurn();
-          setRemoteActive(true);
-          setRemoteStartedAt(Date.now());
-          if (typeof payload.assistantId === "string") {
-            setRemoteAssistantId(payload.assistantId);
-          }
-          break;
-        }
-        case "snapshot": {
-          sawRunning = true;
-          if (!acceptsMirror) break;
-          setRemoteActive(true);
-          setRemoteStartedAt((current) => current ?? Date.now());
-          if (typeof payload.assistantId === "string") {
-            setRemoteAssistantId(payload.assistantId);
-          }
-          setRemoteText(typeof payload.text === "string" ? payload.text : "");
-          if (payload.replyPhase === "generating" || payload.replyPhase === "saving" || payload.replyPhase === "finishing") setRemoteReplyPhase(payload.replyPhase);
-          const reasoning =
-            typeof payload.reasoning === "string" ? payload.reasoning : "";
-          if (reasoning) {
-            const next = appendReasoning(remoteLogRef.current, reasoning, mintRemoteId);
-            if (next !== remoteLogRef.current) {
-              remoteLogRef.current = next;
-              setRemoteEvents(next.events);
-            }
-          }
-          break;
-        }
-        case "activity": {
-          sawRunning = true;
-          if (!acceptsMirror) break;
-          setRemoteActive(true);
-          setRemoteStartedAt((current) => current ?? Date.now());
-          const kind = typeof payload.event === "string" ? payload.event : "";
-          const id = typeof payload.id === "string" ? payload.id : "";
-          const name = typeof payload.name === "string" ? payload.name : "";
-          if (kind === "reply_text_complete") {
-            setRemoteReplyPhase(current => current === "generating" ? "saving" : current);
-          } else if (kind === "assistant_message_saved") {
-            setRemoteReplyPhase("finishing");
-          } else if (kind === "status") {
-            const phase = typeof payload.phase === "string" ? payload.phase : "";
-            if (phase === "research_detected") setRemoteResearchPhase("detected");
-            else if (phase === "research_starting") setRemoteResearchPhase("starting");
-            else if (phase === "research_parallel") setRemoteResearchPhase("parallel");
-          } else if (kind === "worker_start") {
-            const workerId =
-              typeof payload.workerId === "string" ? payload.workerId : "";
-            const description =
-              typeof payload.description === "string" ? payload.description : "";
-            if (workerId && description) {
-              remoteWorkerDescriptionsRef.current.set(workerId, description);
-              remoteToolsRef.current = remoteToolsRef.current.map((tool) =>
-                tool.workerId === workerId
-                  ? { ...tool, workerDescription: description }
-                  : tool,
-              );
-              setRemoteTools(remoteToolsRef.current);
-            }
-          } else if (kind === "tool_start" && id && name) {
-            setRemoteReplyPhase("generating");
-            if (remoteToolsRef.current.some((tool) => tool.id === id)) break;
-            const seeded = describeToolFromInput(name, {}, tChat.toolNarration);
-            const workerId =
-              typeof payload.workerId === "string"
-                ? payload.workerId
-                : undefined;
-            const workerDescription = workerId
-              ? remoteWorkerDescriptionsRef.current.get(workerId)
-              : undefined;
-            remoteToolStartTimesRef.current.set(id, performance.now());
-            remoteToolsRef.current = [
-              ...remoteToolsRef.current,
-              {
-                id,
-                name,
-                status: "running",
-                description: seeded.description,
-                ...(workerId ? { workerId } : {}),
-                ...(workerDescription ? { workerDescription } : {}),
-              },
-            ];
-            setRemoteTools(remoteToolsRef.current);
-            remoteLogRef.current = appendStep(
-              remoteLogRef.current,
-              seeded.description,
-              mintRemoteId,
-              { toolId: id },
-            );
-            setRemoteEvents(remoteLogRef.current.events);
-          } else if (kind === "tool_input" && id) {
-            const inputPayload =
-              payload.input && typeof payload.input === "object"
-                ? (payload.input as Record<string, unknown>)
-                : {};
-            const narration = describeToolFromInput(name, inputPayload, tChat.toolNarration);
-            if (!narration) break;
-            remoteToolsRef.current = remoteToolsRef.current.map((tool) =>
-              tool.id === id
-                ? {
-                    ...tool,
-                    description: narration.description,
-                    ...(narration.url ? { url: narration.url } : {}),
-                  }
-                : tool,
-            );
-            setRemoteTools(remoteToolsRef.current);
-            if (!remoteNarratedRef.current.has(id)) {
-              remoteNarratedRef.current.add(id);
-              remoteLogRef.current = updateStepText(
-                remoteLogRef.current,
-                id,
-                narration.description,
-                narration.url,
-              );
-              setRemoteEvents(remoteLogRef.current.events);
-            }
-          } else if (kind === "tool_result" && id) {
-            const isError = payload.isError === true;
-            const startedAtMs = remoteToolStartTimesRef.current.get(id);
-            const durationMs =
-              startedAtMs != null
-                ? Math.max(0, Math.round(performance.now() - startedAtMs))
-                : undefined;
-            remoteToolsRef.current = remoteToolsRef.current.map((tool) =>
-              tool.id === id
-                ? {
-                    ...tool,
-                    status: isError ? ("retried" as const) : ("done" as const),
-                    ...(durationMs != null ? { durationMs } : {}),
-                  }
-                : tool,
-            );
-            remoteToolStartTimesRef.current.delete(id);
-            setRemoteTools(remoteToolsRef.current);
-          } else if (kind === "tool_dropped" && id) {
-            remoteToolsRef.current = remoteToolsRef.current.filter((tool) => tool.id !== id);
-            remoteToolStartTimesRef.current.delete(id);
-            setRemoteTools(remoteToolsRef.current);
-            remoteLogRef.current = removeToolSteps(remoteLogRef.current, id);
-            setRemoteEvents(remoteLogRef.current.events);
-          } else if (kind === "tool_confirmation_required") {
-            // Every viewer sees the pending card (D8); the server gates who
-            // may act on it.
-            setRemoteConfirmation({
-              toolCallId: typeof payload.toolCallId === "string" ? payload.toolCallId : "",
-              approvalId:
-                typeof payload.approvalId === "string" ? payload.approvalId : undefined,
-              toolName: typeof payload.toolName === "string" ? payload.toolName : "",
-              displayName:
-                typeof payload.displayName === "string" ? payload.displayName : undefined,
-              input:
-                payload.input && typeof payload.input === "object"
-                  ? (payload.input as Record<string, unknown>)
-                  : {},
-              description:
-                typeof payload.description === "string" ? payload.description : undefined,
-              displayLines: Array.isArray(payload.displayLines)
-                ? (payload.displayLines as string[])
-                : undefined,
-              addresserUserId:
-                typeof payload.addresserUserId === "string" ? payload.addresserUserId : null,
-            });
-          } else if (kind === "tool_confirmation_resolved") {
-            setRemoteConfirmation(null);
-          }
-          break;
-        }
-        case "pins_changed": {
-          setPinsEpoch((n) => n + 1);
-          break;
-        }
-        case "assistant_changed": {
-          // The room's default voice is shared state — a teammate who moved
-          // it must not leave everyone else asking the assistant that is no
-          // longer there. Carries the id, so nothing is refetched: the
-          // roster is already loaded. Applied unconditionally, including our
-          // own echo, because the server's value is the authoritative one.
-          const nextId =
-            typeof payload.assistantId === "string" ? payload.assistantId : null;
-          if (!nextId) break;
-          sessionAssistantRef.current.set(sessionId, nextId);
-          patchSharedChatSessions(workspaceId, (rows) =>
-            rows.map((row) =>
-              row.id === sessionId ? { ...row, assistantId: nextId } : row,
-            ),
-          );
-          break;
-        }
-        case "presence": {
-          // The bus's full viewer snapshot; the indicator shows only the
-          // OTHER members mid-composition (your own draft is not news).
-          const viewers = Array.isArray(payload.viewers) ? payload.viewers : [];
-          setRoomTypers(
-            viewers
-              .filter(
-                (v): v is { userId: string; name?: unknown; isTyping?: unknown } =>
-                  !!v &&
-                  typeof v === "object" &&
-                  typeof (v as { userId?: unknown }).userId === "string",
-              )
-              .filter((v) => v.isTyping === true && v.userId !== meId)
-              .map((v) => ({
-                userId: v.userId,
-                name: typeof v.name === "string" ? v.name : null,
-              })),
-          );
-          break;
-        }
-        case "turn_completed": {
-          sawTurnCompleted = true;
-          // A room never sends `done`, so the "still working" line from a
-          // disconnected direct stream ends here; for a personal session
-          // `done` follows at once and clears it again, harmlessly.
-          setReconnectNotice(false);
-          dispatchChatSessionActivity({ workspaceId, sessionId, working: false });
-          // A turn that ended because it stalled or was stopped has to say so.
-          // Silently clearing the card leaves the room wondering whether the
-          // answer is still coming — which is the state this whole recovery
-          // path exists to end. Read BEFORE the `acceptsMirror` gate: the
-          // sender of the stalled turn is exactly who most needs to be told.
-          const endReason =
-            typeof payload.reason === "string" ? payload.reason : null;
-          if (endReason === "stalled_reclaimed" || endReason === "timeout") {
-            setTurnEndNotice(t.turnReclaimed);
-          } else if (endReason === "failed" && !ownsDirectStream) {
-            setTurnEndNotice(t.turnFailed);
-          } else if (endReason === "stopped_by_user") {
-            const by =
-              typeof payload.stoppedByName === "string"
-                ? payload.stoppedByName
-                : null;
-            setTurnEndNotice(
-              by ? format(t.turnStoppedBy, { name: by }) : t.turnStoppedByYou,
-            );
-          }
-          if (endReason && (endReason !== "failed" || !ownsDirectStream)) {
-            // The stalled turn's own sender still owns a dead POST stream.
-            // Tear it down or the composer stays dimmed behind a turn that
-            // the server has already given up on.
-            chat.dispatch({ type: "stream/abort" });
-            resetTurnActivity();
-            setQueuedNotice(false);
-          }
-          // The sender's POST stream owns its optimistic transcript. Refetching
-          // the persisted reply here and then finalizing the same POST in
-          // `onDone` paints two identical replies until the next refresh.
-          if (!acceptsMirror) break;
-          resetRemoteTurn();
-          setRemoteConfirmation(null);
-          setQueuedNotice(false);
-          void loadTranscript(sessionId, { force: true });
-          void reloadShared();
-          dispatchChatSessionsRefresh(workspaceId);
-          if (panePolicy.post) markRoomSeen(workspaceId, sessionId);
-          refreshPendingInput(sessionId);
-          break;
-        }
-        case "done": {
-          // Reconnect mode only: the server closes a personal session's
-          // stream on purpose once there is nothing left to attach to (the
-          // turn is over, or was never running) and never reopens it. A
-          // room's follow stream has no `done`.
-          if (panePolicy.presence) break;
-          followObserver.release();
-          sawDone = true;
-          if (reconnectWanted) chatController.complete(controllerRun);
-          setReconnectSessionId(null);
-          setReconnectNotice(false);
-          resetRemoteTurn();
-          setRemoteConfirmation(null);
-          // The turn is over, so a card the dead POST stream raised is too.
-          chat.dispatch({ type: "confirmation/clear" });
-          // `turn_completed` already refetched the transcript, the rail and
-          // the pending question, and the idle-open probe (`status` then
-          // `done`) has nothing to refetch while the hydrate fetch is still
-          // landing. Only a `done` after `running` with no `turn_completed`
-          // in between still owes the refetch.
-          if (sawRunning && !sawTurnCompleted) {
-            void loadTranscript(sessionId, { force: true });
-            dispatchChatSessionsRefresh(workspaceId);
-            refreshPendingInput(sessionId);
-          }
-          // The dead POST stream could not report `input_applied` for
-          // anything queued mid-turn. Now that the turn is over, whatever
-          // this client still holds goes out as an ordinary turn (the
-          // queue's "client is the durable holder" fallback).
-          if (sawRunning) {
-            setQueuedNotice(false);
-            if (chatController.claimExit(controllerRun)) {
-              flushQueuedInputs(sessionId);
-            }
-          }
-          break;
-        }
-        default:
-          break;
-      }
-    };
+  // Text whose delivery became uncertain (a queued input whose stream died)
+  // comes back to the composer. It is never sent again automatically.
+  const unsentCount = convo?.unsent.length ?? 0;
+  useEffect(() => {
+    if (!controller || unsentCount === 0) return;
+    const texts = controller.takeUnsent();
+    if (texts.length) setInput((current) => [current.trim() ? current : "", ...texts].filter(Boolean).join("\n\n"));
+  }, [controller, unsentCount, setInput]);
 
-    void (async () => {
-      try {
-        const res = await authFetch(
-          `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/stream`,
-          { signal: controller.signal },
-        );
-        if (!ownsFollow()) return;
-        if (!res.ok || !res.body) {
-          // A rejected open is not something a retry fixes. A room keeps
-          // its retry cadence as before; a reconnecting personal session
-          // gives up, and reports it only when the user was shown the
-          // reconnect notice (the hydrate probe failing is not news).
-          if (!panePolicy.presence) {
-            sawDone = true;
-            setReconnectSessionId(null);
-            setReconnectNotice(false);
-            if (noticeShowing) setError(t.errorGeneric);
-          }
-          return;
-        }
-        followObserver.observe(sessionId);
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        const buf = createSSEBuffer();
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done || cancelled) break;
-          for (const ev of parseSSEStream(decoder.decode(value, { stream: true }), buf)) {
-            handleRoomEvent(ev.event, coercePayload(ev.data));
-          }
-        }
-      } catch {
-        // Transport error / abort — reconnect below (or unmount).
-      } finally {
-        followObserver.release();
-        // Follow mode never closes server-side on idle, so a room close means
-        // a deploy / restart / network blip: re-open after a beat. A
-        // personal session's reconnect stream reopens only when the body
-        // closed WITHOUT `done` (the transport gave up on a turn that may
-        // still be running); after `done` the server has nothing more.
-        if (
-          ownsFollow() &&
-          shouldReopenSessionStream({ isRoom: panePolicy.presence, sawDone, cancelled })
-        ) {
-          setTimeout(() => {
-            if (ownsFollow()) setSubscribeEpoch((n) => n + 1);
-          }, 3_000);
-        }
-      }
-    })();
-    return () => {
-      followObserver.release();
-      unregisterControllerCleanup();
-      cancelled = true;
-      controller.abort();
-    };
-    // `resetRemoteTurn` / `refreshPendingInput` / `loadTranscript` /
-    // `reloadShared` are stable callbacks.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSessionId, panePolicy.presence, panePolicy.post, reconnectSessionId, subscribeEpoch, meId, workspaceId, tChat.toolNarration]);
+  // The rail's live marker: this tab observes the open chat while its turn
+  // streams, its mirror runs, or a room's follow stream is held.
+  const observingTurn = !!activeSessionId && (transcript.isStreaming || remoteActive || panePolicy.presence);
+  useEffect(() => {
+    if (!observingTurn || !activeSessionId) return;
+    const observer = createChatStreamObserver(workspaceId);
+    observer.observe(activeSessionId);
+    return () => observer.release();
+  }, [observingTurn, activeSessionId, workspaceId]);
 
   // ── Typing beacon (rooms) ───────────────────────────────────────────
   // Tell the bus while this member composes: a throttled `true` beacon keeps
@@ -2278,25 +1864,21 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
 
   const resetPane = useCallback(() => {
     sessionEpochRef.current += 1;
-    setPendingQuestion(null);
     setStartingShared(false);
-    responseGroupAbortRef.current = true;
-    directTurnSessionRef.current = null;
-    stream.abort();
     hydratedRef.current = null;
     sessionIdRef.current = null;
     freshChannelIdRef.current = null;
     setError(null);
     setInput("");
-    // A new chat starts with an empty pane and no previous reducer owner.
-    chat.setSession(null);
+    // A new chat is a new provisional conversation. A turn still running in
+    // the chat being left keeps running in its own entry.
+    setFreshPaneKey(crypto.randomUUID());
     resetFreshChatPane(workspaceId);
     att.clear();
-    chat.loadMessages([]);
-    chat.dispatch({ type: "stream/abort" });
-    resetTurnActivity();
+    resetEventLog();
+    resetRemoteLog();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stream, resetTurnActivity, att.clear]);
+  }, [att.clear, resetEventLog, resetRemoteLog, workspaceId]);
 
   const startNewChat = useCallback(() => {
     resetPane();
@@ -2346,42 +1928,23 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     }
   }, [activeSessionId, view, creationContext, pickedAssistantId, pickedContextGroupId, pickedContextProjectId, resetPane, selectSession, startingShared, t, workspaceId]);
 
-  /** Stop the in-flight turn. Aborted streams fire neither onDone nor
-   *  onError, so the state resets here (the dock's `handleAbort`). */
-  const handleAbort = useCallback(() => {
-    responseGroupAbortRef.current = true;
-    // Every turn is server-owned and continues after the page stream closes
-    // (the server no longer reads a client close as Stop, 2026-08-24), so
-    // Stop is an explicit `POST /api/chat/stop`. Releasing direct ownership
-    // first lets the session stream render our own mirrored progress until
-    // the server's `turn_completed` lands, instead of making Stop look like
-    // a completed cancellation.
-    const sessionId = sessionIdRef.current;
-    directTurnSessionRef.current = null;
-    stream.abort();
-    chat.dispatch({ type: "stream/abort" });
-    chat.dispatch({ type: "confirmation/clear" });
-    turnTextRef.current = "";
-    resetTurnActivity();
-    // An aborted stream never reaches `onDone`, so the flush happens here
-    // too: the queued text is usually WHY the user reached for Stop. It
-    // waits for the stop to land, because a flush racing the still-running
-    // turn is answered `turn_in_flight`. No session id means nothing is
-    // running server-side and no session-owned queue to flush.
-    if (!sessionId) return;
-    const controllerRun = chatController.capture();
-    chatController.cancel(controllerRun);
-    const epoch = sessionEpochRef.current;
-    const ownsStop = () => sessionEpochRef.current === epoch && sessionIdRef.current === sessionId;
-    void stopTurn(sessionId)
-      .catch(() => { if (ownsStop()) setError(t.stopTurnFailed); })
-      .finally(() => {
-        if (ownsStop() && chatController.claimExit(controllerRun)) {
-          flushQueuedInputs(sessionId);
-        }
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stream, resetTurnActivity, flushQueuedInputs, t.stopTurnFailed, chatController]);
+  /**
+   * Stop the running turn: the one Stop entry point (composer and Work Bench,
+   * direct and mirrored turns alike). The conversation sends the
+   * compare-and-set `POST /api/chat/stop` first, keeps reading the direct
+   * stream while it is pending, and aborts locally only on confirmation
+   * (chat-app.md → "Stopping a turn"). A failure shows `stopTurnFailed` and
+   * leaves the run as it was; a mirrored turn settles on `turn_completed`.
+   */
+  const stopRunningTurn = useCallback(() => {
+    const owner = controllerRef.current;
+    if (!owner) return;
+    setStopRequestedHere(owner);
+    void owner.stop().then((outcome) => {
+      // Only a confirmed Stop is this viewer's; a failed or revoked one is not.
+      if (outcome !== "stopped") setStopRequestedHere((current) => (current === owner ? null : current));
+    });
+  }, []);
 
   const copyResetRef = useRef<number | null>(null);
   const handleCopy = useCallback((messageId: string, text: string) => {
@@ -2397,8 +1960,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   // composer chip and the optimistic bubble read one value. A ref mirrors it
   // for `send`, which must not take the whole `chat` object as a dependency.
 
-  const pendingReply = chat.state.replyTo;
-  const setReplyTo = chat.setReplyTo;
+  const [pendingReply, setReplyTo] = useState<ReplyTo | null>(null);
   const pendingReplyRef = useRef<ReplyTo | null>(null);
   useEffect(() => {
     pendingReplyRef.current = pendingReply ?? null;
@@ -2524,9 +2086,334 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   }, [handleTranscriptSelectionSettled]);
 
   // ── Send ────────────────────────────────────────────────────────────
-  /** Tracks whether the in-flight turn streamed an askQuestion step, so the
-   *  settle can fetch the pending row and surface the answer panel. */
-  const askedQuestionRef = useRef(false);
+  // ── Frame observer: the presentation half of each frame ────────────
+  // The conversation applies every frame to the turn; this page reacts to
+  // the ones that touch the surface around it (URL adoption, the side pane,
+  // goals, research, the rail) and keeps the chronological feed. Direct
+  // frames come from this page's sends (or a queue flush the conversation
+  // started for it); follow frames from the open chat's follow stream.
+  /** The page's own send being painted, for frames that need its context. */
+  const sendContextRef = useRef<PageSendContext | null>(null);
+  /** What the follow stream showed since its last settle: `done` owes a
+   *  refetch only after `running` with no `turn_completed`. */
+  const followSeenRef = useRef({ running: false, completed: false });
+  const observePageFrame = (frame: ClassifiedTurnFrame, replay: boolean) => {
+    // A replay rebuilds only the chronological feed; side effects happened.
+    if (replay && !FEED_FRAMES.has(frame.event)) return;
+    const { event, payload } = frame;
+    const sessionId = sessionIdRef.current;
+    const text = (value: unknown) => (typeof value === "string" ? value : "");
+    if (frame.stream === "direct") {
+      const sending = sendContextRef.current;
+      switch (event) {
+        case "title_update":
+          // Titles may arrive after the durable reply has settled. Read the
+          // authorized rail projection instead of trusting title bytes here.
+          if (payload.sessionId === (sending?.owningSessionId ?? sessionId)) dispatchChatSessionsRefresh(workspaceId);
+          break;
+        case "session": {
+          const id = text(payload.sessionId);
+          // A late `session` frame never adopts the turn into a chat the user
+          // has since selected (the turn keeps its own conversation entry).
+          if (!id || !sending || sending.owningSessionId || sessionEpochRef.current !== sending.epoch) break;
+          // The fresh pane's first turn minted this chat. Adopt it BEFORE the
+          // URL write: `hydratedRef` is what stops the hydrate effect from
+          // re-fetching this thread and wiping the reply streaming into it.
+          sending.owningSessionId = id;
+          sending.localSend.adopt(id);
+          sessionIdRef.current = id;
+          hydratedRef.current = id;
+          // The next turn resolves this thread to the SAME assistant before
+          // the rail refetch lands.
+          sessionAssistantRef.current.set(id, sending.assistantId);
+          // The fresh pane (a document this first turn presented) moves onto
+          // the session it just minted (T6).
+          adoptFreshChatPane(workspaceId, id);
+          selectSession(id);
+          // Paint the real session immediately; title/status reconcile in the background.
+          cacheCreatedChatSession(workspaceId, {
+            id, title: sending.text.slice(0, 120) || t.newChat,
+            channelId: sending.channelId ?? id, transport: "web", appOrigin: "chat",
+            lastActive: new Date().toISOString(), assistantId: sending.assistantId,
+            contextGroupId: sending.contextGroupId, contextProjectId: sending.contextProjectId,
+            status: "running", humanCount: 1,
+          }, "personal");
+          dispatchChatSessionsRefresh(workspaceId);
+          break;
+        }
+        case "goal_accepted": {
+          const notice = goalAcceptedNoticeFromPayload(payload);
+          if (notice) {
+            setAcceptedGoal(notice);
+            // The arming just persisted server-side: pull the session's goals
+            // so the inline pursuit card mounts (the payload is a signal).
+            if (sessionGoalsForRef.current === notice.sessionId) void reloadSessionGoals(notice.sessionId);
+          }
+          break;
+        }
+        case "user_message_saved":
+          if (sending) sending.inputSaved = true;
+          break;
+        case "input_applied":
+          // The running turn took a queued message: the conversation closes
+          // the segment before it, and the feed starts a fresh one.
+          resetEventLog();
+          break;
+        case "reasoning": {
+          // Verbatim model thinking, coalesced into one advancing line in the
+          // chronological log until a step closes it (build-events.ts).
+          const delta = text(payload.text);
+          if (!delta) break;
+          turnReasoningRef.current += delta;
+          const next = appendReasoning(eventLogRef.current, turnReasoningRef.current, mintEventId);
+          if (next !== eventLogRef.current) {
+            eventLogRef.current = next;
+            setStreamingEvents(next.events);
+          }
+          break;
+        }
+        case "tool_start": {
+          const id = text(payload.id);
+          const name = text(payload.name);
+          if (!id || !name) break;
+          // Brian started browsing: show the browser in this chat's pane.
+          const owner = sending?.owningSessionId ?? sessionId;
+          if (!replay && isBrowserToolName(name) && owner) openComputerTab(owner);
+          // Re-emits keep the existing row.
+          if (eventToolIdsRef.current.has(id)) break;
+          eventToolIdsRef.current.add(id);
+          eventLogRef.current = appendStep(
+            eventLogRef.current,
+            describeToolFromInput(name, {}, tChat.toolNarration).description,
+            mintEventId,
+            { toolId: id },
+          );
+          setStreamingEvents(eventLogRef.current.events);
+          break;
+        }
+        case "tool_dropped": {
+          // The engine stripped this call from the persisted turn: retract
+          // the phantom step so the live UI matches what was saved.
+          const id = text(payload.id);
+          if (!id) break;
+          eventToolIdsRef.current.delete(id);
+          eventedToolIdsRef.current.delete(id);
+          eventLogRef.current = removeToolSteps(eventLogRef.current, id);
+          setStreamingEvents(eventLogRef.current.events);
+          break;
+        }
+        case "tool_input": {
+          const id = text(payload.id);
+          if (!id || eventedToolIdsRef.current.has(id)) break;
+          const toolInput = payload.input && typeof payload.input === "object" ? (payload.input as Record<string, unknown>) : {};
+          const narration = describeToolFromInput(text(payload.name), toolInput, tChat.toolNarration);
+          if (!narration) break;
+          eventedToolIdsRef.current.add(id);
+          eventLogRef.current = updateStepText(eventLogRef.current, id, narration.description, narration.url);
+          setStreamingEvents(eventLogRef.current.events);
+          break;
+        }
+        case "research_saved": {
+          // The research turn settled into a saved/partial/failed activity
+          // (features/research.md -> "UI"): its card renders under the reply.
+          const status = payload.status;
+          if (text(payload.activityId) && (status === "saved" || status === "partial" || status === "failed")) announceResearchChanged();
+          break;
+        }
+        case "page_created": {
+          // Brian created a Page: it opens as a tab and the pane expands
+          // (D8), and the hoisted sidebar provider reloads so it shows in the
+          // Pages tree. No navigation: Chat stays the surface.
+          const newPageId = text(payload.pageId);
+          if (!newPageId) break;
+          openInChatPane({ kind: "page", pageId: newPageId });
+          window.dispatchEvent(new CustomEvent("doc:draft-created", { detail: { viewId: newPageId, action: "created" } }));
+          break;
+        }
+        case "document_payload": {
+          // Brian presenting a document opens it as a tab and expands the
+          // pane (D8). Its ending never collapses the pane.
+          const document = parsePresentedDocumentPayload(payload);
+          if (document) openInChatPane({ kind: "document", document });
+          break;
+        }
+        case "research_quota":
+          setResearchQuota({
+            used: typeof payload.used === "number" ? payload.used : 0,
+            quota: typeof payload.quota === "number" ? payload.quota : 0,
+            isPaid: payload.isPaid === true,
+          });
+          break;
+        case "research_quota_exhausted":
+          setResearchExhausted(true);
+          setResearchMode(false);
+          setResearchQuota({
+            used: typeof payload.used === "number" ? payload.used : 0,
+            quota: typeof payload.quota === "number" ? payload.quota : 0,
+            isPaid: false,
+          });
+          break;
+        case "mention_unreachable": {
+          // D-H4: members named in the text who fail this room's clearance.
+          // The turn/post already happened; never an error.
+          const list = Array.isArray(payload.unreachable)
+            ? (payload.unreachable as unknown[]).filter(
+                (row): row is UnreachableMention =>
+                  !!row && typeof row === "object" &&
+                  typeof (row as UnreachableMention).id === "string" &&
+                  typeof (row as UnreachableMention).name === "string",
+              )
+            : [];
+          if (list.length > 0) setUnreachableNote(list);
+          break;
+        }
+        case "notice":
+          if (payload.code === "assistant_clearance_below_conversation") {
+            const id = text(payload.assistantId);
+            clearanceNamesRef.current = {
+              ...clearanceNamesRef.current,
+              skipped: text(payload.assistantName) || assistants.find((assistant) => assistant.id === id)?.name || null,
+            };
+          }
+          break;
+        case "error":
+          if (payload.code === "assistant_clearance_below_conversation") {
+            // The refused request is this send's first member (or its only one).
+            clearanceNamesRef.current = {
+              ...clearanceNamesRef.current,
+              rejected: assistants.find((assistant) => assistant.id === sending?.assistantId)?.name ?? null,
+            };
+          }
+          if (sending) {
+            sending.localSend.release();
+            if (!sending.inputSaved) sending.rollbackRecency();
+          }
+          if (payload.code === "research_quota_exhausted") {
+            setResearchExhausted(true);
+            setResearchMode(false);
+          }
+          break;
+      }
+      return;
+    }
+    if (!sessionId) return;
+    const turnId = typeof payload.turnId === "string" ? payload.turnId : controllerRef.current?.getSnapshot().turnId ?? null;
+    switch (event) {
+      case "status": {
+        const working = payload.status === "running";
+        if (working) followSeenRef.current.running = true;
+        // A GET opened just before this page's POST may carry a stale `idle`
+        // frame after the optimistic start signal. Never let it erase live
+        // direct ownership; a returning page trusts the server both ways.
+        if (working || !stream.inFlight()) dispatchChatSessionActivity({ workspaceId, sessionId, turnId, working });
+        break;
+      }
+      case "turn_started":
+        followSeenRef.current.running = true;
+        if (!replay) dispatchChatSessionActivity({ workspaceId, sessionId, turnId, working: true });
+        resetRemoteLog();
+        break;
+      case "user_message_saved":
+        // A teammate's post: the conversation asks for the history re-read.
+        markRoomSeen(workspaceId, sessionId);
+        break;
+      case "snapshot": {
+        followSeenRef.current.running = true;
+        const reasoning = text(payload.reasoning);
+        if (!reasoning) break;
+        const next = appendReasoning(remoteLogRef.current, reasoning, mintRemoteId);
+        if (next !== remoteLogRef.current) {
+          remoteLogRef.current = next;
+          setRemoteEvents(next.events);
+        }
+        break;
+      }
+      case "activity": {
+        followSeenRef.current.running = true;
+        const kind = text(payload.event);
+        const id = text(payload.id);
+        if (kind === "tool_start" && id && text(payload.name) && !remoteToolIdsRef.current.has(id)) {
+          remoteToolIdsRef.current.add(id);
+          remoteLogRef.current = appendStep(
+            remoteLogRef.current,
+            describeToolFromInput(text(payload.name), {}, tChat.toolNarration).description,
+            mintRemoteId,
+            { toolId: id },
+          );
+          setRemoteEvents(remoteLogRef.current.events);
+        } else if (kind === "tool_input" && id && !remoteNarratedRef.current.has(id)) {
+          const toolInput = payload.input && typeof payload.input === "object" ? (payload.input as Record<string, unknown>) : {};
+          const narration = describeToolFromInput(text(payload.name), toolInput, tChat.toolNarration);
+          if (!narration) break;
+          remoteNarratedRef.current.add(id);
+          remoteLogRef.current = updateStepText(remoteLogRef.current, id, narration.description, narration.url);
+          setRemoteEvents(remoteLogRef.current.events);
+        } else if (kind === "tool_dropped" && id) {
+          remoteToolIdsRef.current.delete(id);
+          remoteLogRef.current = removeToolSteps(remoteLogRef.current, id);
+          setRemoteEvents(remoteLogRef.current.events);
+        }
+        break;
+      }
+      case "assistant_changed": {
+        // The room's default voice is shared state: a teammate who moved it
+        // must not leave everyone else asking the assistant that is no longer
+        // there. Applied unconditionally, including our own echo, because the
+        // server's value is the authoritative one.
+        const nextId = text(payload.assistantId);
+        if (!nextId) break;
+        sessionAssistantRef.current.set(sessionId, nextId);
+        patchSharedChatSessions(workspaceId, (rows) =>
+          rows.map((row) => (row.id === sessionId ? { ...row, assistantId: nextId } : row)),
+        );
+        break;
+      }
+      case "turn_completed": {
+        // A late completion of an older turn settles nothing here.
+        const current = controllerRef.current?.getSnapshot().turnId ?? null;
+        if (typeof payload.turnId === "string" && current && payload.turnId !== current) break;
+        followSeenRef.current.completed = true;
+        dispatchChatSessionActivity({ workspaceId, sessionId, turnId, working: false });
+        resetRemoteLog();
+        void reloadShared();
+        dispatchChatSessionsRefresh(workspaceId);
+        if (panePolicy.post) markRoomSeen(workspaceId, sessionId);
+        refreshPendingInput(sessionId);
+        break;
+      }
+      case "done": {
+        // Reconnect mode only (a room never sends `done`): the server closes
+        // once there is nothing left to attach to. The hydrate probe on an
+        // idle chat (`status` then `done`) owes nothing.
+        const seen = followSeenRef.current;
+        followSeenRef.current = { running: false, completed: false };
+        resetRemoteLog();
+        if (!seen.running) break;
+        if (!seen.completed) {
+          dispatchChatSessionsRefresh(workspaceId);
+          refreshPendingInput(sessionId);
+        }
+        break;
+      }
+    }
+  };
+  pageFrameRef.current = (frame) => observePageFrame(frame, false);
+  replayFrameRef.current = (frame) => observePageFrame(frame, true);
+  // Returning to a chat whose turn kept running while another was open: the
+  // conversation kept a bounded build log of that turn, so the feed is
+  // rebuilt from it and then continues from the observer.
+  useLayoutEffect(() => {
+    if (!controller) return;
+    resetEventLog();
+    resetRemoteLog();
+    for (const frame of controller.getBuildLog().frames) replayFrameRef.current(frame);
+  }, [controller, resetEventLog, resetRemoteLog]);
+
+  /** Clear the conversation's error lines; a new action moves past them. */
+  const dismissErrorNotices = useCallback(() => {
+    const owner = controllerRef.current;
+    for (const code of ["error", "stopTurnFailed", "confirmNotAllowed", "reconnectFailed"] as const) owner?.dismissNotice(code);
+  }, []);
   /**
    * A silent room post (T2): send = post, instantly, for every member — one
    * durable row, no turn, no busy gate. The optimistic bubble stays; the
@@ -2554,6 +2441,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       setReplyTo(null);
       if (usesComposerTray) att.detach();
       setError(null);
+      dismissErrorNotices();
       markRoomSeen(workspaceId, targetId);
       const rollbackRecency = promoteChatSession(workspaceId, targetId, activeContextSession?.contextProjectId);
       try {
@@ -2575,9 +2463,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     [activeContextSession?.contextProjectId, att.detach, chat, setReplyTo, t.postFailed, workspaceId],
   );
   // Resolves TRUE once the message was dispatched (turn started / room post
-  // landed), FALSE when a disqualifier dropped it — the dock's `sendMessage`
+  // landed), FALSE when a disqualifier dropped it: the dock's `sendMessage`
   // contract, which the recorder's voice-clip hand-off relies on: a `false`
   // keeps the clip (failure notice + spool) instead of silently dropping it.
+  // The turn itself is the conversation's (`controller.send`); this decides
+  // the address, the endpoint, the request extras and the surface around it.
   const send = useCallback(async (override?: {
     text?: string;
     fileIds?: string[];
@@ -2600,8 +2490,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     const sendEpoch = sessionEpochRef.current;
     let owningSessionId = sessionIdRef.current;
     const ownsSend = () =>
-      sessionEpochRef.current === sendEpoch && sessionIdRef.current === owningSessionId &&
-      chatController.isCurrent(controllerRun);
+      sessionEpochRef.current === sendEpoch && sessionIdRef.current === owningSessionId;
     const trimmed = (override?.text ?? input).trim();
     const usesComposerTray = override?.fileIds === undefined;
     const turnFileIds = override?.fileIds ?? att.fileIds();
@@ -2611,7 +2500,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         ? pendingRecordings.map((recording) => recording.recordingId)
         : []);
     const turnResearchMode = override?.researchMode ?? researchMode;
-    // Snapshot the interlocutor at send time — the turn belongs to it even
+    // Snapshot the interlocutor at send time: the turn belongs to it even
     // if the resolution inputs shift while the reply streams.
     const interlocutor = activeAssistant;
     // The pending quote, snapshotted the same way. A replay (retry / edit)
@@ -2621,14 +2510,13 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     if (
       (!trimmed && turnFileIds.length === 0 && turnRecordingIds.length === 0) ||
       !interlocutor ||
-      chat.state.isStreaming ||
+      stream.inFlight() ||
       (usesComposerTray && att.uploading) ||
       (usesComposerTray && recordingUpload.busy) ||
       pendingQuestion
     ) {
       return false;
     }
-    let controllerRun = chatController.begin(owningSessionId);
 
     // The address decision (multiplayer chat D1/T3, chat-parity D2): in a
     // conversation that posts and has more than one human, send = POST unless
@@ -2697,7 +2585,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     setUnreachableNote([]);
 
     // First send in a fresh Workspace pane: create the shared thread FIRST
-    // (the explicit-create API — the thread is listable by teammates from
+    // (the explicit-create API: the thread is listable by teammates from
     // this moment), then stream this message into it. Without this a
     // session-less send would mint a PERSONAL session while the UI says
     // Workspace. The create happens before the optimistic paint so a
@@ -2706,7 +2594,6 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       if (startingShared) return false;
       setStartingShared(true);
       const creatingFeedback = beginChatSendFeedback(workspaceId, null);
-      const unregisterCreatingFeedback = chatController.registerCleanup(controllerRun, creatingFeedback.release);
       try {
         // Bind the room to the hero's picked interlocutor (default primary).
         const admitted=creationContext.snapshot();
@@ -2718,14 +2605,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         });
         if (!ownsSend()||!creationContext.isCurrent()) return false;
         owningSessionId = created.id;
-        if (chatController.adoptSession(controllerRun, created.id)) {
-          controllerRun = { ...controllerRun, sessionId: created.id };
-        }
         sessionIdRef.current = created.id;
         hydratedRef.current = created.id;
         cacheCreatedChatSession(workspaceId, created, "workspace");
         sessionAssistantRef.current.set(created.id, interlocutor.id);
-        chat.setSession(created.id);
         selectSession(created.id, "workspace");
         dispatchChatSessionsRefresh(workspaceId);
       } catch {
@@ -2734,7 +2617,6 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         return false;
       } finally {
         creatingFeedback.release();
-        unregisterCreatingFeedback();
         if (ownsSend()) setStartingShared(false);
       }
     }
@@ -2753,8 +2635,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       ? undefined
       : (freshChannelIdRef.current ??= crypto.randomUUID());
 
+    const owner = conversationFor(owningSessionId);
+    if (!owner) {
+      setError(t.errorGeneric);
+      return false;
+    }
     followTranscriptRef.current = true;
-    const localUserId = `local-${Date.now()}`;
     const userAttachments: MessageAttachmentRef[] = usesComposerTray
       ? readyAttachments(att.attachments).map((attachment) => ({
           id: attachment.fileId!,
@@ -2763,821 +2649,147 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           ...(attachment.previewUrl ? { dataUrl: attachment.previewUrl } : {}),
         }))
       : [];
-    chat.appendMessage({
-      id: localUserId,
-      role: "user",
-      // A recorder voice clip is a files-only send with no visible chip
-      // (override fileIds, empty text) — echo the voice-note marker so the
-      // bubble isn't blank. The wire text stays `trimmed`; the transcript
-      // becomes the durable content server-side.
-      text:
-        trimmed ||
-        (!usesComposerTray && turnFileIds.length > 0 ? t.voiceNote : ""),
-      timestamp: new Date(),
+    // The optimistic bubble carries the quote and the attachment previews;
+    // the conversation keeps them across the server re-key. A recorder voice
+    // clip (files-only, no chip) renders the voice-note marker instead of a
+    // blank bubble; the wire text stays `trimmed`.
+    const userMessage: Record<string, unknown> = {
       ...(userAttachments.length > 0 ? { userAttachments } : {}),
       ...(reply ? { replyTo: reply } : {}),
-    } satisfies SurfaceMessage);
-    setInput("");
-    setReplyTo(null);
-    if (usesComposerTray) att.detach();
-    if (usesComposerTray) setPendingRecordings([]);
+      ...(!trimmed && !usesComposerTray && turnFileIds.length > 0 ? { voiceNote: true } : {}),
+    };
+    // A send supersedes a slow read of this chat's history.
+    supersedeHistoryRead();
     setError(null);
-    setQueuedNotice(false);
-    // The previous turn's ending is explained; this send moves past it.
-    setTurnEndNotice(null);
-    setTurnNotice(null);
-    responseGroupAbortRef.current = false;
+    dismissErrorNotices();
+    setStopRequestedHere(null);
+    resetEventLog();
+    const targetIds = targets.map((assistant) => assistant.id);
+    const directSessionId = owningSessionId;
+    if (directSessionId) dispatchChatSessionActivity({ workspaceId, sessionId: directSessionId, working: true });
+    const localSend = beginChatSendFeedback(workspaceId, directSessionId);
+    const promoted = directSessionId ? promoteChatSession(workspaceId, directSessionId, activeContextSession?.contextProjectId) : null;
+    let rolledBack = false;
+    const sending: PageSendContext = {
+      epoch: sessionEpochRef.current,
+      owningSessionId: directSessionId, text: trimmed, assistantId: targetIds[0], channelId,
+      contextGroupId: pickedContextGroupId, contextProjectId: pickedContextProjectId,
+      inputSaved: false, localSend,
+      rollbackRecency: () => { if (!rolledBack && promoted) { rolledBack = true; promoted(); } },
+    };
+    sendContextRef.current = sending;
+    // Composer text and chips clear only once the server accepted the turn
+    // (`session` or `user_message_saved`); a pre-acceptance failure leaves
+    // them in the composer. Never cleared over what the user typed since.
+    const clearDraft = setInput;
     let sourceMessageId: string | null = null;
-    const responseAssistantIds = targets.map((assistant) => assistant.id);
-
-    // One visible human message, then one serialized turn per named
-    // assistant. The first request persists the message and returns its id;
-    // every later request reuses that row as a validated continuation.
-    for (const [targetIndex, target] of targets.entries()) {
-      if (!ownsSend() || responseGroupAbortRef.current) break;
-      if (targetIndex > 0 && !sourceMessageId) break;
-
-      askedQuestionRef.current = false;
-      turnAssistantRef.current = target.id;
-      chat.dispatch({ type: "stream/start" });
-      turnTextRef.current = "";
-      resetTurnActivity();
-      turnStartedAtRef.current = Date.now();
-      setTurnStartedAt(turnStartedAtRef.current);
-
-      // EVERY session records direct ownership, not just rooms: the session
-      // stream can be open for a personal session too (reconnect mode), and
-      // `shouldAcceptRoomMirror` is what keeps our own mirror quiet while
-      // this POST is still painting. A fresh pane has no id yet; the
-      // `session` event below adopts it.
-      const directSessionId = owningSessionId;
-      directTurnSessionRef.current = directSessionId;
-      if (directSessionId) {
-        dispatchChatSessionActivity({
-          workspaceId,
-          sessionId: directSessionId,
-          working: true,
-        });
-      }
-
-      let turnFailed = false;
-      /** The body closed with no terminal event: the turn is still running
-       *  server-side and the session stream has taken over painting it. */
-      let turnDisconnected = false;
-      const localSend = beginChatSendFeedback(workspaceId, directSessionId);
-      const rollbackRecency = directSessionId ? promoteChatSession(workspaceId, directSessionId, activeContextSession?.contextProjectId) : () => {};
-      let inputSaved = targetIndex > 0;
-      const directObserver = createChatStreamObserver(workspaceId);
-      const unregisterDirectObserver = chatController.registerCleanup(controllerRun, () => {
-        directObserver.release();
-        localSend.release();
+    let result: ConversationSendResult;
+    try {
+      result = await owner.send({
+        presentationId: presentationIdRef.current!,
+        text: trimmed,
+        fileIds: turnFileIds,
+        recordingIds: turnRecordingIds,
+        assistantId: targetIds[0],
+        // Multi-assistant response group: one visible human message, then one
+        // serialized turn per named assistant over the same saved row.
+        ...(targetIds.length > 1 ? { responseGroup: targetIds } : {}),
+        ...(override?.truncateFromMessageId ? { override: { truncateFromMessageId: override.truncateFromMessageId } } : {}),
+        userMessage,
+        bodyExtras: {
+          appOrigin: APP_ORIGIN,
+          // The picked tier rides every turn; the server clamps to plan.
+          model,
+          ...(turnResearchMode ? { mode: "research" as const } : {}),
+          // The quote rides EVERY turn of a response group: the row is
+          // persisted once, but each assistant needs the same referent. In a
+          // room it is also an address signal (`detectRoomAddress`).
+          ...(reply?.id ? { replyTo: { id: reply.id, text: reply.text } } : {}),
+          // The Ask affordance marks address intent (T3); the server decides,
+          // counting the humans itself (D2), so only an explicit address asks.
+          ...(panePolicy.post && explicitAddress ? { ask: true } : {}),
+          // A room turn is already live (a teammate's, or ours re-attached):
+          // the message is saved first and ALSO handed to that turn when it
+          // addresses its assistant (chat-parity D3, §6).
+          ...(panePolicy.post && remoteActive && addressed
+            ? { midTurn: true, ...(override?.steer ? { steer: true } : {}) }
+            : {}),
+          ...(!owningSessionId
+            ? { contextGroupId: pickedContextGroupId, contextProjectId: pickedContextProjectId }
+            : {}),
+          ...(channelId ? { channelId } : {}),
+        },
+        onAccepted: (userMessageId) => {
+          if (userMessageId) sourceMessageId ??= userMessageId;
+          clearDraft((current) => (current.trim() === trimmed ? "" : current));
+          setReplyTo((current) => (current === reply ? null : current));
+          if (usesComposerTray) {
+            att.detach();
+            setPendingRecordings([]);
+          }
+        },
+        onUserMessageSaved: (id) => {
+          sending.inputSaved = true;
+          sourceMessageId ??= id;
+        },
+        onRejected: () => {
+          // Refused before anything was saved (a rejected mention, a busy
+          // room): the text and quote go back to the composer if acceptance
+          // had already cleared them, and the recency promotion is undone.
+          sending.rollbackRecency();
+          clearDraft((current) => (current.trim() ? current : trimmed));
+          setReplyTo((current) => current ?? reply);
+        },
       });
-      try {
-      await stream.start({
-      url: `${API_URL}/api/chat`,
-      authFetch: (url, init) => authFetch(String(url), init),
-      body: {
-        message: trimmed,
-        workspaceId,
-        assistantId: target.id,
-        appOrigin: APP_ORIGIN,
-        // The picked tier rides every turn; the server clamps to plan.
-        model,
-        ...(turnResearchMode ? { mode: "research" as const } : {}),
-        // The first persisted row owns the attachments. Later assistants see
-        // them through room history; re-sending file ids would transcribe /
-        // distil the same upload again.
-        ...(targetIndex === 0 && turnFileIds.length > 0
-          ? { fileIds: turnFileIds }
-          : {}),
-        ...(targetIndex === 0 && turnRecordingIds.length > 0
-          ? { attachedRecordingIds: turnRecordingIds }
-          : {}),
-        // First turn only. An edit may address several assistants, and a
-        // second truncate would delete the reply the first one just wrote.
-        ...(targetIndex === 0 && override?.truncateFromMessageId
-          ? { truncateFromMessageId: override.truncateFromMessageId }
-          : {}),
-        // The quote rides EVERY turn of a response group, not just the first:
-        // the row is persisted once, but each assistant needs the same
-        // referent rendered into its own prompt. In a room this is also an
-        // address signal — replying to an assistant asks THAT assistant, the
-        // same way an `@mention` does (`detectRoomAddress`).
-        ...(reply?.id ? { replyTo: { id: reply.id, text: reply.text } } : {}),
-        // The Ask affordance marks address intent (T3) — the server decides,
-        // counting the humans itself (D2), so only an explicit address asks.
-        ...(panePolicy.post && explicitAddress ? { ask: true } : {}),
-        // A room turn is already live (a teammate's, or ours that this pane
-        // re-attached to): the message is saved first and ALSO handed to that
-        // turn when it addresses its assistant (chat-parity D3, §6).
-        ...(panePolicy.post && remoteActive && addressed
-          ? { midTurn: true, ...(override?.steer ? { steer: true } : {}) }
-          : {}),
-        ...(targets.length > 1
-          ? {
-              roomResponseGroup: {
-                assistantIds: responseAssistantIds,
-                ...(sourceMessageId ? { sourceMessageId } : {}),
-              },
-            }
-          : {}),
-        ...(sessionIdRef.current ? { sessionId: sessionIdRef.current } : {}),
-        ...(!sessionIdRef.current
-          ? {
-              contextGroupId: pickedContextGroupId,
-              contextProjectId: pickedContextProjectId,
-            }
-          : {}),
-        ...(channelId ? { channelId } : {}),
-      },
-      onEvent: (event) => {
-        const payload = coercePayload(event.data);
-        if (!ownsSend()) {
-          directObserver.release();
-          // A taken input is durable even if its stream no longer owns the
-          // pane. Acknowledge it without splicing into a different visit.
-          if (event.event === "input_applied" && owningSessionId && typeof payload.inputId === "string") {
-            midTurn.take(payload.inputId, owningSessionId);
-          }
-          return;
-        }
-        if (owningSessionId) directObserver.observe(owningSessionId);
-        switch (event.event) {
-          case "title_update": {
-            // Titles may arrive after the durable reply has settled. Read the
-            // authorized rail projection instead of trusting title bytes here.
-            if (payload.sessionId === owningSessionId) dispatchChatSessionsRefresh(workspaceId);
-            break;
-          }
-          case "session": {
-            const id = typeof payload.sessionId === "string" ? payload.sessionId : null;
-            if (id && !owningSessionId) {
-              owningSessionId = id;
-              localSend.adopt(id);
-              directObserver.observe(id);
-              if (chatController.adoptSession(controllerRun, id)) {
-                controllerRun = { ...controllerRun, sessionId: id };
-              }
-              // Adopt BEFORE the URL write: `hydratedRef` is what stops the
-              // hydrate effect from re-fetching this thread and wiping the
-              // reply that is streaming into it right now.
-              sessionIdRef.current = id;
-              hydratedRef.current = id;
-              // The POST that minted this id is the one painting it.
-              directTurnSessionRef.current = id;
-              // Record the binding so the next turn resolves this thread to
-              // the SAME assistant before the rail refetch lands.
-              sessionAssistantRef.current.set(id, target.id);
-              // The fresh pane (a document this first turn presented) moves
-              // onto the session it just minted (T6).
-              adoptFreshChatPane(workspaceId, id);
-              chat.setSession(id);
-              selectSession(id);
-              // Paint the real session immediately; title/status reconcile in the background.
-              cacheCreatedChatSession(workspaceId, {
-                id, title: trimmed.slice(0, 120) || t.newChat,
-                channelId: channelId ?? id, transport: "web", appOrigin: "chat",
-                lastActive: new Date().toISOString(), assistantId: target.id,
-                contextGroupId: pickedContextGroupId, contextProjectId: pickedContextProjectId,
-                status: "running", humanCount: 1,
-              }, "personal");
-              dispatchChatSessionsRefresh(workspaceId);
-            }
-            break;
-          }
-          case "goal_accepted": {
-            const notice = goalAcceptedNoticeFromPayload(payload);
-            if (notice) {
-              setAcceptedGoal(notice);
-              // The arming just persisted server-side — pull the session's
-              // goals so the inline pursuit card mounts in the transcript
-              // (the SSE payload is a signal, never the data).
-              if (sessionGoalsForRef.current === notice.sessionId) {
-                void reloadSessionGoals(notice.sessionId);
-              }
-            }
-            break;
-          }
-          case "user_message_saved": {
-            const id = typeof payload.id === "string" ? payload.id : null;
-            if (id) {
-              inputSaved = true;
-              sourceMessageId ??= id;
-              // Rekey only. Rebuilding this row would drop the optimistic
-              // attachment previews that now belong to the transcript.
-              chat.dispatch({
-                type: "message/rekey",
-                messageId: localUserId,
-                id,
-              });
-            }
-            break;
-          }
-          // The running turn took a message we queued mid-stream: it is a
-          // real row now, so it moves out of the queued tray into the thread.
-          // See docs/architecture/engine/mid-turn-input.md.
-          case "input_applied": {
-            const inputId =
-              typeof payload.inputId === "string" ? payload.inputId : null;
-            if (!inputId) break;
-            const messageId =
-              typeof payload.messageId === "string"
-                ? payload.messageId
-                : `queued-${inputId}`;
-            if (owningSessionId) applyQueuedInput(inputId, messageId, owningSessionId);
-            break;
-          }
-          case "assistant_message_saved": {
-            if (typeof payload.id === "string") chat.dispatch({ type: "stream/saved" });
-            break;
-          }
-          case "reply_text_complete": {
-            chat.dispatch({ type: "stream/text-complete" });
-            break;
-          }
-          case "text_delta": {
-            const delta = typeof payload.text === "string" ? payload.text : "";
-            if (delta) {
-              // A new answer segment after intermediate tool activity — the
-              // prior segment was step narration, not the answer. Discard it
-              // from the finalized buffer so only the last segment survives.
-              if (pendingAnswerResetRef.current) {
-                pendingAnswerResetRef.current = false;
-                turnTextRef.current = "";
-              }
-              turnTextRef.current += delta;
-              chat.dispatch({ type: "stream/append", text: delta });
-            }
-            break;
-          }
-          case "reasoning": {
-            // Verbatim model thinking, token-by-token. Coalesced into one
-            // advancing line in the chronological event log until a step
-            // closes it (build-events.ts).
-            const delta = typeof payload.text === "string" ? payload.text : "";
-            if (delta) {
-              turnReasoningRef.current += delta;
-              const next = appendReasoning(
-                eventLogRef.current,
-                turnReasoningRef.current,
-                mintEventId,
-              );
-              if (next !== eventLogRef.current) {
-                eventLogRef.current = next;
-                setStreamingEvents(next.events);
-              }
-            }
-            break;
-          }
-          case "worker_start": {
-            // A delegated assistant announces its human-friendly task before
-            // its tool calls. Keep that label on the streamed steps so the
-            // Work Bench can group current progress by assistant.
-            const workerId =
-              typeof payload.workerId === "string" ? payload.workerId : "";
-            const description =
-              typeof payload.description === "string"
-                ? payload.description
-                : undefined;
-            if (workerId && description) {
-              turnWorkerDescriptionsRef.current.set(workerId, description);
-            }
-            break;
-          }
-          case "tool_start": {
-            const id = typeof payload.id === "string" ? payload.id : "";
-            const name = typeof payload.name === "string" ? payload.name : "";
-            if (!id || !name) break;
-            // An askQuestion step means this turn may SUSPEND — the settle
-            // fetches the pending row and surfaces the answer panel.
-            if (name === "askQuestion") askedQuestionRef.current = true;
-            // Brian started browsing: show the browser in this chat's pane.
-            if (isBrowserToolName(name) && owningSessionId) openComputerTab(owningSessionId);
-            // Dedup — re-emits keep the existing row.
-            if (turnToolsRef.current.some((tool) => tool.id === id)) break;
-            // Arm the answer-segment reset and clear the live stream buffer
-            // so stale narration stops showing while the tool runs. See
-            // `pendingAnswerResetRef` above.
-            if (!pendingAnswerResetRef.current) {
-              pendingAnswerResetRef.current = true;
-              // Keep the segment as a receipt note before it is discarded —
-              // `finalizeActivityNotes` drops it again if it turns out to be
-              // the answer (answer-then-bookkeeping-tool turn).
-              const segment = turnTextRef.current.trim();
-              if (segment) {
-                turnNotesRef.current = [
-                  ...turnNotesRef.current,
-                  { id: `note-${id}`, text: segment, beforeToolId: id },
-                ];
-              }
-              chat.dispatch({ type: "stream/reset" });
-            }
-            toolStartTimesRef.current.set(id, performance.now());
-            // Seed the friendliest label we can before the input parses;
-            // `tool_input` upgrades it moments later.
-            const seeded = describeToolFromInput(name, {}, tChat.toolNarration);
-            const workerId =
-              typeof payload.workerId === "string"
-                ? payload.workerId
-                : undefined;
-            const workerDescription = workerId
-              ? turnWorkerDescriptionsRef.current.get(workerId)
-              : undefined;
-            turnToolsRef.current = [
-              ...turnToolsRef.current,
-              {
-                id,
-                name,
-                status: "running",
-                description: seeded.description,
-                ...(workerId ? { workerId } : {}),
-                ...(workerDescription ? { workerDescription } : {}),
-              },
-            ];
-            setToolTimeline(turnToolsRef.current);
-            eventLogRef.current = appendStep(
-              eventLogRef.current,
-              seeded.description,
-              mintEventId,
-              { toolId: id },
-            );
-            setStreamingEvents(eventLogRef.current.events);
-            break;
-          }
-          case "tool_dropped": {
-            // The engine stripped this call from the persisted turn —
-            // retract the phantom step so the live UI matches what was saved.
-            const id = typeof payload.id === "string" ? payload.id : "";
-            if (!id) break;
-            turnToolsRef.current = turnToolsRef.current.filter(
-              (tool) => tool.id !== id,
-            );
-            setToolTimeline(turnToolsRef.current);
-            eventLogRef.current = removeToolSteps(eventLogRef.current, id);
-            setStreamingEvents(eventLogRef.current.events);
-            eventedToolIdsRef.current.delete(id);
-            toolStartTimesRef.current.delete(id);
-            break;
-          }
-          case "tool_input": {
-            // Upgrade the placeholder row to the input-aware narration.
-            const id = typeof payload.id === "string" ? payload.id : "";
-            const name = typeof payload.name === "string" ? payload.name : "";
-            if (!id) break;
-            const inputPayload =
-              payload.input && typeof payload.input === "object"
-                ? (payload.input as Record<string, unknown>)
-                : {};
-            const narration = describeToolFromInput(
-              name,
-              inputPayload,
-              tChat.toolNarration,
-            );
-            if (!narration) break;
-            turnToolsRef.current = turnToolsRef.current.map((tool) =>
-              tool.id === id
-                ? {
-                    ...tool,
-                    description: narration.description,
-                    ...(narration.url ? { url: narration.url } : {}),
-                    ...(narration.detail ? { detail: narration.detail } : {}),
-                    ...(Object.keys(inputPayload).length > 0 ? { input: inputPayload } : {}),
-                  }
-                : tool,
-            );
-            setToolTimeline(turnToolsRef.current);
-            if (!eventedToolIdsRef.current.has(id)) {
-              eventedToolIdsRef.current.add(id);
-              eventLogRef.current = updateStepText(
-                eventLogRef.current,
-                id,
-                narration.description,
-                narration.url,
-              );
-              setStreamingEvents(eventLogRef.current.events);
-            }
-            break;
-          }
-          case "tool_result": {
-            const id = typeof payload.id === "string" ? payload.id : "";
-            if (!id) break;
-            const isError = payload.isError === true;
-            const errorMessage =
-              typeof payload.errorMessage === "string"
-                ? payload.errorMessage
-                : undefined;
-            const startedAtMs = toolStartTimesRef.current.get(id);
-            const output =
-              typeof payload.output === "string" && payload.output ? payload.output : undefined;
-            const durationMs =
-              startedAtMs != null
-                ? Math.max(0, Math.round(performance.now() - startedAtMs))
-                : undefined;
-            const finishedTool = turnToolsRef.current.find((tool) => tool.id === id);
-            if (finishedTool && PAGE_WRITING_TOOLS.has(finishedTool.name) && output) {
-              turnPageLinksRef.current = addPageLinks(
-                turnPageLinksRef.current,
-                pageIdsFromToolResult(output, isError),
-              );
-            }
-            turnToolsRef.current = turnToolsRef.current.map((tool) =>
-              tool.id === id
-                ? {
-                    ...tool,
-                    status: isError ? ("retried" as const) : ("done" as const),
-                    ...(durationMs != null ? { durationMs } : {}),
-                    ...(isError && errorMessage ? { errorMessage } : {}),
-                    ...(output ? { output } : {}),
-                  }
-                : tool,
-            );
-            setToolTimeline(turnToolsRef.current);
-            break;
-          }
-          case "research_saved": {
-            // The research turn settled into a saved/partial/failed activity
-            // (features/research.md -> "UI"): card under the reply.
-            const activityId = typeof payload.activityId === "string" ? payload.activityId : "";
-            const status = payload.status;
-            if (activityId && (status === "saved" || status === "partial" || status === "failed")) {
-              turnResearchRef.current = { activityId, status };
-              announceResearchChanged();
-            }
-            break;
-          }
-          case "page_created": {
-            // The assistant created a new Page. Link it under the reply, open
-            // it in the side pane, and tell the hoisted sidebar provider to
-            // reload so the Page shows in the Pages tree without a refresh.
-            // No navigation: Chat stays the surface.
-            const newPageId =
-              typeof payload.pageId === "string" ? payload.pageId : "";
-            if (!newPageId) break;
-            turnPageLinksRef.current = addPageLinks(turnPageLinksRef.current, [newPageId]);
-            // Brian created a page: it opens as a tab and the pane expands
-            // (D8), so the user watches it fill in beside the chat.
-            openInChatPane({ kind: "page", pageId: newPageId });
-            window.dispatchEvent(
-              new CustomEvent("doc:draft-created", {
-                detail: { viewId: newPageId, action: "created" },
-              }),
-            );
-            break;
-          }
-          case "document_payload": {
-            const document = parsePresentedDocumentPayload(payload);
-            if (!document) break;
-            turnDocumentsRef.current = [
-              ...turnDocumentsRef.current.filter((item) => item.id !== document.id),
-              document,
-            ];
-            // Brian presenting a document opens it as a tab and expands the
-            // pane (D8). Its ending never collapses the pane.
-            openInChatPane({ kind: "document", document });
-            break;
-          }
-          case "status": {
-            // Research / coordinator phase codes only — `message`-only
-            // statuses stay silent, same as the dock.
-            const phase = typeof payload.phase === "string" ? payload.phase : "";
-            if (phase === "research_detected") setResearchPhase("detected");
-            else if (phase === "research_starting") setResearchPhase("starting");
-            else if (phase === "research_parallel") setResearchPhase("parallel");
-            break;
-          }
-          case "citation": {
-            if (!Array.isArray(payload.sources)) break;
-            for (const source of payload.sources as Array<{
-              url?: unknown;
-              title?: unknown;
-            }>) {
-              if (
-                typeof source.url !== "string" ||
-                typeof source.title !== "string" ||
-                turnCitationsRef.current.some((item) => item.url === source.url)
-              ) {
-                continue;
-              }
-              turnCitationsRef.current = [
-                ...turnCitationsRef.current,
-                { url: source.url, title: source.title },
-              ];
-            }
-            setCitations(turnCitationsRef.current);
-            break;
-          }
-          case "attachments": {
-            if (Array.isArray(payload.attachments)) {
-              turnFileAttachmentsRef.current =
-                payload.attachments as ChatFileAttachment[];
-            }
-            break;
-          }
-          case "research_quota": {
-            setResearchQuota({
-              used: typeof payload.used === "number" ? payload.used : 0,
-              quota: typeof payload.quota === "number" ? payload.quota : 0,
-              isPaid: payload.isPaid === true,
-            });
-            break;
-          }
-          case "research_quota_exhausted": {
-            setResearchExhausted(true);
-            setResearchMode(false);
-            setResearchQuota({
-              used: typeof payload.used === "number" ? payload.used : 0,
-              quota: typeof payload.quota === "number" ? payload.quota : 0,
-              isPaid: false,
-            });
-            break;
-          }
-          case "queued":
-          case "input_queued": {
-            // A quiet "will reply after this" line, never an error (T5). A
-            // folded queue means another member's mention already armed the
-            // follow-up turn — this message's row rides its backlog. An
-            // `input_queued` room message (D3) was saved and handed to the
-            // running turn, which answers it in the reply already streaming.
-            setQueuedNotice(true);
-            break;
-          }
-          case "mention_unreachable": {
-            // D-H4 — members named in the text who fail this room's
-            // clearance. The turn/post already happened; this only tells the
-            // sender who was not notified, never an error.
-            const list = Array.isArray(payload.unreachable)
-              ? (payload.unreachable as unknown[]).filter(
-                  (row): row is UnreachableMention =>
-                    !!row &&
-                    typeof row === "object" &&
-                    typeof (row as UnreachableMention).id === "string" &&
-                    typeof (row as UnreachableMention).name === "string",
-                )
-              : [];
-            if (list.length > 0) setUnreachableNote(list);
-            break;
-          }
-          case "posted": {
-            // The server decided this message was a post, not an address
-            // (T3 re-validation). The optimistic bubble already stands.
-            turnFailed = true;
-            chat.dispatch({ type: "stream/abort" });
-            resetTurnActivity();
-            break;
-          }
-          case "tool_confirmation_required": {
-            // Suspended-turn card in the room transcript (T11/D8) — the
-            // sender's own copy, off their POST stream.
-            const toolCallId =
-              typeof payload.toolCallId === "string" ? payload.toolCallId : "";
-            if (!toolCallId) break;
-            const confirmation: PendingConfirmation = {
-              toolCallId,
-              approvalId:
-                typeof payload.approvalId === "string" ? payload.approvalId : undefined,
-              toolName: typeof payload.toolName === "string" ? payload.toolName : "",
-              displayName:
-                typeof payload.displayName === "string" ? payload.displayName : undefined,
-              input:
-                payload.input && typeof payload.input === "object"
-                  ? (payload.input as Record<string, unknown>)
-                  : {},
-              description:
-                typeof payload.description === "string" ? payload.description : undefined,
-              displayLines: Array.isArray(payload.displayLines)
-                ? (payload.displayLines as string[])
-                : undefined,
-              sessionId: sessionIdRef.current ?? "",
-              status: "pending",
-            };
-            chatController.presentInteraction(controllerRun, {
-              kind: "tool-confirmation",
-              approvalId: confirmation.approvalId ?? `tool:${toolCallId}`,
-              toolCallId,
-              source: "live",
-              status: "pending",
-              payload: confirmation,
-            });
-            chat.addConfirmation(confirmation);
-            break;
-          }
-          case "notice": {
-            const code = typeof payload.code === "string" ? payload.code : "";
-            if (code === "post_reply_authority_changed") {
-              setTurnNotice(tChat.noticePostReplyAuthorityChanged);
-            } else if (code === "custom_model_image_fallback") {
-              setTurnNotice(tChat.noticeCustomModelImageFallback);
-            } else if (code === "custom_model_endpoint_fallback") {
-              setTurnNotice(tChat.noticeCustomModelEndpointFallback);
-            } else if (code === "budget_downgraded") {
-              setTurnNotice(tChat.noticeBudgetDowngraded);
-            } else if (typeof payload.message === "string") {
-              // Server-authored English is better than silence for a code
-              // this build has never heard of.
-              setTurnNotice(payload.message);
-            }
-            break;
-          }
-          case "error": {
-            localSend.release();
-            if (!inputSaved) rollbackRecency();
-            turnFailed = true;
-            if (payload.code === "research_quota_exhausted") {
-              setResearchExhausted(true);
-              setResearchMode(false);
-            }
-            if (payload.code === "assistant_clearance_exceeds_room") {
-              setError(t.assistantClearanceBlocked);
-              break;
-            }
-            if (payload.code === "delivery_audience_unverified" && payload.sharedChat === true) {
-              setError(t.deliveryAudienceBlocked);
-              break;
-            }
-            // Dropped provider connection: retrying is safe and usually
-            // enough, so say that instead of the raw socket message.
-            if (payload.code === "upstream_connection_reset") {
-              setError(
-                payload.customEndpoint === true
-                  ? t.upstreamConnectionResetCustom
-                  : t.upstreamConnectionReset,
-              );
-              break;
-            }
-            // Endpoint unreachable: retrying will not help until the
-            // endpoint is back, so the copy points at the settings check.
-            if (payload.code === "upstream_unreachable") {
-              setError(
-                payload.customEndpoint === true
-                  ? t.upstreamUnreachableCustom
-                  : t.upstreamUnreachable,
-              );
-              break;
-            }
-            // Suspended on a question from an earlier turn: restore the
-            // answer panel instead of a red error (the dock's recipe).
-            if (payload.code === "pending_question_exists") {
-              const approvalId =
-                typeof payload.approvalId === "string" ? payload.approvalId : "";
-              const sid = sessionIdRef.current ?? "";
-              if (approvalId && sid) {
-                setPendingQuestion({
-                  approvalId,
-                  question: typeof payload.question === "string" ? payload.question : "",
-                  expiresAt:
-                    typeof payload.expiresAt === "string" ? payload.expiresAt : null,
-                  sessionId: sid,
-                });
-              }
-              break;
-            }
-            const message =
-              typeof payload.message === "string"
-                ? payload.message
-                : typeof payload.error === "string"
-                  ? payload.error
-                  : t.errorGeneric;
-            setError(message);
-            break;
-          }
-          default:
-            // Unknown events remain additive: a newer server must never break
-            // this client just because it emits chrome we do not know yet.
-            break;
-        }
-      },
-      onDone: () => {
-        directObserver.release();
-        localSend.complete();
-        if (!ownsSend()) return;
-        chatController.complete(controllerRun);
-        const settledSessionId = owningSessionId;
-        directTurnSessionRef.current = null;
-        if (settledSessionId) {
-          dispatchChatSessionActivity({
-            workspaceId,
-            sessionId: settledSessionId,
-            working: false,
-          });
-        }
-        const finalMessage = buildStreamedTurnMessage(target.id);
-        if (finalMessage) {
-          chat.dispatch({ type: "stream/finalize", finalMessage });
-        } else {
-          chat.dispatch({ type: "stream/abort" });
-        }
-        turnTextRef.current = "";
-        resetTurnActivity();
-        // Anything still queued was never taken by this turn — send it as an
-        // ordinary one. See mid-turn-input.md → "the client is the holder".
-        if (chatController.claimExit(controllerRun)) {
-          flushQueuedInputs(owningSessionId);
-        }
-        setQueuedNotice(false);
-        chat.dispatch({ type: "confirmation/clear" });
-        // Suspended on a question this turn — fetch the pending row so the
-        // answer panel + composer gate surface immediately (dock recipe).
-        if (askedQuestionRef.current && owningSessionId) {
-          refreshPendingInput(owningSessionId);
-        }
-        if (panePolicy.post && owningSessionId) {
-          markRoomSeen(workspaceId, owningSessionId);
-        }
-        void reloadShared();
-        // The turn may have auto-titled the thread — refresh the rail.
-        dispatchChatSessionsRefresh(workspaceId);
-      },
-      onDisconnect: () => {
-        directObserver.release();
-        localSend.release();
-        if (!ownsSend()) return;
-        chatController.disconnect(controllerRun);
-        // The transport closed with no `done` / `error`: a request-timeout
-        // cut, a deploy, a network blip. The server no longer reads a client
-        // close as Stop (2026-08-24), so the turn is still running and its
-        // reply lands in the transcript when it finishes. Hand the paint to
-        // the mirror machinery and re-attach over the session stream.
-        turnDisconnected = true;
-        const sessionId = owningSessionId;
-        const streamedText = turnTextRef.current;
-        const startedAt = turnStartedAtRef.current;
-        directTurnSessionRef.current = null;
-        chat.dispatch({ type: "stream/abort" });
-        turnTextRef.current = "";
-        resetTurnActivity();
-        // Not flushed: the turn is still running, so a re-send would only
-        // be answered `turn_in_flight`. The stream's `done` flushes.
-        setQueuedNotice(false);
-        if (!sessionId) {
-          // No `session` frame ever arrived, so there is nothing to
-          // re-attach to. Report it like any other transport failure.
-          setError(t.errorGeneric);
-          chatController.fail(controllerRun, t.errorGeneric);
-          if (chatController.claimExit(controllerRun)) {
-            flushQueuedInputs(owningSessionId);
-          }
-          dispatchChatSessionsRefresh(workspaceId);
-          return;
-        }
-        // Paint what the dead stream had so far as the remote turn; the
-        // first `snapshot` off the bus replaces it with the server's text.
-        // Not `resetRemoteTurn()`: our own mirror was suppressed while the
-        // POST was live, so there is nothing stale to clear, and a room's
-        // follow stream is already open to carry on from here.
-        setRemoteAssistantId(target.id);
-        setRemoteActive(true);
-        setRemoteText(streamedText);
-        setRemoteStartedAt((current) => current ?? startedAt ?? Date.now());
-        setReconnectSessionId(sessionId);
-        setReconnectNotice(true);
-      },
-      onError: () => {
-        directObserver.release();
-        localSend.release();
-        if (!inputSaved) rollbackRecency();
-        if (!ownsSend()) return;
-        chatController.fail(controllerRun, t.errorGeneric);
-        turnFailed = true;
-        directTurnSessionRef.current = null;
-        chat.dispatch({ type: "stream/abort" });
-        resetTurnActivity();
-        if (chatController.claimExit(controllerRun)) {
-          flushQueuedInputs(owningSessionId);
-        }
-        setQueuedNotice(false);
-        setError(t.errorGeneric);
-        // The room backend may still be running after a transport failure.
-        // Reconcile the rail from persisted session status instead of
-        // declaring it idle just because this page lost its POST stream.
-        dispatchChatSessionsRefresh(workspaceId);
-      },
-      });
-      } finally {
-        directObserver.release();
-        localSend.release();
-        unregisterDirectObserver();
-      }
-      if (!ownsSend()) return false;
-      if (
-        turnFailed ||
-        turnDisconnected ||
-        askedQuestionRef.current ||
-        responseGroupAbortRef.current
-      ) {
-        break;
-      }
+    } finally {
+      if (sendContextRef.current === sending) sendContextRef.current = null;
     }
+    if (result === "busy" || result === "empty" || result === "invalid" || result === "disposed") {
+      // Nothing was dispatched: a turn still runs in this chat (re-attached,
+      // or started by another presentation), or the identity changed.
+      localSend.release();
+      sending.rollbackRecency();
+      dispatchChatSessionsRefresh(workspaceId);
+      // A send is never a silent no-op: hand plain text to the running turn
+      // the same way a mid-turn send does, otherwise say why nothing went.
+      if (result === "busy") {
+        const taken = midTurnRoute === "client_queue" && usesComposerTray && turnFileIds.length === 0 &&
+          turnRecordingIds.length === 0 && !!trimmed &&
+          owner.queue(trimmed, override?.steer === true, { assistantId: targetIds[0] });
+        if (taken) {
+          clearDraft((current) => (current.trim() === trimmed ? "" : current));
+          setReplyTo((current) => (current === reply ? null : current));
+          return true;
+        }
+        setError(t.sendWhileTurnRunning);
+      }
+      return false;
+    }
+    if (result === "completed" || result === "queued") localSend.complete(owner.getSnapshot().turnId);
+    else localSend.release();
+    if (result === "failed" && !sending.inputSaved) sending.rollbackRecency();
+    const settledSessionId = sending.owningSessionId;
+    if (settledSessionId && result !== "disconnected") {
+      dispatchChatSessionActivity({ workspaceId, sessionId: settledSessionId, turnId: owner.getSnapshot().turnId, working: false });
+    }
+    if (!ownsSend() && sessionIdRef.current !== settledSessionId) return false;
+    owningSessionId = settledSessionId;
+    if (result === "completed" && panePolicy.post && settledSessionId) markRoomSeen(workspaceId, settledSessionId);
+    if (result === "completed") void reloadShared();
+    // The turn may have auto-titled the thread; a failed one is reconciled
+    // from persisted status rather than declared idle.
+    dispatchChatSessionsRefresh(workspaceId);
     // Reconcile once after the whole serialized group, not after each member:
     // this makes persisted sender attribution authoritative without letting
     // an earlier fetch erase a later assistant's live/final row. It also
     // catches teammate posts and restores older history when this send
     // superseded a cold read, including in a personal chat.
-    if (ownsSend() && sourceMessageId && owningSessionId) {
-      await loadTranscript(owningSessionId, { force: true });
+    if (sourceMessageId && settledSessionId && sessionIdRef.current === settledSessionId) {
+      await loadTranscript(settledSessionId, { force: true });
     }
     return true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [historyRecoverySessionId, creationContext, input, activeAssistant, activeSessionId, activeContextSession?.contextProjectId, panePolicy, paneHumanCount, remoteActive, postToRoom, askArmed, model, researchMode, view, workspaceId, pickedContextGroupId, pickedContextProjectId, chat.state.isStreaming, refreshPendingInput, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration, att.attachments, att.uploading, att.fileIds, att.detach, pendingQuestion, pendingRecordings, recordingUpload.status, assistants, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs, mentions.reset, setReplyTo]);
+  }, [historyRecoverySessionId, creationContext, input, activeAssistant, activeSessionId, activeContextSession?.contextProjectId, panePolicy, paneHumanCount, remoteActive, postToRoom, askArmed, model, researchMode, view, workspaceId, pickedContextGroupId, pickedContextProjectId, reloadShared, selectSession, startingShared, stream, t, att.attachments, att.uploading, att.fileIds, att.detach, pendingQuestion, pendingRecordings, recordingUpload.status, assistants, mentions.reset, setReplyTo, conversationFor, supersedeHistoryRead, dismissErrorNotices, resetEventLog, loadTranscript]);
 
   // While this full-page surface is mounted it IS the visible chat, so a
   // short capture's voice turn must land in the open thread here — never in
@@ -3607,24 +2819,13 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           sessionIdRef.current = created.id;
           hydratedRef.current = created.id;
           sessionAssistantRef.current.set(created.id, assistantId);
-          chat.setSession(created.id);
           selectSession(created.id, "personal", true);
           dispatchChatSessionsRefresh(workspaceId);
           return created.id as string;
         } } : {}),
       }),
-    [send, voiceInteractionHere, activeAssistant, workspaceId, pickedContextGroupId, pickedContextProjectId, chat.setSession, selectSession, t.errorGeneric],
+    [send, voiceInteractionHere, activeAssistant, workspaceId, pickedContextGroupId, pickedContextProjectId, selectSession, t.errorGeneric],
   );
-
-  // The mid-turn flush runs inside `send`'s own `onDone`; the ref is the only
-  // way to reach the current `send` from there without a stale closure. The
-  // drained text rides the `text` override rather than the composer state,
-  // which the user may already be typing into again.
-  useEffect(() => {
-    sendRef.current = (text: string) => {
-      void send({ text });
-    };
-  }, [send]);
 
   /** The Ask toggle and chord: only where a plain send would post (D2). */
   const askVisible = askAffordanceVisible(panePolicy, paneHumanCount);
@@ -3645,7 +2846,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     (steer: boolean): boolean => {
       const text = input.trim();
       if (!text) return false;
-      if (midTurnRoute === "client_queue") return midTurn.queue(text, steer);
+      // The conversation holds a personal chat's message until the running
+      // turn takes it; an uncertain one comes back to the composer, never resent.
+      if (midTurnRoute === "client_queue") {
+        return controllerRef.current?.queue(text, steer, { assistantId: activeAssistant?.id ?? null }) ?? false;
+      }
       if (midTurnRoute !== "room_inbox") return false;
       const sessionId = sessionIdRef.current;
       if (!sessionId) return false;
@@ -3668,18 +2873,18 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         return true;
       }
       const target = mentioned[0] ?? replied ?? activeAssistant;
-      const queued = midTurn.queue(text, steer, {
+      const queued = controllerRef.current?.queue(text, steer, {
         serverHeld: true,
-        body: {
+        assistantId: target?.id ?? null,
+        bodyExtras: {
           ask: true,
-          ...(target ? { assistantId: target.id } : {}),
           ...(reply?.id ? { replyTo: { id: reply.id, text: reply.text } } : {}),
         },
-      });
+      }) ?? false;
       if (queued) setReplyTo(null);
       return queued;
     },
-    [activeAssistant, askArmed, assistants, input, mentionTargets, mentions.reset, midTurn, midTurnRoute, paneHumanCount, panePolicy, postToRoom, setReplyTo],
+    [activeAssistant, askArmed, assistants, input, mentionTargets, mentions.reset, midTurnRoute, paneHumanCount, panePolicy, postToRoom, setReplyTo],
   );
 
   const captureComposerDraft = ():RecoverableChatDraft|null => {
@@ -3725,7 +2930,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     const current=captureComposerDraft();
     updateRecoveryDrafts([...recoveryDrafts.filter(row=>row.id!==draft.id),...(current?[current]:[])]);
     handoffAssistantRef.current=draft.assistantId;
-    resetPane();setPendingRecordings(draft.recordings);att.restore(draft.attachments);setInput(draft.text);
+    resetPane();setPendingRecordings(draft.recordings);att.restore(draft.attachments,conversationAttachmentTray(workspaceId,trayPartFor(draft.sessionId,draft.view)));setInput(draft.text);
     setResearchMode(draft.researchMode);setReplyTo(null);pendingReplyRef.current=null;setSelectionQuote(null);
     setPickedAssistantId(draft.assistantId);selectSession(draft.sessionId,draft.view);
     if(!draft.sessionId){setPickedContextProjectId(draft.contextProjectId??null);setPickedContextGroupId(draft.contextGroupId??null);}
@@ -3932,7 +3137,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     roster: assistants,
     fallback: activeAssistant,
     localActive: chat.state.isStreaming,
-    localAssistantId: turnAssistantRef.current,
+    localAssistantId: convo?.liveAssistantId ?? null,
     remoteActive,
     remoteAssistantId,
     waitingForInput: workBenchWaiting,
@@ -3966,34 +3171,16 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     remoteResearchPhase,
   ]);
 
-  /**
-   * Stop the running turn (T5 recovery). The server decides whether this
-   * aborts a live turn or reclaims a stalled lease; either way the room ends
-   * up unblocked and every viewer gets a `turn_completed` carrying the reason.
-   */
-  const stopActiveTurn = useCallback(async () => {
-    const sessionId = activeSessionId;
-    const epoch = sessionEpochRef.current;
-    if (!sessionId) return;
-    try {
-      await stopTurn(sessionId);
-      // Do not clear local turn state here. The authoritative signal is the
-      // `turn_completed` that follows on the room stream, which every viewer
-      // gets — clearing optimistically would make this tab disagree with the
-      // others if the stop lands on a turn in another process.
-    } catch {
-      if (sessionEpochRef.current === epoch && sessionIdRef.current === sessionId) setError(t.stopTurnFailed);
-    }
-  }, [activeSessionId, t.stopTurnFailed]);
-
   /** A conversation without a whole-life follow stream re-attaches per turn;
    *  keep the composer's Stop while that re-attached mirror carries a turn
-   *  this tab lost its direct stream to (the Live card's Stop is there too). */
+   *  this tab lost its direct stream to (the Live card's Stop is there too).
+   *  The Work Bench Stop (T5 recovery) is the same entry point: the server
+   *  decides whether it aborts a live turn or reclaims a stalled lease, and
+   *  every viewer gets a `turn_completed` carrying the reason. */
   const mirrorStopAvailable =
     !panePolicy.presence &&
     remoteActive &&
-    !!activeSessionId &&
-    reconnectSessionId === activeSessionId;
+    !!activeSessionId;
 
   const displayTimeline = useMemo(() => (chat.state.messages as SurfaceMessage[]).map((message, canonicalIndex) => ({
     historicalDisplayOnly: message.historyUnavailable === true, message, canonicalIndex,
@@ -4392,76 +3579,22 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     ));
 
   /**
-   * Resolve a pending write confirmation (`POST /api/chat/confirm`) — the
-   * dock's recipe. In a room the SERVER gates who may act: the turn's
-   * addresser or a workspace admin (T11/D8); a 403 here surfaces as the
-   * quiet not-allowed note, never a broken card.
+   * Resolve a pending write confirmation: the conversation posts
+   * `/api/chat/confirm` for a live card and the canonical approval response
+   * for a restored one. In a room the SERVER gates who may act: the turn's
+   * addresser or a workspace admin (T11/D8); a 403 surfaces as the quiet
+   * not-allowed note, never a broken card.
    */
+  /** Cards this viewer was refused on (403): a teammate who may not act
+   *  keeps seeing the card, without Approve/Deny, until it is resolved. */
+  const [refusedConfirmations, setRefusedConfirmations] = useState<ReadonlySet<string>>(EMPTY_IDS);
   const resolveConfirmation = useCallback(
     async (toolCallId: string, action: "approve" | "deny", comment?: string) => {
-      const confirmation = chat.state.pendingConfirmations.find(
-        (c) => c.toolCallId === toolCallId,
-      );
-      const sessionId =
-        confirmation?.sessionId ??
-        activeSessionId ??
-        sessionIdRef.current;
-      if (!sessionId) return;
-      const controllerRun = chatController.capture();
-      const approvalId = confirmation?.approvalId ?? `tool:${toolCallId}`;
-      chatController.beginResponse(controllerRun, approvalId);
-      chat.updateConfirmation(toolCallId, {
-        status: action === "approve" ? "approving" : "denied",
-      });
-      try {
-        let ok = false;
-        let forbidden = false;
-        if (confirmation?.restored && confirmation.approvalId) {
-          const result = await respondByKind(
-            { id: confirmation.approvalId, kind: "tool_invocation" },
-            action === "approve" ? "approved" : "rejected",
-            comment,
-          );
-          ok = result.ok;
-        } else {
-          const res = await authFetch(`${API_URL}/api/chat/confirm`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              sessionId,
-              toolCallId,
-              decision: action === "approve" ? "allow" : "deny",
-              ...(action === "deny" && comment ? { comment } : {}),
-            }),
-          });
-          ok = res.ok;
-          forbidden = res.status === 403;
-        }
-        if (ok) {
-          chatController.resolveInteraction(controllerRun, approvalId);
-          chat.updateConfirmation(toolCallId, {
-            status: action === "approve" ? "approved" : "denied",
-          });
-          requestApprovalsRefresh(workspaceId);
-          if (remoteConfirmation?.toolCallId === toolCallId) {
-            setRemoteConfirmation(null);
-          }
-        } else if (forbidden) {
-          chatController.responseFailed(controllerRun, approvalId, t.confirmNotAllowed);
-          chat.updateConfirmation(toolCallId, { status: "pending" });
-          setError(t.confirmNotAllowed);
-        } else {
-          chatController.responseFailed(controllerRun, approvalId);
-          chat.updateConfirmation(toolCallId, { status: "pending" });
-        }
-      } catch {
-        chatController.responseFailed(controllerRun, approvalId);
-        chat.updateConfirmation(toolCallId, { status: "pending" });
-      }
+      const outcome = await controllerRef.current?.respondConfirmation(toolCallId, action, comment);
+      if (outcome === "resolved") requestApprovalsRefresh(workspaceId);
+      if (outcome === "forbidden") setRefusedConfirmations((current) => new Set([...current, toolCallId]));
     },
-    // `chat.updateConfirmation` is a stable callback from the hook.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [activeSessionId, chat.state.pendingConfirmations, remoteConfirmation, t, workspaceId, chatController],
+    [workspaceId],
   );
 
   /** The composer, styled as the app's composite-control box (globals.css
@@ -4794,7 +3927,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             <button
               type="button"
               data-brian-chat-action="stop"
-              onClick={chat.state.isStreaming ? handleAbort : stopActiveTurn}
+              onClick={stopRunningTurn}
               aria-label={tChat.abort}
               title={tChat.abort}
               className={cn(
@@ -4830,6 +3963,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         center={<ChatAudienceMenu view={view} onSelect={mode => selectSession(null, mode)} />}
         right={
           <div className="flex items-center gap-1">
+          <ConversationVisibilityControl key={activeContextSession?.id} session={activeContextSession} workspaceId={workspaceId} />
           {/* Attention (chat-app.md -> "Attention"): work that needs this person, narrowed to this chat's Project or session. */}
           <ApprovalReviewAttention
             workspaceId={workspaceId}
@@ -4856,6 +3990,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           </div>
         }
       />
+
+      <ChatRetainedHistoryNotice sessionId={activeSessionId ?? null} listSyncedAt={retainedSyncedAt} onExpire={() => chat.loadMessages([])} />
 
       {/* ── Hero / transcript + composer ──────────────────────────── */}
       {heroMode ? (
@@ -4888,7 +4024,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             <div data-chat-welcome-composer className={cn("w-full shrink-0 pb-[max(0.5rem,env(safe-area-inset-bottom))] @[560px]/chat-reading:pb-6", styles.welcomeComposer)}>
               <ChatContextBar context={creationContext} disabled={att.uploading} />
               {composerBox}
-              {error && <p role="alert" className="mt-3 rounded-xl bg-destructive/10 px-4 py-2 text-sm text-destructive">{error}</p>}
+              {shownError && <p role="alert" className="mt-3 rounded-xl bg-destructive/10 px-4 py-2 text-sm text-destructive">{shownError}</p>}
             </div>
           </div>
         </section>
@@ -4952,7 +4088,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 if (sessionIdRef.current !== sid) return;
                 // Per-job additions only: never hydrate over a typed stream.
                 for (const message of canonicalInteractionAdditions(chat.state.messages, mapTranscriptRows(rows, false), ids)) {
-                  chat.dispatch({ type: "message/append", message });
+                  chat.appendMessage(message);
                 }
               }}
             />}
@@ -5094,9 +4230,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                         </span>
                       ) : null}
                     </div>
-                  ) : m.text ? (
+                  ) : m.text || (m as { voiceNote?: boolean }).voiceNote ? (
                     <div data-brian-chat-user className="max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-3.5 py-2 text-[16px] @[560px]/chat-reading:text-[15px] leading-[1.5] [overflow-wrap:anywhere] whitespace-pre-wrap text-secondary-foreground shadow-sm">
-                      {m.text}
+                      {/* A recorder voice clip's bubble says so rather than staying blank. */}
+                      {m.text || t.voiceNote}
                     </div>
                   ) : null}
                   {m.userAttachments?.length ? (
@@ -5260,7 +4397,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 reasoning/tool steps) above the streaming reply + caret. */}
             {chat.state.isStreaming && (
               <div className="flex gap-2.5">
-                {avatarFor(turnAssistantRef.current)}
+                {avatarFor(convo?.liveAssistantId ?? null)}
                 <div className="min-w-0 flex-1 space-y-2 pt-0.5">
                   <ChatActivityFeed
                     events={streamingEvents}
@@ -5297,9 +4434,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             {/* Messages handed to the running turn, not yet taken by it.
                 See docs/architecture/engine/mid-turn-input.md. */}
             <QueuedInputs
-              inputs={midTurn.queued}
+              inputs={queuedInputs}
               dict={tChat.queue}
-              onSteer={midTurn.steer}
+              onSteer={(inputId) => void controllerRef.current?.steer(inputId)}
             />
             {/* A followed turn, including our own after returning to Chat,
                 relayed off the per-session event bus
@@ -5349,6 +4486,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 <ChatConfirmationCard
                   key={c.toolCallId}
                   confirmation={c}
+                  // Refused for this viewer: the turn's addresser or an admin
+                  // decides; the card says so instead of offering buttons.
+                  actions={refusedConfirmations.has(c.toolCallId)
+                    ? <p role="status" data-confirm-not-allowed className="text-xs text-muted-foreground">{t.confirmNotAllowed}</p>
+                    : undefined}
                   approveLabel={tChat.confirmationApprove}
                   denyLabel={tChat.confirmationDeny}
                   approvingLabel={tChat.confirmationApproving}
@@ -5358,34 +4500,6 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                   }
                 />
               ))}
-            {remoteConfirmation &&
-              !chat.state.isStreaming &&
-              !chat.state.pendingConfirmations.some(
-                (confirmation) =>
-                  !!remoteConfirmation.approvalId &&
-                  confirmation.approvalId === remoteConfirmation.approvalId,
-              ) && (
-              <ChatConfirmationCard
-                confirmation={{
-                  toolCallId: remoteConfirmation.toolCallId,
-                  approvalId: remoteConfirmation.approvalId,
-                  toolName: remoteConfirmation.toolName,
-                  displayName: remoteConfirmation.displayName,
-                  input: remoteConfirmation.input,
-                  description: remoteConfirmation.description,
-                  displayLines: remoteConfirmation.displayLines,
-                  sessionId: activeSessionId ?? "",
-                  status: "pending",
-                }}
-                approveLabel={tChat.confirmationApprove}
-                denyLabel={tChat.confirmationDeny}
-                approvingLabel={tChat.confirmationApproving}
-                onApprove={(toolCallId) => void resolveConfirmation(toolCallId, "approve")}
-                onDeny={(toolCallId, comment) =>
-                  void resolveConfirmation(toolCallId, "deny", comment)
-                }
-              />
-            )}
             {/* A suspended askQuestion — any member with read access may
                 answer, attributed (D8); Answer/Cancel are the reader-gated
                 session routes. */}
@@ -5395,20 +4509,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 sessionId={pendingQuestion.sessionId}
                 approvalId={pendingQuestion.approvalId}
                 dict={tChat.pendingQuestion}
-                onAnswered={() => {
-                  chatController.resolveInteraction(
-                    chatController.capture(),
-                    pendingQuestion.approvalId,
-                  );
-                  setPendingQuestion(null);
-                }}
-                onCancelled={() => {
-                  chatController.resolveInteraction(
-                    chatController.capture(),
-                    pendingQuestion.approvalId,
-                  );
-                  setPendingQuestion(null);
-                }}
+                // The panel posted the answer or cancel itself: the conversation
+                // resolves the interaction and follows the resumed turn.
+                onAnswered={() => void controllerRef.current?.questionSettled(pendingQuestion.approvalId)}
+                onCancelled={() => void controllerRef.current?.questionSettled(pendingQuestion.approvalId)}
               />
             )}
             {/* How this turn was served, when it was not served the way the
@@ -5489,9 +4593,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 </span>
               </div>
             )}
-            {error && !(activeSessionId && historyRecoverySessionId === activeSessionId) && (
+            {shownError && !(activeSessionId && historyRecoverySessionId === activeSessionId) && (
               <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                {error}
+                {shownError}
               </div>
             )}
             {activeSessionId && historyRecoverySessionId === activeSessionId && !transcriptCold && (
@@ -5591,7 +4695,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 currentStep={workBenchCurrentStep}
                 tools={workBenchTools}
                 lastProgressAt={workBenchTurnActive ? lastProgressAt : null}
-                onStopTurn={stopActiveTurn}
+                onStopTurn={stopRunningTurn}
                 onPinsChanged={bumpPins}
               />
             ) : (

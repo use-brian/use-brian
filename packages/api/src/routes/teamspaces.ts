@@ -28,7 +28,7 @@
 
 import { Router } from 'express'
 import { z } from 'zod'
-import { canRead, type Sensitivity } from '@use-brian/core'
+import { canRead, type Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type { TeamspaceStore, Teamspace } from '../db/teamspace-store.js'
 import type { WorkspaceGroupStore } from '../db/workspace-group-store.js'
 import { ensureDefaultTeamspaceSystem, joinDefaultTeamspacesSystem } from '../db/teamspace-store.js'

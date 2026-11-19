@@ -12,7 +12,9 @@ import {
   noteAutomaticScopeEvidence,
   type TurnScopeAssistant,
 } from '../resolve-turn-scope.js'
-import { ContextScopeAccumulator, bindScopeSource, bindScopeSources, type ResourceScope, type ScopeSource } from '@use-brian/core'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ResourceScope, ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { bindScopeSource, bindScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 
 const TEAM_ID = '11111111-1111-4111-8111-111111111111'
 const PROJECT_ID = '22222222-2222-4222-8222-222222222222'
@@ -380,7 +382,7 @@ describe('[COMP:api/context-scope-resolver] resolveTurnScopeSystem', () => {
       store: store(),
       resolveWorkspaceRole,
       createSessionLease,
-      pinPolicyEpoch: async () => async () => true,
+      pinPolicyEpoch: async () => ({isCurrent: async () => true, matches: () => true}),
       resolveAssistant: async () => assistant,
     })
 

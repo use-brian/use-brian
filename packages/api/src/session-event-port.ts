@@ -58,6 +58,7 @@ export type SessionEvent =
       sessionId: string
       payload: {
         text: string
+        turnId?:string|null
         replyPhase?: 'generating' | 'saving' | 'finishing'
         activity: string | null
         reasoning?: string | null
@@ -81,12 +82,12 @@ export type SessionEvent =
        */
       kind: 'turn_activity'
       sessionId: string
-      payload: { event: string; senderUserId?: string | null } & Record<string, unknown>
+      payload: { event: string; senderUserId?: string | null;turnId?:string|null } & Record<string, unknown>
     }
   | {
       kind: 'turn_started'
       sessionId: string
-      payload: { senderUserId: string | null; assistantId?: string }
+      payload: { senderUserId: string | null; assistantId?: string;turnId?:string|null }
     }
   | {
       kind: 'turn_completed'
@@ -101,7 +102,8 @@ export type SessionEvent =
        */
       payload: {
         senderUserId: string | null
-        reason?: 'stopped_by_user' | 'stalled_reclaimed' | 'timeout' | 'failed'
+        turnId?:string|null
+        reason?: 'stopped_by_user' | 'stalled_reclaimed' | 'publication_recovered' | 'timeout' | 'failed'
         /** Display name of whoever pressed stop, when `reason` is a stop. */
         stoppedByName?: string | null
       }
@@ -131,6 +133,11 @@ export type SessionEvent =
       kind: 'session_assistant_changed'
       sessionId: string
       payload: { assistantId: string; byUserId: string }
+    }
+  | {
+      kind: 'conversation_access_changed'
+      sessionId: string
+      payload: { version: number }
     }
   | {
       kind: 'presence'

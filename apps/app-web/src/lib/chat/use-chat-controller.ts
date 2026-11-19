@@ -12,6 +12,7 @@ import {
   type ChatRunState,
 } from "@use-brian/chat-ui";
 import { useLayoutEffect, useRef, useSyncExternalStore } from "react";
+import { conversationRegistry, type ConversationRegistry } from "./conversation-registry";
 
 export type ChatControllerSnapshot = {
   run: ChatRunState;
@@ -39,6 +40,29 @@ export function createChatControllerCoordinator(
       identity,
     }),
   };
+  let turnId: string | null = null;
+  let turnRevision = 0;
+  let pendingStart = false;
+  type StopTarget = { identity: ChatControllerIdentity; turnId: string | null; revision: number };
+  const stopWaiters = new Set<{ resolve: (target: StopTarget | null) => void; reject: (error: Error) => void }>();
+  const settleStopWaiters = (unavailable = false) => {
+    for (const waiter of stopWaiters) {
+      if (unavailable) waiter.reject(new Error("The original turn start is unavailable"));
+      else waiter.resolve(null);
+    }
+    stopWaiters.clear();
+  };
+  const deliverStopTarget = () => {
+    if (!turnId || !identity.sessionId) return;
+    for (const waiter of stopWaiters) waiter.resolve({ identity, turnId, revision: turnRevision });
+    stopWaiters.clear();
+  };
+  const resetTurn = (pending = false) => {
+    settleStopWaiters();
+    turnId = null;
+    pendingStart = pending;
+    turnRevision++;
+  };
   let destroyed = false;
   let attached = true;
   let attachment = 0;
@@ -64,6 +88,7 @@ export function createChatControllerCoordinator(
     const previous = identity;
     const next = { sessionId, generation: identity.generation + 1 };
     identity = next;
+    resetTurn();
     cleanGeneration(previous.generation);
     if (destroyed || !attached || identity !== next) return identity;
     publish({
@@ -89,6 +114,7 @@ export function createChatControllerCoordinator(
     const previous = identity;
     const next = { sessionId, generation: identity.generation + 1 };
     identity = next;
+    resetTurn(true);
     cleanGeneration(previous.generation);
     if (destroyed || !attached || identity !== next) return identity;
     let run = chatRunReducer(snapshot.run, { type: "visit", identity });
@@ -117,6 +143,7 @@ export function createChatControllerCoordinator(
       sessionId,
     });
     identity = adopted;
+    deliverStopTarget();
     publish({ run, interaction });
     return true;
   };
@@ -127,11 +154,102 @@ export function createChatControllerCoordinator(
     error?: string,
   ) => {
     if (!isCurrent(candidate)) return false;
+    if (["disconnect", "fail", "complete", "cancel"].includes(type)) settleStopWaiters(true);
+    // The original POST can no longer bind its start: a disconnected, failed or
+    // cancelled request leaves the slot for a follow to adopt the real owner.
+    if ((type === "disconnect" || type === "fail" || type === "cancel") && pendingStart) { pendingStart = false; turnRevision++; }
     const run = type === "fail"
       ? chatRunReducer(snapshot.run, { type, identity: candidate, ...(error ? { error } : {}) })
       : chatRunReducer(snapshot.run, { type, identity: candidate });
     publish({ ...snapshot, run });
     return true;
+  };
+
+  const publicTurnId = (value: unknown): string | null =>
+    typeof value === "string" && /^[a-f0-9]{64}$/.test(value) ? value : null;
+
+  // Only the captured POST may bind an unconfirmed local start. A room frame
+  // cannot win a race merely by arriving after another room frame.
+  const bindTurn = (candidate: ChatControllerIdentity, value: unknown) => {
+    const next = publicTurnId(value);
+    if (!isCurrent(candidate) || !next || (turnId !== null && turnId !== next)) return false;
+    if (turnId !== next) { turnId = next; turnRevision++; }
+    pendingStart = false;
+    deliverStopTarget();
+    return true;
+  };
+
+  const captureTurn = () => ({ identity: syncSelection(), turnId, revision: turnRevision });
+  const isCurrentTurn = (ticket: ReturnType<typeof captureTurn>) =>
+    isCurrent(ticket.identity) && ticket.revision === turnRevision && ticket.turnId === turnId;
+
+  const receiveTurnEvent = async (
+    candidate: ChatControllerIdentity,
+    event: string,
+    payload: Record<string, unknown>,
+    readStatus: () => Promise<{ status: string; turnId: string | null; turnEndReason?: string | null }>,
+    direct = false,
+    catchUpTerminal = false,
+  ): Promise<boolean> => {
+    if (!isCurrent(candidate)) return false;
+    const incoming = publicTurnId(payload.turnId);
+    if (payload.turnId !== null && payload.turnId !== undefined && incoming === null) return false;
+    if (direct && incoming && bindTurn(candidate, incoming)) return true;
+    const admit = () => {
+      if (event === "turn_completed") applyRun("complete", candidate);
+      return true;
+    };
+    // Status reads and starts can be reordered. A completed owner cannot be
+    // restarted by one of its buffered snapshots or activities.
+    const terminalPhase = ["completed", "cancelled", "failed"].includes(snapshot.run.phase);
+    if (event !== "status" && event !== "turn_started" && !terminalPhase && incoming && incoming === turnId) return admit();
+    if (direct && incoming && turnId !== null) return false;
+    const revision = turnRevision;
+    let current;
+    try { current = await readStatus(); } catch { return false; }
+    if (!isCurrent(candidate) || revision !== turnRevision) return false;
+    const actual = publicTurnId(current.turnId);
+    // A POST whose owner is not known yet must receive its own source-bound
+    // start. An old idle read or the previous owner's running status cannot
+    // take that provisional slot away.
+    if (pendingStart) {
+      if (!direct || current.status === "running" || !["turn_completed", "done", "reply_complete", "error"].includes(event)) return false;
+      pendingStart = false;
+    }
+    if (current.status === "running") {
+      if (actual !== turnId) {
+        turnId = actual;
+        turnRevision++;
+        claimedExits.delete(identity.generation);
+        publish({
+          run: chatRunReducer(snapshot.run, { type: "begin", identity }),
+          interaction: { identity, pending: null },
+        });
+      }
+      if (event === "status") {
+        if (incoming !== actual) delete payload.startedAt;
+        Object.assign(payload, current);
+        return true;
+      }
+      return (incoming !== null ? incoming === actual : actual === null) &&
+        !["turn_completed", "done", "reply_complete", "error"].includes(event);
+    }
+    if (actual !== null && turnId !== null && actual !== turnId) {
+      // A fast resumed turn may have committed between follow connections.
+      // Only a fresh status for that exact owner, with no owned direct POST,
+      // may replace an obsolete bound owner. Buffered terminal events cannot.
+      if (!catchUpTerminal || event !== "status" || incoming !== actual) return false;
+      turnId = actual;
+      turnRevision++;
+      claimedExits.delete(identity.generation);
+      Object.assign(payload, current);
+      applyRun("complete", candidate);
+      return true;
+    }
+    if (incoming !== null && actual !== incoming) return false;
+    if (turnId === null && actual !== null) { turnId = actual; turnRevision++; }
+    if (event === "status") Object.assign(payload, current);
+    return (event === "status" || ["turn_completed", "done", "reply_complete", "error"].includes(event)) && admit();
   };
 
   const presentInteraction = <T,>(
@@ -201,6 +319,7 @@ export function createChatControllerCoordinator(
     if (!attached) {
       attached = true;
       identity = { sessionId: getSelectedSessionId(), generation: identity.generation + 1 };
+      resetTurn();
       publish({
         run: chatRunReducer(snapshot.run, { type: "visit", identity }),
         interaction: chatInteractionReducer(snapshot.interaction, { type: "visit", identity }),
@@ -211,6 +330,7 @@ export function createChatControllerCoordinator(
       attached = false;
       const previous = identity.generation;
       identity = { sessionId: null, generation: previous + 1 };
+      resetTurn();
       // Revocation precedes callbacks: abort may synchronously emit late work.
       cleanGeneration(previous);
     };
@@ -222,6 +342,7 @@ export function createChatControllerCoordinator(
     attached = false;
     const previous = identity.generation;
     identity = { sessionId: null, generation: previous + 1 };
+    resetTurn();
     cleanGeneration(previous);
     listeners.clear();
   };
@@ -236,6 +357,18 @@ export function createChatControllerCoordinator(
     selectSession,
     begin,
     adoptSession,
+    bindTurn,
+    receiveTurnEvent,
+    getTurnId: () => turnId,
+    captureTurn,
+    // An optimistic POST has no public owner yet. Stop waits for that POST's
+    // source-bound start; a latest-status read cannot identify its work.
+    captureStopTarget: (): Promise<StopTarget | null> => {
+      const target = captureTurn();
+      if (!pendingStart) return Promise.resolve(target);
+      return new Promise((resolve, reject) => stopWaiters.add({ resolve, reject }));
+    },
+    isCurrentTurn,
     isCurrent,
     suspend: (candidate: ChatControllerIdentity) => applyRun("suspend", candidate),
     disconnect: (candidate: ChatControllerIdentity) => applyRun("disconnect", candidate),
@@ -258,14 +391,20 @@ export function createChatControllerCoordinator(
   };
 }
 
+/**
+ * Unchanged public API for hosts not yet migrated to `useConversation`.
+ * The coordinator is created and retained through this renderer's
+ * conversation registry, with the mounting component's lifetime as before.
+ */
 export function useChatController(
   getSelectedSessionId: () => string | null,
+  registry: ConversationRegistry = conversationRegistry(),
 ): ChatControllerCoordinator & { state: ChatControllerSnapshot } {
   const selectionRef = useRef(getSelectedSessionId);
   selectionRef.current = getSelectedSessionId;
   const controllerRef = useRef<ChatControllerCoordinator | null>(null);
   if (!controllerRef.current) {
-    controllerRef.current = createChatControllerCoordinator(
+    controllerRef.current = registry.createPresentationCoordinator(
       () => selectionRef.current(),
     );
   }
@@ -276,7 +415,11 @@ export function useChatController(
     controller.getSnapshot,
   );
 
-  useLayoutEffect(() => controller.attach(), [controller]);
+  useLayoutEffect(() => {
+    const release = registry.retainPresentationCoordinator(controller);
+    const detach = controller.attach();
+    return () => { detach(); release(); };
+  }, [controller, registry]);
   useLayoutEffect(() => {
     controller.capture();
   });

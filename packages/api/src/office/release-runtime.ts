@@ -12,7 +12,7 @@ import { getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store
 import { getWorkspaceFileReadProjection } from '../db/workspace-files.js'
 import { bindOfficeFile, classifyOfficeOutput, fileMatchesOfficeOutput, officeFileBindingRevision, officeOutputScopeRevision, type OfficeOutputScope } from './file-binding.js'
 import { materializeOfficeTemplateBundleForGeneration } from './presentation-generation.js'
-import type { Sensitivity } from '@use-brian/core'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { createOfficeResourceReader } from './resource-read.js'
 import { resolveOfficeAccess } from './access.js'
 import { officeReleaseContextRevision, type OfficeReleaseContext, type OfficeReleaseRouteDeps } from '../routes/office-releases.js'

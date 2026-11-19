@@ -13,7 +13,7 @@
  * [COMP:api/task-external-progress]
  */
 import { z } from 'zod'
-import { buildTool, type Tool, type ToolContext } from '@use-brian/core'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { queryWithRLS } from '../db/client.js'
 import {
   appendExternalReportSystem,

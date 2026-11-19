@@ -21,23 +21,25 @@ import { readResearchDefaultPageSource, researchSourceUnavailable } from './rese
  */
 
 import type {
+  PageTreeNeighbor,
+  PageTreeNeighborhood,
+} from '@use-brian/core/doc/page-tree-context.js'
+import type { Page } from '@use-brian/core/views/blocks.js'
+import type {
   BindingConfig,
   CreateDraftInput,
   NameOrigin,
-  Page,
-  PageLifecycleEvent,
   SavedView,
   SavedViewListFilters,
   SavedViewListRow,
   SavedViewStore,
   SavedViewUpdateFields,
-  PageTreeNeighbor,
-  PageTreeNeighborhood,
   ViewEntity,
   ViewState,
   ViewType,
-} from '@use-brian/core'
-import { PAGE_TREE_LIST_CAP } from '@use-brian/core'
+} from '@use-brian/core/views/types.js'
+import type { PageLifecycleEvent } from '@use-brian/core/workflow/page-event-trigger.js'
+import { PAGE_TREE_LIST_CAP } from '@use-brian/core/doc/page-tree-context.js'
 import { applyRLSGucs, getAppPool, query, queryWithRLS, rollbackAndRelease } from './client.js'
 
 // ── SQL projections ───────────────────────────────────────────────────

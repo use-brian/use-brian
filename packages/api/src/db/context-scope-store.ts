@@ -12,7 +12,7 @@ import {
   intersectScopeGrants,
   normalizeProjectName,
   type ScopeGrant,
-} from '@use-brian/core'
+} from '@use-brian/agent-runtime/security/context-scope.js'
 import {
   applyRLSGucs,
   getAppPool,

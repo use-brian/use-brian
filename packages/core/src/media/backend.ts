@@ -38,28 +38,25 @@
  * See docs/architecture/engine/provider-abstraction.md → "Adapters".
  */
 
-import type { LLMProvider, TokenUsage } from '../providers/types.js'
-import type { ExternalCredentialPool, ExternalCredentialLease } from '../providers/credential-pool.js'
-import { calculateCost } from '../billing/cost-tracker.js'
+import type { LLMProvider, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
+import type { ExternalCredentialPool, ExternalCredentialLease } from '@use-brian/agent-runtime/providers/credential-pool.js'
+import { calculateCost } from '@use-brian/agent-runtime/billing/cost-tracker.js'
 import {
   authorizeGoogleRequest,
   type GoogleTransport,
-} from '../providers/google-transport.js'
-import { geminiSamplingConfig } from '../providers/gemini.js'
+} from '@use-brian/agent-runtime/providers/google-transport.js'
+import { geminiSamplingConfig } from '@use-brian/agent-runtime/providers/gemini.js'
 import {
   DASHSCOPE_CHUNK_PAGES,
   DASHSCOPE_RENDER_WIDTH,
   MAX_DISTILL_PAGES,
   PROVIDER_CHUNK_PAGES,
   PROVIDER_RENDER_WIDTH,
-  distillPdfViaPages,
   missingPdfPageCompletionMarkers,
   pdfPageCompletionMarker,
   stripPdfPageCompletionMarkers,
-  type VisionCaller,
-} from '../files/pdf-distill.js'
-import { probePdfPageCount } from '../files/pdf-pages.js'
-import sharp from 'sharp'
+} from './pdf-contract.js'
+import type { VisionCaller } from '../files/pdf-distill.js'
 
 export type MediaBackend =
   | { kind: 'google'; transport: GoogleTransport }
@@ -166,6 +163,8 @@ const DASHSCOPE_MAX_INLINE_IMAGE_BYTES = 6 * 1024 * 1024
 async function prepareDashScopeImage(buffer: Buffer, mime: string): Promise<{ buffer: Buffer; mime: string }> {
   if (buffer.length <= DASHSCOPE_MAX_INLINE_IMAGE_BYTES) return { buffer, mime }
 
+  // sharp loads at first use, never at module evaluation (M4 step 5).
+  const { default: sharp } = await import('sharp')
   const resized = await sharp(buffer, { failOn: 'warning' })
     .rotate()
     .resize({ width: 4096, height: 4096, fit: 'inside', withoutEnlargement: true })
@@ -286,6 +285,8 @@ async function runGoogle(
     )
   }
 
+  // The pdf.js page probe loads at first PDF, never at module evaluation (M4 step 5).
+  const { probePdfPageCount } = await import('../files/pdf-pages.js')
   const pageCount = await probePdfPageCount(req.buffer)
   let native: MediaResult | null = null
   let nativeFailure: unknown
@@ -332,6 +333,7 @@ async function runGoogle(
   // and the page cap all fall back to the same rendered-page engine used by
   // every other provider.
   let renderedFailure: unknown
+  const { distillPdfViaPages } = await import('../files/pdf-distill.js')
   const distilled = await distillPdfViaPages(req.buffer, {
     visionCaller: googleVisionCaller(fetchFn, transport, req.model, req.errorLabel),
     renderWidth: PROVIDER_RENDER_WIDTH,
@@ -561,6 +563,7 @@ async function runDashScopePdf(
   req: MediaRequest,
   signal: AbortSignal,
 ): Promise<MediaResult> {
+  const { distillPdfViaPages } = await import('../files/pdf-distill.js')
   const result = await distillPdfViaPages(req.buffer, {
     visionCaller: dashScopeVisionCaller(fetchFn, backend, req.errorLabel),
     renderWidth: DASHSCOPE_RENDER_WIDTH,
@@ -694,7 +697,8 @@ async function runProviderBacked(
   const caller = providerVisionCaller(backend.provider, backend.model)
 
   if (req.mime === 'application/pdf') {
-    const result = await distillPdfViaPages(req.buffer, {
+    const { distillPdfViaPages } = await import('../files/pdf-distill.js')
+  const result = await distillPdfViaPages(req.buffer, {
       visionCaller: caller,
       renderWidth: PROVIDER_RENDER_WIDTH,
       chunkPages: PROVIDER_CHUNK_PAGES,

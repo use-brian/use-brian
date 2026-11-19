@@ -56,7 +56,7 @@ export function createOfficeLiveStore(db: OfficeDbQuery = defaultOfficeDbQuery) 
       if (!preflight.ok) throw new Error(`Office live snapshot failed preflight: ${preflight.diagnostics.map((item) => `${item.path}: ${item.message}`).join('; ')}`)
       const doc = snapshotToYDoc(params.snapshot)
       const bytes = encodeOfficeState(doc)
-      const hash = createHash('sha256').update(JSON.stringify(params.snapshot)).digest('hex')
+      const hash = createHash('sha256').update(JSON.stringify(yDocToSnapshot(doc))).digest('hex')
       const result = await db(params.userId, `
         INSERT INTO office_collab_documents
           (artifact_id,workspace_id,ydoc,state_vector,canonical_hash,base_version,seq)
@@ -77,7 +77,7 @@ export function createOfficeLiveStore(db: OfficeDbQuery = defaultOfficeDbQuery) 
       if (!preflight.ok) throw new Error(`Office live snapshot failed preflight: ${preflight.diagnostics.map((item) => `${item.path}: ${item.message}`).join('; ')}`)
       const doc = snapshotToYDoc(params.snapshot)
       const bytes = encodeOfficeState(doc)
-      const hash = createHash('sha256').update(JSON.stringify(params.snapshot)).digest('hex')
+      const hash = createHash('sha256').update(JSON.stringify(yDocToSnapshot(doc))).digest('hex')
       const result = await db<{ artifactId: string }>(params.userId, `
         INSERT INTO office_collab_documents
           (artifact_id,workspace_id,ydoc,state_vector,canonical_hash,base_version,seq)

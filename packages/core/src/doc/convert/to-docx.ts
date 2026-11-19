@@ -20,21 +20,13 @@
  * [COMP:doc/to-docx]
  */
 
-import {
-  AlignmentType,
-  BorderStyle,
-  Document,
+import type {
   ExternalHyperlink,
-  HeadingLevel,
-  Packer,
   Paragraph,
   Table,
-  TableCell,
-  TableLayoutType,
-  TableRow,
   TextRun,
-  WidthType,
 } from 'docx'
+import { lazyImplementation } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
 import type {
   Block,
   ChartBlock,
@@ -58,12 +50,18 @@ export interface BlocksToDocxOptions {
 
 type Child = Paragraph | Table
 
-const HEADING_LEVELS = {
-  1: HeadingLevel.HEADING_1,
-  2: HeadingLevel.HEADING_2,
-  3: HeadingLevel.HEADING_3,
-  4: HeadingLevel.HEADING_4,
-} as const
+// The docx writer loads on the first export, not when the doc tooling is
+// imported (M4 step 5, D13). Every builder below runs only after
+// `blocksToDocx` has assigned it.
+const loadDocx = lazyImplementation('The Word (.docx) writer', () => import('docx'))
+let D!: typeof import('docx')
+
+const headingLevels = () => ({
+  1: D.HeadingLevel.HEADING_1,
+  2: D.HeadingLevel.HEADING_2,
+  3: D.HeadingLevel.HEADING_3,
+  4: D.HeadingLevel.HEADING_4,
+}) as const
 
 // ── Inline runs ────────────────────────────────────────────────────────
 
@@ -77,22 +75,22 @@ function runFromSegment(seg: InlineSegment): TextRun | ExternalHyperlink {
     ...(seg.code ? { font: 'Courier New' } : {}),
   }
   if (seg.link) {
-    return new ExternalHyperlink({
+    return new D.ExternalHyperlink({
       link: seg.link,
-      children: [new TextRun({ ...base, color: '0563C1', underline: {} })],
+      children: [new D.TextRun({ ...base, color: '0563C1', underline: {} })],
     })
   }
-  return new TextRun(base)
+  return new D.TextRun(base)
 }
 
 function richRuns(rt: RichTextContent | undefined): (TextRun | ExternalHyperlink)[] {
   const segs = extractInlineSegments(rt)
-  if (segs.length === 0) return [new TextRun('')]
+  if (segs.length === 0) return [new D.TextRun('')]
   return segs.map(runFromSegment)
 }
 
 function plainRuns(text: string): TextRun[] {
-  return [new TextRun(text)]
+  return [new D.TextRun(text)]
 }
 
 // ── Tables ───────────────────────────────────────────────────────────
@@ -127,20 +125,20 @@ function columnWidthsDxa(rows: GridCell[][], count: number): number[] {
 function gridTable(rows: GridCell[][], hasHeaderRow: boolean): Table {
   const width = Math.max(1, rows.reduce((m, r) => Math.max(m, r.length), 0))
   const colWidths = columnWidthsDxa(rows, width)
-  return new Table({
-    width: { size: CONTENT_WIDTH_DXA, type: WidthType.DXA },
+  return new D.Table({
+    width: { size: CONTENT_WIDTH_DXA, type: D.WidthType.DXA },
     columnWidths: colWidths,
-    layout: TableLayoutType.FIXED,
+    layout: D.TableLayoutType.FIXED,
     rows: rows.map(
       (cells, r) =>
-        new TableRow({
+        new D.TableRow({
           tableHeader: hasHeaderRow && r === 0,
           children: Array.from(
             { length: width },
             (_u, c) =>
-              new TableCell({
-                width: { size: colWidths[c]!, type: WidthType.DXA },
-                children: [new Paragraph({ children: cells[c]?.runs ?? [new TextRun('')] })],
+              new D.TableCell({
+                width: { size: colWidths[c]!, type: D.WidthType.DXA },
+                children: [new D.Paragraph({ children: cells[c]?.runs ?? [new D.TextRun('')] })],
               }),
           ),
         }),
@@ -151,7 +149,7 @@ function gridTable(rows: GridCell[][], hasHeaderRow: boolean): Table {
 /** Rich cell → runs plus the plain text used for column-width weighting. */
 function richCell(rt: RichTextContent | undefined): GridCell {
   const segs = extractInlineSegments(rt)
-  if (segs.length === 0) return { runs: [new TextRun('')], text: '' }
+  if (segs.length === 0) return { runs: [new D.TextRun('')], text: '' }
   return { runs: segs.map(runFromSegment), text: segs.map((s) => s.text).join('') }
 }
 
@@ -164,21 +162,21 @@ function tableBlockToDocx(block: TableBlock): Table {
 
 /** Plain-text grid (from a resolved data block) → a docx table. */
 function textGridToDocx(grid: string[][]): Table {
-  const rows = grid.map((row) => row.map((cell) => ({ runs: [new TextRun(cell)], text: cell })))
+  const rows = grid.map((row) => row.map((cell) => ({ runs: [new D.TextRun(cell)], text: cell })))
   return gridTable(rows, true)
 }
 
 function chartToDocx(block: ChartBlock): Child[] {
   const out: Child[] = []
-  if (block.title) out.push(new Paragraph({ heading: HeadingLevel.HEADING_3, children: [new TextRun(block.title)] }))
+  if (block.title) out.push(new D.Paragraph({ heading: D.HeadingLevel.HEADING_3, children: [new D.TextRun(block.title)] }))
   const d = block.data
   if (!d) {
-    out.push(new Paragraph({ children: [new TextRun({ text: '[Live chart]', italics: true })] }))
+    out.push(new D.Paragraph({ children: [new D.TextRun({ text: '[Live chart]', italics: true })] }))
     return out
   }
   if (block.chartType === 'kpi' && d.value !== undefined) {
     const delta = d.delta !== undefined ? ` (${d.delta >= 0 ? '+' : ''}${d.delta})` : ''
-    out.push(new Paragraph({ children: [new TextRun({ text: `${d.value}${delta}`, bold: true })] }))
+    out.push(new D.Paragraph({ children: [new D.TextRun({ text: `${d.value}${delta}`, bold: true })] }))
   } else if ((block.chartType === 'bar' || block.chartType === 'pie') && d.points?.length) {
     const grid = [['Label', 'Value'], ...d.points.map((p) => [p.label, String(p.value)])]
     out.push(textGridToDocx(grid))
@@ -195,53 +193,53 @@ function chartToDocx(block: ChartBlock): Child[] {
 function blockToDocx(block: Block, ordinal: number, opts: BlocksToDocxOptions): Child[] {
   switch (block.kind) {
     case 'text':
-      return [new Paragraph({ children: plainRuns(block.text ?? '') })]
+      return [new D.Paragraph({ children: plainRuns(block.text ?? '') })]
     case 'heading':
-      return [new Paragraph({ heading: HEADING_LEVELS[block.level], children: plainRuns(block.text ?? '') })]
+      return [new D.Paragraph({ heading: headingLevels()[block.level], children: plainRuns(block.text ?? '') })]
     case 'divider':
       return [
-        new Paragraph({
-          border: { bottom: { style: BorderStyle.SINGLE, size: 6, space: 1, color: 'BBBBBB' } },
+        new D.Paragraph({
+          border: { bottom: { style: D.BorderStyle.SINGLE, size: 6, space: 1, color: 'BBBBBB' } },
           children: [],
         }),
       ]
     case 'code':
       return (block.code ?? '').split('\n').map(
-        (line) => new Paragraph({ children: [new TextRun({ text: line, font: 'Courier New' })] }),
+        (line) => new D.Paragraph({ children: [new D.TextRun({ text: line, font: 'Courier New' })] }),
       )
     case 'quote':
-      return [new Paragraph({ indent: { left: 480 }, children: richRuns(block.richText).map((r) => r) })]
+      return [new D.Paragraph({ indent: { left: 480 }, children: richRuns(block.richText).map((r) => r) })]
     case 'callout':
       return [
-        new Paragraph({
+        new D.Paragraph({
           indent: { left: 480 },
           shading: { fill: 'F3F3F1' },
-          children: [new TextRun(`${block.icon} `), ...richRuns(block.richText)],
+          children: [new D.TextRun(`${block.icon} `), ...richRuns(block.richText)],
         }),
       ]
     case 'toggle':
-      return [new Paragraph({ children: richRuns(block.richText).map((r) => r) })]
+      return [new D.Paragraph({ children: richRuns(block.richText).map((r) => r) })]
     case 'bulleted_list_item':
-      return [new Paragraph({ children: [new TextRun('•\t'), ...richRuns(block.richText)] })]
+      return [new D.Paragraph({ children: [new D.TextRun('•\t'), ...richRuns(block.richText)] })]
     case 'numbered_list_item':
-      return [new Paragraph({ children: [new TextRun(`${ordinal}.\t`), ...richRuns(block.richText)] })]
+      return [new D.Paragraph({ children: [new D.TextRun(`${ordinal}.\t`), ...richRuns(block.richText)] })]
     case 'to_do':
-      return [new Paragraph({ children: [new TextRun(block.checked ? '☑\t' : '☐\t'), ...richRuns(block.richText)] })]
+      return [new D.Paragraph({ children: [new D.TextRun(block.checked ? '☑\t' : '☐\t'), ...richRuns(block.richText)] })]
     case 'table':
       return [tableBlockToDocx(block)]
     case 'data': {
       const grid = opts.resolveData?.(block)
       return grid && grid.length
         ? [textGridToDocx(grid)]
-        : [new Paragraph({ children: [new TextRun({ text: '[Live data view]', italics: true })] })]
+        : [new D.Paragraph({ children: [new D.TextRun({ text: '[Live data view]', italics: true })] })]
     }
     case 'chart':
       return chartToDocx(block)
     case 'diagram':
       return [
-        new Paragraph({ children: [new TextRun({ text: 'Diagram (mermaid)', italics: true })] }),
+        new D.Paragraph({ children: [new D.TextRun({ text: 'Diagram (mermaid)', italics: true })] }),
         ...block.code.split('\n').map(
-          (line) => new Paragraph({ children: [new TextRun({ text: line, font: 'Courier New' })] }),
+          (line) => new D.Paragraph({ children: [new D.TextRun({ text: line, font: 'Courier New' })] }),
         ),
       ]
     case 'image': {
@@ -268,10 +266,10 @@ function blockToDocx(block: Block, ordinal: number, opts: BlocksToDocxOptions): 
 
 /** A hyperlink paragraph when a URL is present, else an italic placeholder. */
 function linkOrPlain(placeholder: string, url: string | undefined, label: string): Paragraph {
-  if (!url) return new Paragraph({ children: [new TextRun({ text: placeholder, italics: true })] })
-  return new Paragraph({
+  if (!url) return new D.Paragraph({ children: [new D.TextRun({ text: placeholder, italics: true })] })
+  return new D.Paragraph({
     children: [
-      new ExternalHyperlink({ link: url, children: [new TextRun({ text: label, color: '0563C1', underline: {} })] }),
+      new D.ExternalHyperlink({ link: url, children: [new D.TextRun({ text: label, color: '0563C1', underline: {} })] }),
     ],
   })
 }
@@ -285,10 +283,11 @@ export async function blocksToDocx(
   page: Page | Block[],
   opts: BlocksToDocxOptions = {},
 ): Promise<Buffer> {
+  D = await loadDocx()
   const blocks = Array.isArray(page) ? page : page.blocks
   const children: Child[] = []
   if (opts.title?.trim()) {
-    children.push(new Paragraph({ heading: HeadingLevel.TITLE, children: [new TextRun(opts.title.trim())] }))
+    children.push(new D.Paragraph({ heading: D.HeadingLevel.TITLE, children: [new D.TextRun(opts.title.trim())] }))
   }
   let ordinal = 1
   for (const block of blocks) {
@@ -301,8 +300,8 @@ export async function blocksToDocx(
       children.push(...blockToDocx(block, 1, opts))
     }
   }
-  const doc = new Document({
-    sections: [{ children: children.length ? children : [new Paragraph({ children: [] })] }],
+  const doc = new D.Document({
+    sections: [{ children: children.length ? children : [new D.Paragraph({ children: [] })] }],
   })
-  return Packer.toBuffer(doc)
+  return D.Packer.toBuffer(doc)
 }

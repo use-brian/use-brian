@@ -2,8 +2,17 @@
  * [COMP:crm/config-commands]
  */
 import type { PoolClient } from 'pg'
-import { actorAuditIdentity, assertCrmOperationsAuthority, canonicalCrmRequest, CrmOperationsError, CrmRecordFieldDefinitionSchema,
-  type CrmConfigCommand, type CrmOperationsContext } from '@use-brian/core'
+import {
+  CrmRecordFieldDefinitionSchema,
+  type CrmConfigCommand
+} from '@use-brian/core/crm/config-commands.js'
+import {
+  actorAuditIdentity,
+  assertCrmOperationsAuthority,
+  canonicalCrmRequest,
+  CrmOperationsError,
+  type CrmOperationsContext
+} from '@use-brian/core/crm/operations-types.js'
 import {
   archiveCrmFieldDefinition, createCrmFieldDefinition, createCrmPipeline, createCrmStage,
   executeProtectedCrmConfiguration,lockCrmConfiguration, lockCrmConfigurationMember, restoreCrmFieldDefinition, setCrmStageArchived,

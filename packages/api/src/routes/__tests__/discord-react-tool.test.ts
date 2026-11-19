@@ -16,7 +16,7 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import { DiscordApiError } from '@use-brian/channels'
-import type { ToolContext } from '@use-brian/core'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { createDiscordReactToMessageTool } from '../discord.js'
 
 const ctx = { userId: 'u1', sessionId: 's1', channelType: 'discord' } as ToolContext

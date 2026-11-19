@@ -32,6 +32,8 @@ import {
   INTERACTIVE_STATEMENT_TIMEOUT_MS,
   BACKGROUND_STATEMENT_TIMEOUT_MS,
   seedCurrentUserIdSentinel,
+  transactionReleaseDecision,
+  instrumentPoolClient,
 } from '../client.js'
 import pg from 'pg'
 
@@ -132,14 +134,17 @@ describe('[COMP:api/db-client] Database client', () => {
 
   // ── queryWithRLS() — app pool, RLS-enforced ─────────────────
 
-  it('scopes via SET LOCAL current_user_id inside a transaction, and sets NO bypass GUC', async () => {
+  it('scopes current_user_id transaction-locally with bound parameters and no bypass GUC', async () => {
     mockClient.query.mockResolvedValue({ rows: [], rowCount: 0 })
 
     await queryWithRLS('u_1', 'SELECT * FROM memories', [])
 
     const calls = mockClient.query.mock.calls.map((c) => c[0])
     expect(calls).toContain('BEGIN')
-    expect(calls).toContain("SET LOCAL app.current_user_id = 'u_1'")
+    expect(mockClient.query.mock.calls).toContainEqual([
+      expect.stringContaining('set_config(setting.name, setting.value, true)'),
+      [['app.current_user_id'], ['u_1']],
+    ])
     expect(calls).toContain('COMMIT')
     // The defining behavioral change of the two-role model: enforcement comes
     // from the app_user role, NOT from disabling a bypass GUC. If a refactor
@@ -161,13 +166,12 @@ describe('[COMP:api/db-client] Database client', () => {
     expect(mockClient.release).toHaveBeenCalled()
   })
 
-  it('escapes single quotes in userId to prevent SQL injection', async () => {
+  it('binds hostile userId text as data without SQL interpolation', async () => {
     mockClient.query.mockResolvedValue({ rows: [], rowCount: 0 })
     await queryWithRLS("user'; DROP TABLE--", 'SELECT 1', [])
-    const userIdCall = mockClient.query.mock.calls
-      .map((c) => c[0])
-      .find((c: string) => c.includes('current_user_id') && c.includes('DROP'))
-    expect(userIdCall).toContain("user''; DROP TABLE--")
+    const config = mockClient.query.mock.calls.find(c => c[0].includes('set_config'))!
+    expect(config[0]).not.toContain('DROP')
+    expect(config[1]).toEqual([['app.current_user_id'], ["user'; DROP TABLE--"]])
   })
 
   // ── rollbackAndRelease() ────────────────────────────────────
@@ -195,6 +199,128 @@ describe('[COMP:api/db-client] Database client', () => {
     await expect(
       rollbackAndRelease(mockClient as unknown as Parameters<typeof rollbackAndRelease>[0]),
     ).resolves.toBeUndefined()
+  })
+
+  // ── committed-state release contract ────────────────────────
+  // Spec: database-schema.md → "Transaction completion and release".
+
+  it('queryWithRLS sends exactly BEGIN, set_config, the statement and COMMIT, then releases without ROLLBACK', async () => {
+    mockClient.query.mockResolvedValue({ rows: [], rowCount: 0 })
+    await queryWithRLS('u_1', 'SELECT 1', [])
+    const calls = mockClient.query.mock.calls.map((c) => c[0] as string)
+    expect(calls).toHaveLength(4)
+    expect(calls[0]).toBe('BEGIN')
+    expect(calls[1]).toContain('set_config(setting.name, setting.value, true)')
+    expect(calls[2]).toBe('SELECT 1')
+    expect(calls[3]).toBe('COMMIT')
+    expect(calls).not.toContain('ROLLBACK')
+    expect(mockClient.release).toHaveBeenCalledTimes(1)
+    expect(mockClient.release).toHaveBeenCalledWith()
+  })
+
+  it('queryWithRLS destroys the client when COMMIT itself throws (uncertain outcome)', async () => {
+    const commitErr = new Error('could not serialize access')
+    mockClient.query.mockImplementation((sql: string) =>
+      sql === 'COMMIT' ? Promise.reject(commitErr) : Promise.resolve({ rows: [], rowCount: 0 }),
+    )
+    await expect(queryWithRLS('u_1', 'SELECT 1', [])).rejects.toBe(commitErr)
+    expect(mockClient.release).toHaveBeenCalledTimes(1)
+    expect(mockClient.release).toHaveBeenCalledWith(commitErr)
+    expect(mockClient.query.mock.calls.map((c) => c[0])).not.toContain('ROLLBACK')
+  })
+
+  function statefulClient(state: { status?: string | null; ready?: boolean; queryable?: boolean }) {
+    const client = {
+      query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
+      release: vi.fn(),
+      readyForQuery: state.ready ?? true,
+      _queryable: state.queryable ?? true,
+      _ending: false,
+      getTransactionStatus: () => state.status ?? null,
+    }
+    return client as typeof client & Parameters<typeof rollbackAndRelease>[0]
+  }
+
+  it('releases an idle (committed) client directly — no ROLLBACK round trip', async () => {
+    const client = statefulClient({ status: 'I' })
+    expect(transactionReleaseDecision(client)).toBe('release')
+    await rollbackAndRelease(client)
+    expect(client.query).not.toHaveBeenCalled()
+    expect(client.release).toHaveBeenCalledWith()
+  })
+
+  it('rolls back an unfinished or failed transaction, and an idle status while a statement is in flight', async () => {
+    for (const state of [{ status: 'T' }, { status: 'E' }, { status: 'I', ready: false }, { status: null }]) {
+      const client = statefulClient(state)
+      expect(transactionReleaseDecision(client), JSON.stringify(state)).toBe('rollback')
+      await rollbackAndRelease(client)
+      expect(client.query).toHaveBeenCalledWith('ROLLBACK')
+      expect(client.release).toHaveBeenCalledWith()
+    }
+  })
+
+  it('destroys a broken connection without attempting ROLLBACK', async () => {
+    const client = statefulClient({ status: 'T', queryable: false })
+    await rollbackAndRelease(client)
+    expect(client.query).not.toHaveBeenCalled()
+    expect(client.release).toHaveBeenCalledWith(expect.any(Error))
+  })
+
+  it('a store-style raw COMMIT rejection on an instrumented client destroys it at release', async () => {
+    const commitErr = new Error('deferred constraint violated')
+    class FakeClient {
+      readyForQuery = true
+      release = vi.fn()
+      getTransactionStatus() { return 'I' }
+      query(sql: string) { return sql === 'COMMIT' ? Promise.reject(commitErr) : Promise.resolve({ rows: [], rowCount: 0 }) }
+    }
+    const client = new FakeClient()
+    instrumentPoolClient(client as unknown as Parameters<typeof instrumentPoolClient>[0], 'app')
+    instrumentPoolClient(client as unknown as Parameters<typeof instrumentPoolClient>[0], 'app') // idempotent
+    const pooled = client as unknown as Parameters<typeof rollbackAndRelease>[0]
+    try {
+      await pooled.query('BEGIN')
+      await pooled.query('COMMIT')
+    } catch (err) {
+      expect(err).toBe(commitErr)
+    } finally {
+      await rollbackAndRelease(pooled)
+    }
+    expect(client.release).toHaveBeenCalledWith(commitErr)
+  })
+
+  it('instrumentation forwards callback and promise overloads unchanged', async () => {
+    class FakeClient {
+      query(sql: string, values?: unknown, cb?: (err: Error | null, res?: unknown) => void) {
+        if (typeof values === 'function') { cb = values as typeof cb; values = undefined }
+        const res = { rows: [{ sql }], rowCount: 1 }
+        if (cb) { setImmediate(() => cb!(null, res)); return undefined }
+        return Promise.resolve(res)
+      }
+    }
+    const client = new FakeClient()
+    instrumentPoolClient(client as unknown as Parameters<typeof instrumentPoolClient>[0], 'system')
+    await expect(client.query('SELECT 1')).resolves.toEqual({ rows: [{ sql: 'SELECT 1' }], rowCount: 1 })
+    const viaCallback = await new Promise((resolve) => client.query('SELECT 2', [], (_err, res) => resolve(res)))
+    expect(viaCallback).toEqual({ rows: [{ sql: 'SELECT 2' }], rowCount: 1 })
+  })
+
+  it('installs the instrumentation on both pools', async () => {
+    vi.resetModules()
+    vi.stubEnv('PG_SINGLE_CONNECTION', '')
+    vi.stubEnv('DATABASE_URL_APP', 'postgres://app_user@localhost/db')
+    try {
+      const fresh = await import('../client.js')
+      const pool = mockPool as unknown as { on: ReturnType<typeof vi.fn> }
+      pool.on.mockClear()
+      fresh.getPool()
+      fresh.getAppPool()
+      const events = pool.on.mock.calls.map((c) => c[0])
+      expect(events.filter((e) => e === 'acquire')).toHaveLength(2)
+      expect(events.filter((e) => e === 'connect')).toHaveLength(3) // two instrumentations + the app seed
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 })
 

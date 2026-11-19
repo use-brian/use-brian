@@ -35,7 +35,7 @@ describe('[COMP:api/channel-live-authority] exact destination authority wiring',
     const source = readFileSync(new URL('../channel-pipeline.ts', import.meta.url), 'utf8')
     expect(source).toContain('if (sessionStateStore && !isolatedAudience)')
     const adapterSink = source.match(/sink: \{ kind: 'adapter',([\s\S]*?)afterLoop: async \(\) => \{([\s\S]*?)const result = await runTurnSessionStateDiff\(/)
-    expect(adapterSink?.[1]).toContain('...(nativeTranscriptAuthority ? { assertOutputAuthority: assertDeliveryAudience } : {}),')
+    expect(adapterSink?.[1]).toContain('...(nativeTranscriptAuthority ? { admitOutput: () => assertDeliveryAudience() } : {}),')
     const postLoop = adapterSink?.[2] ?? ''
     expect(postLoop).toMatch(/await flushBufferedTurns\([^\n]+\)\s+if \(!sessionStateStore \|\| !isIdentified \|\| isolatedAudience\) return\s+try \{/)
     expect(source.match(/runTurnSessionStateDiff\(/g)).toHaveLength(1)

@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { formatStamp } from '@use-brian/shared'
-import { buildTool, type Embedder, type Tool } from '@use-brian/core'
+import type { Embedder } from '@use-brian/core/embeddings/embedder.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 
 export type LiveInteractionUtterance = {
   id: string

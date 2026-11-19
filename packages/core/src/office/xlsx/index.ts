@@ -1,8 +1,8 @@
 /** Safe Brian-owned XLSX import/export/reparse adapter. [COMP:office/xlsx-engine] */
 import { createHash } from 'node:crypto'
-import ExcelJS from 'exceljs'
-import JSZip from 'jszip'
-import { DOMParser } from 'linkedom'
+import type ExcelJS from 'exceljs'
+import { lazyImplementation } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
+import { officeXmlDomParser } from '../xml-dom.js'
 type XmlElement = { localName: string; attributes: ArrayLike<{ name: string }>; getAttribute(name: string): string | null }
 type XmlDocument = { querySelectorAll(selector: string): ArrayLike<XmlElement> }
 import { posix } from 'node:path'
@@ -53,6 +53,11 @@ const DEFAULT_PRINT: SpreadsheetWorksheet['print'] = {
 }
 
 type ExcelColor = { argb?: string; rgb?: string; indexed?: number; theme?: number }
+// The workbook engine and ZIP codec load on the first spreadsheet export or
+// import, not with the Office modules (M4 step 5).
+const loadExcelJS = lazyImplementation('The spreadsheet engine (ExcelJS)', () => import('exceljs').then((m) => m.default))
+const loadJSZip = lazyImplementation('The Office package codec (JSZip)', () => import('jszip').then((m) => m.default))
+
 type FormulaValue = { formula?: string; result?: ExcelJS.CellValue; error?: string; richText?: Array<{ text: string }> }
 
 function color(value: ExcelColor | undefined): string | undefined {
@@ -339,7 +344,7 @@ async function normalizeWorkbook(workbook: ExcelJS.Workbook, context: OfficeImpo
 }
 
 async function excelJsCompatiblePackage(bytes: Uint8Array): Promise<Buffer> {
-  const zip = await JSZip.loadAsync(bytes)
+  const zip = await (await loadJSZip()).loadAsync(bytes)
   for (const entry of Object.values(zip.files)) {
     if (entry.dir || !/^xl\/.*\.xml$/i.test(entry.name)) continue
     const xml = await entry.async('string')
@@ -353,7 +358,8 @@ async function excelJsCompatiblePackage(bytes: Uint8Array): Promise<Buffer> {
 
 async function buildWorkbook(snapshot: SpreadsheetSnapshot, resolveResource: OfficeResourceResolver): Promise<Buffer> {
   const calculated = recalculateSpreadsheet(snapshot).snapshot
-  const workbook = new ExcelJS.Workbook()
+  const [ExcelJSEngine, JSZipCodec] = await Promise.all([loadExcelJS(), loadJSZip()])
+  const workbook = new ExcelJSEngine.Workbook()
   workbook.creator = 'Use Brian'
   workbook.created = new Date(0)
   workbook.modified = new Date(0)
@@ -403,7 +409,7 @@ async function buildWorkbook(snapshot: SpreadsheetSnapshot, resolveResource: Off
       printArea: sheet.print.printArea,
     }
   }
-  const zip = await JSZip.loadAsync(await workbook.xlsx.writeBuffer())
+  const zip = await JSZipCodec.loadAsync(await workbook.xlsx.writeBuffer())
   const escape = (s: string) => s.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
   let tableIndex = 0
   const names = new Set<string>()
@@ -452,10 +458,14 @@ export async function exportOfficeSpreadsheet(snapshot: SpreadsheetSnapshot, res
 export async function importOfficeSpreadsheet(bytes: Uint8Array, context: OfficeImportContext): Promise<OfficeImportResult> {
   const packageResult = await preflightOfficePackage(bytes, 'spreadsheet')
   if (!packageResult.ok || !packageResult.zip) return { ok: false, resources: [], diagnostics: packageResult.diagnostics }
+  // Loaded before the catch below, which reports a failed import of the file:
+  // an engine that cannot load is unavailable, not an invalid workbook.
+  const ExcelJSEngine = await loadExcelJS()
+  const DOMParser = officeXmlDomParser()
   try {
     const canonical = await readCanonicalOfficePart(packageResult.zip, 'spreadsheet')
     if (canonical?.family === 'spreadsheet') return { ok: true, snapshot: canonical, resources: [], diagnostics: packageResult.diagnostics }
-    const workbook = new ExcelJS.Workbook()
+    const workbook = new ExcelJSEngine.Workbook()
     await workbook.xlsx.load(await excelJsCompatiblePackage(bytes) as unknown as Parameters<typeof workbook.xlsx.load>[0])
     const normalized = await normalizeWorkbook(workbook, context)
     // Resolve actual worksheet table relationships, not ExcelJS's lossy table model.

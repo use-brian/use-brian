@@ -2,7 +2,8 @@ import { readFileSync } from 'node:fs'
 import express, { type RequestHandler } from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { createExecutionContext, executionToolContext, type ToolContext } from '@use-brian/core'
+import { createExecutionContext, executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { createAuthorityLease } from '../../context-scope/authority-lease.js'
 
 const store = vi.hoisted(() => ({

@@ -78,7 +78,7 @@ function DesktopBrowserButton({ workspaceId }: { workspaceId: string }) {
   const state = useSyncExternalStore(browser.subscribe, browser.snapshot, browser.serverSnapshot);
   const router = useRouter();
   const phase = state.workspaceId === workspaceId ? state.phase : "idle";
-  const label = phase === "connected" ? copy.desktop.open : phase === "paused" ? copy.desktop.resume :
+  const label = phase === "disabled" ? copy.desktop.disabled : phase === "connected" ? copy.desktop.open : phase === "paused" ? copy.desktop.resume :
     phase === "failed" ? copy.desktop.retry : phase === "connecting" ? copy.oneClickConnecting : copy.desktop.automatic;
   const onClick = () => {
     if (phase === "connected") void browser.show().catch(() => {});

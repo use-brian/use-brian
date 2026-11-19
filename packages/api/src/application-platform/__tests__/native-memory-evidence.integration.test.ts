@@ -1,16 +1,18 @@
 import {createDbDocEntityStore} from '../../db/doc-entity-store.js'
 import {persistentSourceFixture} from './fixtures/persistent-source.js'
 import {authSessionStore} from '../../db/auth-session-store.js'
-import {createPersonalWebSession} from '../../db/sessions.js'
+import {createPersonalWebSession,createWorkspaceChatSession} from '../../db/sessions.js'
 import {findAssistantById} from '../../db/users.js'
 import {resolveExecutionContextSystem} from '../../context-scope/execution-context.js'
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
-import {boundScopeSources,executionToolContext,type ScopeSource,type ExecutionContext} from '@use-brian/core'
+import type {ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
+import {executionToolContext, type ExecutionContext} from '@use-brian/agent-runtime/security/execution-context.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {getAppPool,getPool,runWithAgentAccess,applyRLSGucs,rollbackAndRelease} from '../../db/client.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
-import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
+import {readAdmittedSessionQuery} from '../../db/conversation-store.js'
 import {validateCallerScopeEvidence} from '../../context-scope/caller-evidence.js'
-import {assertSourceModelInputAuthority,assertSourceModelOutputAuthority} from '../model-source-authority.js'
+import {admitModelInput,admitModelOutput} from '../../context-scope/admission.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -43,8 +45,8 @@ describe.sequential('[COMP:api/application-persistence] actual native memory and
   const value=await rpc(authority.execution,sources)
   expect(value?.admitted).toBe(true);expect(value?.current.some(source=>source.resourceKind==='memory')).toBe(true)
   await expect(frame(authority.execution,db=>validateCallerScopeEvidence({sources},authority.execution.security.ceiling,db))).resolves.toMatchObject({sources:expect.any(Array)})
-  await expect(assertSourceModelInputAuthority(context)).resolves.toBeUndefined()
-  await expect(assertSourceModelOutputAuthority(context)).resolves.toBeUndefined()
+  await expect(admitModelInput(context)).resolves.toBeUndefined()
+  await expect(admitModelOutput(context)).resolves.toBeUndefined()
  })
  it('holds reclassified memory for the original reader and keeps another authorized reader usable',async()=>{
   const {f,authority,memory,sources,context}=await setup(),before=structuredClone(sources)
@@ -63,8 +65,10 @@ describe.sequential('[COMP:api/application-persistence] actual native memory and
   }finally{await rollbackAndRelease(writer);await pending?.catch(()=>{})}
   await f.pool.query("UPDATE memories SET sensitivity='confidential' WHERE id=$1",[memory.id])
   expect(await rpc(authority.execution,sources)).toEqual({admitted:false})
-  await expect(assertSourceModelInputAuthority(context)).rejects.toMatchObject({reason:'authority_changed'})
-  const second=await f.execution(f.secondId)
+  await expect(admitModelInput(context)).rejects.toMatchObject({reason:'authority_changed'})
+  const confidentialRoom=await createWorkspaceChatSession({assistantId:f.assistantId,starterUserId:f.secondId,
+   workspaceId:f.workspaceId,effectiveClearance:'confidential',authenticatedHuman:true})
+  const second=await f.execution(f.secondId,confidentialRoom)
   expect((await rpc(second,sources))?.admitted).toBe(true)
   expect(sources).toEqual(before)
  })
@@ -88,7 +92,7 @@ describe.sequential('[COMP:api/application-persistence] actual native memory and
   const {f,authority,memory,sources,context}=await setup(),before=structuredClone(sources)
   await f.pool.query('DELETE FROM memories WHERE id=$1',[memory.id])
   expect((await rpc(authority.execution,sources))?.admitted).toBe(true)
-  await expect(assertSourceModelInputAuthority(context)).resolves.toBeUndefined()
+  await expect(admitModelInput(context)).resolves.toBeUndefined()
   expect(sources).toEqual(before)
  })
  it('rejects owner-role admission and follows canonical query evaluator drift',async()=>{
@@ -98,7 +102,7 @@ describe.sequential('[COMP:api/application-persistence] actual native memory and
    'application_memory_statement_domain(uuid,uuid,text[],jsonb)','application_memory_statement_envelope(uuid,jsonb,text,uuid,text,text,text[],integer,jsonb)',
    'application_field_projection_state(uuid,jsonb,text,uuid,text,text,text[])',
    'application_field_projection_state_before_feedback_outcome(uuid,jsonb,text,uuid,text,text,text[])',
-   'application_memory_statement_helpers_current()','application_session_eval_field(uuid,uuid,text,jsonb)',
+   'native_turn_helpers_current()','application_session_eval_field(uuid,uuid,text,jsonb)',
    'application_session_eval_scope(uuid,text,uuid,text,jsonb)','application_session_eval_envelope(uuid,text,uuid,text,text[],jsonb)',
    'read_native_session_cohort_evidence(uuid,text[],uuid[],text[],boolean)']
   expect((await getAppPool().query(`SELECT count(*)::integer AS count,
@@ -137,18 +141,18 @@ describe.sequential('[COMP:api/application-persistence] actual native memory and
   if(!protectedMemory)throw new Error('Missing actual authority-bound Memory projection')
   expect(boundScopeSources(protectedMemory).some(source=>source.resourceKind==='application_field')).toBe(true)
   const protectedSources=[...sources,...boundScopeSources(protectedMemory)]
-  const helpersBefore=(await f.pool.query('SELECT application_memory_statement_helpers_current() AS current')).rows[0].current
+  const helpersBefore=(await f.pool.query('SELECT native_turn_helpers_current() AS current')).rows[0].current
   expect((await rpc(authority.execution,protectedSources))?.admitted).toBe(true)
   const changedEnvelope=envelope.definition.replace('\nBEGIN\n','\nBEGIN\n RETURN NULL;\n')
   expect(changedEnvelope).not.toBe(envelope.definition)
   try{
    await f.pool.query(changedEnvelope)
-   expect((await f.pool.query('SELECT application_memory_statement_helpers_current() AS current')).rows[0].current).toBe(false)
+   expect((await f.pool.query('SELECT native_turn_helpers_current() AS current')).rows[0].current).toBe(false)
    expect(await rpc(authority.execution,protectedSources)).toEqual({admitted:false})
   }finally{await f.pool.query(envelope.definition)}
   expect((await f.pool.query(`SELECT pg_get_functiondef(oid) AS definition,to_jsonb(p)-'prosrc' AS metadata FROM pg_proc p
    WHERE oid='public.application_compute_field_envelope_before_module_policy(uuid,jsonb,text,uuid,text,text,text[],integer)'::regprocedure`)).rows[0]).toEqual(envelope)
-  expect((await f.pool.query('SELECT application_memory_statement_helpers_current() AS current')).rows[0].current).toBe(helpersBefore)
+  expect((await f.pool.query('SELECT native_turn_helpers_current() AS current')).rows[0].current).toBe(helpersBefore)
   expect((await rpc(authority.execution,protectedSources))?.admitted).toBe(true)
   // Both exact dispatcher deltas remain pinned after reconciliation. A future
   // canonical body change must still use its current path and deny this row.
@@ -161,12 +165,12 @@ describe.sequential('[COMP:api/application-persistence] actual native memory and
    expect(changedDispatcher).not.toBe(dispatcher.definition)
    try{
     await f.pool.query(changedDispatcher)
-    expect((await f.pool.query('SELECT application_memory_statement_helpers_current() AS current')).rows[0].current).toBe(false)
+    expect((await f.pool.query('SELECT native_turn_helpers_current() AS current')).rows[0].current).toBe(false)
     expect(await rpc(authority.execution,protectedSources)).toEqual({admitted:false})
    }finally{await f.pool.query(dispatcher.definition)}
    expect((await f.pool.query(`SELECT pg_get_functiondef(oid) AS definition,to_jsonb(p)-'prosrc' AS metadata FROM pg_proc p
     WHERE oid=$1::regprocedure`,[signature])).rows[0]).toEqual(dispatcher)
-   expect((await f.pool.query('SELECT application_memory_statement_helpers_current() AS current')).rows[0].current).toBe(true)
+   expect((await f.pool.query('SELECT native_turn_helpers_current() AS current')).rows[0].current).toBe(true)
    expect((await rpc(authority.execution,protectedSources))?.admitted).toBe(true)
   }
   // Name normalization applies only to the exact reviewed predecessor name.
@@ -174,9 +178,9 @@ describe.sequential('[COMP:api/application-persistence] actual native memory and
   let predecessorRenamed=false
   try{
    await f.pool.query('ALTER FUNCTION application_field_projection_state_before_feedback_outcome(uuid,jsonb,text,uuid,text,text,text[]) RENAME TO application_field_projection_state_unreviewed');predecessorRenamed=true
-   expect((await f.pool.query('SELECT application_memory_statement_helpers_current() AS current')).rows[0].current).toBe(false)
+   expect((await f.pool.query('SELECT native_turn_helpers_current() AS current')).rows[0].current).toBe(false)
   }finally{if(predecessorRenamed)await f.pool.query('ALTER FUNCTION application_field_projection_state_unreviewed(uuid,jsonb,text,uuid,text,text,text[]) RENAME TO application_field_projection_state_before_feedback_outcome')}
-  expect((await f.pool.query('SELECT application_memory_statement_helpers_current() AS current')).rows[0].current).toBe(true)
+  expect((await f.pool.query('SELECT native_turn_helpers_current() AS current')).rows[0].current).toBe(true)
   // Keep the intended known-helper positive profile explicit. An additive
   // canonical dispatcher must receive its own reviewed compatibility amendment.
   expect(helpersBefore).toBe(true)

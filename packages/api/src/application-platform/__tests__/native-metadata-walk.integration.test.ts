@@ -1,13 +1,15 @@
 import {randomUUID} from 'node:crypto'
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
-import {boundScopeSources,executionToolContext,type ScopeSource} from '@use-brian/core'
+import type {ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
+import {executionToolContext} from '@use-brian/agent-runtime/security/execution-context.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import type {PoolClient} from 'pg'
 import {getAppPool,getPool,rollbackAndRelease,runWithAgentAccess,applyRLSGucs} from '../../db/client.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
-import {assertSourceModelInputAuthority} from '../model-source-authority.js'
+import {admitModelInput} from '../../context-scope/admission.js'
 import {addSessionMessage} from '../../db/sessions.js'
 import {writeSessionContextRevision} from '../../db/session-context-revisions.js'
-import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
+import {readAdmittedSessionQuery} from '../../db/conversation-store.js'
 import {createDbDocEntityStore} from '../../db/doc-entity-store.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
@@ -147,7 +149,7 @@ describe.sequential('[COMP:api/application-persistence] native metadata equivale
   const context={...executionToolContext(authority.execution,{appId:'fixture'}),scopeAccumulator:authority.accumulator}
   const lineage=async()=>(await f.pool.query('SELECT * FROM application_scope_lineage($1,ARRAY[$2::text],ARRAY[$3::uuid],ARRAY[$4::text])',[f.workspaceId,'memory',memory.id,root.version])).rows
   expect(await lineage()).toEqual([{kind:'memory',id:memory.id,version:root.version}])
-  await expect(assertSourceModelInputAuthority(context)).resolves.toBeUndefined()
+  await expect(admitModelInput(context)).resolves.toBeUndefined()
   const original=(await f.pool.query("SELECT pg_get_functiondef(p.oid) AS definition,p.prosrc AS body FROM pg_proc p WHERE p.oid=$1::regprocedure",[`public.${helper}(uuid,text,uuid,text)`])).rows[0]
   const version=(await f.pool.query('SELECT scope_version::text AS version FROM memories WHERE id=$1',[dependency.id])).rows[0].version
   try{
@@ -162,10 +164,10 @@ describe.sequential('[COMP:api/application-persistence] native metadata equivale
    expect(body).not.toBe(original.body)
    await f.pool.query(original.definition.replace(original.body,()=>body))
    expect(await lineage()).toEqual(expect.arrayContaining([{kind:'memory',id:memory.id,version:root.version},{kind:'memory',id:dependency.id,version}]))
-   await expect(assertSourceModelInputAuthority(context)).rejects.toMatchObject({reason:'authority_changed'})
+   await expect(admitModelInput(context)).rejects.toMatchObject({reason:'authority_changed'})
    expect(sources).toEqual(before)
   }finally{await f.pool.query(original.definition)}
   const fresh=await f.modelContext(f.firstId);fresh.accumulator.note({sources})
-  await expect(assertSourceModelInputAuthority({...executionToolContext(fresh.execution,{appId:'fixture'}),scopeAccumulator:fresh.accumulator})).resolves.toBeUndefined()
+  await expect(admitModelInput({...executionToolContext(fresh.execution,{appId:'fixture'}),scopeAccumulator:fresh.accumulator})).resolves.toBeUndefined()
  })
 })

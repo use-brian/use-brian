@@ -1,6 +1,6 @@
 import type {PoolClient} from 'pg'
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
-import {createKnowledgeTools} from '@use-brian/core'
+import {createKnowledgeTools} from '@use-brian/core/tools/base/knowledge.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {createDbKnowledgeStore} from '../../db/knowledge-store.js'
 import {configureConnectorSourceRuntimeFactory} from '../source-runtime.js'

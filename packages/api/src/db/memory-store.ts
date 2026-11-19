@@ -1,22 +1,26 @@
 import { memoryLearningAdmissionEnabled } from './memory-learning.js'
 import { createHash } from 'node:crypto'
-import { ContextScopeAccumulator, DerivedScopeError,bindScopeSource,bindScopeSources,boundScopeSources, type EntityLinksStore, type MemoryRecord, type MemoryStore, type ScopeSource } from '@use-brian/core'
+import type { EntityLinksStore } from '@use-brian/core/entities/types.js'
+import type { MemoryRecord, MemoryStore } from '@use-brian/core/memory/types.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { DerivedScopeError, type ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { bindScopeSource, bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { query } from './client.js'
-import {readRetainedContextFrame,writeRetainedContextFrame} from './session-context-revisions.js'
+import {readRetainedContextFrame,writeRetainedContextFrame,writeMemoryCreateFrame} from './session-context-revisions.js'
 import {readExternalSourceAncestors} from '../application-platform/external-source-ancestry.js'
 import {readApplicationFieldAncestors} from '../application-platform/field-evidence.js'
 import { readReflectionReceipt, type ReflectionReceiptKind } from './reflection-evidence.js'
-import { writeScopedSummary, getSoulContext } from './scoped-summary-store.js'
+import { writeScopedSummary, getSoulContext, getNativePromptAuxiliaryContext } from './scoped-summary-store.js'
 import {
   emitCreatedMemoryEdges,createMemory, updateMemory, getMemoryById, getMemoryByIdSystem, searchMemories, searchMemoriesByIdPrefix,
-  getIdentityMemories, getMemoryIndex, getMemoryIndexSystem, getMemoryIndexRanked, trackRecall, trackRecallOutcome, getSoul, countMemories,
+  getIdentityMemories, getMemoryIndex, getMemoryIndexSystem, getMemoryIndexRanked, getPairedPromptMemoryIndexes, getNativePromptMemoryContext, trackRecall, trackRecallOutcome, getSoul, countMemories,
   listMemoriesWithMetrics, writeConsolidationScore, deleteMemory,
   listCronContextCandidatesForPrune,
   listForSoulSynthesis, upsertSoul, logConsolidation,
   listMemoryUsers, getLastPhaseAt, hasRecentActivity,
   withWorkerLock,
   listOpenCommitments,
-  getWorkspaceIdentityMemories, getWorkspaceMemoryIndex, getWorkspaceMemoryIndexSystem, getWorkspaceMemoriesByCategory, searchWorkspaceMemories, searchWorkspaceMemoriesByIdPrefix,
+  getWorkspaceIdentityMemories, getWorkspacePromptMemories, getWorkspaceMemoryIndex, getWorkspaceMemoryIndexSystem, getWorkspaceMemoriesByCategory, searchWorkspaceMemories, searchWorkspaceMemoriesByIdPrefix,
   listWorkspaceMemoryGroups, listWorkspaceMemoriesWithMetrics, getLastWorkspacePhaseAt, logWorkspaceConsolidation,
 } from './memories.js'
 import {
@@ -44,6 +48,24 @@ function projectMemory(m: MemoryRecord): MemoryRecord {
   }),boundScopeSources(m))
 }
 
+function projectRankedMemoryIndex(result: Awaited<ReturnType<typeof getMemoryIndexRanked>>) {
+  return bindScopeSources({ ...result,rows: bindScopeSources(result.rows.map(bindMemorySource),boundScopeSources(result.rows)) },boundScopeSources(result))
+}
+
+function projectIdentityMemories(rows: Awaited<ReturnType<typeof getIdentityMemories>>) {
+  return bindScopeSources(rows.map(projectMemory),boundScopeSources(rows))
+}
+
+function projectPromptIndexes({ranked,workspace}:Awaited<ReturnType<typeof getPairedPromptMemoryIndexes>>):Awaited<
+  ReturnType<NonNullable<MemoryStore['getPairedPromptIndexes']>>> {
+  return {
+    ranked: ranked.status === 'fulfilled' ? { status:'fulfilled',value:projectRankedMemoryIndex(ranked.value) } : ranked,
+    workspace: workspace.status === 'fulfilled'
+      ? { status:'fulfilled',value:bindScopeSources(workspace.value.map(bindMemorySource),boundScopeSources(workspace.value)) }
+      : workspace,
+  }
+}
+
 /**
  * Create a MemoryStore backed by PostgreSQL.
  * Adapts the DB functions to the core package's MemoryStore interface.
@@ -54,8 +76,8 @@ function projectMemory(m: MemoryRecord): MemoryRecord {
  * dependency is optional so callers that don't carry the graph layer
  * keep working — edges are simply not emitted in that case.
  */
-export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {}): MemoryStore {
-  const { entityLinks } = deps
+export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore; excludedBackgroundWorkspaceIdsSql?: string } = {}): MemoryStore {
+  const { entityLinks, excludedBackgroundWorkspaceIdsSql } = deps
   return {
     learningEnabled: memoryLearningAdmissionEnabled(),
     async create(params) {
@@ -70,7 +92,8 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
         const initial=roots.evidence.sources??[],workspaceId=execution.security.access.workspaceId
         roots.note({sources:[...await readExternalSourceAncestors(workspaceId,initial),...await readApplicationFieldAncestors(workspaceId,initial)]})
         const sources=roots.evidence.sources??[]
-        const m=await writeRetainedContextFrame(authority,sources,client=>createMemory({...command,workspaceId,
+        const m=await writeMemoryCreateFrame(authority,sources,command.userId,(client,explicitSave)=>createMemory({...command,workspaceId,
+          source:explicitSave?'user':command.source,
           createdByAssistantId:command.createdByAssistantId??undefined,sourceEpisodeId:command.sourceEpisodeId??undefined,
           ...(sources.length?{derivation:{producer:command.derivation?.producer??'tool:saveMemory:create',sources}}:{})},undefined,client))
         // Preserve the canonical hook after commit. Source-backed graph
@@ -157,8 +180,7 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
     },
 
     async getIdentity(ctx,authority) {
-      const results = await getIdentityMemories(ctx,authority)
-      return bindScopeSources(results.map(projectMemory),boundScopeSources(results))
+      return projectIdentityMemories(await getIdentityMemories(ctx,authority))
     },
 
     async getIndex(ctx, validOnly,authority) {
@@ -176,8 +198,23 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
     },
 
     async getIndexRanked(ctx, limit,authority) {
-      const result = await getMemoryIndexRanked(ctx, limit,authority)
-      return bindScopeSources({ ...result, rows: bindScopeSources(result.rows.map(bindMemorySource),boundScopeSources(result.rows)) },boundScopeSources(result))
+      return projectRankedMemoryIndex(await getMemoryIndexRanked(ctx,limit,authority))
+    },
+
+    async getPairedPromptIndexes(ctx, limit, authority) {
+      return projectPromptIndexes(await getPairedPromptMemoryIndexes(ctx,limit,authority))
+    },
+
+    async getPromptMemoryContext(ctx, limit, authority) {
+      const value=await getNativePromptMemoryContext(ctx,limit,authority)
+      return value&&{indexes:projectPromptIndexes(value.indexes),
+        team:{identity:value.team.identity.map(projectMemory),tagged:value.team.tagged.map(projectMemory)},
+        ...(value.selfEntityId===undefined?{}:{selfEntityId:value.selfEntityId})}
+    },
+
+    async getPromptAuxiliaryContext(ctx,appId,authority) {
+      const result=await getNativePromptAuxiliaryContext(ctx,appId,authority)
+      return result&&{...result,identity:projectIdentityMemories(result.identity)}
     },
 
     async trackRecall(memoryId, queryHash) {
@@ -273,7 +310,7 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
     },
 
     async listMemoryUsers() {
-      return listMemoryUsers()
+      return listMemoryUsers(excludedBackgroundWorkspaceIdsSql)
     },
 
     async getLastPhaseAt(assistantId, userId, phase) {
@@ -456,6 +493,11 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
       return bindScopeSources(results.map(projectMemory),boundScopeSources(results))
     },
 
+    async getWorkspacePromptMemories(ctx, tag) {
+      const { identity, tagged } = await getWorkspacePromptMemories(ctx, tag)
+      return { identity: identity.map(projectMemory), tagged: tagged.map(projectMemory) }
+    },
+
     async getWorkspaceIndex(ctx, validOnly,authority) {
       const results=await getWorkspaceMemoryIndex(ctx, validOnly,authority);return bindScopeSources(results.map(bindMemorySource),boundScopeSources(results))
     },
@@ -486,7 +528,7 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
     },
 
     async listWorkspaceMemoryGroups() {
-      return listWorkspaceMemoryGroups()
+      return listWorkspaceMemoryGroups(excludedBackgroundWorkspaceIdsSql)
     },
 
     async listTeamWithMetrics(assistantId, workspaceId, page) {

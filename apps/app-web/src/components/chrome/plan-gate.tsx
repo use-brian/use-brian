@@ -15,6 +15,8 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 // data is never hostage, only compute — and the OSS edition never renders it.
 
 import { useEffect, useState, type CSSProperties } from "react";
+import { usePathname, useSearchParams } from "next/navigation";
+import Link from "next/link";
 import {
   ArrowRightIcon,
   CheckIcon,
@@ -34,6 +36,7 @@ import { getUsage, reconcileBillingCheckout } from "@/lib/api/usage";
 import { authFetch } from "@/lib/auth-fetch";
 import { webAppUrl } from "@/lib/primary-auth";
 import { useT } from "@/lib/i18n/client";
+import { memoryContextPath } from "@/lib/memory-context-path";
 import styles from "./plan-gate.module.css";
 
 const OSS_REPO_URL = "https://github.com/use-brian/use-brian";
@@ -94,6 +97,8 @@ function BrianTrialMascot() {
 
 export function PlanGate({ workspaceId }: { workspaceId: string }) {
   const t = useT();
+  const pathname = usePathname();
+  const memoryExport = useSearchParams().get("memoryExport");
   const capabilities = deploymentCapabilities();
   const [plan, setPlan] = useState<string | null>(null);
   const [trialEligible, setTrialEligible] = useState(false);
@@ -154,6 +159,10 @@ export function PlanGate({ workspaceId }: { workspaceId: string }) {
     };
   }, [workspaceId, capabilities.billing]);
 
+  // The export dialog owns the actionable plan prompt for an OAuth handoff.
+  if (pathname === `/w/${workspaceId}/brain` && (memoryExport === "markdown" || memoryExport === "csv")) return null;
+  const contextPath = memoryContextPath(workspaceId);
+  if (pathname === contextPath) return null;
   if (!planGateApplies(capabilities, plan) || dismissed) return null;
 
   const g = t.planGate;
@@ -241,6 +250,8 @@ export function PlanGate({ workspaceId }: { workspaceId: string }) {
             <p className={styles.noCard}>{g.noCard}</p>
             {checkoutError && <p className={styles.checkoutError} role="alert">{g.checkoutError}</p>}
 
+            <Link href={contextPath} className={`${styles.exploreButton} inline-flex min-h-8 items-center max-md:min-h-11`}>{t.brainPage.memoryContext.action}</Link>
+
             <button type="button" onClick={dismiss} className={styles.exploreButton}>
               {g.exploreFirst}
             </button>
@@ -251,8 +262,8 @@ export function PlanGate({ workspaceId }: { workspaceId: string }) {
   }
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-foreground/40 backdrop-blur-sm p-6" role="dialog" aria-modal="true" aria-labelledby="plan-required-title">
-      <div className="w-full max-w-md rounded-2xl border border-border bg-card p-8 shadow-lg">
+    <div className="fixed inset-0 z-[100] flex overflow-y-auto bg-foreground/40 backdrop-blur-sm p-6" role="dialog" aria-modal="true" aria-labelledby="plan-required-title">
+      <div className="m-auto w-full max-w-md rounded-2xl border border-border bg-card p-8 shadow-lg">
         <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mb-5">
           <LockIcon className="w-6 h-6 text-primary" />
         </div>
@@ -281,6 +292,9 @@ export function PlanGate({ workspaceId }: { workspaceId: string }) {
             {g.selfHost}
             <ExternalLinkIcon className="w-3.5 h-3.5" aria-hidden />
           </a>
+          <Link href={contextPath} className="flex min-h-8 w-full items-center justify-center rounded-lg border border-border px-4 text-center text-sm font-medium hover:bg-muted max-md:min-h-11">
+            {t.brainPage.memoryContext.action}
+          </Link>
         </div>
         <button
           onClick={dismiss}

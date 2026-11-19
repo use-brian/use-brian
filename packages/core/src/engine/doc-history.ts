@@ -43,7 +43,7 @@
  * See `docs/architecture/engine/query-loop.md` → "Doc tool-result elision".
  */
 
-import type { ContentBlock, Message } from '../providers/types.js'
+import type { ContentBlock, Message } from '@use-brian/agent-runtime/providers/types.js'
 
 /**
  * Doc page-state tools whose results carry page snapshots — a `patchPage`

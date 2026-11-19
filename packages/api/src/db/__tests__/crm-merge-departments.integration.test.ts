@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
-import { mergeEntities, undoMerge } from '@use-brian/core'
+import { mergeEntities, undoMerge } from '@use-brian/core/corrections/entity-merge.js'
 import { createEntityMergeStore } from '../entity-merge-store.js'
 import { getAppPool, getPool } from '../client.js'
 

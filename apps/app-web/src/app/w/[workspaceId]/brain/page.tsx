@@ -62,8 +62,10 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ArrowDownToLine, Plus, Sparkles } from "lucide-react";
+import { ArrowDownToLine, Copy, Plus, Sparkles } from "lucide-react";
+import { memoryContextPath } from "@/lib/memory-context-path";
 import { useWorkspaces } from "@/contexts/workspace-context";
 import { isPhoneViewport } from "@/lib/viewport";
 import {
@@ -125,6 +127,7 @@ import { suggestedSkillCount } from "@/lib/skills-view";
 import { FilterStrip } from "@/components/brain/filter-strip";
 import { EmptyState, PristineBrainNudge } from "@/components/brain/empty-state";
 import { HeldMemoriesNotice } from "@/components/brain/held-memories-notice";
+import { MemoryExport } from "@/components/brain/memory-export";
 import { ReviewAllClear, ReviewPanel } from "@/components/brain/review-panel";
 import { AuditPanel } from "@/components/brain/audit-panel";
 import { BrainTopbar, BrainTopbarPager } from "@/components/brain/brain-topbar";
@@ -147,6 +150,7 @@ import {
 } from "@/contexts/brain-surface-context";
 import { Button } from "@/components/ui/button";
 import { useIsOffline } from "@/lib/offline/use-offline-sync";
+import { isHostedEdition } from "@/lib/edition";
 import { WorkspaceFileIntakeButton } from "@/components/doc/workspace-file-drop";
 import {
   deleteBrainContentCache,
@@ -170,10 +174,12 @@ import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 let phoneViewSeeded = false;
 
 function BrainPageInner() {
-  const { activeId } = useWorkspaces();
+  const { activeId, active } = useWorkspaces();
   const { me } = useWorkspaceContext();
   const router = useRouter();
   const searchParams = useSearchParams();
+  const memoryExportParam = searchParams.get("memoryExport");
+  const requestedExport = memoryExportParam === "markdown" || memoryExportParam === "csv" ? memoryExportParam : null;
   const t = useT();
   const offline = useIsOffline();
   // The Brain controls live in the sidebar (`BrainSidebarPanel`); this page
@@ -1068,7 +1074,27 @@ function BrainPageInner() {
       <BrainTopbar
         workspaceId={activeId ?? ""}
         center={topbarCenter}
-        right={topbarRight}
+        right={<>
+          {topbarRight}
+          {activeId && me.id && section === "entries" && (
+            <Link href={memoryContextPath(activeId)} aria-label={t.brainPage.memoryContext.action} title={t.brainPage.memoryContext.action}
+              className="inline-flex size-11 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground md:h-7 md:w-auto md:gap-1.5 md:px-2">
+              <Copy className="size-4" aria-hidden />
+              <span className="hidden text-xs font-medium md:inline">{t.brainPage.memoryContext.action}</span>
+            </Link>
+          )}
+          {activeId && me.id && isHostedEdition() && (section === "entries" || requestedExport) && (
+            <MemoryExport key={`${activeId}:${me.id}`} workspaceId={activeId} workspaceName={active?.name}
+              offline={offline} requestedFormat={requestedExport} showTrigger={section === "entries"}
+              clearRequest={() => {
+                const params = new URLSearchParams(searchParams.toString());
+                params.delete("memoryExport");
+                const query = params.toString();
+                router.replace(`/w/${activeId}/brain${query ? `?${query}` : ""}`, { scroll: false });
+              }}
+            />
+          )}
+        </>}
       />
 
       {activeId && !offline && (

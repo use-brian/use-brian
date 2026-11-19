@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { SensitivityAccumulator } from '../../security/sensitivity.js'
+import { SensitivityAccumulator } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { createCrmTools, type CrmToolEvent } from '../tools.js'
 import type {
   CompanyRecord, ContactRecord, CrmStore, DealRecord, DealStage,

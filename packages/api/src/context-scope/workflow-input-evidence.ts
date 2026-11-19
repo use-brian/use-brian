@@ -1,4 +1,6 @@
-import { ContextScopeAccumulator, isSensitivity, type ScopeEvidence, type ScopeSource } from '@use-brian/core'
+import { ContextScopeAccumulator, type ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { isSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { getPool } from '../db/client.js'
 import type { PoolClient } from 'pg'
 

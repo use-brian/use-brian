@@ -4,7 +4,7 @@ import { createFileTools, MAX_FILE_READ_BYTES, type FileToolEvent } from '../too
 import type { FilesApi, FilesContext, FilesError, FilesResult } from '../api.js'
 import type { WorkspaceFile, WorkspaceFileIndexRow, WorkspaceFileMetaPatch } from '../types.js'
 import { ctxFor, errorMessage } from '../tool-helpers.js'
-import { ContextScopeAccumulator } from '../../security/context-scope.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 
 describe('[COMP:files/tools] departmental mutation context', () => {
   it('preserves independent edit reach and all evidence requirements', () => {

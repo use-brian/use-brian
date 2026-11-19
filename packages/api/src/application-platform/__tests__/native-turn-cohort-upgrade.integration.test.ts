@@ -10,10 +10,11 @@ import {persistentContextFixture} from './fixtures/persistent-context.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 const pool=getPool()
+const canonical=(await pool.query("SELECT to_regprocedure('conversation_prepare_publications(uuid,uuid,jsonb)') IS NOT NULL current")).rows[0].current===true
 const migration=(await readFile(new URL('../../../migrations/8201_native_turn_publication_cohorts.sql',import.meta.url),'utf8'))
  .replace(/^BEGIN;\n/m,'').replace(/\nCOMMIT;\s*$/,'')
 const boundary=process.env.BRIAN_NATIVE_COHORT_UPGRADE_BOUNDARY==='8200'
- ||(await pool.query("SELECT to_regprocedure('read_native_turn_publication_cohorts(uuid,jsonb)') IS NULL predecessor")).rows[0].predecessor===true
+ ||(await pool.query("SELECT to_regprocedure('read_native_turn_publication_cohorts(uuid,jsonb)') IS NULL AND to_regprocedure('conversation_prepare_publications(uuid,uuid,jsonb)') IS NULL predecessor")).rows[0].predecessor===true
 const guards=`SELECT native_turn_helpers_current() reader,native_turn_publication_contract() publication,
  application_native_worklist_helpers_current() worklist,application_native_dependency_batch_helpers_current() dependency,
  application_native_field_reference_helpers_current() reference,application_memory_statement_helpers_current() memory`
@@ -33,7 +34,11 @@ async function replaceBody(client:PoolClient,signature:string,body:string){
 }
 describe.sequential('[COMP:api/native-turn-frame] shared publication cohort guard canary',()=>{
  it('keeps current authority guards and the private capture boundary',async()=>{
-  expect((await pool.query(guards)).rows[0]).toEqual(healthy)
+  if(canonical){
+   expect((await pool.query('SELECT native_turn_helpers_current() reader,native_turn_publication_contract() publication')).rows[0]).toEqual({reader:true,publication:true})
+   for(const signature of ['application_memory_statement_helpers_current()','application_native_dependency_batch_helpers_current()','application_native_field_reference_helpers_current()'])
+    expect((await pool.query('SELECT to_regprocedure($1) retired',[signature])).rows[0].retired).toBeNull()
+  }else expect((await pool.query(guards)).rows[0]).toEqual(healthy)
   expect((await pool.query(`SELECT count(*)::integer exposed FROM pg_proc p WHERE p.pronamespace='public'::regnamespace
    AND(${capture}) AND has_function_privilege('app_user',p.oid,'EXECUTE')`)).rows[0].exposed).toBe(0)
  })

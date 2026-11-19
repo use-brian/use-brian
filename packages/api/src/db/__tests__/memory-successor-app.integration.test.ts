@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { PoolClient } from 'pg'
-import type { AccessContext } from '@use-brian/core'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import { applyRLSGucs, getAppPool, getPool, rollbackAndRelease } from '../client.js'
 import { createMemory, updateMemory, type Memory } from '../memories.js'
 import { createDbWorkspaceGroupStore } from '../workspace-group-store.js'

@@ -45,7 +45,7 @@ export type {
   PieChartWidget,
   DiagramWidget,
   ViewPayload,
-} from '@use-brian/core/dist/views/a2ui.js'
+} from '@use-brian/core/views/a2ui.js'
 
 /**
  * Host-supplied action callback. Fired by Button widgets, Table row

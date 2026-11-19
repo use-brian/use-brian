@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import pg from 'pg'
-import type { RetrievalActor, RetrievalStore } from '@use-brian/core'
+import type { RetrievalActor, RetrievalStore } from '@use-brian/core/retrieval/types.js'
 
 /**
  * Integration tests for createDbAggregateStore (company-brain WU-5.4).

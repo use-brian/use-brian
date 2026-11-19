@@ -1,6 +1,9 @@
 /** Explicit template selection for an uninitialized generation draft.
  * [COMP:api/office-generation-recovery] */
-import { OfficeGenerationBriefSchema, canRead, scopeGrantContains, OfficeGenerationTemplateSelection, type OfficeTemplateChoice } from '@use-brian/core'
+import { OfficeGenerationBriefSchema } from '@use-brian/core/office/generation/contracts.js'
+import { OfficeGenerationTemplateSelection, type OfficeTemplateChoice } from '@use-brian/core/office/tools.js'
+import { scopeGrantContains } from '@use-brian/agent-runtime/security/context-scope.js'
+import { canRead } from '@use-brian/agent-runtime/security/sensitivity.js'
 import {dispatchOfficeJobLocal} from './job-event-bus.js'
 import { getAppPool, applyRLSGucs, rollbackAndRelease } from '../db/client.js'
 import { defaultOfficeDbQuery, type OfficeDbQuery } from '../db/office-artifacts.js'

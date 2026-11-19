@@ -9,7 +9,7 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '../types.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { type Json, asRows, str, num, bool, obj, projectList, mapField, connectorError } from './_connector-result.js'
 
 // ── Result projections ─────────────────────────────────────────

@@ -125,11 +125,9 @@ export async function deleteAssistantFootprint(
   }
   if (problems.length > 0) throw blocked(problems)
 
-  // FORCE-RLS evidence tables (workspace_skill_scope_revisions) admit writes
-  // only under the system bypass, even from the owner role; the actor is who
-  // their triggers record. Transaction-local: both revert at COMMIT/ROLLBACK.
+  // Keep the actual actor for forced policies and trigger attribution.
   await client.query(
-    `SELECT set_config('app.system_bypass', 'true', true), set_config('app.current_user_id', $1, true)`,
+    `SELECT set_config('app.current_user_id', $1, true)`,
     [actorUserId],
   )
 

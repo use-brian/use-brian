@@ -2,9 +2,11 @@ import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { PoolClient } from 'pg'
-import { boundScopeSources, ContextScopeAccumulator, type ScopeSource } from '@use-brian/core'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { getAppPool, getPool, rollbackAndRelease } from '../../db/client.js'
-import { readAdmittedSessionQuery } from '../../db/session-query-reader.js'
+import { readAdmittedSessionQuery } from '../../db/conversation-store.js'
 import { addSessionMessage } from '../../db/sessions.js'
 import { persistentContextFixture } from './fixtures/persistent-context.js'
 
@@ -35,9 +37,9 @@ async function equalEdges(client: PoolClient, args: unknown[]) {
   return actual
 }
 async function guards(client: PoolClient) {
-  return (await client.query(`SELECT application_memory_statement_helpers_current() memory,
+  return (await client.query(`SELECT native_turn_helpers_current() memory,
     application_native_worklist_helpers_current() worklist,
-    application_native_covered_evidence_helpers_current() covered`)).rows[0]
+    native_turn_helpers_current() covered`)).rows[0]
 }
 
 describe.sequential('[COMP:api/application-persistence] native source-edge dispatch', () => {

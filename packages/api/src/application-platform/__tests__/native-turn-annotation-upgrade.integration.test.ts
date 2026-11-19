@@ -6,6 +6,7 @@ import { getPool } from '../../db/client.js'
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
 const pool = getPool()
+const canonical=(await pool.query("SELECT to_regprocedure('conversation_prepare_publications(uuid,uuid,jsonb)') IS NOT NULL current")).rows[0].current===true
 const migration = await readFile(new URL('../../../migrations/8196_native_turn_annotation_publication.sql', import.meta.url), 'utf8')
 const annotationUpgrade = migration.replace(/^BEGIN;\n/m, '').replace(/\nCOMMIT;\s*$/, '')
 const invalidationMigration = await readFile(new URL('../../../migrations/8195_native_publication_invalidation_contract.sql', import.meta.url), 'utf8')
@@ -14,7 +15,7 @@ const historicalTriggers = await readFile(new URL('./fixtures/native-invalidatio
 // The canonical forward bridge must refuse later executable versions. The
 // maintained runner executes this profile before installing migration 8196.
 const upgradeBoundary = process.env.BRIAN_NATIVE_PUBLICATION_UPGRADE_BOUNDARY === '8195'
-  || (await pool.query(`SELECT to_regprocedure('public.publish_native_turn_annotation(uuid,uuid,uuid,uuid,jsonb,text,jsonb,uuid,bigint)') IS NULL AS predecessor`)).rows[0].predecessor
+  || (await pool.query(`SELECT to_regprocedure('public.publish_native_turn_annotation(uuid,uuid,uuid,uuid,jsonb,text,jsonb,uuid,bigint)') IS NULL AND to_regprocedure('public.conversation_prepare_publications(uuid,uuid,jsonb)') IS NULL AS predecessor`)).rows[0].predecessor
 const guardQuery = `SELECT native_turn_helpers_current() native,
   native_turn_publication_contract() publication,application_native_worklist_helpers_current() worklist,
   application_native_dependency_batch_helpers_current() dependency,
@@ -40,7 +41,11 @@ async function inRollback(action: (client: PoolClient) => Promise<void>) {
 
 describe.sequential('[COMP:api/native-turn-frame] annotation publication guard compatibility', () => {
   it('keeps all six authority and structural guards current after migrations', async () => {
-    expect((await pool.query(guardQuery)).rows[0]).toEqual(healthyGuards)
+  if(canonical){
+   expect((await pool.query('SELECT native_turn_helpers_current() reader,native_turn_publication_contract() publication')).rows[0]).toEqual({reader:true,publication:true})
+   for(const signature of ['application_memory_statement_helpers_current()','application_native_dependency_batch_helpers_current()','application_native_field_reference_helpers_current()'])
+    expect((await pool.query('SELECT to_regprocedure($1) retired',[signature])).rows[0].retired).toBeNull()
+  }else expect((await pool.query(guardQuery)).rows[0]).toEqual(healthyGuards)
   })
 })
 

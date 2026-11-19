@@ -7,23 +7,27 @@
  */
 
 import {
-  boundScopeSources,
+  pinAccessCeiling,
+  intersectAccessCeilings,
+  type AccessCeiling,
+} from '@use-brian/agent-runtime/security/access-ceiling.js'
+import {
   canonicalScopeGrant,
-  pinAccessCeiling,intersectAccessCeilings,
   ContextScopeAccumulator,
   intersectScopeGrants,
-  maxSensitivity,
   scopeEvidenceFromRows,
   scopeGrantContains,
-  type DerivedWriteEvidence,
-  type Sensitivity,
   type TurnScope,
   type ScopeGrant,
-  type AccessCeiling,
-  type ResourceScope,
-  type ScopeSource,
-  type DepartmentReadGrant,
-} from '@use-brian/core'
+} from '@use-brian/agent-runtime/security/context-scope.js'
+import type { DepartmentReadGrant } from '@use-brian/agent-runtime/security/department-read.js'
+import type {
+  DerivedWriteEvidence,
+  ResourceScope,
+  ScopeSource,
+} from '@use-brian/agent-runtime/security/derived-scope.js'
+import { maxSensitivity, type Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import {
   createDbContextScopeStore,
   type ContextScopeStore,
@@ -146,12 +150,22 @@ export type ResolveTurnScopeInput = {
   systemRead?: boolean
 }
 
+export type ScopeAuthorityFacts = {
+  assistant: {teamGrant: ScopeGrant; projectGrant: ScopeGrant} | null
+  team: Pick<ContextTeam, 'id' | 'name' | 'key' | 'compartmentKey' | 'status' | 'readBundle'> | null
+  project: Pick<WorkspaceProject, 'id' | 'name' | 'status' | 'shared'> | null
+}
+
 export type ResolveTurnScopeDeps = {
+  /** Complete current authority tuple; no store fallback is permitted. */
+  scopeFacts?: ScopeAuthorityFacts
   store?: ContextScopeStore
   resolveReadCeilings?: typeof resolveOperationCeilingsSystem
   resolveWorkspaceRole?: typeof getWorkspaceRoleSystem
   /** Permission model v2 snapshot reads, for a workspace whose flag is on. Defaults to the database. */
-  departmentRead?: { query: <R>(sql: string, values: unknown[]) => Promise<{ rows: R[] }>; now?: () => Date }
+  departmentRead?: { query: <R>(sql: string, values: unknown[]) => Promise<{ rows: R[] }>; now?: () => Date;
+    /** Fresh facts from the session renewal statement, never a previous boundary. */
+    facts?: {workspaceId:string;userId:string;assistantId:string;loaded:Awaited<ReturnType<typeof loadDepartmentSnapshot>>} }
 }
 
 function selectedBinding(input: ResolveTurnScopeInput): {
@@ -197,7 +211,7 @@ function requireActiveOrHistorical(
 }
 
 /** A nested execution may narrow the caller projection but cannot replace it. */
-function withinExecutingCaller(scope:ResolvedTurnScope):ResolvedTurnScope {
+export function withinExecutingCaller(scope:ResolvedTurnScope):ResolvedTurnScope {
   const parent=currentAgentAccess()
   if(!parent)return scope
   const own=pinAccessCeiling(scope.access)
@@ -224,6 +238,21 @@ export async function resolveTurnScopeSystem(
   deps: ResolveTurnScopeDeps = {},
 ): Promise<ResolvedTurnScope> {
   return resolveScope(input, deps, withinExecutingCaller)
+}
+
+/**
+ * The same resolution as `resolveTurnScopeSystem` without the executing
+ * caller's ambient projection (`withinExecutingCaller`). A lease pins and
+ * renews through this, so the two comparisons see the same facts under the
+ * same scope wherever the check runs: a narrower call-site projection, such as
+ * a shared room's audience around a tool call, is not revocation. Authority
+ * metadata only; never used to read content or to widen an execution.
+ */
+export async function resolveTurnScopeMetadataSystem(
+  input: ResolveTurnScopeInput,
+  deps: ResolveTurnScopeDeps = {},
+): Promise<ResolvedTurnScope> {
+  return resolveScope(input, deps, scope => scope)
 }
 
 /** Authority metadata only: lease renewal must not mistake inherited narrowing for revocation. */
@@ -341,21 +370,21 @@ async function resolveScope(
   const store = needsStore ? (deps.store ?? createDbContextScopeStore()) : deps.store
 
   if (input.assistant.teamScopeMode === 'assigned') {
-    const principal = await store!.resolveAssistantPrincipalSystem(input.assistant.id, workspaceId)
+    const principal = deps.scopeFacts ? deps.scopeFacts.assistant : await store!.resolveAssistantPrincipalSystem(input.assistant.id, workspaceId)
     if (!principal) throw new ContextNotAvailableError('workspace', 'not_found')
     effectiveCompartments = intersectScopeGrants(effectiveCompartments, principal.teamGrant)
     mutationCompartments = intersectScopeGrants(mutationCompartments, principal.teamGrant)
     assistantProjectGrant = externalPrincipal ? [] : principal.projectGrant
   } else if (input.assistant.projectScopeMode === 'assigned') {
-    const principal = await store!.resolveAssistantPrincipalSystem(input.assistant.id, workspaceId)
+    const principal = deps.scopeFacts ? deps.scopeFacts.assistant : await store!.resolveAssistantPrincipalSystem(input.assistant.id, workspaceId)
     if (!principal) throw new ContextNotAvailableError('workspace', 'not_found')
     assistantProjectGrant = externalPrincipal ? [] : principal.projectGrant
   }
 
   let activeTeam: ResolvedTurnScope['activeTeam'] = null
   if (binding.groupId) {
-    const team = await store!.getTeamSystem(workspaceId, binding.groupId)
-    if (!team) throw new ContextNotAvailableError('team', 'not_found')
+    const team = deps.scopeFacts ? deps.scopeFacts.team : await store!.getTeamSystem(workspaceId, binding.groupId)
+    if (!team || team.id !== binding.groupId) throw new ContextNotAvailableError('team', 'not_found')
     requireActiveOrHistorical('team', team.status, binding.historical)
     if (!scopeGrantContains(effectiveCompartments, [team.compartmentKey])) {
       throw new ContextNotAvailableError('team', 'outside_grant')
@@ -378,8 +407,8 @@ async function resolveScope(
   // against the v2 grant.
   let sharedProject = false
   if (binding.projectId) {
-    const project = await store!.getProjectSystem(workspaceId, binding.projectId)
-    if (!project) throw new ContextNotAvailableError('project', 'not_found')
+    const project = deps.scopeFacts ? deps.scopeFacts.project : await store!.getProjectSystem(workspaceId, binding.projectId)
+    if (!project || project.id !== binding.projectId) throw new ContextNotAvailableError('project', 'not_found')
     sharedProject = project.shared === true
     requireActiveOrHistorical('project', project.status, binding.historical)
     if (!sharedProject && !scopeGrantContains(assistantProjectGrant, [project.id])) {
@@ -407,6 +436,9 @@ async function resolveScope(
     // Actionable setup (§4 "Assistants"): name the missing assistant
     // membership instead of an unexplained refusal.
     const query = deps.departmentRead?.query ?? flagged.departmentQuery ?? systemQuery as <R>(sql: string, values: unknown[]) => Promise<{ rows: R[] }>
+    // Missing shared-Project admission is already authoritative. Diagnostics
+    // must not reopen the database from a complete lease snapshot.
+    if (deps.scopeFacts) throw new ContextNotAvailableError('project', 'outside_grant')
     const people = await query<{ human: boolean; assistant: boolean }>(
       `SELECT project_member_live($1,'user',$2) OR EXISTS (SELECT 1 FROM workspace_members m WHERE m.workspace_id=$4 AND m.user_id=$2 AND m.role='owner') AS human,
               project_member_live($1,'assistant',$3) AS assistant`, [activeProject!.id, input.userId, input.assistant.id, workspaceId]).catch(() => ({ rows: [] }))
@@ -466,7 +498,9 @@ async function resolveDepartmentGrant(
   // resolveScope already refused an assistant from another workspace, so an
   // id with no assistant row here is a member-only probe (access inspection
   // passes the member's own id): no assistant acts, identity in min().
-  const acting = (await deps.query<{ id: string }>('SELECT id FROM assistants WHERE id = $1 AND workspace_id = $2',
+  const facts=deps.facts
+  if(facts&&(facts.workspaceId!==workspaceId||facts.userId!==input.userId||facts.assistantId!==input.assistant.id))throw new Error('authority_unavailable')
+  const acting = facts ? true : (await deps.query<{ id: string }>('SELECT id FROM assistants WHERE id = $1 AND workspace_id = $2',
     [input.assistant.id, workspaceId])).rows.length > 0
   const read = {
     workspaceId,
@@ -475,7 +509,7 @@ async function resolveDepartmentGrant(
     contextDepartment,
     credential: input.memberMode === 'assistant' ? { cap: input.assistant.clearance, binding: null } : null,
   }
-  const loaded = await loadDepartmentSnapshot(deps.query, read)
+  const loaded = facts?.loaded ?? await loadDepartmentSnapshot(deps.query, read)
   const principal = external ? { kind: 'anonymous' as const, id: 'anonymous' } : loaded.principal
   return resolveDepartmentReadGrant(loaded.snapshot, principal, read, deps.now?.() ?? new Date())
 }
@@ -489,7 +523,7 @@ async function resolveDepartmentGrant(
  * Project admission, so it cannot widen anything.
  */
 export function automaticContextAccess<T extends Pick<ResolvedTurnScope, 'access'>['access']>(access: T, activeProjectId: string | null): T {
-  access = { ...access, memoryContext: { ...(access as import('@use-brian/core').AccessContext).memoryContext, ...(activeProjectId ? { projectId: activeProjectId } : {}) } }
+  access = { ...access, memoryContext: { ...(access as import('@use-brian/agent-runtime/security/access-context.js').AccessContext).memoryContext, ...(activeProjectId ? { projectId: activeProjectId } : {}) } }
   const grant = access.departmentRead
   if (!grant?.projects) return access
   const kept = Object.fromEntries(Object.entries(grant.projects).filter(([id]) => id === activeProjectId))

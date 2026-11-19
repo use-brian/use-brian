@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import type { JobStore, ScheduledJob } from '@use-brian/core'
+import type { JobStore, ScheduledJob } from '@use-brian/core/scheduling/types.js'
 import { createJobExecutor } from '../executor.js'
 
 /**

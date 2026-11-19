@@ -1,7 +1,7 @@
 /** Immutable Office source bindings and high-water output classification.
  * [COMP:api/office-resources] */
 import { createHash } from 'node:crypto'
-import type { WorkspaceFile } from '@use-brian/core'
+import type { WorkspaceFile } from '@use-brian/core/workspace-files/types.js'
 
 export type OfficeFileBinding = {
   fileId: string

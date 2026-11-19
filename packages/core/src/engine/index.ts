@@ -1,48 +1,56 @@
-export { queryLoop, assertModelOutputAuthority, isConnectionDropError, isEndpointUnreachableError, streamErrorCode, streamErrorCodes } from './query-loop.js'
-export type { QueryEvent, QueryLoopOptions, TerminalStopReason } from './query-loop.js'
-export { createTurnOutputCollector } from './turn-output.js'
+export { applyOutputRevisions, outputContentDigest } from '@use-brian/agent-runtime/engine/output-provenance.js'
+export type { QueryOutputProvenance, OutputRecord, OutputRevision, OutputDisposition } from '@use-brian/agent-runtime/engine/output-provenance.js'
+// The core-composed loop (default ports wired); see query-loop-defaults.ts.
+export { queryLoop } from './query-loop-defaults.js'
+export { assertModelInputAuthority, assertModelOutputAuthority, assertOutputOperationAuthority, isConnectionDropError, isEndpointUnreachableError, streamErrorCode, streamErrorCodes } from '@use-brian/agent-runtime/engine/query-loop.js'
+export type { QueryLoopPorts, ToolSchemaSelector, RoutineReadPhase } from '@use-brian/agent-runtime/engine/query-loop-ports.js'
+export type { ToolSelectionOptions, ToolSelectionResult } from './tool-selection.js'
+export type { RoutineReadOptions } from './routine-read.js'
+export type { QueryEvent, QueryLoopOptions, QueryUsageSnapshot, TerminalStopReason } from '@use-brian/agent-runtime/engine/query-loop.js'
+export { createTurnOutputCollector } from '@use-brian/agent-runtime/engine/turn-output.js'
 export type {
   TurnOutputCollector,
+  FinalizedOutputSelection,
   TurnOutputEmptyReason,
   TurnOutputFormat,
   TurnOutputSelection,
-} from './turn-output.js'
+} from '@use-brian/agent-runtime/engine/turn-output.js'
 export {
   matchesDisputedFigure,
   buildDisputeContextNote,
-} from './grounding-gate.js'
+} from '@use-brian/agent-runtime/engine/grounding-gate.js'
 export {
   formatMidTurnInput,
   resolveDrainMode,
   shouldInterruptStreamForSteer,
   MID_TURN_INPUT_MAX_CHARS,
-} from './turn-inbox.js'
+} from '@use-brian/agent-runtime/engine/turn-inbox.js'
 export type {
   MidTurnInputMode,
   PendingTurnInput,
   TurnInboxPeek,
   TurnInboxPort,
-} from './turn-inbox.js'
-export { createToolExecutor, formatToolError, NO_TOOL_TIMEOUT } from './tool-executor.js'
-export { NOOP_TURN_LEDGER, safeTrace } from './turn-ledger.js'
+} from '@use-brian/agent-runtime/engine/turn-inbox.js'
+export { createToolExecutor, formatToolError, NO_TOOL_TIMEOUT } from '@use-brian/agent-runtime/engine/tool-executor.js'
+export { NOOP_TURN_LEDGER, safeTrace } from '@use-brian/agent-runtime/engine/turn-ledger.js'
 export type {
   TurnLedger,
   TurnLedgerActor,
   TurnRetrievalProvenance,
   TurnTrace,
   TurnTraceStart,
-} from './turn-ledger.js'
+} from '@use-brian/agent-runtime/engine/turn-ledger.js'
 export {
   createStallWatchdog,
   withStallSignal,
   isStalledError,
   StalledError,
   DEFAULT_STALL_IDLE_MS,
-} from './stall-watchdog.js'
-export type { ProgressClock, StallWatchdog, StallInfo } from './stall-watchdog.js'
-export type { ToolExecutor, ToolExecutorOptions } from './tool-executor.js'
-export { createLoopDetector, DEFAULT_HARD_LIMIT } from './loop-detector.js'
-export type { LoopDetector, LoopAction } from './loop-detector.js'
+} from '@use-brian/agent-runtime/engine/stall-watchdog.js'
+export type { ProgressClock, StallWatchdog, StallInfo } from '@use-brian/agent-runtime/engine/stall-watchdog.js'
+export type { ToolExecutor, ToolExecutorOptions } from '@use-brian/agent-runtime/engine/tool-executor.js'
+export { createLoopDetector, DEFAULT_HARD_LIMIT } from '@use-brian/agent-runtime/engine/loop-detector.js'
+export type { LoopDetector, LoopAction } from '@use-brian/agent-runtime/engine/loop-detector.js'
 export {
   resolveResearchBudget,
   ResearchDepthConfigSchema,
@@ -62,7 +70,7 @@ export {
   stripUnsignedToolUses,
   modelRequiresToolSignatures,
   SYNTHETIC_TOOL_RESULT_PLACEHOLDER,
-} from './tool-pairing.js'
+} from '@use-brian/agent-runtime/engine/tool-pairing.js'
 export {
   elideStaleDocToolResults,
   DOC_PAGE_STATE_TOOLS,
@@ -74,7 +82,7 @@ export type {
   ToolUseHookContext,
   PreToolUseDirective,
   PostToolUseHookContext,
-} from './hooks.js'
+} from '@use-brian/agent-runtime/engine/hooks.js'
 
 export {consumeHostReadObservation,combineHostReadObservations,assertHostObservationPublication} from './routine-read.js'
 export type {RoutineCalendarCall} from './routine-read.js'

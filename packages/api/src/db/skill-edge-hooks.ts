@@ -1,12 +1,13 @@
 import type {
-  AccessContext,
   EdgeType,
   EntityLinksStore,
   EntitySource,
   LinkKind,
-  Sensitivity,
-} from '@use-brian/core'
-import { extractSkillMarkdownLinks, parseSkillReferences } from '@use-brian/core'
+} from '@use-brian/core/entities/types.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { extractSkillMarkdownLinks } from '@use-brian/core/skills/bundle.js'
+import { parseSkillReferences } from '@use-brian/core/skills/references.js'
 
 /**
  * Skill edge derivation (`docs/architecture/engine/skill-system.md` §6).

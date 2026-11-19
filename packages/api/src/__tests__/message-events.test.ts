@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { IncomingMessage } from '@use-brian/channels'
-import { createWorkflowEventDispatcher } from '../../../core/src/workflow/event-trigger.js'
+import { createWorkflowEventDispatcher } from '@use-brian/core/workflow/event-trigger.js'
 import type { ChannelType } from '../db/channels-store.js'
 import {
   dispatchIncomingMessageEvent,

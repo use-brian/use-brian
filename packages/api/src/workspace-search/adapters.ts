@@ -3,6 +3,7 @@ import { WORKSPACE_SEARCH_FAMILIES, type WorkspaceSearchFamily } from '@use-bria
 import { searchDatabase } from './database.js'
 import type { SearchAdapter, SearchAdapters, SearchCandidate } from './service.js'
 import { OFFICE_SEARCH_REVISION } from './office-projection.js'
+import { conversationReadersActive } from '../db/conversation-visibility.js'
 
 // All source reads run on the authenticated app role, in addition to these
 // explicit current-department and owner predicates. RLS retains source ACLs.
@@ -16,7 +17,7 @@ const brainTarget = (alias: string, primitive: string) => `jsonb_build_object('t
 const jsonText = (expression: string) => `(SELECT string_agg(value #>> '{}', ' ') FROM jsonb_path_query(coalesce(${expression}, '{}'::jsonb), 'strict $.**.text') value WHERE jsonb_typeof(value)='string')`
 
 /** Shared authorization, with native Project filtering before projection. */
-function searchSourceSql(projectScoped = false, countsOnly = false): Record<WorkspaceSearchFamily, string> {
+function searchSourceSql(projectScoped = false, countsOnly = false, conversationRecord = false): Record<WorkspaceSearchFamily, string> {
   const project = (alias: string, column?: string) => !projectScoped ? '' : column
     ? ` AND ${alias}.${column}=$3::uuid`
     // UUID equality is leakproof, unlike array containment: PostgreSQL may
@@ -76,7 +77,12 @@ function searchSourceSql(projectScoped = false, countsOnly = false): Record<Work
       AND office_root_scope_allows(a.id,a.workspace_id,a.sensitivity,a.compartments,a.project_ids,a.visibility_user_ids,a.visibility_assistant_ids,false)
       AND (a.creator_user_id=$2 OR a.owner_user_id=$2 OR a.default_workspace_role<>'deny'
         OR EXISTS(SELECT 1 FROM office_artifact_grants g WHERE g.artifact_id=a.id AND g.user_id=$2 AND g.revoked_at IS NULL AND g.role<>'deny'))`,
-  conversations: `${select('conversation', 's', 's.title', `(SELECT string_agg(
+  conversations: conversationRecord
+    ? `${select('conversation', 's', "read_conversation_title_current(s.id)->>'title'", 'read_conversation_search_text_current(s.id)',
+    's.last_active_at', "jsonb_build_object('type','conversation','id',s.id,'visibility',s.visibility)")}
+    FROM sessions s JOIN assistants a ON a.id=s.assistant_id WHERE coalesce(s.workspace_id,a.workspace_id)=$1${project('s', 'context_project_id')}
+      AND public.assistant_placement_visible($2,s.assistant_id) AND ${sessionKindSql.conversationLane('s')} AND ${sessionKindSql.searchableConversation('s')}`
+    : `${select('conversation', 's', 's.title', `(SELECT string_agg(
       CASE WHEN jsonb_typeof(m.content)='string' THEN m.content#>>'{}'
         WHEN jsonb_typeof(m.content)='array' THEN (SELECT string_agg(block->>'text',' ') FROM jsonb_array_elements(m.content) block WHERE block->>'type'='text')
         ELSE '' END, ' ' ORDER BY m.sequence_num)
@@ -99,13 +105,19 @@ function searchSourceSql(projectScoped = false, countsOnly = false): Record<Work
 export const SEARCH_SOURCE_SQL = searchSourceSql()
 export const PROJECT_SEARCH_SOURCE_SQL = searchSourceSql(true)
 export const PROJECT_COUNT_SOURCE_SQL = searchSourceSql(true, true)
+const RECORD_SEARCH_SOURCE_SQL = searchSourceSql(false, false, true)
+const PROJECT_RECORD_SEARCH_SOURCE_SQL = searchSourceSql(true, false, true)
+const PROJECT_RECORD_COUNT_SOURCE_SQL = searchSourceSql(true, true, true)
+const currentSource = (kind: WorkspaceSearchFamily) => (conversationReadersActive() ? RECORD_SEARCH_SOURCE_SQL : SEARCH_SOURCE_SQL)[kind]
+export const currentProjectSearchSource = (kind: WorkspaceSearchFamily) => (conversationReadersActive() ? PROJECT_RECORD_SEARCH_SOURCE_SQL : PROJECT_SEARCH_SOURCE_SQL)[kind]
+export const currentProjectCountSource = (kind: WorkspaceSearchFamily) => (conversationReadersActive() ? PROJECT_RECORD_COUNT_SOURCE_SQL : PROJECT_COUNT_SOURCE_SQL)[kind]
 
 const normalized = (expression: string) => `lower(regexp_replace(normalize(coalesce(${expression},''),NFKC),'[[:space:]]+',' ','g'))`
 
 export function createSearchAdapters(): SearchAdapters {
   return Object.fromEntries(WORKSPACE_SEARCH_FAMILIES.map(kind => [kind, async (input: Parameters<SearchAdapter>[0]) => {
     const sql = `WITH authorized AS MATERIALIZED (
-        ${SEARCH_SOURCE_SQL[kind]}
+        ${currentSource(kind)}
       ), normalized AS (
         SELECT *,btrim(${normalized('title')}) AS name,btrim(${normalized('body')}) AS text FROM authorized
         WHERE EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$2)
@@ -136,7 +148,7 @@ export function createSearchAdapters(): SearchAdapters {
 /** Identity read for revocation-safe preview/open; no unbounded query or client ACL. */
 export async function readSearchItem(scope: {userId:string;workspaceId:string}, kind:WorkspaceSearchFamily, key:string, signal:AbortSignal) {
   const rows=await searchDatabase<{key:string;id:string;title:string;body:string;target:SearchCandidate['target'];status:string|null}>(scope,signal,
-    `WITH authorized AS MATERIALIZED (${SEARCH_SOURCE_SQL[kind]})
+    `WITH authorized AS MATERIALIZED (${currentSource(kind)})
      SELECT key,id,title,left(body,4000) AS body,target,status FROM authorized WHERE key=$3
        AND status IS DISTINCT FROM 'index_pending'
        AND EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$2) LIMIT 1`,[scope.workspaceId,scope.userId,key])

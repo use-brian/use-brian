@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { MAILBOX_ATTACHMENT_MAX_BYTES } from '@use-brian/core'
+import { MAILBOX_ATTACHMENT_MAX_BYTES } from '@use-brian/core/tools/base/mailbox.js'
 import {
   createMailboxApi,
   resolveSenderAddress,

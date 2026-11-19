@@ -3,14 +3,14 @@ import request from 'supertest'
 import { createTestApp } from './helpers.js'
 
 import { pageActionsRoutes, type PageActionsRouteOptions } from '../page-actions.js'
+import type { PageAction } from '@use-brian/core/doc/page-action-types.js'
+import type { ExecutorDeps } from '@use-brian/core/workflow/executor.js'
 import type {
-  ExecutorDeps,
-  PageAction,
   WorkflowDefinition,
   WorkflowRecord,
   WorkflowRunRecord,
   WorkflowStepRunRecord,
-} from '@use-brian/core'
+} from '@use-brian/core/workflow/types.js'
 
 const WS = '00000000-0000-0000-0000-000000000001'
 const USER = '00000000-0000-0000-0000-000000000002'

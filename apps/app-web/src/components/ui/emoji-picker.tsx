@@ -27,10 +27,8 @@ import { isPhoneViewport } from "@/lib/viewport";
 
 import * as React from "react";
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
-import type { LucideIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-import { isImageIcon } from "@use-brian/shared/page-icon";
 import { useT } from "@/lib/i18n/client";
 
 export type EmojiPickerProps = {
@@ -165,68 +163,6 @@ function EmojiMart({
   }, [perLine]);
 
   return <div ref={ref} />;
-}
-
-/**
- * The leading page-icon as a self-contained picker trigger. Renders the
- * chosen emoji when `icon` is set, otherwise the type-derived lucide
- * glyph (`fallback`). Clicking opens the `<EmojiPicker>`; picking calls
- * `onSetIcon(emoji | null)`.
- *
- * A *separate button from the row's navigation target* — rendered as a
- * sibling of the title button so the icon opens the picker while the
- * title navigates (never a button nested inside a button).
- * `stopPropagation` keeps a row-level drag/select from firing on tap.
- */
-export function PageIconButton({
-  icon,
-  fallback: Fallback,
-  onSetIcon,
-  side,
-  align,
-  className,
-  open,
-  onOpenChange,
-}: {
-  icon: string | null;
-  fallback: LucideIcon;
-  onSetIcon: (icon: string | null) => void;
-  side?: EmojiPickerProps["side"];
-  align?: EmojiPickerProps["align"];
-  /** Extra classes for the trigger button (sizing per row context). */
-  className?: string;
-  /** Controlled open — lets a sibling menu item open this picker. */
-  open?: boolean;
-  onOpenChange?: (open: boolean) => void;
-}) {
-  const t = useT().docPage.emojiPicker;
-  return (
-    <EmojiPicker
-      onPick={onSetIcon}
-      side={side}
-      align={align}
-      open={open}
-      onOpenChange={onOpenChange}
-      trigger={
-        <button
-          type="button"
-          aria-label={t.iconButtonAria}
-          onClick={(e) => e.stopPropagation()}
-          onPointerDown={(e) => e.stopPropagation()}
-          className={cn(
-            "flex shrink-0 items-center justify-center rounded hover:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
-            className,
-          )}
-        >
-          {icon && !isImageIcon(icon) ? (
-            <span className="text-[15px] leading-none">{icon}</span>
-          ) : (
-            <Fallback className="size-4 text-sidebar-foreground/55" />
-          )}
-        </button>
-      }
-    />
-  );
 }
 
 /**

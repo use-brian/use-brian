@@ -22,28 +22,30 @@ import { randomUUID } from 'node:crypto'
 
 import { z } from 'zod'
 import {
-  buildTool,
   blueprintRecordToBlocks,
+  recordCompleteness,
+  validateFieldValue,
+  type BlueprintRecordFields,
+} from '@use-brian/core/doc/blueprint-record.js'
+import {
   extractionSpecSchema,
   extractionSpecToBlocks,
   fieldKeyFromHeading,
-  markdownToBlocks,
-  notFoundFailure,
-  recordCompleteness,
-  resolveWriteScope,
-  scopeEvidenceFromRows,
-  toolFailure,
-  validateFieldValue,
   BLUEPRINT_CAPTURE_KINDS,
   ENTITY_REF_KINDS,
   EXTRACTION_FIELD_TYPES,
-  type BlueprintRecordFields,
   type CustomPageTemplateSummary,
-  type DocPageStore,
   type ExtractionSpec,
-  type Tool,
-} from '@use-brian/core'
-import type { SavedViewStore } from '@use-brian/core'
+} from '@use-brian/core/doc/custom-template-types.js'
+import { markdownToBlocks } from '@use-brian/core/doc/markdown.js'
+import type { DocPageStore } from '@use-brian/core/doc/tools.js'
+import {
+  resolveWriteScope,
+  scopeEvidenceFromRows,
+} from '@use-brian/agent-runtime/security/context-scope.js'
+import { notFoundFailure, toolFailure } from '@use-brian/agent-runtime/tools/tool-failure.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
+import type { SavedViewStore } from '@use-brian/core/views/types.js'
 import type { PageTemplateStore } from '../db/page-templates-store.js'
 import type { BlueprintRecord, BlueprintRecordStore } from '../db/blueprint-records-store.js'
 import { createRecordPageProjector } from './synthesize.js'

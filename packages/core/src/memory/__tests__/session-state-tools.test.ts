@@ -4,7 +4,7 @@ import type {
   SessionStateRecord,
   SessionStateStore,
 } from '../session-state-types.js'
-import type { ToolContext } from '../../tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 function makeRecord(overrides: Partial<SessionStateRecord> = {}): SessionStateRecord {
   return {

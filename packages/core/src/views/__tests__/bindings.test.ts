@@ -12,7 +12,7 @@ import type { TaskStore } from '../../tasks/types.js'
 import type { WorkflowRunStore } from '../../workflow/types.js'
 import type { WorkspaceDirectoryStore } from '../../workspace/types.js'
 import { buildPayload, type BindingDeps } from '../bindings.js'
-import { bindScopeSources,boundScopeSources } from '../../security/source-evidence.js'
+import { bindScopeSources,boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { viewPayloadSchema } from '../a2ui.js'
 
 const WORKSPACE_ID = '00000000-0000-0000-0000-000000000001'

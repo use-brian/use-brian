@@ -12,7 +12,7 @@
 
 import { z } from 'zod'
 import { query } from '../db/client.js'
-import type { Sensitivity } from '@use-brian/core'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 
 export type KnowledgeCaptureRule = {
   id: string

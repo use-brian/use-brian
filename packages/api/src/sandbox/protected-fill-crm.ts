@@ -1,4 +1,6 @@
-import type { AccessContext, EntityRecord, ProtectedFillScope, ProtectedFillSource } from '@use-brian/core'
+import type { EntityRecord } from '@use-brian/core/entities/types.js'
+import type { ProtectedFillScope, ProtectedFillSource } from '@use-brian/core/sandbox/protected-fill.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 
 /** Uses the same member viewpoint and gated entity lookup as trusted CRM UI.
  * Never call a model CRM tool, log a record, or reflect source errors.

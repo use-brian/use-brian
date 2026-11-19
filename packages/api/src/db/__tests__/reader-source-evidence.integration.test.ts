@@ -1,7 +1,14 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
-import { boundScopeSource, ContextScopeAccumulator, createMemoryTools, scopeEvidenceFromRows,
-  type AccessContext, type ScopeSource, type ToolContext } from '@use-brian/core'
+import { createMemoryTools } from '@use-brian/core/memory/tools.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import {
+  ContextScopeAccumulator,
+  scopeEvidenceFromRows
+} from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { boundScopeSource } from '@use-brian/agent-runtime/security/source-evidence.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { getAppPool, getPool } from '../client.js'
 import { createDbMemoryStore } from '../memory-store.js'
 import { createDbWorkspaceFilesStore } from '../workspace-files-store.js'
@@ -67,6 +74,42 @@ describe('[COMP:api/reader-source-evidence] canonical tool and prompt provenance
       expect(rows).toEqual([])
       expect(scopeEvidenceFromRows(rows).sources).toBeUndefined()
     }
+  })
+
+  it('keeps paired prompt lists equivalent to the scalar reads under current viewer limits', async () => {
+    const f = await fixture()
+    const common = { workspaceId: f.ctx.workspaceId, assistantId: f.ctx.assistantId,
+      createdByUserId: f.ctx.userId, sensitivity: 'internal' as const }
+    const overlap = await createMemory({ ...common, userId: null, scope: 'workspace',
+      summary: 'Private team voice', tags: ['self-profile', 'voice'], confidence: 0.9,
+      compartments: ['finance'], projectIds: f.ctx.projectIds! })
+    const tagged = await createMemory({ ...common, userId: f.ctx.userId, scope: 'shared',
+      summary: 'Current personal voice', tags: ['voice'], confidence: 0.7 })
+    const expired = await createMemory({ ...common, userId: null, scope: 'workspace',
+      summary: 'Former team voice', tags: ['self-profile', 'voice'], confidence: 1 })
+    await pool.query('UPDATE memories SET valid_to=now() WHERE id=$1', [expired.id])
+
+    const check = async (ctx: AccessContext, tag: string) => {
+      const paired = await f.store.getWorkspacePromptMemories!(ctx, tag)
+      expect(paired).toEqual({ identity: await f.store.getWorkspaceIdentity(ctx),
+        tagged: await f.store.getWorkspaceMemoriesByCategory(ctx, tag) })
+      for (const rows of [paired.identity, paired.tagged]) {
+        expect(scopeEvidenceFromRows(rows).sources ?? [])
+          .toEqual(await Promise.all(rows.map(row => f.canonical('memory', row.id))))
+        expect(rows.some(row => row.id === expired.id)).toBe(false)
+      }
+      return paired
+    }
+
+    const paired = await check(f.ctx, 'voice')
+    expect(paired.identity.map(row => row.id)).toContain(overlap.id)
+    expect(paired.tagged.map(row => row.id)).toEqual([overlap.id, tagged.id])
+    const withoutIdentity = await check({ ...f.ctx, compartments: [], projectIds: [] }, 'voice')
+    expect(withoutIdentity.identity).toEqual([])
+    expect(withoutIdentity.tagged.map(row => row.id)).toEqual([tagged.id])
+    const withoutVoice = await check(f.ctx, 'unmatched-voice-tag')
+    expect(withoutVoice.identity).toEqual(paired.identity)
+    expect(withoutVoice.tagged).toEqual([])
   })
 
   it('carries getMemory evidence into an explicitly derived write and invalidates it on source change', async () => {

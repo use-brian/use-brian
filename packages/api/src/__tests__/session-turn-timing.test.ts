@@ -12,7 +12,7 @@ describe('[COMP:api/session-turn-reconnect] initial turn timing', () => {
     const start = new Date('2026-01-01T00:00:00Z')
     vi.setSystemTime(start.getTime() + 45_000)
     const session = { id: 'session-fixture', userId: 'viewer', channelType: 'web',
-      visibility: 'personal', anchorKind: 'none', status, turnStartedAt: start }
+      visibility: 'personal', anchorKind: 'none', status, turnStartedAt: start, turnId: 'a'.repeat(64), turnEndReason: status === 'idle' ? 'completed' : null }
     vi.spyOn(sessions, 'findSessionById').mockResolvedValue(session as sessions.Session)
     const gate = vi.spyOn(authority, 'gateSessionRead').mockResolvedValue(null)
     const router = sessionRoutes()
@@ -26,7 +26,7 @@ describe('[COMP:api/session-turn-reconnect] initial turn timing', () => {
         await handler(req as never, res as never, vi.fn())
         expect(gate).toHaveBeenCalledWith('viewer', session)
         const frame = res.write.mock.calls[0][0] as string
-        expect(frame).toBe(`event: status\ndata: ${JSON.stringify({ status, startedAt: status === 'running' ? start.getTime() : null })}\n\n`)
+        expect(frame).toBe(`event: status\ndata: ${JSON.stringify({ status, turnId: session.turnId, turnEndReason: session.turnEndReason, startedAt: status === 'running' ? start.getTime() : null })}\n\n`)
       } finally {
         req.emit('close'); res.emit('close')
       }

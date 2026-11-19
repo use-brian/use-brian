@@ -39,6 +39,7 @@ import { fetchWorkspaceTasks } from "@/lib/api/tasks";
 import { leaseSurfaceContent, surfaceContentRemaining } from "@/lib/offline/surface-content-cache";
 import { getUserInfo } from "@/lib/user";
 import { currentOfflineWriteAuthority } from "@/lib/offline/application-write-authority";
+import { chatHistoryMemoryKey } from "@/lib/offline/chat-history-cache";
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 import { getView, listWorkspaceAssistants } from "@/lib/api/views";
 import { listWorkflows } from "@/lib/api/workflow";
@@ -47,7 +48,6 @@ import { officeMetadataRemaining } from "@/lib/office/metadata";
 import type { CacheLifecycle } from "@/lib/surface-cache";
 import { listOfficeArtifacts } from "@/lib/office/api";
 import { listTools as listShopifyTools } from "@/lib/api/shopify";
-import { associationModuleRemaining } from "@/lib/api/association";
 import { fetchLiveRoster, liveRosterRemaining } from "@/lib/api/live";
 
 /**
@@ -59,7 +59,6 @@ export type WarmableSurface =
   | "projects"
   | "tasks"
   | "crm"
-  | "association"
   | "workflow"
   | "studio"
   | "chat"
@@ -138,23 +137,6 @@ export function surfaceDataKey(
  */
 export function crmConfigCacheKey(workspaceId: string): string {
   return `${surfaceDataKey("crm", workspaceId)}:config`;
-}
-
-export function associationModuleCacheKey(workspaceId: string): string {
-  return `association-module:${workspaceId}${viewerSuffix()}`;
-}
-
-export function associationPageCacheKey(workspaceId:string,resource:string,query:Record<string,unknown>={}):string {
-  return `crm:${workspaceId}${viewerSuffix()}:association:${resource}:${JSON.stringify(query)}`;
-}
-
-/** Browser-tab request references contain no form content. */
-export function associationIntentKey(workspaceId:string,operation:string,target:string):string {
-  return `association-intent:${workspaceId}${viewerSuffix()}:${operation}:${target}`;
-}
-
-export function associationOrdersCacheKey(workspaceId: string, cursor: string | null, filters = ""): string {
-  return `association-orders:${workspaceId}${viewerSuffix()}:${filters}:${cursor ?? "first"}`;
 }
 
 /**
@@ -362,11 +344,11 @@ export function brandCacheKey(workspaceId: string): string {
  * marks stay workspace-first so they match every viewer variant.
  */
 export function chatRosterCacheKey(workspaceId: string): string {
-  return `chat-roster:${workspaceId}${viewerSuffix()}`;
+  return `chat-roster:${workspaceId}${viewerSuffix()}:${encodeURIComponent(publicRuntimeConfig().apiUrl ?? "http://localhost:4000")}`;
 }
 
 export function chatSessionsCacheKey(workspaceId: string): string {
-  return `chat-sessions:${workspaceId}${viewerSuffix()}`;
+  return `chat-sessions:${workspaceId}${viewerSuffix()}:${encodeURIComponent(publicRuntimeConfig().apiUrl ?? "http://localhost:4000")}`;
 }
 
 export function channelRecordingsCacheKey(workspaceId: string, channelId: string): string {
@@ -374,7 +356,7 @@ export function channelRecordingsCacheKey(workspaceId: string, channelId: string
 }
 
 export function chatSharedSessionsCacheKey(workspaceId: string, projectId?: string | null): string {
-  return `chat-shared:${workspaceId}${viewerSuffix()}${projectId === undefined ? "" : `:project:${projectId ?? "general"}`}`;
+  return `chat-shared:${workspaceId}${viewerSuffix()}:${encodeURIComponent(publicRuntimeConfig().apiUrl ?? "http://localhost:4000")}${projectId === undefined ? "" : `:project:${projectId ?? "general"}`}`;
 }
 
 export function chatArchivedSessionsCacheKey(workspaceId: string, audience: "personal" | "workspace"): string {
@@ -383,7 +365,7 @@ export function chatArchivedSessionsCacheKey(workspaceId: string, audience: "per
 
 /** One short-lived intent read per viewer, consumed by chat selection. */
 export function chatTranscriptIntentCacheKey(): string {
-  return `chat-transcript-intent${viewerSuffix()}`;
+  return `chat-transcript-intent${viewerSuffix()}:${encodeURIComponent(publicRuntimeConfig().apiUrl ?? "http://localhost:4000")}`;
 }
 
 /**
@@ -395,7 +377,7 @@ export function chatTranscriptIntentCacheKey(): string {
  * write-through of streamed rows).
  */
 export function chatTranscriptCacheKey(sessionId: string): string {
-  return `chat-transcript:${sessionId}`;
+  return chatHistoryMemoryKey(sessionId);
 }
 
 /**
@@ -905,12 +887,6 @@ export function warmTargetFor(
         fetch: () => leaseSurfaceContent(() => fetchWorkspaceTasks(workspaceId)),
         lifecycle: { expiresInMs: surfaceContentRemaining, keepInflightOnExpiry: true },
       };
-    case "association":
-      return {
-        key: associationModuleCacheKey(workspaceId),
-        fetch: () => import("@/lib/api/association").then(m => m.getAssociationModuleSnapshot(workspaceId)),
-        lifecycle: { expiresInMs: associationModuleRemaining },
-      };
     case "crm":
       return {
         key: crmConfigCacheKey(workspaceId),
@@ -986,7 +962,6 @@ const WARMABLE: ReadonlySet<string> = new Set<WarmableSurface>([
   "projects",
   "tasks",
   "crm",
-  "association",
   "workflow",
   "studio",
   "chat",

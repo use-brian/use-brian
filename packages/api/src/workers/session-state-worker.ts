@@ -1,16 +1,23 @@
 /** Durable commitment analysis outside the chat lease. [COMP:api/session-state-jobs] */
+import { runSessionStateDiff } from '@use-brian/core/memory/session-state-diff.js'
+import type {
+  SessionContextAuthority,
+  SessionStateStore,
+} from '@use-brian/core/memory/session-state-types.js'
+import type { LLMProvider, Message } from '@use-brian/agent-runtime/providers/types.js'
+import { accessCeilingContains } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import {
-  accessCeilingContains, bindScopeSources, boundScopeSources, runSessionStateDiff,
-  type LLMProvider, type Message, type SessionContextAuthority, type SessionStateStore,
-} from '@use-brian/core'
+  bindScopeSources,
+  boundScopeSources,
+} from '@use-brian/agent-runtime/security/source-evidence.js'
 import { claimSessionStateJob, finishSessionStateJob, parseSessionStateJobAuthority, sessionStateJobCurrent, type SessionStateJob } from '../db/session-state-jobs.js'
 import { resolveSessionTitleAuthority } from '../routes/session-title-authority.js'
-import { readAdmittedSessionQuery } from '../db/session-query-reader.js'
+import { readAdmittedSessionQuery } from '../db/conversation-store.js'
 import { createDbSessionStateStore } from '../db/session-state-store.js'
 import { sessionContextGeneration } from '../db/session-context-revisions.js'
 import { upsertSessionState, resolveSessionState } from '../db/session-state-queries.js'
-import { assertSourceModelInputAuthority } from '../application-platform/model-source-authority.js'
-import { executionToolContext } from '@use-brian/core'
+import { admitModelInput } from '../context-scope/admission.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { inheritPrivateTranscriptCredential } from '../db/private-transcript.js'
 
 type Runtime = { provider: LLMProvider; model: string; providerKeySource: 'user' | 'platform' }
@@ -76,7 +83,7 @@ export async function analyzeSessionStateJob(input: { job: SessionStateJob; auth
   const query = await readAdmittedSessionQuery({ sessionId: job.sessionId, throughSequence: job.throughSequence,
     topicThroughSequence: 0, authority })
   const context = { ...executionToolContext(authority.execution, { appId: 'session-state-worker' }), scopeAccumulator: authority.accumulator }
-  const assertInputAuthority = () => assertSourceModelInputAuthority(context)
+  const assertInputAuthority = () => admitModelInput(context)
   await assertInputAuthority()
   const selected = query.history.filter(row => row.sequenceNum >= job.firstSequence)
   if (!selected.some(row => row.sequenceNum === job.throughSequence && row.role === 'assistant')) throw new StateJobChanged()

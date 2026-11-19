@@ -6,7 +6,7 @@ import {
   MAX_OFFICE_IMAGE_BYTES,
   normalizeOfficeImageResource,
   type NormalizedOfficeImage,
-} from '@use-brian/core'
+} from '@use-brian/core/office/image-resource.js'
 import {
   OfficeResourceRefSchema,
   type OfficeArtifactSnapshot,

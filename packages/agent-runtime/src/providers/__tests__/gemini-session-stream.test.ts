@@ -1,0 +1,263 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { createGeminiProvider } from '../gemini.js'
+import { bufferProviderStream } from '../stream-backpressure.js'
+import type { Message, StreamChunk, ToolDefinition } from '../types.js'
+
+/**
+ * Guards the stateful Gemini session path AFTER it was converted from a
+ * single non-streaming `generateContent` to true SSE streaming
+ * (`streamGeminiSSE`). The invariants that must survive the rewrite:
+ *
+ *  1. Verbatim reasoning (`thought: true` parts) surfaces live as a
+ *     `thinking_delta` chunk — the "watch it generate" feature.
+ *  2. Visible reply text streams as `text_delta` (thought text is NOT text).
+ *  3. A tool call's `thoughtSignature` round-trips as `providerSignature`
+ *     AND is replayed on the model turn in the NEXT request's history —
+ *     the Gemini 3.x multi-turn signature requirement.
+ *  4. Reasoning is never replayed: thought parts are dropped entirely from
+ *     the next request's history (not re-sent as a `{ thought: true }` stub,
+ *     which Gemini 400s with "Unsupported input part type ... thought: true").
+ *
+ * See docs/architecture/engine/live-streaming.md.
+ */
+
+/** A Response whose body is an SSE stream of Gemini chunks. */
+function sseResponse(chunks: unknown[]): Response {
+  const encoder = new TextEncoder()
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const c of chunks) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(c)}\n\n`))
+      }
+      controller.close()
+    },
+  })
+  return new Response(body, {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  })
+}
+
+async function collect(stream: AsyncIterable<StreamChunk>): Promise<StreamChunk[]> {
+  const out: StreamChunk[] = []
+  for await (const c of stream) out.push(c)
+  return out
+}
+
+// One model turn: a thought, then visible text, then a tool call carrying a
+// thoughtSignature — exercising all three part kinds in arrival order.
+const TURN_CHUNKS = [
+  { candidates: [{ content: { role: 'model', parts: [{ thought: true, text: 'Let me plan the page.' }] } }] },
+  { candidates: [{ content: { role: 'model', parts: [{ text: 'Drafting now. ' }] } }] },
+  {
+    candidates: [{
+      content: {
+        role: 'model',
+        parts: [{ functionCall: { name: 'patchPage', args: { ops: [] }, id: 'fc-provider-1' }, thoughtSignature: 'sig-abc' }],
+      },
+      finishReason: 'STOP',
+    }],
+    usageMetadata: { promptTokenCount: 12, candidatesTokenCount: 7, thoughtsTokenCount: 3 },
+  },
+]
+
+describe('[COMP:providers/gemini-session-stream] Gemini session streaming', () => {
+  let fetchMock: ReturnType<typeof vi.fn>
+  beforeEach(() => {
+    fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it.each(['headers', 'authority'] as const)('shared loop buffer closes Gemini during pending %s without a later fetch', async phase => {
+    let settle!: () => void
+    let entered!: () => void
+    const started = new Promise<void>(resolve => { entered = resolve })
+    const blocked = new Promise<void>(resolve => { settle = resolve })
+    const pause = async () => { entered(); await blocked }
+    const provider = createGeminiProvider({
+      kind: 'ai-studio', endpoint: () => 'https://model.example/stream',
+      headers: async () => { if (phase === 'headers') await pause(); return {} },
+    })
+    const session = provider.createSession!({ model: 'gemini-3.6-flash-standard', systemPrompt: 'Fictional context',
+      ...(phase === 'authority' ? { assertInputAuthority: pause } : {}),
+    })
+    const stream = bufferProviderStream(signal => session.send([{ role: 'user', content: 'Hello' }], { signal }))
+    expect((await stream.next()).value.type).toBe('message_start')
+    await started
+    await stream.return(undefined)
+    expect(fetchMock).not.toHaveBeenCalled()
+    settle()
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('loads discovered schemas on the next send without losing provider history', async () => {
+    fetchMock.mockResolvedValueOnce(sseResponse(TURN_CHUNKS))
+      .mockResolvedValueOnce(sseResponse([{ candidates: [{ content: { role: 'model', parts: [{ text: 'Done.' }] }, finishReason: 'STOP' }] }]))
+    const tools: ToolDefinition[] = [{ name: 'patchPage', description: 'Patch a page', parameters: { type: 'object', properties: {} } }]
+    const catalog = [...tools, { name: 'findRecord', description: 'Find a record', parameters: { type: 'object' as const, properties: {} } }]
+    const session = createGeminiProvider('test-key').createSession({ model: 'gemini-pro', systemPrompt: 'sys', tools: catalog,
+      toolRegistration: { mode: 'deferred', catalog, active: tools } })
+    await collect(session.send([{ role: 'user', content: 'Build a page' }]))
+    tools.push({ name: 'findRecord', description: 'Find a record', parameters: { type: 'object', properties: {} } })
+    await collect(session.send([{ role: 'user', content: [{ type: 'tool_result', toolUseId: 'fc-provider-1', name: 'patchPage', content: 'saved' }] }]))
+    const first = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
+    const second = JSON.parse((fetchMock.mock.calls[1][1] as RequestInit).body as string)
+    expect(first.tools[0].functionDeclarations.map((tool: { name: string }) => tool.name)).toEqual(['patchPage'])
+    expect(second.tools[0].functionDeclarations.map((tool: { name: string }) => tool.name)).toEqual(['patchPage', 'findRecord'])
+    expect(JSON.stringify(second.contents)).toContain('sig-abc')
+  })
+
+  it.each(['gemini-3.6-flash-standard', 'gemini-3.6-flash-pro', 'gemini-4-argon-research'])('records %s while sending its wire model', async model => {
+    fetchMock.mockResolvedValueOnce(sseResponse(TURN_CHUNKS))
+    const session = createGeminiProvider('test-key').createSession({ model, systemPrompt: 'sys' })
+    const chunks = await collect(session.send([{ role: 'user', content: 'Hello' }]))
+    expect(chunks[0]).toMatchObject({ type: 'message_start', model })
+    const wireModel = model === 'gemini-4-argon-research' ? 'gemini-4-argon' : 'gemini-3.6-flash'
+    expect(fetchMock.mock.calls[0][0]).toContain(`/models/${wireModel}:streamGenerateContent`)
+  })
+
+  it.each(['gemini-pro', 'gemini-4-argon-research'])('streams reasoning, reply text, and tool chunks for %s', async model => {
+    fetchMock.mockResolvedValueOnce(sseResponse(TURN_CHUNKS))
+    const session = createGeminiProvider('test-key').createSession({
+      model,
+      systemPrompt: 'sys',
+    })
+    const msgs: Message[] = [{ role: 'user', content: [{ type: 'text', text: 'build a page' }] }]
+    const chunks = await collect(session.send(msgs))
+
+    // The request must opt into reasoning summaries, else Gemini emits no
+    // `thought` parts and the whole feature is inert.
+    const reqBody = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
+    expect(reqBody.generationConfig?.thinkingConfig?.includeThoughts).toBe(true)
+
+    const types = chunks.map((c) => c.type)
+    expect(types[0]).toBe('message_start')
+    expect(types[types.length - 1]).toBe('message_end')
+
+    // The headline: verbatim reasoning is surfaced as a live chunk.
+    expect(chunks.filter((c) => c.type === 'thinking_delta')).toEqual([
+      { type: 'thinking_delta', text: 'Let me plan the page.' },
+    ])
+    // Visible reply streams as text_delta — thought text is NOT replayed as text.
+    expect(chunks.filter((c) => c.type === 'text_delta')).toEqual([
+      { type: 'text_delta', text: 'Drafting now. ' },
+    ])
+    // Tool call round-trips its thoughtSignature as providerSignature.
+    expect(chunks.find((c) => c.type === 'tool_use_end')).toMatchObject({
+      type: 'tool_use_end',
+      id: 'fc-provider-1',
+      providerSignature: 'sig-abc',
+    })
+  })
+
+  it("reports 'incomplete' when the stateful stream ends without a finish reason", async () => {
+    // Production repro 2026-08-09: the CFO reply stopped at "HKD 600," but
+    // interactive chat persisted it as stopReason=end_turn. The stateless
+    // Gemini path already guarded this shape; the stateful session path still
+    // defaulted to end_turn before observing the provider's final SSE chunk.
+    fetchMock.mockResolvedValueOnce(
+      sseResponse([
+        {
+          candidates: [{ content: { role: 'model', parts: [{ text: 'IT Staff Payroll: HKD 600,' }] } }],
+          usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 8 },
+        },
+      ]),
+    )
+    const session = createGeminiProvider('test-key').createSession({
+      model: 'gemini-3.8-flash',
+      systemPrompt: 'sys',
+    })
+
+    const chunks = await collect(
+      session.send([{ role: 'user', content: [{ type: 'text', text: 'List the IT costs' }] }]),
+    )
+
+    expect(chunks.at(-1)).toMatchObject({ type: 'message_end', stopReason: 'incomplete' })
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Stateful stream ended with NO finishReason'))
+  })
+
+  it("still reports 'end_turn' when the stateful provider sends STOP", async () => {
+    fetchMock.mockResolvedValueOnce(
+      sseResponse([
+        {
+          candidates: [{ content: { role: 'model', parts: [{ text: 'Complete.' }] }, finishReason: 'STOP' }],
+          usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2 },
+        },
+      ]),
+    )
+    const session = createGeminiProvider('test-key').createSession({
+      model: 'gemini-3.8-flash',
+      systemPrompt: 'sys',
+    })
+
+    const chunks = await collect(
+      session.send([{ role: 'user', content: [{ type: 'text', text: 'Reply completely' }] }]),
+    )
+
+    expect(chunks.at(-1)).toMatchObject({ type: 'message_end', stopReason: 'end_turn' })
+  })
+
+  it.each(['gemini-pro', 'gemini-4-argon-research'])('preserves signatures across %s tool turns and drops thought bodies', async model => {
+    fetchMock.mockResolvedValueOnce(sseResponse(TURN_CHUNKS))
+    fetchMock.mockResolvedValueOnce(
+      sseResponse([
+        { candidates: [{ content: { role: 'model', parts: [{ text: 'done' }] }, finishReason: 'STOP' }], usageMetadata: {} },
+      ]),
+    )
+
+    const session = createGeminiProvider('test-key').createSession({
+      model,
+      systemPrompt: 'sys',
+    })
+
+    await collect(session.send([{ role: 'user', content: [{ type: 'text', text: 'build a page' }] }]))
+    await collect(
+      session.send([
+        { role: 'user', content: [{ type: 'tool_result', toolUseId: 'fc-provider-1', name: 'patchPage', content: 'ok' }] },
+      ]),
+    )
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const secondBody = JSON.parse((fetchMock.mock.calls[1][1] as RequestInit).body as string)
+    const contents = secondBody.contents as Array<{ role: string; parts: Array<Record<string, unknown>> }>
+
+    // The turn-1 model turn rides along in history, carrying the signature.
+    const modelTurn = contents.find((c) => c.role === 'model')
+    expect(modelTurn).toBeDefined()
+    const fcPart = modelTurn!.parts.find((p) => p.functionCall)
+    expect(fcPart?.thoughtSignature).toBe('sig-abc')
+    expect((fcPart?.functionCall as { id?: string } | undefined)?.id).toBe('fc-provider-1')
+
+    const functionResponse = contents
+      .flatMap((c) => c.parts)
+      .find((p) => p.functionResponse)
+      ?.functionResponse as { id?: string; name?: string } | undefined
+    expect(functionResponse).toMatchObject({ id: 'fc-provider-1', name: 'patchPage' })
+
+    // Reasoning is never replayed: no thought part survives into history.
+    // The turn-1 thought carried NO signature, so a "signature-only stub"
+    // would have been a bare `{ thought: true }` — exactly the part Gemini
+    // rejects with 400 "Unsupported input part type ... thought: true".
+    expect(modelTurn!.parts.some((p) => p.thought)).toBe(false)
+
+    // Every replayed part across the whole request must have a content
+    // carrier (text / functionCall / functionResponse / inlineData). A
+    // content-less part is what triggers the production 400 — guard against
+    // any reappearing.
+    for (const content of contents) {
+      for (const p of content.parts) {
+        expect(p.thought ?? false).toBe(false)
+        const hasCarrier =
+          p.text !== undefined || !!p.functionCall || !!p.functionResponse || !!p.inlineData
+        expect(hasCarrier).toBe(true)
+      }
+    }
+  })
+})

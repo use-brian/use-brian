@@ -2,7 +2,7 @@ import { readWorkspaceMcpConsent, workspaceMcpMaximum, type WorkspaceMcpConsent 
 import { ProgrammaticCaptureError } from '../ingest/programmatic-capture.js'
 import { EngineeringHistoryCommandSchema,type EngineeringHistoryCommand,type CaptureConfiguration } from '@use-brian/shared'
 import { EngineeringHistoryError,ARCHIVE_TEXT_LIMIT } from '../engineering-history/contracts.js'
-import type { CrmCredentialParent } from '@use-brian/core'
+import type { CrmCredentialParent } from '@use-brian/core/crm/integration-authority.js'
 /**
  * Brain MCP server — tool surface.
  *
@@ -62,46 +62,49 @@ import { listHomeApps as listHomeAppRows } from '../db/home-apps-store.js'
 import { z } from 'zod'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import {
-  SensitivityAccumulator,
-  ContextScopeAccumulator,
-  extractEffectContract,
-  formatToolError,
-  validateLocalRecording,
-  isSensitivity,
-  minSensitivity,
-  applyOps,
-  buildUndoEntry,
-  markdownToBlocks,
-  normalizeMarkdownBlocks,
-  pageToMarkdown,
-  rankPagesByTitle,
-  listPageTemplates,
-  instantiatePageTemplate,
-  pageTemplateIds,
   withFreshBlockIds,
   PAGE_TEMPLATE_CATEGORIES,
   pageTemplateCategorySchema,
-  filterToolsByCapabilities,
-  executionToolContext,
-} from '@use-brian/core'
+} from '@use-brian/core/doc/custom-template-types.js'
+import { rankPagesByTitle } from '@use-brian/core/doc/find-page.js'
+import { markdownToBlocks, normalizeMarkdownBlocks } from '@use-brian/core/doc/markdown.js'
+import { applyOps } from '@use-brian/core/doc/ops.js'
+import {
+  listPageTemplates,
+  instantiatePageTemplate,
+  pageTemplateIds,
+} from '@use-brian/core/doc/templates.js'
+import { pageToMarkdown } from '@use-brian/core/doc/to-markdown.js'
+import { buildUndoEntry } from '@use-brian/core/doc/undo.js'
+import { extractEffectContract } from '@use-brian/core/sandbox/effect-contract.js'
+import { validateLocalRecording } from '@use-brian/core/sandbox/local-skill-runner.js'
+import { formatToolError } from '@use-brian/agent-runtime/engine/tool-executor.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import {
+  SensitivityAccumulator,
+  isSensitivity,
+  minSensitivity,
+} from '@use-brian/agent-runtime/security/sensitivity.js'
+import { filterToolsByCapabilities } from '@use-brian/agent-runtime/tools/capability-gate.js'
+import type { CrmBusinessReferenceTools } from '@use-brian/core/crm/business-reference-tools.js'
+import type { CrmCommercialContextTools } from '@use-brian/core/crm/commercial-context-tools.js'
+import type { CrmCommercialDocumentTools } from '@use-brian/core/crm/commercial-document-tools.js'
+import type { CrmDeliveryOversightTools } from '@use-brian/core/crm/delivery-oversight-tools.js'
+import type { CrmGovernedRecordTools } from '@use-brian/core/crm/governed-record-tools.js'
+import type { CrmOperationsTools } from '@use-brian/core/crm/operations-tools.js'
+import type { Op } from '@use-brian/core/doc/page-types.js'
+import type { DocGateway, DocPageStore } from '@use-brian/core/doc/tools.js'
+import type { Embedder } from '@use-brian/core/embeddings/embedder.js'
+import type { PipelineBResult } from '@use-brian/core/ingest/pipeline-b.js'
 import type {
-  BindingConfig,
-  Block,
   BrowserSkillRecordingStep,
   BrowserSkillStore,
-  DocGateway,
-  DocPageStore,
-  Op,
-  Page,
-  PipelineBResult,
-  SavedViewStore,
-  Sensitivity,
-  Tool,
-  ToolContext,
-  CrmOperationsTools, CrmBusinessReferenceTools, CrmCommercialContextTools, CrmCommercialDocumentTools, CrmGovernedRecordTools, CrmDeliveryOversightTools,
-  AssociationTools,
-  Embedder,
-} from '@use-brian/core'
+} from '@use-brian/core/sandbox/browser-skills.js'
+import type { Block, Page } from '@use-brian/core/views/blocks.js'
+import type { BindingConfig, SavedViewStore } from '@use-brian/core/views/types.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { query, runWithAgentAccess } from '../db/client.js'
 import { searchRecording as searchRecordingFn, readRecordingRange, type RecordingSegmentHit } from '../db/retrieval-store.js'
 import { createListRecordingsTool } from '../recordings/recording-chat-tools.js'
@@ -366,7 +369,6 @@ type BuildOpts = {
   memoryTools: BrainMemoryTools
   taskTools: BrainTaskTools
   crmTools: BrainCrmTools
-  associationTools?: AssociationTools
   retrievalTools: BrainRetrievalTools
   /**
    * Query embedder for the dedicated `searchRecording` tool's vector arm
@@ -1771,18 +1773,6 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     ...[...filterToolsByCapabilities(new Map([opts.crmTools.sendCrmMessage,opts.crmTools.getCrmDelivery].map(tool=>[tool.name,tool])),opts.agentActiveCapabilities ?? new Set()).values()].map(tool=>bridgeCoreTool(tool,resolveCtx,workspaceId)),
   ]
 
-  const visibleAssociation = filterToolsByCapabilities(
-    new Map(Object.values(opts.associationTools ?? {}).map(tool => [tool.name, tool])),
-    opts.agentActiveCapabilities ?? new Set(),
-  )
-  const associationReads = new Set([...visibleAssociation.values()].filter(tool => tool.isReadOnly).map(tool => tool.name))
-  // The bridge runs execute() directly, so a tool that needs a person's confirmation in chat (publishing
-  // website content or a catalogue, confirming a free order) would run unconfirmed here. Association keeps
-  // those in chat and the console only; other brain-MCP tools are unchanged.
-  const associationBridges = [...visibleAssociation.values()]
-    .filter(tool => (opts.scope === 'read_write' || tool.isReadOnly) && !tool.requiresConfirmation)
-    .map(tool => bridgeCoreTool(tool, resolveCtx, workspaceId))
-
   // ── File bridges (workspace filesystem). Present only when a blob client is
   // configured (opts.fileTools set). Both byte-preserving saves are bridged:
   // `saveFileToBrain` references a cached upload by id (bytes entered via the
@@ -1979,7 +1969,6 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     }catch(error){return {...text('Engineering history unavailable.',true),structuredContent:{contractVersion:1,failureCode:error instanceof EngineeringHistoryError?error.code:'history_unavailable'}}}}})
   const all: BrainTool[] = [
     ...historyTools,
-    ...associationBridges,
     ...storeBridges,
     ...(askStoreAssistant ? [askStoreAssistant] : []),
     // Reads
@@ -2088,7 +2077,6 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     ? all.filter(
         (t) =>
           READ_TOOL_NAMES.has(t.name) ||
-          associationReads.has(t.name) ||
           agentReadNames.has(t.name) ||
           storeNames.has(t.name) ||
           t.name === 'askStoreAssistant',

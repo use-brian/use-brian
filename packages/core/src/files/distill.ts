@@ -28,11 +28,10 @@
  * [COMP:files/distill]
  */
 
-import type { TokenUsage } from '../providers/types.js'
+import type { TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
 import type { MediaBackend } from '../media/backend.js'
 import { GEMINI_VISION_MODEL, runMediaUnderstanding } from '../media/backend.js'
-import { aiStudioTransport } from '../providers/google-transport.js'
-import { extractPdfText } from './pdf-text.js'
+import { aiStudioTransport } from '@use-brian/agent-runtime/providers/google-transport.js'
 
 export type DistillOptions = {
   /** AI Studio key. Equivalent to a `google` backend over `aiStudioTransport`. */
@@ -119,6 +118,8 @@ export async function distillFileToText(
   // Local text-layer fallback for PDFs (unpdf) — no adapter, no model call.
   let text: string
   try {
+    // The unpdf fallback loads only when it runs, never at module evaluation (M4 step 5).
+    const { extractPdfText } = await import('./pdf-text.js')
     text = await extractPdfText(input.buffer)
   } catch (fallbackErr) {
     // Both paths are gone. Surface the DISTILLATION error, not the fallback's:

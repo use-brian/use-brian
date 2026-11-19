@@ -45,15 +45,29 @@ describe('[COMP:api/chat-route] session-binding refusals are observable', () => 
   it('logs every refusal that ends the stream in the binding block', () => {
     const block = sessionBindingBlock()
     const refusals = block.match(/sendEvent\('error'/g) ?? []
-    // clearance · cross-assistant mismatch · per-user access · Office lane · Feed target
-    expect(refusals).toHaveLength(5)
+    // clearance · cross-assistant mismatch · room default below its floor ·
+    // per-user access · Office lane · Feed target
+    expect(refusals).toHaveLength(6)
 
     // Each one is answered by a log call. `logSendRefusal` covers the two
-    // policy verdicts; the access and Feed target gates log inline.
+    // policy verdicts; the room-default, access and Feed target gates log inline.
     const logged =
       (block.match(/logSendRefusal\(/g) ?? []).length - 1 + // minus its definition
       (block.match(/eventName: 'chat_setup_error'/g) ?? []).length
     expect(logged).toBeGreaterThanOrEqual(refusals.length)
+  })
+
+  it('refuses a room default voice bound below the room floor, with the rebind copy', () => {
+    // A rebind the old rule admitted (M5Q-7 variant A) leaves a room whose own
+    // assistant cannot read it; its default turns are refused here, up front.
+    const block = sessionBindingBlock()
+    const refusal = block.slice(block.indexOf('} else if ('), block.indexOf('const sessionDenied = await gateSessionRead'))
+    expect(refusal).toContain("roomClearanceFit({")
+    expect(refusal).toContain("=== 'below'")
+    expect(refusal).toContain('code: ASSISTANT_CLEARANCE_BELOW_CONVERSATION')
+    expect(refusal).toContain('clearanceBelowRoomDefaultCopy(assistant.name)')
+    expect(refusal).toContain("eventName: 'chat_setup_error'")
+    expect(refusal).toContain('res.end()')
   })
 
   it('stamps the refusals with the session_binding stage', () => {

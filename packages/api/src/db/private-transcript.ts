@@ -1,6 +1,9 @@
 /** Same-owner conversation evidence, independent of upstream facts. [COMP:api/private-transcript] */
 import {z} from 'zod'
-import {bindScopeSources,DerivedScopeError,type ScopeSource,type SessionContextAuthority,type ExecutionContext} from '@use-brian/core'
+import type {SessionContextAuthority} from '@use-brian/core/memory/session-state-types.js'
+import {DerivedScopeError, type ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
+import type {ExecutionContext} from '@use-brian/agent-runtime/security/execution-context.js'
+import {bindScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {applyRLSGucs,getAppPool,runWithAgentAccess,rollbackAndRelease} from './client.js'
 import {privateHistoryText} from './session-legacy-history.js'
 import type {SessionMessage} from './sessions.js'

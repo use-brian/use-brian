@@ -27,8 +27,8 @@
  * [COMP:doc/context-meter]
  */
 
-import type { Message } from '../providers/types.js'
-import { estimateStringTokens, estimateTokens } from '../compaction/compact.js'
+import type { Message } from '@use-brian/agent-runtime/providers/types.js'
+import { estimateStringTokens, estimateTokens } from '@use-brian/agent-runtime/compaction/compact.js'
 import { DOC_PAGE_STATE_TOOLS } from '../engine/doc-history.js'
 
 /**

@@ -18,7 +18,7 @@ import type {
   ApprovalReviewScopeKind,
   ParameterPolicy,
   ReviewOutcome,
-} from '@use-brian/core'
+} from '@use-brian/core/approval-review/contracts.js'
 import { getPool, queryWithRLS } from './client.js'
 
 export type Queryable = Pick<pg.Pool | pg.PoolClient, 'query'>

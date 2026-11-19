@@ -353,7 +353,7 @@ if [ "$mint_only" = "0" ]; then
   [ "$ADMIN_ONLY" = 1 ] && launch_args+=(--admin-only)
   [ "$REFERENCE_APPLICATIONS" = 0 ] || launch_args+=(--reference-applications)
   nohup env "${launch_env[@]}" \
-    node "$ROOT/scripts/launch.mjs" "${launch_args[@]}" >>"$LOG" 2>&1 </dev/null &
+    node "$ROOT/scripts/launch.mjs" ${launch_args[@]+"${launch_args[@]}"} >>"$LOG" 2>&1 </dev/null &
   echo $! >"$PIDFILE"
   launcher_pid="$(cat "$PIDFILE")"
   printf '%s\n' "$launcher_pid" >"$STATE/runtime-role.pid"

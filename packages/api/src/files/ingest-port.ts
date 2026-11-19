@@ -5,7 +5,8 @@
  * drives the open Pipeline B ingestor built by boot.
  */
 
-import type { FileSensitivity, Sensitivity } from '@use-brian/core'
+import type { FileSensitivity } from '@use-brian/core/workspace-files/types.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 
 export type FileIngestContext = {
   workspaceId: string

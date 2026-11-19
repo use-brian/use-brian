@@ -1,6 +1,7 @@
 /** Current original-cohort source context. [COMP:api/application-persistence] */
 import {z} from 'zod'
-import {resourceScopeKey,type ExecutionContext,type ScopeSource} from '@use-brian/core'
+import {resourceScopeKey, type ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
+import type {ExecutionContext} from '@use-brian/agent-runtime/security/execution-context.js'
 import {SourceProtocolError} from '@use-brian/brian-app/connector'
 import {getPool} from '../db/client.js'
 import {readExternalSourceAncestors} from './external-source-ancestry.js'
@@ -12,7 +13,6 @@ const source=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nu
 function unavailable(cause?:unknown):never{throw Object.assign(new SourceProtocolError('source_unavailable'),cause===undefined?{}:{cause})}
 /** Metadata authorizes nothing; every added root gets a fresh actual source decision. */
 export async function nativeSessionQueryContextSources(execution:ExecutionContext,rawSources:readonly ScopeSource[],prepare?:Prepare):Promise<{sources:ScopeSource[];independent:boolean}>{
- await execution.security.authority.assertCurrent()
  const roots=rawSources.map(root=>structuredClone(root)),workspaceId=execution.security.access.workspaceId,cohort=new Map<string,ScopeSource>()
  if(roots.some(root=>root.workspaceId!==workspaceId))unavailable()
  try{
@@ -43,7 +43,6 @@ export async function nativeSessionQueryContextSources(execution:ExecutionContex
    if(previous&&(previous.version!==current.version||resourceScopeKey(previous)!==resourceScopeKey(current)))unavailable()
    combined.set(key,current)
   }
-  await execution.security.authority.assertCurrent()
-  return{sources:[...combined.values()],independent:true}
+   return{sources:[...combined.values()],independent:true}
  }catch(error){if(error instanceof SourceProtocolError)throw error;unavailable(error)}
 }

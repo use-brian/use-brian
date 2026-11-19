@@ -2,14 +2,16 @@ import { randomUUID } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import {
   emptyApplicationCounts,
-  freezeExtractionPlan,
-  type AccessContext,
   type ExtractionApplicationClaim,
   type ExtractionApplicationItem,
   type ExtractionApplicationMutation,
   type ExtractionApplicationRun,
+} from '@use-brian/core/ingest/application.js'
+import {
+  freezeExtractionPlan,
   type FrozenCandidate,
-} from '@use-brian/core'
+} from '@use-brian/core/ingest/extraction-plan.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 
 import type { DbExtractionApplicationStore } from '../../db/extraction-application-store.js'
 import { createIngestApplicationService, IngestApplicationServiceError } from '../application-service.js'

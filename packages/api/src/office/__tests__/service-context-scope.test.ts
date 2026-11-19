@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { ToolContext, ScopeSource } from '@use-brian/core'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import type { OfficeArtifactRow } from '../../db/office-artifacts.js'
 import { createOfficeService } from '../service.js'
 

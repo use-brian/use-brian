@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { AccessCeiling, ScopeEvidence, WorkflowRecord, WorkflowRunRecord } from '@use-brian/core'
+import type { WorkflowRecord, WorkflowRunRecord } from '@use-brian/core/workflow/types.js'
+import type { AccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import type { ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
 // Source ancestry is covered by the real DB/HTTP source fixture. These tests exercise native audience rules.
 vi.mock('../../application-platform/external-source-ancestry.js', () => ({ readExternalSourceAncestors: async () => [] }))
 vi.mock('../../application-platform/field-evidence.js', () => ({ readApplicationFieldAncestors: async () => [] }))

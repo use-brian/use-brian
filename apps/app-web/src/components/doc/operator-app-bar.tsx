@@ -4,7 +4,7 @@
  * Spec: docs/architecture/features/workspace-navigation.md.
  * [COMP:app-web/operator-app-bar] */
 import { CheckSquare, FileText, Files, Users, Megaphone, MessageSquare,
-  MonitorPlay, ShoppingBag, Ticket, type LucideIcon } from "lucide-react";
+  MonitorPlay, ShoppingBag, type LucideIcon } from "lucide-react";
 import type { OperatorAppKey } from "@/lib/operator-apps";
 
 /** App key → glyph — shared with the operator top bar's tab chip
@@ -19,5 +19,4 @@ export const APP_ICON: Record<OperatorAppKey, LucideIcon> = {
   browsers: MonitorPlay,
   chat: MessageSquare,
   shopify: ShoppingBag,
-  association: Ticket,
 };

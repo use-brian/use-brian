@@ -1,14 +1,22 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { getPool, getAppPool, query } from '../db/client.js'
+import { conversationAnchorWriteAdmissionActive,initializeConversationVisibility } from '../db/conversation-visibility.js'
 import { admitTelegramRecording, changeChannelRecording, confirmChannelRecordingOwner, recordDeliveredTelegramMessage } from '../channel-recording.js'
 import { getSessionMessages } from '../db/sessions.js'
 import { processChannelMessage, type ChannelPipelineParams } from '../routes/channel-pipeline.js'
 import { createPublicationConsentStore } from '../workflow/publication-consent.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
+import { z } from 'zod'
 const { runTurn } = vi.hoisted(() => ({ runTurn: vi.fn() }))
-vi.mock('../turn/kernel.js', async original => ({ ...await original<typeof import('../turn/kernel.js')>(),runAssistantTurn: runTurn }))
-vi.mock('../turn/prepare.js', () => ({ prepareAssistantRun: vi.fn(async input => ({ model: input.model,
-  tools: input.candidateTools,trustedContext: '',userVisibleContext: '' })) }))
+vi.mock('../turn/kernel.js',async original=>{
+ const real=await original<typeof import('../turn/kernel.js')>()
+ return{...real,openAssistantTurn:async(...args:Parameters<typeof real.openAssistantTurn>)=>{
+  const owner=await real.openAssistantTurn(...args),run=owner.run.bind(owner)
+  vi.spyOn(owner,'run').mockImplementation(input=>runTurn(input,run))
+  return owner
+ }}
+})
 const { assertLocalFixture } = await import(new URL('../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
 
@@ -24,6 +32,8 @@ let recordings: Array<NonNullable<Awaited<ReturnType<typeof admitTelegramRecordi
 
 describe('[COMP:api/channel-recording] public provider reply capture', () => {
   beforeAll(async () => {
+    await initializeConversationVisibility()
+    expect(conversationAnchorWriteAdmissionActive()).toBe(true)
     await query(`INSERT INTO users(id,auth_provider,auth_provider_id,name) SELECT id,'test',id::text,'Fictional person' FROM unnest($1::uuid[]) id`, [[owner,speaker]])
     for (const [index,target] of targets.entries()) {
       await query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Recording delivery test',$2)", [target.workspace,owner])
@@ -62,28 +72,37 @@ describe('[COMP:api/channel-recording] public provider reply capture', () => {
   it('keeps model/tool rounds out of recording and saves only one successful published final', async () => {
     const recording = recordings[0], target = targets[0]
     const before = (await assistantRows(recording.session.id)).length
-    const privateTurn = { content: [{ type: 'text',text: 'Private execution narration' },
-      { type: 'tool_use',id: 'fixture-tool',name: 'privateLookup',input: { secret: 'Fictional private tool input' } }],
-      stopReason: 'tool_use',usage: { inputTokens: 1,outputTokens: 1 },model: 'fixture' }
-    const finalTurn = { ...privateTurn,content: [{ type: 'text',text: 'Public final answer' }],stopReason: 'end_turn' }
-    runTurn.mockImplementationOnce(async ({ sink }) => {
-      await sink.onEvent({ type: 'text_delta',text: 'Private execution narration' })
-      await sink.onEvent({ type: 'thinking_delta',text: 'Fictional private reasoning' })
-      await sink.onEvent({ type: 'tool_input',id: 'fixture-tool',name: 'privateLookup',input: { secret: 'Fictional private tool input' } })
-      await sink.onEvent({ type: 'assistant_turn',response: privateTurn,toolResults: [{ type: 'tool_result',toolUseId: 'fixture-tool',content: 'Fictional private result' }] })
-      await sink.onEvent({ type: 'assistant_turn',response: finalTurn,toolResults: [] })
-      await sink.onEvent({ type: 'turn_complete',response: finalTurn })
-      return { finalText: 'Public final answer' }
-    })
-    let sends = 0
+    // The actual owner run, output admission, publication and settlement:
+    // only the provider is scripted (a private tool round, then the final).
+    runTurn.mockImplementationOnce((input, run) => run(input))
+    let sends = 0, mainCalls = 0
     const publishSessionEvent = vi.fn()
-    const provider = { name: 'fixture',models: [],async *stream() { yield { type: 'text_delta',text: '{"topic_label":"fictional","confidence":1}' } } }
+    const privateLookup = buildTool({ name: 'privateLookup',description: 'Fictional private lookup',inputSchema: z.object({}).passthrough(),
+      isReadOnly: true,isConcurrencySafe: true,execute: async () => ({ data: 'Fictional private result' }) })
+    const provider = { name: 'fixture',models: [],async *stream() { yield { type: 'text_delta',text: '{"topic_label":"fictional","confidence":1}' } },
+      createSession() { return { send() {
+        const call = mainCalls++
+        return (async function* () {
+          yield { type: 'message_start' as const,model: 'fixture' }
+          if (call === 0) {
+            yield { type: 'text_delta' as const,text: 'Private execution narration' }
+            yield { type: 'thinking_delta' as const,text: 'Fictional private reasoning' }
+            yield { type: 'tool_use_start' as const,id: 'fixture-tool',name: 'privateLookup' }
+            yield { type: 'tool_use_delta' as const,id: 'fixture-tool',input: JSON.stringify({ secret: 'Fictional private tool input' }) }
+            yield { type: 'tool_use_end' as const,id: 'fixture-tool' }
+            yield { type: 'message_end' as const,stopReason: 'tool_use' as const,usage: { inputTokens: 1,outputTokens: 1 } }
+          } else {
+            yield { type: 'text_delta' as const,text: 'Public final answer' }
+            yield { type: 'message_end' as const,stopReason: 'end_turn' as const,usage: { inputTokens: 1,outputTokens: 1 } }
+          }
+        })()
+      } } } }
     await processChannelMessage({ recording,publishSessionEvent,admittedAnswerContext: { kind: 'continue' },
       assistant: { id: target.assistant,name: 'Private recorder name',workspaceId: target.workspace,ownerUserId: null,
         systemPrompt: null,clearance: 'internal' },userId: owner,ownerId: owner,isIdentified: false,
       channelType: 'telegram',channelId: conversationId,isGroupChat: true,channelIntegrationId: target.integration,
       incomingChannelMessageId: 'human-1',messageText: 'Hi',userContentBlocks: [{ type: 'text',text: 'Hi' }],
-      abortController: new AbortController(),modelAlias: 'standard',provider,systemPrompt: 'Fixture prompt',tools: new Map(),
+      abortController: new AbortController(),modelAlias: 'standard',provider,systemPrompt: 'Fixture prompt',tools: new Map([['privateLookup',privateLookup]]),
       memoryStore: {},capabilityStore: {},hooks: { onConfirmationRequired: async () => {},
         sendError: async (error: Error) => { throw error },sendResponse: async (text: string) => {
           // The callback fires after flush: no unpublished/tool turn may exist.
@@ -94,9 +113,10 @@ describe('[COMP:api/channel-recording] public provider reply capture', () => {
         } },
     } as unknown as ChannelPipelineParams)
     expect(runTurn).toHaveBeenCalledOnce()
+    expect(mainCalls).toBe(2)
     expect(sends).toBe(1)
     expect(publishSessionEvent.mock.calls.map(([event]) => event)).toEqual([
-      { kind: 'turn_completed',sessionId: recording.session.id,payload: { senderUserId: owner } },
+      { kind: 'turn_completed',sessionId: recording.session.id,payload: { senderUserId: owner,turnId: expect.any(String) } },
     ])
     expect(await assistantRows(recording.session.id)).toHaveLength(before+1)
     expect((await assistantRows(recording.session.id)).at(-1)?.content).toEqual([{ type: 'text',text: 'Public final answer' }])
@@ -136,5 +156,17 @@ describe('[COMP:api/channel-recording] public provider reply capture', () => {
     const before = await assistantRows(recordings[1].session.id)
     await recordDeliveredTelegramMessage(delivered('departed'))
     expect(await assistantRows(recordings[1].session.id)).toHaveLength(before.length)
+  })
+  it('keeps a later provider receipt out of an explicitly held recorder',async()=>{
+    const target=targets[0],policy=recordings[0].policy
+    const actual=(await query<{session_id:string}>('SELECT session_id FROM public.channel_recording_policies WHERE id=$1',[policy.id])).rows[0]
+    const before=(await assistantRows(actual.session_id)).length
+    expect(before).toBeGreaterThan(0)
+    await query('UPDATE public.sessions SET recording_privacy_held=true WHERE id=$1',[actual.session_id])
+    await recordDeliveredTelegramMessage(delivered('held-recorder'))
+    expect(await assistantRows(actual.session_id)).toHaveLength(before)
+    expect((await query('SELECT 1 FROM public.channel_recording_messages WHERE policy_id=$1 AND provider_message_id=$2',
+      [policy.id,'held-recorder'])).rowCount).toBe(0)
+    await expect(admitTelegramRecording(incoming(target,'held-inbound'))).rejects.toMatchObject({code:'recording_destination_unavailable'})
   })
 })

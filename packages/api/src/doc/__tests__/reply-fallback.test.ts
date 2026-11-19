@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
-import type { DocPageStore, Page, Tool, ToolContext } from '@use-brian/core'
+import type { DocPageStore } from '@use-brian/core/doc/tools.js'
+import type { Page } from '@use-brian/core/views/blocks.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { placeReplyOnEmptyPage, placeReplyAtAnchor } from '../reply-fallback.js'
 
 const USER_ID = 'user-1'

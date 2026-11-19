@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, type Mock } from 'vitest'
-import type { Sensitivity } from '../../security/sensitivity.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import {
   ChannelRuleSupersessionError,
   SensitivityReclassificationError,

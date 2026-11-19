@@ -1,7 +1,7 @@
 /** Add protection to an Office root. Shared human/Brian command. [COMP:api/office-classification] */
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
-import type { ToolContext } from '@use-brian/core'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { runWithAgentAccess } from '../db/agent-access-context.js'
 import { getAppPool, applyRLSGucs, rollbackAndRelease } from '../db/client.js'
 import { defaultOfficeDbQuery } from '../db/office-artifacts.js'

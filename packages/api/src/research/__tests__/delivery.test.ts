@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { QueryEvent } from '@use-brian/core'
+import type { QueryEvent } from '@use-brian/agent-runtime/engine/query-loop.js'
 import type { ResearchActivity, SettleResearchActivityInput } from '../../db/research-store.js'
 import { createResearchTurnObserver, recordResearchDelivery, researchTitleFor, type ResearchDeliveryDeps } from '../delivery.js'
 

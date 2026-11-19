@@ -42,9 +42,9 @@ export {
 // docs/architecture/features/doc-conversion.md) can convert Markdown → blocks
 // without pulling the core barrel.
 // Offline creation validates the exact same seed as the draft API.
-export { pageSchema } from '@use-brian/core/dist/views/blocks.js'
+export { pageSchema } from '@use-brian/core/views/blocks.js'
 
-export { markdownToBlocks } from '@use-brian/core/dist/doc/markdown.js'
+export { markdownToBlocks } from '@use-brian/core/doc/markdown.js'
 
 // Page templates — re-exported from core's `dist/doc/templates.js` leaf, which
 // imports only the fs-free `markdown.js` + `blocks.js` leaves (no barrel, no
@@ -64,7 +64,7 @@ export {
   getPageTemplate,
   pageTemplateIds,
   instantiatePageTemplate,
-} from '@use-brian/core/dist/doc/templates.js'
+} from '@use-brian/core/doc/templates.js'
 
 // Custom (user-authored, workspace-shared) page templates — re-exported from
 // core's fs-free `dist/doc/custom-template-types.js` leaf (imports only `zod`
@@ -97,7 +97,7 @@ export {
   // "Save as template" path calls this so a WYSIWYG blueprint persists as a
   // blueprint (extraction != null) instead of a plain skeleton.
   blocksToExtractionSpec,
-} from '@use-brian/core/dist/doc/custom-template-types.js'
+} from '@use-brian/core/doc/custom-template-types.js'
 
 // Starter blueprints — the installable catalog, from the same fs-free leaf
 // discipline (it imports only `custom-template-types.js` + the `blocks.js`
@@ -110,7 +110,7 @@ export {
   STARTER_BLUEPRINTS,
   findStarterBlueprint,
   starterExtractionSpec,
-} from '@use-brian/core/dist/doc/starter-blueprints.js'
+} from '@use-brian/core/doc/starter-blueprints.js'
 
 // Blueprint record helpers — the typed output contract's pure half (field
 // validation, completeness, page projection). Same fs-free leaf discipline.
@@ -122,7 +122,7 @@ export {
   recordCompleteness,
   formatFieldValueText,
   blueprintRecordToBlocks,
-} from '@use-brian/core/dist/doc/blueprint-record.js'
+} from '@use-brian/core/doc/blueprint-record.js'
 
 export {
   LEGACY_SEED_CLIENT_ID,

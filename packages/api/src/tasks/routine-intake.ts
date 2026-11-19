@@ -6,12 +6,34 @@
 import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import {
-  ContextScopeAccumulator, WorkflowDefinitionSchema, WorkflowTriggerSchema, crmDomainEventToDispatchEvent,
-  evaluateTaskAdmission, matchesEvent, normalizeTaskTitle, parseAuthoringAuthority, pinAccessCeiling,
-  qualifyRoutineTracking, readRoutineInput, routineConfigurationIssues, routineConfigurationShape,
-  TASK_ADMISSION_THRESHOLDS, type AuthoringAuthority, type DispatchEvent, type ScopeEvidence,
-  type TaskReadinessAssessment, type TaskRecord, type RoutineTrackingQualification,
-} from '@use-brian/core'
+  evaluateTaskAdmission,
+  normalizeTaskTitle,
+  TASK_ADMISSION_THRESHOLDS,
+  type TaskReadinessAssessment,
+} from '@use-brian/core/tasks/admission.js'
+import {
+  qualifyRoutineTracking,
+  readRoutineInput,
+  routineConfigurationIssues,
+  routineConfigurationShape,
+  type RoutineTrackingQualification,
+} from '@use-brian/core/tasks/routine-intake.js'
+import type { TaskRecord } from '@use-brian/core/tasks/types.js'
+import { crmDomainEventToDispatchEvent } from '@use-brian/core/workflow/crm-event-trigger.js'
+import { matchesEvent, type DispatchEvent } from '@use-brian/core/workflow/event-trigger.js'
+import {
+  WorkflowDefinitionSchema,
+  WorkflowTriggerSchema,
+} from '@use-brian/core/workflow/schemas.js'
+import {
+  parseAuthoringAuthority,
+  pinAccessCeiling,
+  type AuthoringAuthority,
+} from '@use-brian/agent-runtime/security/access-ceiling.js'
+import {
+  ContextScopeAccumulator,
+  type ScopeEvidence,
+} from '@use-brian/agent-runtime/security/context-scope.js'
 import type { PoolClient } from 'pg'
 import { applyRLSGucs, getPool, rollbackAndRelease } from '../db/client.js'
 import { findRoutineReceipt, requireRoutineSchema, routineConfigurationDigest,

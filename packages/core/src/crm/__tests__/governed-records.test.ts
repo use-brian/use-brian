@@ -1,16 +1,18 @@
 import { describe, expect, it, vi } from 'vitest'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { createCrmGovernedRecordTools } from '../governed-record-tools.js'
 import {
   CrmChangeSetSchema,
-  CrmOperationsCommandSchema,
   CrmReviewPolicySchema,
   DEFAULT_CRM_REVIEW_POLICIES,
-  commandRequiresConfigurationAuthority,
-  createCrmGovernedRecordTools,
   isCrmGovernedCommand,
   type CrmGovernedReadPort,
+} from '../governed-records.js'
+import {
+  CrmOperationsCommandSchema,
+  commandRequiresConfigurationAuthority,
   type CrmOperationsServicePort,
-  type ToolContext,
-} from '../../index.js'
+} from '../operations-types.js'
 
 const UUID = '00000000-0000-4000-8000-000000000001'
 const OTHER = '00000000-0000-4000-8000-000000000002'

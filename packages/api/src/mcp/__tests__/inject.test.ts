@@ -1,12 +1,12 @@
 /**
- * Unit tests for the MCP tool-injection module.
- * Component tag: [COMP:api/mcp-inject].
- *
- * Exercises the public surface of inject.ts: injectMcpTools' fail-soft
- * contract (a connector-store error degrades to an empty result rather
- * than throwing), the no-connectors path returning a valid
- * McpInjectionResult, the INJECTED_BUILTIN_TOOLS_BY_CONNECTOR drift-
- * sweep table's integrity, and the discovery-cache size accessor.
+ * Entrypoint capability surfaces (M3 WP5): the behavior suite written
+ * against the retired injector, run through the production surface
+ * (`mcp/surface.ts`, via `surface-harness.ts`). Covers the fail-soft
+ * contract (a connector-store error degrades to an empty result rather than
+ * throwing), the no-connectors result, the provider `describe()` tables the
+ * drift sweep reads, the descriptor-lifecycle size accessor, and every
+ * connector family's lanes, policy, grants, auth threading and fold.
+ * Component tag: [COMP:api/mcp-surface].
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -116,12 +116,19 @@ vi.mock('../../msgraph/client.js', () => ({
   },
 }))
 
-import {
-  injectMcpTools,
-  INJECTED_BUILTIN_TOOLS_BY_CONNECTOR,
-  _getMcpDiscoveryCacheSize,
-} from '../inject.js'
-import { createGmailTools, createGoogleDriveTools, createGoogleMapsTools, createSearchConsoleTools } from '@use-brian/core'
+import { composeForTest, discoverSources } from './surface-harness.js'
+import { descriptorLifecycleSize } from '../descriptors.js'
+import { PROVIDER_MODULES } from '../providers/index.js'
+
+/** Tools each connector's provider `describe()` reports (the runtime surface the drift sweep reads). */
+const DESCRIBED_TOOLS_BY_CONNECTOR: Record<string, string[]> = {}
+for (const descriptor of Object.values(PROVIDER_MODULES).flatMap((provider) => provider.describe())) {
+  (DESCRIBED_TOOLS_BY_CONNECTOR[descriptor.connectorId] ??= []).push(descriptor.name)
+}
+import { createGoogleDriveTools } from '@use-brian/core/tools/base/google-drive.js'
+import { createGmailTools } from '@use-brian/core/tools/base/google-gmail.js'
+import { createGoogleMapsTools } from '@use-brian/core/tools/base/google-maps.js'
+import { createSearchConsoleTools } from '@use-brian/core/tools/base/gsc.js'
 import { OFFICIAL_CONNECTOR_TOOLS } from '@use-brian/shared/builtin-connectors'
 import { packSearchConsoleCredentials } from '../../gsc/client.js'
 import { buildUnavailableCapabilitiesPrompt } from '../../routes/route-helpers.js'
@@ -157,10 +164,10 @@ beforeEach(() => {
   listGDriveCatalogFiles.mockResolvedValue([])
 })
 
-describe('[COMP:api/mcp-inject] injectMcpTools', () => {
+describe('[COMP:api/mcp-surface] composeSurfaceCapabilities', () => {
   it('degrades to an empty result without throwing when the connector store errors', async () => {
     const tools = new Map()
-    const result = await injectMcpTools({
+    const result = await composeForTest({
       userId: 'u-1',
       assistantId: 'a-1',
       tools,
@@ -174,7 +181,7 @@ describe('[COMP:api/mcp-inject] injectMcpTools', () => {
   })
 
   it('returns a valid McpInjectionResult when the user has no connectors', async () => {
-    const result = await injectMcpTools({
+    const result = await composeForTest({
       userId: 'u-1',
       assistantId: 'a-1',
       tools: new Map(),
@@ -190,7 +197,7 @@ describe('[COMP:api/mcp-inject] injectMcpTools', () => {
   })
 })
 
-describe('[COMP:api/mcp-inject] KB write-tool exposure gate', () => {
+describe('[COMP:api/mcp-surface] KB write-tool exposure gate', () => {
   type KbSource = { id: string; repo: string; sourceType: 'github' | 'local'; writeAccess?: boolean | null }
 
   function kbStoreStub(sources: KbSource[]) {
@@ -226,7 +233,7 @@ describe('[COMP:api/mcp-inject] KB write-tool exposure gate', () => {
             }],
       ),
     }
-    const result = await injectMcpTools({
+    const result = await composeForTest({
       userId: 'u-1',
       assistantId: 'a-1',
       tools,
@@ -312,7 +319,7 @@ describe('[COMP:api/mcp-inject] KB write-tool exposure gate', () => {
   })
 })
 
-describe('[COMP:api/mcp-inject] workspace connector-scoping gate', () => {
+describe('[COMP:api/mcp-surface] workspace connector-scoping gate', () => {
   // Regression guard for the 2026-06-01 cross-member leak and the 2026-07-14
   // cross-workspace leak: NO workspace assistant may load the workspace
   // owner's personal connectors as its base tool set — exposure
@@ -326,7 +333,7 @@ describe('[COMP:api/mcp-inject] workspace connector-scoping gate', () => {
 
   it('workspace assistant (any member count): does NOT load the owner-personal connector base', async () => {
     const list = listSpy()
-    await injectMcpTools({
+    await composeForTest({
       userId: 'owner-1',
       assistantId: 'a-1',
       tools: new Map(),
@@ -339,7 +346,7 @@ describe('[COMP:api/mcp-inject] workspace connector-scoping gate', () => {
 
   it('no workspace (personal assistant): loads the connector base', async () => {
     const list = listSpy()
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-1',
       assistantId: 'a-1',
       tools: new Map(),
@@ -350,7 +357,7 @@ describe('[COMP:api/mcp-inject] workspace connector-scoping gate', () => {
   })
 })
 
-describe('[COMP:api/mcp-inject] granted custom MCP overlay', () => {
+describe('[COMP:api/mcp-surface] granted custom MCP overlay', () => {
   // Regression: a user-scoped CUSTOM remote MCP shared to a shared workspace
   // via a connector_grant was silently dropped (the grant overlay only
   // re-injected known built-in providers). For a shared workspace the
@@ -376,7 +383,7 @@ describe('[COMP:api/mcp-inject] granted custom MCP overlay', () => {
     }
     const isEnabled = vi.fn().mockResolvedValue(true)
 
-    await injectMcpTools({
+    await composeForTest({
       userId: 'owner-1',
       assistantId: 'a-1',
       tools,
@@ -386,6 +393,7 @@ describe('[COMP:api/mcp-inject] granted custom MCP overlay', () => {
       assistantConnectorStore: { isEnabled } as never,
       assistantTeamId: 'ws-shared',
     })
+    await discoverSources(tools, 'My MCP')
 
     // The granted custom MCP was discovered by URL...
     expect(discoverMcpServer).toHaveBeenCalledWith('http://localhost:8770/mcp', 'My MCP', {})
@@ -401,7 +409,7 @@ describe('[COMP:api/mcp-inject] granted custom MCP overlay', () => {
       name: 'gcal',
       tools: [{ name: 'lookupShift', description: 'looks up a work shift', inputSchema: { type: 'object' } }],
     })
-    const result = await injectMcpTools({
+    const result = await composeForTest({
       userId: 'u-1',
       assistantId: 'a-1',
       tools: new Map(),
@@ -430,7 +438,7 @@ describe('[COMP:api/mcp-inject] granted custom MCP overlay', () => {
       ],
     })
     const tools = new Map()
-    const result = await injectMcpTools({
+    const result = await composeForTest({
       userId: 'owner-1',
       assistantId: 'a-1',
       tools,
@@ -477,7 +485,7 @@ describe('[COMP:api/mcp-inject] granted custom MCP overlay', () => {
         },
       ])),
     }
-    await injectMcpTools({
+    await composeForTest({
       userId: 'owner-1', assistantId: 'a-1', tools,
       connectorStore: { list: vi.fn().mockResolvedValue([]) } as never,
       settingsStore: settingsStoreStub() as never,
@@ -489,7 +497,7 @@ describe('[COMP:api/mcp-inject] granted custom MCP overlay', () => {
   })
 })
 
-describe('[COMP:api/mcp-inject] granted CLI MCP overlay', () => {
+describe('[COMP:api/mcp-surface] granted CLI MCP overlay', () => {
   it('injects every CLI instance exposed to a workspace', async () => {
     discoverCliServer.mockImplementation(async (_params, name) => ({
       name,
@@ -514,7 +522,7 @@ describe('[COMP:api/mcp-inject] granted CLI MCP overlay', () => {
       })),
     }
 
-    await injectMcpTools({
+    await composeForTest({
       userId: 'owner-1', assistantId: 'a-1', tools,
       connectorStore: { list: vi.fn().mockResolvedValue([]) } as never,
       settingsStore: settingsStoreStub() as never,
@@ -522,6 +530,7 @@ describe('[COMP:api/mcp-inject] granted CLI MCP overlay', () => {
       connectorInstanceStore: connectorInstanceStore as never,
       assistantTeamId: 'ws-shared',
     })
+    await discoverSources(tools, 'Test Filesystem')
 
     expect(discoverCliServer).toHaveBeenCalledTimes(2)
     expect(discoverCliServer).toHaveBeenCalledWith(expect.anything(), 'Test Filesystem')
@@ -541,7 +550,7 @@ describe('[COMP:api/mcp-inject] granted CLI MCP overlay', () => {
       ],
     })
     const tools = new Map()
-    const result = await injectMcpTools({
+    const result = await composeForTest({
       userId: 'owner-1', assistantId: 'a-1', tools,
       connectorStore: { list: vi.fn().mockResolvedValue([]) } as never,
       settingsStore: settingsStoreStub() as never,
@@ -603,7 +612,7 @@ describe('[COMP:api/mcp-inject] granted CLI MCP overlay', () => {
     const isEnabled = vi.fn(async (_assistantId: string, governanceId: string) => governanceId !== 'cli:cli-disabled-1')
     const tools = new Map()
 
-    await injectMcpTools({
+    await composeForTest({
       userId: 'owner-1', assistantId: 'a-1', tools,
       connectorStore: { list: vi.fn().mockResolvedValue([]) } as never,
       settingsStore: settingsStoreStub() as never,
@@ -621,6 +630,7 @@ describe('[COMP:api/mcp-inject] granted CLI MCP overlay', () => {
       } as never,
       assistantTeamId: 'ws-shared',
     })
+    await discoverSources(tools, 'Two')
 
     expect(isEnabled).toHaveBeenCalledWith('a-1', 'cli:cli-disabled-1', 'cli')
     expect(isEnabled).toHaveBeenCalledWith('a-1', 'cli:cli-enabled-2', 'cli')
@@ -638,7 +648,7 @@ describe('[COMP:api/mcp-inject] granted CLI MCP overlay', () => {
       id, provider: 'cli', label: 'Calendar', connected: true, config: {}, updatedAt: new Date(0),
     }))
     const tools = new Map()
-    const result = await injectMcpTools({
+    const result = await composeForTest({
       userId: 'owner-1', assistantId: 'a-1', tools,
       connectorStore: { list: vi.fn().mockResolvedValue([]) } as never,
       settingsStore: settingsStoreStub() as never,
@@ -664,7 +674,7 @@ describe('[COMP:api/mcp-inject] granted CLI MCP overlay', () => {
   })
 })
 
-describe('[COMP:api/mcp-inject] custom connector auth threading', () => {
+describe('[COMP:api/mcp-surface] custom connector auth threading', () => {
   // Execution dispatches by serverUrl alone (tool-search's mcp_call carries
   // no per-entry credentials), so inject.ts joins per-connector auth headers
   // by URL. Both halves matter: discovery AND the mcp_call dispatcher.
@@ -691,7 +701,7 @@ describe('[COMP:api/mcp-inject] custom connector auth threading', () => {
       updateCredentialsSystem: vi.fn(),
     }
 
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-bearer',
       assistantId: 'a-1',
       tools,
@@ -699,6 +709,7 @@ describe('[COMP:api/mcp-inject] custom connector auth threading', () => {
       settingsStore: settingsStoreStub() as never,
       connectorInstanceStore: connectorInstanceStore as never,
     })
+    await discoverSources(tools, 'Trading MCP')
 
     // Discovery carried the Authorization header...
     expect(connectorInstanceStore.getAuthCredentialsSystem).toHaveBeenCalledWith('ci-bear')
@@ -741,12 +752,13 @@ describe('[COMP:api/mcp-inject] custom connector auth threading', () => {
       getAuthCredentialsSystem: vi.fn().mockResolvedValue({ type: 'bearer', token: 'tok-1' }),
       getCredentialsSystem: vi.fn(), updateCredentialsSystem: vi.fn(),
     }
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-pf-1', assistantId: 'a-1', tools,
       connectorStore: connectorStore as never,
       settingsStore: settingsStoreStub() as never,
       connectorInstanceStore: connectorInstanceStore as never,
     })
+    await discoverSources(tools, 'Preflight MCP')
     expect(discoverMcpServer).toHaveBeenCalledWith(
       'http://localhost:9100/mcp', 'Preflight MCP',
       { Authorization: 'Bearer tok-1', 'X-Tenant': 'acme' },
@@ -763,7 +775,7 @@ describe('[COMP:api/mcp-inject] custom connector auth threading', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     discoverMcpServer.mockResolvedValueOnce({ name: 'Preflight MCP 2', url: 'http://localhost:9101/mcp', tools: [] })
     const tools = new Map()
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-pf-2', assistantId: 'a-1', tools,
       connectorStore: {
         list: vi.fn().mockResolvedValue([
@@ -781,6 +793,7 @@ describe('[COMP:api/mcp-inject] custom connector auth threading', () => {
         getCredentialsSystem: vi.fn(), updateCredentialsSystem: vi.fn(),
       } as never,
     })
+    await discoverSources(tools, 'Preflight MCP 2')
     expect(discoverMcpServer).toHaveBeenCalledWith(
       'http://localhost:9101/mcp', 'Preflight MCP 2',
       { Authorization: 'Bearer tok-1', 'X-Good': 'ok' },
@@ -795,7 +808,7 @@ describe('[COMP:api/mcp-inject] custom connector auth threading', () => {
       tools: [{ name: 'getQuote', description: 'q', inputSchema: { type: 'object', properties: {} } }],
     })
     const tools = new Map()
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-actor-1', assistantId: 'a-1', tools,
       connectorStore: {
         list: vi.fn().mockResolvedValue([
@@ -814,6 +827,7 @@ describe('[COMP:api/mcp-inject] custom connector auth threading', () => {
       } as never,
       actorIdentity: { channel: 'web', id: 'ceo@corp.com', email: 'ceo@corp.com', userId: 'u-actor-1' },
     })
+    await discoverSources(tools, 'Actor MCP')
     expect(discoverMcpServer).toHaveBeenCalledWith('http://localhost:9200/mcp', 'Actor MCP', {
       Authorization: 'Bearer tok',
       'X-Tenant': 'acme',
@@ -842,7 +856,7 @@ describe('[COMP:api/mcp-inject] custom connector auth threading', () => {
       tools: [{ name: 'getMyOrders', description: 'self-scoped', inputSchema: { type: 'object', properties: {} } }],
     })
     const tools = new Map()
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-owner-1', assistantId: 'a-1', tools,
       connectorStore: {
         list: vi.fn().mockResolvedValue([
@@ -867,6 +881,7 @@ describe('[COMP:api/mcp-inject] custom connector auth threading', () => {
         org: 'acme-corp',
       },
     })
+    await discoverSources(tools, 'Bridge MCP')
     const headers = discoverMcpServer.mock.calls.at(-1)![2] as Record<string, string>
     expect(headers['X-UseBrian-Actor-Channel']).toBe('api')
     expect(headers['X-UseBrian-Actor-Id']).toBe('cust_8812')
@@ -879,7 +894,7 @@ describe('[COMP:api/mcp-inject] custom connector auth threading', () => {
   it('does NOT inject actor headers for a connector that did not opt in (no PII leak)', async () => {
     discoverMcpServer.mockResolvedValueOnce({ name: 'No-Actor MCP', url: 'http://localhost:9201/mcp', tools: [] })
     const tools = new Map()
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-actor-2', assistantId: 'a-1', tools,
       connectorStore: {
         list: vi.fn().mockResolvedValue([
@@ -894,6 +909,7 @@ describe('[COMP:api/mcp-inject] custom connector auth threading', () => {
       settingsStore: settingsStoreStub() as never,
       actorIdentity: { channel: 'web', id: 'ceo@corp.com', email: 'ceo@corp.com', userId: 'u-actor-2' },
     })
+    await discoverSources(tools, 'No-Actor MCP')
     expect(discoverMcpServer).toHaveBeenCalledWith('http://localhost:9201/mcp', 'No-Actor MCP', {})
   })
 
@@ -902,7 +918,7 @@ describe('[COMP:api/mcp-inject] custom connector auth threading', () => {
   it('injects X-Sidanclaw-Media-Token for an opted-in connector', async () => {
     discoverMcpServer.mockResolvedValueOnce({ name: 'Media MCP', url: 'http://localhost:9210/mcp', tools: [] })
     const tools = new Map()
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-media-1', assistantId: 'a-1', tools,
       connectorStore: {
         list: vi.fn().mockResolvedValue([
@@ -917,6 +933,7 @@ describe('[COMP:api/mcp-inject] custom connector auth threading', () => {
       settingsStore: settingsStoreStub() as never,
       actorIdentity: { channel: 'whatsapp', id: '+15551234567', email: null, userId: 'u-media-1', mediaToken: 'tok.media.sig' },
     })
+    await discoverSources(tools, 'Media MCP')
     // Media token present; actor headers absent (that connector opted out of identity).
     expect(discoverMcpServer).toHaveBeenCalledWith('http://localhost:9210/mcp', 'Media MCP', {
       'X-UseBrian-Media-Token': 'tok.media.sig',
@@ -927,7 +944,7 @@ describe('[COMP:api/mcp-inject] custom connector auth threading', () => {
   it('does NOT inject X-Sidanclaw-Media-Token for a connector that did not opt in', async () => {
     discoverMcpServer.mockResolvedValueOnce({ name: 'No-Media MCP', url: 'http://localhost:9211/mcp', tools: [] })
     const tools = new Map()
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-media-2', assistantId: 'a-1', tools,
       connectorStore: {
         list: vi.fn().mockResolvedValue([
@@ -942,6 +959,7 @@ describe('[COMP:api/mcp-inject] custom connector auth threading', () => {
       settingsStore: settingsStoreStub() as never,
       actorIdentity: { channel: 'whatsapp', id: '+15551234567', email: null, userId: 'u-media-2', mediaToken: 'tok.media.sig' },
     })
+    await discoverSources(tools, 'No-Media MCP')
     // Actor headers present (identity opt-in), but NO media token.
     expect(discoverMcpServer).toHaveBeenCalledWith('http://localhost:9211/mcp', 'No-Media MCP', {
       'X-UseBrian-Actor-Channel': 'whatsapp',
@@ -958,7 +976,7 @@ describe('[COMP:api/mcp-inject] custom connector auth threading', () => {
   it('discovers with empty headers when no instance store is wired (legacy parity)', async () => {
     discoverMcpServer.mockResolvedValueOnce({ name: 'Open MCP', url: 'http://localhost:9001/mcp', tools: [] })
     const tools = new Map()
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-open',
       assistantId: 'a-1',
       tools,
@@ -973,17 +991,18 @@ describe('[COMP:api/mcp-inject] custom connector auth threading', () => {
       } as never,
       settingsStore: settingsStoreStub() as never,
     })
+    await discoverSources(tools, 'Open MCP')
     expect(discoverMcpServer).toHaveBeenCalledWith('http://localhost:9001/mcp', 'Open MCP', {})
   })
 })
 
-describe('[COMP:api/mcp-inject] INJECTED_BUILTIN_TOOLS_BY_CONNECTOR', () => {
+describe('[COMP:api/mcp-surface] DESCRIBED_TOOLS_BY_CONNECTOR', () => {
   it('maps each built-in connector to a non-empty, duplicate-free tool list', () => {
-    const connectors = Object.keys(INJECTED_BUILTIN_TOOLS_BY_CONNECTOR)
+    const connectors = Object.keys(DESCRIBED_TOOLS_BY_CONNECTOR)
     expect(connectors).toEqual(
       expect.arrayContaining(['gcal', 'gmail', 'gdrive', 'github', 'notion', 'fathom', 'wordpress', 'gsc', 'msgraph']),
     )
-    for (const [connector, toolNames] of Object.entries(INJECTED_BUILTIN_TOOLS_BY_CONNECTOR)) {
+    for (const [connector, toolNames] of Object.entries(DESCRIBED_TOOLS_BY_CONNECTOR)) {
       expect(toolNames.length, connector).toBeGreaterThan(0)
       expect(new Set(toolNames).size, `${connector} has duplicate tool names`).toBe(toolNames.length)
     }
@@ -997,7 +1016,7 @@ describe('[COMP:api/mcp-inject] INJECTED_BUILTIN_TOOLS_BY_CONNECTOR', () => {
       listSites: async () => ({}), query: async () => ({}), inspectUrl: async () => ({}), listSitemaps: async () => ({}), defaultSite: async () => null,
     }).map((t) => t.name)
     expect(built).toEqual(['searchConsoleListSites', 'searchConsoleQuery', 'searchConsoleInspectUrl', 'searchConsoleListSitemaps'])
-    expect([...INJECTED_BUILTIN_TOOLS_BY_CONNECTOR.gsc]).toEqual(built)
+    expect([...DESCRIBED_TOOLS_BY_CONNECTOR.gsc]).toEqual(built)
     expect((OFFICIAL_CONNECTOR_TOOLS.gsc ?? []).map((t) => t.name)).toEqual(built)
   })
 
@@ -1018,7 +1037,7 @@ describe('[COMP:api/mcp-inject] INJECTED_BUILTIN_TOOLS_BY_CONNECTOR', () => {
   for (const { connectorId, build } of PHASE_GATED_BUILDERS) {
     it(`only advertises ${connectorId} tools that the builder actually returns`, () => {
       const built = new Set(build().map((t) => t.name))
-      const injected = INJECTED_BUILTIN_TOOLS_BY_CONNECTOR[connectorId] ?? []
+      const injected = DESCRIBED_TOOLS_BY_CONNECTOR[connectorId] ?? []
       const governed = (OFFICIAL_CONNECTOR_TOOLS[connectorId] ?? []).map((t) => t.name)
 
       // Tools from OTHER builders share a connector row (gdrive carries the
@@ -1026,7 +1045,7 @@ describe('[COMP:api/mcp-inject] INJECTED_BUILTIN_TOOLS_BY_CONNECTOR', () => {
       // that phase-gating breaks: nothing this builder gates off may remain
       // listed. A name the builder does return must be listed in both.
       for (const name of built) {
-        expect(injected, `${connectorId}: ${name} is built but missing from INJECTED_BUILTIN_TOOLS_BY_CONNECTOR`)
+        expect(injected, `${connectorId}: ${name} is built but missing from DESCRIBED_TOOLS_BY_CONNECTOR`)
           .toContain(name)
         expect(governed, `${connectorId}: ${name} is built but missing from OFFICIAL_CONNECTOR_TOOLS`)
           .toContain(name)
@@ -1035,13 +1054,13 @@ describe('[COMP:api/mcp-inject] INJECTED_BUILTIN_TOOLS_BY_CONNECTOR', () => {
       const ownPrefix = connectorId === 'gmail' ? 'gmail' : 'googleDrive'
       const phantomInjected = injected.filter((n) => n.startsWith(ownPrefix) && !built.has(n))
       const phantomGoverned = governed.filter((n) => n.startsWith(ownPrefix) && !built.has(n))
-      expect(phantomInjected, `${connectorId}: listed in INJECTED_BUILTIN_TOOLS_BY_CONNECTOR but never built`).toEqual([])
+      expect(phantomInjected, `${connectorId}: listed in DESCRIBED_TOOLS_BY_CONNECTOR but never built`).toEqual([])
       expect(phantomGoverned, `${connectorId}: grantable in the tools page but never built`).toEqual([])
     })
   }
 })
 
-describe('[COMP:api/mcp-inject] multi-instance built-ins', () => {
+describe('[COMP:api/mcp-surface] multi-instance built-ins', () => {
   // Two connected GitHub accounts: the OLDEST keeps the canonical tool names
   // (so single-account users are unchanged); the newer one is injected as a
   // label-qualified variant bound to its own PAT.
@@ -1059,7 +1078,7 @@ describe('[COMP:api/mcp-inject] multi-instance built-ins', () => {
       updateCredentialsSystem: vi.fn(),
     }
 
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-1',
       assistantId: 'a-1',
       tools,
@@ -1094,7 +1113,7 @@ describe('[COMP:api/mcp-inject] multi-instance built-ins', () => {
       getCredentialsSystem: vi.fn(),
       updateCredentialsSystem: vi.fn(),
     }
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-1', assistantId: 'a-1', tools,
       connectorStore: connectorStore as never,
       settingsStore: settingsStoreStub() as never,
@@ -1136,7 +1155,7 @@ describe('[COMP:api/mcp-inject] multi-instance built-ins', () => {
       markHealth: vi.fn(),
     }
 
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-1',
       assistantId: 'a-1',
       tools,
@@ -1157,7 +1176,7 @@ describe('[COMP:api/mcp-inject] multi-instance built-ins', () => {
   })
 })
 
-describe('[COMP:api/mcp-inject] Google Search Console built-in', () => {
+describe('[COMP:api/mcp-surface] Google Search Console built-in', () => {
   const PEM = '-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7\n-----END PRIVATE KEY-----\n'
   const envelope = (defaultSite: string | null) => packSearchConsoleCredentials({
     clientEmail: 'sa@example.iam.gserviceaccount.com', privateKey: PEM, tokenUri: 'https://oauth2.googleapis.com/token', defaultSite,
@@ -1176,7 +1195,7 @@ describe('[COMP:api/mcp-inject] Google Search Console built-in', () => {
       getCredentialsSystem: vi.fn().mockResolvedValue({ client_id: 'gsc_service_account', client_secret: envelope(null) }),
       markHealth: vi.fn(),
     }
-    const { unavailable } = await injectMcpTools({
+    const { unavailable } = await composeForTest({
       userId: 'u-1',
       assistantId: 'a-1',
       tools,
@@ -1186,7 +1205,7 @@ describe('[COMP:api/mcp-inject] Google Search Console built-in', () => {
       keepBuiltinsDirect: true,
     })
     const names = [...tools.keys()]
-    for (const name of INJECTED_BUILTIN_TOOLS_BY_CONNECTOR.gsc) expect(names).toContain(name)
+    for (const name of DESCRIBED_TOOLS_BY_CONNECTOR.gsc) expect(names).toContain(name)
     const variant = names.find((name) => name.startsWith('searchConsoleQuery__'))
     expect(variant).toBeTruthy()
     expect((tools.get(variant!) as { description: string }).description).toMatch(/^\[Agency account\]/)
@@ -1195,7 +1214,7 @@ describe('[COMP:api/mcp-inject] Google Search Console built-in', () => {
   })
 
   it('advertises the not-connected notice, and an expired notice for an unreadable envelope', async () => {
-    const disconnected = await injectMcpTools({
+    const disconnected = await composeForTest({
       userId: 'u-1', assistantId: 'a-1', tools: new Map(),
       connectorStore: {
         list: vi.fn().mockResolvedValue([
@@ -1207,7 +1226,7 @@ describe('[COMP:api/mcp-inject] Google Search Console built-in', () => {
     expect(disconnected.unavailable.some((u) => u.startsWith('Google Search Console: not connected'))).toBe(true)
 
     const tools = new Map()
-    const { unavailable: expired } = await injectMcpTools({
+    const { unavailable: expired } = await composeForTest({
       userId: 'u-1', assistantId: 'a-1', tools,
       connectorStore: {
         list: vi.fn().mockResolvedValue([
@@ -1223,7 +1242,7 @@ describe('[COMP:api/mcp-inject] Google Search Console built-in', () => {
   })
 })
 
-describe('[COMP:api/mcp-inject] multi-account Google built-ins', () => {
+describe('[COMP:api/mcp-surface] multi-account Google built-ins', () => {
   // Two connected accounts per Google provider: the oldest keeps the
   // canonical names + the legacy per-provider token path; the newer one is a
   // suffixed variant set bound to its OWN refresh token (resolved lazily off
@@ -1265,7 +1284,7 @@ describe('[COMP:api/mcp-inject] multi-account Google built-ins', () => {
   it('injects canonical Google tools for the primary and labelled variants for the extra accounts', async () => {
     const tools = new Map()
     const { connectorStore, connectorInstanceStore } = googleStores()
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-1',
       assistantId: 'a-1',
       tools,
@@ -1296,7 +1315,7 @@ describe('[COMP:api/mcp-inject] multi-account Google built-ins', () => {
   it.each([false, true])('advertises Calendar and optionally exposes guarded read schemas (%s)', async exposeLocalReadTools => {
     const tools = new Map()
     const { connectorStore, connectorInstanceStore } = googleStores()
-    const result = await injectMcpTools({
+    const result = await composeForTest({
       userId: 'u-1',
       assistantId: 'a-1',
       tools,
@@ -1320,7 +1339,7 @@ describe('[COMP:api/mcp-inject] multi-account Google built-ins', () => {
   it('binds each Gmail confirmation preview to its concrete sender account', async () => {
     const tools = new Map()
     const { connectorStore, connectorInstanceStore } = googleStores()
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-1',
       assistantId: 'a-1',
       tools,
@@ -1364,7 +1383,7 @@ describe('[COMP:api/mcp-inject] multi-account Google built-ins', () => {
       shadowOnly: false,
     }))
     const emit = vi.fn(async () => ({ status: 'executed' as const }))
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-1', assistantId: 'a-1', tools,
       connectorStore: connectorStore as never,
       settingsStore: settingsStoreStub() as never,
@@ -1396,7 +1415,7 @@ describe('[COMP:api/mcp-inject] multi-account Google built-ins', () => {
   it('enriches an event mutation from the calendar it will modify', async () => {
     const tools = new Map()
     const { connectorStore, connectorInstanceStore } = googleStores()
-    const result = await injectMcpTools({
+    const result = await composeForTest({
       userId: 'u-1', assistantId: 'a-1', tools,
       connectorStore: connectorStore as never,
       settingsStore: settingsStoreStub() as never,
@@ -1418,7 +1437,7 @@ describe('[COMP:api/mcp-inject] multi-account Google built-ins', () => {
     connectorStore.list.mockResolvedValue([
       { id: 'ci-gm1', connectorId: 'gmail', name: 'Gmail', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
     ])
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-1', assistantId: 'a-1', tools,
       connectorStore: connectorStore as never,
       settingsStore: settingsStoreStub() as never,
@@ -1431,7 +1450,7 @@ describe('[COMP:api/mcp-inject] multi-account Google built-ins', () => {
   })
 })
 
-describe('[COMP:api/mcp-inject] per-assistant write-grant gate', () => {
+describe('[COMP:api/mcp-surface] per-assistant write-grant gate', () => {
   // The registry-derived `gateToolsOnActionGrants` wrapper must ride the
   // REAL injection path for every built-in with write tools — a missing
   // wire here is exactly the dead-checkbox drift (Studio shows grant
@@ -1457,7 +1476,7 @@ describe('[COMP:api/mcp-inject] per-assistant write-grant gate', () => {
 
   async function injectWith(connectorRows: unknown[], keepBuiltinsDirect = true) {
     const tools = new Map()
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-1',
       assistantId: 'a-1',
       tools,
@@ -1515,7 +1534,7 @@ describe('[COMP:api/mcp-inject] per-assistant write-grant gate', () => {
       grantedAt: new Date(), updatedAt: new Date(),
     })
     const tools = new Map()
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-1', assistantId: 'a-1', tools,
       connectorStore: {
         list: vi.fn().mockResolvedValue([
@@ -1546,7 +1565,7 @@ describe('[COMP:api/mcp-inject] per-assistant write-grant gate', () => {
         : null,
     )
     const tools = new Map()
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-1', assistantId: 'a-1', tools,
       connectorStore: {
         list: vi.fn().mockResolvedValue([
@@ -1573,7 +1592,7 @@ describe('[COMP:api/mcp-inject] per-assistant write-grant gate', () => {
   })
 })
 
-describe('[COMP:api/mcp-inject] Google Drive BYO credential refresh', () => {
+describe('[COMP:api/mcp-surface] Google Drive BYO credential refresh', () => {
   afterEach(() => {
     getConnectorConfig.mockReset()
     getConnectorConfig.mockReturnValue(undefined)
@@ -1597,7 +1616,7 @@ describe('[COMP:api/mcp-inject] Google Drive BYO credential refresh', () => {
     }
     const tools = new Map()
 
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-1', assistantId: 'a-1', tools,
       connectorStore: connectorStore as never,
       settingsStore: settingsStoreStub() as never,
@@ -1612,7 +1631,7 @@ describe('[COMP:api/mcp-inject] Google Drive BYO credential refresh', () => {
   })
 })
 
-describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
+describe('[COMP:api/mcp-surface] grant overlay instance binding', () => {
   // Incident 2026-07-08 (fls.com.hk): a workspace assistant sent mail from a
   // PERSONAL Gmail that was never exposed to the workspace. The team-grant
   // overlay gated injection on the connector_grant existing, but resolved the
@@ -1671,7 +1690,7 @@ describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
     const tools = new Map()
     const { connectorStore, connectorInstanceStore, connectorGrantStore } = stores()
 
-    await injectMcpTools({
+    await composeForTest({
       userId: 'owner-1',
       assistantId: 'a-1',
       tools,
@@ -1698,7 +1717,7 @@ describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
     const tools = new Map()
     const { connectorStore, connectorInstanceStore, connectorGrantStore } = stores()
 
-    await injectMcpTools({
+    await composeForTest({
       userId: 'owner-1',
       assistantId: 'a-1',
       tools,
@@ -1744,7 +1763,7 @@ describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
     const tools = new Map()
     enqueueGDriveLazyEnrichment.mockClear()
 
-    await injectMcpTools({
+    await composeForTest({
       userId: 'owner-1', assistantId: 'a-1', tools,
       connectorStore: connectorStore as never,
       settingsStore: settingsStoreStub() as never,
@@ -1814,7 +1833,7 @@ describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
       }])),
     }
     const tools = new Map()
-    await injectMcpTools({
+    await composeForTest({
       userId: 'owner-1', assistantId: 'a-1', tools,
       connectorStore: connectorStore as never,
       settingsStore: settingsStoreStub() as never,
@@ -1861,7 +1880,7 @@ describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
     }
     const tools = new Map()
 
-    await injectMcpTools({
+    await composeForTest({
       userId: 'owner-1', assistantId: 'a-1', tools,
       connectorStore: connectorStore as never,
       settingsStore: settingsStoreStub() as never,
@@ -1885,7 +1904,7 @@ describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
       connectorId: string,
     ) => connectorId !== 'gmail:ci-gm-work')
     const disabledTools = new Map()
-    await injectMcpTools({
+    await composeForTest({
       userId: 'owner-1', assistantId: 'a-1', tools: disabledTools,
       connectorStore: connectorStore as never,
       settingsStore: settingsStoreStub() as never,
@@ -1904,7 +1923,7 @@ describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
       connectorId: string,
     ) => connectorId !== 'gmail')
     const extraOnlyTools = new Map()
-    await injectMcpTools({
+    await composeForTest({
       userId: 'owner-1', assistantId: 'a-1', tools: extraOnlyTools,
       connectorStore: connectorStore as never,
       settingsStore: settingsStoreStub() as never,
@@ -1937,7 +1956,7 @@ describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
     }
     const tools = new Map()
 
-    await injectMcpTools({
+    await composeForTest({
       userId: 'owner-1', assistantId: 'a-1', tools,
       connectorStore: connectorStore as never,
       settingsStore: settingsStoreStub() as never,
@@ -1978,7 +1997,7 @@ describe('[COMP:integrations/connector-health] team-native connector health gate
   it('injects a healthy team-native GitHub connector (no reconnect notice)', async () => {
     const tools = new Map()
     const { connectorStore, connectorInstanceStore } = makeStores('ok')
-    const result = await injectMcpTools({
+    const result = await composeForTest({
       userId: 'u-1', assistantId: 'a-1', tools,
       connectorStore: connectorStore as never,
       settingsStore: settingsStoreStub() as never,
@@ -1993,7 +2012,7 @@ describe('[COMP:integrations/connector-health] team-native connector health gate
   it('skips a dead team-native GitHub connector and tells the model to reconnect', async () => {
     const tools = new Map()
     const { connectorStore, connectorInstanceStore } = makeStores('auth_failed')
-    const result = await injectMcpTools({
+    const result = await composeForTest({
       userId: 'u-1', assistantId: 'a-1', tools,
       connectorStore: connectorStore as never,
       settingsStore: settingsStoreStub() as never,
@@ -2043,7 +2062,7 @@ describe('[COMP:api/workspace-tool-policy-store] team-owned connector shared pol
       setPolicy: vi.fn(),
       listForWorkspace: vi.fn().mockResolvedValue([]),
     }
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-1', assistantId: 'a-1', tools,
       connectorStore: connectorStore as never,
       settingsStore: settingsStoreStub() as never,
@@ -2058,7 +2077,7 @@ describe('[COMP:api/workspace-tool-policy-store] team-owned connector shared pol
   })
 })
 
-describe('[COMP:api/mcp-inject] Microsoft Graph (msgraph) built-in', () => {
+describe('[COMP:api/mcp-surface] Microsoft Graph (msgraph) built-in', () => {
   // Read-only Teams tools over a rotating-refresh-token credential. Unlike
   // github/notion/fathom there is no extras path: `msgraph` is
   // `single_instance` in OFFICIAL_CONNECTORS, so a second account can never
@@ -2099,7 +2118,7 @@ describe('[COMP:api/mcp-inject] Microsoft Graph (msgraph) built-in', () => {
     credentials?: string
   } = {}): Promise<{ tools: Map<string, unknown>; unavailable: string[] }> {
     const tools = new Map()
-    const result = await injectMcpTools({
+    const result = await composeForTest({
       userId: 'u-1',
       assistantId: 'a-1',
       tools,
@@ -2195,7 +2214,7 @@ describe('[COMP:api/mcp-inject] Microsoft Graph (msgraph) built-in', () => {
       getCredentials: vi.fn().mockResolvedValue({ client_id: 'msgraph_oauth', client_secret: '{}' }),
       upsert: vi.fn(),
     }
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-1', assistantId: 'a-1', tools,
       connectorStore: connectorStore as never,
       settingsStore: settingsStoreStub() as never,
@@ -2209,13 +2228,13 @@ describe('[COMP:api/mcp-inject] Microsoft Graph (msgraph) built-in', () => {
   })
 
   it('registers its tools in the drift-sweep table so local tool search can see them', async () => {
-    // The INJECTED_BUILTIN_TOOLS_BY_CONNECTOR entry is what turns injected
+    // The DESCRIBED_TOOLS_BY_CONNECTOR entry is what turns injected
     // tools into an mcp_search local source — omitting it injects tools the
     // model can never find. Assert the fold, not just the constant.
-    expect(INJECTED_BUILTIN_TOOLS_BY_CONNECTOR.msgraph).toEqual(MSGRAPH_TOOLS)
+    expect(DESCRIBED_TOOLS_BY_CONNECTOR.msgraph).toEqual(MSGRAPH_TOOLS)
 
     const tools = new Map()
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-1', assistantId: 'a-1', tools,
       connectorStore: msgraphStore(true) as never,
       settingsStore: settingsStoreStub() as never,
@@ -2230,7 +2249,7 @@ describe('[COMP:api/mcp-inject] Microsoft Graph (msgraph) built-in', () => {
   })
 })
 
-describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
+describe('[COMP:api/mcp-surface] msgraph workspace overlays', () => {
   // The suite above exercises the PERSONAL-assistant path (no assistantTeamId),
   // which base-loads the owner's connectors. Every assistant that a user
   // actually chats with is workspace-scoped, and the workspace connector-scoping
@@ -2304,7 +2323,7 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
     ]))
     const inject = async (mutationCompartments: string[], expectRestriction = true) => {
       const tools = new Map()
-      const result = await injectMcpTools({
+      const result = await composeForTest({
         userId: 'owner-1', assistantId: 'a-1', tools,
         connectorStore: connectorStore as never, settingsStore: settingsStoreStub() as never,
         connectorInstanceStore: connectorInstanceStore as never,
@@ -2330,7 +2349,7 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
     for (const name of PROBE_TOOLS) expect(matching.has(name)).toBe(false)
     expect(connectorInstanceStore.getCredentialsSystem).not.toHaveBeenCalled()
     expect(diagnostics.mock.calls).toEqual(Array.from({ length: 2 }, () => [
-      '[mcp-inject] connector discovery scope restriction',
+      '[mcp-catalog] connector discovery scope restriction',
       { assistantId: 'a-1', workspaceId: 'ws-1', reason: 'connector_exposure_outside_execution_scope' },
     ]))
     diagnostics.mockRestore()
@@ -2348,7 +2367,7 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
       { grantedByUserId: 'grantor-1', instance, compartments: ['team:product'], projectIds: ['project'] },
     ]))
 
-    const result = await injectMcpTools({
+    const result = await composeForTest({
       userId: 'owner-1', assistantId: 'a-1', tools,
       connectorStore: connectorStore as never, settingsStore: settingsStoreStub() as never,
       connectorInstanceStore: connectorInstanceStore as never,
@@ -2373,7 +2392,7 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
       { grantedByUserId: 'grantor-1', instance: exposedInstance },
     ]))
 
-    await injectMcpTools({
+    await composeForTest({
       userId: 'owner-1', assistantId: 'a-1', tools,
       connectorStore: connectorStore as never,
       settingsStore: settingsStoreStub() as never,
@@ -2396,7 +2415,7 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
       { grantedByUserId: 'grantor-1', instance: exposedInstance },
     ]))
 
-    await injectMcpTools({
+    await composeForTest({
       userId: 'owner-1', assistantId: 'a-1', tools,
       connectorStore: connectorStore as never,
       settingsStore: settingsStoreStub() as never,
@@ -2419,7 +2438,7 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
       { grantedByUserId: 'grantor-1', instance: { ...exposedInstance, healthStatus: 'auth_failed' } },
     ]))
 
-    const result = await injectMcpTools({
+    const result = await composeForTest({
       userId: 'owner-1', assistantId: 'a-1', tools,
       connectorStore: connectorStore as never,
       settingsStore: settingsStoreStub() as never,
@@ -2446,7 +2465,7 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
       { grantedByUserId: 'grantor-1', instance: exposedInstance },
     ]))
 
-    const result = await injectMcpTools({
+    const result = await composeForTest({
       userId: 'owner-1', assistantId: 'a-1', tools,
       connectorStore: connectorStore as never,
       settingsStore: settingsStoreStub() as never,
@@ -2470,7 +2489,7 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
     async function inject(bindingMaximum?: Record<string, string>) {
       connectorInstanceStore.listByWorkspaceSystem.mockResolvedValue(explicitConnectorBindings([instance]))
       const tools = new Map()
-      await injectMcpTools({ userId: 'owner-1', assistantId: 'a-1', tools,
+      await composeForTest({ userId: 'owner-1', assistantId: 'a-1', tools,
         connectorStore: connectorStore as never, settingsStore: settingsStoreStub() as never,
         connectorInstanceStore: connectorInstanceStore as never, connectorGrantStore: connectorGrantStore as never,
         assistantTeamId: 'ws-1', keepBuiltinsDirect: true, bindingMaximum,
@@ -2500,7 +2519,7 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
       },
     ]))
 
-    await injectMcpTools({
+    await composeForTest({
       userId: 'owner-1', assistantId: 'a-1', tools,
       connectorStore: connectorStore as never,
       settingsStore: settingsStoreStub() as never,
@@ -2516,9 +2535,9 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
   })
 })
 
-describe('[COMP:api/mcp-inject] _getMcpDiscoveryCacheSize', () => {
+describe('[COMP:api/mcp-surface] descriptorLifecycleSize', () => {
   it('reports the discovery-cache size as a non-negative number', () => {
-    const size = _getMcpDiscoveryCacheSize()
+    const size = descriptorLifecycleSize()
     expect(typeof size).toBe('number')
     expect(size).toBeGreaterThanOrEqual(0)
   })
@@ -2533,7 +2552,7 @@ describe('[COMP:tools/google-maps] built-in Maps discovery', () => {
   async function injectMaps(keepBuiltinsDirect: boolean) {
     const callTool = vi.fn().mockResolvedValue({ weather: 'sunny' })
     const tools = new Map(createGoogleMapsTools({ callTool }).map((tool) => [tool.name, tool]))
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-1', assistantId: 'a-1', tools,
       connectorStore: { list: vi.fn().mockResolvedValue([]) } as never,
       settingsStore: settingsStoreStub() as never,
@@ -2576,7 +2595,7 @@ describe('[COMP:tools/google-maps] built-in Maps discovery', () => {
   })
 })
 
-describe('[COMP:api/mcp-inject] built-in fold vs direct (keepBuiltinsDirect)', () => {
+describe('[COMP:api/mcp-surface] built-in fold vs direct (keepBuiltinsDirect)', () => {
   // The contract a workflow `assistant_call` step's `tools` allow-list depends
   // on. With the flag OFF, a built-in connector tool is DELETED from the map
   // and reachable only through `mcp_search` — so pinning it by name resolves to
@@ -2593,7 +2612,7 @@ describe('[COMP:api/mcp-inject] built-in fold vs direct (keepBuiltinsDirect)', (
 
   async function injectWith(keepBuiltinsDirect: boolean) {
     const tools = new Map()
-    const result = await injectMcpTools({
+    const result = await composeForTest({
       userId: 'u-1',
       assistantId: 'a-1',
       tools,
@@ -2629,7 +2648,7 @@ describe('[COMP:api/mcp-inject] built-in fold vs direct (keepBuiltinsDirect)', (
       // ONE injector run supplies BOTH halves — the map and the unavailable
       // list have to come from the same turn or the composition proves nothing.
       const tools = new Map()
-      const result = await injectMcpTools({
+      const result = await composeForTest({
         userId: 'u-1',
         assistantId: 'a-1',
         tools,

@@ -1,11 +1,12 @@
 /** [COMP:api/native-chat-read-cost] Genuine retained native turns cross the old estimate under the real graph limits. */
-import {ContextScopeAccumulator,type SessionContextAuthority} from '@use-brian/core'
+import type {SessionContextAuthority} from '@use-brian/core/memory/session-state-types.js'
+import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
 import {afterAll,beforeAll,describe,expect,it,vi} from 'vitest'
 import {getAppPool,getPool} from '../db/client.js'
 import {addSessionMessage,readSessionById} from '../db/sessions.js'
-import {readAdmittedSessionQuery} from '../db/session-query-reader.js'
+import {readAdmittedSessionQuery} from '../db/conversation-store.js'
 import {writeSessionContextRevision} from '../db/session-context-revisions.js'
-import {publishNativeSessionMessageBatch} from '../db/session-message-publication.js'
+import {publishNativeSessionMessageBatch} from '../db/conversation-store.js'
 import {persistentContextFixture} from '../application-platform/__tests__/fixtures/persistent-context.js'
 import {assertRetainedNativeQueryCapacity} from './fixtures/native-session-capacity.js'
 
@@ -84,13 +85,14 @@ describe.sequential('[COMP:api/native-chat-read-cost] real retained query capaci
   expect(await history()).toEqual(initialHistory)
  },retainedCapacityTurnTimeout)
 
- it('admits a fresh real query beyond the former estimate and rolls every staged capture back',async()=>{
+ it('captures the complete retained history and rolls every staged observation back',async()=>{
   const input=await addSessionMessage({sessionId:fixture.session.id,role:'user',senderUserId:fixture.ownerId,
    content:[{type:'text',text:'Fictional pending capacity request.'}],scope:fixture.envelope})
   expect(input.sequenceNum).toBe(272)
   const result=await assertRetainedNativeQueryCapacity(await authority(),'1min')
   console.info('[retained native capacity]',result)
-  expect(result.oldSemanticEstimate).toBeGreaterThan(16_384)
+  expect(result.historyRows).toBe(272)
+  expect(result.annotationRows).toBe(8)
   expect(await history()).toEqual(initialHistory)
  },90_000)
 })

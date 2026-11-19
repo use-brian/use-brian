@@ -1,4 +1,4 @@
-import type { DepartmentReadGrant } from '../security/department-read.js'
+import type { DepartmentReadGrant } from '@use-brian/agent-runtime/security/department-read.js'
 /**
  * The watched browser-agent path (R2-1/R2-7): `browserExplore` runs Jev
  * Ultrafast for a NOVEL flow inside the cloud micro-VM, with Browser Use as a
@@ -17,9 +17,9 @@ import type { DepartmentReadGrant } from '../security/department-read.js'
  *    paid plan (R2-8) — same gate as every computer tool.
  */
 import { z } from 'zod'
-import { buildTool, type Tool, type ToolContext, type ToolResult } from '../tools/types.js'
-import { isAttendedTurn } from '../tools/capability-gate.js'
-import type { Sensitivity } from '../security/sensitivity.js'
+import { buildTool, type Tool, type ToolContext, type ToolResult } from '@use-brian/agent-runtime/tools/types.js'
+import { isAttendedTurn } from '@use-brian/agent-runtime/tools/capability-gate.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { extractEffectContract } from './effect-contract.js'
 import {
   describeProfileResolution,

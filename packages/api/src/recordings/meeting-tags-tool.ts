@@ -1,6 +1,8 @@
 /** [COMP:recordings/meeting-tags] Brian uses the same commands as the page UI. */
 import { z } from 'zod'
-import { actorFromContext, buildTool, type SavedViewStore } from '@use-brian/core'
+import { actorFromContext } from '@use-brian/core/retrieval/tools.js'
+import type { SavedViewStore } from '@use-brian/core/views/types.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
 import { createMeetingTagsService } from './meeting-tags-service.js'
 import { meetingTagCommand } from './meeting-tags.js'
 import { runWithAgentAccess } from '../db/client.js'

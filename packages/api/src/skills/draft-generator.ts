@@ -34,18 +34,20 @@ import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import {
-  collectStream,
-  queryLoop,
-  webSearchTool,
-  urlReaderTool,
   extractionSpecSchema,
-  type ContentBlock,
   type ExtractionSpec,
-  type LLMProvider,
-  type Message,
-  type TokenUsage,
-  type Tool,
-} from '@use-brian/core'
+} from '@use-brian/core/doc/custom-template-types.js'
+import { queryLoop } from '@use-brian/core/engine/query-loop-defaults.js'
+import { urlReaderTool } from '@use-brian/core/tools/base/url-reader.js'
+import { webSearchTool } from '@use-brian/core/tools/base/web-search.js'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
+import type {
+  ContentBlock,
+  LLMProvider,
+  Message,
+  TokenUsage,
+} from '@use-brian/agent-runtime/providers/types.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 
 /** The model couldn't produce a usable draft or reply. */
 export class SkillDraftError extends Error {

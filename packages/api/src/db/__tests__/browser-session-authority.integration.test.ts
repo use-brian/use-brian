@@ -4,7 +4,9 @@ import { getPool, getAppPool, query } from '../client.js'
 import { createBrowserProfileStore, withBrowserProfileOwnerMutation } from '../browser-profile-store.js'
 import { createSandboxTaskStore } from '../sandbox-task-store.js'
 import { createBrowserSessionVault } from '../browser-session-vault.js'
-import { createCloudBrowserProvider, createSandboxOrchestrator, StubSandboxProvider } from '@use-brian/core'
+import { createCloudBrowserProvider } from '@use-brian/core/sandbox/cloud-browser-provider.js'
+import { createSandboxOrchestrator } from '@use-brian/core/sandbox/orchestrator.js'
+import { StubSandboxProvider } from '@use-brian/core/sandbox/providers/stub.js'
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
 afterAll(async () => { await getAppPool().end(); await getPool().end() })

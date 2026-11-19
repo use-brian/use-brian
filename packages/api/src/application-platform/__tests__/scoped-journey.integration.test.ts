@@ -13,7 +13,7 @@ import {createWorkspaceStore} from '../../db/workspace-store.js'
 import {workflowsRoutes} from '../../routes/workflows.js'
 import {createJobExecutor} from '../../scheduling/executor.js'
 import {createWorkflowDependencyPreflight} from '../../workflow/dependency-preflight.js'
-import {advanceWorkflowRun} from '@use-brian/core'
+import {advanceWorkflowRun} from '@use-brian/core/workflow/executor.js'
 import {createConnectorInstanceStore} from '../../db/connector-instance-store.js'
 import {createConnectorActorKeyStore} from '../connector-actor-keys.js'
 import {createConnectorActorVerifier} from '@use-brian/brian-app/connector'
@@ -31,6 +31,7 @@ import {ApplicationPlatformService} from '../service.js'
 import {ApplicationManagementService} from '../management.js'
 import {createCanonicalNativeApplicationModule} from '../native-adapters.js'
 import {applicationPlatformRoutes} from '../../routes/application-platform.js'
+import {withBootstrap} from '../../__tests__/fixtures/bootstrap-role.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 
@@ -119,8 +120,11 @@ describe.sequential('[COMP:api/application-management] [COMP:workflow/wait-lifec
  })
  it('uses independent source approval, real reissue and binding activation for protected workflow wait/resume/revoke',async()=>{
   const role='scoped_source_'+randomBytes(6).toString('hex'),password=randomBytes(24).toString('hex')
-  await pool.query("CREATE ROLE "+role+" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD '"+password+"'")
-  await pool.query('CREATE SCHEMA '+role+' AUTHORIZATION '+role)
+  // Fixture-only source login: the bootstrap role provisions it; the ordinary owner cannot.
+  await withBootstrap(async bootstrap=>{
+   await bootstrap.query("CREATE ROLE "+role+" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD '"+password+"'")
+   await bootstrap.query('CREATE SCHEMA '+role+' AUTHORIZATION '+role)
+  })
   const url=new URL(process.env.DATABASE_URL!);url.username=role;url.password=password
   const sourcePool=new pg.Pool({connectionString:url.href,options:'-c search_path='+role+',pg_catalog',max:3})
   let source:Awaited<ReturnType<typeof startIndependentSource>>|undefined
@@ -209,7 +213,7 @@ describe.sequential('[COMP:api/application-management] [COMP:workflow/wait-lifec
    expect((await pool.query('SELECT count(*)::int AS count FROM workflow_runs WHERE workflow_id=$1',[workflow.id])).rows[0].count).toBe(countAfterRevoke)
    expect(source.counters.effects).toBe(0)
    expect((await pool.query("SELECT application_runtime_qualified($1,'connector_source') AS ready",[workspaceId])).rows[0].ready).toBe(false)
-  }finally{configureConnectorSourceRuntimeFactory(undefined);await source?.close();await sourcePool.end();await pool.query('DROP SCHEMA '+role+' CASCADE');await pool.query('DROP ROLE '+role)}
+  }finally{configureConnectorSourceRuntimeFactory(undefined);await source?.close();await sourcePool.end();await withBootstrap(async bootstrap=>{await bootstrap.query('DROP SCHEMA '+role+' CASCADE');await bootstrap.query('DROP ROLE '+role)})}
  },60_000)
 
 })

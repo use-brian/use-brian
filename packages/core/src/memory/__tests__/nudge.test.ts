@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { runMemoryNudge, extractRecalledMemories, extractResponseText, parseVerdicts } from '../nudge.js'
 import type { NudgeTurn } from '../nudge.js'
-import type { ContentBlock, LLMProvider } from '../../providers/types.js'
+import type { ContentBlock, LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
 import type { MemoryStore } from '../types.js'
 import { executionFixture, fixtureDecisionProvider } from '../../decisions/__tests__/execution-fixture.js'
 
@@ -269,14 +269,17 @@ describe('[COMP:memory/nudge] runMemoryNudge', () => {
 
   it('returns early without calling model when no getMemory results', async () => {
     const callModel = vi.fn()
+    const execute = vi.fn()
     const store = makeFakeStore()
     const result = await runMemoryNudge({
       turns: [turn([textBlock('Hello')], [])],
       callModel,
+      execute,
       store,
     })
     expect(result).toEqual({ judged: 0, useful: 0, usage: null, model: null })
     expect(callModel).not.toHaveBeenCalled()
+    expect(execute).not.toHaveBeenCalled()
   })
 
   it('returns early when no response text', async () => {

@@ -1,5 +1,6 @@
 import { z } from 'zod'
-import type { FilesApi, FilesContext, Tool, ToolContext } from '@use-brian/core'
+import type { FilesApi, FilesContext } from '@use-brian/core/workspace-files/api.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import type { OfficeCommand } from '@use-brian/office-model'
 import { createStructuredExtractionStore } from '../db/structured-document-extractions.js'
 import { createStructuredFillProposalStore } from '../db/structured-fill-proposals.js'

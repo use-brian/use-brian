@@ -51,15 +51,19 @@ import type { LinkCodeStore } from '../db/link-codes.js'
 import type { LinkedAccountStore } from '../db/linked-accounts.js'
 import { completeLinkClaim } from './link-claim.js'
 import { resolveAssistantForSurface, resolveRoutingForSurface, getChannelForWebhook } from '../db/channels-store.js'
-import {
-  parseFileContent,
-  buildTool,
-  resolveRealtimeThreadAddressing,
-  sanitize as sanitizeAnalytics,
-} from '@use-brian/core'
+import { sanitize as sanitizeAnalytics } from '@use-brian/core/analytics/logger.js'
+import { parseFileContent } from '@use-brian/core/files/parsers.js'
+import { resolveRealtimeThreadAddressing } from '@use-brian/core/ingest/realtime-thread-targets.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
 import { z } from 'zod'
-import type { ContentBlock } from '@use-brian/core'
-import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore, WorkflowEventDispatcher } from '@use-brian/core'
+import type { ContentBlock } from '@use-brian/agent-runtime/providers/types.js'
+import type { AnalyticsLogger } from '@use-brian/core/analytics/logger.js'
+import type { MemoryStore } from '@use-brian/core/memory/types.js'
+import type { WorkflowEventDispatcher } from '@use-brian/core/workflow/event-trigger.js'
+import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
+import type { McpSettingsStore } from '@use-brian/agent-runtime/mcp/types.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import { humanizeToolName, describeToolInput } from '@use-brian/shared'
@@ -132,7 +136,7 @@ type SlackRouteOptions = {
   /** Servable background-lane model, resolved at boot; forwarded to the
    * channel pipeline so its background calls work without a Google key. */
   backgroundModel?: string
-  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
+  decisionRuntime?: import('@use-brian/core/decisions/hydra.js').DecisionExecutionPort
   provider: LLMProvider
   configuredProviders?: import('@use-brian/shared/model-registry').ProviderAvailability
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
@@ -148,7 +152,7 @@ type SlackRouteOptions = {
   /** Link-code claim (identity healing). When both set, a 6-char code in DM merges the Slack user into the code owner. See docs/architecture/platform/identity-healing.md. */
   linkedAccountStore?: LinkedAccountStore
   linkCodeStore?: LinkCodeStore
-  workerManager?: import('@use-brian/core').WorkerManager
+  workerManager?: import('@use-brian/core/workers/worker.js').WorkerManager
   connectorStore?: ConnectorStore
   mcpSettingsStore?: McpSettingsStore
   assistantConnectorStore?: import('../db/assistant-connector-store.js').AssistantConnectorStore
@@ -156,15 +160,15 @@ type SlackRouteOptions = {
   connectorGrantStore?: import('../db/connector-grant-store.js').ConnectorGrantStore
   /** Stage 5: enables team-native connector_instance consumption. */
   connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
-  knowledgeStore?: import('@use-brian/core').KnowledgeStoreInterface
+  knowledgeStore?: import('@use-brian/core/knowledge/types.js').KnowledgeStoreInterface
   /** Temporary, channel-neutral thread authority store. */
-  realtimeThreadTargetStore?: import('@use-brian/core').RealtimeThreadTargetStore
+  realtimeThreadTargetStore?: import('@use-brian/core/ingest/realtime-thread-targets.js').RealtimeThreadTargetStore
   knowledgeCaptureRuleStore?: import('../knowledge/capture-rules.js').KnowledgeCaptureRuleStore
-  gdriveFilesStore?: import('@use-brian/core').GDriveFilesStore
+  gdriveFilesStore?: import('@use-brian/core/tools/base/gdrive-files.js').GDriveFilesStore
   /** Workspace files store (Q3 §10). Optional. */
-  workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
+  workspaceFilesStore?: import('@use-brian/core/workspace-files/types.js').WorkspaceFilesStore
   /** Files orchestration API. Enables outbound documents (`sendFile`). */
-  filesApi?: import('@use-brian/core').FilesApi
+  filesApi?: import('@use-brian/core/workspace-files/api.js').FilesApi
   /** Promotes an over-threshold text paste to a durable artifact
    *  (large-content-artifacts §Phase 3.2). Absent ⇒ pastes pass through. */
   artifactPromoter?: import('../files/artifact-promote.js').ArtifactPromoter | null
@@ -172,7 +176,7 @@ type SlackRouteOptions = {
    *  cached so the turn carries a promotable `<attached_file id="…">` tag
    *  (save-on-request — see routes/channel-file-cache.ts). Absent ⇒ images
    *  ride content blocks with no reference, as before. */
-  fileStore?: import('@use-brian/core').FileStore
+  fileStore?: import('@use-brian/core/files/types.js').FileStore
   /**
    * Route a pulled media reference (a download URL) through the channel-media
    * intake (audio/video → recording → brain). Boot wires this over
@@ -193,15 +197,15 @@ type SlackRouteOptions = {
   }) => Promise<import('../ingest/channel-media-intake.js').ChannelMediaIntakeResult>
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
-  workflowStore?: import('@use-brian/core').WorkflowStore
+  workflowStore?: import('@use-brian/core/workflow/types.js').WorkflowStore
   workspaceSkillStore?: import('../db/skill-store.js').WorkspaceSkillStore
   workspaceSkillEnablementStore?: import('../db/workspace-skill-enablement-store.js').WorkspaceSkillEnablementStore
   workspaceSkillFilesStore?: import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore
   deferredConfirmationStore?: DeferredConfirmationStore
-  episodicStore?: import('@use-brian/core').EpisodicStore
-  sessionStateStore?: import('@use-brian/core').SessionStateStore
-  crmEmailDraftStore?: import('@use-brian/core').CrmEmailDraftStore
-  capabilityStore: import('@use-brian/core').CapabilityStore
+  episodicStore?: import('@use-brian/core/memory/episodic-types.js').EpisodicStore
+  sessionStateStore?: import('@use-brian/core/memory/session-state-types.js').SessionStateStore
+  crmEmailDraftStore?: import('@use-brian/core/crm/email-drafts.js').CrmEmailDraftStore
+  capabilityStore: import('@use-brian/core/authorization/types.js').CapabilityStore
   /**
    * Connector-action audit deps. When both are set + the answering
    * assistant is workspace-scoped, every outbound Slack `chat.postMessage`
@@ -264,10 +268,10 @@ export async function resolveSlackAddressing(input: {
   requireMention: boolean
   workspaceId: string | null
   assistantId: string
-  targetStore?: import('@use-brian/core').RealtimeThreadTargetStore
+  targetStore?: import('@use-brian/core/ingest/realtime-thread-targets.js').RealtimeThreadTargetStore
 }): Promise<{
   accepted: boolean
-  target: import('@use-brian/core').RealtimeThreadTarget | null
+  target: import('@use-brian/core/ingest/realtime-thread-targets.js').RealtimeThreadTarget | null
 }> {
   const explicitlyAddressed =
     !input.incoming.isGroupChat ||
@@ -1229,7 +1233,7 @@ async function dispatchSlackReactionFeedback(params: {
 type ProcessMessageParams = {
   /** Servable background-lane model, threaded from the route options. */
   backgroundModel?: string
-  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
+  decisionRuntime?: import('@use-brian/core/decisions/hydra.js').DecisionExecutionPort
   adapter: ReturnType<typeof createSlackAdapter>
   incoming: IncomingMessage
   assistant: { id: string; name: string; ownerUserId: string; defaultModelAlias: string; workspaceId: string | null; systemPrompt: string | null; clearance: 'public' | 'internal' | 'confidential'; kind: 'primary' | 'standard' | 'app' }
@@ -1241,7 +1245,7 @@ type ProcessMessageParams = {
   threadTs?: string
   /** Thread-qualified Brian conversation id; never sent to the Slack API. */
   sessionChannelId: string
-  realtimeThreadTarget?: import('@use-brian/core').RealtimeThreadTarget | null
+  realtimeThreadTarget?: import('@use-brian/core/ingest/realtime-thread-targets.js').RealtimeThreadTarget | null
   /** The conversation is a converged workspace room (unified-sessions §4.4). */
   room?: boolean
   botToken: string
@@ -1256,7 +1260,7 @@ type ProcessMessageParams = {
   memoryStore: MemoryStore
   usageStore?: UsageStore
   checkCreditBudget?: import('./route-helpers.js').CreditBudgetGate
-  workerManager?: import('@use-brian/core').WorkerManager
+  workerManager?: import('@use-brian/core/workers/worker.js').WorkerManager
   connectorStore?: ConnectorStore
   integrationStore: ChannelIntegrationStore
   mcpSettingsStore?: McpSettingsStore
@@ -1265,14 +1269,14 @@ type ProcessMessageParams = {
   connectorGrantStore?: import('../db/connector-grant-store.js').ConnectorGrantStore
   /** Stage 5: enables team-native connector_instance consumption. */
   connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
-  knowledgeStore?: import('@use-brian/core').KnowledgeStoreInterface
+  knowledgeStore?: import('@use-brian/core/knowledge/types.js').KnowledgeStoreInterface
   knowledgeCaptureRuleStore?: import('../knowledge/capture-rules.js').KnowledgeCaptureRuleStore
-  gdriveFilesStore?: import('@use-brian/core').GDriveFilesStore
+  gdriveFilesStore?: import('@use-brian/core/tools/base/gdrive-files.js').GDriveFilesStore
   /** Workspace files store (Q3 §10). Optional. */
-  workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
+  workspaceFilesStore?: import('@use-brian/core/workspace-files/types.js').WorkspaceFilesStore
   /** Files orchestration API. Enables outbound documents (`sendFile`) —
    *  delivered via Slack's external upload flow (needs `files:write`). */
-  filesApi?: import('@use-brian/core').FilesApi
+  filesApi?: import('@use-brian/core/workspace-files/api.js').FilesApi
   /** Promotes an over-threshold text paste to a durable artifact
    *  (large-content-artifacts §Phase 3.2). Absent ⇒ pastes pass through. */
   artifactPromoter?: import('../files/artifact-promote.js').ArtifactPromoter | null
@@ -1280,19 +1284,19 @@ type ProcessMessageParams = {
    *  cached so the turn carries a promotable `<attached_file id="…">` tag
    *  (save-on-request — see routes/channel-file-cache.ts). Absent ⇒ images
    *  ride content blocks with no reference, as before. */
-  fileStore?: import('@use-brian/core').FileStore
+  fileStore?: import('@use-brian/core/files/types.js').FileStore
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
-  workflowStore?: import('@use-brian/core').WorkflowStore
+  workflowStore?: import('@use-brian/core/workflow/types.js').WorkflowStore
   workspaceSkillStore?: import('../db/skill-store.js').WorkspaceSkillStore
   workspaceSkillEnablementStore?: import('../db/workspace-skill-enablement-store.js').WorkspaceSkillEnablementStore
   workspaceSkillFilesStore?: import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore
   interactionScope: ChannelInteractionScope
   questionIntegrationId: string
-  episodicStore?: import('@use-brian/core').EpisodicStore
-  sessionStateStore?: import('@use-brian/core').SessionStateStore
-  crmEmailDraftStore?: import('@use-brian/core').CrmEmailDraftStore
-  capabilityStore: import('@use-brian/core').CapabilityStore
+  episodicStore?: import('@use-brian/core/memory/episodic-types.js').EpisodicStore
+  sessionStateStore?: import('@use-brian/core/memory/session-state-types.js').SessionStateStore
+  crmEmailDraftStore?: import('@use-brian/core/crm/email-drafts.js').CrmEmailDraftStore
+  capabilityStore: import('@use-brian/core/authorization/types.js').CapabilityStore
 }
 
 /**

@@ -23,7 +23,7 @@
 
 import { Router } from 'express'
 import { z } from 'zod'
-import type { LLMProvider } from '@use-brian/core'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import {
   ThemeLimitReachedError,

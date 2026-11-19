@@ -26,7 +26,7 @@ import {
   type ResearchLessonEvidence,
   type ResearchLessonProposal,
   type ResearchLessonScope,
-} from '@use-brian/core'
+} from '@use-brian/core/research/contracts.js'
 import { getPool } from '../db/client.js'
 import { appendDecisionEvent } from '../db/decision-event-store.js'
 import { appendDecisionDerivation } from '../db/decision-provenance-store.js'

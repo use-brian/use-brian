@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ToolContext } from '@use-brian/core'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { createWorkspaceMigrationTools } from '../migration-tools.js'
 import { WorkspaceAccessError } from '../policy.js'
 const mocks = vi.hoisted(() => ({ createMigrationPlan: vi.fn(), getMigrationPlan: vi.fn(), listMigrationPlans: vi.fn(), prepareMigrationItem: vi.fn(), getMigrationItemReview: vi.fn(), applyMigrationItem: vi.fn(), setMigrationPlanState: vi.fn(), getWorkspaceAccessMode: vi.fn() }))

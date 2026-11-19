@@ -23,7 +23,7 @@
  */
 
 import type { MemoryStore, MemoryWithMetrics, MemoryRecord } from '../memory/types.js'
-import { deriveResourceScope, DerivedScopeError, resourceScopeKey, type ScopeSource } from '../security/derived-scope.js'
+import { deriveResourceScope, DerivedScopeError, resourceScopeKey, type ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import {
   runSkillUmbrellaPass,
   type RunSkillUmbrellaPassParams,

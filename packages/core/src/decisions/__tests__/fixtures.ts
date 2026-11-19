@@ -1,4 +1,4 @@
-import type { LLMProvider, ProviderRequest, StreamChunk } from '../../providers/types.js'
+import type { LLMProvider, ProviderRequest, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
 import type { DecisionRequest } from '../types.js'
 
 export function decisionRequest(): DecisionRequest {

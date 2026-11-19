@@ -17,7 +17,7 @@ import { projectAggregates, projectContent } from '../../db/project-aggregates.j
 import { runWithAgentAccess } from '../../db/agent-access-context.js'
 import { admitWorkspaceResource } from '../../workspace-access/resource-admission.js'
 import { decideSessionRead } from '../../session-read-access.js'
-import { accessCeilingContains } from '@use-brian/core'
+import { accessCeilingContains } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { createAuthorityLease } from '../authority-lease.js'
 import { automaticContextAccess, projectRoomAudienceCeiling, resolveLiveAccessCeilingSystem, type TurnScopeAssistant } from '../resolve-turn-scope.js'
 import { buildAccessPredicate } from '../../db/access-predicate.js'

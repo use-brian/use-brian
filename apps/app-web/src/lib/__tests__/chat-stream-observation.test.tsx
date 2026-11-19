@@ -1,6 +1,5 @@
 // @vitest-environment jsdom
 import { readFileSync } from "node:fs";
-import { TextDecoder } from "node:util";
 import { resolve } from "node:path";
 import ts from "typescript";
 import React, { act, useEffect } from "react";
@@ -42,17 +41,6 @@ function evaluate<T = (...args: any[]) => any>(expression: string, scope: Record
   const code = ts.transpileModule(`return (${expression});`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
   return new Function(...Object.keys(scope), code)(...Object.values(scope)) as T;
 }
-function directHandler(name: string) {
-  return (find(node => ts.isPropertyAssignment(node) && node.name.getText(tree) === name && node.getText(tree).includes("directObserver")) as ts.PropertyAssignment).initializer.getText(tree);
-}
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (reason: unknown) => void;
-  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
-}
-const followExpression = () => find(node => ts.isArrowFunction(node) && !!node.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.AsyncKeyword)
-  && node.getText(tree).includes("followObserver.observe(sessionId)")).getText(tree);
 
 describe("[COMP:app-web/chat-stream-observation] activity polling ownership", () => {
   it("keeps polling after selection or request creation until a stream observes the exact chat", () => {
@@ -164,57 +152,46 @@ describe("[COMP:app-web/chat-stream-observation] activity polling ownership", ()
     expect(refreshShared).not.toHaveBeenCalled();
   });
 
-  for (const callback of ["onDone", "onDisconnect", "onError"]) it(`releases stale POST coverage in actual ${callback} before the ownership gate`, () => {
-    const stale = observe(); stale.observe("chat-a");
-    const release = vi.fn();
-    evaluate(directHandler(callback), { directObserver: stale, localSend: { release, complete: release }, ownsSend: () => false })();
-    expect(release).toHaveBeenCalledOnce();
+  // The full page is a conversation presentation (M5 WP-B): it observes the
+  // open chat for exactly as long as the conversation streams its turn,
+  // paints a mirrored turn, or holds a room's follow stream, and releases on
+  // any change or navigation.
+  const pageObservation = () => (find(node => ts.isCallExpression(node) && node.expression.getText(tree) === "useEffect"
+    && !!node.arguments[0]?.getText(tree).includes("createChatStreamObserver(workspaceId)")) as ts.CallExpression).arguments[0].getText(tree);
+  const observingTurn = (state: { isStreaming: boolean; remoteActive: boolean; presence: boolean; activeSessionId: string | null }) =>
+    evaluate<boolean>((declarationOf("observingTurn").initializer!).getText(tree), {
+      activeSessionId: state.activeSessionId, transcript: { isStreaming: state.isStreaming },
+      remoteActive: state.remoteActive, panePolicy: { presence: state.presence },
+    });
+  function declarationOf(name: string) {
+    return find(node => ts.isVariableDeclaration(node) && node.name.getText(tree) === name) as ts.VariableDeclaration;
+  }
+
+  it.each([
+    [{ isStreaming: true, remoteActive: false, presence: false }, true],
+    [{ isStreaming: false, remoteActive: true, presence: false }, true],
+    [{ isStreaming: false, remoteActive: false, presence: true }, true],
+    [{ isStreaming: false, remoteActive: false, presence: false }, false],
+  ] as const)("observes the open chat only while its turn or room stream is live (%o)", (state, expected) => {
+    expect(observingTurn({ ...state, activeSessionId: "chat-a" })).toBe(expected);
+    expect(observingTurn({ ...state, activeSessionId: null })).toBe(false);
+  });
+
+  it("the actual page observation covers the open chat and releases on settle or navigation", () => {
+    const run = (observing: boolean, sessionId: string | null) => evaluate<() => (() => void) | undefined>(pageObservation(), {
+      observingTurn: observing, activeSessionId: sessionId, workspaceId: "fictional-workspace", createChatStreamObserver: observe,
+    })();
+    expect(run(false, "chat-a")).toBeUndefined();
     expect(polling()).toBe(true);
-    const successor = observe(); successor.observe("chat-a");
-    evaluate(directHandler(callback), { directObserver: stale, ownsSend: () => false })();
+    const cleanup = run(true, "chat-a")!;
     expect(polling()).toBe(false);
-  });
-
-  it("releases stale event ownership while leaving successor observation intact", () => {
-    const stale = observe(), successor = observe(); stale.observe("chat-a"); successor.observe("chat-a");
-    evaluate(directHandler("onEvent"), { directObserver: stale, ownsSend: () => false, coercePayload: (value: unknown) => value })({ event: "text_delta", data: {} });
+    cleanup(); // the turn settled, or the user moved to another chat
+    expect(polling()).toBe(true);
+    // A stale cleanup leaves a successor's observation intact.
+    const successor = run(true, "chat-a")!;
+    cleanup();
     expect(polling()).toBe(false);
-    successor.release();
+    successor();
     expect(polling()).toBe(true);
-  });
-
-  it("the actual POST finally releases observation even if no terminal callback ran", () => {
-    const token = observe(); token.observe("chat-a");
-    const statement = find(node => ts.isTryStatement(node) && !!node.finallyBlock?.getText(tree).includes("unregisterDirectObserver")) as ts.TryStatement;
-    const unregister = vi.fn();
-    evaluate(`() => ${statement.finallyBlock!.getText(tree)}`, { directObserver: token, unregisterDirectObserver: unregister })();
-    expect(polling()).toBe(true); expect(unregister).toHaveBeenCalledOnce();
-  });
-
-  it.each([false, true])("actual follow connection covers only an accepted body and releases on close (accepted: %s)", async accepted => {
-    const token = observe(), read = deferred<{ done: boolean; value?: Uint8Array }>();
-    const response = { ok: accepted, body: { getReader: () => ({ read: () => read.promise }) } };
-    const scope = {
-      authFetch: async () => response, API_URL: "https://api.example", sessionId: "chat-a",
-      controller: new AbortController(), ownsFollow: () => true, panePolicy: { presence: true },
-      followObserver: token, TextDecoder, createSSEBuffer: () => ({}), parseSSEStream: () => [],
-      handleRoomEvent: vi.fn(), coercePayload: (value: unknown) => value, cancelled: false,
-      shouldReopenSessionStream: () => false, sawDone: false,
-    };
-    const running = evaluate(followExpression(), scope)();
-    await Promise.resolve(); await Promise.resolve();
-    expect(polling()).toBe(!accepted);
-    read.resolve({ done: true }); await running;
-    expect(polling()).toBe(true);
-  });
-
-  it("actual follow cleanup releases immediately on navigation even before the reader unwinds", () => {
-    const token = observe(); token.observe("chat-a");
-    const controller = new AbortController(), unregister = vi.fn();
-    const cleanup = find(node => ts.isArrowFunction(node) && !node.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.AsyncKeyword)
-      && node.body.getText(tree).includes("followObserver.release();") && node.body.getText(tree).includes("unregisterControllerCleanup();")
-      && !node.body.getText(tree).includes("followObserver.observe(sessionId)"));
-    evaluate(cleanup.getText(tree), { followObserver: token, unregisterControllerCleanup: unregister, controller, cancelled: false })();
-    expect(controller.signal.aborted).toBe(true); expect(polling()).toBe(true); expect(unregister).toHaveBeenCalledOnce();
   });
 });

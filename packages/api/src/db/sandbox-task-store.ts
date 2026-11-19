@@ -1,14 +1,16 @@
 import { withFileTransactionAdmission } from '../workspace-access/file-transaction-admission.js'
 import { resolveBrowserTaskExecutionAuthority } from '../sandbox/task-execution-authority.js'
-import { browserTaskPublicationSnapshot } from '@use-brian/core'
+import { browserTaskPublicationSnapshot } from '@use-brian/core/sandbox/task-publication.js'
 /**
  * DB-backed sandbox task store and spend accumulator.
  *
  * [COMP:sandbox/lifecycle]
  */
-import { BrowserProfileAuthoritySchema, parseAuthoringAuthority, AuthoritySourceSchema } from '@use-brian/core'
-import { parseBrowserInputScope, mergeBrowserInputScope } from '@use-brian/core'
-import type { SandboxTaskRecord, SandboxTaskStatus, SandboxTaskStore } from '@use-brian/core'
+import { BrowserProfileAuthoritySchema } from '@use-brian/core/sandbox/profiles.js'
+import { parseAuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import { AuthoritySourceSchema } from '@use-brian/agent-runtime/security/authority-source.js'
+import { parseBrowserInputScope, mergeBrowserInputScope } from '@use-brian/core/sandbox/input-scope.js'
+import type { SandboxTaskRecord, SandboxTaskStatus, SandboxTaskStore } from '@use-brian/core/sandbox/orchestrator.js'
 import { query, getPool, rollbackAndRelease } from './client.js'
 
 type Row = {

@@ -5,7 +5,7 @@ import {
   type SkillGovernance,
   type SkillOfferableViewer,
 } from '../route-helpers.js'
-import type { Tool } from '@use-brian/core'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 import type { ConnectorStore } from '../../db/connector-store.js'
 import type { SkillStore } from '../../db/skill-store.js'
 

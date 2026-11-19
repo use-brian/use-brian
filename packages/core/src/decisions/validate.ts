@@ -10,7 +10,7 @@ import type {
   UncertaintyEvidence,
 } from './types.js'
 import { DecisionProviderError } from './types.js'
-import { estimateStringTokens } from '../compaction/compact.js'
+import { estimateStringTokens } from '@use-brian/agent-runtime/compaction/compact.js'
 
 const DISTRIBUTION_EPSILON = 0.01
 

@@ -25,10 +25,10 @@
 import {
   authorizeGoogleRequest,
   type GoogleTransport,
-} from '../providers/google-transport.js'
+} from '@use-brian/agent-runtime/providers/google-transport.js'
 import type { Embedder } from './embedder.js'
 import { GEMINI_EMBEDDING_DIMENSIONS, GEMINI_EMBEDDING_MODEL_ID, createGeminiEmbedder } from './embedder.js'
-import type { ExternalCredentialPool } from '../providers/credential-pool.js'
+import type { ExternalCredentialPool } from '@use-brian/agent-runtime/providers/credential-pool.js'
 
 /**
  * Vertex serves the same embedding family as AI Studio (`gemini-embedding-001`),

@@ -5,8 +5,10 @@
  * Component tag: [COMP:api/smtp-client].
  */
 
-import { createTransport, type Transporter } from 'nodemailer'
-import addressparser from 'nodemailer/lib/addressparser/index.js'
+import { createRequire } from 'node:module'
+import type { Transporter } from 'nodemailer'
+import type addressparserFn from 'nodemailer/lib/addressparser/index.js'
+import { lazyImplementation } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
 import type { MagicLinkLocale } from '../db/magic-link-store.js'
 import { brandMarkAttachment } from './brand-mark.js'
 import { renderMagicLinkEmail } from './magic-link-template.js'
@@ -112,17 +114,28 @@ export function resolveSmtpTransportOptions(opts: {
  * form resolves to. An unparseable value is returned trimmed so the transport
  * reports it rather than this function guessing.
  */
+// nodemailer's address parser is a single self-contained module; it is
+// required synchronously on the first call (senderMailbox is synchronous) so
+// the SMTP package stays out of the boot graph (M4 step 5).
+const requirePackage = createRequire(import.meta.url)
+let addressparser: typeof addressparserFn | null = null
+
 export function senderMailbox(fromAddress: string): string {
+  addressparser ??= requirePackage('nodemailer/lib/addressparser/index.js') as typeof addressparserFn
   const [first] = addressparser(fromAddress, { flatten: true })
   const address = first?.address?.trim()
   return address && address.includes('@') ? address : fromAddress.trim()
 }
 
 export function createSmtpTransport(opts: Parameters<typeof resolveSmtpTransportOptions>[0]): SmtpTransport {
-  const transporter: Transporter = createTransport(resolveSmtpTransportOptions(opts))
+  // Options are resolved (and a bad SMTP_PORT refused) at construction, as
+  // before; the nodemailer transporter is built on the first send (M4 step 5).
+  const options = resolveSmtpTransportOptions(opts)
+  const transporter = lazyImplementation('The SMTP client (nodemailer)', async (): Promise<Transporter> =>
+    (await import('nodemailer')).createTransport(options))
   return {
     async sendMail(o) {
-      const result = (await transporter.sendMail(o)) as {
+      const result = (await (await transporter()).sendMail(o)) as {
         messageId?: string
         response?: string
         accepted?: unknown[]
@@ -147,7 +160,7 @@ export function createSmtpClient(opts: {
    */
   fromAddress: string
 }): SmtpClient {
-  const inviteSenderAddress = senderMailbox(opts.fromAddress)
+  let inviteSenderAddress: string | null = null
   return {
     async sendMagicLink(to, link, locale = 'en', code) {
       const { subject, html, text } = renderMagicLinkEmail(link, locale, code)
@@ -174,7 +187,7 @@ export function createSmtpClient(opts: {
         // "Use Brian - <workspace>" instead of the bare alias local-part.
         from: {
           name: `Use Brian - ${inviteOpts.workspaceName}`,
-          address: inviteSenderAddress,
+          address: (inviteSenderAddress ??= senderMailbox(opts.fromAddress)),
         },
         to,
         subject,

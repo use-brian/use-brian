@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { DecisionEvaluationProfile } from '@use-brian/core'
+import type { DecisionEvaluationProfile } from '@use-brian/core/decisions/hydra.js'
 import {
   parsePromoteDecisionProfileArgs,
   parseRevokeDecisionProfileArgs,

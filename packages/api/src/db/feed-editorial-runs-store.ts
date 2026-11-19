@@ -2,7 +2,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type pg from 'pg'
 import { FEED_EDITORIAL_LIMITS, type FeedEditorialRunSummary, type FeedReviewCoverage, type FeedReviewDimension, type FeedReviewContext } from '@use-brian/shared'
-import { canonicalFeedValue } from '@use-brian/doc-model'
+import { canonicalFeedValue } from '@use-brian/doc-model/feed.js'
 import { query } from './client.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import { FeedCollaborationError, readFeedCopy, withFeedTransaction, type FeedActor, type FeedScope } from './feed-collaboration-store.js'

@@ -66,3 +66,35 @@ export function parseCompanionState(value: unknown): CompanionState | null {
       : "";
   return { phase: candidate.phase as CompanionPhase, ...(label ? { label } : {}) };
 }
+
+/**
+ * Identity transitions the dedicated chat renderer is exposed to. The window
+ * shares the main window's session partition, so any change of active identity
+ * would otherwise hand the previous account's transcript, draft binding and
+ * late frames to the replacement account.
+ */
+export type ChatWindowIdentityTransition =
+  | { kind: "deployment-switch" }
+  | { kind: "account-switch" }
+  | { kind: "sign-out" }
+  | {
+      kind: "session-restored";
+      restoredUserId: string;
+      previousUserId?: string | null;
+      intendedUserId?: string | null;
+    };
+
+/**
+ * The chat window survives only a restore proven to be the same identity it
+ * was opened under; every other transition retires it before the new identity
+ * becomes active. Spec: app-desktop.md "Account switch and the chat window".
+ */
+export function chatWindowSurvivesIdentityChange(
+  transition: ChatWindowIdentityTransition,
+): boolean {
+  if (transition.kind !== "session-restored") return false;
+  const restored = transition.restoredUserId;
+  if (!restored) return false;
+  if (transition.previousUserId) return transition.previousUserId === restored;
+  return !!transition.intendedUserId && transition.intendedUserId === restored;
+}

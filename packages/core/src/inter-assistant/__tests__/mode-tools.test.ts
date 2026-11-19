@@ -11,7 +11,7 @@
 
 import { describe, it, expect } from 'vitest'
 import { filterToolsByAllowList } from '../mode-tools.js'
-import type { Tool } from '../../tools/types.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 
 function tool(name: string): Tool {
   return { name } as unknown as Tool

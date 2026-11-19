@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createMcpInputSchema } from '../input-schema.js'
+import { createMcpInputSchema } from '@use-brian/agent-runtime/mcp/input-schema.js'
 import { wrapMcpTools } from '../connector.js'
 import { createMcpGateway } from '../gateway.js'
 import { buildToolIndex, createMcpSearchTools } from '../tool-search.js'
-import { jsonSchemaFromZod } from '../../engine/query-loop.js'
-import type { McpServerConfig, McpSettingsStore } from '../types.js'
-import type { ToolContext } from '../../tools/types.js'
+import { jsonSchemaFromZod } from '@use-brian/agent-runtime/engine/query-loop.js'
+import type { McpServerConfig, McpSettingsStore } from '@use-brian/agent-runtime/mcp/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const settingsStore: McpSettingsStore = {
   getPolicy: async () => null,

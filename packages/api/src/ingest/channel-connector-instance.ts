@@ -9,7 +9,7 @@
  * [COMP:api/channel-connector-instance]
  */
 
-import { DEFAULT_INGEST_RULES, type IngestSourceProvider } from '@use-brian/core'
+import { DEFAULT_INGEST_RULES, type IngestSourceProvider } from '@use-brian/core/ingest/default-rules.js'
 import { query, queryWithRLS } from '../db/client.js'
 
 export type EnsureChannelConnectorInstanceInput = {

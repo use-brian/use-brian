@@ -1,9 +1,13 @@
-import {ContextScopeAccumulator,DerivedScopeError,intersectAccessCeilings,pinAccessCeiling,type ScopeSource} from '@use-brian/core'
+import {intersectAccessCeilings, pinAccessCeiling} from '@use-brian/agent-runtime/security/access-ceiling.js'
+import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
+import {DerivedScopeError, type ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
 import {readRetainedContextFrame,writeRetainedContextFrame} from './session-context-revisions.js'
 import {readExternalSourceAncestors} from '../application-platform/external-source-ancestry.js'
 import {readApplicationFieldAncestors} from '../application-platform/field-evidence.js'
 import {getPool} from './client.js'
-import type { EntityLinksStore, TaskAssignmentProvenance, TaskRecord, TaskStore, SessionContextAuthority } from '@use-brian/core'
+import type { EntityLinksStore } from '@use-brian/core/entities/types.js'
+import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
+import type { TaskAssignmentProvenance, TaskRecord, TaskStore } from '@use-brian/core/tasks/types.js'
 import { createTask,emitCreatedTaskEffects, findTasksByExternalRefSystem, getTaskById, listTasks, resolveTaskById, updateTask } from './tasks.js'
 
 /**

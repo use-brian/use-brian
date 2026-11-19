@@ -236,7 +236,7 @@ export async function convertToPdfWithLibreOffice(
 
 /** Page count of rendered bytes; throws `invalid_pdf` when they do not parse. */
 export async function renderedPdfPageCount(bytes: Uint8Array): Promise<number> {
-  const count = await probePdfPageCount(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength))
+  const count = await probePdfPageCount(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength), { strict: true })
   if (count === null) throw new LibreOfficeError('invalid_pdf')
   return count
 }

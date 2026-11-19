@@ -20,11 +20,9 @@ import {
   TaskResponsibilityError,
   claimPrecondition,
   type TaskHome,
-  type TaskRecord,
-  type TaskRecordStatus,
   type TaskResponsibility,
-  type TaskStore,
-} from '@use-brian/core'
+} from '@use-brian/core/tasks/responsibility.js'
+import type { TaskRecord, TaskRecordStatus, TaskStore } from '@use-brian/core/tasks/types.js'
 import { query } from '../db/client.js'
 
 type Db = { query: (text: string, values: unknown[]) => Promise<{ rows: Record<string, unknown>[] }> }

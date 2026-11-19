@@ -36,19 +36,14 @@
 import { randomUUID } from 'node:crypto'
 import { seedBuiltinPrimitiveCapabilities } from '../db/capability-seed.js'
 import { z } from 'zod'
-import {
-  buildTool,
-  boundScopeSource,
-  classifyTool,
-  CONFIGURE_CAPABILITY,
-  minSensitivity,
-  notFoundFailure,
-  type McpSettingsStore,
-  type DerivedWriteEvidence,
-  type Sensitivity,
-  type Tool,
-  type ToolContext,
-} from '@use-brian/core'
+import { CONFIGURE_CAPABILITY } from '@use-brian/core/authorization/types.js'
+import { classifyTool } from '@use-brian/agent-runtime/mcp/classifier.js'
+import type { McpSettingsStore } from '@use-brian/agent-runtime/mcp/types.js'
+import type { DerivedWriteEvidence } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { minSensitivity, type Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { boundScopeSource } from '@use-brian/agent-runtime/security/source-evidence.js'
+import { notFoundFailure } from '@use-brian/agent-runtime/tools/tool-failure.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { OFFICIAL_CONNECTORS } from '@use-brian/shared'
 import { query, queryWithRLS } from '../db/client.js'
 import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'

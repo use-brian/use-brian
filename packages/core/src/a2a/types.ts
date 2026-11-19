@@ -20,6 +20,7 @@
 import type { z } from 'zod'
 import type { ResearchDepthConfig } from '../engine/research-depth.js'
 import type { ErrorCode } from './limits.js'
+import type { WorkspaceCredentialDelegation } from '@use-brian/agent-runtime/security/workspace-delegation.js'
 
 // ── Identity ────────────────────────────────────────────────────────────
 
@@ -184,27 +185,14 @@ export type ConsultChain = {
  * input, fixed tool surface, structured artifact result). Absent = free mode
  * (free-text conversation, full tool surface, conversational reply).
  */
-/** Server-created parent reference. Never accepted by the external A2A schema. */
-type WorkspaceCredentialParent = {
-  kind: 'brain_key' | 'assistant_key' | 'oauth_token'
-  credentialId: string
-  revision: string
-  userId: string
-  workspaceId: string
-  assistantId: string
-  sessionId: string
-  selectionId?: string
-}
-export type WorkspaceCredentialDelegation = WorkspaceCredentialParent & {
-  /** Additional host-verified origins; flat and bounded. All must remain current. */
-  constraints?: WorkspaceCredentialParent[]
-}
+/** Declared next to its schema in the runtime security subset; one symbol. */
+export type { WorkspaceCredentialDelegation }
 export type ConsultRequest = {
   callerWorkspaceDelegation?: WorkspaceCredentialDelegation
   /** Server-owned starting ceiling, never a model or public request argument. */
-  callerAccessCeiling?: import('../security/access-ceiling.js').AccessCeiling
+  callerAccessCeiling?: import('@use-brian/agent-runtime/security/access-ceiling.js').AccessCeiling
   /** Server-owned high-water evidence behind the question, never a tool argument. */
-  callerScopeEvidence?: import('../security/context-scope.js').ScopeEvidence
+  callerScopeEvidence?: import('@use-brian/agent-runtime/security/context-scope.js').ScopeEvidence
   target: {
     workspaceId: string
     assistantId: string
@@ -345,10 +333,10 @@ export type ConsultRequest = {
 
 export type ConsultResponse = {
   /** Notification completed; the human answer is a subsequent chat turn, not task resume. */
-  question?: import('../tools/base/ask-question.js').AssistantQuestion
+  question?: import('@use-brian/agent-runtime/tools/base/ask-question.js').AssistantQuestion
   task: Task
   /** Internal high-water evidence from the callee's surfaced context/tools. */
-  scopeEvidence?: import('../security/context-scope.js').ScopeEvidence
+  scopeEvidence?: import('@use-brian/agent-runtime/security/context-scope.js').ScopeEvidence
 }
 
 // ── Errors ──────────────────────────────────────────────────────────────

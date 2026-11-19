@@ -1,4 +1,4 @@
-import { workspaceCredentialDelegation } from '../security/workspace-delegation.js'
+import { workspaceCredentialDelegation } from '@use-brian/agent-runtime/security/workspace-delegation.js'
 /**
  * Workflow executor — advances a `workflow_runs` row through its definition.
  *
@@ -14,18 +14,18 @@ import { workspaceCredentialDelegation } from '../security/workspace-delegation.
  * [COMP:workflow/executor]
  */
 
-import { askQuestionSchema, formatAssistantQuestion } from '../tools/base/ask-question.js'
+import { askQuestionSchema, formatAssistantQuestion } from '@use-brian/agent-runtime/tools/base/ask-question.js'
 import {
   INITIAL_BUDGET,
   type ConsultRequest,
   type ConsultTransport,
 } from '../a2a/index.js'
-import type { Tool, ToolContext } from '../tools/types.js'
-import { ContextScopeAccumulator, type ScopeEvidence, type TurnScope } from '../security/context-scope.js'
-import { executionToolContext, type ExecutionContext } from '../security/execution-context.js'
-import { pinAccessCeiling } from '../security/access-ceiling.js'
-import { crmOperationsSha256 } from '../crm/operations-types.js'
-import type { Sensitivity } from '../security/sensitivity.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { ContextScopeAccumulator, type ScopeEvidence, type TurnScope } from '@use-brian/agent-runtime/security/context-scope.js'
+import { executionToolContext, type ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { pinAccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import { crmOperationsSha256 } from '../application-platform/operation-contract.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type {
   AssistantCallStep,
   BranchStep,
@@ -230,10 +230,10 @@ export type DeliverToChannel = (params: {
   /** Optional native action buttons (approve/deny). Text remains the portable fallback. */
   actions?: Array<{ id: string; label: string; data: string; replyText?: string }>
   /** Trusted run/turn high-water evidence checked against the current audience. */
-  scopeEvidence?: import('../security/context-scope.js').ScopeEvidence
+  scopeEvidence?: import('@use-brian/agent-runtime/security/context-scope.js').ScopeEvidence
   /** Engine-owned workflow step identity; never supplied by tool result data. */
   publication?: { runId: string; stepId: string }
-  question?: import('../tools/base/ask-question.js').AssistantQuestion
+  question?: import('@use-brian/agent-runtime/tools/base/ask-question.js').AssistantQuestion
   questionResponse?: { toolName: string; arguments: Record<string, unknown>; answerField: string }
   /**
    * Platform message id to reply under (Slack thread_ts / Telegram
@@ -388,7 +388,7 @@ export type ExecutorDeps = {
     /** Validated production context backed by the same live run lease. */
     executionContext?: ExecutionContext
     /** Server-resolved causal inputs, never audience claims from input JSON. */
-    inputScopeEvidence?: import('../security/context-scope.js').ScopeEvidence
+    inputScopeEvidence?: import('@use-brian/agent-runtime/security/context-scope.js').ScopeEvidence
     /** API-owned live lease; rejects stale results without retrying effects. */
     executeWithAuthority?: <T>(operation: () => Promise<T>) => Promise<T>
   }>
@@ -896,7 +896,7 @@ export async function advanceWorkflowRun(
   const persistedScopeEvidence = run.vars[WORKFLOW_SCOPE_EVIDENCE_VAR]
   scopeAccumulator.note(runtimeScope?.inputScopeEvidence)
   if (persistedScopeEvidence && typeof persistedScopeEvidence === 'object') {
-    scopeAccumulator.note(persistedScopeEvidence as import('../security/context-scope.js').ScopeEvidence)
+    scopeAccumulator.note(persistedScopeEvidence as import('@use-brian/agent-runtime/security/context-scope.js').ScopeEvidence)
   }
   const sourceAuthority = runtimeScope?.executionContext?.security.authority
   const originalSource = sourceAuthority?.snapshotSource?.()

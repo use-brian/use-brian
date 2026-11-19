@@ -117,7 +117,7 @@ export async function upsertEvolution(params: UpsertEvolutionParams): Promise<vo
        $2, $3,
        $4, $5,
        $6, $7,
-       $8, CASE WHEN $8 IS NULL THEN 0 ELSE 1 END,
+       $8::text, CASE WHEN $8::text IS NULL THEN 0 ELSE 1 END,
        now(), now()
      )
      ON CONFLICT (workspace_id) DO UPDATE SET

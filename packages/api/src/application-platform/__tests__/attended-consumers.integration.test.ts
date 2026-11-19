@@ -4,12 +4,21 @@ import { writeSessionContextRevision, sessionContextGeneration } from '../../db/
 import { createDbEpisodicStore } from '../../db/episodic-store.js'
 import { addSessionMessage, findSessionById, readCompactSummary } from '../../db/sessions.js'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
-import { DecisionAdapterRegistry, executeDecisionCascade, createTypeSafeDecisionProvider, type TopicClassifierOptions, bindScopeSources, executionToolContext, classifyTopic, boundScopeSources, createCompactionCircuitBreaker, queryLoop, NOOP_TURN_LEDGER, type LLMProvider, type StreamFn } from '@use-brian/core'
-import { getAppPool, getPool } from '../../db/client.js'
+import { createTypeSafeDecisionProvider } from '@use-brian/core/decisions/adapters/typesafe.js'
+import { executeDecisionCascade } from '@use-brian/core/decisions/hydra.js'
+import { DecisionAdapterRegistry } from '@use-brian/core/decisions/registry.js'
+import { queryLoop } from '@use-brian/core/engine/query-loop-defaults.js'
+import { type TopicClassifierOptions, classifyTopic } from '@use-brian/core/memory/topic-classifier.js'
+import { createCompactionCircuitBreaker } from '@use-brian/agent-runtime/compaction/compact.js'
+import { NOOP_TURN_LEDGER } from '@use-brian/agent-runtime/engine/turn-ledger.js'
+import type { LLMProvider, StreamFn } from '@use-brian/agent-runtime/providers/types.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
+import { getAppPool, getPool, applyRLSGucs, runWithAgentAccess } from '../../db/client.js'
 import { createDbMemoryStore } from '../../db/memory-store.js'
 import { houseKeepEpisodic, runProactiveCompaction } from '../../routes/proactive-compaction.js'
 import { createDecisionRuntime } from '../../decision-runtime.js'
-import { assertSourceModelInputAuthority } from '../model-source-authority.js'
+import { admitModelInput } from '../../context-scope/admission.js'
 import { persistentContextFixture } from './fixtures/persistent-context.js'
 import { readAttendedSessionHistory } from '../../routes/attended-session-context.js'
 
@@ -40,7 +49,7 @@ describe.sequential('[COMP:api/application-persistence] current attended compact
   it('assembles admitted native history without another graph proof but refuses a later source hold before model dispatch', async () => {
     fixture = await persistentContextFixture()
     const f = fixture, original = await f.history(), current = await f.modelContext()
-    const history = await readAttendedSessionHistory(current, f.session.id)
+    const history = (await readAttendedSessionHistory(current, f.session.id)).messages
     const stream = vi.fn<StreamFn>(async function* () { yield { type: 'text_delta', text: 'Must not reach the fictional provider' } })
     const sql: string[] = [], query = pg.Client.prototype.query
     const spy = vi.spyOn(pg.Client.prototype, 'query').mockImplementation(function (this: pg.Client, ...args: Parameters<typeof query>) {
@@ -63,7 +72,7 @@ describe.sequential('[COMP:api/application-persistence] current attended compact
     expect(stream).not.toHaveBeenCalled()
     await f.pool.query('UPDATE session_messages SET scope_held=true WHERE id=$1', [original[0].id])
     const context = { ...executionToolContext(current.execution, { appId: 'fictional-compaction-dispatch' }),
-      scopeAccumulator: current.accumulator, assertModelInputAuthority: assertSourceModelInputAuthority }
+      scopeAccumulator: current.accumulator, admitModelInput: admitModelInput }
     const dispatch = async () => {
       for await (const _event of queryLoop({ provider: provider(stream), model: 'fixture', systemPrompt: 'Fictional current history.',
         messages: assembled.messages, tools: new Map(), ledger: NOOP_TURN_LEDGER, context, stateless: true, maxTurns: 1 })) { /* consume */ }
@@ -86,7 +95,7 @@ describe.sequential('[COMP:api/application-persistence] current attended compact
         recentUserTurns: [{ text: 'Fictional earlier request', topicLabel: 'fictional earlier request' }],
         replyToText: 'Fictional earlier response', currentMessage: 'Fictional current request',
         knownTopicsThisSession: ['fictional earlier request'], authority: current,
-        assertInputAuthority: () => assertSourceModelInputAuthority(context),
+        assertInputAuthority: () => admitModelInput(context),
       }, sources)
     }
     await f.pool.query("UPDATE workspace_members SET clearance='public' WHERE workspace_id=$1 AND user_id=$2", [f.workspaceId, f.firstId])
@@ -110,7 +119,7 @@ describe.sequential('[COMP:api/application-persistence] current attended compact
       recentUserTurns: [{ text: text(history[0]), topicLabel: text(history[0]).toLowerCase() }],
       replyToText: text(history[1]), currentMessage: text(history[2]),
       knownTopicsThisSession: [text(history[0]).toLowerCase(), text(history[1]).toLowerCase()], authority: current,
-      assertInputAuthority: () => assertSourceModelInputAuthority(context),
+      assertInputAuthority: () => admitModelInput(context),
     }, sources)
     return { options, current, sources }
   }
@@ -238,7 +247,7 @@ describe.sequential('[COMP:api/application-persistence] current attended compact
       assertInputAuthority: async () => {
         checks++
         if (checks === 3) { enter(); await pendingCheck }
-        await assertSourceModelInputAuthority(context)
+        await admitModelInput(context)
       },
       decide: () => ({ kind: 'complete' as const, result: 'fictional' }), validateResult: value => value,
       safeFailure: () => 'synthetic default', completeWithLlm: complete,
@@ -286,7 +295,7 @@ describe.sequential('[COMP:api/application-persistence] current attended compact
       state: { message: 'Fictional current request' },
       questions: [{ kind: 'choice', id: 'topic', prompt: 'Choose the fictional topic.', options: [{ value: 'fictional' }] }],
     }, operation: {
-      assertInputAuthority: () => assertSourceModelInputAuthority(context),
+      assertInputAuthority: () => admitModelInput(context),
       decide: () => ({ kind: 'complete', result: 'fictional' }), validateResult: result => result,
       safeFailure: () => 'synthetic fallback',
       completeWithLlm: async () => ({ result: 'fictional', providerId: 'fixture', model: { catalogId: 'fixture', wireId: 'fixture' } }),
@@ -490,6 +499,12 @@ describe.sequential('[COMP:api/application-persistence] current attended compact
     const stats = await houseKeepEpisodic({ episodicStore:store,memoryStore:createDbMemoryStore(),sessionId:f.session.id,
       assistantId:f.assistantId,userId:f.ownerId,contextAuthority:await f.modelContext() })
     expect(stats).toEqual({ promoted:1,evicted:1,kept:1 })
+    // Promotion's integrity trigger may inspect provenance; application callers
+    // still cannot read the protected tables or invoke that trigger directly.
+    expect((await f.pool.query(`SELECT
+      has_table_privilege('app_user','session_context_scope_revisions','SELECT') AS revisions,
+      has_function_privilege('app_user','guard_episodic_promotion()','EXECUTE') AS trigger`)).rows[0])
+      .toEqual({revisions:false,trigger:false})
     const parents = (await f.pool.query('SELECT id,promoted_memory_id,survival_count FROM episodic_memories WHERE session_id=$1',[f.session.id])).rows
     expect(parents.find(p => p.id===cold.id)).toBeUndefined()
     expect(parents.find(p => p.id===young.id).survival_count).toBe(1)
@@ -503,6 +518,27 @@ describe.sequential('[COMP:api/application-persistence] current attended compact
     const input = (await f.pool.query(`SELECT s.source_id FROM scope_derivations d JOIN scope_derivation_sources s ON s.workspace_id=d.workspace_id AND s.derivation_id=d.id
       WHERE d.workspace_id=$1 AND d.resource_kind='memory' AND d.resource_id=$2`,[f.workspaceId,memoryId])).rows.map(r=>r.source_id)
     expect(input).toContain(boundScopeSources(row)[0].resourceId)
+  })
+
+  it('enforces current source authority on non-owner episode counter updates and deletes', async () => {
+    fixture = await persistentContextFixture()
+    const f=fixture,{row}=await episode(f),current=await f.modelContext(f.secondId)
+    const mutate=async(sql:string)=>{
+      const client=await getAppPool().connect()
+      try{return await runWithAgentAccess(current.execution.security.access,async()=>{
+        await client.query('BEGIN')
+        await applyRLSGucs(client,f.secondId,f.assistantId)
+        expect((await client.query('SELECT session_user AS actor')).rows[0].actor).toBe('app_user')
+        const result=await client.query(sql,[row.id])
+        await client.query('COMMIT')
+        return result.rowCount
+      })}finally{await client.query('ROLLBACK');client.release()}
+    }
+    expect(await mutate('UPDATE episodic_memories SET access_count=access_count+1 WHERE id=$1 RETURNING id')).toBe(1)
+    await f.pool.query('UPDATE session_messages SET scope_held=true WHERE id=$1',[(await f.history())[0].id])
+    expect(await mutate('UPDATE episodic_memories SET access_count=access_count+1 WHERE id=$1 RETURNING id')).toBe(0)
+    expect(await mutate('DELETE FROM episodic_memories WHERE id=$1 RETURNING id')).toBe(0)
+    expect((await f.pool.query('SELECT access_count FROM episodic_memories WHERE id=$1',[row.id])).rows[0].access_count).toBe(1)
   })
 
   it('pins workspace admission before a context reader can hold the publication session', async () => {

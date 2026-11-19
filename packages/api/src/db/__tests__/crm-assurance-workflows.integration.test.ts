@@ -1,8 +1,16 @@
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { afterAll, describe, expect, it, vi } from 'vitest'
-import { advanceWorkflowRun, createCrmOperationsTools, createCrmTools, createTaskTools, CrmOperationsCommandSchema, WorkflowDefinitionSchema,
-  type CrmOperationsContext, type ExecutorDeps, type Tool, type ToolContext } from '@use-brian/core'
+import { createCrmOperationsTools } from '@use-brian/core/crm/operations-tools.js'
+import {
+  CrmOperationsCommandSchema,
+  type CrmOperationsContext
+} from '@use-brian/core/crm/operations-types.js'
+import { createCrmTools } from '@use-brian/core/crm/tools.js'
+import { createTaskTools } from '@use-brian/core/tasks/tools.js'
+import { advanceWorkflowRun, type ExecutorDeps } from '@use-brian/core/workflow/executor.js'
+import { WorkflowDefinitionSchema } from '@use-brian/core/workflow/schemas.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { getPool, getAppPool } from '../client.js'
 import { createDbWorkflowStore, createDbWorkflowRunStore } from '../workflow-store.js'
 import { createPendingApprovalsStore } from '../pending-approvals-store.js'

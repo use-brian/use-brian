@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { McpSettingsStore } from '@use-brian/core'
+import type { McpSettingsStore } from '@use-brian/agent-runtime/mcp/types.js'
 import type { ConnectorEntry } from '@use-brian/shared'
 
 import type { ConnectorStore } from '../../db/connector-store.js'

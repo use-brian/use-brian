@@ -21,7 +21,7 @@
 
 import { CrmOperationsStableKeySchema, CrmOperationsError } from '../../crm/operations-types.js'
 import { z } from 'zod'
-import { buildTool, type Tool } from '../types.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { connectorError, type ConnectorApiError } from './_connector-result.js'
 
 export type AgentmailInboxRef = {

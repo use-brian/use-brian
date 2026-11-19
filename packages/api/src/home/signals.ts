@@ -15,13 +15,10 @@
  * [COMP:api/home-signals]
  */
 
-import {
-  computeNextRun,
-  type ApprovalGroupCounts,
-  type HomeSignals,
-  type WorkflowTrigger,
-} from '@use-brian/core'
-import type { SavedViewStore } from '@use-brian/core'
+import type { ApprovalGroupCounts, HomeSignals } from '@use-brian/core/home/types.js'
+import { computeNextRun } from '@use-brian/core/scheduling/schedule.js'
+import type { WorkflowTrigger } from '@use-brian/core/workflow/types.js'
+import type { SavedViewStore } from '@use-brian/core/views/types.js'
 import { query } from '../db/client.js'
 import { countBrainInbox } from '../db/brain-inbox-store.js'
 import type { ApprovalKind } from '../db/pending-approvals-store.js'

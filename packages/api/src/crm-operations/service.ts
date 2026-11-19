@@ -9,6 +9,15 @@
  */
 
 import { randomBytes, randomUUID } from 'node:crypto'
+import { isCrmBusinessReferenceCommand } from '@use-brian/core/crm/business-references.js'
+import { isCrmCommercialContextCommand } from '@use-brian/core/crm/commercial-context.js'
+import { isCrmConfigCommand } from '@use-brian/core/crm/config-commands.js'
+import { isDeliveryCommand } from '@use-brian/core/crm/delivery-oversight.js'
+import { isCrmErpCommand } from '@use-brian/core/crm/erp-bridge.js'
+import type { CrmImportFileCleanupPort } from '@use-brian/core/crm/file-cleanup-types.js'
+import { isCrmGovernedCommand } from '@use-brian/core/crm/governed-records.js'
+import { requireCrmIntegrationResources } from '@use-brian/core/crm/integration-authority.js'
+import { isCrmCommercialDocumentCommand } from '@use-brian/core/crm/invoice-preparation.js'
 import {
   CrmOperationsCommandSchema,
   CrmOperationsContextSchema,
@@ -16,21 +25,10 @@ import {
   ImportHistoricalCrmSubmissionSchema,
   CrmLocaleWordingsSchema,
   CrmWordingLocaleSchema,
-  CrmSegmentPredicateSchema,
   actorAuditIdentity,
   assertCrmOperationsAuthority,
-  isCrmConfigCommand,
-  isCrmBusinessReferenceCommand,
-  isCrmCommercialContextCommand,
-  isCrmCommercialDocumentCommand,
-  isCrmGovernedCommand,
-  isDeliveryCommand,
-  isCrmErpCommand,
   canonicalCrmRequest,
   crmOperationsSha256,
-  prepareCrmSubmissionAttachments,
-  requireCrmIntegrationResources,
-  validateCrmSegmentCatalog,
   type CrmIntakeFieldDefinition,
   type CrmOperationsActor,
   type CrmOperationsCommand,
@@ -40,9 +38,13 @@ import {
   type CrmHistoricalSubmissionImportPort,
   type CrmDeliveryServicePort,
   type CrmPrivacyServicePort,
-  type CrmRetentionServicePort,
-  type CrmImportFileCleanupPort,
-} from '@use-brian/core'
+} from '@use-brian/core/crm/operations-types.js'
+import type { CrmRetentionServicePort } from '@use-brian/core/crm/retention-types.js'
+import {
+  CrmSegmentPredicateSchema,
+  validateCrmSegmentCatalog,
+} from '@use-brian/core/crm/segments.js'
+import { prepareCrmSubmissionAttachments } from '@use-brian/core/crm/submission-attachments.js'
 import type {
   AuditIdentity,
   ContactWrite,
