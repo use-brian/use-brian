@@ -2,6 +2,7 @@
 export const memoryPublicationMigration = '8272_durable_conversation_publications.sql'
 export const memoryPublicationSourceSha256 = '06afd49b1e8a165f8cee9ec78ee5c4fa42ef815cdbfd192fa77f453025451609'
 export const memoryWriteSuccessorMigration = '8326_native_memory_query_write_contract.sql'
+export const memoryWriteSuccessorSourceSha256 = 'c3a07b8c572088697a353179806f8cb880cfc73838094a2d3c2670c0a6aec269'
 export const upstreamMemoryMigration = '8268_native_memory_query_write_lineage.sql'
 
 // The exact difference between the two installed predecessor profiles. Order
@@ -35,6 +36,16 @@ const nativeMemoryContracts = [
 ] as const
 const scan = nativeMemoryContracts[0]
 const writer = "record_admitted_application_field_derivation(uuid,text,uuid,text,text,jsonb)"
+
+/** Historical function defaults can store the same explicit grants in reverse order. */
+export function memoryWriteSuccessorExecutionSql(sql: string): string {
+  const canonical = `   OR actual.proacl IS DISTINCT FROM (CASE WHEN member.signature='${writer}' THEN ARRAY[owner_grant,runtime_grant] ELSE ARRAY[owner_grant] END)`
+  const parts = sql.split(canonical)
+  if (parts.length !== 3) throw new Error('8326: unexpected Memory writer ACL guards')
+  return parts.join(`   OR (actual.proacl IS DISTINCT FROM (CASE WHEN member.signature='${writer}' THEN ARRAY[owner_grant,runtime_grant] ELSE ARRAY[owner_grant] END)
+    AND (member.signature<>'${writer}' OR actual.proacl IS DISTINCT FROM ARRAY[runtime_grant,owner_grant]))`)
+}
+
 const ownedMemoryBodies = {
   "application_memory_historical_query_scan(uuid,text[],jsonb,boolean,jsonb)": [
     "1f5afc1d54fb3bbb09a9719cbc0b4d6b2bcd6cb5743df2143abc5abb7700a864",

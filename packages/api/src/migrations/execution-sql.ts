@@ -1,7 +1,10 @@
 import { createHash } from 'node:crypto'
 import { configuredTaskPublicationExecutionSql } from './configured-task-publication-execution.js'
 import { participationRetirementExecutionSql } from './participation-retirement-execution.js'
-import { memoryLineagePublicationExecutionSql, memoryPublicationMigration, memoryPublicationSourceSha256 } from './memory-lineage-publication-execution.js'
+import {
+  memoryLineagePublicationExecutionSql, memoryPublicationMigration, memoryPublicationSourceSha256,
+  memoryWriteSuccessorExecutionSql, memoryWriteSuccessorMigration, memoryWriteSuccessorSourceSha256,
+} from './memory-lineage-publication-execution.js'
 import { pageThreadSourceExecutionSql } from './page-thread-execution.js'
 
 /** Execution-only adaptation of reviewed historical SQL; contract checks stay intact.
@@ -38,6 +41,7 @@ const reviewed: Readonly<Record<string, readonly [string, number]>> = {
   [participationRetirement]: ['5fdaec0ab2468bc805c7163478d58e88b5c407efbc02a55fafdb5dc89a74b8d0', 0],
   [crmSealedProjection]: ['97548d6aa29af708654e892377818288207eca5096082209e8ea06a74314445f', 0],
   [memoryPublicationMigration]: [memoryPublicationSourceSha256, 0],
+  [memoryWriteSuccessorMigration]: [memoryWriteSuccessorSourceSha256, 0],
   [privateTranscriptPreparation]: ['e5de14be570dea6f612243ef862c72a8e3af68126b0fe1bdbdd8ee8e3b672b80', 0],
 }
 
@@ -133,6 +137,7 @@ export function toMigrationExecutionSql(sql: string, file: string): string {
   }
   if (file === crmSealedProjection) return crmSealedProjectionExecutionSql(sql)
   if (file === memoryPublicationMigration) return memoryLineagePublicationExecutionSql(sql)
+  if (file === memoryWriteSuccessorMigration) return memoryWriteSuccessorExecutionSql(sql)
   if (file === configuredTaskPublication) return configuredTaskPublicationExecutionSql(sql)
   if (file === participationRetirement) return participationRetirementExecutionSql(sql)
   if (file === privateTranscriptPreparation) {

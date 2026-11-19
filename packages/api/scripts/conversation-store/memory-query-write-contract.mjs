@@ -54,7 +54,9 @@ async function originalClauses(sourceRoot) {
 const pinRows = successor => Object.entries(routinePins).map(([signature, pins]) =>
   '(' + literal(signature) + ',' + literal(pins[Number(successor)]) + ')').join(',')
 
-const checkRoutines = (successor = true) => `DO $memory_write_routines$
+const checkRoutines = ({ successor = true, allowInheritedAclOrder = false } = {}) => {
+  const aclMismatch = `actual.proacl IS DISTINCT FROM (CASE WHEN member.signature=${literal(writer)} THEN ARRAY[owner_grant,runtime_grant] ELSE ARRAY[owner_grant] END)`
+  return `DO $memory_write_routines$
 DECLARE member record; actual pg_proc;
  owner_oid oid:=(SELECT relowner FROM pg_class WHERE oid='public.memories'::regclass);
  runtime_oid oid:=(SELECT oid FROM pg_roles WHERE rolname='app_user');
@@ -70,7 +72,8 @@ BEGIN
   IF encode(sha256(convert_to(actual.prosrc,'UTF8')),'hex') IS DISTINCT FROM member.body_digest
    OR actual.proowner IS DISTINCT FROM owner_oid OR actual.pronamespace<>'public'::regnamespace
    OR actual.prolang<>(SELECT oid FROM pg_language WHERE lanname='plpgsql')
-   OR actual.proacl IS DISTINCT FROM (CASE WHEN member.signature=${literal(writer)} THEN ARRAY[owner_grant,runtime_grant] ELSE ARRAY[owner_grant] END)
+   OR ${allowInheritedAclOrder ? `(${aclMismatch}
+    AND (member.signature<>${literal(writer)} OR actual.proacl IS DISTINCT FROM ARRAY[runtime_grant,owner_grant]))` : aclMismatch}
    OR actual.proconfig IS DISTINCT FROM ARRAY['search_path=pg_catalog, public, pg_temp']
    OR actual.proargnames IS DISTINCT FROM (CASE member.signature
     WHEN ${literal(writer)} THEN ARRAY['w','k','i','v','producer','sources']
@@ -86,6 +89,7 @@ BEGIN
   THEN RAISE EXCEPTION 'memory_query_write_routine_contract_changed: %',member.signature;END IF;
  END LOOP;
 END $memory_write_routines$;`
+}
 
 const intentTable = `CREATE TABLE public.native_memory_query_write_intents(
  derivation_id uuid NOT NULL REFERENCES public.scope_derivations(id) ON DELETE CASCADE,
@@ -191,7 +195,7 @@ DO $memory_write_receipt$ BEGIN
  IF NOT EXISTS(SELECT 1 FROM public._migrations WHERE name=${literal(migrationName)})
  THEN RAISE EXCEPTION 'memory_query_write_release_missing';END IF;
 END $memory_write_receipt$;
-${checkRoutines()}
+${checkRoutines({ allowInheritedAclOrder: true })}
 ${checkTable()}
 ${sql}`
   assertAuthenticationReadOnly(sql)
@@ -212,7 +216,7 @@ DO $memory_write_predecessor$ BEGIN
 END $memory_write_predecessor$;
 ${priorSql}
 ${previous.cleanup}
-${checkRoutines(false)}
+${checkRoutines({ successor: false })}
 DO $memory_write_install_intents$ BEGIN
  IF to_regclass('public.native_memory_query_write_intents') IS NULL THEN
   ${intentTable}
