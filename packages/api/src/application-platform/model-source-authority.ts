@@ -6,6 +6,7 @@ import { nativeSessionQueryContextSources } from './session-query-context.js'
 import { readPersistentSessionContextAncestors } from '../db/session-context-ancestry.js'
 import { beginClosureAdmission } from '../context-scope/admission-closure.js'
 /** Fresh source permission at model input/output boundaries. [COMP:api/external-source-access] */
+import { isConversationEvidenceRoot } from './conversation-evidence.js'
 import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
@@ -100,17 +101,7 @@ export async function admitModelSourceEvidence(context: ToolContext, action: 'co
     const cohortRoots = sources, discoverCohort = () => nativeSessionQueryContextSources(execution, cohortRoots, prepare)
     const cohort = !fields.length ? { sources, independent: false } : closure ? await closure.discover('model-source-cohort', [...cohortRoots], discoverCohort,
       value => value.independent ? null : [...cohortRoots, ...value.sources]) : await discoverCohort()
-    if (!external && !fields.length && !persistent && !cohort.independent) {
-      if(narrowingGuard)denied()
-      const current = await validate(evidence.evidence, execution.security.ceiling)
-      if (JSON.stringify(accumulator.evidence) !== originalEvidence) denied()
-      return current
-    }
     const application = getApplicationExecutionBinding(execution)
-    // Native delegated consumers keep their original host actor, assistant,
-    // current invocation lease and pinned parent ceiling through full canonical
-    // field/source admission below.
-    // Independent sources and application-bound profiles require their own proof.
     const nativeVerifiedAttended = !application && execution.identity.kind === 'attended' && execution.identity.principal.kind === 'workspace_member'
       && (execution.identity.principal.authenticationKind === 'native_session' || execution.identity.principal.authenticationKind === 'verified_channel') && execution.identity.principal.userId === execution.security.access.userId
       && execution.security.access.assistantId === execution.assistant.id && execution.ownership.kind === 'workspace'
@@ -124,6 +115,18 @@ export async function admitModelSourceEvidence(context: ToolContext, action: 'co
       && execution.ownership.kind === 'workspace' && execution.ownership.workspaceId === workspaceId
       && !execution.surface.systemRead && !execution.security.access.systemRead && !execution.surface.clientSelfMemory
     const nativeProgrammatic = !external && !cohort.independent && !application && hasWorkspaceMcpRetainedAuthority(execution)
+    const needsConversationProof = (nativeVerifiedAttended || nativeDelegated || nativeProgrammatic)
+      && sources.some(isConversationEvidenceRoot)
+    if (!external && !fields.length && !persistent && !cohort.independent && !needsConversationProof) {
+      if(narrowingGuard)denied()
+      const current = await validate(evidence.evidence, execution.security.ceiling)
+      if (JSON.stringify(accumulator.evidence) !== originalEvidence) denied()
+      return current
+    }
+    // Native delegated consumers keep their original host actor, assistant,
+    // current invocation lease and pinned parent ceiling through full canonical
+    // field/source admission below.
+    // Independent sources and application-bound profiles require their own proof.
     if (execution.ownership.kind !== 'workspace' || execution.security.access.sharedAudience && external
       || !nativeDelegated && !nativeProgrammatic && (!application || external) && (execution.identity.kind !== 'attended' || execution.identity.principal.kind !== 'workspace_member')) denied()
     if ((external || cohort.independent) && !prepare) denied()

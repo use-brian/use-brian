@@ -95,23 +95,28 @@ describe('[COMP:api/channel-billing-identity] Channel billing identity', () => {
       ts.forEachChild(node, visit)
     }
     visit(tree)
-    // Turn routing (classifier, adaptive research and splitter records, one
-    // flush), voice, state diff, nudge, and two recovery sites all execute the
-    // real overhead recorder, including newly owned rows.
-    expect(argumentsToRecord).toHaveLength(6)
+    // Both recovery outcomes share the one usage recording callback.
+    expect(pipelineCode).toContain("await recoverMessage('empty')")
+    expect(pipelineCode).toContain("await recoverMessage('failed')")
     const recordUsage = vi.fn(async () => {}), usage = { inputTokens: 2, outputTokens: 3 }
     const reported = { model: 'fixture-model', usage }
     const scope = { usageStore: { recordUsage }, billingUserId: 'workspace-payer', userId: 'channel-actor',
       assistant: { id: 'assistant' }, session: { id: 'session' }, userMessageIdForUsage: 'message', userMessageRow: { id: 'message' }, earlyUserMessageRow: { id: 'message' },
-      record: { ...reported, source: 'overhead:classifier' }, reportedClassification: reported, voiceTranscriptionUsage: reported, adaptive: reported, preflight: reported, result: reported, recovered: reported,
+      record: { ...reported, source: 'overhead:classifier' }, voiceTranscriptionUsage: reported, result: reported, ...reported,
       classifierUsageAttribution: { providerKeySource: 'platform' }, backgroundUsageAttribution: { providerKeySource: 'platform' } }
+    const sources: string[] = []
     for (const argument of argumentsToRecord) {
       const row = new Function(...Object.keys(scope), ts.transpileModule(`return (${argument});`,
         { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText)(...Object.values(scope))
+      sources.push(row.source)
       await recordOverheadUsage(row)
       expect(recordUsage).toHaveBeenLastCalledWith(expect.objectContaining({ userId: 'workspace-payer', actorUserId: 'channel-actor', inputTokens: 2, outputTokens: 3 }))
     }
-    expect(recordUsage).toHaveBeenCalledTimes(6)
+    expect(sources.sort()).toEqual([
+      'overhead:classifier', 'overhead:nudge', 'overhead:recovery-message',
+      'overhead:session-state-diff', 'overhead:transcription',
+    ])
+    expect(recordUsage).toHaveBeenCalledTimes(sources.length)
   })
 
   it('hands the compaction lane the billing party, not the raw owner', () => {

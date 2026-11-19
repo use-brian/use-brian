@@ -5,7 +5,8 @@ const state = vi.hoisted(() => ({
   owner: "viewer-a" as string | null,
   beforeWrite: null as (() => Promise<void>) | null,
 }));
-vi.mock("../idb", () => ({
+vi.mock("../idb", async importOriginal => ({
+  ...await importOriginal<typeof import("../idb")>(),
   idbGet: async (key: string) => structuredClone(state.data.get(key) ?? null),
   idbSet: async (key: string, value: unknown) => { state.data.set(key, structuredClone(value)); },
   idbDelete: async (key: string) => { state.data.delete(key); },

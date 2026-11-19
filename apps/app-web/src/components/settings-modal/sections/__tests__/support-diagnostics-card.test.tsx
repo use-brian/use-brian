@@ -31,7 +31,8 @@ vi.mock("@/lib/user", () => ({
 vi.mock("@/lib/desktop-auth-source", () => ({
   desktopSignOut: vi.fn(() => false),
 }));
-vi.mock("@/lib/offline/idb", () => ({
+vi.mock("@/lib/offline/idb", async importOriginal => ({
+  ...await importOriginal<typeof import("@/lib/offline/idb")>(),
   clearLocalDocCaches: vi.fn(),
 }));
 

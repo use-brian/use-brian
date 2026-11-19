@@ -110,17 +110,17 @@ it('repairs one requested historical envelope and resumes bounded background inv
     expect((await f.pool.query('SELECT session_id FROM conversation_envelopes WHERE session_id=ANY($1::uuid[])', [[f.session.id, other.id]])).rows)
       .toEqual([{ session_id: f.session.id }])
     const advance = async () => (await f.pool.query('SELECT advance_conversation_envelope_backfill(1) AS value')).rows[0].value
-    const initial = await advance()
-    expect(initial.scanned).toBeLessThanOrEqual(1)
-    const initialCursor = (await f.pool.query('SELECT after_session_id FROM conversation_envelope_backfill_checkpoint')).rows[0].after_session_id
-    expect(initialCursor).toBeTruthy()
-    let done = initial.done === true
-    for (let attempt=0; !done && attempt<8; attempt++) {
+    // The installation-wide cursor scans even sessions already classified by other suites.
+    const inventory = (await f.pool.query<{ id: string }>('SELECT id FROM sessions ORDER BY id')).rows
+    for (const [index, { id }] of inventory.entries()) {
       const result = await advance()
-      expect(result.scanned).toBeLessThanOrEqual(1)
-      done = result.done === true
+      expect(result.scanned).toBe(1)
+      expect(result.done).toBe(index === inventory.length - 1)
+      const checkpoint = (await f.pool.query<{ after_session_id: string }>(
+        'SELECT after_session_id FROM conversation_envelope_backfill_checkpoint',
+      )).rows[0]
+      expect(checkpoint.after_session_id).toBe(id)
     }
-    expect(done).toBe(true)
     expect((await f.pool.query('SELECT session_id FROM conversation_envelopes WHERE session_id=$1', [other.id])).rows).toEqual([{ session_id: other.id }])
     expect(await advance()).toEqual({ done: true, scanned: 0, classified: 0 })
   } finally { await f.cleanup() }

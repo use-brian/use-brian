@@ -78,7 +78,7 @@ describe('[COMP:api/private-transcript] native web delivery admission', () => {
     for (let chunk = 0; chunk < 100; chunk++) await f.snapshot!.authorizeDelivery(f.context)
     expect(admit).toHaveBeenCalledTimes(100)
     expect(admit).toHaveBeenLastCalledWith(f.execution, f.accumulator.evidence,
-      expect.objectContaining({ userId: 'actor', workspaceId: 'workspace', visibilityAssistantIds: null }), { directHumanSource: true })
+      expect.objectContaining({ userId: 'actor', workspaceId: 'workspace', visibilityAssistantIds: null }), { directHumanSource: true, turnDestinationSessionId: 'session' })
     expect(fallback).not.toHaveBeenCalled()
   })
 
@@ -112,7 +112,7 @@ describe('[COMP:api/private-transcript] native web delivery admission', () => {
     expect(admit.mock.calls[0][0]).toBe(f.execution)
     expect(f.execution.security.access.userId).toBe('actor')
     expect(admit.mock.calls[0][2]).toMatchObject({ userId: shared ? '' : 'actor', visibilityAssistantIds: null })
-    expect(admit.mock.calls[0][3]).toEqual({ directHumanSource: !shared })
+    expect(admit.mock.calls[0][3]).toEqual({ directHumanSource: !shared, turnDestinationSessionId: 'session' })
     expect(f.execution.security.ceiling.visibilityAssistantIds).toEqual(['assistant'])
   })
 
@@ -124,7 +124,7 @@ describe('[COMP:api/private-transcript] native web delivery admission', () => {
     expect(f.snapshot).toBeDefined()
     await f.snapshot!.authorizeDelivery(f.context)
     expect(admit).toHaveBeenCalledWith(f.execution, f.accumulator.evidence,
-      expect.objectContaining({ userId: '', clearance: 'internal', compartments: [], projectIds: [] }), { directHumanSource: false })
+      expect.objectContaining({ userId: '', clearance: 'internal', compartments: [], projectIds: [] }), { directHumanSource: false, turnDestinationSessionId: 'session' })
     expect(admit.mock.calls[0][2].departmentRead).toBeUndefined()
     expect(f.execution.security.ceiling.departmentRead).toEqual(input.access.departmentRead)
   })
@@ -244,7 +244,7 @@ describe('[COMP:api/private-transcript] native web delivery admission', () => {
     for (let chunk = 0; chunk < 4; chunk++) await f.snapshot!.authorizeDelivery(f.context)
     expect(admit).toHaveBeenCalledTimes(4)
     expect(admit).toHaveBeenLastCalledWith(f.execution, f.accumulator.evidence,
-      expect.objectContaining({ userId: '', workspaceId: 'workspace' }), { directHumanSource: false })
+      expect.objectContaining({ userId: '', workspaceId: 'workspace' }), { directHumanSource: false, turnDestinationSessionId: 'session' })
     expect(fallback).not.toHaveBeenCalled()
   })
 

@@ -17,7 +17,8 @@ vi.mock("@/contexts/feed-profiles-context", () => ({ useFeedWorkspace: () => ({
   workspaceId: "workspace-1", name: "Demo", profiles: [], assistants: [{ id: "assistant-1", name: "Writer" }],
   canDraft: state.canDraft, me: { id: "viewer-a" }, role: "owner", brand: null,
 }) }));
-vi.mock("@/lib/offline/idb", () => ({
+vi.mock("@/lib/offline/idb", async importOriginal => ({
+  ...await importOriginal<typeof import("@/lib/offline/idb")>(),
   idbGet: async (key: string) => structuredClone(state.data.get(key) ?? null),
   idbSet: async (key: string, value: unknown) => { state.data.set(key, structuredClone(value)); },
   idbDelete: async (key: string) => { state.data.delete(key); },

@@ -292,9 +292,9 @@ describe.sequential('[COMP:api/pending-questions-resume] approval card restore a
   }, 180_000)
 
   // Fail closed: a live holder of the predecessor lease, or a lease the resume point
-  // does not name (stale under the resume's window, fresh under the claim's own), is
-  // never reclaimed; the resume keeps waiting and refuses at its bound with no effect.
-  it.each(['live predecessor holder', 'unnamed lease'] as const)('keeps waiting on a %s and fails closed at its bound', async (holder) => {
+  // does not name, is never reclaimed. A successor already stale under the
+  // ordinary 90-second claim window must survive the resume's first claim too.
+  it.each(['live predecessor holder', 'fresh successor lease', 'expired successor lease'] as const)('keeps waiting on a %s and fails closed at its bound', async (holder) => {
     const f = await persistentContextFixture('confidential')
     const directory = await mkdtemp(join(tmpdir(), 'brian-approval-restore-'))
     const counter = `approval_counter_${randomUUID().replaceAll('-', '')}`
@@ -306,8 +306,8 @@ describe.sequential('[COMP:api/pending-questions-resume] approval card restore a
         const beat = () => f.pool.query('UPDATE sessions SET turn_heartbeat_at=clock_timestamp() WHERE id=$1', [t.session.id])
         await beat(); heartbeat = setInterval(() => { void beat() }, 300)
       } else {
-        await f.pool.query("UPDATE sessions SET turn_lease_token=$2, turn_heartbeat_at=clock_timestamp()-interval '10 seconds' WHERE id=$1",
-          [t.session.id, otherToken])
+        await f.pool.query("UPDATE sessions SET turn_lease_token=$2, turn_heartbeat_at=clock_timestamp()-make_interval(secs=>$3) WHERE id=$1",
+          [t.session.id, otherToken, holder === 'expired successor lease' ? 120 : 10])
       }
       const expectedToken = holder === 'live predecessor holder' ? t.approval.token : otherToken
       await expect(t.run({ staleAfterMs: 3_000, pollMs: 200, timeoutMs: 6_000 })).rejects.toMatchObject({ code: 'room_turn_wait_timeout' })

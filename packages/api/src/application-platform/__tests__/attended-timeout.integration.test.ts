@@ -19,7 +19,7 @@ import {createDbMemoryStore} from '../../db/memory-store.js'
 import {authSessionStore} from '../../db/auth-session-store.js'
 import {createPersonalWebSession,requestTurnCancel,claimTurnLease,TURN_HEARTBEAT_INTERVAL_MS} from '../../db/sessions.js'
 import {chatRoutes} from '../../routes/chat.js'
-import * as recovery from '../../routes/_recovery-message.js'
+import * as recovery from '../../turn/recovery-message.js'
 import * as emptyTurn from '../../routes/_empty-turn-synthesis.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
 import {updateSelfEntityAttributes} from '../../db/entities-store.js'
@@ -402,8 +402,19 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
    JOIN session_context_revision_contents c ON c.workspace_id=h.workspace_id AND c.revision_id=h.scope_revision_id WHERE h.session_id=$1`,[current.session.id])).rows[0]
   expect(title.content).toEqual({title:'Fictional scoped browser title',manual:false})
   expect((await current.f.pool.query('SELECT title FROM sessions WHERE id=$1',[current.session.id])).rows).toEqual([{title:null}])
-  const edges=(await current.f.pool.query(`SELECT kind AS source_kind FROM application_scope_lineage($1,ARRAY['session_context_revision'],ARRAY[$2::uuid],ARRAY['1'])`,[current.f.workspaceId,title.scope_revision_id])).rows
-  expect(edges.some(edge=>edge.source_kind==='application_field')).toBe(true)
+  const edges = (await current.f.pool.query(`
+    SELECT o.session_id AS "sessionId", o.binding->>'purpose' AS purpose, o.binding->>'readerUserId' AS "readerUserId"
+    FROM scope_derivations d
+    JOIN scope_derivation_sources frame ON frame.workspace_id=d.workspace_id AND frame.derivation_id=d.id
+      AND frame.source_kind='session_context_revision'
+    JOIN scope_derivations owner ON owner.workspace_id=frame.workspace_id AND owner.resource_kind=frame.source_kind
+      AND owner.resource_id=frame.source_id AND owner.resource_version=frame.source_version
+    JOIN scope_derivation_sources record ON record.workspace_id=owner.workspace_id AND record.derivation_id=owner.id
+      AND record.source_kind='conversation_record' AND record.source_version='1'
+    JOIN private_transcript_observations o ON o.workspace_id=record.workspace_id AND o.id=record.source_id
+    WHERE d.workspace_id=$1 AND d.resource_kind='session_context_revision' AND d.resource_id=$2`,
+    [current.f.workspaceId,title.scope_revision_id])).rows
+  expect(edges).toEqual([{ sessionId: current.session.id, purpose: 'native_session_title', readerUserId: current.f.ownerId }])
  })
  it('holds generated title output after original device revocation and accepts a separate current device',async()=>{
   const current=await setup({title:'none'}),oldId=current.auth.id,other=await authSessionStore.create(current.f.ownerId,{deviceLabel:'Fictional independent device',userAgent:'Fixture',ipAddress:'127.0.0.1'})

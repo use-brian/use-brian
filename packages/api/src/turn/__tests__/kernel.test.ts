@@ -66,6 +66,8 @@ import { claimTurnLease, touchTurnLease, releaseTurnLease } from '../../db/sessi
 import { AuthorityChangedError } from '../../context-scope/authority-lease.js'
 import {turnAbortKind,TurnLeaseLostError,TurnStoppedError,abortLocalTurn} from '../lease.js'
 import {localTurnInboxAssistant} from '../../turn-inbox.js'
+import type { LLMProvider, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
+import type { RecoveryPendingTurn } from '../recovery-message.js'
 
 const textTurn = (text: string) => ({
   type: 'assistant_turn',
@@ -98,6 +100,64 @@ beforeEach(() => {
   loopCleanup = null
   loopOptions.length = 0
   vi.mocked(claimTurnLease).mockImplementation(async () => { leaseCalls.push('claim'); return 'tok-1' })
+})
+
+const recoveryTurn: RecoveryPendingTurn = {
+  content: [{ type: 'tool_use', id: 'fixture-operation', name: 'recordFictionalEffect', input: {} }],
+  toolResults: [{ type: 'tool_result', toolUseId: 'fixture-operation', name: 'recordFictionalEffect', content: 'Recorded fictional effect' }],
+}
+
+function recoveryFixture(kind: TurnSinkKind) {
+  const stream = vi.fn(async function* (): AsyncGenerator<StreamChunk> {
+    yield { type: 'text_delta', text: 'The fictional change was recorded. Check it before repeating.' }
+    yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 9, outputTokens: 4 } }
+  })
+  const provider: LLMProvider = { stream, createSession: vi.fn(), name: 'fictional-recovery', models: [] }
+  const input = params(kind, { prepareBackground: true,
+    model: { provider, model: 'gemini-flash', configuredProviders: undefined, customLlm: null } })
+  const authorizeDestination = vi.fn(async () => {})
+  const recordUsage = vi.fn(async () => {})
+  const request = { pendingAssistantTurns: [recoveryTurn], userText: 'Record the fictional change',
+    channelType: 'fixture', authorizeDestination, recordUsage }
+  loopEvents = [{ ...textTurn(''), response: { ...textTurn('').response, content: recoveryTurn.content } }]
+  return { input, stream, request, authorizeDestination, recordUsage }
+}
+
+describe('[COMP:api/turn-kernel] interactive recovery owner', () => {
+  it.each([['sse', 'failed'], ['adapter', 'empty']] as const)('uses the original %s background provider and settles recovery once', async (kind, reason) => {
+    const f = recoveryFixture(kind)
+    const owner = await openAssistantTurn(f.input)
+    try {
+      await owner.run(f.input)
+      const first = owner.recoverInteractiveReply({ ...f.request, reason })
+      const duplicate = owner.recoverInteractiveReply({ ...f.request, reason })
+      await expect(duplicate).resolves.toBeNull()
+      await expect(first).resolves.toMatchObject({ text: expect.stringContaining('was recorded'), usage: { inputTokens: 9, outputTokens: 4 } })
+      expect(f.stream).toHaveBeenCalledTimes(1)
+      expect(vi.mocked(admitModelInput)).toHaveBeenCalledTimes(1)
+      expect(f.authorizeDestination).toHaveBeenCalledTimes(2)
+      expect(f.recordUsage).toHaveBeenCalledTimes(1)
+      expect(leaseCalls).not.toContain('release')
+    } finally { await owner.finish() }
+  })
+
+  it.each(['before dispatch', 'after provider', 'stopped', 'unattended'] as const)('withholds the recovery result %s', async stage => {
+    const f = recoveryFixture(stage === 'unattended' ? 'return' : 'adapter')
+    const owner = await openAssistantTurn(f.input)
+    try {
+      await owner.run(f.input)
+      const refused = new AuthorityChangedError()
+      if (stage === 'before dispatch') f.authorizeDestination.mockRejectedValueOnce(refused)
+      if (stage === 'after provider') f.authorizeDestination.mockResolvedValueOnce(undefined).mockRejectedValueOnce(refused)
+      if (stage === 'stopped') f.input.abortController.abort(new TurnStoppedError())
+      const pending = owner.recoverInteractiveReply({ ...f.request, reason: 'failed' })
+      if (stage.startsWith('before') || stage.startsWith('after')) await expect(pending).rejects.toBe(refused)
+      else await expect(pending).resolves.toBeNull()
+      const dispatched = stage === 'after provider'
+      expect(f.stream).toHaveBeenCalledTimes(dispatched ? 1 : 0)
+      expect(f.recordUsage).toHaveBeenCalledTimes(dispatched ? 1 : 0)
+    } finally { await owner.finish() }
+  })
 })
 
 describe('[COMP:api/turn-kernel] runAssistantTurn', () => {

@@ -498,7 +498,7 @@ describe('[COMP:api/mcp-surface] granted custom MCP overlay', () => {
 })
 
 describe('[COMP:api/mcp-surface] granted CLI MCP overlay', () => {
-  it('injects every CLI instance exposed to a workspace', async () => {
+  it('discovers each exposed CLI instance only when selected', async () => {
     discoverCliServer.mockImplementation(async (_params, name) => ({
       name,
       url: `stdio://${name}`,
@@ -531,6 +531,8 @@ describe('[COMP:api/mcp-surface] granted CLI MCP overlay', () => {
       assistantTeamId: 'ws-shared',
     })
     await discoverSources(tools, 'Test Filesystem')
+    expect(discoverCliServer).toHaveBeenCalledExactlyOnceWith(expect.anything(), 'Test Filesystem')
+    await discoverSources(tools, 'Project Filesystem')
 
     expect(discoverCliServer).toHaveBeenCalledTimes(2)
     expect(discoverCliServer).toHaveBeenCalledWith(expect.anything(), 'Test Filesystem')

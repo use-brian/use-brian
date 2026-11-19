@@ -58,7 +58,7 @@ vi.mock('../../db/crm-r2.js', () => ({
   getCrmConfig: vi.fn(),
   getCrmR2Record: vi.fn(),
   getCrmReport: vi.fn(),
-  getCrmSummary: vi.fn(),
+  getWorkspaceCrmSummary: vi.fn(),
   listCrmDealParticipants: vi.fn(),
   listCrmRecordPage: vi.fn(),
   listCrmRecordRelationships: vi.fn(),
@@ -102,7 +102,7 @@ import {
   createCrmPipeline,
   getCrmConfig,
   getCrmR2Record,
-  getCrmSummary,
+  getWorkspaceCrmSummary,
   findCrmDuplicateGroups,
   listCrmDealParticipants,
   listCrmRecordPage,
@@ -422,7 +422,7 @@ describe('[COMP:api/crm-page-http] CRM collection HTTP boundary', () => {
   })
 
   it('serves access-scoped summary and bounded lookup resources', async () => {
-    vi.mocked(getCrmSummary).mockResolvedValue({
+    vi.mocked(getWorkspaceCrmSummary).mockResolvedValue({
       totals: { deals: 2, contacts: 4, companies: 1 },
       attention: { overdue: 1, stale: 0, noAmount: 1, orphaned: 2 },
       stages: [],
@@ -433,7 +433,7 @@ describe('[COMP:api/crm-page-http] CRM collection HTTP boundary', () => {
     const lookup = await request(makeApp()).get(`/api/crm/${WS}/lookup?kind=contact&limit=900&q=fic`)
 
     expect(summary.status).toBe(200)
-    expect(getCrmSummary).toHaveBeenCalledWith(CTX, 'pipeline-1')
+    expect(getWorkspaceCrmSummary).toHaveBeenCalledWith(CTX.userId, WS, 'pipeline-1')
     expect(lookup.status).toBe(200)
     expect(lookupCrmRecords).toHaveBeenCalledWith({
       ctx: CTX, kind: 'person', query: 'fic', limit: 100,

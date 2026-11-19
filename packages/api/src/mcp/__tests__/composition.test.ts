@@ -26,7 +26,8 @@ import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { surfaceProfile, type CatalogActivationPlan } from '../catalog.js'
 import { applyDirectCapabilities, createLaneBuilder, prepareComposedCatalog } from '../composition.js'
 import { createDescriptorLifecycle, remoteDescriptorSourceKey } from '../descriptors.js'
-import { composeSurfaceCapabilities } from '../surface.js'
+import { resolveResumeOutcomeNote } from '../../routes/session-resume-replay.js'
+import { composeResumeCapabilities, composeSurfaceCapabilities } from '../surface.js'
 import type { ProviderActivationContext } from '../providers/types.js'
 import type { TurnAuthority } from '../activation.js'
 
@@ -206,6 +207,102 @@ describe('[COMP:api/mcp-catalog] capability composition', () => {
       const result = await tools.get('mcp_call')!.execute({ server: `connector:${id}`, tool: 'search_tasks', args: { query: 'x' } }, context())
       expect(JSON.stringify(result)).toContain(`answer from ${url}`)
     }
+  })
+
+  it('resumes a held gateway approval on its exact source and refuses drift or removal', async () => {
+    const f = fixture()
+    const secondUrl = 'https://planner-two.example/mcp'
+    const fixtureSecond = instance({ id: 'ci-remote-2', provider: 'custom-planner-2', label: 'Project Orchard', custom: true, url: secondUrl })
+    f.instances.push(fixtureSecond)
+    boundary.callRemoteMcpTool.mockResolvedValue('created in selected planner')
+    f.settingsStore.recordUsage.mockImplementation(async () => {})
+    const lifecycle = createDescriptorLifecycle()
+    const stores = { userId: OWNER, assistantId: ASSISTANT, assistantTeamId: WORKSPACE,
+      connectorStore: f.connectorStore as never, settingsStore: f.settingsStore as never,
+      connectorInstanceStore: f.connectorInstanceStore as never, connectorGrantStore: f.connectorGrantStore as never,
+      policyReader: async () => [], actionGrantReader: null, descriptorLifecycle: lifecycle }
+    const tools = new Map<string, Tool>()
+    await composeSurfaceCapabilities('web', { ...stores, tools })
+    expect(boundary.discoverMcpServer).not.toHaveBeenCalled()
+    expect(boundary.discoverCliServer).not.toHaveBeenCalled()
+    await tools.get('mcp_search')!.execute({ query: 'Project Orchard' }, context())
+    const onInnerAwaitingApproval = vi.fn<NonNullable<ToolContext['onInnerAwaitingApproval']>>()
+    await tools.get('mcp_call')!.execute({ server: 'connector:ci-remote-2', tool: 'create_task', args: { title: 'Frozen approval' } }, {
+      ...context(), confirmationResolver: { waitForDecision: async () => ({ decision: 'deny' }) } as never,
+      notifyConfirmationRequired: vi.fn(), createToolInvocationApproval: async () => 'approval-fixed',
+      onInnerAwaitingApproval,
+    })
+    expect(boundary.callRemoteMcpTool).not.toHaveBeenCalled()
+    expect(boundary.discoverMcpServer.mock.calls.map(([url]) => url)).toEqual([secondUrl])
+    expect(boundary.discoverCliServer).not.toHaveBeenCalled()
+    expect(onInnerAwaitingApproval).toHaveBeenCalledOnce()
+    const held = onInnerAwaitingApproval.mock.calls[0]![0]
+    expect(held.connectorTarget).toEqual({ serverName: 'connector:ci-remote-2', version: expect.any(String) })
+    expect(held.toolInput).toEqual({ title: 'Frozen approval' })
+
+    const outcome = async () => {
+      const resumed = new Map<string, Tool>()
+      await composeResumeCapabilities({ ...stores, tools: resumed, suspendedToolName: held.toolName, connectorTarget: held.connectorTarget })
+      return resolveResumeOutcomeNote(resumed, {
+        approvalId: held.approvalId, suspendedToolName: held.toolName, suspendedToolInput: held.toolInput,
+        approvalStatus: 'approved', approvalKind: 'tool_invocation', rejectReason: null, answerText: null,
+      }, context())
+    }
+    expect(await outcome()).toContain('created in selected planner')
+    expect(boundary.callRemoteMcpTool).toHaveBeenCalledWith(secondUrl, 'create_task', { title: 'Frozen approval' }, undefined)
+    expect(boundary.discoverMcpServer.mock.calls.map(([url]) => url)).toEqual([secondUrl, secondUrl])
+
+    boundary.discoverMcpServer.mockImplementation(async (url: string, name: string) => ({ name, url, tools: [{
+      name: 'create_task', description: 'Create a planner task for a dated plan', inputSchema: {
+        type: 'object', properties: { title: { type: 'string' }, due: { type: 'string' } }, required: ['title', 'due'],
+      },
+    }] }))
+    expect(await outcome()).toContain('the tool is no longer available')
+    expect(boundary.callRemoteMcpTool).toHaveBeenCalledOnce()
+
+    f.instances.splice(f.instances.indexOf(fixtureSecond), 1)
+    expect(await outcome()).toContain('the tool is no longer available')
+    expect(boundary.discoverMcpServer.mock.calls.map(([url]) => url)).toEqual([secondUrl, secondUrl, secondUrl])
+    expect(boundary.discoverCliServer).not.toHaveBeenCalled()
+
+    await composeResumeCapabilities({ ...stores, tools: new Map(), suspendedToolName: 'unknown_tool' })
+    expect(boundary.discoverMcpServer).toHaveBeenCalledTimes(3)
+    expect(boundary.discoverCliServer).not.toHaveBeenCalled()
+  })
+
+  it('replays an unambiguous legacy alias using catalog metadata and refuses an unknown or ambiguous alias', async () => {
+    const f = fixture()
+    const firstUrl = 'https://planner.example/mcp'
+    const secondUrl = 'https://planner-two.example/mcp'
+    const discoveryName = 'Team Planner'
+    const first = f.instances.find(row => row.id === 'ci-remote')!
+    f.instances.splice(0, f.instances.length, first)
+    const lifecycle = createDescriptorLifecycle()
+    const stores = { userId: OWNER, assistantId: ASSISTANT, assistantTeamId: WORKSPACE,
+      connectorStore: f.connectorStore as never, settingsStore: f.settingsStore as never,
+      connectorInstanceStore: f.connectorInstanceStore as never, connectorGrantStore: f.connectorGrantStore as never,
+      policyReader: async () => [], actionGrantReader: null, descriptorLifecycle: lifecycle }
+    const discover = async (query: string) => {
+      const tools = new Map<string, Tool>()
+      await composeSurfaceCapabilities('web', { ...stores, tools })
+      await tools.get('mcp_search')!.execute({ query }, context())
+    }
+    const resume = async (suspendedToolName: string) => {
+      const tools = new Map<string, Tool>()
+      await composeResumeCapabilities({ ...stores, tools, suspendedToolName })
+      return tools
+    }
+    await discover(discoveryName)
+    const legacyName = 'mcp_Team_Planner_create_task'
+    expect((await resume(legacyName)).has(legacyName)).toBe(true)
+    expect(boundary.discoverMcpServer.mock.calls.map(([url]) => url)).toEqual([firstUrl, firstUrl])
+    expect((await resume('unknown')).size).toBe(0)
+    expect(boundary.discoverMcpServer).toHaveBeenCalledTimes(2)
+
+    f.instances.push(instance({ id: 'ci-remote-2', provider: 'custom-planner-2', label: discoveryName, custom: true, url: secondUrl }))
+    await discover(discoveryName)
+    expect((await resume(legacyName)).size).toBe(0)
+    expect(boundary.discoverMcpServer.mock.calls.map(([url]) => url)).toEqual([firstUrl, firstUrl, secondUrl])
   })
 
   it('pins exactly the admitted rows a family lane uses, with the catalog-time binding', async () => {

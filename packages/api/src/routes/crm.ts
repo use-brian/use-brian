@@ -56,7 +56,7 @@ import {
   getCrmConfig,
   getCrmR2Record,
   getCrmReport,
-  getCrmSummary,
+  getWorkspaceCrmSummary,
   listCrmDealParticipants,
   listCrmRecordPage,
   listCrmRecordRelationships,
@@ -587,10 +587,17 @@ export function crmRoutes({
   })
 
   router.get('/:workspaceId/summary', async (req, res) => {
-    const member = await memberContext(req as never, res)
-    if (!member) return
+    const userId = (req as Request & { userId?: string }).userId
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
     try {
-      const summary = await getCrmSummary(member.ctx, queryText(req.query.pipeline, 100))
+      const summary = await getWorkspaceCrmSummary(userId, req.params.workspaceId, queryText(req.query.pipeline, 100))
+      if (!summary) {
+        res.status(403).json({ error: 'Not a member of this workspace' })
+        return
+      }
       res.json(summary)
     } catch (err) {
       if (respondToScopeRefusal(err, res)) return

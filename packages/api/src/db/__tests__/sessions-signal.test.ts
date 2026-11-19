@@ -55,10 +55,12 @@ beforeEach(() => {
   // Default: every write touches one row; the workspace-resolve SELECT
   // finds the owning assistant's workspace.
   mockQuery.mockImplementation(async (sql: string) => {
+    if (sql.includes('native_session_release_turn')) {
+      return { rows: [{ value: releaseResult, workspaceId: releaseResult ? WS : null }], rowCount: 1 } as never
+    }
     if (typeof sql === 'string' && sql.includes('JOIN assistants a')) {
       return { rows: [{ workspaceId: WS }], rowCount: 1 } as never
     }
-    if (sql.includes('native_session_release_turn')) return { rows: [{ value: releaseResult }], rowCount: 1 } as never
     if (sql.includes('native_session_turn_transition')) return { rows: [{ value: transitionResult }], rowCount: 1 } as never
     return { rows: [], rowCount: 1 } as never
   })
@@ -87,7 +89,7 @@ describe('[COMP:api/session-signal] store-seam emission', () => {
 
   it('releaseTurnLease emits when the lock was actually released', async () => {
     expect(await releaseTurnLease(SID, 'completed', 'token-1')).toBe(true)
-    expect(mockQuery).toHaveBeenCalledWith(expect.any(String), [SID, 'token-1', 'completed'])
+    expect(mockQuery).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('native_session_release_turn'), [SID, 'token-1', 'completed'])
     await flushSignals()
     expect(mockNotify).toHaveBeenCalledWith(WS, 'session', 'update', SID)
   })

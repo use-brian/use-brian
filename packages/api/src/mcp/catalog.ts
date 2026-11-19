@@ -18,6 +18,7 @@
  * [COMP:api/mcp-catalog]
  * See docs/architecture/integrations/mcp.md → "Capability catalog".
  */
+import { createHash } from 'node:crypto'
 import type { KnowledgeRepoWriter, KnowledgeStoreInterface } from '@use-brian/core/knowledge/types.js'
 import {
   legacyMcpToolName,
@@ -29,7 +30,7 @@ import { createKnowledgeTools, type KnowledgeWriteCaptureRule } from '@use-brian
 import { classifyTool, defaultPolicy } from '@use-brian/agent-runtime/mcp/classifier.js'
 import type { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
-import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
+import type { ConnectorResumeTarget, Tool } from '@use-brian/agent-runtime/tools/types.js'
 import {
   ALL_EXACT_INSTANCE_GOVERNANCE_CONNECTOR_IDS,
   APP_LEVEL_ASSISTANT_ID,
@@ -52,7 +53,7 @@ import {
   matchKnowledgeCaptureRules,
   type KnowledgeCaptureRuleStore,
 } from '../knowledge/capture-rules.js'
-import { connectorBindingFingerprint, connectorBindingKey, type Activation } from './activation.js'
+import { connectorBindingFingerprint, connectorBindingKey, type Activation, type FamilySelection } from './activation.js'
 import { connectorReconnectNotice } from './connector-health.js'
 import {
   cliDescriptorSourceKey,
@@ -184,6 +185,8 @@ const readActionGrantsSystem: CatalogActionGrantReader = async (assistantId) => 
 
 export type CatalogLane = 'workspace' | 'grant' | 'personal'
 
+const AGENTMAIL_ASSIGNMENT_NOTICE = 'Assistant Email (this assistant does not handle an inbox) - assign an inbox to it in Studio → Channels, or create one with Add channel → Email.'
+
 /** One admitted connector binding, as handed to activation. */
 export type AdmittedConnector = {
   lane: CatalogLane
@@ -254,6 +257,7 @@ export type CatalogActivationPlan = Readonly<{
   bindingFingerprints: ReadonlyMap<string, string>
   descriptors: readonly CatalogDescriptor[]
   descriptorLifecycle: DescriptorLifecycle
+  agentmailInboxIds?: readonly string[]
 }>
 
 /**
@@ -286,22 +290,31 @@ export function createCatalogActivator(params: {
 }): CatalogActivator {
   return async (plan, selection) => {
     const whole = new Set<ProviderFamily>(selection.families ?? [])
-    for (const key of selection.sourceKeys ?? []) whole.add(key.startsWith('cli:') ? 'cli' : 'remote-mcp')
+    const bySource = new Map<ProviderFamily, string[]>()
+    for (const key of new Set(selection.sourceKeys ?? [])) {
+      const family = key.startsWith('cli:') ? 'cli' : 'remote-mcp'
+      if (!whole.has(family)) bySource.set(family, [...(bySource.get(family) ?? []), key])
+    }
     const named = new Map<ProviderFamily, Set<string>>()
-    for (const name of selection.toolNames ?? []) {
+    const namesToActivate = bySource.size === 0 ? selection.toolNames : undefined
+    for (const name of namesToActivate ?? []) {
       for (const descriptor of plan.descriptors) {
-        if (descriptor.name !== name || whole.has(descriptor.family)) continue
+        if (descriptor.name !== name || descriptor.origin === 'dynamic' || whole.has(descriptor.family)) continue
         let names = named.get(descriptor.family)
         if (!names) named.set(descriptor.family, names = new Set())
         names.add(name)
       }
     }
-    const families = [...whole, ...[...named.keys()].filter((family) => !whole.has(family))]
+    const families: Array<Omit<FamilySelection, 'instances'>> = [
+      ...Array.from(whole, family => ({ family })),
+      ...Array.from(named, ([family, names]) => ({ family, toolNames: [...names] })),
+      ...Array.from(bySource, ([family, keys]) => keys.map(sourceKey => ({ family, sourceKey }))).flat(),
+    ]
     if (families.length === 0) return []
-    const entries = await Promise.all(families.map(async (family) => ({
-      family,
-      instances: await params.instancesFor(family, plan, selection),
-      ...(whole.has(family) ? {} : { toolNames: [...named.get(family)!] }),
+    const entries = await Promise.all(families.map(async entry => ({
+      ...entry,
+      instances: await params.instancesFor(entry.family, plan,
+        entry.sourceKey ? { sourceKeys: [entry.sourceKey] } : {}),
     })))
     const outcome = await params.activation.activateWithRecords({ families: entries })
     return { tools: outcome.tools, records: outcome.records, ...(outcome.sourceTools ? { sourceTools: outcome.sourceTools } : {}) }
@@ -358,6 +371,7 @@ export type PrepareCapabilityCatalogInput = {
   /** Provider modules whose `describe()` replaces registry rows for their family. */
   providers?: readonly Pick<ProviderModule, 'family' | 'describe'>[]
   descriptorLifecycle?: DescriptorLifecycle
+  listAssignedAgentmailInboxIds?: (workspaceId: string, assistantId: string) => Promise<string[]>
   activator?: CatalogActivator
   /** Test seam for the runtime authority; production uses the canonical reader. */
   createRuntimeAuthority?: typeof createConnectorRuntimeAuthority
@@ -418,6 +432,7 @@ export type CapabilityCatalog = {
   knowledgeCapturePrompt?: string
   activate(selection: CapabilitySelection): Promise<Tool[]>
   plan: CatalogActivationPlan
+  resolveSuspendedDynamicTool(name: string, target?: ConnectorResumeTarget): Promise<Tool | undefined>
 }
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -465,6 +480,10 @@ function toolVersion(descriptor: ToolDescriptor): string {
   return descriptorVersion([descriptor])
 }
 
+function nativeToolVersion(version: string | null, binding: unknown): string {
+  return createHash('sha256').update(JSON.stringify([version, binding])).digest('hex')
+}
+
 // ── Catalog ──────────────────────────────────────────────────
 
 export async function prepareCapabilityCatalog(input: PrepareCapabilityCatalogInput): Promise<CapabilityCatalog> {
@@ -482,7 +501,8 @@ export async function prepareCapabilityCatalog(input: PrepareCapabilityCatalogIn
     return { profile, sources: [], searchOptions: { keepDynamicToolsDirect: profile.keepDynamicToolsDirect, exposeLocalReadTools: profile.exposeLocalReadTools },
       descriptors: [], direct: { descriptors: [], tools: [] }, unavailable, searchableSources: [],
       admittedConnectorIds: new Set(), admittedBindings: new Map(), plan,
-      activate: async () => { throw new CapabilityActivationUnavailableError() } }
+      activate: async () => { throw new CapabilityActivationUnavailableError() },
+      resolveSuspendedDynamicTool: async () => undefined }
   }
 
   // 1. One runtime authority (workspace assistants only).
@@ -569,7 +589,9 @@ export async function prepareCapabilityCatalog(input: PrepareCapabilityCatalogIn
 
   // 3-5. One enablement read, one bulk policy read, one bulk action-grant read.
   const policyUsers = [...new Set([connectorUserId, ...admitted.flatMap((row) => row.grantedByUserId ? [row.grantedByUserId] : [])])]
-  const [enablementRows, policyRows, grantRows] = await Promise.all([
+  const hasAgentmailInbox = admitted.some(row => row.lane === 'workspace' && row.provider === 'agentmail'
+    && row.connected && row.healthStatus !== 'auth_failed')
+  const [enablementRows, policyRows, grantRows, assignedAgentmailIds] = await Promise.all([
     stores.assistantConnectorStore
       ? stores.assistantConnectorStore.listForAssistant(assistantId).catch((error) => {
         // Fail closed: an unknown enablement state hides connector tools this turn.
@@ -581,6 +603,12 @@ export async function prepareCapabilityCatalog(input: PrepareCapabilityCatalogIn
       ? Promise.resolve(null)
       : (input.actionGrantReader ?? readActionGrantsSystem)(assistantId)
         .catch((error) => { console.error('[mcp-catalog] action-grant read failed:', error); return 'failed' as const }),
+    workspaceId && hasAgentmailInbox && input.listAssignedAgentmailInboxIds
+      ? input.listAssignedAgentmailInboxIds(workspaceId, assistantId).catch(error => {
+        console.error('[mcp-catalog] Assistant Email assignment read failed:', error)
+        return null
+      })
+      : Promise.resolve([]),
   ])
   const enablement = new Map((enablementRows ?? []).map((row) => [row.connectorId, row.enabled]))
   const isEnabled = (governanceId: string, fallback?: string) => enablementRows !== null
@@ -618,10 +646,41 @@ export async function prepareCapabilityCatalog(input: PrepareCapabilityCatalogIn
   // 6a. Static native descriptors, by winning lane per provider.
   const nativeRecords = new Map(staticNativeDescriptorRecords(input.providers ?? []).map((record) => [record.connectorId, record]))
   const nativeSources: Array<{ connectorId: string; descriptors: CatalogDescriptor[] }> = []
+  let agentmailInboxIds: string[] | undefined
   const configured = input.isConnectorConfigured ?? deploymentServesConnector
   for (const [connectorId, record] of nativeRecords) {
-    // Assistant Email is routed per inbox by channel ownership; activation owns that read.
-    if (record.family === 'agentmail') continue
+    // Assistant Email registers one schema across every inbox assigned to the assistant.
+    if (record.family === 'agentmail') {
+      if (!workspaceId || !input.listAssignedAgentmailInboxIds) continue
+      const assigned = new Set(assignedAgentmailIds ?? [])
+      const inboxes = admitted.filter(row => row.lane === 'workspace' && row.provider === 'agentmail'
+        && row.connected && row.healthStatus !== 'auth_failed' && assigned.has(row.instanceId))
+      if (inboxes.length === 0) {
+        note(assignedAgentmailIds ? AGENTMAIL_ASSIGNMENT_NOTICE : 'Assistant Email (assignment could not be verified)')
+        continue
+      }
+      if (!isEnabled(connectorId)) continue
+      agentmailInboxIds = inboxes.map(row => row.instanceId).sort()
+      const bindings = inboxes.map(row => [row.instanceId, row.connectedEmail ?? row.label, row.createdAt?.getTime()])
+        .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
+      const version = nativeToolVersion(record.version, bindings)
+      const tools = record.tools.flatMap((tool): CatalogDescriptor[] => {
+        const effective = policyFor({ kind: 'workspace' }, { appServer: connectorId, assistantServer: connectorId,
+          toolName: tool.name, fallback: tool.requiresConfirmation ? 'ask' : 'allow' })
+        if (effective === 'block') return []
+        if ((tool.classification === 'write' || tool.classification === 'destructive')
+          && !inboxes.some(row => actionGranted(`${connectorId}:${row.instanceId}`, tool.name))) return []
+        const descriptor: CatalogDescriptor = { ...tool, canonicalName: tool.name, serverName: connectorId,
+          sourceKey: record.sourceKey, governanceId: connectorId, lane: 'workspace', effectivePolicy: effective,
+          version }
+        return visible(descriptor) ? [descriptor] : []
+      })
+      if (tools.length > 0) {
+        descriptors.push(...tools)
+        nativeSources.push({ connectorId, descriptors: tools })
+      }
+      continue
+    }
     // A built-in this deployment cannot activate is neither indexed nor announced.
     if (!configured(connectorId)) continue
     const lanes: CatalogLane[] = workspaceId ? ['workspace', 'grant'] : ['personal']
@@ -649,6 +708,7 @@ export async function prepareCapabilityCatalog(input: PrepareCapabilityCatalogIn
         ? connectorId : `${connectorId}:${row.instanceId}`
       if (!isEnabled(governanceId, connectorId)) return
       const suffix = primary ? '' : instanceToolSuffix(row.instanceId, row.label)
+      const version = nativeToolVersion(record.version, [row.lane, row.instanceId, row.bindingKey])
       for (const tool of record.tools) {
         const fallback: Policy = tool.requiresConfirmation ? 'ask' : 'allow'
         // A workspace-owned mailbox is governed per instance at both levels (as its activation does).
@@ -673,6 +733,7 @@ export async function prepareCapabilityCatalog(input: PrepareCapabilityCatalogIn
           governanceId,
           lane: row.lane,
           effectivePolicy: effective,
+          version,
         }
         if (visible(descriptor)) sourceDescriptors.push(descriptor)
       }
@@ -786,6 +847,7 @@ export async function prepareCapabilityCatalog(input: PrepareCapabilityCatalogIn
     profile, assistantId, assistantTeamId: workspaceId, connectorUserId, runtimeActorId,
     executionContext: input.executionContext, scopeAccumulator: input.scopeAccumulator, contextScope, runtimeAuthority,
     admitted, bindingFingerprints: admittedBindings, descriptors, descriptorLifecycle: lifecycle,
+    agentmailInboxIds,
   }
   type Activated = { tools: Tool[]; records: readonly DescriptorRecord[]; sourceTools?: Readonly<Record<string, readonly Tool[]>> }
   const activations = new Map<string, Promise<Activated>>()
@@ -817,7 +879,7 @@ export async function prepareCapabilityCatalog(input: PrepareCapabilityCatalogIn
   }
   const resolveDynamic = (source: DynamicSource) => async (name: string): Promise<LocalToolResolution> => {
     let result
-    try { result = await activateWithRecords({ toolNames: [name], sourceKeys: [source.ref.sourceKey] }) } catch (error) {
+    try { result = await activateWithRecords({ sourceKeys: [source.ref.sourceKey], toolNames: [name] }) } catch (error) {
       if (error instanceof CapabilityActivationUnavailableError) return { status: 'unavailable', reason: 'activation is not available on this surface' }
       if (isImplementationUnavailable(error)) return { status: 'unavailable', reason: IMPLEMENTATION_UNAVAILABLE_REASON }
       throw error
@@ -827,8 +889,8 @@ export async function prepareCapabilityCatalog(input: PrepareCapabilityCatalogIn
     // The source's own adapters first (unambiguous across colliding labels), then the shared aliases.
     const legacy = legacyMcpToolName(source.label, name)
     const own = result.sourceTools?.[source.serverName]
-    const tool = own?.find((candidate) => candidate.name === name) ?? own?.find((candidate) => candidate.name === legacy)
-      ?? result.tools.find((candidate) => candidate.name === legacy) ?? result.tools.find((candidate) => candidate.name === name)
+    const candidates = result.sourceTools ? own ?? [] : result.tools
+    const tool = candidates.find(candidate => candidate.name === name) ?? candidates.find(candidate => candidate.name === legacy)
     const record = currentRecord(source, result.records)
     const current = record.version ? dynamicDescriptors(source, record.tools).find((descriptor) => descriptor.name === name) : undefined
     if (record.version && !current) return { status: 'unavailable', reason: `${source.label} no longer offers it to this assistant` }
@@ -837,6 +899,24 @@ export async function prepareCapabilityCatalog(input: PrepareCapabilityCatalogIn
       ? { status: 'ready', tool, version: current.version, descriptor: localDescriptor(current) }
       : { status: 'ready', tool }
   }
+  async function resolveSuspendedDynamicTool(name: string, target?: ConnectorResumeTarget): Promise<Tool | undefined> {
+    if (target) {
+      const source = dynamicSources.find(candidate => candidate.serverName === target.serverName)
+      if (!source) return undefined
+      const resolved = await resolveDynamic(source)(name)
+      return resolved.status === 'ready' && resolved.version === target.version ? resolved.tool : undefined
+    }
+    // Older checkpoints contain only the canonical name (or the old direct
+    // alias). Use it only when the available metadata establishes one source.
+    const candidates = dynamicSources.flatMap(source => dynamicDescriptors(source, source.record.tools)
+      .filter(tool => name === tool.name || name === legacyMcpToolName(source.label, tool.name))
+      .map(tool => ({ source, tool })))
+    if (candidates.length !== 1 || dynamicSources.some(source => !source.record.version)) return undefined
+    const { source, tool } = candidates[0]!
+    const resolved = await resolveDynamic(source)(tool.name)
+    return resolved.status === 'ready' && resolved.version === tool.version ? resolved.tool : undefined
+  }
+
   const discoverDynamic = (source: DynamicSource) => async (): Promise<LocalToolDescriptor[]> => {
     const result = await activateWithRecords({ sourceKeys: [source.ref.sourceKey] })
     const record = currentRecord(source, result.records)
@@ -908,6 +988,7 @@ export async function prepareCapabilityCatalog(input: PrepareCapabilityCatalogIn
     ...(knowledgeCapturePrompt ? { knowledgeCapturePrompt } : {}),
     plan,
     activate: async (selection) => (await activateWithRecords(selection)).tools,
+    resolveSuspendedDynamicTool,
   }
 }
 

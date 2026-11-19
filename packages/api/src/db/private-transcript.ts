@@ -16,6 +16,17 @@ const capture=z.object({source:z.object({workspaceId:z.string().uuid(),userId:z.
  rows:z.array(z.object({id:z.string().uuid(),sequence:z.number().int(),role:z.enum(['user','assistant']),timestamp:z.string(),
  available:z.literal(true),content:z.unknown()}))})
 
+const privateResponderTurns=new WeakSet<ExecutionContext>()
+
+/** This personal turn uses the private transcript owner's reader floor. */
+export function bindPrivateResponderTranscript(execution:ExecutionContext):void{
+ privateResponderTurns.add(execution)
+}
+
+export function usesPrivateResponderTranscript(execution:ExecutionContext):boolean{
+ return privateResponderTurns.has(execution)
+}
+
 const nativeCredentials=new WeakMap<ExecutionContext,{userId:string;sessionId:string;authVersion:number}>()
 /** Called by the canonical execution-context factory with middleware credentials. */
 export function bindPrivateTranscriptCredential(execution:ExecutionContext,credential:{userId:string;sessionId:string;authVersion:number}):void{

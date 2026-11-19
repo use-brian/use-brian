@@ -26,7 +26,7 @@
  * preparation". [COMP:api/turn-kernel]
  */
 import { routeTurn, type CapabilityDescriptorRef, type TurnRoute, type TurnRoutingInput } from '@use-brian/core/workers/turn-routing.js'
-import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
+import type { ConnectorResumeTarget, Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { isAuthorityChangedError } from '../context-scope/authority-lease.js'
 import type { ApplyMcpInjectionParams } from '../routes/route-helpers.js'
 import type { SurfaceCapabilities, SurfaceCapabilityOptions } from '../mcp/surface.js'
@@ -35,7 +35,10 @@ import { CONNECTOR_PREPARATION_UNAVAILABLE } from '../mcp/discovery-diagnostics.
 export type TurnCapabilityProfile = 'web' | 'channel' | 'public' | 'callee' | 'workflow' | 'workspace-mcp' | 'home-app' | 'resume'
 
 /** Resume: the entrypoint's stores and identity plus the exact suspended tool. */
-export type ResumeCapabilityParams = SurfaceCapabilityOptions & { suspendedToolName: string }
+export type ResumeCapabilityParams = SurfaceCapabilityOptions & {
+  suspendedToolName: string
+  connectorTarget?: ConnectorResumeTarget
+}
 
 /**
  * The web/public route parameter block. `routineCalendarRead` (web only) asks

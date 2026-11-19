@@ -23,9 +23,10 @@ vi.mock("@/lib/auth-fetch", () => ({
   authFetch: (...args: unknown[]) => mockAuthFetch(...args),
 }));
 
-// The panel is a presentation of the viewer's scoped conversation controller.
-vi.mock("@/lib/offline/application-write-authority", () => ({
-  currentOfflineWriteAuthority: (workspaceId: string) => ({ apiOrigin: "https://api.example", viewerId: "viewer-1", workspaceId }),
+// The fixture supplies the signed-in identity and real workspace route.
+vi.mock("@/lib/user", async importOriginal => ({
+  ...await importOriginal<typeof import("@/lib/user")>(),
+  getUserInfo: () => ({ id: "viewer-1" }),
 }));
 
 const mockListAssistants = vi.fn();
@@ -43,6 +44,7 @@ let root: Root | null = null;
 let host: HTMLElement | null = null;
 
 beforeEach(() => {
+  window.history.replaceState(null, "", "/w/ws-1/knowledge");
   vi.clearAllMocks();
   mockListAssistants.mockResolvedValue([
     { id: "a-std", name: "Worker", iconSeed: 0, kind: "standard", appType: null },
@@ -58,6 +60,7 @@ afterEach(() => {
   host = null;
   // Cases reuse session ids: drop entries a case left following (never a Stop).
   conversationRegistry().disposeAll();
+  window.history.replaceState(null, "", "/");
 });
 
 function render(ui: React.ReactNode) {
@@ -112,13 +115,10 @@ describe("[COMP:app-web/kb-chat-panel] KbChatPanel", () => {
         return { ok: true, json: async () => ({ id: "sess-1" }) };
       }
       if (url.includes("/api/sessions/sess-1/messages")) {
-        return {
-          ok: true,
-          json: async () => [
-            { id: "m1", role: "user", content: "What are the vault fees?", timestamp: new Date().toISOString() },
-            { id: "m2", role: "assistant", content: "Maker fee is 5 bps.", timestamp: new Date().toISOString() },
-          ],
-        };
+        return Response.json([
+          { id: "m1", role: "user", content: "What are the vault fees?", timestamp: new Date().toISOString() },
+          { id: "m2", role: "assistant", content: "Maker fee is 5 bps.", timestamp: new Date().toISOString() },
+        ]);
       }
       return { ok: false, json: async () => ({}) };
     });

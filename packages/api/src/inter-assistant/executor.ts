@@ -60,7 +60,6 @@ import {
   DEFAULT_STALL_IDLE_MS,
   isStalledError,
 } from '@use-brian/agent-runtime/engine/stall-watchdog.js'
-import { createTurnOutputCollector } from '@use-brian/agent-runtime/engine/turn-output.js'
 import { createConfirmationResolver } from '@use-brian/agent-runtime/mcp/types.js'
 import {
   intersectAccessCeilings,
@@ -99,10 +98,12 @@ import { findAssistantById, findUserById, resolveAssistantAccess } from '../db/u
 import { getConnectorUserId, getWorkspaceRoleSystem } from '../db/workspace-store.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import { recordExternalCostFromMeta } from '../billing-external.js'
-import { runWithAgentAccess } from '../db/client.js'
+import { runWithAgentAccess, withRLSTransaction } from '../db/client.js'
+import { isConversationEvidenceRoot } from '../application-platform/conversation-evidence.js'
 import { currentAgentAccess } from '../db/agent-access-context.js'
-import { validateCallerScopeEvidence } from '../context-scope/caller-evidence.js'
-import { assertCurrentAuthority, AuthorityChangedError, createAuthorityLease, createSessionAuthorityLease, executeWithCurrentAuthority, runWithAuthorityLease } from '../context-scope/authority-lease.js'
+import { assertScopeEvidenceFitsCeiling, validateCallerScopeEvidence } from '../context-scope/caller-evidence.js'
+import { resourceScopeKey } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { assertCurrentAuthority, AuthorityChangedError, createAuthorityLease, createSessionAuthorityLease, currentLockedSourceEvidence, executeWithCurrentAuthority, runWithAuthorityLease, withLockedSourceEvidence } from '../context-scope/authority-lease.js'
 import {
   formatActiveWorkspaceContext,
   noteAutomaticScopeEvidence,
@@ -114,7 +115,7 @@ import {
 } from '../context-scope/resolve-turn-scope.js'
 import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
 import { normalizeSessionVisibility, policyFor, sessionAuthorityDestinationMatches } from '../session-kind.js'
-import { openAssistantTurn, openTurnSqlScope, TurnRefusal, type TurnSqlScope } from '../turn/kernel.js'
+import { openAssistantTurn, openTurnSqlScope, TurnRefusal, type TurnLoopResult, type TurnSqlScope } from '../turn/kernel.js'
 import { waitForTurnSlot } from '../turn/lease.js'
 import { checkUsageBudget } from '../routes/route-helpers.js'
 import { getWorkspacePlan } from '../db/workspace-store.js'
@@ -596,15 +597,32 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       const receiverStarting = intersectAccessCeilings(starting, await resolveLiveAccessCeilingSystem({
         userId: starting.userId, assistant: receiver, workspaceId: receiver.workspaceId, key: receiverBinding,
       }))
+      const validateReceiverEvidence = (evidence: NonNullable<CalleeQueryParams['callerScopeEvidence']>, ceiling: typeof receiverStarting) => {
+        if (!receiver.workspaceId || !evidence.sources?.some(isConversationEvidenceRoot)) {
+          return validateCallerScopeEvidence(evidence, ceiling)
+        }
+        const locked = currentLockedSourceEvidence()
+        if (locked?.assistantId === receiver.id && locked.ceiling.userId === ceiling.userId
+          && locked.ceiling.workspaceId === ceiling.workspaceId && accessCeilingContains(ceiling, locked.ceiling)
+          && evidence.sources.every(source => locked.evidence.sources?.some(current => current.resourceKind === source.resourceKind
+            && current.resourceId === source.resourceId && current.version === source.version && resourceScopeKey(current) === resourceScopeKey(source)))) {
+          assertScopeEvidenceFitsCeiling(evidence, ceiling, 'caller')
+          return Promise.resolve(evidence)
+        }
+        // This transport boundary has verified the receiver, but does not own
+        // a callee execution or session yet. Use its actual narrowed app role.
+        return runWithAgentAccess(ceiling, () => withRLSTransaction(ceiling.userId,
+          client => validateCallerScopeEvidence(evidence, ceiling, client), receiver.id))
+      }
       const callerEvidence = params.callerScopeEvidence !== undefined
-        ? await validateCallerScopeEvidence(params.callerScopeEvidence,receiverStarting) : undefined
+        ? await validateReceiverEvidence(params.callerScopeEvidence, receiverStarting) : undefined
       const receiverLease = createAuthorityLease(receiverStarting, async () => {
         const liveReceiver = await findAssistantById(params.calleeAssistantId)
         if (!liveReceiver || (liveReceiver.workspaceId ?? '') !== starting.workspaceId) return null
         const currentReceiver = await resolveLiveAccessCeilingSystem({
           userId: starting.userId, assistant: liveReceiver, workspaceId: liveReceiver.workspaceId, key: receiverBinding,
         })
-        if (callerEvidence) await validateCallerScopeEvidence(callerEvidence,intersectAccessCeilings(receiverStarting,currentReceiver))
+        if (callerEvidence) await validateReceiverEvidence(callerEvidence, intersectAccessCeilings(receiverStarting, currentReceiver))
         return currentReceiver
       })
       return runWithAuthorityLease(lease, () => runWithAuthorityLease(receiverLease,
@@ -856,10 +874,13 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     const inOriginalCaller = AsyncLocalStorage.snapshot()
     let sessionAuthority: ReturnType<typeof createSessionAuthorityLease> | undefined
     const assertOriginalAuthority = async (): Promise<void> => {
-      await inOriginalCaller(assertCurrentAuthority)
+      const locked = currentLockedSourceEvidence()
+      const assertOriginalCaller = () => inOriginalCaller(() => locked
+        ? withLockedSourceEvidence(locked, assertCurrentAuthority) : assertCurrentAuthority())
+      await assertOriginalCaller()
       if (!sessionAuthority) throw new AuthorityChangedError()
       await sessionAuthority.assertCurrent()
-      await inOriginalCaller(assertCurrentAuthority)
+      await assertOriginalCaller()
     }
     const assertOperationCurrent = async (): Promise<void> => {
       abortController.signal.throwIfAborted()
@@ -941,7 +962,6 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     const budget = resolveResearchBudget(params.depth, ASSISTANT_CALL_DEFAULT_BUDGET)
     // Timeout diagnostics use the same finalized-turn selection as replies.
     // Unfinished deltas and narration alongside tool calls are not retained.
-    const turnOutput = createTurnOutputCollector({ format: 'compact' })
     // Liveness, not wall-clock (2026-08-19). The step is bounded by cost
     // (`budget.maxTurns` / `maxToolCalls`) and by the query loop's stall
     // watchdog (`stallIdleMs`: no provider chunk / tool activity / loop event
@@ -2254,6 +2274,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       // try/finally so the wall-clock timer is still cleared and any registered
       // confirmation resolvers are still released.
         await assertOperationCurrent()
+        let turnLoopResult: TurnLoopResult | undefined
         if (!synthesisHandled) {
           await owner.prepareRun({
             systemPrompt: loopSystemPrompt,
@@ -2263,7 +2284,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           })
           await assertOperationCurrent()
           let finalContent: import('@use-brian/agent-runtime/providers/types.js').ContentBlock[] | null = null
-          await owner.run({
+          turnLoopResult = await owner.run({
 
             // The callee lane had no budget gate: a workspace with no active
             // plan still ran workflow and A2A turns.
@@ -2329,7 +2350,6 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
             stallIdleMs,
             sink: { kind: 'return', onEvent: async (event) => {
             await assertOperationCurrent()
-            turnOutput.observe(event)
             if (params.onActivity) {
               for (const frame of goalActivityFramesFromQueryEvent(event)) {
                 try {
@@ -2526,16 +2546,14 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       // step completed → downstream steps + chat asserted the send happened).
       // The typed reason is hoisted by the workflow run-loop catch into the
       // step-run error, so the run records `failed`/`empty_response` honestly.
-      const selectedOutput = turnOutput.select()
-      const surfacedQuestion = selectedOutput.kind === 'question'
+      const selectedOutput = turnLoopResult?.selection
+      const surfacedQuestion = selectedOutput?.kind === 'question'
         ? selectedOutput.question
         : undefined
       const finalText = synthesisOutput ?? (
         surfacedQuestion
           ? formatAssistantQuestion(surfacedQuestion)
-          : selectedOutput.kind === 'text'
-            ? selectedOutput.text
-            : ''
+          : turnLoopResult?.finalText ?? ''
       )
       if (!finalText) {
         throw Object.assign(
@@ -2572,7 +2590,6 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       await assertOperationCurrent()
       if (surfacedQuestion) params.onQuestion?.(surfacedQuestion)
       params.onScopeEvidence?.(scopeAccumulator.evidence)
-      turnOutput.advanceDelivery()
       completed = true
       return finalText
     } catch (err) {
@@ -2587,7 +2604,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
       if (owner.abortKind === 'stop' || owner.abortKind === 'lease_lost') throw abortController.signal.reason
       await assertOriginalAuthority()
-      const selectedPartial = turnOutput.select()
+      const selectedPartial = owner.selectedOutput()
       const partialOutput = selectedPartial.kind === 'text'
         ? sanitizeDeliveryText(selectedPartial.text).trim() || undefined
         : undefined

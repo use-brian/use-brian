@@ -82,8 +82,38 @@ export async function readConversationEvidence(client:Pick<PoolClient,'query'>,w
 // Page receipts are current-scope obligations of the Page source family only.
 // The ordinary capture schema above never accepts them.
 const pageKinds=['page_event_changed','page_event_destination','page_live_changed','page_live_destination'] as const
+const nativeEvidenceRoots = new Set(['application_field','session_context_revision','session_message','memory','workspace_file','private_transcript',...pageKinds])
+
+/** Potential native or Page roots still require an admitted app-role transaction. */
+export function isConversationEvidenceRoot(source: ScopeSource): boolean {
+  return nativeEvidenceRoots.has(source.resourceKind)
+}
+
 const pageClosureCurrent=z.union([nativeSessionCurrentScopeSchema,scope.extend({resourceKind:z.enum(pageKinds),assistantId:z.null()}).strict()])
 const pageClosureResult=z.object({admitted:z.literal(true),immutable:z.array(scope),current:z.array(pageClosureCurrent)}).strict()
+type PageClosureRoot = Pick<ScopeSource, 'resourceKind' | 'resourceId' | 'version'>
+
+async function capturePageClosure(client:Pick<PoolClient,'query'>,workspaceId:string,roots:readonly PageClosureRoot[],actor:string){
+ const identities=roots.map(source=>({kind:source.resourceKind,id:source.resourceId,version:source.version}))
+ const row=(await client.query<{value:unknown}>('SELECT capture_page_closure_evidence($1,$2,$3) AS value',[workspaceId,JSON.stringify(identities),actor])).rows[0]
+ if(!row||!Object.hasOwn(row,'value')||row.value===undefined)throw new Error('Page closure evidence unavailable')
+ if(row.value===null)return null
+ const parsed=pageClosureResult.parse(row.value)
+ if([...parsed.immutable,...parsed.current].some(source=>source.workspaceId!==workspaceId)
+  ||!parsed.current.some(source=>(pageKinds as readonly string[]).includes(source.resourceKind)))throw new Error('Page closure evidence unavailable')
+ return parsed
+}
+
+/** The current Page row supplies its exact receipt identity. The Page owner
+ * supplies its labels and required saved/live observations in one proof. */
+export async function readCurrentPageReceipt(client:Pick<PoolClient,'query'>,workspaceId:string,revision:string,actor:string):Promise<ScopeEvidence|null>{
+ const result=await capturePageClosure(client,workspaceId,[{resourceKind:'page_event_changed',resourceId:revision,version:revision}],actor)
+ if(!result)return null
+ if(!result.current.some(source=>source.resourceKind==='page_event_changed'&&source.resourceId===revision&&source.version===revision))
+  throw new Error('Current Page receipt unavailable')
+ return new ContextScopeAccumulator({sources:[...result.immutable,...result.current]}).evidence
+}
+
 /** Page source-family adapter of the native capture. [COMP:api/application-persistence]
  * Called only after `readConversationEvidence` declined. The database admits a
  * closure whose only non-native family is Page receipts reached through
@@ -97,14 +127,74 @@ export async function readPageClosureEvidence(client:Pick<PoolClient,'query'>,wo
  // the database admits them under the same principal rules as reached receipts.
  if(!actor||!roots.length||roots.length>4096||roots.some(root=>root.workspaceId!==workspaceId
   ||!['application_field','session_context_revision','session_message','memory','workspace_file','private_transcript',...pageKinds].includes(root.resourceKind)))return null
- const identities=roots.map(source=>({kind:source.resourceKind,id:source.resourceId,version:source.version}))
- const row=(await client.query<{value:unknown}>('SELECT capture_page_closure_evidence($1,$2,$3) AS value',[workspaceId,JSON.stringify(identities),actor])).rows[0]
- if(!row||!Object.hasOwn(row,'value')||row.value===undefined)throw new Error('Page closure evidence unavailable')
- if(row.value===null)return null
- const parsed=pageClosureResult.parse(row.value)
- if([...parsed.immutable,...parsed.current].some(source=>source.workspaceId!==workspaceId)
-  ||!parsed.current.some(source=>(pageKinds as readonly string[]).includes(source.resourceKind)))throw new Error('Page closure evidence unavailable')
+ const parsed=await capturePageClosure(client,workspaceId,roots,actor)
+ if(!parsed)return null
  return{kind:'complete',evidence:new ContextScopeAccumulator({sources:[...roots,...parsed.immutable]}).evidence,current:parsed.current}
+}
+
+const mixedRoute = z.object({
+  actor: z.string().uuid(),
+  footprint: z.string().regex(/^[a-f0-9]{64}$/),
+  families: z.array(z.enum(['native','page','history','retained','record','hybrid','independent'])).max(4096),
+}).strict()
+
+const mixedPorts = {
+  conversation_mixed_evidence_route: {
+    volatility: 's',
+    body: '162c4eaf0a3d727d40f6e9ba729bcb1e8190809e89e1b4896e2bef66ed5be768',
+  },
+  capture_hybrid_conversation_evidence: {
+    volatility: 'v',
+    body: '6e201360f69999e2144df9c8f705d134905449a9e0959acb6ebc212357079ae3',
+  },
+} as const
+
+async function readMixedConversationPort(client: Pick<PoolClient, 'query'>, port: keyof typeof mixedPorts,
+  workspaceId: string, roots: readonly ScopeSource[]): Promise<unknown> {
+  const identities = roots.map(source => ({ kind: source.resourceKind, id: source.resourceId, version: source.version }))
+  const row = (await client.query<{ route: unknown }>(
+    `SELECT CASE WHEN EXISTS(
+      SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid='public.sessions'::regclass
+      WHERE p.oid='public.${port}(uuid,jsonb)'::regprocedure
+        AND p.proowner=c.relowner AND p.prosecdef AND p.provolatile=$4::"char"
+        AND p.proconfig=ARRAY['search_path=pg_catalog, public, pg_temp']
+        AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')=$3
+    ) THEN public.${port}($1,$2) ELSE '"invalid_definition"'::jsonb END AS route`,
+    [workspaceId, JSON.stringify(identities), mixedPorts[port].body, mixedPorts[port].volatility],
+  )).rows[0]
+  if (!row || !Object.hasOwn(row, 'route')) throw new Error('Mixed conversation source proof unavailable')
+  return row.route
+}
+
+/** Route the exact original cohort through the transaction's native topology.
+ * This receipt contains no admitted data and never proves any source visible. */
+export async function readMixedConversationEvidenceRoute(
+  client: Pick<PoolClient, 'query'>, workspaceId: string, roots: readonly ScopeSource[],
+): Promise<z.infer<typeof mixedRoute> | null> {
+  const raw = await readMixedConversationPort(client, 'conversation_mixed_evidence_route', workspaceId, roots)
+  if (raw === null) return null
+  const parsed = mixedRoute.parse(raw)
+  if (parsed.families.length !== roots.length) throw new Error('Mixed conversation source route incomplete')
+  return parsed
+}
+
+const hybridScope = scope.extend({ resourceKind: z.string().min(1) })
+const hybridResult = z.object({
+  admitted: z.literal(true),
+  immutable: z.array(scope),
+  current: z.array(hybridScope),
+  independent: z.array(hybridScope.extend({ resourceKind: z.enum(['external_source','office_observation',...pageKinds]) })),
+}).strict()
+
+/** Prove canonical native nodes of a cross-family closure, with the exact
+ * independently owned Page, connector and Office leaves for the receiver. */
+export async function readHybridConversationEvidence(client: Pick<PoolClient, 'query'>, workspaceId: string,
+  roots: readonly ScopeSource[]): Promise<{ native: CompleteNativeEvidence; independent: ScopeSource[] }> {
+  const raw = await readMixedConversationPort(client, 'capture_hybrid_conversation_evidence', workspaceId, roots)
+  const { immutable, current, independent } = hybridResult.parse(raw)
+  if ([...immutable,...current,...independent].some(source => source.workspaceId !== workspaceId))
+    throw new Error('Mixed conversation proof workspace mismatch')
+  return { native: { kind: 'complete', evidence: new ContextScopeAccumulator({ sources: [...roots,...immutable] }).evidence, current }, independent }
 }
 
 const preparationCohortKinds=['application_field','session_context_revision','session_message','memory','workspace_file','private_transcript']

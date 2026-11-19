@@ -5,7 +5,7 @@
  * [COMP:api/conversation-visibility] */
 import type { ResourceScope } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { canRead } from '@use-brian/agent-runtime/security/sensitivity.js'
-import type { ConversationVisibility } from '../session-kind.js'
+import { hasWorkspaceConversationAudience, type ConversationVisibility } from '../session-kind.js'
 
 export type ConversationAudience = {
   sessionId: string
@@ -63,13 +63,13 @@ export function conversationAudienceContainsDestination(source: ConversationAudi
   const cap = destination.kind === 'conversation' ? destination.audience.cap : destination.scope.sensitivity
   if (!canRead(cap, source.cap) || !contains(target.compartments, source.compartments)
     || !contains(target.projectIds, source.projectIds)) return { allowed: false, reason: 'labels' }
-  const destinationParticipants = destination.kind === 'conversation' && destination.audience.visibility !== 'workspace'
+  const destinationParticipants = destination.kind === 'conversation' && !hasWorkspaceConversationAudience(destination.audience.visibility)
     ? [...new Set(participants(destination.audience))] : []
   const privateUser = destination.kind === 'resource' ? destination.scope.userId
     : destinationParticipants.length === 1 ? destinationParticipants[0] : null
-  if (source.visibility !== 'workspace') {
+  if (!hasWorkspaceConversationAudience(source.visibility)) {
     if (destination.kind === 'conversation') {
-      if (destination.audience.visibility === 'workspace'
+      if (hasWorkspaceConversationAudience(destination.audience.visibility)
         || !contains(participants(source), participants(destination.audience))) return { allowed: false, reason: 'participants' }
       // Matching readers now cannot turn a permanent 1:1 boundary into an
       // administrator-widenable copy. Only the explicit owner handoff carries

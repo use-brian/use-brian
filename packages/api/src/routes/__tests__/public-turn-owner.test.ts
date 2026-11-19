@@ -68,6 +68,7 @@ function deferred<T>() {let resolve!:(value:T)=>void;const promise=new Promise<T
 let held:string|null=null,nextToken=0,waiters:Array<()=>void>=[],current=true,effects=0,providerFailure:Error|undefined
 let requests:Array<string|null>=[]
 let toolRequested=false
+let finalProviderText: string
 let providerGate:Promise<void>|null=null
 let afterSpend:(()=>void|Promise<void>)|undefined
 let extraTools:Array<ReturnType<typeof buildTool>>=[]
@@ -87,7 +88,7 @@ const provider:LLMProvider={name:'fixture-public',models:['fixture'],stream(){th
       yield {type:'tool_use_end' as const,id:'public-call'}
       yield {type:'message_end' as const,stopReason:'tool_use' as const,usage:{inputTokens:2,outputTokens:3}}
     }else{
-      yield {type:'text_delta' as const,text:'Fictional public answer'}
+      yield {type:'text_delta' as const,text:finalProviderText}
       yield {type:'message_end' as const,stopReason:'end_turn' as const,usage:{inputTokens:2,outputTokens:3}}
     }
     await afterSpend?.()
@@ -112,6 +113,7 @@ function start(options:Partial<PublicTurnInput>={}) {
 }
 beforeEach(()=>{
   vi.clearAllMocks();held=null;nextToken=0;waiters=[];current=true;effects=0;requests=[];toolRequested=false;providerFailure=undefined;providerGate=null;afterSpend=undefined;extraTools=[];offeredTools=[]
+  finalProviderText = 'Fictional public answer'
   mocks.assistant.mockResolvedValue(assistant);mocks.session.mockResolvedValue(session);mocks.freshSession.mockResolvedValue(session)
   mocks.query.mockImplementation(async () => {expect(held).not.toBeNull();return {rows:[]}})
   mocks.add.mockImplementation(async row => {expect(held).not.toBeNull();return {id:`public-${row.role}`,role:row.role,content:row.content}})
@@ -237,7 +239,7 @@ describe('[COMP:api/public-turn] complete public operation ownership',()=>{
     await vi.waitFor(()=>expect(mocks.wait).toHaveBeenCalled())
     expect(mocks.truncate).not.toHaveBeenCalled();expect(mocks.query).not.toHaveBeenCalled()
     await mocks.release(session.id,'completed','prior-owner');await run.promise
-    expect(mocks.truncate).toHaveBeenCalledWith('fictional-old-message')
+    expect(mocks.truncate).toHaveBeenCalledExactlyOnceWith('fictional-old-message', session.id)
     expect(run.res.body).toMatchObject({reply:'Fictional public answer'})
   })
   it('withholds output and settlement success after lease loss during the real provider stream',async()=>{
@@ -276,6 +278,15 @@ describe('[COMP:api/public-turn] complete public operation ownership',()=>{
     expect(run.res.frames.join('')).toContain('event: text_delta\ndata: {"text":"Fictional public answer"}')
     expect(run.res.frames.join('')).toContain('event: turn_complete\ndata: {"sessionId":"public-room","messageId":"public-assistant","model":"fixture"}')
     expect(run.res.writableEnded).toBe(true);expect(mocks.release).toHaveBeenLastCalledWith(session.id,'completed','public-token-1')
+  })
+  it('renders the owner’s sanitized final JSON answer without including tool narration', async () => {
+    toolRequested = true
+    finalProviderText = 'Message body:\nFictional clean answer. (Word count: ~3)'
+    const run = start()
+    await run.promise
+    expect(effects).toBe(1)
+    expect(run.res.body).toMatchObject({ reply: 'Fictional clean answer.' })
+    expect(mocks.release).toHaveBeenLastCalledWith(session.id, 'completed', 'public-token-1')
   })
   it.each(['json','sse'] as const)('delivers %s over actual HTTP without treating completed request input as disconnect',async delivery=>{
     const app=express();app.use(express.json())

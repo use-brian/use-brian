@@ -463,6 +463,18 @@ describe.sequential('[COMP:brain/row-history-store][COMP:corrections/retraction-
     expect(chain[1].status).toBe('active')
     expect(chain[1].display).toMatchObject({ title: 'Draft v2' })
     expect(result!.data.current_id).toBe(f2!.id)
+
+    const f3 = await withNativeAccess(access => files.supersedeWorkspaceFile(userId, workspaceId, f2!.id, {
+      editorUserId: userId,
+      storageUri: 'gs://bucket/draft.md-v3',
+      sizeBytes: 13,
+    }, access))
+    expect(f3).not.toBeNull()
+    const latest = await factory.getRowHistory(await actor(), { primitive: 'workspace_files', row_id: f2!.id })
+    expect(latest?.data.chain.map(row => ({id:row.id,status:row.status}))).toEqual([
+      {id:f1.id,status:'superseded'}, {id:f2!.id,status:'superseded'}, {id:f3!.id,status:'active'},
+    ])
+    expect(latest?.data.current_id).toBe(f3!.id)
   })
 
   it('entities: maintained supersession chain walks correctly', async () => {

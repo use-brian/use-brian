@@ -171,6 +171,9 @@ describe.sequential('[COMP:api/private-transcript] ordinary private conversation
  })
  it('publishes and reads back a private batch with earlier Memory fields and a current context revision',async()=>{
   const c=await mixedPublication()
+  const context={...executionToolContext(c.authority.execution,{appId:'fictional-mixed-private-publication'}),scopeAccumulator:c.authority.accumulator}
+  await expect(admitModelInput(context)).resolves.toBeUndefined()
+  await expect(admitModelOutput(context)).resolves.toBeUndefined()
   const replies=await publishNativeSessionMessageBatch({sessionId:c.session.id,authority:c.authority,derivationTarget:c.scope,
    derivation:{producer:'fixture:mixed-private-publication',sources:c.sources},messages:c.messages})
   expect(replies).toHaveLength(2)

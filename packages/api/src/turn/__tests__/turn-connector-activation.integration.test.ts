@@ -50,6 +50,8 @@ const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/
 await assertLocalFixture()
 
 const { chatRoutes } = await import('../../routes/chat.js')
+const { readAttendedSessionHistory } = await import('../../routes/attended-session-context.js')
+const { resolveSessionTitleAuthority } = await import('../../routes/session-title-authority.js')
 const { composeSurfaceCapabilities } = await import('../../mcp/surface.js')
 const { getAppPool, getPool } = await import('../../db/client.js')
 const { authSessionStore } = await import('../../db/auth-session-store.js')
@@ -59,6 +61,8 @@ const { createDbMemoryStore } = await import('../../db/memory-store.js')
 const { createDbCapabilityStore } = await import('../../db/capability-store.js')
 const { createPendingApprovalsStore } = await import('../../db/pending-approvals-store.js')
 const { createConnectorInstanceStore } = await import('../../db/connector-instance-store.js')
+const { setGlobalEmailInboxProvider } = await import('../../agentmail/provider.js')
+const { createDbAssistantConnectorGrantsStore } = await import('../../db/assistant-connector-grants-store.js')
 const { createDbConnectorStore } = await import('../../db/connector-store.js')
 const { createConnectorGrantStore } = await import('../../db/connector-grant-store.js')
 const { createDbMcpSettingsStore } = await import('../../db/mcp-settings-store.js')
@@ -84,6 +88,28 @@ describe.sequential('[COMP:api/turn-kernel] T1: ordinary chat activates no conne
       const instances = createConnectorInstanceStore(key)
       await instances.createWorkspaceInstance({ workspaceId: f.workspaceId, provider: 'gcal', label: 'Google Calendar', createdBy: f.ownerId,
         connected: true, credentials: { client_id: 'fictional-client', client_secret: 'fictional-refresh-token' }, compartments: [], projectIds: [] })
+      await instances.createWorkspaceInstance({ workspaceId: f.workspaceId, provider: 'github', label: 'Fixture GitHub', createdBy: f.ownerId,
+        connected: true, credentials: { client_id: 'fixture', client_secret: 'fixture' } })
+      await instances.createWorkspaceInstance({ workspaceId: f.workspaceId, provider: 'm3-remote', label: 'Fixture MCP', createdBy: f.ownerId,
+        connected: true, custom: true, url: 'https://fixture.example.invalid/mcp', credentials: { type: 'none' } })
+      if (process.env.USEBRIAN_EDITION === 'hosted') {
+        const inbox = await instances.createWorkspaceInstance({ workspaceId: f.workspaceId, provider: 'agentmail',
+          label: 'Fixture assistant inbox', connectedEmail: 'm3@example.invalid', createdBy: f.ownerId, connected: true, credentials: { type: 'none' } })
+        const channelId = randomUUID()
+        await f.pool.query("INSERT INTO channels(id,workspace_id,channel_type,display_name) VALUES($1,$2,'email','Fixture inbox')", [channelId, f.workspaceId])
+        await f.pool.query("INSERT INTO channel_integrations(channel_id,channel_type,credentials,connector_instance_id) VALUES($1,'email',$2,$3)",
+          [channelId, Buffer.alloc(1), inbox.id])
+        await f.pool.query('INSERT INTO channel_assistants(channel_id,assistant_id) VALUES($1,$2)', [channelId, f.assistantId])
+      } else {
+        await instances.createWorkspaceInstance({ workspaceId: f.workspaceId, provider: 'cli', label: 'Fixture CLI', createdBy: f.ownerId,
+          connected: true, credentials: { type: 'cli', binaryPath: '/fixture/no-spawn', args: [] } })
+      }
+      const mailboxCalls = vi.fn(async () => ({ threads: [], nextPageToken: null }))
+      if (process.env.USEBRIAN_EDITION === 'hosted') setGlobalEmailInboxProvider({ kind: 'agentmail', listThreads: mailboxCalls } as never)
+      const grantStore = createDbAssistantConnectorGrantsStore()
+      const exactActionGrantReads = vi.spyOn(grantStore, 'getForAssistantSystem')
+      const settings = createDbMcpSettingsStore()
+      const policyReads = vi.spyOn(settings, 'getPolicy')
       const credentialReads: string[] = []
       const counted = new Proxy(instances, { get(target, property, receiver) {
         const value = Reflect.get(target, property, receiver)
@@ -93,7 +119,7 @@ describe.sequential('[COMP:api/turn-kernel] T1: ordinary chat activates no conne
         }
         return value.bind(target)
       } })
-      const stores = { connectorStore: createDbConnectorStore(key), mcpSettingsStore: createDbMcpSettingsStore(),
+      const stores = { connectorStore: createDbConnectorStore(key), mcpSettingsStore: settings, assistantConnectorGrantsStore: grantStore,
         connectorInstanceStore: counted, connectorGrantStore: createConnectorGrantStore() }
 
       const offered: string[][] = []
@@ -129,6 +155,16 @@ describe.sequential('[COMP:api/turn-kernel] T1: ordinary chat activates no conne
       expect(offered[0]).not.toContain('googleCalendarListEvents')
 
       expect(activations.selections).toEqual([])
+      expect(policyReads).not.toHaveBeenCalled()
+      expect(exactActionGrantReads).not.toHaveBeenCalled()
+      expect(mailboxCalls).not.toHaveBeenCalled()
+      const reopened = await readAttendedSessionHistory(await resolveSessionTitleAuthority({
+        claims: { userId: f.ownerId, sessionId: device.id, authVersion: device.authVersion },
+        sessionId: session.id, readOnly: true,
+      }), session.id)
+      expect(reopened.messages.at(-1)).toMatchObject({ role: 'assistant',
+        content: [{ type: 'text', text: 'Fictional ordinary answer.' }] })
+
 
       // Routine eligibility on, through the real routine read port: one fresh
       // preparation of the same stores per case, bound through the owner's
@@ -210,6 +246,9 @@ describe.sequential('[COMP:api/turn-kernel] T1: ordinary chat activates no conne
       expect(planned.result.records[0]).toMatchObject({ name: calendarRead, isError: true })
       expect(planned.result.complete).toBe(false)
       expect(activations.selections).toHaveLength(1)
-    } finally { await f.cleanup() }
+    } finally {
+      setGlobalEmailInboxProvider(null)
+      await f.cleanup()
+    }
   }, 120_000)
 })

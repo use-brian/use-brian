@@ -19,6 +19,8 @@ type CanonicalEvidenceRow = ResourceScope & {
   causalEntityId?: string
 }
 
+const isCrmSummarySource=(kind:string)=>kind==='crm_summary_domain'||kind==='crm_summary_group'
+
 /** Keep the owner-only native snapshot function outside the app-role external statement. */
 async function scopeSnapshots(client: Pick<pg.ClientBase, 'query'>, workspaceId: string, sources: readonly ScopeSource[],
   reader: 'read_scope_source' | 'read_entity_derivation_source' = 'read_scope_source', workflowRunId?: string, requiredExternalAction?: 'context' | 'deliver',
@@ -31,9 +33,18 @@ async function scopeSnapshots(client: Pick<pg.ClientBase, 'query'>, workspaceId:
        FROM unnest($2::uuid[]) WITH ORDINALITY t(id,ord)`, [workspaceId,records.map(({source})=>source.resourceId)])
     for (const row of rows) if (records[row.ord - 1]) result.push({ ord: records[row.ord - 1].index + 1, snapshot: row.snapshot })
   }
+  const summaries=sources.map((source,index)=>({source,index})).filter(({source})=>isCrmSummarySource(source.resourceKind))
+  if(summaries.length){
+    const {rows}=await client.query<{ord:number;snapshot:CanonicalEvidenceRow|null}>(
+      'SELECT ord::int,snapshot FROM read_crm_summary_certificate_sources($1,$2,$3,$4,$5)',[workspaceId,
+        summaries.map(({source})=>source.resourceKind),summaries.map(({source})=>source.resourceId),summaries.map(({source})=>source.version),
+        summaries.map(({source})=>{const packet=(source as ScopeSource&{sourceProof?:unknown}).sourceProof
+          return typeof packet==='string'?packet:null})])
+    for(const row of rows)if(summaries[row.ord-1])result.push({ord:summaries[row.ord-1].index+1,snapshot:row.snapshot})
+  }
   for (const profile of ['native','field','external'] as const) {
     const group = sources.map((source,index) => ({ source,index })).filter(({ source }) =>
-      source.resourceKind !== 'conversation_record'
+      source.resourceKind !== 'conversation_record' && !isCrmSummarySource(source.resourceKind)
        && (source.resourceKind === 'external_source' ? 'external' : source.resourceKind === 'application_field' ? 'field' : 'native') === profile)
     if (group.length === 0) continue
     const rows = profile === 'field' ? (await client.query<{ ord: number; snapshot: CanonicalEvidenceRow | null }>(
@@ -188,7 +199,7 @@ export async function readCurrentScopeSources(
     const row = byOrd.get(index + 1) ?? null
     // A CRM event snapshot is withheld (NULL) while held or retired, so its
     // absence is not proof of deletion.
-    if (!row) return source.resourceKind === 'external_source' || source.resourceKind === 'application_field' || source.resourceKind === 'session_context_revision' || source.resourceKind === 'private_transcript' ? { state: 'unverifiable', source }
+    if (!row) return isCrmSummarySource(source.resourceKind) || source.resourceKind === 'external_source' || source.resourceKind === 'application_field' || source.resourceKind === 'session_context_revision' || source.resourceKind === 'private_transcript' ? { state: 'unverifiable', source }
       : source.resourceKind === 'crm_event' ? { state: 'held', source } : { state: 'gone', source }
     if (row.held) return { state: 'held', source }
     if (source.resourceKind === 'crm_event' && (!row.causalEntityId
@@ -197,7 +208,7 @@ export async function readCurrentScopeSources(
     if (row.version === source.version && resourceScopeKey(row) === resourceScopeKey(source)) {
       return { state: 'current', source }
     }
-    if (source.resourceKind === 'external_source') return { state: 'unverifiable', source }
+    if (isCrmSummarySource(source.resourceKind) || source.resourceKind === 'external_source') return { state: 'unverifiable', source }
     // An outbox event is immutable by nature and is the run's causal input:
     // a changed payload means the run would finish on stale input, so its
     // version must still match (scoped-context.md -> "CRM workflow input
@@ -214,6 +225,38 @@ export async function readCurrentScopeSources(
   })
 }
 
+/** Preserve the application-field lineage recognized by the existing output writers. */
+async function encloseCrmSummaryLineage(
+  client: Pick<pg.PoolClient, 'query'>,
+  evidence: DerivedWriteEvidence,
+  workspaceId: string,
+): Promise<DerivedWriteEvidence> {
+  const crm = evidence.sources.filter(source => isCrmSummarySource(source.resourceKind))
+  if (!crm.length) return evidence
+  const checked = await readCurrentScopeSources(client, workspaceId, crm)
+  if (checked.length !== crm.length || checked.some(source => source.state !== 'current')) {
+    throw new DerivedScopeError('scope_source_changed')
+  }
+  const packets = new Set<string>()
+  for (const source of crm) {
+    const packet = (source as ScopeSource & { sourceProof?: unknown }).sourceProof
+    if (typeof packet !== 'string') throw new DerivedScopeError('scope_evidence_missing')
+    packets.add(packet)
+  }
+  const canonical = evidence.sources.filter(source => !isCrmSummarySource(source.resourceKind))
+  for (const packet of packets) {
+    const { rows: [row] } = await client.query<{ evidence: ScopeSource[] | null }>(
+      'SELECT materialize_crm_summary_native_evidence($1,$2) AS evidence', [workspaceId, packet],
+    )
+    if (!row?.evidence?.length) throw new DerivedScopeError('scope_source_changed')
+    canonical.push(...row.evidence)
+  }
+  const sources = [...new Map(canonical.map(source => [
+    JSON.stringify([source.resourceKind, source.resourceId, source.version]), source,
+  ])).values()]
+  return { ...evidence, sources }
+}
+
 /** The database validates the output reference and envelope again. */
 export async function recordDerivedResource(
   client: Pick<pg.PoolClient, 'query'>,
@@ -222,6 +265,7 @@ export async function recordDerivedResource(
   /** The acting author, whose own private rows may feed a wider target (D3). */
   actorUserId?: string | null,
 ): Promise<void> {
+  evidence = await encloseCrmSummaryLineage(client, evidence, output.workspaceId)
   // The output must carry every label it was derived from and must not take
   // another person's private rows anywhere else; its assistant visibility is
   // the target's own (decision D3).

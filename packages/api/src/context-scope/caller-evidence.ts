@@ -1,5 +1,6 @@
+import { captureProviderConversationEvidence } from './provider-conversation-evidence.js'
 import type {SessionAuthorityFactsInput} from './session-authority-facts.js'
-import { readConversationEvidence,readConversationPublicationCohorts,readPageClosureEvidence } from '../application-platform/conversation-evidence.js'
+import { isConversationEvidenceRoot,readConversationEvidence,readConversationPublicationCohorts,readMixedConversationEvidenceRoute,readHybridConversationEvidence,readPageClosureEvidence } from '../application-platform/conversation-evidence.js'
 import {readNativeTitleGroupEvidence,type NativeTitleHead} from '../application-platform/native-title-group-evidence.js'
 import { readPersistentSessionContextAncestors } from '../db/session-context-ancestry.js'
 import {
@@ -30,6 +31,8 @@ import { deliveryFailureMetadata, type DeliveryFailureMetadata, type DeliveryVer
 import { readPageThreadAudienceAuthority, type PageThreadAudience } from './page-thread-audience.js'
 import { enterOptionalEvidenceSlot, yieldOptionalEvidence } from './optional-evidence.js'
 import type { ClosureAdmission } from './admission-closure.js'
+
+const pageKinds = new Set(['page_event_changed','page_event_destination','page_live_changed','page_live_destination'])
 
 /**
  * Why evidence could not be admitted. Internal only: it reaches logs and
@@ -172,9 +175,9 @@ async function validateScopeEvidence(
   pageAudience?: PageThreadAudience,
   closure?: ClosureAdmission,
 ): Promise<ScopeEvidence> {
+  const exactPageThread = kind === 'audience' && ceiling.userId === '' ? pageAudience : undefined
   const currentVisibility = (scope: ResourceScope, receiver: AccessCeiling) => {
-    const pageSource = pageAudience && kind === 'audience' && receiver.userId === ''
-      && 'resourceKind' in scope && ['page_event_changed','page_event_destination','page_live_changed','page_live_destination'].includes(String(scope.resourceKind))
+    const pageSource = exactPageThread && 'resourceKind' in scope && pageKinds.has(String(scope.resourceKind))
     // The Page's own thread proves this principal axis below. Private Memory,
     // fields and every other source keep their ordinary per-source visibility.
     return visibilityFailure(pageSource ? { ...scope, userId: null } : scope, receiver)
@@ -216,26 +219,128 @@ async function validateScopeEvidence(
   const originalSources=structuredClone(sources)
   if (!sources.length) return snapshot
   if (!client && sources.some(source=>source.resourceKind==='session_context_revision')) throw unavailable(kind,'source_unverifiable')
-  // The closed native facade performs the same current checks in one SQL
-  // statement. Mixed families and workflow-run profiles retain the original
-  // validator below, including independent source and Page admission.
-  if (client && !workflowRunId) {
+  // Preserve the closed one-statement path for the ordinary conversation.
+  // If it explicitly declines, route the original roots before an independent
+  // owner starts reconstructing its own ancestry.
+  let checkMixedRoute: (() => Promise<void>) | undefined
+  if (client && !workflowRunId && sources.some(source => isConversationEvidenceRoot(source)
+    && !(exactPageThread && pageKinds.has(source.resourceKind)))) {
     try {
+      const provider = await captureProviderConversationEvidence(client, ceiling, kind, sources)
+      if (provider) return checkedConversationCapture(snapshot, provider, ceiling, kind)
       const native = await readConversationEvidence(client, ceiling.workspaceId, sources)
-      if(native?.kind==='complete')return checkedConversationCapture(snapshot,native,ceiling,kind)
-      // Page source family (scoped-context.md -> "Page source-family adapter"):
-      // the receiver's own principal only. An anonymous Page-thread audience
-      // keeps the full validator, whose Page axis is proved by the thread.
-      if(native===null&&ceiling.userId&&!(kind==='audience'&&pageAudience)){
-        // The turn's admission closure may supply the proof it already holds
-        // for this exact root set, principal and transaction context; this
-        // receiver's own visibility and label comparison below always runs.
-        const prove=(roots:readonly ScopeSource[])=>readPageClosureEvidence(client,ceiling.workspaceId,roots,ceiling.userId)
-        const page=closure?await closure.pageClosure(client,sources,ceiling.userId,prove):await prove(sources)
-        if(page)return checkedConversationCapture(snapshot,page,ceiling,kind)
+      if (native?.kind === 'complete') return checkedConversationCapture(snapshot, native, ceiling, kind)
+      const canReadPage = !!ceiling.userId && !(kind === 'audience' && pageAudience)
+      const provePage = (roots: readonly ScopeSource[]) => readPageClosureEvidence(client, ceiling.workspaceId, roots, ceiling.userId)
+      if (native === null && canReadPage) {
+        const page = closure
+          ? await closure.pageClosure(client, sources, ceiling.userId, provePage)
+          : await provePage(sources)
+        if (page) return checkedConversationCapture(snapshot, page, ceiling, kind)
       }
-    } catch (error) { throw scopeEvidenceFailureOf(error) ? error : unavailable(kind, 'source_unverifiable', error, 'native_proof') }
+
+      const route = await readMixedConversationEvidenceRoute(client, ceiling.workspaceId, originalSources)
+      if (route) {
+        const rootsFor = (family: typeof route.families[number]) =>
+          originalSources.filter((_, index) => route.families[index] === family)
+        const checked = new ContextScopeAccumulator(snapshot)
+        const residual = rootsFor('independent')
+        const noteIndependent = (independent: ScopeSource[]) => {
+          for (const source of independent) {
+            const refused = currentVisibility(source, ceiling) ?? labelFailure(source, ceiling)
+            if (refused) throw unavailable(kind, refused)
+            if (!residual.some(value => value.resourceKind === source.resourceKind && value.resourceId === source.resourceId
+              && value.version === source.version && resourceScopeKey(value) === resourceScopeKey(source))) residual.push(source)
+          }
+        }
+        const admitHybrid = async (roots: ScopeSource[]) => {
+          if (!roots.length) return
+          const { native, independent } = await readHybridConversationEvidence(client, ceiling.workspaceId, roots)
+          checked.note(checkedConversationCapture({}, native, ceiling, kind))
+          noteIndependent(independent)
+        }
+        const hybridRoots = [...rootsFor('hybrid'), ...rootsFor('record')]
+        const nativeRoots = rootsFor('native')
+        if (nativeRoots.length) {
+          const proof = await readConversationEvidence(client, ceiling.workspaceId, nativeRoots)
+          if (proof?.kind === 'complete') checked.note(checkedConversationCapture({}, proof, ceiling, kind))
+          else hybridRoots.push(...nativeRoots)
+        }
+        const pageRoots = rootsFor('page')
+        if (pageRoots.length) {
+          if (canReadPage && route.actor === ceiling.userId) {
+            const proof = await provePage(pageRoots)
+            if (!proof) throw unavailable(kind, 'source_unverifiable')
+            checked.note(checkedConversationCapture({}, proof, ceiling, kind))
+          } else {
+            // A direct Page receipt for its anonymous discussion belongs to
+            // that exact Page audience. Prove only its native carriers here.
+            for (const root of pageRoots) {
+              if (exactPageThread && pageKinds.has(root.resourceKind)) noteIndependent([root])
+              else hybridRoots.push(root)
+            }
+          }
+        }
+        const retained = rootsFor('retained')
+        if (retained.length) {
+          // A semantic candidate omitted from the initial query results may
+          // still belong to the external coordinator's current context cohort.
+          const proof = await readConversationEvidence(client, ceiling.workspaceId, retained)
+          if (proof?.kind === 'complete') checked.note(checkedConversationCapture({}, proof, ceiling, kind))
+          else hybridRoots.push(...retained)
+        }
+        await admitHybrid(hybridRoots)
+        const history = rootsFor('history')
+        const projectSelectedHistory = async () => {
+          const scopes: ResourceScope[] = []
+          for (const root of history) {
+            const proof = await readConversationEvidence(client, ceiling.workspaceId, [root])
+            if (proof?.kind !== 'memory_history' || !proof.available) throw unavailable(kind, 'source_unverifiable')
+            for (const scope of proof.scopes) {
+              const refused = currentVisibility(scope, ceiling) ?? labelFailure(scope, ceiling)
+              if (refused) throw unavailable(kind, refused)
+              scopes.push(scope)
+            }
+          }
+          return scopes
+        }
+        const historyScopes = await projectSelectedHistory()
+        // A selected-history proof returns labels only. The owned independent
+        // leaves still require their own Page, Office or external admission.
+        if (history.length) {
+          const { independent } = await readHybridConversationEvidence(client, ceiling.workspaceId, history)
+          noteIndependent(independent)
+        }
+        for (const scope of historyScopes) {
+          checked.note({ sensitivity: scope.sensitivity, compartments: scope.compartments, projectIds: scope.projectIds })
+        }
+        // The purpose proof supplies high-water labels. The current field
+        // snapshot independently admits the exact historical observation.
+        snapshot = await validateCurrent(checked.evidence, history)
+        if (originalSources.some(root => !residual.includes(root))) {
+          checkMixedRoute = async () => {
+            const current = await readMixedConversationEvidenceRoute(client, ceiling.workspaceId, originalSources)
+            if (current?.footprint !== route.footprint || JSON.stringify(current.families) !== JSON.stringify(route.families)
+                || JSON.stringify(await projectSelectedHistory()) !== JSON.stringify(historyScopes)) {
+              throw unavailable(kind, 'source_unverifiable')
+            }
+          }
+          if (!residual.length) {
+            await checkMixedRoute()
+            return snapshot
+          }
+          sources = residual
+        }
+      }
+    } catch (error) {
+      throw scopeEvidenceFailureOf(error) ? error : unavailable(kind, 'source_unverifiable', error, 'native_proof')
+    }
   }
+  // Retain the caller's complete floor, but do not send canonically admitted
+  // roots and projections through an unrelated owner's validation again.
+  const combined = snapshot
+  const residualRoots = sources
+  snapshot = { ...combined, sources: residualRoots }
   // Optional decoration (session list titles) holds the installation's single
   // optional slot here and yields to foreground admission between the heavy
   // phases below. Outside runOptionalEvidence both are no-ops without SQL.
@@ -277,7 +382,7 @@ async function validateScopeEvidence(
     return scopes
   }
   let historyProjection:Awaited<ReturnType<typeof projectHistory>>
-  try{historyProjection=await projectHistory(originalSources)}
+  try{historyProjection=await projectHistory(residualRoots)}
   catch(error){throw scopeEvidenceFailureOf(error)?error:unavailable(kind,'source_unverifiable',error)}
   if(historyProjection.length){
     const raised=new ContextScopeAccumulator(snapshot)
@@ -347,7 +452,6 @@ async function validateScopeEvidence(
 
   // Page receipts carry principal boundaries beyond generic labels. Resolve
   // each immutable observation; never treat a missing receipt as D1 deletion.
-  const pageKinds = new Set(['page_event_changed','page_event_destination','page_live_changed','page_live_destination'])
   // Private dialogue has no Page ancestry. Keep it in `sources` for the
   // mandatory current transcript proof below, including mixed evidence.
   const ordinarySources = sources.filter(source=>!pageKinds.has(source.resourceKind)&&source.resourceKind!=='private_transcript')
@@ -380,8 +484,8 @@ async function validateScopeEvidence(
   const raisedPages = new ContextScopeAccumulator(snapshot)
   try {
     for (const source of sources.filter(source => pageKinds.has(source.resourceKind))) {
-      const authority = kind === 'audience' && ceiling.userId === '' && pageAudience
-        ? await readPageThreadAudienceAuthority(ceiling.workspaceId, source, pageAudience)
+      const authority = exactPageThread
+        ? await readPageThreadAudienceAuthority(ceiling.workspaceId, source, exactPageThread)
         : (await (client ?? getPool()).query<{ authority: {
         source: ScopeSource | null; requiredSources: ScopeSource[]; principalAllowed: boolean
       } | null }>(`SELECT ${client ? 'read_admitted_page_authority' : 'read_page_scope_authority'}($1,$2,$3,$4) AS authority`,
@@ -404,7 +508,7 @@ async function validateScopeEvidence(
   const raised = await validateCurrent(raisedPages.evidence, sources.filter(source=>!pageKinds.has(source.resourceKind)))
   await yieldOptionalEvidence(client)
   try {
-    if(historyKey(await projectHistory(originalSources))!==historyKey(historyProjection)
+    if(historyKey(await projectHistory(residualRoots))!==historyKey(historyProjection)
       ||historyKey(await projectHistory(projectedHistoryRoots))!==historyKey(projectedHistory))throw unavailable(kind,'source_unverifiable')
     if(persistentKey(await readPersistentSessionContextAncestors(ceiling.workspaceId,ancestryRoots,client))!==persistentAncestry!) throw unavailable(kind,'source_unverifiable')
     if (ancestryKey(await readExternalSourceAncestors(ceiling.workspaceId, ancestryRoots, client)) !== originalAncestry!) {
@@ -416,8 +520,11 @@ async function validateScopeEvidence(
   } catch (error) {
     throw scopeEvidenceFailureOf(error) ? error : unavailable(kind, 'source_unverifiable', error, 'ancestry_recheck')
   }
+  await checkMixedRoute?.()
   optionalCompleted=true
-  return raised
+  const admitted = new ContextScopeAccumulator(combined)
+  admitted.note(raised)
+  return admitted.evidence
   } finally { leaveOptional(optionalCompleted) }
 }
 

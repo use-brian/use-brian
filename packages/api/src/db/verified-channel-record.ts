@@ -1,5 +1,6 @@
 /** Native record floor for an already verified provider ingress.
  * [COMP:api/conversation-visibility] */
+import { sessionKindSql } from '../session-kind.js'
 import { resolveWriteScope, type ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
 import { maxSensitivity, type Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { DerivedScopeError } from '@use-brian/agent-runtime/security/derived-scope.js'
@@ -75,10 +76,10 @@ const addressedEnvelope = `SELECT e AS envelope FROM public.conversation_envelop
     AND s.archived_at IS NULL AND s.recording_privacy_held IS NOT TRUE
     AND public.scope_review_state_held('session',s.id) IS NOT TRUE
     AND ($9::text IS NULL OR e.version::text=$9)
-    AND (($8::boolean AND s.anchor_kind='channel' AND e.visibility='workspace') OR
+    AND (($8::boolean AND s.anchor_kind='channel' AND ${sessionKindSql.workspaceEnvelope('e')}) OR
       (NOT $8::boolean AND s.anchor_kind='none' AND s.user_id=$6 AND s.assistant_id=$5))
     AND ($7::boolean AND public.conversation_member_read_allowed(e.workspace_id,s.id,$6) OR
-      NOT $7::boolean AND e.visibility='workspace' AND (s.anchor_kind='channel' OR
+      NOT $7::boolean AND ${sessionKindSql.workspaceEnvelope('e')} AND (s.anchor_kind='channel' OR
         e.cap='public' AND cardinality(e.compartments)=0 AND e.classification='new_public')
       AND NOT EXISTS (SELECT 1 FROM public.workspace_members m WHERE m.workspace_id=e.workspace_id AND m.user_id=$6))`
 
