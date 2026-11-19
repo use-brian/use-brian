@@ -15,7 +15,7 @@ for (let i = 2; i < process.argv.length; i++) {
 if (!opts.root || !opts.pgBin || !opts.out || existsSync(opts.out)) throw new Error('Explicit paths and new output required')
 mkdirSync(opts.out, { recursive: true })
 const pg = createRequire(join(opts.root, 'packages/api/package.json'))('pg')
-const file = join(opts.root, 'packages/api/migrations/8268_private_transcript_preparation_eligibility.sql')
+const file = join(opts.root, 'packages/api/migrations/82690_private_transcript_preparation_eligibility.sql')
 const original = readFileSync(file, 'utf8'), sha = (s) => createHash('sha256').update(s).digest('hex')
 const target = "RAISE EXCEPTION 'private_transcript_preparation_successor_contract_changed: %',saved.name;"
 if (original.split(target).length !== 2 || !original.endsWith('COMMIT;\n')) throw new Error('Exact8268 diagnostic seam changed')
@@ -31,7 +31,7 @@ function differences(before, after, path = '') {
 const { createLocalFixture } = await import(pathToFileURL(join(opts.root, 'scripts/crm/local-fixture.mjs')).href)
 try {
   await createLocalFixture({ pgBin: opts.pgBin, ordinaryOwner: true,
-    beforeApplyFile: '8268_private_transcript_preparation_eligibility.sql', beforeApply: async ({ adminUrl }) => {
+    beforeApplyFile: '82690_private_transcript_preparation_eligibility.sql', beforeApply: async ({ adminUrl }) => {
       const client = new pg.Client({ connectionString: adminUrl }), other = new pg.Client({ connectionString: adminUrl })
       await client.connect(); await other.connect()
       try {

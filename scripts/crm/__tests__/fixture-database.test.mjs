@@ -14,7 +14,7 @@ test('[COMP:api/private-transcript] private transcript preparation migration ref
   await assertLocalFixture()
   const env = cleanRuntimeEnvironment(process.env)
   const pgBin = (await runCommand('pg_config', ['--bindir'], { env })).trim()
-  const filename = '8268_private_transcript_preparation_eligibility.sql'
+  const filename = '82690_private_transcript_preparation_eligibility.sql'
   const sql = await readFile(new URL('../../../packages/api/migrations/' + filename, import.meta.url), 'utf8')
   const target = 'prepare_native_session_message_covered(uuid,uuid,text,jsonb,jsonb)'
   const observed = []

@@ -628,7 +628,7 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
         }finally{await db.exec('ROLLBACK')}
       })
       // Historical repair idempotence belongs to its last supported cohort.
-      await migratePglite(db, migrationsDir, {through:'8268_private_transcript_preparation_eligibility.sql'})
+      await migratePglite(db, migrationsDir, {through:'82690_private_transcript_preparation_eligibility.sql'})
       const mutationAfter=(await db.query<{raw:Record<string,unknown>}>(
         'SELECT to_jsonb(p) raw FROM pg_proc p WHERE oid=$1::regprocedure',[mutationHelper])).rows[0].raw
       assert.deepEqual({...mutationAfter,proacl:mutationBefore.raw.proacl},mutationBefore.raw)
