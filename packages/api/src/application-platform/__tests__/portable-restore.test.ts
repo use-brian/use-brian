@@ -9,11 +9,24 @@ const directory=new URL('../../../scripts/conversation-store/',import.meta.url)
 const restore=await import(new URL('portable-restore.mjs',directory).href)
 const builder=await import(new URL('build-portable-restore-roster.mjs',directory).href)
 const {portableOwnerPolicies,portableLegacyConversionTables,restoreStrippedFields}=await import(new URL('portable-restore-seals.mjs',directory).href)
+const {crmSummaryOriginStamps,crmSummaryStructuralValidators}=await import(new URL('crm-summary-portable.mjs',directory).href)
 const record=await import(new URL('executable-record.mjs',directory).href)
 const {sealJson}=await import(new URL('../../../../../scripts/operations/recovery-common.mjs',import.meta.url).href)
 const sha=(value:string)=>createHash('sha256').update(value).digest('hex')
 const scratch:string[]=[]
 afterAll(async()=>{for(const path of scratch)await rm(path,{recursive:true,force:true})})
+
+const crmSummaryProjections=[
+ 'crm_summary_attention_rollups','crm_summary_company_references','crm_summary_configuration_publications',
+ 'crm_summary_entity_publications','crm_summary_principal_revisions','crm_summary_release_revisions',
+ 'crm_summary_rollup_leaves','crm_summary_rollups','crm_summary_scope_policy_usage','crm_summary_selected_cells',
+]
+const crmSummaryDurableFacts=[
+ 'crm_summary_partition_leaves','crm_summary_policy_adapters','crm_summary_policy_inputs','crm_summary_policy_requirements',
+ 'crm_summary_record_policies','crm_summary_scope_classes','crm_summary_source_descriptors','crm_summary_source_groups',
+]
+const crmSummaryEpochs=['crm_summary_entity_domain_versions','crm_summary_scope_partition_versions']
+const crmSummaryCredentials='crm_summary_receipt_keys'
 
 /** An idle ordinary owner that refuses any query beyond the owner check. */
 function ownerOnly(){
@@ -29,18 +42,23 @@ describe('[COMP:api/portable-restore] finite portable restore roster',()=>{
  it('classifies every inventoried table exactly once with a reviewed rule',async()=>{
   const roster=await restore.loadPortableRoster()
   const entries=Object.entries(roster.tables) as [string,{class:string;rule:string;slots?:string[];forceRls?:unknown;generated?:string[];identity?:string[]}][]
-  expect(entries).toHaveLength(574)
-  expect(roster.counts).toMatchObject({tables:574,derived:8,rederived:1,rebound:2,durable:563,regprocedureSlots:4,forceRls:11,generatedTables:4,identityTables:4,sequences:6})
+  expect(entries).toHaveLength(595)
+  expect(roster.counts).toMatchObject({tables:595,derived:19,rederived:1,rebound:2,durable:573,regprocedureSlots:4,forceRls:11,generatedTables:4,identityTables:4,sequences:6})
   for(const [,entry] of entries)expect(Object.keys(roster.rules)).toContain(entry.rule)
   expect(entries.filter(([,entry])=>entry.class==='derived').map(([name])=>name).sort()).toEqual(
-   ['_migrations','conversation_envelope_backfill_checkpoint','conversation_settings_transitions','crm_erasure_journal_targets','native_retained_contract_helpers','native_turn_contract_helpers','native_turn_contract_witness','private_session_display_contract'])
+   ['_migrations','conversation_envelope_backfill_checkpoint','conversation_settings_transitions','crm_erasure_journal_targets',
+    'native_retained_contract_helpers','native_turn_contract_helpers','native_turn_contract_witness','private_session_display_contract',
+    ...crmSummaryProjections,crmSummaryCredentials].sort())
+  for(const name of crmSummaryProjections)expect(roster.tables[name]).toEqual({class:'derived',rule:'D10-crm-summary-projection'})
+  for(const name of crmSummaryDurableFacts)expect(roster.tables[name]).toEqual({class:'durable',rule:'F1-durable-fact'})
+  expect(roster.tables[crmSummaryCredentials]).toEqual({class:'derived',rule:'D11-crm-summary-credential'})
   // 8276 registry-guard witness: installation-derived, re-recorded after import.
   expect(roster.tables.native_turn_contract_witness).toEqual({class:'derived',rule:'D7-contract-witness'})
   expect(Object.fromEntries(entries.filter(([,entry])=>entry.slots).map(([name,entry])=>[name,entry.slots]))).toEqual({
    application_native_configuration_operations:['apply_handler'],
    application_native_field_contracts:['metadata_reader','catalog_reader','configuration_reader']})
   expect(entries.filter(([,entry])=>entry.rule==='F2-authority-epoch').map(([name])=>name).sort()).toEqual(
-   ['application_native_crm_configuration_epochs','application_policy_contract_epoch','application_policy_workspace_epochs','ledger_epoch'])
+   ['application_native_crm_configuration_epochs','application_policy_contract_epoch','application_policy_workspace_epochs','ledger_epoch',...crmSummaryEpochs].sort())
   expect(roster.inventoryOverrides).toEqual({native_conversation_conversion_pending:'D6-enrollment-maintenance'})
  })
  it('pins the 8273 release-cohort roster used by the existing-brain transfer',async()=>{
@@ -48,10 +66,11 @@ describe('[COMP:api/portable-restore] finite portable restore roster',()=>{
   const cohort=await embedded.loadCohortRoster(),head=await restore.loadPortableRoster()
   expect(cohort.digest).toBe(embedded.embeddedTransferCohort.rosterSha256)
   expect(cohort.counts).toMatchObject({tables:564,derived:5,rederived:1,rebound:2,durable:556})
-  expect(Object.keys(head.tables).filter(name=>!cohort.tables[name])).toEqual([
+  expect(Object.keys(head.tables).filter(name=>!cohort.tables[name]).sort()).toEqual([
    'conversation_envelope_backfill_checkpoint','conversation_envelopes','conversation_legacy_history_enrollments',
    'conversation_message_quarantine','conversation_participants','conversation_settings_transitions',
-   'conversation_visibility_audit','conversation_visibility_notices','native_turn_completions','native_turn_contract_witness'])
+   'conversation_visibility_audit','conversation_visibility_notices','native_turn_completions','native_turn_contract_witness',
+   ...crmSummaryProjections,...crmSummaryDurableFacts,...crmSummaryEpochs,crmSummaryCredentials].sort())
   const forcedAtCohortOnly=['page_link_aliases','realtime_thread_targets','task_candidates','task_rules','task_tombstones','workspace_brand_versions','workspace_brands','workspace_link_aliases']
   const changed=[...forcedAtCohortOnly,...Object.keys(portableOwnerPolicies),'episode_extraction_items',...portableLegacyConversionTables].sort()
   expect(Object.keys(cohort.tables).filter(name=>JSON.stringify(cohort.tables[name])!==JSON.stringify(head.tables[name])).sort()).toEqual(changed)
@@ -96,15 +115,17 @@ describe('[COMP:api/portable-restore] finite portable restore roster',()=>{
   const head=await restore.loadPortableRoster(),cohort=await embedded.loadCohortRoster()
   for(const roster of [head,cohort]){
    const triggers=roster.triggers as Record<string,{class:string;events:string[]}>
+   const expectedStamps=roster===head?[...builder.originStamps,...crmSummaryOriginStamps]:[...builder.originStamps]
    // A released lease leaves last_turn_lease_token behind; firing the INSERT branch would overwrite it with NULL.
    expect(triggers['sessions.remember_native_session_turn_lease']).toMatchObject({class:'suspended:origin-stamp',function:'remember_native_session_turn_lease()'})
-   expect(roster.originStamps).toEqual([...builder.originStamps]);expect(roster.fixpointStamps).toEqual([...builder.fixpointStamps])
-   expect(Object.entries(triggers).filter(([,trigger])=>trigger.class==='suspended:origin-stamp').map(([key])=>key).sort()).toEqual([...builder.originStamps].sort())
+   expect(roster.originStamps).toEqual(expectedStamps);expect(roster.fixpointStamps).toEqual([...builder.fixpointStamps])
+   expect(Object.entries(triggers).filter(([,trigger])=>trigger.class==='suspended:origin-stamp').map(([key])=>key).sort()).toEqual(expectedStamps.sort())
    // A fixpoint stamp is not an origin stamp; its validation may still be origin-bound or read a placeholder.
    for(const key of builder.fixpointStamps)expect(triggers[key].class).not.toBe('suspended:origin-stamp')
-   for(const key of builder.originStamps)expect(triggers[key].events).toContain('insert')
+   for(const key of expectedStamps)expect(triggers[key].events).toContain('insert')
   }
-  expect(head.counts.suspendedTriggers).toBe(357);expect(builder.originStamps).toHaveLength(62);expect(builder.fixpointStamps).toHaveLength(17)
+  expect(head.counts.suspendedTriggers).toBe(393);expect(cohort.counts.suspendedTriggers).toBe(344)
+  expect(head.originStamps).toHaveLength(65);expect(builder.originStamps).toHaveLength(62);expect(builder.fixpointStamps).toHaveLength(17)
   expect(new Set([...builder.originStamps,...builder.fixpointStamps]).size).toBe(79)
   expect(cohort.inventory).toMatchObject({ledgerCount:756,ledgerHead:embedded.embeddedTransferCohort.through})
   expect(builder.cohortRosters[embedded.embeddedTransferCohort.through]).toBe(embedded.embeddedTransferCohort.rosterFile)
@@ -118,7 +139,7 @@ describe('[COMP:api/portable-restore] finite portable restore roster',()=>{
    const afterCohortStructural = 'lock_conversation_anchor_policy_change'
    expect(roster.originValidators).toEqual((builder.originValidators as readonly string[]).filter(name => roster === head || name !== afterCohortOrigin))
    expect(roster.structuralValidators).toEqual(roster === head
-    ? [...builder.structuralValidators, 'protect_configured_task_receipt']
+    ? [...builder.structuralValidators, 'protect_configured_task_receipt', ...crmSummaryStructuralValidators]
     : (builder.structuralValidators as readonly string[]).filter(name => name !== afterCohortStructural))
    // The refused families: issuer checks under the nil import actor, linked rosters, goal scope, access migration.
    for(const key of ['application_clients.application_client_guard','application_access_grants.application_grant_guard','teamspace_members.teamspace_members_linked_roster_immutable',
