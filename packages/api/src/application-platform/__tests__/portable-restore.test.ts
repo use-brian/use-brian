@@ -42,17 +42,18 @@ describe('[COMP:api/portable-restore] finite portable restore roster',()=>{
  it('classifies every inventoried table exactly once with a reviewed rule',async()=>{
   const roster=await restore.loadPortableRoster()
   const entries=Object.entries(roster.tables) as [string,{class:string;rule:string;slots?:string[];forceRls?:unknown;generated?:string[];identity?:string[]}][]
-  expect(entries).toHaveLength(595)
-  expect(roster.counts).toMatchObject({tables:595,derived:19,rederived:1,rebound:2,durable:573,regprocedureSlots:4,forceRls:11,generatedTables:4,identityTables:4,sequences:6})
+  expect(entries).toHaveLength(596)
+  expect(roster.counts).toMatchObject({tables:596,derived:20,rederived:1,rebound:2,durable:573,regprocedureSlots:4,forceRls:11,generatedTables:4,identityTables:4,sequences:6})
   for(const [,entry] of entries)expect(Object.keys(roster.rules)).toContain(entry.rule)
   expect(entries.filter(([,entry])=>entry.class==='derived').map(([name])=>name).sort()).toEqual(
    ['_migrations','conversation_envelope_backfill_checkpoint','conversation_settings_transitions','crm_erasure_journal_targets',
-    'native_retained_contract_helpers','native_turn_contract_helpers','native_turn_contract_witness','private_session_display_contract',
+    'native_memory_query_write_intents','native_retained_contract_helpers','native_turn_contract_helpers','native_turn_contract_witness','private_session_display_contract',
     ...crmSummaryProjections,crmSummaryCredentials].sort())
   for(const name of crmSummaryProjections)expect(roster.tables[name]).toEqual({class:'derived',rule:'D10-crm-summary-projection'})
   for(const name of crmSummaryDurableFacts)expect(roster.tables[name]).toEqual({class:'durable',rule:'F1-durable-fact'})
   expect(roster.tables[crmSummaryCredentials]).toEqual({class:'derived',rule:'D11-crm-summary-credential'})
   // 8276 registry-guard witness: installation-derived, re-recorded after import.
+  expect(roster.tables.native_memory_query_write_intents).toEqual({class:'derived',rule:'D8-transaction-scratch'})
   expect(roster.tables.native_turn_contract_witness).toEqual({class:'derived',rule:'D7-contract-witness'})
   expect(Object.fromEntries(entries.filter(([,entry])=>entry.slots).map(([name,entry])=>[name,entry.slots]))).toEqual({
    application_native_configuration_operations:['apply_handler'],
@@ -69,7 +70,7 @@ describe('[COMP:api/portable-restore] finite portable restore roster',()=>{
   expect(Object.keys(head.tables).filter(name=>!cohort.tables[name]).sort()).toEqual([
    'conversation_envelope_backfill_checkpoint','conversation_envelopes','conversation_legacy_history_enrollments',
    'conversation_message_quarantine','conversation_participants','conversation_settings_transitions',
-   'conversation_visibility_audit','conversation_visibility_notices','native_turn_completions','native_turn_contract_witness',
+   'conversation_visibility_audit','conversation_visibility_notices','native_memory_query_write_intents','native_turn_completions','native_turn_contract_witness',
    ...crmSummaryProjections,...crmSummaryDurableFacts,...crmSummaryEpochs,crmSummaryCredentials].sort())
   const forcedAtCohortOnly=['page_link_aliases','realtime_thread_targets','task_candidates','task_rules','task_tombstones','workspace_brand_versions','workspace_brands','workspace_link_aliases']
   const changed=[...forcedAtCohortOnly,...Object.keys(portableOwnerPolicies),'episode_extraction_items',...portableLegacyConversionTables].sort()
