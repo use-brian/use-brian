@@ -1165,3 +1165,8 @@ export function externalApprovalSourcesCacheKey(workspaceId: string, viewerId: s
 export function externalApprovalDestinationsCacheKey(workspaceId: string, viewerId: string, assistantId: string): string {
   return `${externalApprovalSourcesCacheKey(workspaceId, viewerId)}:destinations:${assistantId}`;
 }
+
+/** Protected engineering resources, isolated by the explicit signed-in viewer. */
+export function projectHarnessCacheKey(workspaceId: string, projectId: string, viewerId: string, resource = ""): string {
+  return `project-harness:${encodeURIComponent(workspaceId)}:${encodeURIComponent(viewerId)}:${encodeURIComponent(projectId)}:${resource}`;
+}
