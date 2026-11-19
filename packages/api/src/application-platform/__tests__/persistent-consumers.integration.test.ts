@@ -711,13 +711,23 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
     expect(await independent.independentlyAuthorized()).toBe(true)
   })
 
-  it('carries actual private caller evidence through a delegated consult accumulator, returned evidence and canonical transcript',async()=>{
+  it.each(['memory','session_context_revision'] as const)('carries actual caller %s through a delegated consult and canonical transcript',async(resourceKind)=>{
     fixture=await persistentContextFixture();const f=fixture,parent=await f.execution(f.firstId)
     const memory=await createMemory({workspaceId:f.workspaceId,userId:f.firstId,assistantId:f.assistantId,createdByUserId:f.firstId,summary:'Fictional private caller evidence',sensitivity:'internal'})
     const snapshot=(await f.pool.query<{source:ScopeSource & {held:boolean}}>("SELECT read_scope_source($1,'memory',$2) AS source",[f.workspaceId,memory.id])).rows[0].source
     expect(snapshot.held).toBe(false)
-    const source:ScopeSource={workspaceId:f.workspaceId,userId:f.firstId,assistantId:null,sensitivity:'internal',compartments:[],projectIds:[],resourceKind:'memory',resourceId:memory.id,version:memory.scopeVersion}
-    expect(snapshot).toMatchObject(source)
+    const privateMemory:ScopeSource={workspaceId:f.workspaceId,userId:f.firstId,assistantId:null,sensitivity:'internal',compartments:[],projectIds:[],resourceKind:'memory',resourceId:memory.id,version:memory.scopeVersion}
+    expect(snapshot).toMatchObject(privateMemory)
+    let source=privateMemory
+    if(resourceKind==='session_context_revision'){
+      const history=await f.history()
+      const commitment=await createDbSessionStateStore().upsert({sessionId:f.session.id,userId:f.ownerId,assistantId:f.assistantId,
+        key:'Fictional consult commitment',summary:'Fictional consult source',source:'tool',authority:await f.modelContext(),
+        derivation:{producer:'fixture:consult',sources:history.flatMap(boundScopeSources)}})
+      source=boundScopeSources(commitment)[0]
+      expect(source.resourceKind).toBe(resourceKind)
+      await expect(validateCallerScopeEvidence({sources:[source]},parent.security.ceiling)).rejects.toMatchObject({diagnostic:'source_unverifiable'})
+    }
     const answer:StreamFn=async function*(){yield{type:'message_start',model:'gemini-3.6-flash-pro'};yield{type:'text_delta',text:'Fictional private consult result'};yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:1,outputTokens:1}}}
     const provider:LLMProvider={name:'fixture',models:['gemini-3.6-flash-pro'],stream:answer,createSession(options){return{send:()=>answer({model:options.model,systemPrompt:options.systemPrompt,messages:[]})}}}
     const returned:ScopeEvidence[]=[],execute=createCalleeExecutor({provider,tools:new Map(),memoryStore:createDbMemoryStore(),capabilityStore:createDbCapabilityStore()})
@@ -729,7 +739,7 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
     const rows=(await f.pool.query(`SELECT m.id,s.user_id,s.visibility FROM session_messages m JOIN sessions s ON s.id=m.session_id
       JOIN scope_derivations d ON d.resource_kind='session_message' AND d.resource_id=m.id AND d.workspace_id=$1
       CROSS JOIN LATERAL application_scope_lineage(d.workspace_id,ARRAY[d.resource_kind],ARRAY[d.resource_id],ARRAY[d.resource_version]) edge
-      WHERE m.role='assistant' AND edge.kind='memory' AND edge.id=$2`,[f.workspaceId,memory.id])).rows
+      WHERE m.role='assistant' AND edge.kind=$2 AND edge.id=$3`,[f.workspaceId,source.resourceKind,source.resourceId])).rows
     expect(rows.length).toBeGreaterThan(0)
     for(const row of rows)expect(row).toMatchObject({user_id:f.firstId,visibility:'personal'})
     const before=(await f.pool.query('SELECT count(*)::int n FROM session_messages WHERE workspace_id=$1',[f.workspaceId])).rows[0].n

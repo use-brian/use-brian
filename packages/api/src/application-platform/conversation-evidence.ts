@@ -91,6 +91,29 @@ export function isConversationEvidenceRoot(source: ScopeSource): boolean {
 
 const pageClosureCurrent=z.union([nativeSessionCurrentScopeSchema,scope.extend({resourceKind:z.enum(pageKinds),assistantId:z.null()}).strict()])
 const pageClosureResult=z.object({admitted:z.literal(true),immutable:z.array(scope),current:z.array(pageClosureCurrent)}).strict()
+type PageClosureRoot = Pick<ScopeSource, 'resourceKind' | 'resourceId' | 'version'>
+
+async function capturePageClosure(client:Pick<PoolClient,'query'>,workspaceId:string,roots:readonly PageClosureRoot[],actor:string){
+ const identities=roots.map(source=>({kind:source.resourceKind,id:source.resourceId,version:source.version}))
+ const row=(await client.query<{value:unknown}>('SELECT capture_page_closure_evidence($1,$2,$3) AS value',[workspaceId,JSON.stringify(identities),actor])).rows[0]
+ if(!row||!Object.hasOwn(row,'value')||row.value===undefined)throw new Error('Page closure evidence unavailable')
+ if(row.value===null)return null
+ const parsed=pageClosureResult.parse(row.value)
+ if([...parsed.immutable,...parsed.current].some(source=>source.workspaceId!==workspaceId)
+  ||!parsed.current.some(source=>(pageKinds as readonly string[]).includes(source.resourceKind)))throw new Error('Page closure evidence unavailable')
+ return parsed
+}
+
+/** The current Page row supplies its exact receipt identity. The Page owner
+ * supplies its labels and required saved/live observations in one proof. */
+export async function readCurrentPageReceipt(client:Pick<PoolClient,'query'>,workspaceId:string,revision:string,actor:string):Promise<ScopeEvidence|null>{
+ const result=await capturePageClosure(client,workspaceId,[{resourceKind:'page_event_changed',resourceId:revision,version:revision}],actor)
+ if(!result)return null
+ if(!result.current.some(source=>source.resourceKind==='page_event_changed'&&source.resourceId===revision&&source.version===revision))
+  throw new Error('Current Page receipt unavailable')
+ return new ContextScopeAccumulator({sources:[...result.immutable,...result.current]}).evidence
+}
+
 /** Page source-family adapter of the native capture. [COMP:api/application-persistence]
  * Called only after `readConversationEvidence` declined. The database admits a
  * closure whose only non-native family is Page receipts reached through
@@ -104,13 +127,8 @@ export async function readPageClosureEvidence(client:Pick<PoolClient,'query'>,wo
  // the database admits them under the same principal rules as reached receipts.
  if(!actor||!roots.length||roots.length>4096||roots.some(root=>root.workspaceId!==workspaceId
   ||!['application_field','session_context_revision','session_message','memory','workspace_file','private_transcript',...pageKinds].includes(root.resourceKind)))return null
- const identities=roots.map(source=>({kind:source.resourceKind,id:source.resourceId,version:source.version}))
- const row=(await client.query<{value:unknown}>('SELECT capture_page_closure_evidence($1,$2,$3) AS value',[workspaceId,JSON.stringify(identities),actor])).rows[0]
- if(!row||!Object.hasOwn(row,'value')||row.value===undefined)throw new Error('Page closure evidence unavailable')
- if(row.value===null)return null
- const parsed=pageClosureResult.parse(row.value)
- if([...parsed.immutable,...parsed.current].some(source=>source.workspaceId!==workspaceId)
-  ||!parsed.current.some(source=>(pageKinds as readonly string[]).includes(source.resourceKind)))throw new Error('Page closure evidence unavailable')
+ const parsed=await capturePageClosure(client,workspaceId,roots,actor)
+ if(!parsed)return null
  return{kind:'complete',evidence:new ContextScopeAccumulator({sources:[...roots,...parsed.immutable]}).evidence,current:parsed.current}
 }
 

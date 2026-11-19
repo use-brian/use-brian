@@ -31,6 +31,8 @@ import { readPageThreadAudienceAuthority, type PageThreadAudience } from './page
 import { enterOptionalEvidenceSlot, yieldOptionalEvidence } from './optional-evidence.js'
 import type { ClosureAdmission } from './admission-closure.js'
 
+const pageKinds = new Set(['page_event_changed','page_event_destination','page_live_changed','page_live_destination'])
+
 /**
  * Why evidence could not be admitted. Internal only: it reaches logs and
  * analytics metadata, never the model or the client, because a finer reason
@@ -172,9 +174,9 @@ async function validateScopeEvidence(
   pageAudience?: PageThreadAudience,
   closure?: ClosureAdmission,
 ): Promise<ScopeEvidence> {
+  const exactPageThread = kind === 'audience' && ceiling.userId === '' ? pageAudience : undefined
   const currentVisibility = (scope: ResourceScope, receiver: AccessCeiling) => {
-    const pageSource = pageAudience && kind === 'audience' && receiver.userId === ''
-      && 'resourceKind' in scope && ['page_event_changed','page_event_destination','page_live_changed','page_live_destination'].includes(String(scope.resourceKind))
+    const pageSource = exactPageThread && 'resourceKind' in scope && pageKinds.has(String(scope.resourceKind))
     // The Page's own thread proves this principal axis below. Private Memory,
     // fields and every other source keep their ordinary per-source visibility.
     return visibilityFailure(pageSource ? { ...scope, userId: null } : scope, receiver)
@@ -220,7 +222,8 @@ async function validateScopeEvidence(
   // If it explicitly declines, route the original roots before an independent
   // owner starts reconstructing its own ancestry.
   let checkMixedRoute: (() => Promise<void>) | undefined
-  if (client && !workflowRunId && sources.some(isConversationEvidenceRoot)) {
+  if (client && !workflowRunId && sources.some(source => isConversationEvidenceRoot(source)
+    && !(exactPageThread && pageKinds.has(source.resourceKind)))) {
     try {
       const native = await readConversationEvidence(client, ceiling.workspaceId, sources)
       if (native?.kind === 'complete') return checkedConversationCapture(snapshot, native, ceiling, kind)
@@ -267,7 +270,12 @@ async function validateScopeEvidence(
             if (!proof) throw unavailable(kind, 'source_unverifiable')
             checked.note(checkedConversationCapture({}, proof, ceiling, kind))
           } else {
-            hybridRoots.push(...pageRoots)
+            // A direct Page receipt for its anonymous discussion belongs to
+            // that exact Page audience. Prove only its native carriers here.
+            for (const root of pageRoots) {
+              if (exactPageThread && pageKinds.has(root.resourceKind)) noteIndependent([root])
+              else hybridRoots.push(root)
+            }
           }
         }
         const retained = rootsFor('retained')
@@ -441,7 +449,6 @@ async function validateScopeEvidence(
 
   // Page receipts carry principal boundaries beyond generic labels. Resolve
   // each immutable observation; never treat a missing receipt as D1 deletion.
-  const pageKinds = new Set(['page_event_changed','page_event_destination','page_live_changed','page_live_destination'])
   // Private dialogue has no Page ancestry. Keep it in `sources` for the
   // mandatory current transcript proof below, including mixed evidence.
   const ordinarySources = sources.filter(source=>!pageKinds.has(source.resourceKind)&&source.resourceKind!=='private_transcript')
@@ -474,8 +481,8 @@ async function validateScopeEvidence(
   const raisedPages = new ContextScopeAccumulator(snapshot)
   try {
     for (const source of sources.filter(source => pageKinds.has(source.resourceKind))) {
-      const authority = kind === 'audience' && ceiling.userId === '' && pageAudience
-        ? await readPageThreadAudienceAuthority(ceiling.workspaceId, source, pageAudience)
+      const authority = exactPageThread
+        ? await readPageThreadAudienceAuthority(ceiling.workspaceId, source, exactPageThread)
         : (await (client ?? getPool()).query<{ authority: {
         source: ScopeSource | null; requiredSources: ScopeSource[]; principalAllowed: boolean
       } | null }>(`SELECT ${client ? 'read_admitted_page_authority' : 'read_page_scope_authority'}($1,$2,$3,$4) AS authority`,
