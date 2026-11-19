@@ -1,5 +1,5 @@
 import { hasWorkspaceConversationAudience } from '../session-kind.js'
-import {readPrivateTranscript} from './private-transcript.js'
+import {readPrivateTranscript,usesPrivateResponderTranscript} from './private-transcript.js'
 /** Current native session query captures. [COMP:api/application-persistence] */
 import {z} from 'zod'
 import type {PoolClient,ClientBase} from 'pg'
@@ -163,12 +163,21 @@ export async function readAdmittedSessionQuery(input:{sessionId:string;throughSe
      FROM session_messages WHERE workspace_id=$1 AND session_id=$2 AND id=$3 AND sequence_num=$4
       AND role='user' AND session_recording_read_allowed(session_id)`,
      [workspaceId,sessionId,input.currentMessageId,currentSequence])).rows[0]
-    if(!row)changed()
-    return bindScopeSources(row,[currentSource])
+    if(row)return bindScopeSources(row,[currentSource])
+    if(!usesPrivateResponderTranscript(execution))changed()
+    // The direct presentation fence can decline a private responder. Use the
+    // original native selector in this same source frame for this exact input.
+    const captured=await captureConversationQuery(client,workspaceId,{sessionId,throughSequence:currentSequence,topicThroughSequence:0})
+    const authored=captured.history.find(({row:message})=>message?.id===input.currentMessageId
+      &&message.sequenceNum===currentSequence&&message.role==='user')
+    if(!authored?.row)changed()
+    const value=authored.row
+    return bindScopeSources({...value,sessionId,createdAt:new Date(value.createdAt),
+      replyToText:null,topicLabel:null,topicConfidence:null},[currentSource,...authored.sources])
    })
    const index=history.findIndex(row=>row.id===current.id)
    if(index<0)history.push(current);else history[index]=current
-   sources.push(currentSource)
+   sources.push(...boundScopeSources(current))
   }
   history.sort((a,b)=>a.sequenceNum-b.sequenceNum)
   bindScopeSources(history,sources)
