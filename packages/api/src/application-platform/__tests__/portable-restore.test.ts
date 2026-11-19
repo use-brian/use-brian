@@ -52,8 +52,8 @@ describe('[COMP:api/portable-restore] finite portable restore roster',()=>{
   for(const name of crmSummaryProjections)expect(roster.tables[name]).toEqual({class:'derived',rule:'D10-crm-summary-projection'})
   for(const name of crmSummaryDurableFacts)expect(roster.tables[name]).toEqual({class:'durable',rule:'F1-durable-fact'})
   expect(roster.tables[crmSummaryCredentials]).toEqual({class:'derived',rule:'D11-crm-summary-credential'})
+  expect(roster.tables.native_memory_query_write_intents).toEqual({class:'derived',rule:'D8-transaction-scratch',transactionBound:['transaction_id']})
   // 8276 registry-guard witness: installation-derived, re-recorded after import.
-  expect(roster.tables.native_memory_query_write_intents).toEqual({class:'derived',rule:'D8-transaction-scratch'})
   expect(roster.tables.native_turn_contract_witness).toEqual({class:'derived',rule:'D7-contract-witness'})
   expect(Object.fromEntries(entries.filter(([,entry])=>entry.slots).map(([name,entry])=>[name,entry.slots]))).toEqual({
    application_native_configuration_operations:['apply_handler'],
