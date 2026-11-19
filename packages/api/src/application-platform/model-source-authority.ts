@@ -5,7 +5,7 @@ import {DeliveryAudienceUnverifiedError,isDeliveryAudienceUnverifiedError,type D
 import { nativeSessionQueryContextSources } from './session-query-context.js'
 import { readPersistentSessionContextAncestors } from '../db/session-context-ancestry.js'
 /** Fresh source permission at model input/output boundaries. [COMP:api/external-source-access] */
-import { accessCeilingContains,intersectAccessCeilings,ContextScopeAccumulator, type ExecutionContext, type ScopeSource, type ToolContext } from '@use-brian/core'
+import { accessCeilingContains,intersectAccessCeilings,ContextScopeAccumulator, type ExecutionContext, type ScopeEvidence, type ScopeSource, type ToolContext } from '@use-brian/core'
 import { SourceProtocolError } from '@use-brian/brian-app/connector'
 import { getAppPool, applyRLSGucs, rollbackAndRelease, runWithAgentAccess } from '../db/client.js'
 import { validateCallerScopeEvidence, validateAudienceScopeEvidence } from '../context-scope/caller-evidence.js'
@@ -17,6 +17,28 @@ import { applyApplicationRLSContext, getApplicationExecutionBinding, releaseAppl
 
 const invalid = new WeakSet<ExecutionContext>()
 function denied(): never { throw new SourceProtocolError('source_access_denied') }
+
+// Tools (including parked/parallel/nested tools) synchronously raise the shared
+// high-water mark while admission awaits I/O. A successful proof for an older
+// snapshot is not an allow and is not an authority failure: discard it and
+// prepare a wholly fresh operation. Never retry a thrown authority error.
+// Bound churn so a producer cannot keep an admission alive indefinitely.
+const MAX_ADMISSION_CANDIDATES = 32
+function assertAdmissionCurrent(context: ToolContext): void {
+  if (context.executionContext && invalid.has(context.executionContext)) denied()
+  context.abortSignal?.throwIfAborted()
+}
+function supersededAdmission(accumulator: ContextScopeAccumulator, original: string, admitted: ScopeEvidence | null): boolean {
+  if (JSON.stringify(accumulator.evidence) === original) return false
+  // A successful canonical read may itself discover stricter labels. Retain
+  // those even when its proof is discarded. Do not merge stale source pointers:
+  // a concurrent tool may already have advanced a mutable native revision.
+  if (admitted) {
+    const { sensitivity, compartments, projectIds } = admitted
+    accumulator.note({ sensitivity, compartments, projectIds })
+  }
+  return true
+}
 
 /** Keep the private exception chain for server logs, never JSON/wire output. */
 function sourceAuthorityError(error: unknown): SourceProtocolError {
@@ -42,7 +64,8 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
   const validate = action === 'deliver' ? validateAudienceScopeEvidence : validateCallerScopeEvidence
   const execution = context.executionContext
   try {
-    if (execution && invalid.has(execution)) denied()
+    for (let candidate = 0; candidate < MAX_ADMISSION_CANDIDATES; candidate++) {
+    assertAdmissionCurrent(context)
     const accumulated = context.scopeAccumulator?.evidence
     const evidence = new ContextScopeAccumulator(execution?.security.provenance)
     evidence.note(accumulated)
@@ -57,7 +80,8 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
     const native=await tryNativeInvocationEvidence(execution,evidence.evidence,execution.security.ceiling,action==='deliver'?'audience':'caller',narrowingGuard)
     if(native){
       await execution.security.authority.assertCurrent()
-      if(JSON.stringify(accumulator.evidence)!==originalEvidence)denied()
+      assertAdmissionCurrent(context)
+      if(supersededAdmission(accumulator,originalEvidence,native))continue
       accumulator.note(native);return
     }
 
@@ -74,7 +98,8 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
       if(narrowingGuard)denied()
       const current = await validate(evidence.evidence, execution.security.ceiling)
       await execution.security.authority.assertCurrent()
-      if (JSON.stringify(accumulator.evidence) !== originalEvidence) denied()
+      assertAdmissionCurrent(context)
+      if (supersededAdmission(accumulator, originalEvidence, current)) continue
       accumulator.note(current)
       return
     }
@@ -135,8 +160,13 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
     if (contextProof) await assertPreparedExternalSourceAuthorityCurrent(execution, contextProof)
     if (prepared) await assertPreparedExternalSourceAuthorityCurrent(execution, prepared)
     await execution.security.authority.assertCurrent()
-    if (wiring && getSharedRetainedSourceAuthority() !== wiring || JSON.stringify(accumulator.evidence) !== originalEvidence) denied()
+    if (wiring && getSharedRetainedSourceAuthority() !== wiring) denied()
+    assertAdmissionCurrent(context)
+    if (supersededAdmission(accumulator, originalEvidence, raised)) continue
     accumulator.note(raised)
+    return
+    }
+    denied()
   } catch (error) {
     if (execution) invalid.add(execution)
     throw Object.assign(sourceAuthorityError(error), {
@@ -173,13 +203,19 @@ export function createNativeAttendedOutputBoundary(execution:ExecutionContext,ac
  const boundary:NativeAttendedOutputBoundary=Object.freeze({[nativeOutputBrand]:true as const,
   assertOutputAuthority:async(context:ToolContext)=>{
    try{
+    for(let candidate=0;candidate<MAX_ADMISSION_CANDIDATES;candidate++){
+    assertAdmissionCurrent(context)
     assertNativeOutputBinding(binding,context)
     const originalEvidence=JSON.stringify(accumulator.evidence)
     const result=await authorize({...binding.input,scopeEvidence:accumulator.evidence})
     assertNativeOutputBinding(binding,context)
     if(!result.allowed)throw new DeliveryAudienceUnverifiedError(result.detail,result.diagnostic)
-    if(JSON.stringify(accumulator.evidence)!==originalEvidence)denied()
+    assertAdmissionCurrent(context)
+    if(supersededAdmission(accumulator,originalEvidence,result.evidence))continue
     accumulator.note({sensitivity:result.evidence.sensitivity,compartments:result.evidence.compartments,projectIds:result.evidence.projectIds})
+    return
+    }
+    denied()
    }catch(error){nativeOutputFailure(execution,error)}
   },
  })
@@ -270,6 +306,8 @@ export async function tryAssertNativeCombinedOutput(boundary:NativeAttendedOutpu
  if(!binding||recipientCallback!==boundary.assertOutputAuthority)return captureFence?null:false
  const {execution,accumulator}=binding
  try{
+  for(let candidate=0;candidate<MAX_ADMISSION_CANDIDATES;candidate++){
+  assertAdmissionCurrent(context)
   assertNativeOutputBinding(binding,context)
   const originalEvidence=JSON.stringify(accumulator.evidence)
   const detached=new ContextScopeAccumulator(execution.security.provenance)
@@ -278,10 +316,13 @@ export async function tryAssertNativeCombinedOutput(boundary:NativeAttendedOutpu
   const evidence=await tryValidateNativePersonalOutput(execution,{...binding.input,scopeEvidence:detached.evidence})
   await execution.security.authority.assertCurrent()
   assertNativeOutputBinding(binding,context)
-  if(JSON.stringify(accumulator.evidence)!==originalEvidence)denied()
+  assertAdmissionCurrent(context)
+  if(supersededAdmission(accumulator,originalEvidence,evidence))continue
   if(!evidence)return captureFence?null:false
   accumulator.note(evidence)
   // Capture synchronously at admission, before resolving to an awaited caller.
   return captureFence?Object.freeze({evidence:JSON.stringify(accumulator.evidence)}):true
+  }
+  denied()
  }catch(error){nativeOutputFailure(execution,error)}
 }
