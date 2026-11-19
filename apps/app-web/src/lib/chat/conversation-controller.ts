@@ -1286,11 +1286,16 @@ export function createConversationController(options: ConversationControllerOpti
       if (event === "status" && payload.status !== "running" && typeof payload.turnId === "string"
         && (previousTurn !== null && payload.turnId !== previousTurn || current.resumeAfterTurnId !== null && payload.turnId !== current.resumeAfterTurnId)
         && !ownsExactPost) {
-        // The resumed owner finished while the transport was reconnecting.
-        // Release the dead mirror before history reconciliation, otherwise a
-        // presentation's in-flight guard would discard the persisted reply.
-        current.sawTurnCompleted = true;
+        // A different idle receipt may belong to a turn that ended during
+        // disconnection. Reveal its saved history, but an opaque turn ID
+        // cannot establish that this is the pending resumed turn.
         mirror = emptyMirror();
+        if (!current.sawRunning && current.resumeUntil !== null && scheduler.now() < current.resumeUntil) {
+          if (!ownCommitted(payload)) { historyEpoch++; void reloadHistory(); }
+          publishNow();
+          return;
+        }
+        current.sawTurnCompleted = true;
         const reason = str(payload.turnEndReason);
         if (reason && reason !== "completed" && reason !== "publication_recovered") {
           addNotice({ code: "turnEnd", reason, stoppedByName: str(payload.stoppedByName) ?? null, senderUserId: sender ?? mirror.senderUserId });

@@ -28,7 +28,7 @@ import {
 import { pinPolicyEpoch, policyEpochFromCurrentSnapshot } from './policy-epoch.js'
 import { readSessionAuthorityFacts } from './session-authority-facts.js'
 import { conversationReadersActive } from '../db/conversation-visibility.js'
-import { normalizeSessionVisibility } from '../session-kind.js'
+import { usesStoredPrivateChat } from '../session-kind.js'
 import { roomAudienceCeiling } from '../routes/_room-binding.js'
 import { findAssistantById } from '../db/users.js'
 import {authSessionStore} from '../db/auth-session-store.js'
@@ -155,8 +155,7 @@ async function readPrivateSessionStart(input:ResolveExecutionContextInput, works
     || input.identity.principal.authenticationKind !== 'native_session' || input.identity.principal.userId !== input.userId
     || input.ownership.kind !== 'workspace' || input.ownership.workspaceId !== workspaceId
     || input.lifecycle.sessionId !== session.id || input.lifecycle.channelType !== 'web'
-    || session.channelType !== 'web' || session.appOrigin !== 'chat' || session.anchorKind !== 'none'
-    || session.anchorRef != null || session.mode === 'draft' || normalizeSessionVisibility(session.visibility) !== 'personal'
+    || !usesStoredPrivateChat(session) || session.anchorRef != null
     || session.userId !== input.userId || session.assistantId !== input.assistant.id
     || (input.session.contextGroupId ?? null) !== session.contextGroupId
     || (input.session.contextProjectId ?? null) !== session.contextProjectId) return null

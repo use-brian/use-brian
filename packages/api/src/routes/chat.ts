@@ -100,7 +100,7 @@ import { EvidenceAccumulator } from '@use-brian/agent-runtime/security/evidence.
 import { isSensitivity, minSensitivity, SensitivityAccumulator } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { filterToolsByCapabilities } from '@use-brian/agent-runtime/tools/capability-gate.js'
 import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
-import { classifySession, isPersonalChat, policyFor, sessionPolicy } from '../session-kind.js'
+import { classifySession, isPersonalChat, policyFor, sessionPolicy, usesStoredPrivateChat, usesWorkspacePromptIndexes } from '../session-kind.js'
 import { abortLocalTurn, waitForTurnSlot, TURN_SLOT_WAIT_TIMEOUT_MS, TurnStoppedError } from '../turn/lease.js'
 import { finalizedTurnOutput, openAssistantTurn, openTurnSqlScope, TurnRefusal, turnUsageIdentity, type AssistantTurn, type TurnSqlScope } from '../turn/kernel.js'
 import { createBufferedTurnOutput } from './buffered-turn-output.js'
@@ -4695,9 +4695,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       const viewerCtx = { ...automaticContextAccess(turnScope.access, turnScope.activeProjectId), memoryContext: { ...(turnScope.activeProjectId ? {projectId:turnScope.activeProjectId} : {}), activity:memoryActivityFromText(typeof message === "string" ? message : undefined) } }
       let promptIndexes: ReturnType<NonNullable<typeof options.memoryStore.getPairedPromptIndexes>> | undefined
       let nativePromptMemory: ReturnType<NonNullable<typeof options.memoryStore.getPromptMemoryContext>> | undefined
-      const privatePromptShape = !executionContext.security.access.sharedAudience && session.channelType==='web'
-        && session.appOrigin==='chat' && session.anchorKind==='none' && session.workspaceId===assistant.workspaceId
-        && (session.visibility==='owner' || session.visibility==='personal') && session.mode!=='draft'
+      const privatePromptShape = !executionContext.security.access.sharedAudience && usesStoredPrivateChat(session)
+        && session.workspaceId===assistant.workspaceId
         && session.userId===user.id && session.assistantId===assistant.id
       const auxiliaryPrompt = nativeTranscriptAuthority && privatePromptShape
         ? options.memoryStore.getPromptAuxiliaryContext?.(viewerCtx,'Use Brian',nativeTranscriptAuthority) : undefined
@@ -4707,9 +4706,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           : undefined
       const readPromptIndexes = (candidate: typeof nativeTranscriptAuthority) =>
         candidate && assistant.workspaceId && (!executionContext.security.access.sharedAudience
-          || conversationReadersActive() && session.channelType==='web'
-          && (session.appOrigin==='chat' && session.anchorKind==='none' || pageBoundTurn)
-          && session.visibility==='workspace'
+          || conversationReadersActive() && usesWorkspacePromptIndexes(session, pageBoundTurn)
           && session.workspaceId===assistant.workspaceId && session.assistantId===assistant.id
           && turnScope.activeProjectId===null)
           ? (promptIndexes ??= options.memoryStore.getPairedPromptIndexes?.(viewerCtx,PER_TURN_INDEX_CAP,candidate))

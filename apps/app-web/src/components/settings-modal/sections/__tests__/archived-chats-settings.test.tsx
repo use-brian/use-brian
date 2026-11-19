@@ -11,6 +11,11 @@ import { ArchivedChatsSettings } from "../archived-chats-settings";
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const workspace = vi.hoisted(() => ({ workspaceId: "workspace-1" }));
 vi.mock("@/lib/workspace-context", () => ({ useWorkspaceContext: () => workspace }));
+const chatEntries = vi.hoisted(() => new Map<string, unknown>());
+vi.mock("@/lib/offline/idb", async importOriginal => {
+  const { chatIdbEntries } = await import("@/lib/offline/__tests__/fixtures/chat-idb");
+  return { ...await importOriginal<typeof import("@/lib/offline/idb")>(), ...chatIdbEntries(chatEntries) };
+});
 vi.mock("@/lib/user", () => ({ getUserInfo: () => ({ id: "viewer" }) }));
 vi.mock("next/link", () => ({ default: (props: React.AnchorHTMLAttributes<HTMLAnchorElement>) => <a {...props} /> }));
 const api = vi.hoisted(() => ({ listPersonalSessions: vi.fn(), listWorkspaceSessions: vi.fn(), setSessionArchived: vi.fn() }));
@@ -21,6 +26,7 @@ let root: Root;
 let host: HTMLDivElement;
 const onOpenChat = vi.fn();
 beforeEach(() => {
+  chatEntries.clear();
   vi.resetAllMocks();
   resetSurfaceCache();
   workspace.workspaceId = "workspace-1";

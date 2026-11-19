@@ -104,7 +104,7 @@ describe('[COMP:api/portable-restore] finite portable restore roster',()=>{
    for(const key of builder.fixpointStamps)expect(triggers[key].class).not.toBe('suspended:origin-stamp')
    for(const key of builder.originStamps)expect(triggers[key].events).toContain('insert')
   }
-  expect(head.counts.suspendedTriggers).toBe(354);expect(builder.originStamps).toHaveLength(62);expect(builder.fixpointStamps).toHaveLength(17)
+  expect(head.counts.suspendedTriggers).toBe(357);expect(builder.originStamps).toHaveLength(62);expect(builder.fixpointStamps).toHaveLength(17)
   expect(new Set([...builder.originStamps,...builder.fixpointStamps]).size).toBe(79)
   expect(cohort.inventory).toMatchObject({ledgerCount:756,ledgerHead:embedded.embeddedTransferCohort.through})
   expect(builder.cohortRosters[embedded.embeddedTransferCohort.through]).toBe(embedded.embeddedTransferCohort.rosterFile)
@@ -114,7 +114,12 @@ describe('[COMP:api/portable-restore] finite portable restore roster',()=>{
   const head=await restore.loadPortableRoster(),cohort=await embedded.loadCohortRoster()
   for(const roster of [head,cohort]){
    const triggers=roster.triggers as Record<string,{class:string;function:string}>
-   expect(roster.originValidators).toEqual([...builder.originValidators]);expect(roster.structuralValidators).toEqual([...builder.structuralValidators,...(roster===head?['protect_configured_task_receipt']:[])])
+   const afterCohortOrigin = 'require_conversation_record_retention_current'
+   const afterCohortStructural = 'lock_conversation_anchor_policy_change'
+   expect(roster.originValidators).toEqual((builder.originValidators as readonly string[]).filter(name => roster === head || name !== afterCohortOrigin))
+   expect(roster.structuralValidators).toEqual(roster === head
+    ? [...builder.structuralValidators, 'protect_configured_task_receipt']
+    : (builder.structuralValidators as readonly string[]).filter(name => name !== afterCohortStructural))
    // The refused families: issuer checks under the nil import actor, linked rosters, goal scope, access migration.
    for(const key of ['application_clients.application_client_guard','application_access_grants.application_grant_guard','teamspace_members.teamspace_members_linked_roster_immutable',
     'workflow_runs.workflow_goal_scope_guard','workspace_access_migration_items.access_migration_guard','brain_row_versions.crm_privacy_write_admission'])

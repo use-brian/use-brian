@@ -12,6 +12,9 @@ function poolFor(stored: unknown): Pool {
   const credentials = encryptCredentials(stored, key)
   const client = {
     async query(sql: string) {
+      if (sql.includes("FROM pg_class c WHERE c.oid='public.connector_pending_setups'::regclass")) {
+        return { rows: [{ allowed: true }], rowCount: 1 }
+      }
       if (sql.includes('SELECT i.credentials')) return { rows: [{ credentials, setup_managed: false, account_digest: null }], rowCount: 1 }
       return { rows: [], rowCount: 0 }
     },

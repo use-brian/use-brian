@@ -109,7 +109,7 @@ describe('[COMP:api/workspace-memory-evolution-store] upsertEvolution', () => {
     const sql = mockQuery.mock.calls[0][0] as string
     // The INSERT path computes version=0 when snippet is null —
     // exercised via the CASE expression in the INSERT VALUES clause.
-    expect(sql).toContain('CASE WHEN $8 IS NULL THEN 0 ELSE 1 END')
+    expect(sql).toContain('CASE WHEN $8::text IS NULL THEN 0 ELSE 1 END')
     const args = mockQuery.mock.calls[0][1] as unknown[]
     expect(args[7]).toBeNull()
   })

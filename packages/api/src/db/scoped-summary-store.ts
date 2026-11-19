@@ -1,3 +1,4 @@
+import { sessionKindSql } from '../session-kind.js'
 import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import type { ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
 import { DerivedScopeError, deriveResourceScope, resourceScopeKey, type DerivedWriteEvidence, type ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
@@ -144,8 +145,7 @@ export async function getNativePromptAuxiliaryContext(viewer: AccessContext, app
     }>(`WITH live AS MATERIALIZED (
       SELECT public.read_session_authority_facts(${facts}) AS authority
       FROM public.sessions s WHERE s.workspace_id=$4 AND s.user_id=$2 AND s.assistant_id=$1 AND s.id=${session}
-        AND s.channel_type='web' AND s.app_origin='chat' AND s.anchor_kind='none' AND s.anchor_ref IS NULL
-        AND s.visibility IN('owner','personal') AND s.mode IS DISTINCT FROM 'draft'
+        AND ${sessionKindSql.nativePrivatePromptChat('s')}
         AND s.status='running' AND s.turn_lease_token=${token} AND s.last_turn_lease_token=${token}
         AND coalesce(s.turn_assistant_id,s.assistant_id)=$1 AND s.cancel_requested_at IS NULL
         AND s.turn_heartbeat_at>clock_timestamp()-interval '90 seconds'

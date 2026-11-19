@@ -7,6 +7,8 @@ const state = vi.hoisted(() => ({
 }));
 vi.mock("../application-write-authority", () => ({
   currentOfflineWriteAuthority: () => state.scope,
+  offlineWriteIdentityIsCurrent: (scope: typeof state.scope) =>
+    scope.viewerId === state.scope.viewerId && scope.apiOrigin === state.scope.apiOrigin,
   sameOfflineWriteAuthority: (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b),
 }));
 vi.mock("../idb", () => ({

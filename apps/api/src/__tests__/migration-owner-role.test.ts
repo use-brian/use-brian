@@ -853,7 +853,98 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
       await assertFinalUpgradeMembers(configuredPublication,configuredMembers,
         [[appGrant,ownerGrant],[publicGrant,appGrant,ownerGrant]],[[ownerGrant],[ownerGrant]],
         {'check_programmatic_publication_commit()':['search_path=pg_catalog, public, pg_temp']})
+      const triggerRepair = '82980_legacy_conversation_trigger_privileges.sql'
+      const triggerMembers = [
+        'prevent_locked_session_context_change()', 'stamp_session_project_label()', 'validate_session_context_binding()',
+      ]
+      await migratePglite(db, migrationsDir, { through: '8297_conversation_record_admission.sql' })
+      const legacyTriggers = await finalUpgradeState(triggerMembers)
+      assert.equal(legacyTriggers.routines.length, triggerMembers.length)
+      assert.ok(legacyTriggers.routines.every(row => row.acl.slice().sort().join() === [appGrant, ownerGrant, publicGrant].sort().join()))
+      t.diagnostic('legacy_conversation_trigger_acl ' + JSON.stringify(legacyTriggers.routines.map(({signature,acl,oid,deps})=>({signature,acl,oid,deps}))))
+      await t.test('refuses unreviewed conversation trigger ACL, definition and binding changes atomically', async () => {
+        await rejectsFinalUpgrade(triggerRepair, triggerMembers,
+          `GRANT EXECUTE ON FUNCTION public.${triggerMembers[0]} TO legacy_privilege_probe`, /conversation_trigger_acl_profile_changed/)
+        await rejectsFinalUpgrade(triggerRepair, triggerMembers,
+          `GRANT EXECUTE ON FUNCTION public.${triggerMembers[0]} TO app_user WITH GRANT OPTION`, /conversation_trigger_acl_profile_changed/)
+        await rejectsFinalUpgrade(triggerRepair, triggerMembers,
+          `REVOKE EXECUTE ON FUNCTION public.${triggerMembers[0]} FROM app_user`, /conversation_trigger_acl_unverified_historical_profile/)
+        await rejectsFinalUpgrade(triggerRepair, triggerMembers,
+          `ALTER FUNCTION public.${triggerMembers[0]} COST 101`, /conversation_trigger_acl_definition_changed/)
+        await rejectsFinalUpgrade(triggerRepair, triggerMembers,
+          'ALTER TABLE public.sessions DISABLE TRIGGER sessions_context_immutable_after_lock', /conversation_trigger_acl_binding_changed/)
+      })
+      const publicRoutines = ['can_view_department_directory(uuid,uuid)', 'crm_activity_scope_allows(crm_activities,boolean)']
+      const appRoutines = [
+        'admit_knowledge_repo_write(jsonb,jsonb,jsonb,uuid,text)', 'apply_knowledge_source_refresh(jsonb,jsonb)',
+        'native_knowledge_creation_fields_allowed(uuid,text[],uuid,text)',
+        'record_admitted_knowledge_entry_derivation(uuid,uuid,text,text,jsonb)',
+        'update_admitted_knowledge_entry_body(uuid,uuid,text,text,text,jsonb,text[],uuid[])',
+      ]
+      const ordinaryRoutines = [...publicRoutines, ...appRoutines, 'application_native_task_review_current(uuid,uuid)']
+      const repairedPolicies = [
+        'workspace_groups_directory', 'workspace_compartments_directory', 'crm_activities_scope_read',
+        'crm_activities_scope_insert', 'crm_activities_scope_update', 'crm_activities_scope_delete',
+      ]
+      const exactPolicies = async () => (await db.query(`SELECT p.oid::text,p.polname,p.polcmd,p.polpermissive,p.polroles::text,
+        c.relrowsecurity,c.relforcerowsecurity,pg_get_expr(p.polqual,p.polrelid) AS qual,pg_get_expr(p.polwithcheck,p.polrelid) AS check
+        FROM pg_policy p JOIN pg_class c ON c.oid=p.polrelid WHERE p.polname=ANY($1::text[]) ORDER BY p.polname`,[repairedPolicies])).rows
+      const beforePolicies = await exactPolicies()
+      assert.equal(beforePolicies.length, repairedPolicies.length)
+      const beforeOrdinary = await finalUpgradeState(ordinaryRoutines)
+      await t.test('refuses changed ordinary-routine policy or registered dependencies without partial rebind', async () => {
+        await rejectsFinalUpgrade(triggerRepair, ordinaryRoutines,
+          'ALTER POLICY workspace_groups_directory ON public.workspace_groups TO app_user', /legacy_ordinary_acl_policy_changed/)
+        await rejectsFinalUpgrade(triggerRepair, ordinaryRoutines,
+          'ALTER TABLE public.workspace_groups FORCE ROW LEVEL SECURITY', /legacy_ordinary_acl_policy_changed/)
+        await rejectsFinalUpgrade(triggerRepair, ordinaryRoutines,
+          'CREATE VIEW public.unreviewed_directory AS SELECT public.can_view_department_directory(NULL::uuid,NULL::uuid)',
+          /legacy_ordinary_acl_unreviewed_inbound_dependency/)
+        await rejectsFinalUpgrade(triggerRepair, ordinaryRoutines,
+          'ALTER TABLE public.application_native_field_contracts ADD COLUMN unreviewed_proc regprocedure',
+          /legacy_ordinary_acl_registry_shape_changed/)
+        const candidateSql = toPgliteMigrationSql(await readFile(`${migrationsDir}/${triggerRepair}`,'utf8'),triggerRepair)
+        await assert.rejects(db.transaction(async tx => {
+          await tx.exec(candidateSql)
+          throw Error('ordinary-policy-rollback-control')
+        }), /ordinary-policy-rollback-control/)
+        assert.deepEqual(await finalUpgradeState(ordinaryRoutines),beforeOrdinary)
+        assert.deepEqual(await exactPolicies(),beforePolicies)
+      })
+      assert.equal(await migratePglite(db, migrationsDir, { through: triggerRepair }), 1)
+      const afterOrdinary = await finalUpgradeState(ordinaryRoutines)
+      assert.deepEqual(await exactPolicies(),beforePolicies)
+      assert.equal(afterOrdinary.routines.length,ordinaryRoutines.length)
+      for (let index = 0; index < ordinaryRoutines.length; index++) {
+        const before = beforeOrdinary.routines[index], after = afterOrdinary.routines[index]
+        assert.equal(after.signature,before.signature)
+        assert.equal(after.body,before.body)
+        assert.deepEqual({...after.metadata,oid:before.metadata.oid},before.metadata)
+        if (publicRoutines.includes(before.signature)) {
+          assert.notEqual(after.oid,before.oid)
+          assert.equal(after.acl,null)
+        } else {
+          assert.equal(after.oid,before.oid)
+          assert.deepEqual(after.acl,appRoutines.includes(before.signature)?[ownerGrant,appGrant]:[ownerGrant])
+          assert.deepEqual(after.deps,before.deps)
+        }
+      }
+      const repairedTriggers = await finalUpgradeState(triggerMembers)
+      assert.deepEqual(repairedTriggers.routines.map(row => ({ ...row, acl: row.acl.slice().sort() })),
+        legacyTriggers.routines.map(row => ({ ...row, acl: [ownerGrant, publicGrant].sort() })))
+      assert.deepEqual(repairedTriggers.defaults, legacyTriggers.defaults)
       await migratePglite(db, migrationsDir)
+      await t.test('records the interstitial migration on a canonical 8314 ledger without changing the functions', async () => {
+        const canonical = await finalUpgradeState([...triggerMembers,...ordinaryRoutines])
+        const canonicalPolicies = await exactPolicies()
+        await rejectsFinalUpgrade(triggerRepair, triggerMembers,
+          `GRANT EXECUTE ON FUNCTION ${triggerMembers.map(signature => 'public.' + signature).join(', ')} TO app_user`,
+          /conversation_trigger_acl_unverified_historical_profile/)
+        await db.query('DELETE FROM _migrations WHERE name=$1', [triggerRepair])
+        assert.equal(await migratePglite(db, migrationsDir), 1)
+        assert.deepEqual(await finalUpgradeState([...triggerMembers,...ordinaryRoutines]), canonical)
+        assert.deepEqual(await exactPolicies(),canonicalPolicies)
+      })
       await noWriteTitleRepair()
       assert.equal(await migratePglite(db, migrationsDir), 0)
       assert.deepEqual((await db.query(`SELECT

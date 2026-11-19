@@ -1000,7 +1000,10 @@ export async function supersedeWorkspaceFile(
       assertExecutionResourceScope({ ...sourceScope, ...after }, 'mutation', access)
     }
 
-    const inserted = await client.query<FileRow>(
+    // RETURNING would evaluate the retained ancestry SELECT policy before
+    // the successor is visible to its source lookup. Insert under RLS, then
+    // project the stored row through the same role once any binding is in place.
+    const inserted = await client.query(
       `INSERT INTO workspace_files (
          id, workspace_id, path, parent_path, name, title, summary,
          mime, size_bytes, tags, related_ids, storage_uri,
@@ -1018,8 +1021,7 @@ export async function supersedeWorkspaceFile(
          $21::text[], $22::uuid[]
        WHERE EXISTS (SELECT 1 FROM workspace_members WHERE workspace_id=$2 AND user_id=$19)
          AND (effective_member_team_compartments($19,$2) IS NULL
-           OR $21::text[] <@ effective_member_team_compartments($19,$2))
-       RETURNING ${FULL_SELECT}`,
+           OR $21::text[] <@ effective_member_team_compartments($19,$2))`,
       [
         newId,
         workspaceId,
@@ -1046,11 +1048,16 @@ export async function supersedeWorkspaceFile(
       ],
     )
 
-    if (!inserted.rows[0]) throw Object.assign(new Error('The operation exceeds current department access.'), { code: 'scope_operation_denied' })
+    if (inserted.rowCount !== 1) throw Object.assign(new Error('The operation exceeds current department access.'), { code: 'scope_operation_denied' })
     if (sessionBinding) await client.query(`INSERT INTO workspace_file_session_bindings(file_id,artifact_id,workspace_id,owner_user_id,snapshot,bound_scope)
       VALUES($1,$2,$3,$4,$5,$6::jsonb)`,[newId,sessionBinding.artifactId,workspaceId,userId,sessionBinding.snapshot,JSON.stringify(after)])
+    const { rows: [successor] } = await client.query<FileRow>(
+      `SELECT ${FULL_SELECT} FROM workspace_files WHERE workspace_id = $1 AND id = $2`,
+      [workspaceId, newId],
+    )
+    if (!successor) throw Object.assign(new Error('The operation exceeds current department access.'), { code: 'scope_operation_denied' })
     await client.query('COMMIT')
-    return toRecord(inserted.rows[0])
+    return toRecord(successor)
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
     throw err
