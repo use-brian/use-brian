@@ -3,8 +3,7 @@ import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-export const crmPredecessor = '8318_committed_room_record_evidence.sql'
-export const crmMigrationPins = {
+const crmMigrationPins = {
   '8319_crm_summary_policy_facts.sql': '921efbf857facc7957429d856e44accc096684142199399f58e7e337838f344f',
   '8320_crm_summary_entity_publications.sql': '22a5eb2038bef23910066fd8bb18da005d9965d5974bc7c1ff4ace163116f213',
   '8321_crm_summary_principal_basis.sql': '0ea175e0c9bd1374d1a7957973e1e86cc1550f435c0e803e112cf43722e84030',
@@ -101,7 +100,7 @@ SELECT jsonb_build_object(
  'triggers',(SELECT jsonb_agg(to_jsonb(t) ORDER BY t.relation COLLATE "C",t.name COLLATE "C") FROM triggers t)
 )::text AS catalog;`
 
-export async function readReviewedCrmCatalog(owner, scope) {
+async function readReviewedCrmCatalog(owner, scope) {
   const value = (await owner.query(CATALOG, [scope.functions,scope.tables,scope.types,scope.triggers])).rows[0]?.catalog
   if (typeof value !== 'string') throw Error('crm_installation_catalog_unavailable')
   const valueJson = JSON.parse(value)
