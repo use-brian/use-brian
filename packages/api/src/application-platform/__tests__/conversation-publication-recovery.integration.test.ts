@@ -19,19 +19,19 @@ await assertLocalFixture()
 const secret='fictional-durable-publication-secret',worker=fileURLToPath(new URL('./fixtures/conversation-publication-worker.ts',import.meta.url))
 const require=createRequire(import.meta.url)
 type ResponseEvent={event:'response';pid:number;status:number;body:unknown;discoveries:number;modelCalls:number;toolCalls:number;providerSends:number;sawPriorReply:boolean;providerAborted:boolean;lifecycle:Array<{kind:string;sessionId:string;payload:Record<string,unknown>}>;statusBody?:Record<string,unknown>;submittedPublication?:unknown[]}
-async function child(command:object,directory:string,kill=false,beforeLock?:()=>Promise<void>,beforeCommit?:()=>Promise<void>):Promise<ResponseEvent|{event:'publication_committed';pid:number}>{
+async function child(command:object,directory:string,kill=false,beforeLock?:()=>Promise<void>,beforeCommit?:(backendPid:number)=>Promise<void>):Promise<ResponseEvent|{event:'publication_committed';pid:number}>{
  const path=join(directory,`${randomUUID()}.json`);await writeFile(path,JSON.stringify(command),{mode:0o600})
  return new Promise((resolve,reject)=>{
   const process:ChildProcess=fork(worker,[path],{execArgv:['--import',require.resolve('tsx')],stdio:['ignore','pipe','pipe','ipc']})
   let output='',event:ResponseEvent|{event:'publication_committed';pid:number}|undefined
   const timeout=setTimeout(()=>{process.kill('SIGKILL');reject(new Error(`Publication worker timed out: ${output.slice(-3000)}`))},60_000)
   process.stdout?.on('data',chunk=>{output+=chunk});process.stderr?.on('data',chunk=>{output+=chunk})
-  process.on('message',(message:ResponseEvent|{event:string;pid:number;message?:string})=>{
+  process.on('message',(message:ResponseEvent|{event:string;pid:number;backendPid?:number;message?:string})=>{
    if(message.event==='before_publication_lock'){
     void(async()=>{if(!beforeLock)throw new Error('Unexpected publication pause');await beforeLock();process.send?.({kind:'continue'})})().catch(error=>{process.kill('SIGKILL');reject(error)});return
    }
    if(message.event==='before_publication_commit'){
-    void(async()=>{if(!beforeCommit)throw new Error('Unexpected commit pause');await beforeCommit();process.send?.({kind:'continue'})})().catch(error=>{process.kill('SIGKILL');reject(error)});return
+    void(async()=>{const backendPid=(message as {backendPid?:number}).backendPid;if(!beforeCommit||!backendPid)throw new Error('Publication pause needs the actual server backend PID');await beforeCommit(backendPid);process.send?.({kind:'continue'})})().catch(error=>{process.kill('SIGKILL');reject(error)});return
    }
    if(message.event==='publication_committed'&&kill){event=message as {event:'publication_committed';pid:number};process.kill('SIGKILL')}
    else if(message.event==='response')event=message as ResponseEvent
@@ -156,25 +156,55 @@ describe.sequential('[COMP:api/native-turn-frame] authenticated durable buffered
    const device=(await authSessionStore.create(f.ownerId,{deviceLabel:'Fictional lock-wait browser',userAgent:null,ipAddress:null}))!
    const token=createTokens(f.ownerId,secret,device).accessToken,base={workspaceId:f.workspaceId,sessionId:f.session.id,assistantId:f.assistantId,token,secret,counter}
    let originalId:string|undefined
-   await child({...base,mode:'kill_wait_after_commit'},directory,true,async()=>{
+   const publication=await child({...base,mode:'kill_wait_after_commit'},directory,true,async()=>{
     originalId=(await f.pool.query('SELECT native_session_public_turn_id(workspace_id,id,last_turn_lease_token) id FROM sessions WHERE id=$1',[f.session.id])).rows[0].id
-    await f.pool.query("UPDATE sessions SET turn_heartbeat_at=clock_timestamp()-interval '3 minutes' WHERE id=$1",[f.session.id])
-   },async()=>{
-    recovering=child({...base,mode:'recover_sweep'},directory)
-    let blocked=false
+   },async(publisherBackendPid)=>{
+    // The publisher has already passed live source/lease admission. Give the
+    // genuine competing sweeper a fixture-only short staleness threshold
+    // so it can wait on this exact in-flight publisher without expiring its
+    // heartbeat before admission or changing the production threshold.
+    recovering=child({...base,mode:'recover_sweep',staleAfterMs:1},directory)
+    recovering.catch(()=>{})
+    let waiter:{pid:number;blockedBy:number[]}|undefined
     for(let i=0;i<200;i++){
-     blocked=(await f.pool.query("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE '%native_session_turn_transition%') blocked")).rows[0].blocked
-     if(blocked)break
+     waiter=(await f.pool.query<{pid:number;blockedBy:number[]}>(`SELECT pid,pg_blocking_pids(pid) AS "blockedBy" FROM pg_stat_activity
+      WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock'
+      AND query LIKE '%native_session_turn_transition%' AND $1=ANY(pg_blocking_pids(pid))`,[publisherBackendPid])).rows[0]
+     if(waiter)break
      await new Promise(resolve=>setTimeout(resolve,25))
     }
-    expect(blocked).toBe(true)
+    expect(waiter?.blockedBy).toContain(publisherBackendPid)
+    console.info('publication-recovery-lock',JSON.stringify({publisherBackendPid,waiter}))
+    await new Promise(resolve=>setTimeout(resolve,80))
    })
+   expect(publication.event).toBe('publication_committed')
+   expect(recovering).toBeDefined()
    const recovered=await recovering! as ResponseEvent
+   expect(recovered.status).toBe(200)
+   expect(JSON.stringify(recovered.body)).toContain('Fictional durable tool answer')
    expect(recovered.statusBody).toMatchObject({status:'idle',turnId:originalId,turnEndReason:'publication_recovered'})
    expect(recovered.lifecycle).toContainEqual({kind:'turn_completed',sessionId:f.session.id,payload:{senderUserId:null,turnId:originalId,reason:'publication_recovered'}})
    expect(recovered.modelCalls).toBe(0);expect(recovered.toolCalls).toBe(0)
    expect((await f.pool.query(`SELECT calls FROM ${counter}`)).rows[0].calls).toBe(1)
   }finally{if(recovering)await recovering.catch(()=>{});await f.pool.query(`DROP TABLE IF EXISTS ${counter}`);await f.cleanup();await rm(directory,{recursive:true,force:true})}
+ },120000)
+ it('refuses an expired original heartbeat before native publication admission',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'brian-expired-publication-')),f=await persistentContextFixture('confidential'),counter=`publication_counter_${randomUUID().replaceAll('-','')}`
+  try{
+   await f.pool.query(`CREATE TABLE ${counter}(calls integer NOT NULL);INSERT INTO ${counter} VALUES(0)`)
+   await f.pool.query("UPDATE workspaces SET plan='pro' WHERE id=$1",[f.workspaceId])
+   const device=(await authSessionStore.create(f.ownerId,{deviceLabel:'Fictional expired-publication browser',userAgent:null,ipAddress:null}))!
+   const token=createTokens(f.ownerId,secret,device).accessToken
+   const outcome=await child({mode:'kill_wait_after_commit',workspaceId:f.workspaceId,sessionId:f.session.id,assistantId:f.assistantId,token,secret,counter},directory,true,async()=>{
+    await f.pool.query("UPDATE sessions SET turn_heartbeat_at=clock_timestamp()-interval '3 minutes' WHERE id=$1",[f.session.id])
+   })
+   expect(outcome.event).toBe('response')
+   const refused=outcome as ResponseEvent
+   expect(refused.status).toBe(200)
+   expect(refused.body).toContain('"code":"delivery_audience_unverified"')
+   expect(refused.body).not.toContain('event: done')
+   expect((await f.pool.query('SELECT count(*)::int AS count FROM native_conversation_publications WHERE session_id=$1',[f.session.id])).rows[0].count).toBe(0)
+  }finally{await f.pool.query(`DROP TABLE IF EXISTS ${counter}`);await f.cleanup();await rm(directory,{recursive:true,force:true})}
  },120000)
  it.each([false,true])('fences an explicit-null HTTP Stop against a legacy owner successor: %s',async successor=>{
   const directory=await mkdtemp(join(tmpdir(),'brian-terminal-null-stop-')),f=await persistentContextFixture('confidential'),counter=`publication_counter_${randomUUID().replaceAll('-','')}`

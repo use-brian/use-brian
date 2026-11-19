@@ -518,6 +518,7 @@ export async function createTurnAuthority(params: TurnAuthorityParams): Promise<
  */
 export type FamilySelection<F extends ProviderFamily = ProviderFamily> = {
   family: F
+  sourceKey?: string
   instances: unknown
   toolNames?: readonly string[]
 }
@@ -531,9 +532,8 @@ export type ProviderRegistry = Readonly<Partial<Record<ProviderFamily, ProviderM
 
 export type Activation = {
   /**
-   * Activate the selected families. One promise per family per turn: a later
-   * selection of an already activated family reuses its result (the first
-   * selection's instances win). Tools come back in selection order.
+   * Memoize each selected native family or dynamic source for the turn.
+   * A previously loaded full family can serve a selected source.
    */
   activate(selection: ActivationSelection): Promise<Tool[]>
   /** As `activate`, also returning the descriptor records the activated families produced. */
@@ -554,10 +554,12 @@ export function createActivation(params: {
   providers: ProviderRegistry
 }): Activation {
   const { ctx, authority, providers } = params
-  const memo = new Map<ProviderFamily, Promise<ActivationOutcome>>()
+  const memo = new Map<string, Promise<ActivationOutcome>>()
+  const activatedFamilies = new Set<ProviderFamily>()
 
-  function activateFamily(family: ProviderFamily, instances: unknown): Promise<ActivationOutcome> {
-    const memoized = memo.get(family)
+  function activateFamily({ family, sourceKey, instances }: FamilySelection): Promise<ActivationOutcome> {
+    const key = sourceKey ?? family
+    const memoized = memo.get(key) ?? memo.get(family)
     if (memoized) return memoized
     const provider = providers[family] as ProviderModule<unknown> | undefined
     const pending = (async () => {
@@ -574,13 +576,14 @@ export function createActivation(params: {
       await authority.assertActivationCurrent()
       return { tools: wrapped, records, ...(sourceTools ? { sourceTools } : {}) }
     })()
-    memo.set(family, pending)
+    memo.set(key, pending)
+    activatedFamilies.add(family)
     return pending
   }
 
   async function activateWithRecords(selection: ActivationSelection): Promise<ActivationOutcome> {
     const results = await Promise.all(selection.families.map(async (entry) => {
-      const outcome = await activateFamily(entry.family, entry.instances)
+      const outcome = await activateFamily(entry)
       if (!entry.toolNames) return outcome
       const named = new Set(entry.toolNames)
       return { ...outcome, tools: outcome.tools.filter((tool) => named.has(tool.name)) }
@@ -595,6 +598,6 @@ export function createActivation(params: {
       return (await activateWithRecords(selection)).tools
     },
     activateWithRecords,
-    activatedFamilies: () => [...memo.keys()],
+    activatedFamilies: () => [...activatedFamilies],
   }
 }

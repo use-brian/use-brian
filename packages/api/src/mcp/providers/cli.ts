@@ -50,6 +50,7 @@ export async function discoverCliSources(
   options: {
     /** The catalog plan's lifecycle; the shared one otherwise. */
     descriptorLifecycle?: DescriptorLifecycle
+    refreshDescriptors?: boolean
     /** Receives every record this call discovered or found unavailable. */
     records?: DescriptorRecord[]
   } = {},
@@ -86,7 +87,7 @@ export async function discoverCliSources(
           bindingKey: dynamicSourceBindingKey({ url: null, updatedAt: inst.updatedAt, config: inst.config }, actorId) }
         const cached = lifecycle.read(ref)
         let server: McpServerConfig
-        if (cached.availability === 'fresh') {
+        if (cached.availability === 'fresh' && !options.refreshDescriptors) {
           server = { name: inst.name, url: '', tools: cached.tools.map((tool) => ({ name: tool.name, description: tool.description,
             inputSchema: tool.inputSchema.kind === 'json-schema' ? tool.inputSchema.schema : { type: 'object' } })) }
         } else {
@@ -124,7 +125,7 @@ export async function discoverCliSources(
           name: server.tools[index]?.name ?? tool.name,
         }))
 
-        return { label: inst.name, tools: searchableTools }
+        return { id: inst.id, label: inst.name, tools: searchableTools }
       }),
     )
 
@@ -132,7 +133,8 @@ export async function discoverCliSources(
       if (result.status === 'fulfilled' && result.value) {
         cliLocalSources.push({
           kind: 'local',
-          serverName: result.value.label,
+          serverName: `connector:${result.value.id}`,
+          label: result.value.label,
           tools: result.value.tools,
         })
         console.debug(`[mcp-inject] CLI ${result.value.label}: ${result.value.tools.length} tools`)
@@ -146,20 +148,20 @@ export async function discoverCliSources(
 }
 
 /** CLI family input: admitted instances plus the lifecycle to record into. */
-export type CliInstances = CliInstance[] | { instances: CliInstance[]; descriptorLifecycle?: DescriptorLifecycle }
+export type CliInstances = CliInstance[] | { instances: CliInstance[]; descriptorLifecycle?: DescriptorLifecycle; refreshDescriptors?: boolean }
 
 export const cliProvider: ProviderModule<CliInstances> = {
   family: 'cli',
   describe: () => [],
   async activate(ctx, input) {
-    const { instances, descriptorLifecycle } = Array.isArray(input) ? { instances: input, descriptorLifecycle: undefined } : input
+    const { instances, descriptorLifecycle, refreshDescriptors } = Array.isArray(input) ? { instances: input } : input
     const records: DescriptorRecord[] = []
-    const sources = await discoverCliSources(ctx, instances, { descriptorLifecycle, records })
+    const sources = await discoverCliSources(ctx, instances, { descriptorLifecycle, refreshDescriptors, records })
     if (sources.length === 0) return { tools: [], records }
     // Direct adapters under canonical and legacy names, dispatched through the
     // wrapped local tool (policy under the instance's principal stays intact).
-    const tools = createMcpSearchTools({
-      index: buildToolIndex(sources),
+    const adapters = (selected: typeof sources) => createMcpSearchTools({
+      index: buildToolIndex(selected),
       settingsStore: ctx.stores.settingsStore,
       assistantId: ctx.assistantId,
       appLevelAssistantId: APP_LEVEL_ASSISTANT_ID,
@@ -167,6 +169,7 @@ export const cliProvider: ProviderModule<CliInstances> = {
       hooks: ctx.hosted.engineHooks,
       keepDynamicToolsDirect: true,
     }).filter((tool) => tool.name !== 'mcp_search' && tool.name !== 'mcp_call')
-    return { tools, records }
+    return { tools: adapters(sources), records,
+      sourceTools: Object.fromEntries(sources.map(source => [source.serverName, adapters([source])])) }
   },
 }

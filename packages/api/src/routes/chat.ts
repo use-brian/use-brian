@@ -130,7 +130,6 @@ import { recordRoomMentionsForMessage, type RecordRoomMentionsResult } from '../
 import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { resolveMentionSpans } from '@use-brian/shared/mention-matching'
 import { recordOverheadUsage } from './_overhead-usage.js'
-import { composeRecoveryMessage } from './_recovery-message.js'
 import { composeEmptyTurnSynthesis } from './_empty-turn-synthesis.js'
 import { resolveReplyText } from './_reply-context.js'
 import { resolveBrandContext } from '../brand/prompt-context.js'
@@ -174,7 +173,7 @@ import type { CacheStore } from '@use-brian/agent-runtime/compaction/cache-tool.
 import type { EngineHooks } from '@use-brian/agent-runtime/engine/hooks.js'
 import type { McpSettingsStore, ConfirmationDecision, ConfirmationResolver } from '@use-brian/agent-runtime/mcp/types.js'
 import type { Message, LLMProvider, ContentBlock, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
-import type { Tool, WorkerResult } from '@use-brian/agent-runtime/tools/types.js'
+import type { ConnectorResumeTarget, Tool, WorkerResult } from '@use-brian/agent-runtime/tools/types.js'
 
 import { resolveModel, ensureServableModel, backgroundModelFor, isStandardTier, chatTierBudget, planNudgeCap, tierForModel, isExplicitMeteredModelSelection } from '../model-resolution.js'
 import { isRegistryModelAvailable, registryRow } from '@use-brian/shared/model-registry'
@@ -1819,6 +1818,7 @@ export type ResumeReplayParams = {
   suspendedToolName: string
   /** Model-proposed arguments at suspension. The approval gates THIS input. */
   suspendedToolInput: unknown
+  connectorTarget?: ConnectorResumeTarget
   /** Resume worker position marker — useful for analytics + assertions. */
   loopStepIndex: number
   selectedCustomModel?: string
@@ -1943,6 +1943,7 @@ export async function runSessionResume(
       approvalId,
       suspendedToolName: point.suspendedToolName,
       suspendedToolInput: point.suspendedToolInput,
+      ...(point.connectorTarget ? { connectorTarget: point.connectorTarget } : {}),
       loopStepIndex: point.loopStepIndex,
       ...(point.selectedCustomModel ? { selectedCustomModel: point.selectedCustomModel } : {}),
       ...(point.selectedTier ? { selectedTier: point.selectedTier } : {}),
@@ -7503,6 +7504,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
                   approvalId: event.approvalId,
                   suspendedToolName: event.toolName,
                   suspendedToolInput: event.toolInput,
+                  connectorTarget: event.connectorTarget,
                   selectedCustomModel: customLlmRuntime?.selector,
                   selectedTier: logicalTier,
                   selectedLegacyByo: usedLegacyByoKey,
@@ -8568,13 +8570,16 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         // mode after tool calls). Best-effort; if Flash hiccups we
         // fall through to the outer catch's generic `error` event.
         try {
-          const recovered = !queryLoopError && !abortController.signal.aborted && !recoveryDelivered
-            ? await authority.execute(() => composeRecoveryMessage({
-                provider: backgroundProvider,
-                pendingAssistantTurns,
-                userText: userMessageText,
-                channelType: 'web',
-              })) : null
+          const recovered = !queryLoopError && !recoveryDelivered
+            ? await ownedTurn.recoverInteractiveReply({
+                reason: 'failed', pendingAssistantTurns, userText: userMessageText, channelType: 'web',
+                authorizeDestination: assertDeliveryAudience,
+                recordUsage: ({ model, usage }) => recordOverheadUsage({
+                  usageStore: options.usageStore, userId: user.id, assistantId: assistant.id,
+                  sessionId: session.id, userMessageId: storedUserMsg.id, model, usage,
+                  source: 'overhead:recovery-message', ...backgroundUsageAttribution,
+                }),
+              }) : null
           if (recovered) {
             await assertDeliveryAudience()
             sendEvent('text_delta', { text: recovered.text })
@@ -8590,17 +8595,6 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
               // Same attribution contract as the empty-turn synthesis above.
               senderAssistantId: assistant.id,
             }] })
-            await recordOverheadUsage({
-              usageStore: options.usageStore,
-              userId: user.id,
-              assistantId: assistant.id,
-              sessionId: session.id,
-              userMessageId: storedUserMsg.id,
-              model: recovered.model,
-              usage: recovered.usage,
-              source: 'overhead:recovery-message',
-              ...backgroundUsageAttribution,
-            })
             recoveryDelivered = true
           }
         } catch (recoverErr) {

@@ -36,7 +36,7 @@ export async function reviewedRowTransitions(options) {
   return { previous, installed, authentication }
 }
 
-export async function buildRowTransitionsMigration(options) {
+async function buildRowTransitionsMigration(options) {
   const { previous, installed } = await reviewedRowTransitions(options)
   return `-- [COMP:api/conversation-visibility] Keep native row transitions and retained evidence distinct.
 BEGIN;

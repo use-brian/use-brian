@@ -57,6 +57,7 @@ async function injectAgentmail(over: {
   handled?: string[]
   getGrant?: ReturnType<typeof vi.fn>
   audit?: ConnectorActionAudit
+  folded?: boolean
 } = {}) {
   const provider = providerStub()
   const tools = new Map<string, Tool>()
@@ -79,11 +80,10 @@ async function injectAgentmail(over: {
     settingsStore: settingsStoreStub() as never,
     connectorInstanceStore: connectorInstanceStore as never,
     assistantConnectorGrantsStore: { getForAssistantSystem } as never,
-    // Assistant Email is not catalogued; its grants are checked at build and execute time only.
-    actionGrantReader: null,
+    actionGrantReader: async () => [{ connectorId: 'agentmail:inbox-primary', allowedActions: ['agentmailSendMessage'] }],
     emailInboxProvider: provider as never,
     ...(over.audit ? { connectorActionAudit: over.audit } : {}),
-    keepBuiltinsDirect: true,
+    keepBuiltinsDirect: !over.folded,
   })
 
   return { tools, provider, result, getForAssistantSystem }
@@ -108,6 +108,27 @@ beforeEach(() => {
 })
 
 describe('[COMP:tools/agentmail] Channel-owned mailbox injection', () => {
+  it('keeps hosted Assistant Email dormant on folded preparation and activates the selected read', async () => {
+    const { tools, provider, getForAssistantSystem } = await injectAgentmail({ folded: true })
+    expect(listHandledInstances).toHaveBeenCalledOnce()
+    expect(getForAssistantSystem).not.toHaveBeenCalled()
+    expect(provider.listThreads).not.toHaveBeenCalled()
+    const search = await tools.get('mcp_search')!.execute({ query: 'search assistant inbox threads' }, {} as never)
+    expect(String(search.data)).toContain('agentmailSearchThreads')
+    expect(getForAssistantSystem).not.toHaveBeenCalled()
+    const args = { server: 'agentmail', tool: 'agentmailSearchThreads', args: {} }
+    const result = await tools.get('mcp_call')!.execute(args, {} as never)
+    expect(result.isError).toBeFalsy()
+    expect(JSON.stringify(result.data)).toContain('thread-1')
+    expect(getForAssistantSystem).toHaveBeenCalledOnce()
+    expect(provider.listThreads).toHaveBeenCalledOnce()
+
+    listHandledInstances.mockResolvedValue(['inbox-ops'])
+    const afterReassignment = await tools.get('mcp_call')!.execute(args, {} as never)
+    expect(afterReassignment.isError).toBe(true)
+    expect(provider.listThreads).toHaveBeenCalledOnce()
+  })
+
   it('exposes only handled inboxes and only exact-granted outbound actions', async () => {
     const { tools, provider, getForAssistantSystem } = await injectAgentmail()
 

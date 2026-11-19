@@ -67,7 +67,6 @@ import {
   matchesDisputedFigure,
   buildDisputeContextNote,
 } from '@use-brian/agent-runtime/engine/grounding-gate.js'
-import { createTurnOutputCollector } from '@use-brian/agent-runtime/engine/turn-output.js'
 import { createConfirmationResolver } from '@use-brian/agent-runtime/mcp/types.js'
 import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
 import { pinAccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
@@ -102,7 +101,6 @@ import {
   acceptedGoalIdsFromToolResults,
   GOAL_ACCEPTED_CHANNEL_MESSAGE,
 } from '../goals/acknowledgement.js'
-import { composeRecoveryMessage } from './_recovery-message.js'
 import {
   CONTEXT_NOT_AVAILABLE_MESSAGE,
   CUSTOM_MODEL_ENDPOINT_FALLBACK_NOTICE,
@@ -2691,7 +2689,16 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
   // ── Tool-pairing buffer ──
   type PendingTurn = { content: ContentBlock[]; toolResults: ContentBlock[] }
   const pendingAssistantTurns: PendingTurn[] = []
-  const turnOutput = createTurnOutputCollector({ format: 'channel' })
+  const recoverMessage = (reason: 'failed' | 'empty') => turnOwner.recoverInteractiveReply({
+    reason, pendingAssistantTurns, userText: messageText, channelType,
+    authorizeDestination: assertDeliveryAudience,
+    recordUsage: ({ model, usage }) => recordOverheadUsage({
+      usageStore, userId: billingUserId, actorUserId: userId, assistantId: assistant.id,
+      sessionId: session.id, userMessageId: userMessageRow.id, model, usage,
+      source: 'overhead:recovery-message', triggerKey: 'recovery_message', ...backgroundUsageAttribution,
+    }),
+  })
+
   let flushed = false
   // Track the most-recently-flushed assistant `session_messages` row id
   // so a `sendResponse` returning a channel-native message id (Slack
@@ -3054,7 +3061,6 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
         }
       }, onEvent: async (event) => {
       if (!nativeTranscriptAuthority) await assertDeliveryAudience()
-      turnOutput.observe(event)
       researchObserver?.observe(event)
       switch (event.type) {
         case 'question':
@@ -3244,7 +3250,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
           // so the raw tag would leak into the message body. Web parses
           // it client-side and renders chips. See
           // docs/architecture/features/follow-up-questions.md.
-          const selectedOutput = turnOutput.select()
+          const selectedOutput = turnOwner.selectedOutput('channel')
           terminalQuestion = selectedOutput.kind === 'question'
             ? {
                 question: selectedOutput.question.question,
@@ -3299,42 +3305,8 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
                 model: sanitizeAnalytics(analyticsModel),
               },
             })
-            // `tools_only` is the one reason where "try again" is the wrong
-            // advice: a tool may already have shipped a side effect, so the
-            // user needs to CHECK, not resend. That is exactly what
-            // `composeRecoveryMessage` exists for on the catch path, and it
-            // matches the user's language while it is at it. It returns null
-            // when no tool actually succeeded (nothing to describe, and a
-            // retry is safe after all) and on any synthesis failure, both of
-            // which fall through to the fixed notice. It runs on the
-            // background provider on purpose: the endpoint that just produced
-            // nothing must not also decide whether the user hears about it.
-            // Never synthesize for a destination that is no longer authorized:
-            // a refusal here unwinds to the live-authority exit below.
-            if (emptyReason === 'tools_only') await assertDeliveryAudience()
-            const recovered = emptyReason === 'tools_only'
-              ? await composeRecoveryMessage({
-                  provider: backgroundProvider,
-                  pendingAssistantTurns,
-                  userText: messageText,
-                  channelType,
-                })
-              : null
-            if (recovered) {
-              await recordOverheadUsage({
-                usageStore,
-                userId: billingUserId,
-                actorUserId: userId,
-                assistantId: assistant.id,
-                sessionId: session.id,
-                userMessageId: userMessageRow.id,
-                model: recovered.model,
-                usage: recovered.usage,
-                source: 'overhead:recovery-message',
-                triggerKey: 'recovery_message',
-                ...backgroundUsageAttribution,
-              })
-            }
+            // The owner runs recovery only for admitted tool-only output.
+            const recovered = await recoverMessage('empty')
             // Not persisted as an assistant row. `flushBufferedTurns` has
             // already run and skips zero-content turns, so there is nothing to
             // append this to, and the catch path's recovery message has the
@@ -3347,7 +3319,6 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
               documents.length > 0 ? documents : undefined,
             )
           }
-          turnOutput.advanceDelivery()
           terminalQuestion = undefined
 
           // ── Cost tracking + analytics ──
@@ -3522,29 +3493,8 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     // original instruction and duplicate side effects (e.g. two
     // calendar updates, two Threads replies). Falls back to the
     // generic `hooks.sendError` when no tools ran or Flash hiccups.
-    const recovered = await composeRecoveryMessage({
-      provider: backgroundProvider,
-      pendingAssistantTurns,
-      userText: messageText,
-      channelType,
-    })
+    const recovered = await recoverMessage('failed')
     if (recovered) {
-      // Cost attribution for the Flash call. The synthesiser is paid
-      // for by the billing party (same as every other overhead row),
-      // not by whichever channel user happened to trigger the bail.
-      await recordOverheadUsage({
-        usageStore,
-        userId: billingUserId,
-        actorUserId: userId,
-        assistantId: assistant.id,
-        sessionId: session.id,
-        userMessageId: userMessageRow.id,
-        model: recovered.model,
-        usage: recovered.usage,
-        source: 'overhead:recovery-message',
-        triggerKey: 'recovery_message',
-        ...backgroundUsageAttribution,
-      })
       // Surface the recovery text via the same channel-native path the
       // normal turn would have used. Kept on `sendResponse` rather than
       // `sendError` so the message renders as the assistant speaking

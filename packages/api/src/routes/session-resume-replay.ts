@@ -29,11 +29,9 @@ import { withTurnInference } from '../turn/runtime.js'
 import { renderCharterBlock, resolveCharter } from '@use-brian/shared'
 import { openAssistantTurn, openTurnSqlScope, turnUsageIdentity, type TurnSqlScope } from '../turn/kernel.js'
 import { resolveTurnBilling } from '../turn/billing.js'
-import { TURN_SLOT_WAIT_TIMEOUT_MS, waitForTurnSlot, type TurnSlotWait } from '../turn/lease.js'
-import { readResumePredecessorLease } from '../db/session-resume-store.js'
+import type { ResumeSlotWaitOptions } from '../turn/resume-recovery.js'
 import type { ResumeCapabilityParams } from '../turn/capabilities.js'
 import { createTurnLedger } from '../ledger/recorder.js'
-import { committedTurnCompletion } from '../db/conversation-publication-recovery.js'
 import { noopPublishSessionEvent, type PublishSessionEvent } from '../session-event-port.js'
 import { createTurnStreamPublisher, publishTurnCompleted } from '../session-live-publisher.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
@@ -67,10 +65,7 @@ import { classifySession, normalizeSessionVisibility, policyFor, sessionAuthorit
 import {
   findSessionById,
   addSessionMessage,
-  reclaimStaleTurnOutcome,
   toStampedMessages,
-  TURN_LEASE_STALE_AFTER_MS,
-  type RecoveredTurn,
   type Session,
 } from '../db/sessions.js'
 import {
@@ -115,7 +110,7 @@ export type SessionResumeReplayDeps = {
    * candidates are the boot registry only, still bound by the same owner.
    */
   capabilityStores?: Omit<ResumeCapabilityParams, 'userId' | 'assistantId' | 'tools' | 'executionContext' | 'scopeAccumulator'
-    | 'contextScope' | 'assistantTeamId' | 'suspendedToolName'>
+    | 'contextScope' | 'assistantTeamId' | 'suspendedToolName' | 'connectorTarget'>
   /** Base L1 system prompt. The assistant's L2 is appended per-session. */
   systemPrompt: string
   /** Model for the continuation turn. Defaults to `gemini-flash`. */
@@ -147,52 +142,6 @@ export type SessionResumeReplayDeps = {
    * window is `TURN_LEASE_STALE_AFTER_MS`, the bound `TURN_SLOT_WAIT_TIMEOUT_MS`.
    */
   resumeSlotWait?: ResumeSlotWaitOptions
-}
-
-export type ResumeSlotWaitOptions = { staleAfterMs?: number; pollMs?: number; timeoutMs?: number }
-
-/**
- * The resume's slot wait (askquestion-suspend-resume.md → "Resumed turn
- * execution (D9)", step 1). The suspended turn's own lease, named by this
- * session's resume point, is the resume's predecessor: while it is fresh the
- * resume waits (a live process may still hold it); once its heartbeat is stale
- * the resume reclaims it through the sweeper's fenced `reclaimStaleTurnOutcome`
- * (`stalled_reclaimed` / `publication_recovered`), announces it, and lets the
- * owner claim, without waiting for a sweep tick. A fresh lease or one the resume
- * point does not name is never reclaimed here: it keeps the ordinary
- * `waitForTurnSlot` wait and fails closed at the timeout.
- */
-export function resumePredecessorSlotWait(params: {
-  approvalId: string
-  onReclaimed: (recovered: RecoveredTurn) => void
-  options?: ResumeSlotWaitOptions
-}): TurnSlotWait {
-  return async (sessionId, opts) => {
-    // Resolved on use: a slot that is free on the first claim never waits.
-    const staleAfterMs = params.options?.staleAfterMs ?? TURN_LEASE_STALE_AFTER_MS
-    const pollMs = params.options?.pollMs ?? 2_000
-    const deadline = Date.now() + (params.options?.timeoutMs ?? TURN_SLOT_WAIT_TIMEOUT_MS)
-    for (;;) {
-      opts?.signal?.throwIfAborted()
-      const lease = await readResumePredecessorLease(sessionId, params.approvalId, staleAfterMs)
-      if (!lease || !lease.running) return true
-      if (lease.predecessorToken && lease.stale) {
-        const recovered = await reclaimStaleTurnOutcome(sessionId, staleAfterMs, lease.predecessorToken)
-        if (recovered) {
-          params.onReclaimed(recovered)
-          return true
-        }
-        continue // the lease changed under us: read it again
-      }
-      const remaining = deadline - Date.now()
-      if (remaining <= 0) return false
-      // The predecessor is re-checked every poll; any other lease waits as before.
-      const freed = await waitForTurnSlot(sessionId, { signal: opts?.signal, pollMs,
-        timeoutMs: lease.predecessorToken ? Math.min(pollMs, remaining) : remaining })
-      if (freed) return true
-      if (!lease.predecessorToken) return false
-    }
-  }
 }
 
 type AssistantRow = NonNullable<Awaited<ReturnType<typeof findAssistantById>>>
@@ -491,9 +440,7 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
       sessionId,
       policy: resumePolicy,
       abortController,
-      waitForSlot: resumePredecessorSlotWait({ approvalId: params.approvalId, options: deps.resumeSlotWait,
-        onReclaimed: recovered => publishTurnCompleted({ sessionId, senderUserId: null, publishSessionEvent,
-          turnId: recovered.turnId, reason: recovered.reason }) }),
+      resumeRecovery: { workspaceId: initialAssistant.workspaceId, approvalId: params.approvalId, options: deps.resumeSlotWait },
       assistantId: initialAssistant.id,
       // Same stale-takeover notice as web and channel: the reclaimed
       // predecessor's followers see its terminal outcome, never this turn's.
@@ -517,8 +464,7 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
       // acknowledgement or resume-point deletion was lost) is never replayed;
       // 'completed' lets the caller delete the resume point. Read after this
       // owner holds the lease, so no predecessor can still be publishing.
-      if (await committedTurnCompletion({ workspaceId: initialAssistant.workspaceId, sessionId,
-        input: { kind: 'approval', ref: params.approvalId } })) { completed = true; return 'completed' }
+      if (await owner.hasCommittedResumePublication()) { completed = true; return 'completed' }
       // A queued replay resumes the current stored destination and scope, after
       // obtaining its slot, rather than preparing against its pre-wait snapshot.
       const admittedSession = await findSessionById(sessionId)
@@ -681,12 +627,15 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
         // The roster comes from the owner's capability port (profile `resume`,
         // exactly the suspended tool), then binds through the same invocation.
         const candidates = new Map(deps.tools)
-        if (deps.capabilityStores) {
+        if (deps.capabilityStores && params.approvalStatus === 'approved' && params.approvalKind !== 'question') {
           await owner.prepareCapabilities({ profile: 'resume', composition: { kind: 'resume', params: {
             ...deps.capabilityStores, userId: session.userId, assistantId: assistant.id, tools: candidates,
             executionContext: execution, scopeAccumulator: context.scopeAccumulator as ContextScopeAccumulator,
-            assistantTeamId: assistant.workspaceId ?? null, contextScope: turnScope, suspendedToolName } } })
+            assistantTeamId: assistant.workspaceId ?? null, contextScope: turnScope, suspendedToolName,
+            connectorTarget: params.connectorTarget } } })
           await assertReplayCurrent()
+        } else if (params.connectorTarget) {
+          candidates.delete(suspendedToolName)
         }
         const scopedTools = owner.prepareTools(candidates)
         await assertReplayCurrent()

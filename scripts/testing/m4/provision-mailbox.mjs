@@ -8,9 +8,9 @@ if (!root || !workspaceId || !credentialKey || !process.send) throw new Error('F
 const { assertLocalFixture } = await import(pathToFileURL(join(root, 'scripts/crm/local-fixture.mjs')).href)
 await assertLocalFixture()
 const built = path => import(pathToFileURL(join(root, 'packages/api/dist', path)).href)
-const [{ getPool, getAppPool }, { createConnectorInstanceStore }, { insertEmailArchiveMessage, searchEmailArchive },
+const [{ getPool, getAppPool }, { createConnectorInstanceStore }, { insertEmailArchiveMessage }, { searchEmailArchive },
   { createDbAssistantConnectorStore }, { createConnectorGrantStore }] = await Promise.all([
-  built('db/client.js'), built('db/connector-instance-store.js'), built('db/email-archive-store.js'),
+  built('db/client.js'), built('db/connector-instance-store.js'), built('db/email-archive-store.js'), built('db/email-archive-search.js'),
   built('db/assistant-connector-store.js'), built('db/connector-grant-store.js'),
 ])
 try {

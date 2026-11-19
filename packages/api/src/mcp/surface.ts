@@ -51,9 +51,9 @@ import type { McpSettingsStore } from '@use-brian/agent-runtime/mcp/types.js'
 import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import type { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
-import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import type { ConnectorResumeTarget, Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTORS } from '@use-brian/shared'
-import { getGlobalEmailInboxProvider, type EmailInboxProvider } from '../agentmail/provider.js'
+import type { EmailInboxProvider } from '../agentmail/provider.js'
 import type { ConnectorSourceRuntimeFactory } from '../application-platform/source-runtime.js'
 import type { ConnectorActionAudit } from '../connector-action-port.js'
 import type { ConnectorTurnGrant } from '../context-scope/connector-exposure.js'
@@ -65,7 +65,7 @@ import {
   CapabilityActivationUnavailableError, restrictSources, surfaceProfile,
   type CapabilitySurface, type CatalogActionGrantReader, type CatalogPolicyReader, type SurfaceProfile,
 } from './catalog.js'
-import { capabilityExtraFamilies, prepareComposedCatalog, type ComposedCatalog } from './composition.js'
+import { dynamicCapabilityFamilies, prepareComposedCatalog, type ComposedCatalog } from './composition.js'
 import type { DescriptorLifecycle } from './descriptors.js'
 import type { ConfirmationEnricher } from './providers/google.js'
 import { pluckGoogleMapsTools } from './providers/google-maps.js'
@@ -260,7 +260,6 @@ export async function composeSurfaceCapabilities(surface: CapabilitySurface, opt
     settingsStore: options.settingsStore,
     hooks: options.engineHooks,
     discoveryQuery: options.discoveryQuery,
-    emailInboxProvider: options.emailInboxProvider,
     routineCalendarRead: options.routineCalendarRead,
   })
 }
@@ -271,8 +270,12 @@ export async function composeSurfaceCapabilities(surface: CapabilitySurface, opt
  * needs no activation; a tool the catalog no longer admits stays absent, so
  * the resume reports it as no longer available.
  */
-export async function composeResumeCapabilities(options: SurfaceCapabilityOptions & { suspendedToolName: string }): Promise<SurfaceCapabilities> {
-  const { suspendedToolName: name, tools } = options
+export async function composeResumeCapabilities(options: SurfaceCapabilityOptions & {
+  suspendedToolName: string
+  connectorTarget?: ConnectorResumeTarget
+}): Promise<SurfaceCapabilities> {
+  const { suspendedToolName: name, connectorTarget, tools } = options
+  if (connectorTarget) tools.delete(name)
   const composed = await prepareSurfaceCatalog('resume', { ...options, keepBuiltinsDirect: true, keepDynamicToolsDirect: true,
     introspectionTools: undefined, allowKnowledgeWrites: false })
   const { catalog, composition } = composed
@@ -282,22 +285,20 @@ export async function composeResumeCapabilities(options: SurfaceCapabilityOption
     unavailable: [...new Set([...catalog.unavailable, ...composition.activationUnavailable()])],
     searchableSources: [],
   })
-  if (!catalog.descriptors.some((descriptor) => descriptor.name === name) && tools.has(name)) return result()
-  const native = catalog.direct.descriptors.some((descriptor) => descriptor.name === name)
+  if (!connectorTarget && !catalog.descriptors.some(descriptor => descriptor.name === name) && tools.has(name)) return result()
+  const native = catalog.direct.descriptors.find(descriptor => descriptor.name === name
+    && (!connectorTarget || descriptor.serverName === connectorTarget.serverName && descriptor.version === connectorTarget.version))
   if (native) {
     for (const tool of await unavailableAsEmpty(() => catalog.activate({ toolNames: [name] }))) if (tool.name === name) tools.set(name, tool)
     return result()
   }
-  const knowledge = catalog.direct.tools.filter((tool) => tool.name === name)
+  const knowledge = !connectorTarget ? catalog.direct.tools.filter(tool => tool.name === name) : []
   if (knowledge.length > 0) {
     for (const tool of await unavailableAsEmpty(() => composition.wrapTools(catalog.plan, knowledge))) tools.set(tool.name, tool)
     return result()
   }
-  const { builtins, dynamic } = capabilityExtraFamilies(catalog.plan)
-  const families = [...builtins, ...dynamic]
-  if (families.length > 0) {
-    for (const tool of await unavailableAsEmpty(() => catalog.activate({ families }))) if (tool.name === name) tools.set(name, tool)
-  }
+  const dynamic = await catalog.resolveSuspendedDynamicTool(name, connectorTarget)
+  if (dynamic) tools.set(name, dynamic)
   return result()
 }
 
@@ -351,34 +352,23 @@ export async function applySurfaceCapabilities(tools: Map<string, Tool>, compose
   settingsStore: McpSettingsStore
   hooks?: EngineHooks
   discoveryQuery?: string
-  emailInboxProvider?: EmailInboxProvider | null
   routineCalendarRead?: boolean
 }): Promise<SurfaceCapabilities> {
   const { catalog, composition } = composed
   const { profile, plan } = catalog
   const publicSafe = (list: Tool[]) => profile.excludeConfirmationRequired
     ? list.filter((tool) => !tool.requiresConfirmation && !tool.resolveConfirmation) : list
-  const { builtins, dynamic } = capabilityExtraFamilies(plan)
-  const notices: string[] = []
-  // Assistant Email with no inbox at all: the honest assignment notice, without the routing read.
-  if (plan.assistantTeamId && builtins.length === 0 && (options.emailInboxProvider ?? getGlobalEmailInboxProvider())) {
-    notices.push('Assistant Email (this assistant does not handle an inbox) - assign an inbox to it in Studio → Channels, or create one with Add channel → Email.')
-  }
+  const dynamic = dynamicCapabilityFamilies(plan)
 
   // 1. Built-ins: direct by name, or folded behind the search pair.
   const extraSources: LocalSource[] = []
   if (profile.keepBuiltinsDirect) {
     const names = catalog.direct.descriptors.map((descriptor) => descriptor.name)
-    if (names.length > 0 || builtins.length > 0) {
-      for (const tool of await unavailableAsEmpty(() => catalog.activate({ toolNames: names, families: builtins }))) tools.set(tool.name, tool)
+    if (names.length > 0) {
+      for (const tool of await unavailableAsEmpty(() => catalog.activate({ toolNames: names }))) tools.set(tool.name, tool)
     }
     for (const tool of await unavailableAsEmpty(() => composition.wrapTools(plan, catalog.direct.tools))) tools.set(tool.name, tool)
   } else {
-    // Assistant Email is activation-routed (per-inbox channel ownership), so it is an eager source.
-    if (builtins.length > 0) {
-      const mail = publicSafe(await unavailableAsEmpty(() => catalog.activate({ families: builtins })))
-      if (mail.length > 0) extraSources.push({ kind: 'local', serverName: 'agentmail', tools: mail })
-    }
     // Deployment-keyed Maps reads come from the boot map and fold into their own source.
     const maps = publicSafe(pluckGoogleMapsTools(tools))
     if (maps.length > 0) extraSources.push({ kind: 'local', serverName: 'google-maps', tools: maps })
@@ -455,7 +445,7 @@ export async function applySurfaceCapabilities(tools: Map<string, Tool>, compose
       }
       return composition.enrichConfirmation(toolName, input)
     },
-    unavailable: [...new Set([...catalog.unavailable, ...notices, ...composition.activationUnavailable()])],
+    unavailable: [...new Set([...catalog.unavailable, ...composition.activationUnavailable()])],
     searchableSources: [...new Set(sources.map((source) => source.label ?? officialName.get(source.serverName) ?? source.serverName))],
     restrictedSearchToolNames,
     ...(catalog.knowledgeCapturePrompt ? { knowledgeCapturePrompt: catalog.knowledgeCapturePrompt } : {}),

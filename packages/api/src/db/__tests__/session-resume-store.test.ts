@@ -88,6 +88,18 @@ describe('[COMP:api/session-resume-store] create', () => {
     expect(reselect).toContain('WHERE session_id = $1')
   })
 
+  it('round-trips a frozen connector source and descriptor version separately from model arguments', async () => {
+    const connectorTarget = { serverName: 'connector:fictional', version: 'a'.repeat(64) }
+    const args = { title: 'Frozen task' }
+    mockQuery.mockImplementationOnce(async (_sql, params) => ({
+      rows: [{ ...SAMPLE_ROW, suspendedToolName: 'create_task', suspendedToolInput: JSON.parse(String(params?.[3])) }],
+      rowCount: 1,
+    }) as never)
+    const row = await store.create({ sessionId: 'sess-1', approvalId: 'app-1', suspendedToolName: 'create_task',
+      suspendedToolInput: args, connectorTarget, loopStepIndex: 3, workerRunIds: [], startingAccessCeiling: STARTING_ACCESS })
+    expect(row).toMatchObject({ connectorTarget, suspendedToolInput: args })
+  })
+
   it('stores and decodes the selected profile and logical tier in JSONB', async () => {
     const storedInput = {
       __useBrianResumeVersion: 3,

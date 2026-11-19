@@ -21,11 +21,11 @@ import { OFFICIAL_CONNECTORS } from '@use-brian/shared/connector-registry'
  * catalog-time fingerprint and activation re-checks it before and after each
  * effect. Notices are computed once by the catalog; activation-time notices
  * (expired credentials on the personal lane, protected source restrictions,
- * Assistant Email assignment) land in the turn sink.
+ * Assistant Email reassignment) land in the turn sink.
  *
  * `applyDirectCapabilities(tools, composed, options)` is the direct-surface
  * consumer (workflow `tool_call`, home apps): it activates the catalog's
- * direct descriptors by name plus the Assistant Email and dynamic families,
+ * direct descriptors by name plus the dynamic families,
  * then registers them with the injector's collision rules.
  *
  * [COMP:api/mcp-catalog]
@@ -51,6 +51,7 @@ import {
   type CapabilitySelection, type PrepareCapabilityCatalogInput,
 } from './catalog.js'
 import { createHealthReporter } from './connector-health.js'
+import { cliDescriptorSourceKey, remoteDescriptorSourceKey } from './descriptors.js'
 import { PROVIDER_MODULES } from './providers/index.js'
 import type { CliInstance } from './providers/cli.js'
 import type { GitHubLane } from './providers/github.js'
@@ -211,6 +212,8 @@ export async function prepareComposedCatalog(
     ...catalogInput,
     providers: DESCRIBED_PROVIDERS,
     activator: composition.activator,
+    ...((ports.hosted?.emailInboxProvider ?? getGlobalEmailInboxProvider())
+      ? { listAssignedAgentmailInboxIds: listAgentmailConnectorInstanceIdsForAssistantSystem } : {}),
     ...(ports.connectorSourceRuntimeFactory && !catalogInput.isProtectedSource
       ? { isProtectedSource: (row: AdmittedConnector) => row.lane !== 'personal' }
       : {}),
@@ -233,9 +236,8 @@ type SyntheticConnector = {
 
 /**
  * `instancesFor(family, plan, selection)`: each family's provider input built
- * from the plan's admitted bindings. A family always receives every admitted
- * lane (activation memoizes one promise per family per turn, so a narrower
- * first selection must not starve a later one).
+ * from the plan's admitted bindings. Native selections build their full
+ * family once. Dynamic selections can instead build one source.
  */
 export function createLaneBuilder(deps: {
   ctx: ProviderActivationContext
@@ -265,7 +267,10 @@ export function createLaneBuilder(deps: {
     driveAccessMode: instance.config?.driveAccessMode === 'full_drive_readonly' ? 'full_drive_readonly' : 'picked_files',
   })
 
-  return async (family, plan) => {
+  return async (family, plan, selection) => {
+    const selectedSource = selection.sourceKeys?.[0]
+    const hasRemoteSource = (id: string) => !selectedSource || selectedSource === remoteDescriptorSourceKey(id)
+    const hasCliSource = (id: string) => !selectedSource || selectedSource === cliDescriptorSourceKey(id)
     const userId = plan.connectorUserId
     const teamId = plan.assistantTeamId
     const teamPolicyStore = teamId && workspaceToolPolicyStore ? workspacePolicyAsSettingsStore(workspaceToolPolicyStore, teamId) : settingsStore
@@ -297,7 +302,7 @@ export function createLaneBuilder(deps: {
       case 'remote-mcp':
         return remoteMcpInstances()
       case 'cli':
-        return { instances: cliInstances(), descriptorLifecycle: plan.descriptorLifecycle }
+        return { instances: cliInstances(), descriptorLifecycle: plan.descriptorLifecycle, refreshDescriptors: plan.profile.surface === 'resume' }
       case 'agentmail':
         return agentmailLanes()
       default:
@@ -307,12 +312,12 @@ export function createLaneBuilder(deps: {
     // ── Remote MCP ──
     async function remoteMcpInstances(): Promise<RemoteMcpInstances> {
       const connected: RemoteMcpInstance[] = personalRows
-        .filter((row) => row.connected && row.url)
+        .filter((row) => row.connected && row.url && hasRemoteSource(row.id))
         .map((row) => ({ connectorId: row.connectorId, name: row.name, url: row.url!, instanceId: row.id, updatedAt: row.updatedAt,
           preflightHeaders: preflightHeadersToRecord(row.config), sendActorIdentity: row.config?.sendActorIdentity === true,
           sendMediaToken: row.config?.sendMediaToken === true, policyStore: settingsStore, policyUserId: userId, governanceId: row.connectorId }))
       for (const { row, instance } of workspaceRows) {
-        if (!instance.custom || !instance.connected || !instance.url) continue
+        if (!instance.custom || !instance.connected || !instance.url || !hasRemoteSource(instance.id)) continue
         pin(row)
         connected.push({ connectorId: instance.provider, name: instance.label, url: instance.url, instanceId: instance.id,
           updatedAt: instance.updatedAt, preflightHeaders: preflightHeadersToRecord(instance.config),
@@ -324,22 +329,23 @@ export function createLaneBuilder(deps: {
       const granted: GrantedRemoteMcp[] = []
       for (const { row, grant } of winningGrants()) {
         const instance = grant.instance
-        if (!instance.custom || !instance.url || instance.healthStatus === 'auth_failed') continue
+        if (!instance.custom || !instance.url || instance.healthStatus === 'auth_failed' || !hasRemoteSource(instance.id)) continue
         if (!await isEnabled(connectorInstanceGovernanceId(instance.provider, instance.id), instance.provider)) continue
         pin(row)
         granted.push({ url: instance.url, name: instance.label ?? instance.provider, cacheUserId: grant.grantedByUserId,
           instanceId: instance.id, updatedAt: instance.updatedAt, config: instance.config, connectorId: instance.provider })
       }
-      return { instances: connected.filter((_, index) => enabled[index]), granted, authority, descriptorLifecycle: plan.descriptorLifecycle }
+      return { instances: connected.filter((_, index) => enabled[index]), granted, authority,
+        descriptorLifecycle: plan.descriptorLifecycle, refreshDescriptors: plan.profile.surface === 'resume' }
     }
 
     // ── CLI MCP ──
     function cliInstances(): CliInstance[] {
-      const out: CliInstance[] = personalRows.filter((row) => row.connectorId === 'cli' && row.connected)
+      const out: CliInstance[] = personalRows.filter((row) => row.connectorId === 'cli' && row.connected && hasCliSource(row.id))
         .map((row) => ({ id: row.id, name: row.name, updatedAt: row.updatedAt, config: row.config, policyStore: settingsStore, policyUserId: userId }))
       const seen = new Set(out.map((instance) => instance.id))
       for (const { row, instance } of workspaceRows) {
-        if (instance.provider !== 'cli' || !instance.connected || seen.has(instance.id)) continue
+        if (instance.provider !== 'cli' || !instance.connected || seen.has(instance.id) || !hasCliSource(instance.id)) continue
         seen.add(instance.id)
         pin(row)
         out.push({ id: instance.id, name: instance.label, updatedAt: instance.updatedAt, config: instance.config,
@@ -347,7 +353,7 @@ export function createLaneBuilder(deps: {
       }
       for (const { row, grant } of grants) {
         const instance = grant.instance
-        if (instance.provider !== 'cli' || !instance.connected || seen.has(instance.id)) continue
+        if (instance.provider !== 'cli' || !instance.connected || seen.has(instance.id) || !hasCliSource(instance.id)) continue
         seen.add(instance.id)
         pin(row)
         out.push({ id: instance.id, name: instance.label, updatedAt: instance.updatedAt, config: instance.config,
@@ -364,7 +370,8 @@ export function createLaneBuilder(deps: {
       const inboxes = workspaceRows
         .filter(({ instance }) => instance.provider === 'agentmail' && instance.connected && instance.healthStatus !== 'auth_failed' && handled.has(instance.id))
         .sort((a, b) => a.instance.createdAt.getTime() - b.instance.createdAt.getTime())
-      if (inboxes.length === 0) {
+      if (inboxes.length === 0 || inboxes.length !== plan.agentmailInboxIds?.length
+        || inboxes.some(({ instance }) => !plan.agentmailInboxIds?.includes(instance.id))) {
         if (!ctx.unavailable.some((line) => line.startsWith('Assistant Email ('))) {
           ctx.unavailable.push('Assistant Email (this assistant does not handle an inbox) - assign an inbox to it in Studio → Channels, or create one with Add channel → Email.')
         }
@@ -373,8 +380,9 @@ export function createLaneBuilder(deps: {
       for (const { row } of inboxes) pin(row)
       return [{
         provider,
-        inboxes: inboxes.map(({ instance }) => ({ address: (instance.connectedEmail ?? instance.label).toLowerCase(),
+        inboxes: inboxes.map(({ instance }) => ({ instanceId: instance.id, address: (instance.connectedEmail ?? instance.label).toLowerCase(),
           governanceId: connectorInstanceGovernanceId('agentmail', instance.id) })),
+        currentInboxIds: () => listAgentmailConnectorInstanceIdsForAssistantSystem(teamId, ctx.assistantId),
         settingsStore: workspaceToolPolicyStore ? workspacePolicyAsSettingsStore(workspaceToolPolicyStore, teamId) : settingsStore,
         userId,
         reportUnavailable: true,
@@ -422,9 +430,9 @@ export function createLaneBuilder(deps: {
         } else if (target === 'fathom') {
           lanes.push({ ...base, extraInstances: extrasByProvider.get(p), resolveInstanceCreds, persistInstanceCreds })
         } else if (target === 'shopify') {
-          lanes.push({ ...base, extraInstances: extrasByProvider.get(p), resolveInstanceCreds, persistInstanceCreds, healthProbe, withCachedFileReader: true })
+          lanes.push({ ...base, extraInstances: extrasByProvider.get(p), resolveInstanceCreds, persistInstanceCreds, healthProbe })
         } else if (target === 'wordpress') {
-          lanes.push({ ...base, extraInstances: extrasByProvider.get(p), resolveInstanceCreds, healthProbe, withCachedFileReader: true })
+          lanes.push({ ...base, extraInstances: extrasByProvider.get(p), resolveInstanceCreds, healthProbe })
         } else if (target === 'msgraph' || target === 'mailbox') {
           lanes.push({ ...base, healthProbe })
         } else {
@@ -594,15 +602,13 @@ export async function applyDirectCapabilities(
       throw error
     }
   }
-  // Built-ins by name (and Assistant Email, which the catalog does not index):
-  // they land as themselves, replacing a same-named entry as the injector did.
+  // Built-ins by name replace same-named registry entries.
   const nativeNames = catalog.direct.descriptors
     .filter((descriptor) => !narrowed || narrowed.includes(descriptor.connectorId))
     .map((descriptor) => descriptor.name)
-  const { builtins, dynamic } = capabilityExtraFamilies(catalog.plan)
-  const nativeFamilies = narrowed ? [] : builtins
-  if (nativeNames.length > 0 || nativeFamilies.length > 0) {
-    for (const tool of await unavailableOnly(() => catalog.activate({ toolNames: nativeNames, families: nativeFamilies }), [] as Tool[])) {
+  const dynamic = dynamicCapabilityFamilies(catalog.plan)
+  if (nativeNames.length > 0) {
+    for (const tool of await unavailableOnly(() => catalog.activate({ toolNames: nativeNames }), [] as Tool[])) {
       tools.set(tool.name, tool)
     }
   }
@@ -644,12 +650,10 @@ export async function applyDirectCapabilities(
   return [...new Set([...catalog.unavailable, ...composition.activationUnavailable(), ...implementationNotices])]
 }
 
-/** Families a surface activates beyond the indexed built-ins: Assistant Email, then dynamic sources. */
-export function capabilityExtraFamilies(plan: CatalogActivationPlan): { builtins: ProviderFamily[]; dynamic: ProviderFamily[] } {
-  const builtins: ProviderFamily[] = []
+/** Dynamic families a registry surface can activate to build a complete roster. */
+export function dynamicCapabilityFamilies(plan: CatalogActivationPlan): ProviderFamily[] {
   const dynamic: ProviderFamily[] = []
-  if (plan.admitted.some((row) => row.lane === 'workspace' && row.connected && row.provider === 'agentmail')) builtins.push('agentmail')
   if (plan.admitted.some((row) => row.connected && row.provider !== 'cli' && !!row.url && (row.lane === 'personal' || row.custom))) dynamic.push('remote-mcp')
   if (plan.admitted.some((row) => row.connected && row.provider === 'cli')) dynamic.push('cli')
-  return { builtins, dynamic }
+  return dynamic
 }

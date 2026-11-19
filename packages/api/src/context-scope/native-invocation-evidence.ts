@@ -10,6 +10,18 @@ import {hasWorkspaceMcpRetainedAuthority} from '../db/session-context-revisions.
 import {tryValidateNativeScopeEvidence} from './caller-evidence.js'
 
 const verifiedProviderEvidence = new WeakMap<ExecutionContext, CurrentAuthorityBoundary>()
+const verifiedResumeEvidence = new WeakMap<ExecutionContext, {
+ authority: CurrentAuthorityBoundary
+ assertOwnerCurrent: () => Promise<void>
+}>()
+
+/** Only the original turn owner binds its leased approval execution. */
+export function bindVerifiedResumeEvidence(
+ execution: ExecutionContext, assertOwnerCurrent: () => Promise<void>,
+): void {
+ verifiedResumeEvidence.set(execution, { authority: execution.security.authority, assertOwnerCurrent })
+}
+
 
 /** The channel entry point enrolls the original, linked group invocation.
  * Its credential and destination callbacks remain part of its live lease. */
@@ -44,19 +56,35 @@ export async function tryNativeInvocationEvidence(execution:ExecutionContext,evi
   &&execution.security.access.assistantId===execution.assistant.id
   &&!execution.surface.readOnly&&!execution.surface.systemRead&&!execution.surface.clientSelfMemory&&!execution.security.access.systemRead
  const nativeProgrammatic=hasWorkspaceMcpRetainedAuthority(execution)
- if(execution.ownership.kind!=='workspace'||execution.ownership.workspaceId!==workspaceId||!nativeAttended&&!nativeDelegated&&!nativeProgrammatic||getApplicationExecutionBinding(execution)
+ const resumeOwner = verifiedResumeEvidence.get(execution)
+ const nativeResume = !narrowingGuard && kind === 'caller' && recipient.userId === actor
+  && execution.identity.kind === 'system' && execution.identity.purpose === 'session_resume'
+  && execution.lifecycle.sessionPersisted !== false && !execution.lifecycle.abortSignal.aborted
+  && execution.security.access.assistantId === execution.assistant.id
+  && !execution.surface.systemRead && !execution.surface.clientSelfMemory && !execution.security.access.systemRead
+  && resumeOwner?.authority === execution.security.authority ? resumeOwner : undefined
+
+ if(execution.ownership.kind!=='workspace'||execution.ownership.workspaceId!==workspaceId||!nativeAttended&&!nativeDelegated&&!nativeProgrammatic&&!nativeResume||getApplicationExecutionBinding(execution)
   ||recipient.workspaceId!==workspaceId||recipient.userId!==''&&recipient.userId!==actor
   ||!roots.length||roots.length>4096
   ||roots.some(root=>!['application_field','session_message','session_context_revision','memory','workspace_file','private_transcript'].includes(root.resourceKind)))return null
  const anonymous=recipient.userId===''
  const ceiling=intersectAccessCeilings(execution.security.ceiling,{...recipient,userId:actor,mutationCompartments:[],visibilityAssistantIds:execution.security.ceiling.visibilityAssistantIds})
  const access={...execution.security.access,...ceiling,sharedAudience:anonymous||execution.security.access.sharedAudience}
- const assistantId=nativeDelegated||nativeVerifiedAttended||nativeProgrammatic?execution.assistant.id:undefined
+ const assistantId=nativeDelegated||nativeVerifiedAttended||nativeProgrammatic||nativeResume?execution.assistant.id:undefined
  // A source-only operation has no host work between capture and release.
  // Its RLS initialization and capture share one implicit transaction.
  if(!narrowingGuard)return runWithAgentAccess(access,async()=>{
   const settings=rlsGucSettings(actor,assistantId)
   const lease=execution.security.authority
+  if (nativeResume) {
+   return withCurrentReadAuthority(lease, async () => {
+    await nativeResume.assertOwnerCurrent()
+    const captured = await tryValidateNativeScopeEvidence(evidence, recipient, getAppPool(), kind, settings)
+    await nativeResume.assertOwnerCurrent()
+    return captured
+   })
+  }
   // The native capture proves this cohort's entire current ancestry. An
   // unsupported cohort keeps the original independent source checks.
   if(nativeVerifiedAttended&&verifiedProviderEvidence.get(execution)===lease){
