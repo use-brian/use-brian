@@ -126,9 +126,46 @@ test('[COMP:api/migration-execution-sql] authenticates every adapted immutable s
     adaptedFiles.push(Number(name.split('_')[0]))
   }
   assert.deepEqual(adaptedFiles.sort((a,b)=>a-b), [8188,8196,8197,8198,8199,8200,8201,8204,8205,8229,
-    8234,8235,8236,8242,8243,8245,8246,8247,8248,8249,8250,8251,8272,8290,8296,8322,82690])
+    8234,8235,8236,8242,8243,8245,8246,8247,8248,8249,8250,8251,8272,8290,8296,8322,8326,82690])
   assert.equal(toMigrationExecutionSql('SELECT 1;', 'future.sql'), 'SELECT 1;')
   assert.equal(toMigrationExecutionSql(source, 'future.sql'), source)
+})
+
+test('[COMP:api/migration-execution-sql] accepts either exact Memory writer grant order and refuses an additional grant', async () => {
+  const name = '8326_native_memory_query_write_contract.sql'
+  const sql = await readFile(new URL(name, migrations), 'utf8')
+  const { memoryWriteReleaseSource } = await import(new URL('../../../../packages/api/scripts/conversation-store/memory-query-write-contract.mjs', import.meta.url).href)
+  const aclChecks = (source: string) => [...source.matchAll(/^   OR (\(actual\.proacl IS DISTINCT FROM[^\n]+\n    AND [^\n]+\))$/gm)].map(match => match[1])
+  const [predicate, successor] = aclChecks(toMigrationExecutionSql(sql, name))
+  assert.ok(predicate)
+  assert.equal(successor, predicate)
+  assert.deepEqual(aclChecks((await memoryWriteReleaseSource()).sql), [predicate])
+  const db = new PGlite()
+  try {
+    await db.waitReady
+    await db.exec(`CREATE ROLE app_user NOLOGIN NOSUPERUSER NOBYPASSRLS;
+      CREATE ROLE migration_owner NOSUPERUSER NOBYPASSRLS;
+      CREATE ROLE grant_probe NOLOGIN;
+      GRANT USAGE,CREATE ON SCHEMA public TO migration_owner; SET ROLE migration_owner;
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO app_user;
+      CREATE FUNCTION legacy_writer() RETURNS uuid LANGUAGE sql AS 'SELECT NULL::uuid';
+      REVOKE ALL ON FUNCTION legacy_writer() FROM PUBLIC;
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM app_user;
+      CREATE FUNCTION current_writer() RETURNS uuid LANGUAGE sql AS 'SELECT NULL::uuid';
+      REVOKE ALL ON FUNCTION current_writer() FROM PUBLIC;
+      GRANT EXECUTE ON FUNCTION current_writer() TO app_user;`)
+    const check = async (routine: string) => (await db.query(`SELECT actual.proacl::text[] AS grants,
+      ${predicate} AS mismatch FROM pg_proc actual,
+      (SELECT 'record_admitted_application_field_derivation(uuid,text,uuid,text,text,jsonb)' AS signature) member,
+      (SELECT makeaclitem(current_user::regrole,current_user::regrole,'EXECUTE',false) AS owner_grant,
+        makeaclitem('app_user'::regrole,current_user::regrole,'EXECUTE',false) AS runtime_grant) grants
+      WHERE actual.oid=$1::regprocedure`, [routine])).rows[0]
+    const owner = 'migration_owner=X/migration_owner', runtime = 'app_user=X/migration_owner'
+    assert.deepEqual(await check('current_writer()'), { grants: [owner, runtime], mismatch: false })
+    assert.deepEqual(await check('legacy_writer()'), { grants: [runtime, owner], mismatch: false })
+    await db.exec('GRANT EXECUTE ON FUNCTION legacy_writer() TO grant_probe')
+    assert.deepEqual(await check('legacy_writer()'), { grants: [runtime, owner, 'grant_probe=X/migration_owner'], mismatch: true })
+  } finally { await db.close() }
 })
 
 test('[COMP:api/migration-execution-sql] stabilizes the private transcript registries inside the existing transaction', async () => {
