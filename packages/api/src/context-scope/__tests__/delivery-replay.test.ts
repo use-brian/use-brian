@@ -70,7 +70,7 @@ import type { AccessCeiling } from '@use-brian/agent-runtime/security/access-cei
 import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { currentAgentAccess } from '../../db/agent-access-context.js'
 import { AuthorityChangedError, isAuthorityChangedError } from '../authority-lease.js'
-import { createSessionResumeReplay, RESUME_FAILED_TEXT } from '../../routes/session-resume-replay.js'
+import { createSessionResumeReplay } from '../../routes/session-resume-replay.js'
 import type { ResumeReplayParams } from '../../routes/chat.js'
 
 const SESSION = {
@@ -294,10 +294,12 @@ describe('[COMP:api/scope-delivery-replay] persisted replay authority', () => {
       answerText: 'the first',
     })).catch((caught: unknown) => caught)
     expect(error).toMatchObject({ reason: 'delivery_audience_unverified', diagnostic: 'user_visibility' })
-    // The withheld continuation is never saved; only the terminal outcome note is.
-    expect(JSON.stringify(mocks.addSessionMessage.mock.calls)).not.toContain('personal result')
-    expect(mocks.addSessionMessage).toHaveBeenCalledWith(expect.objectContaining({ role: 'assistant',
-      content: [{ type: 'text', text: RESUME_FAILED_TEXT }] }))
+    // The captured answer remains authorized input. Audience refusal publishes no assistant row.
+    expect(mocks.addSessionMessage.mock.calls).toEqual([[
+      expect.objectContaining({ role: 'system', content: [
+        expect.objectContaining({ type: 'text', text: expect.stringContaining('The user answered: the first') }),
+      ] }),
+    ]])
   })
 
   it('withholds a completed model event when authority changes before persistence', async () => {
