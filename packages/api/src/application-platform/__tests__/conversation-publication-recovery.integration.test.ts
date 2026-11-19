@@ -8,8 +8,8 @@ import {createRequire} from 'node:module'
 import {afterAll,describe,expect,it} from 'vitest'
 import {authSessionStore} from '../../db/auth-session-store.js'
 import {createTokens} from '../../auth/jwt.js'
-import {getAppPool,getPool} from '../../db/client.js'
-import {addSessionMessage,claimTurnLease} from '../../db/sessions.js'
+import {applyRLSGucs,getAppPool,getPool,rollbackAndRelease,runWithAgentAccess} from '../../db/client.js'
+import {addSessionMessage,claimTurnLease,createWorkspaceChatSession,readSessionById,releaseTurnLease} from '../../db/sessions.js'
 import {withSessionMessagePublication} from '../../db/session-context-revisions.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
 import {policyFor,sessionKindSql,type SessionKindRow} from '../../session-kind.js'
@@ -17,7 +17,6 @@ import {resolveExecutionContextSystem} from '../../context-scope/execution-conte
 import {bindSessionTurnAuthority} from '../../context-scope/authority-lease.js'
 import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
 import {findAssistantById} from '../../db/users.js'
-import {readSessionById} from '../../db/sessions.js'
 
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -361,6 +360,33 @@ describe.sequential('[COMP:api/native-turn-frame] authenticated durable buffered
     expect((await f.pool.query('SELECT turn_lease_token FROM sessions WHERE id=$1',[f.session.id])).rows[0])
       .toEqual({turn_lease_token:successor})
    } finally { retireRetry() }
+   expect(await releaseTurnLease(f.session.id,'completed',successor!)).toBe(true)
+
+   const readReceipt = async (actor: string, destination: string) => {
+    const client = await getAppPool().connect()
+    try {
+     return await runWithAgentAccess({ ...execution.security.access, userId: actor }, async () => {
+      await client.query('BEGIN')
+      await applyRLSGucs(client,actor,f.assistantId)
+      const {rows} = await client.query<{value:{items:Array<{operationId:string;state:string}>}}>(
+       'SELECT read_native_conversation_publications($1,$2) AS value',[f.workspaceId,destination])
+      await client.query('COMMIT')
+      return rows[0].value.items
+     })
+    } finally { await rollbackAndRelease(client) }
+   }
+   const other = await createWorkspaceChatSession({assistantId:f.assistantId,starterUserId:f.ownerId,
+    workspaceId:f.workspaceId,effectiveClearance:'confidential',authenticatedHuman:true})
+   expect(await readReceipt(f.ownerId,f.session.id)).toEqual([expect.objectContaining({operationId:receipt.id,state:'committed'})])
+   expect(await readReceipt(f.secondId,f.session.id)).toEqual([])
+   expect(await readReceipt(f.ownerId,other.id)).toEqual([])
+   await expect(getAppPool().query('SELECT capture_committed_room_record_evidence($1,$2,$3)',
+    [f.workspaceId,f.session.id,'[]'])).rejects.toMatchObject({code:'42501'})
+   await f.pool.query('UPDATE session_messages SET scope_held=true WHERE workspace_id=$1 AND id=$2',
+    [f.workspaceId,receipt.input_message_id])
+   expect(await readReceipt(f.ownerId,f.session.id)).toEqual([expect.objectContaining({
+    operationId:receipt.id,state:'unavailable',reason:'publication_frame_changed',
+   })])
   }finally{await f.pool.query(`DROP TABLE IF EXISTS ${counter}`);await f.cleanup();await rm(directory,{recursive:true,force:true})}
  },120000)
 
