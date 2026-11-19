@@ -132,7 +132,7 @@ test('[COMP:api/migration-execution-sql] authenticates every adapted immutable s
 })
 
 test('[COMP:api/migration-execution-sql] stabilizes the two 8268 registries inside its existing transaction', async () => {
-  const name = '8268_private_transcript_preparation_eligibility.sql'
+  const name = '82690_private_transcript_preparation_eligibility.sql'
   const sql = await readFile(new URL(name, migrations), 'utf8')
   const lock = 'LOCK TABLE public.native_turn_contract_helpers, public.native_retained_contract_helpers IN SHARE MODE;\n'
   assert.equal(toMigrationExecutionSql(sql, name), sql.replace('\nBEGIN;\n', `\nBEGIN;\n${lock}`))

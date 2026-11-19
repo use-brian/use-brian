@@ -6,7 +6,7 @@ import { pageThreadSourceExecutionSql } from './page-thread-execution.js'
 /** Execution-only adaptation of reviewed historical SQL; contract checks stay intact.
  * [COMP:api/migration-execution-sql]
  */
-const privateTranscriptPreparation = '8268_private_transcript_preparation_eligibility.sql'
+const privateTranscriptPreparation = '82690_private_transcript_preparation_eligibility.sql'
 const participationRetirement = '8290_participation_read_retirement.sql'
 const configuredTaskPublication = '8296_configured_task_publication.sql'
 const reviewed: Readonly<Record<string, readonly [string, number]>> = {
