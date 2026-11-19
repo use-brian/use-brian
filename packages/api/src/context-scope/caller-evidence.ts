@@ -1,3 +1,4 @@
+import { captureProviderConversationEvidence } from './provider-conversation-evidence.js'
 import type {SessionAuthorityFactsInput} from './session-authority-facts.js'
 import { isConversationEvidenceRoot,readConversationEvidence,readConversationPublicationCohorts,readMixedConversationEvidenceRoute,readHybridConversationEvidence,readPageClosureEvidence } from '../application-platform/conversation-evidence.js'
 import {readNativeTitleGroupEvidence,type NativeTitleHead} from '../application-platform/native-title-group-evidence.js'
@@ -225,6 +226,8 @@ async function validateScopeEvidence(
   if (client && !workflowRunId && sources.some(source => isConversationEvidenceRoot(source)
     && !(exactPageThread && pageKinds.has(source.resourceKind)))) {
     try {
+      const provider = await captureProviderConversationEvidence(client, ceiling, kind, sources)
+      if (provider) return checkedConversationCapture(snapshot, provider, ceiling, kind)
       const native = await readConversationEvidence(client, ceiling.workspaceId, sources)
       if (native?.kind === 'complete') return checkedConversationCapture(snapshot, native, ceiling, kind)
       const canReadPage = !!ceiling.userId && !(kind === 'audience' && pageAudience)

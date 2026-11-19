@@ -1,3 +1,4 @@
+import { bindProviderConversationTurn, withProviderConversationEvidence } from '../context-scope/provider-conversation-evidence.js'
 import { assertTelegramConversationCurrent } from '../telegram-conversation-context.js'
 import { recordingInputScope, type RecordingAdmission } from '../channel-recording.js'
 import { assembleTurnPublication } from '../turn/publication.js'
@@ -1161,7 +1162,23 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // "Per-turn SQL accounting phases"); recording off, it enters no frame.
   const sqlScope = openTurnSqlScope()
   try {
-    await sqlScope.run(() => processChannelMessageTurn({ ...params, hooks }, () => channelStopRequested, sqlScope))
+    const run = () => sqlScope.run(() => processChannelMessageTurn({ ...params, hooks }, () => channelStopRequested, sqlScope))
+    const providerRoom = params.conversationContext
+    const identity = providerRoom?.providerContextIdentity
+    const providerSender = params.incomingMessage?.userId
+    const epoch = providerRoom?.providerContextGeneration
+    if (providerRoom?.workspaceId && identity && epoch != null &&
+      identity.integrationId === params.channelIntegrationId && providerSender && messageId != null &&
+      params.channelType === 'telegram' && params.isGroupChat && params.isIdentified && params.senderLinkedIdentity &&
+      providerRoom.channelId === params.channelId && providerRoom.assistantId === params.assistant.id &&
+      providerRoom.workspaceId === params.assistant.workspaceId) {
+      await withProviderConversationEvidence({
+        workspaceId: providerRoom.workspaceId, actorId: params.userId, sessionId: providerRoom.id,
+        assistantId: providerRoom.assistantId, address: providerRoom.channelId, integrationId: identity.integrationId,
+        botId: identity.botId, epoch, speakerId: String(providerSender), incomingId: String(messageId),
+        assertCurrent: () => assertTelegramConversationCurrent(providerRoom),
+      }, run)
+    } else await run()
   } finally {
     try {
       if (processingStarted) await hooks.onCleanup?.()
@@ -1680,6 +1697,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
   if (abortController.signal.aborted) return
   await hooks.onProcessingStart?.()
   if (abortController.signal.aborted) return
+  if (recordEnvelope && nativeTranscriptAuthority && audienceEnvelope?.allowed && audienceEnvelope.source === 'binding') {
+    bindProviderConversationTurn(executionContext, turnOwner.token, recordEnvelope.version)
+  }
 
   turnOwner.bindModelPreparation({ kind: 'execution', toolProfile: 'channel', execution: executionContext, assertCurrent: assertDeliveryAudience },
     { provider: provider, configuredProviders: params.configuredProviders,
