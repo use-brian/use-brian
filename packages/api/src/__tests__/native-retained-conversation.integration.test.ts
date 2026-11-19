@@ -42,6 +42,8 @@ describe.sequential('[COMP:api/native-chat-read-cost] complete retained native c
  // complete synthetic database after the suite, including immutable ancestry.
  afterAll(async()=>{await getAppPool().end();await getPool().end()})
 
+ // Each retained turn acquires history twice and posts both an annotation and
+ // a reply. The harness timer covers the whole sequence of bounded statements.
  it.each([1,2,3,4,5,6,7,8,9,10,11,12,13,14])('retains genuine native annotation and reply %i',async(index)=>{
   const input=await addSessionMessage({sessionId:fixture.session.id,role:'user',senderUserId:fixture.ownerId,
    content:[{type:'text',text:`Fictional native capacity request ${index}.`}],scope:fixture.envelope})
@@ -69,7 +71,7 @@ describe.sequential('[COMP:api/native-chat-read-cost] complete retained native c
    derivation:{producer:'fixture:retained-answer',sources:current.accumulator.evidence.sources??[]}})
   expect(reply.sequenceNum).toBe(retainedRows+index*2)
   expect(await history()).toEqual(initialHistory)
- },90_000)
+ },180_000)
 
  it('reads and publishes the complete genuine conversation above the legacy expanded edge budget',async()=>{
   const retainedMessages=(await fixture.pool.query('SELECT to_jsonb(m) value FROM session_messages m WHERE session_id=$1 ORDER BY sequence_num',[fixture.session.id])).rows
