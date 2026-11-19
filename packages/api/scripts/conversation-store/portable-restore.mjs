@@ -610,7 +610,9 @@ export async function importPortableBrain({ownerClient:client,archiveDirectory,k
    receipt.suspendedTriggers=suspended.length;receipt.windowedTriggers=windowed.length
    if(crmSummary){
     receipt.currentTable='crm-summary-credentials'
-    receipt.crmCredentialRecords=await installCrmSummaryCredentials(client,crmCredentials)
+    const installed=await installCrmSummaryCredentials(client,crmCredentials)
+    if(installed===null)throw refusal('portable_restore_target_not_fresh','crm_summary_receipt_keys')
+    receipt.crmCredentialRecords=installed
    }
    const order=await importOrder(client,roster),byName=new Map(manifest.tables.map(table=>[table.name,table])),fixups=[]
    let stageIndex=0
