@@ -8,8 +8,8 @@ import { currentInstallationAuthenticationSource as previousSource } from './ins
 import { assertAuthenticationReadOnly } from './installation-authentication-8315.mjs'
 import { executableProjection } from './executable-record.mjs'
 
-export const migrationName = '8326_native_memory_query_write_contract.sql'
-export const upstreamOriginal = '8268_native_memory_query_write_lineage.sql'
+const migrationName = '8326_native_memory_query_write_contract.sql'
+const upstreamOriginal = '8268_native_memory_query_write_lineage.sql'
 const predecessor = '8325_conversation_office_observation.sql'
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const sha = value => createHash('sha256').update(value).digest('hex')
@@ -141,14 +141,17 @@ function editsSql(edits) {
 }
 
 async function sourceWithCurrentScans(previous, clauses) {
-  const renderer = "  body:=pg_temp.a8314_conversion_predecessor_body(expected->>'signature',expected->'bodyParts');"
   const before = literal(clauses.scan[0])
   const assertion = "   IF (length(body)-length(replace(body," + before + ",'')))/length(" + before + ")<>1 THEN RAISE EXCEPTION 'memory_query_write_scan_source_changed';END IF;"
-  let sql = replaceOnce(previous.sql, renderer, renderer + `
-  IF expected->>'signature' IN(${literal(historical)},${literal(statement)}) THEN
+  const amendment = signature => `
+  IF ${signature} IN(${literal(historical)},${literal(statement)}) THEN
 ${assertion}
    body:=replace(body,${literal(clauses.scan[0])},${literal(clauses.scan[1])});
-  END IF;`)
+  END IF;`
+  const predecessorRender = "  body:=pg_temp.a8314_conversion_predecessor_body(expected->>'signature',expected->'bodyParts');"
+  const successorRender = '  body:=pg_temp.a8314_conversion_source_body(routine.signature,routine.parts,true);'
+  let sql = replaceOnce(previous.sql, predecessorRender, predecessorRender + amendment("expected->>'signature'"))
+  sql = replaceOnce(sql, successorRender, successorRender + amendment('routine.signature'))
   sql = replaceOnce(sql, '(' + literal(historical) + ',' + literal(routinePins[historical][0]) + ')',
     '(' + literal(historical) + ',' + literal(routinePins[historical][1]) + ')')
   sql = `SET LOCAL search_path=pg_catalog,public,pg_temp;
@@ -163,7 +166,7 @@ ${sql}`
   return sql
 }
 
-export async function buildMemoryWriteMigration(sourceRoot = root) {
+async function buildMemoryWriteMigration(sourceRoot = root) {
   const previous = await previousSource({ sourceRoot })
   const clauses = await originalClauses(sourceRoot)
   const priorSql = previous.sql
