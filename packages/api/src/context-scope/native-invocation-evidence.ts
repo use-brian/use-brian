@@ -4,15 +4,15 @@ import {intersectAccessCeilings, type AccessCeiling} from '@use-brian/agent-runt
 import {ContextScopeAccumulator, type ScopeEvidence} from '@use-brian/agent-runtime/security/context-scope.js'
 import type {ExecutionContext} from '@use-brian/agent-runtime/security/execution-context.js'
 import type {CurrentAuthorityBoundary} from '@use-brian/agent-runtime/tools/types.js'
-import {getAppPool,applyRLSGucs,rlsGucSettings,rollbackAndRelease,runWithAgentAccess} from '../db/client.js'
+import {getAppPool,applyRLSGucs,rlsGucSettings,rollbackAndRelease,runWithAgentAccess,withRLSTransaction} from '../db/client.js'
 import {getApplicationExecutionBinding} from '../application-platform/execution-context.js'
 import {hasWorkspaceMcpRetainedAuthority} from '../db/session-context-revisions.js'
-import {assertScopeEvidenceFitsCeiling,tryValidateNativeScopeEvidence} from './caller-evidence.js'
+import {assertScopeEvidenceFitsCeiling,tryValidateNativeScopeEvidence,validateAudienceScopeEvidence} from './caller-evidence.js'
 
 import { z } from 'zod'
 import type { PoolClient } from 'pg'
 import { resourceScopeKey } from '@use-brian/agent-runtime/security/derived-scope.js'
-import { nativeSessionCurrentScopeSchema } from '../application-platform/conversation-evidence.js'
+import { isConversationEvidenceRoot, nativeSessionCurrentScopeSchema } from '../application-platform/conversation-evidence.js'
 
 const verifiedProviderEvidence = new WeakMap<ExecutionContext, CurrentAuthorityBoundary>()
 const verifiedResumeEvidence = new WeakMap<ExecutionContext, {
@@ -37,6 +37,25 @@ function resumeReadOwner(execution: ExecutionContext) {
   && security.access.assistantId === execution.assistant.id
   && !surface.systemRead && !surface.clientSelfMemory && !security.access.systemRead
   && !getApplicationExecutionBinding(execution) && owner?.authority === security.authority ? owner : undefined
+}
+
+/** Native source proof for a personal web approval returning to its own member. */
+export async function admitVerifiedPersonalResumeAudience(
+ execution:ExecutionContext,evidence:ScopeEvidence,recipient:AccessCeiling,
+):Promise<ScopeEvidence>{
+ const owner=resumeReadOwner(execution),{security,lifecycle}=execution
+ const {userId,workspaceId}=security.access
+ if(!owner||security.access.sharedAudience||lifecycle.channelType!=='web'
+  ||recipient.userId!==userId||recipient.workspaceId!==workspaceId)throw new Error('Personal resume recipient unavailable')
+ if(!evidence.sources?.some(isConversationEvidenceRoot))return validateAudienceScopeEvidence(evidence,recipient)
+ const ceiling=intersectAccessCeilings(security.ceiling,recipient)
+ return withCurrentReadAuthority(owner.authority,async()=>{
+  await owner.assertOwnerCurrent()
+  const checked=await runWithAgentAccess({...security.access,...ceiling},()=>withRLSTransaction(userId,
+   client=>validateAudienceScopeEvidence(evidence,recipient,client),execution.assistant.id))
+  await owner.assertOwnerCurrent()
+  return checked
+ })
 }
 
 const roomResumeProof = z.object({
