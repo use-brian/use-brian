@@ -11,17 +11,14 @@ import {
   whatsappCloudMediaId,
 } from '@use-brian/channels'
 import type { IncomingMessage } from '@use-brian/channels'
-import { parseFileContent } from '@use-brian/core'
-import type {
-  AnalyticsLogger,
-  ContentBlock,
-  LLMProvider,
-  McpSettingsStore,
-  MemoryStore,
-  Tool,
-  UsageStore,
-  WorkflowEventDispatcher,
-} from '@use-brian/core'
+import { parseFileContent } from '@use-brian/core/files/parsers.js'
+import type { AnalyticsLogger } from '@use-brian/core/analytics/logger.js'
+import type { MemoryStore } from '@use-brian/core/memory/types.js'
+import type { WorkflowEventDispatcher } from '@use-brian/core/workflow/event-trigger.js'
+import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
+import type { McpSettingsStore } from '@use-brian/agent-runtime/mcp/types.js'
+import type { ContentBlock, LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 import type {
   ChannelIntegrationConfig,
   ChannelIntegrationStore,
@@ -53,7 +50,7 @@ const MAX_MEDIA_BYTES = 25 * 1024 * 1024
 export type WhatsAppCloudRouteOptions = {
   questionStore?: ChannelQuestionStore
   backgroundModel?: string
-  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
+  decisionRuntime?: import('@use-brian/core/decisions/hydra.js').DecisionExecutionPort
   provider: LLMProvider
   /**
    * Forwarded to the pipeline so `resolveChatModelSelection` can run its
@@ -73,30 +70,30 @@ export type WhatsAppCloudRouteOptions = {
   checkCreditBudget?: import('./route-helpers.js').CreditBudgetGate
   integrationStore: ChannelIntegrationStore
   channelUserStore?: ChannelUserStore
-  workerManager?: import('@use-brian/core').WorkerManager
+  workerManager?: import('@use-brian/core/workers/worker.js').WorkerManager
   connectorStore?: import('../db/connector-store.js').ConnectorStore
   mcpSettingsStore?: McpSettingsStore
   assistantConnectorStore?: import('../db/assistant-connector-store.js').AssistantConnectorStore
   connectorGrantStore?: import('../db/connector-grant-store.js').ConnectorGrantStore
   connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
   workspaceToolPolicyStore?: import('../db/workspace-tool-policy-store.js').WorkspaceToolPolicyStore
-  knowledgeStore?: import('@use-brian/core').KnowledgeStoreInterface
+  knowledgeStore?: import('@use-brian/core/knowledge/types.js').KnowledgeStoreInterface
   knowledgeCaptureRuleStore?: import('../knowledge/capture-rules.js').KnowledgeCaptureRuleStore
-  gdriveFilesStore?: import('@use-brian/core').GDriveFilesStore
-  workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
-  filesApi?: import('@use-brian/core').FilesApi
-  fileStore?: import('@use-brian/core').FileStore
+  gdriveFilesStore?: import('@use-brian/core/tools/base/gdrive-files.js').GDriveFilesStore
+  workspaceFilesStore?: import('@use-brian/core/workspace-files/types.js').WorkspaceFilesStore
+  filesApi?: import('@use-brian/core/workspace-files/api.js').FilesApi
+  fileStore?: import('@use-brian/core/files/types.js').FileStore
   artifactPromoter?: import('../files/artifact-promote.js').ArtifactPromoter | null
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
-  workflowStore?: import('@use-brian/core').WorkflowStore
+  workflowStore?: import('@use-brian/core/workflow/types.js').WorkflowStore
   workspaceSkillStore?: import('../db/skill-store.js').WorkspaceSkillStore
   workspaceSkillEnablementStore?: import('../db/workspace-skill-enablement-store.js').WorkspaceSkillEnablementStore
   workspaceSkillFilesStore?: import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore
-  episodicStore?: import('@use-brian/core').EpisodicStore
-  sessionStateStore?: import('@use-brian/core').SessionStateStore
-  crmEmailDraftStore?: import('@use-brian/core').CrmEmailDraftStore
-  capabilityStore: import('@use-brian/core').CapabilityStore
+  episodicStore?: import('@use-brian/core/memory/episodic-types.js').EpisodicStore
+  sessionStateStore?: import('@use-brian/core/memory/session-state-types.js').SessionStateStore
+  crmEmailDraftStore?: import('@use-brian/core/crm/email-drafts.js').CrmEmailDraftStore
+  capabilityStore: import('@use-brian/core/authorization/types.js').CapabilityStore
   /** Best-effort producer for workflows triggered by this channel integration. */
   workflowEventDispatcher?: WorkflowEventDispatcher
   /** Injectable seam for managed-group lifecycle persistence. */

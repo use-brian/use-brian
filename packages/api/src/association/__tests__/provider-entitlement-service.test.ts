@@ -2,11 +2,11 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import type { Pool, PoolClient } from 'pg'
 import { describe, expect, it, vi } from 'vitest'
+import type { AssociationActor } from '@use-brian/core/association/domain.js'
 import {
   ProviderEntitlementEventSchema,
-  type AssociationActor,
   type ProviderInboxEnvelope,
-} from '@use-brian/core'
+} from '@use-brian/core/association/provider-inbox.js'
 import { createAssociationStore } from '../../db/association-store.js'
 import type { ProviderInboxHandlers, ProviderInboxResult } from '../provider-inbox.js'
 import {

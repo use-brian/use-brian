@@ -15,7 +15,7 @@
  * tracking policy" for the binding rule.
  */
 
-import type { ToolResultMeta } from '../tools/types.js'
+import type { ToolResultMeta } from '@use-brian/agent-runtime/tools/types.js'
 
 /** Per-token (LLM-like) external cost. The chat route computes USD via `calculateCost`. */
 export type PerTokenExternalCost = {

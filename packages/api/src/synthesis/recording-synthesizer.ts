@@ -8,30 +8,26 @@
 //
 // See docs/architecture/brain/structural-synthesis.md → "The first source".
 
-import {
-  createCrmTools,
-  createDocTools,
-  createMemoryTools,
-  createTaskTools,
-  loadBuiltinSkills,
-  type CrmStore,
-  type DocPageStore,
-  type Embedder,
-  type LLMProvider,
-  type MemoryStore,
-  type SavedViewStore,
-  type Sensitivity,
-  type TaskStore,
-  type TokenUsage,
-  type Tool,
-  type UsageStore,
-  type WorkflowRunStore,
-  type WorkspaceDirectoryStore,
-} from '@use-brian/core'
+import { createCrmTools } from '@use-brian/core/crm/tools.js'
+import type { CrmStore } from '@use-brian/core/crm/types.js'
+import { createDocTools, type DocPageStore } from '@use-brian/core/doc/tools.js'
+import type { Embedder } from '@use-brian/core/embeddings/embedder.js'
+import { createMemoryTools } from '@use-brian/core/memory/tools.js'
+import type { MemoryStore } from '@use-brian/core/memory/types.js'
+import { loadBuiltinSkills } from '@use-brian/core/skills/loader.js'
+import { createTaskTools } from '@use-brian/core/tasks/tools.js'
+import type { TaskStore } from '@use-brian/core/tasks/types.js'
+import type { SavedViewStore } from '@use-brian/core/views/types.js'
+import type { WorkflowRunStore } from '@use-brian/core/workflow/types.js'
+import type { WorkspaceDirectoryStore } from '@use-brian/core/workspace/types.js'
+import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
+import type { LLMProvider, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { buildCitationIndex, formatTranscript, recordingAnchorKey } from '@use-brian/shared'
 import { createSearchRecordingTool } from '../recordings/recording-search-tool.js'
 import { readRecordingRange, type RecordingSegmentHit } from '../db/retrieval-store.js'
-import type { RetrievalActor } from '@use-brian/core'
+import type { RetrievalActor } from '@use-brian/core/retrieval/types.js'
 import {
   createRecordPageProjector,
   synthesizeFromSource,

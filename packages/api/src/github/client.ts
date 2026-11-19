@@ -5,7 +5,7 @@
  * See docs/architecture/integrations/github.md.
  */
 
-import { ConnectorApiError, type ConnectorFailureKind } from '@use-brian/core'
+import { ConnectorApiError, type ConnectorFailureKind } from '@use-brian/core/tools/base/_connector-result.js'
 
 const GITHUB_API = 'https://api.github.com'
 

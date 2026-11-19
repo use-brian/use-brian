@@ -19,7 +19,7 @@ import type {
   EntityLinkCreateParams,
   EntityLinkRecord,
   EntityLinksStore,
-} from '@use-brian/core'
+} from '@use-brian/core/entities/types.js'
 
 import {
   emitCrmRelationEdge,

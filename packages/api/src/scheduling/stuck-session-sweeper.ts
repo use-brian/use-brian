@@ -34,7 +34,7 @@
  *      → "Turn lease and recovery".
  */
 
-import { sweepStuckSessions, TURN_LEASE_STALE_AFTER_MS } from '../db/sessions.js'
+import { sweepStuckSessions, TURN_LEASE_STALE_AFTER_MS,type RecoveredTurn } from '../db/sessions.js'
 import { policyFor } from '../session-kind.js'
 
 /**
@@ -64,7 +64,7 @@ export type StuckSessionSweeperDeps = {
    * `'timeout'` and returns the affected rows. Production wires this to
    * `sweepStuckSessions` from `db/sessions.ts`. Tests inject a fake.
    */
-  sweep?: (staleAfterMs: number) => Promise<Array<{ id: string; mode: string | null; userId: string; visibility: string; channelType: string; anchorKind: string | null }>>
+  sweep?: (staleAfterMs: number) => Promise<Array<{ id: string; mode: string | null; userId: string; visibility: string; channelType: string; anchorKind: string | null;turnId?:string|null;reason?:RecoveredTurn['reason'] }>>
   /**
    * Publishes a `turn_completed` bus event so any SSE subscriber immediately
    * unblocks their UI's "working" indicator. The bus is in-process **and**
@@ -77,7 +77,7 @@ export type StuckSessionSweeperDeps = {
    * nothing told them. Production wires this to `publishSessionEvent`; tests
    * pass a spy.
    */
-  publishDraftTurnCompleted?: (sessionId: string) => void
+  publishDraftTurnCompleted?: (sessionId: string,outcome:RecoveredTurn) => void
   /** Pluggable clock for tests. Production leaves this undefined. */
   now?: () => Date
   /** Test-only error hook. Defaults to `console.error`. */
@@ -119,7 +119,7 @@ export function createStuckSessionSweeper(options: StuckSessionSweeperOptions = 
         // them just moves the stuck state into the browser.
         if (policyFor({ channelType: row.channelType, mode: row.mode, visibility: row.visibility, anchorKind: row.anchorKind }).liveFollow) {
           try {
-            publish(row.id)
+            publish(row.id,{turnId:row.turnId??null,reason:row.reason??'stalled_reclaimed'})
           } catch (err) {
             onError(err)
           }

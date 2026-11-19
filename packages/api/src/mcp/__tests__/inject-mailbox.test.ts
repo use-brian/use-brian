@@ -48,10 +48,10 @@ vi.mock('../../mailbox/mailbox-api.js', () => ({
 }))
 
 import { OFFICIAL_CONNECTOR_TOOLS } from '@use-brian/shared'
-import { injectMcpTools } from '../inject.js'
+import { composeForTest } from './surface-harness.js'
 import type { ConnectorActionAudit, ConnectorActionPreflight } from '../../connector-action-port.js'
 import type { ConnectorInstanceStore } from '../../db/connector-instance-store.js'
-import type { Tool } from '@use-brian/core'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 
 const IMAP_CREDS = {
   type: 'imap' as const,
@@ -137,7 +137,7 @@ async function injectImap(
   } = {},
 ) {
   const tools = new Map<string, Tool>()
-  const result = await injectMcpTools({
+  const result = await composeForTest({
     userId: 'u-1',
     assistantId: 'a-1',
     tools,
@@ -195,7 +195,7 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
 
   it('announces the capability as unavailable when no mailbox is connected', async () => {
     const tools = new Map<string, Tool>()
-    const { unavailable } = await injectMcpTools({
+    const { unavailable } = await composeForTest({
       userId: 'u-1',
       assistantId: 'a-1',
       tools,
@@ -232,7 +232,7 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     } as unknown as ConnectorActionAudit
 
     const tools = new Map<string, Tool>()
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-1', assistantId: 'a-1', tools,
       connectorStore: { list: vi.fn().mockResolvedValue([primary, second]) } as never,
       settingsStore: settingsStoreStub() as never,
@@ -283,7 +283,7 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     const isEnabled = vi.fn(async (_assistantId: string, governanceId: string) => governanceId !== 'imap:inst-imap-2')
     const tools = new Map<string, Tool>()
 
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-1', assistantId: 'a-1', tools,
       connectorStore: { list: vi.fn().mockResolvedValue([primary, second]) } as never,
       settingsStore: settingsStoreStub() as never,
@@ -308,7 +308,7 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
         : null
     ))
     const policyTools = new Map<string, Tool>()
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-1', assistantId: 'a-1', tools: policyTools,
       connectorStore: { list: vi.fn().mockResolvedValue([primary, second]) } as never,
       settingsStore: { getPolicy, setPolicy: vi.fn(), recordUsage: vi.fn(), recordUsageAndGetCount: vi.fn() } as never,
@@ -345,12 +345,17 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
       emit: vi.fn(async () => ({ status: 'executed' as const })),
     } as unknown as ConnectorActionAudit
     const tools = new Map<string, Tool>()
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-1', assistantId: 'a-1', tools,
       connectorStore: { list: vi.fn().mockResolvedValue([primary, second]) } as never,
       settingsStore: settingsStoreStub() as never,
       connectorInstanceStore: instanceStore,
       assistantConnectorGrantsStore: { getForAssistantSystem } as never,
+      // The catalog's one bulk grant read (visibility); execution re-checks per mailbox.
+      actionGrantReader: async () => [
+        { connectorId: 'imap:inst-imap-1', allowedActions: ['imapSendMessage'] },
+        { connectorId: 'imap:inst-imap-2', allowedActions: [] },
+      ],
       connectorActionAudit: audit,
       keepBuiltinsDirect: true,
     })
@@ -415,7 +420,7 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     }
     const tools = new Map<string, Tool>()
 
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-1', assistantId: 'a-1', assistantTeamId: 'ws-1', tools,
       connectorStore: connectorStore as never,
       settingsStore: settingsStoreStub() as never,
@@ -485,7 +490,7 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
       return null
     })
 
-    await injectMcpTools({
+    await composeForTest({
       userId: 'u-1', assistantId: 'a-1', tools,
       // Empty: a workspace assistant never base-loads the owner's personal set.
       connectorStore: { list: vi.fn().mockResolvedValue([]) } as never,

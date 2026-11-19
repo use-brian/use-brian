@@ -1,6 +1,7 @@
 /** Current-policy explanations and content-free audit. [COMP:api/workspace-access] */
 import type { PoolClient } from 'pg'
-import { canRead, scopeGrantContains, type ScopeGrant } from '@use-brian/core'
+import { scopeGrantContains, type ScopeGrant } from '@use-brian/agent-runtime/security/context-scope.js'
+import { canRead } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type { WorkspaceDepartmentRegistry, WorkspaceAccessExplanation, WorkspaceAccessEvents } from '@use-brian/shared'
 import { getPool } from '../db/client.js'
 import { createDbContextScopeStore } from '../db/context-scope-store.js'

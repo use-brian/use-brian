@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { ContentBlock } from '@use-brian/core'
+import type { ContentBlock } from '@use-brian/agent-runtime/providers/types.js'
 import { closeProviderError } from '../chat-provider-error.js'
 
 function setup(turnCount = 0) {

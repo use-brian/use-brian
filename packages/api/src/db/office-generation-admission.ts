@@ -1,8 +1,10 @@
-import { pinToolAuthoringAuthority, workspaceCredentialDelegation, type ToolContext } from '@use-brian/core'
+import { pinToolAuthoringAuthority } from '@use-brian/core/security/tool-authority.js'
+import { workspaceCredentialDelegation } from '@use-brian/agent-runtime/security/workspace-delegation.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { captureOfficeWorkspaceAuthority } from '../office/workspace-authority.js'
 /** Bounded authenticated prompt-only request admission; not derived output admission. */
 import { APP_LEVEL_ASSISTANT_ID, type ResourceDestination } from '@use-brian/shared'
-import type { OfficeToolPort } from '@use-brian/core'
+import type { OfficeToolPort } from '@use-brian/core/office/tools.js'
 import { getAppPool, applyRLSGucs, rollbackAndRelease } from './client.js'
 import { createOfficeArtifactStore, type OfficeDbQuery } from './office-artifacts.js'
 import { createOfficeGenerationStore } from './office-generation.js'

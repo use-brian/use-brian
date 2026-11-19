@@ -1,6 +1,35 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { Readable, Writable } from 'node:stream'
-import { streamUrlToGcs, MediaTooLargeError } from '../gcs-client.js'
+import { pipeline } from 'node:stream/promises'
+import { createGcsFilesClient, deferredWritable, streamUrlToGcs, MediaTooLargeError } from '../gcs-client.js'
+
+// The SDK is replaced by an in-memory bucket. `sdk.loads` counts module
+// evaluations, which proves the client loads it at first use only.
+const sdk = vi.hoisted(() => ({ loads: 0, objects: new Map<string, string>(), committed: [] as string[], failWrite: false }))
+vi.mock('@google-cloud/storage', () => {
+  sdk.loads++
+  class Storage {
+    bucket() {
+      return {
+        file: (key: string) => ({
+          save: async (bytes: Buffer) => { sdk.objects.set(key, bytes.toString()) },
+          createWriteStream: () => {
+            const chunks: Buffer[] = []
+            return new Writable({
+              write(chunk, _enc, cb) {
+                if (sdk.failWrite) { cb(new Error('gcs upload rejected')); return }
+                chunks.push(Buffer.from(chunk)); cb()
+              },
+              // The upload commits after the last byte, asynchronously.
+              final(cb) { setTimeout(() => { sdk.objects.set(key, Buffer.concat(chunks).toString()); sdk.committed.push(key); cb() }, 15) },
+            })
+          },
+        }),
+      }
+    }
+  }
+  return { Storage }
+})
 
 /**
  * [COMP:files/gcs-stream] — the pull-by-URL → GCS streaming ingress. The fetch
@@ -79,5 +108,41 @@ describe('[COMP:files/gcs-stream] streamUrlToGcs', () => {
         fetchFn: async () => ({ ok: false, status: 404, body: null, headers: new Headers() }) as unknown as Response,
       }),
     ).rejects.toThrow(/media fetch failed/)
+  })
+})
+
+describe('[COMP:files/gcs-stream] lazy SDK and deferred write stream', () => {
+  it('loads @google-cloud/storage at the first bucket operation, not at import or client construction', async () => {
+    expect(sdk.loads).toBe(0)
+    const client = createGcsFilesClient({ bucket: 'fixture-bucket' })
+    expect(sdk.loads).toBe(0)
+    await client.writeBlob('ws/one', Buffer.from('hello'), { workspaceId: 'ws', mime: 'text/plain' })
+    expect(sdk.loads).toBe(1)
+    expect(sdk.objects.get('ws/one')).toBe('hello')
+  })
+
+  it('writeStream is synchronous and a pipeline resolves only after the upload commits', async () => {
+    const client = createGcsFilesClient({ bucket: 'fixture-bucket' })
+    const sink = client.writeStream('ws/stream', { mime: 'text/plain' })
+    expect(sink).toBeInstanceOf(Writable)
+    await pipeline(Readable.from([Buffer.from('ab'), Buffer.from('cd')]), sink)
+    expect(sdk.committed).toContain('ws/stream')
+    expect(sdk.objects.get('ws/stream')).toBe('abcd')
+  })
+
+  it('a destination write error fails the pipeline instead of reporting completion', async () => {
+    sdk.failWrite = true
+    try {
+      const client = createGcsFilesClient({ bucket: 'fixture-bucket' })
+      await expect(pipeline(Readable.from([Buffer.from('x')]), client.writeStream('ws/fail', { mime: 'text/plain' }))).rejects.toThrow('gcs upload rejected')
+      expect(sdk.committed).not.toContain('ws/fail')
+    } finally {
+      sdk.failWrite = false
+    }
+  })
+
+  it('a destination that cannot open fails the pipeline with its error', async () => {
+    const sink = deferredWritable(async () => { throw new Error('storage backend unavailable') })
+    await expect(pipeline(Readable.from([Buffer.from('x')]), sink)).rejects.toThrow('storage backend unavailable')
   })
 })

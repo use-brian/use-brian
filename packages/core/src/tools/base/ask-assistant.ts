@@ -12,11 +12,11 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool, type ToolContext } from '../types.js'
-import { NO_TOOL_TIMEOUT } from '../../engine/tool-executor.js'
-import { toolFailure } from '../tool-failure.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { NO_TOOL_TIMEOUT } from '@use-brian/agent-runtime/engine/tool-executor.js'
+import { toolFailure } from '@use-brian/agent-runtime/tools/tool-failure.js'
 import { INITIAL_BUDGET, type ConsultRequest, type ConsultTransport } from '../../a2a/index.js'
-import { pinAccessCeiling } from '../../security/access-ceiling.js'
+import { pinAccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
 
 // ── Dependency types ───────────────────────────────────────────
 

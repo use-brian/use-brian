@@ -1,8 +1,8 @@
 import { z } from 'zod'
-import { buildTool, type ToolContext } from '../tools/types.js'
-import { isAttendedTurn } from '../tools/capability-gate.js'
-import { notFoundFailure, toolFailure } from '../tools/tool-failure.js'
-import type { AccessContext } from '../security/access-context.js'
+import { buildTool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { isAttendedTurn } from '@use-brian/agent-runtime/tools/capability-gate.js'
+import { notFoundFailure, toolFailure } from '@use-brian/agent-runtime/tools/tool-failure.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import type { EntityStore } from './types.js'
 
 // Native alias curation is available without the optional Brain reclassifier.

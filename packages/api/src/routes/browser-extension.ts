@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { z } from 'zod'
-import type { BrowserProfile, BrowserProfileStore, DepartmentReadGrant } from '@use-brian/core'
+import type { BrowserProfile, BrowserProfileStore } from '@use-brian/core/sandbox/profiles.js'
+import type { DepartmentReadGrant } from '@use-brian/agent-runtime/security/department-read.js'
 import { humanCanReadBrowserProfile } from '../sandbox/profile-authority.js'
 import { signBrowserExtPairToken, verifyBrowserExtHelloToken } from '../auth/browser-ext-pair-token.js'
 

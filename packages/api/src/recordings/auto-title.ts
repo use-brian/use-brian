@@ -1,5 +1,6 @@
 // [COMP:recordings/auto-title] - shared OSS/hosted recording topic titles.
-import { extractLeadingEmoji, sanitizeTitle, type LLMProvider, type TokenUsage } from '@use-brian/core'
+import { extractLeadingEmoji, sanitizeTitle } from '@use-brian/core/doc/auto-title.js'
+import type { LLMProvider, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
 import {
   claimRecordingAutoTitle,
   loadRecordingAutoTitle,

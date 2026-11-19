@@ -11,12 +11,12 @@
  */
 
 import type { QueryResultRow } from 'pg'
+import { crmDecimalAdd } from '@use-brian/core/crm/commercial-decimal.js'
 import {
   DEFAULT_CRM_REVIEW_POLICIES,
   CRM_GOVERNANCE_SUBJECTS,
-  crmDecimalAdd,
   type CrmGovernedReadPort,
-} from '@use-brian/core'
+} from '@use-brian/core/crm/governed-records.js'
 import { query } from './client.js'
 import { commercialVisibility } from './crm-commercial-context-store.js'
 import { queryCrmPage } from '../crm-operations/pagination.js'

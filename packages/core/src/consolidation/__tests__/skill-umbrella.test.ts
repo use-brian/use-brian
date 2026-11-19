@@ -13,7 +13,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
-import { bindScopeSource, boundScopeSources } from '../../security/source-evidence.js'
+import { bindScopeSource, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import {
   runSkillUmbrellaPass,
   clusterByEmbedding,

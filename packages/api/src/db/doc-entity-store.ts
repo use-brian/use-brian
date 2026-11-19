@@ -32,29 +32,31 @@ import type { PoolClient, QueryResult, QueryResultRow } from 'pg'
 import { canonicalGenericResource, queryCanonicalGenericRecords } from '../application-platform/generic-reader.js'
 import { readCanonicalGenericRecord } from '../application-platform/field-evidence.js'
 import type {
-  DocEntityInstance,
-  DocEntityStore,
-  DocEntityType,
+  EntityInstance as DocEntityInstance,
+  EntityStore as DocEntityStore,
+  EntityType as DocEntityType,
   CellValue,
   PropertyDef,
   DocEntityOperationOptions,
-} from '@use-brian/core'
+} from '@use-brian/core/entities/doc-types.js'
+import { applicationAuthorityCreationScope } from '@use-brian/core/application-platform/access.js'
+import { validateDocApplicationSchema } from '@use-brian/core/application-platform/values.js'
 import {
-  docEntityInstanceSchema,
-  docEntityTypeSchema,
+  entityInstanceSchema as docEntityInstanceSchema,
+  entityTypeSchema as docEntityTypeSchema,
   cellValueSchema,
-  validateDocApplicationSchema,
-  applicationAuthorityCreationScope,
+} from '@use-brian/core/entities/doc-schemas.js'
+import {
   bindScopeSources,
   boundScopeSources,
-} from '@use-brian/core'
+} from '@use-brian/agent-runtime/security/source-evidence.js'
 import { getAppPool, applyRLSGucs, queryWithRLS, rollbackAndRelease } from './client.js'
 import { currentAgentAccess } from './agent-access-context.js'
 import { ApplicationPlatformError, applicationQuerySchema } from '@use-brian/shared'
 import { applicationResourceRefSchema, type ApplicationResourceRef } from '@use-brian/shared'
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
-import type { ApplicationOperationContext } from '@use-brian/core'
+import type { ApplicationOperationContext } from '@use-brian/core/application-platform/contracts.js'
 import { getApplicationExecutionBinding } from '../application-platform/execution-context.js'
 
 // ── Row projections ────────────────────────────────────────────────────

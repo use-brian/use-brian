@@ -97,6 +97,8 @@ export type SlackApiOptions = {
    * happens at the bot-socket boundary rather than the tool boundary.
    */
   onOutboundAudit?: (event: SlackOutboundAudit) => Promise<void>
+  /** Recheck the sending caller before each physical message attempt. */
+  beforePostMessage?: () => Promise<void>
 }
 
 /** Provider fields needed to project a Slack thread into model-visible text. */
@@ -188,6 +190,7 @@ export function createSlackApi(options: SlackApiOptions) {
 
   return {
     postMessage: async (channel: string, text: string, opts?: { threadTs?: string; mrkdwn?: boolean }) => {
+      await options.beforePostMessage?.()
       try {
         const result = await call<{ ts: string; channel: string }>('chat.postMessage', {
           channel,

@@ -9,11 +9,11 @@
  * [COMP:crm/identity-bindings]
  */
 
+import { EntityMergeError } from '@use-brian/core/corrections/entity-merge.js'
 import {
-  EntityMergeError,
   stableExternalIdentityFromCrmRef,
   type StableExternalIdentity,
-} from '@use-brian/core'
+} from '@use-brian/core/decision-learning/types.js'
 import type pg from 'pg'
 
 import { getPool } from './client.js'

@@ -1,7 +1,7 @@
 /** Public campaign redirect/collection boundary. [COMP:api/campaign-tracking] */
 import express, { Router, type Response } from 'express'
 import { z } from 'zod'
-import { CampaignError } from '@use-brian/core'
+import { CampaignError } from '@use-brian/core/campaigns/types.js'
 import { campaignBrowserEventSchema, campaignOpaqueIdSchema } from '@use-brian/shared/campaigns'
 import { createDbCampaignStore, type CampaignLinkRow } from '../db/campaign-store.js'
 import { createCampaignTrackingStore, type CampaignTrackingStore } from '../db/campaign-tracking-store.js'

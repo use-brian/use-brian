@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { WorkspaceFile } from '@use-brian/core'
+import type { WorkspaceFile } from '@use-brian/core/workspace-files/types.js'
 import {
   bindOfficeFile,
   classifyOfficeOutput,

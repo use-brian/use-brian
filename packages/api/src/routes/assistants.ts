@@ -35,7 +35,9 @@ import { buildConnectorAuthHeaders } from '../mcp/auth-headers.js'
 import { workspacePolicyAsSettingsStore } from '../db/workspace-tool-policy-store.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import { AssistantTeardownBlockedError, deleteAssistantFootprint, type AssistantTeardownRule } from '../db/assistant-teardown.js'
-import type { McpSettingsStore, JobStore, CapabilityStore } from '@use-brian/core'
+import type { CapabilityStore } from '@use-brian/core/authorization/types.js'
+import type { JobStore } from '@use-brian/core/scheduling/types.js'
+import type { McpSettingsStore } from '@use-brian/agent-runtime/mcp/types.js'
 import {
   APP_LEVEL_ASSISTANT_ID,
   ALL_EXACT_INSTANCE_GOVERNANCE_CONNECTOR_IDS,
@@ -46,8 +48,9 @@ import {
   OFFICIAL_CONNECTORS,
   type ConnectorEntry,
 } from '@use-brian/shared'
-import { classifyTool, defaultPolicy, loadBuiltinSkills } from '@use-brian/core'
-import type { SkillContent } from '@use-brian/core'
+import { loadBuiltinSkills } from '@use-brian/core/skills/loader.js'
+import { classifyTool, defaultPolicy } from '@use-brian/agent-runtime/mcp/classifier.js'
+import type { SkillContent } from '@use-brian/core/skills/types.js'
 import {
   CHARTER_FIELDS,
   CHARTER_FIELD_LIMITS,
@@ -107,7 +110,7 @@ type AssistantRouteOptions = {
     workspaceId: string,
   ) => Promise<Array<{ id: string; name: string }>>
   capabilityStore: CapabilityStore
-  analytics?: import('@use-brian/core').AnalyticsLogger
+  analytics?: import('@use-brian/core/analytics/logger.js').AnalyticsLogger
   /**
    * Per-assistant connector grants store. Reserved for future inline
    * surfaces on this router (e.g. show "grant required" warnings on
@@ -1673,7 +1676,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
     if (updates.timezone) {
       const existing = await options.jobStore.get(jobId)
       if (existing) {
-        const { computeNextRun } = await import('@use-brian/core')
+        const { computeNextRun } = await import('@use-brian/core/scheduling/schedule.js')
         updates.nextRunAt = computeNextRun(existing.schedule, updates.timezone)
       }
     }

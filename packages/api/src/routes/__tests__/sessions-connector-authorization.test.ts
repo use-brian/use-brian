@@ -24,7 +24,7 @@ vi.mock('../../db/sessions.js', () => ({
 vi.mock('../../db/users.js', () => ({
   getUserAssistant: vi.fn(async () => ({ id: 'assistant-test' })), findAssistantById: vi.fn() }))
 
-import { CONFIGURE_CAPABILITY } from '@use-brian/core'
+import { CONFIGURE_CAPABILITY } from '@use-brian/core/authorization/types.js'
 import { sessionQuestionRoutes } from '../sessions-questions.js'
 import { enqueueToolInvocationResume } from '../../workflow/approval.js'
 import { findSessionById } from '../../db/sessions.js'

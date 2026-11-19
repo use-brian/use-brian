@@ -2,6 +2,7 @@ import pg from 'pg'
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { connectActingAs, connectionRole } from '../../__tests__/fixtures/bootstrap-role.js'
 
 const connectionString = process.env.CONTEXT_SCOPE_TEST_DATABASE_URL
 const describeIf = connectionString ? describe : describe.skip
@@ -217,11 +218,15 @@ describeIf('[COMP:api/context-scope-store] context scope schema integration', ()
 
 describeIf('[COMP:api/context-scope-store] saved-page RLS after agent connection reuse', () => {
   let connection: pg.Client
+  let session: Awaited<ReturnType<typeof connectActingAs>>
   let readerRole: string
 
   beforeEach(async () => {
-    connection = new pg.Client({ connectionString })
-    await connection.connect()
+    // The migration and fixtures run as the connection's own (ordinary owner)
+    // role; only creating the disposable reader role, and switching to it, use
+    // the fixture bootstrap session user.
+    session = await connectActingAs(connectionRole(connectionString!), connectionString)
+    connection = session.client
     // Commit only connection-local settings, never fixtures. A fresh custom
     // GUC reverts to '' (not SQL NULL) when this agent transaction finishes.
     await connection.query('BEGIN READ ONLY')
@@ -253,7 +258,7 @@ describeIf('[COMP:api/context-scope-store] saved-page RLS after agent connection
     await connection.query(policySql)
     // Keep role setup rollback-only too; local rigs need not have app_user.
     readerRole = `scope_test_${randomUUID().replaceAll('-', '')}`
-    await connection.query(`CREATE ROLE "${readerRole}" NOLOGIN NOSUPERUSER NOBYPASSRLS`)
+    await session.privileged(() => connection.query(`CREATE ROLE "${readerRole}" NOLOGIN NOSUPERUSER NOBYPASSRLS`))
     await connection.query(`GRANT USAGE ON SCHEMA public TO "${readerRole}"`)
     await connection.query(`GRANT SELECT ON ALL TABLES IN SCHEMA public TO "${readerRole}"`)
   })

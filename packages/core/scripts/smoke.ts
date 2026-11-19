@@ -14,18 +14,18 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { NOOP_TURN_LEDGER } from '../src/engine/turn-ledger.js'
+import { NOOP_TURN_LEDGER } from '@use-brian/agent-runtime/engine/turn-ledger.js'
 import { z } from 'zod'
-import { queryLoop, type QueryEvent } from '../src/engine/query-loop.js'
-import { buildTool } from '../src/tools/types.js'
-import type { Tool } from '../src/tools/types.js'
+import { queryLoop, type QueryEvent } from '@use-brian/agent-runtime/engine/query-loop.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 import type {
   LLMProvider,
   ProviderSession,
   SessionOptions,
   StreamChunk,
   Message,
-} from '../src/providers/types.js'
+} from '@use-brian/agent-runtime/providers/types.js'
 
 // ── Scripted stream sequences ──────────────────────────────────
 //

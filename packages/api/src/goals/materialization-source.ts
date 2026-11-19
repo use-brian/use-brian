@@ -5,7 +5,10 @@
  */
 import { isDeepStrictEqual } from 'node:util'
 import type { PoolClient } from 'pg'
-import { parseAuthoringAuthority, type AuthoringAuthority, type WorkflowDefinition, type GoalRecord, type JobStore } from '@use-brian/core'
+import type { GoalRecord } from '@use-brian/core/goals/types.js'
+import type { JobStore } from '@use-brian/core/scheduling/types.js'
+import type { WorkflowDefinition } from '@use-brian/core/workflow/types.js'
+import { parseAuthoringAuthority, type AuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { GOAL_TICK_KIND, type GoalLoopState } from './driver.js'
 import { getGoalByIdSystem } from '../db/goals.js'
 import { getPool } from '../db/client.js'

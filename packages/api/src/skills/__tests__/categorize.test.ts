@@ -8,7 +8,7 @@ import {
   suggestSkillCategories,
   type CategorizableSkill,
 } from '../categorize.js'
-import type { LLMProvider, StreamChunk } from '@use-brian/core'
+import type { LLMProvider, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
 import {
   executionFixture,
   fixtureDecisionProvider,

@@ -7,8 +7,8 @@
  * with a fake FilesApi without pulling pg or @google-cloud/storage.
  */
 
-import type { DerivedWriteEvidence } from '../security/derived-scope.js'
-import type { Sensitivity } from '../security/sensitivity.js'
+import type { DerivedWriteEvidence } from '@use-brian/agent-runtime/security/derived-scope.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type {
   FileSensitivity,
   WorkspaceFile,
@@ -18,7 +18,7 @@ import type {
 
 export type FilesContext = {
   /** Host-only origin for durable transfer admission. */
-  executionContext?: import('../security/execution-context.js').ExecutionContext
+  executionContext?: import('@use-brian/agent-runtime/security/execution-context.js').ExecutionContext
   /** Per-call trusted source snapshots from the executing tool accumulator. Never a transport field. */
   derivation?: DerivedWriteEvidence
   workspaceId: string

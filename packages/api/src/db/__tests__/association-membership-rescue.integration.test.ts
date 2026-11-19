@@ -5,7 +5,7 @@ import {
   AssociationMembershipRescueReversalSchema,
   AssociationMembershipRescueSettlementSchema,
   type AssociationActor,
-} from '@use-brian/core'
+} from '@use-brian/core/association/domain.js'
 import { getAppPool, getPool } from '../client.js'
 import { createAssociationStore } from '../association-store.js'
 import { createCrmPrivacyService } from '../../crm-operations/privacy-previews.js'

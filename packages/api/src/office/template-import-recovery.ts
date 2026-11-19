@@ -1,5 +1,6 @@
 /** Explicit recovery of one failed, unedited template import. [COMP:api/office-generation] */
-import { canRead, scopeGrantContains } from '@use-brian/core'
+import { scopeGrantContains } from '@use-brian/agent-runtime/security/context-scope.js'
+import { canRead } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type { OfficeGenerationJobRow } from '../db/office-generation.js'
 import type { OfficeArtifactRow } from '../db/office-artifacts.js'
 import type { OfficeFileBinding } from './file-binding.js'

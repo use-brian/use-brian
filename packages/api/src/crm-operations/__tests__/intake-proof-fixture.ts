@@ -1,6 +1,6 @@
 /** Synthetic backend only. Never validates real email or provider accounts. */
 import { generateKeyPairSync, sign } from 'node:crypto'
-import { canonicalCrmRequest, crmOperationsSha256, type RecordCrmSubmissionCommand } from '@use-brian/core'
+import { canonicalCrmRequest, crmOperationsSha256, type RecordCrmSubmissionCommand } from '@use-brian/core/crm/operations-types.js'
 
 export function intakeProofFixture() {
   const keys = generateKeyPairSync('ed25519')

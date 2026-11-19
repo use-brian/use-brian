@@ -11,7 +11,8 @@
  */
 import { Router, type Request, type RequestHandler, type Response } from 'express'
 import { z } from 'zod'
-import { TaskResponsibilityError, type TaskStore } from '@use-brian/core'
+import { TaskResponsibilityError } from '@use-brian/core/tasks/responsibility.js'
+import type { TaskStore } from '@use-brian/core/tasks/types.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { readWorkProjection, WorkUnavailableError } from '../briefs/work.js'
 import { claimTask } from '../tasks/responsibility.js'

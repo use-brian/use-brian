@@ -31,7 +31,9 @@
 
 import { query } from './client.js'
 import { recomputeSkillEdges, type SkillEdgeReferenceTarget } from './skill-edge-hooks.js'
-import { extractSkillMarkdownLinks, type EntityLinksStore, type Sensitivity } from '@use-brian/core'
+import type { EntityLinksStore } from '@use-brian/core/entities/types.js'
+import { extractSkillMarkdownLinks } from '@use-brian/core/skills/bundle.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type { ConnectorInstanceStore } from './connector-instance-store.js'
 import type { WorkspaceSkillStore, WorkspaceSkill } from './skill-store.js'
 import type { WorkspaceSkillFilesStore } from './workspace-skill-files-store.js'

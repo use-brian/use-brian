@@ -29,15 +29,11 @@ import type { WorkspaceMcpProfile } from '../workspace-mcp/profile.js'
 import { randomUUID } from 'node:crypto'
 import { Router } from 'express'
 import { serveStatelessMcp } from '../brain-mcp/stateless.js'
-import {
-  SensitivityAccumulator,
-  ContextScopeAccumulator,
-  CONFIGURE_CAPABILITY,
-  executionToolContext,
-  type CapabilityStore,
-  type Tool,
-  type ToolContext,
-} from '@use-brian/core'
+import { CONFIGURE_CAPABILITY, type CapabilityStore } from '@use-brian/core/authorization/types.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { SensitivityAccumulator } from '@use-brian/agent-runtime/security/sensitivity.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { parseAuthToken, verifySecret, type ApiKeyStore } from '../db/api-key-store.js'
 import { findAssistantById } from '../db/users.js'
 import { query } from '../db/client.js'

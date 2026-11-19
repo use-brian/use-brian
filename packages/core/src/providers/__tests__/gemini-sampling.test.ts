@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createGeminiProvider } from '../gemini.js'
+import { createGeminiProvider } from '@use-brian/agent-runtime/providers/gemini.js'
 import { transcribeAudio } from '../../media/transcribe.js'
 import { transcribeRecording, transcribeRecordingChunks } from '../../media/transcribe-recording.js'
 

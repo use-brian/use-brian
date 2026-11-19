@@ -17,8 +17,29 @@ declare global {
 /**
  * Express middleware that verifies JWT access token from Authorization header.
  * Sets req.userId on success, returns 401 on failure.
+ *
+ * One admission per request (plan "One-turn SQL baseline", M2): fall-through
+ * `/api` routers each mount their own guard, so a single request can cross
+ * several before its handler. The first successful validation is recorded on
+ * that request object only, keyed by the exact header and validator, and later
+ * guards on the SAME request reuse it. This is not a cache: nothing outlives the
+ * request, every new request validates (and so observes revocation) afresh, and
+ * long turns keep their own live authority checks.
  */
 type AuthSessionValidator = Pick<AuthSessionStore, 'validateAccess'>
+type RequestAdmission = { header: string; sessions: AuthSessionValidator; userId: string; authSessionId?: string; authVersion: number }
+const requestAdmissions = new WeakMap<Request, RequestAdmission>()
+/** The request's own admission, when an earlier guard admitted this exact header. */
+function admittedRequest(req: Request, header: string, sessions: AuthSessionValidator): RequestAdmission | null {
+  const admitted = requestAdmissions.get(req)
+  return admitted && admitted.header === header && admitted.sessions === sessions && req.userId === admitted.userId ? admitted : null
+}
+function admit(req: Request, header: string, sessions: AuthSessionValidator, claims: { userId: string; sessionId?: string; authVersion?: number }): void {
+  req.userId = claims.userId
+  req.authSessionId = claims.sessionId
+  req.authVersion = claims.authVersion ?? 0
+  requestAdmissions.set(req, { header, sessions, userId: claims.userId, authSessionId: claims.sessionId, authVersion: req.authVersion })
+}
 
 export function requireAuth(
   jwtSecret: string,
@@ -30,6 +51,7 @@ export function requireAuth(
       res.status(401).json({ error: 'Missing or invalid Authorization header' })
       return
     }
+    if (admittedRequest(req, header, sessions)) { next(); return }
 
     const token = header.slice(7)
     const claims = verifyAccessTokenClaims(token, jwtSecret)
@@ -47,9 +69,7 @@ export function requireAuth(
         res.status(401).json({ error: 'Invalid or revoked token' })
         return
       }
-      req.userId = claims.userId
-      req.authSessionId = claims.sessionId
-      req.authVersion = claims.authVersion ?? 0
+      admit(req, header, sessions, claims)
       next()
     } catch (error) {
       console.error('[auth] session validation failed:', error)
@@ -68,7 +88,7 @@ export function optionalAuth(
 ) {
   return async (req: Request, _res: Response, next: NextFunction): Promise<void> => {
     const header = req.headers.authorization
-    if (header?.startsWith('Bearer ')) {
+    if (header?.startsWith('Bearer ') && !admittedRequest(req, header, sessions)) {
       const token = header.slice(7)
       const claims = verifyAccessTokenClaims(token, jwtSecret)
       if (
@@ -77,11 +97,7 @@ export function optionalAuth(
         (claims.sessionId === undefined || UUID_RE.test(claims.sessionId))
       ) {
         try {
-          if (await sessions.validateAccess(claims)) {
-            req.userId = claims.userId
-            req.authSessionId = claims.sessionId
-            req.authVersion = claims.authVersion ?? 0
-          }
+          if (await sessions.validateAccess(claims)) admit(req, header, sessions, claims)
         } catch (error) {
           console.error('[auth] optional session validation failed:', error)
         }

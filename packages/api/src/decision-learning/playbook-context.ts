@@ -7,7 +7,7 @@
  */
 
 import { PLAYBOOK_BLOCK_CHAR_CAP, type FeedLearningScope } from '@use-brian/shared'
-import type { AnalyticsLogger } from '@use-brian/core'
+import type { AnalyticsLogger } from '@use-brian/core/analytics/logger.js'
 
 import {
   listActivePlaybookRulesForActor,

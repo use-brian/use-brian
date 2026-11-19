@@ -24,31 +24,32 @@ import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import {
-  buildTool,
-  buildUndoEntry,
   blueprintRecordToBlocks,
-  queryLoop,
   recordCompleteness,
-  resolveResearchBudget,
   validateFieldValue,
-  type AssistantKind,
-  type Block,
   type BlueprintRecordFields,
-  type DocPageStore,
-  type ExtractionSpec,
-  type LLMProvider,
-  type Message,
-  type Ops,
+} from '@use-brian/core/doc/blueprint-record.js'
+import type { ExtractionSpec } from '@use-brian/core/doc/custom-template-types.js'
+import type { Ops } from '@use-brian/core/doc/page-types.js'
+import type { DocPageStore } from '@use-brian/core/doc/tools.js'
+import { buildUndoEntry } from '@use-brian/core/doc/undo.js'
+import { queryLoop } from '@use-brian/core/engine/query-loop-defaults.js'
+import {
+  resolveResearchBudget,
   type ResearchDepthConfig,
-  type SavedViewStore,
-  type TokenUsage,
-  type Tool,
-  type UsageStore,
-  DEFAULT_STALL_IDLE_MS,
-  ContextScopeAccumulator,
-  isStalledError,
   type ResearchBudget,
-} from '@use-brian/core'
+} from '@use-brian/core/engine/research-depth.js'
+import type { Block } from '@use-brian/core/views/blocks.js'
+import type { SavedViewStore } from '@use-brian/core/views/types.js'
+import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
+import {
+  DEFAULT_STALL_IDLE_MS,
+  isStalledError,
+} from '@use-brian/agent-runtime/engine/stall-watchdog.js'
+import type { LLMProvider, Message, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
+import type { AssistantKind } from '@use-brian/agent-runtime/security/access-context.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { extractCitations, type CitationIndex } from '@use-brian/shared'
 import type {
   BlueprintRecord,

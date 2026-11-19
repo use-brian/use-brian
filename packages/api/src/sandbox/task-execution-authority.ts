@@ -1,8 +1,11 @@
 import { restoreWorkspaceMcpDelegation } from '../workspace-mcp/delegation.js'
 import { createDbCapabilityStore } from '../db/capability-store.js'
 import { bindWorkspaceMcpPublication } from '../db/session-context-revisions.js'
-import { assertSourceModelInputAuthority } from '../application-platform/model-source-authority.js'
-import { intersectAccessCeilings, AuthoritySourceSchema, pinAccessCeiling, parseAuthoringAuthority, type CurrentAuthorityBoundary, type SandboxTaskRecord } from '@use-brian/core'
+import { admitModelInput } from '../context-scope/admission.js'
+import type { SandboxTaskRecord } from '@use-brian/core/sandbox/orchestrator.js'
+import { intersectAccessCeilings, pinAccessCeiling, parseAuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import { AuthoritySourceSchema } from '@use-brian/agent-runtime/security/authority-source.js'
+import type { CurrentAuthorityBoundary } from '@use-brian/agent-runtime/tools/types.js'
 import { createAuthorityLease, createSessionAuthorityLease } from '../context-scope/authority-lease.js'
 import { resolveLiveAccessCeilingSystem } from '../context-scope/resolve-turn-scope.js'
 import { findAssistantById } from '../db/users.js'
@@ -37,9 +40,9 @@ export async function resolveBrowserTaskExecutionAuthority(task: Pick<SandboxTas
       ...lease,
       async execute<T>(operation:()=>Promise<T>):Promise<T> {
         return lease.execute(async()=>{
-          await assertSourceModelInputAuthority(parent.context)
+          await admitModelInput(parent.context)
           const result=await operation()
-          await assertSourceModelInputAuthority(parent.context)
+          await admitModelInput(parent.context)
           return result
         })
       },

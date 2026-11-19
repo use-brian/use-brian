@@ -49,7 +49,7 @@
  */
 
 import { read } from '../context-scope/reference-predicate.js'
-import { canRead, type Sensitivity } from '@use-brian/core'
+import { canRead, type Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type { ConnectorInstance, ConnectorInstanceStore } from '../db/connector-instance-store.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import { departmentClearancesForUserSystem } from '../db/department-store.js'

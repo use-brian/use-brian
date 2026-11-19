@@ -1,6 +1,7 @@
 /** Canonical candidate floors for reviewed and scheduled retention. [COMP:crm/retention] */
 import type {Pool,PoolClient} from 'pg'
-import {CrmOperationsError,deriveResourceScope,type CrmOperationsContext,type ResourceScope,type ScopeSource} from '@use-brian/core'
+import {CrmOperationsError, type CrmOperationsContext} from '@use-brian/core/crm/operations-types.js'
+import {deriveResourceScope, type ResourceScope, type ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
 import {assertAssociationOrderAuthority,assertAssociationSourceAuthority} from '../association/source-scope.js'
 import {assertCrmEventPrivacyAuthority} from './privacy-subject-authority.js'
 import {assertCrmDeliveryScope} from './delivery-source-authority.js'

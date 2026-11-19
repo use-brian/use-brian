@@ -6,7 +6,7 @@ import {
   type CampaignCommand,
   type CampaignContext,
   type CampaignServicePort,
-} from '@use-brian/core'
+} from '@use-brian/core/campaigns/types.js'
 import {
   campaignAttachContentSchema,
   campaignCreateLinkSchema,

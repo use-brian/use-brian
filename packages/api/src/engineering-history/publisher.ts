@@ -1,6 +1,6 @@
 import {notifyWorkspaceChange} from '../brain-stream/notify.js'
 /** Durable archive terminal. No Episode or model port. [COMP:api/engineering-history] */
-import type { FilesApi,FilesContext } from '@use-brian/core'
+import type { FilesApi, FilesContext } from '@use-brian/core/workspace-files/api.js'
 import type { ArchiveCapture,ArchiveSnapshot } from './contracts.js'
 import { EngineeringHistoryError } from './contracts.js'
 import { archiveDigest,archiveReceipt,enqueueArchive,claimArchiveBatch,finishArchiveBatch,releaseArchiveBatch } from '../db/engineering-history-store.js'

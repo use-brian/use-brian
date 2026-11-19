@@ -1,5 +1,5 @@
 import type { PoolClient } from 'pg'
-import type { WorkspaceFileCreateInput } from '@use-brian/core'
+import type { WorkspaceFileCreateInput } from '@use-brian/core/workspace-files/types.js'
 import { readAdmissionPolicy, usesClassicModeAdmission } from './admission-policy-read.js'
 import { admitWorkspaceResource } from './resource-admission.js'
 import { WorkspaceAccessError } from './policy.js'

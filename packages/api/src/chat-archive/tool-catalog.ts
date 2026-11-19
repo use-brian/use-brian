@@ -20,16 +20,6 @@ export const CHAT_ARCHIVE_SEARCH_TOOL = {
 } as const
 
 /**
- * The retrieval half of "send me that file".
- *
- * Search hits describe media (`media_sha256`, `media_mime`, extraction state)
- * but the bytes live in the archive's content-addressed store. This tool pulls
- * them into the workspace file layer, where `sendFile`, `ingestFile`, and the
- * web app's Files view can reach them.
- */
-export { CHAT_ARCHIVE_SAVE_MEDIA_TOOL } from '@use-brian/core'
-
-/**
  * Resolver for the search tool.
  *
  * Without it a model has no way to discover a channel handle except by lifting

@@ -1,6 +1,6 @@
 /** Terminal decision deadlines, including admission. [COMP:decisions/hydra] */
 import { DecisionProviderError } from './types.js'
-import { assertInputAuthority } from '../providers/input-authority.js'
+import { assertInputAuthority } from '@use-brian/agent-runtime/providers/input-authority.js'
 import { sharesClassifierCompletionAdmission, transferClassifierDecisionCheck } from './authority-ownership.js'
 
 /** Finite host ceiling; operator profiles and caller deadlines may only narrow it. */

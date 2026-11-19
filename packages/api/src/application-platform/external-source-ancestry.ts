@@ -1,6 +1,6 @@
 /** Immutable external obligations behind native inputs. [COMP:api/external-source-access] */
 import { z } from 'zod'
-import { resourceScopeKey, type ScopeSource } from '@use-brian/core'
+import { resourceScopeKey, type ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { SourceProtocolError } from '@use-brian/brian-app/connector'
 import type { PoolClient } from 'pg'
 import { getPool } from '../db/client.js'

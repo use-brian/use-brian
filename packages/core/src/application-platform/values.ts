@@ -4,8 +4,8 @@ import { ApplicationPlatformError, applicationDecimalSchema, applicationJsonSche
 import { cellValueSchema, propertyDefSchema } from '../entities/doc-schemas.js'
 import type { CellValue, PropertyDef } from '../entities/doc-types.js'
 import { z } from 'zod'
-import { CrmRecordFieldDefinitionSchema } from '../crm/config-commands.js'
-import { validateCrmCustomFieldValue, type CrmCustomFieldDefinition } from '../crm/types.js'
+import { CrmRecordFieldDefinitionSchema } from './record-configuration.js'
+import { validateCrmCustomFieldValue, type CrmCustomFieldDefinition } from './record-values.js'
 
 const systemKinds = new Set(['created_time', 'created_by', 'last_edited_time', 'last_edited_by'])
 const reserved = new Set(['__proto__', 'prototype', 'constructor'])

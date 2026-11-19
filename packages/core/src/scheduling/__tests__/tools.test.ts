@@ -1,4 +1,4 @@
-import { createExecutionContext, executionToolContext } from '../../security/execution-context.js'
+import { createExecutionContext, executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { describe, it, expect, vi } from 'vitest'
 import { createSchedulingTools } from '../tools.js'
 import type { JobStore, ScheduledJob } from '../types.js'

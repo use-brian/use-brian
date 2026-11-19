@@ -2,7 +2,11 @@
  * [COMP:api/office-generation] [COMP:office/pdf-tools] */
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
-import { AssistantOfficePlanSchema, AssistantOfficeOperationSchema, type AssistantOfficeOperation, collectStream, fitOfficeArtifact, repairOfficeArtifactFit, type LLMProvider, type Message } from '@use-brian/core'
+import { AssistantOfficePlanSchema, AssistantOfficeOperationSchema, type AssistantOfficeOperation } from '@use-brian/core/office/command-input.js'
+import { repairOfficeArtifactFit } from '@use-brian/core/office/generation/pipeline.js'
+import { fitOfficeArtifact } from '@use-brian/core/office/index.js'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
+import type { LLMProvider, Message } from '@use-brian/agent-runtime/providers/types.js'
 import {
   OfficeArtifactSnapshotSchema,
   OfficeCommandSchema,

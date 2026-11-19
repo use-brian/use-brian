@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { buildToolIndex, createMcpSearchTools } from '../tool-search.js'
-import type { McpSettingsStore, McpServerConfig } from '../types.js'
-import type { EngineHooks } from '../../engine/hooks.js'
+import type { McpSettingsStore, McpServerConfig } from '@use-brian/agent-runtime/mcp/types.js'
+import type { EngineHooks } from '@use-brian/agent-runtime/engine/hooks.js'
 
 // Read-classified tool (`get_*`) → default policy `allow` → no confirmation
 // gate, so the dispatch reaches the preflight hook + callMcpTool directly.

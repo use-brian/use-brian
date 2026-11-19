@@ -1,8 +1,22 @@
 /** Deployed operations over the canonical generic record store. [COMP:api/application-records] */
 import { z } from 'zod'
 import type { PoolClient } from 'pg'
-import { applicationAuthorityFieldCatalog, applicationAuthorityQueryFieldCeiling, assertApplicationQueryFields, assertApplicationWriteFields, bindScopeSources,boundScopeSources,propertyDefSchema,
-  type ApplicationModuleDefinition, type ApplicationOperationContext, type PropertyDef } from '@use-brian/core'
+import {
+  applicationAuthorityFieldCatalog,
+  applicationAuthorityQueryFieldCeiling,
+  assertApplicationQueryFields,
+  assertApplicationWriteFields
+} from '@use-brian/core/application-platform/access.js'
+import type {
+  ApplicationModuleDefinition,
+  ApplicationOperationContext
+} from '@use-brian/core/application-platform/contracts.js'
+import { propertyDefSchema } from '@use-brian/core/entities/doc-schemas.js'
+import type { PropertyDef } from '@use-brian/core/entities/doc-types.js'
+import {
+  bindScopeSources,
+  boundScopeSources
+} from '@use-brian/agent-runtime/security/source-evidence.js'
 import { ApplicationPlatformError, applicationQuerySchema,
   type ApplicationQuery, type ApplicationRecordProjection, type ApplicationResourceDefinition, type ApplicationResourceRef } from '@use-brian/shared'
 import { applyCanonicalApplicationRecordMutation, canonicalApplicationRecordMutationSchema,

@@ -13,19 +13,20 @@
 
 import { randomUUID } from 'node:crypto'
 import type { PoolClient } from 'pg'
+import { normalizeCrmBusinessReference } from '@use-brian/core/crm/business-references.js'
+import { crmDecimalAdd, crmDecimalCompare } from '@use-brian/core/crm/commercial-decimal.js'
 import {
   CrmErpImportRecordsSchema,
-  crmDecimalAdd,
-  crmDecimalCompare,
   crmErpCanonicalRecords,
-  crmOperationsSha256,
   crmProjectionReceiptOutcome,
-  normalizeCrmBusinessReference,
   type CrmErpCommand,
   type CrmErpImportRecords,
+} from '@use-brian/core/crm/erp-bridge.js'
+import {
+  crmOperationsSha256,
   type CrmOperationsContext,
-  type EntityRecord,
-} from '@use-brian/core'
+} from '@use-brian/core/crm/operations-types.js'
+import type { EntityRecord } from '@use-brian/core/entities/types.js'
 import type { CrmOperationsTransaction } from '../db/crm-operations-store.js'
 import { createCompany, createDeal, readCrmReference, updateCompany } from '../db/crm.js'
 import { updateEntity } from '../db/entities-store.js'

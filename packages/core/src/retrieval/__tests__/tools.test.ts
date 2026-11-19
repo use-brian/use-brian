@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { ContextScopeAccumulator } from '../../security/context-scope.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import { createRetrievalTools } from '../tools.js'
 import type {
   AggregateData,
@@ -13,7 +13,7 @@ import type {
   RetrievalToolEvent,
   SearchData,
 } from '../types.js'
-import type { ToolContext } from '../../tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const WORKSPACE_ID = 'ws-1'
 const USER_ID = 'user-1'

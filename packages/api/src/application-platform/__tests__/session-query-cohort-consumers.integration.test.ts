@@ -1,10 +1,11 @@
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
-import {boundScopeSources,executionToolContext} from '@use-brian/core'
+import {executionToolContext} from '@use-brian/agent-runtime/security/execution-context.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {applyRLSGucs,getAppPool,getPool,rollbackAndRelease,runWithAgentAccess} from '../../db/client.js'
 import {addSessionMessage} from '../../db/sessions.js'
 import {bindSessionContextRetainedAuthority,readSessionContextRevisions,writeSessionContextRevision} from '../../db/session-context-revisions.js'
-import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
-import {assertSourceModelInputAuthority,assertSourceModelOutputAuthority} from '../model-source-authority.js'
+import {readAdmittedSessionQuery} from '../../db/conversation-store.js'
+import {admitModelInput,admitModelOutput} from '../../context-scope/admission.js'
 import {configureConnectorSourceRuntimeFactory} from '../source-runtime.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
 import {persistentSourceFixture} from './fixtures/persistent-source.js'
@@ -39,7 +40,7 @@ describe.sequential('[COMP:api/application-persistence] complete original sessio
  for(const boundary of ['model input','model output'] as const)it('holds stale absence before '+boundary+' after an actual independent source grant gain',async()=>{
   const {f,source,carrier,authority,sources,grantAccess,unchanged}=await setup()
   authority.accumulator.note({sources});const context={...executionToolContext(authority.execution,{appId:'fixture'}),scopeAccumulator:authority.accumulator}
-  const check=boundary==='model input'?assertSourceModelInputAuthority:assertSourceModelOutputAuthority
+  const check=boundary==='model input'?admitModelInput:admitModelOutput
   // Source-denied candidates leave the native-only original query usable.
   await expect(check(context)).resolves.toBeUndefined()
   await grantAccess();let exposures=0
@@ -78,11 +79,11 @@ describe.sequential('[COMP:api/application-persistence] complete original sessio
  it('fails closed on an unavailable current cohort instead of treating an unknown source as denied',async()=>{
   const {f,source,authority,sources,unchanged}=await setup();authority.accumulator.note({sources})
   await source.pool.query('ALTER TABLE grants RENAME TO temporarily_unavailable_grants')
-  await expect(assertSourceModelInputAuthority({...executionToolContext(authority.execution,{appId:'fixture'}),scopeAccumulator:authority.accumulator})).rejects.toMatchObject({code:'source_unavailable',reason:'authority_changed',retrySafe:false})
+  await expect(admitModelInput({...executionToolContext(authority.execution,{appId:'fixture'}),scopeAccumulator:authority.accumulator})).rejects.toMatchObject({code:'source_unavailable',reason:'authority_changed',retrySafe:false})
   await expect(addSessionMessage({sessionId:f.session.id,role:'assistant',content:'Fictional unavailable cohort reply',authority,derivation:{producer:'fixture:cohort-unavailable',sources},derivationTarget:f.envelope})).rejects.toMatchObject({code:'source_unavailable'})
   expect((await f.pool.query('SELECT count(*)::int AS count FROM session_messages WHERE session_id=$1',[f.session.id])).rows[0].count).toBe(4)
   await source.pool.query('ALTER TABLE temporarily_unavailable_grants RENAME TO grants')
   const current=await f.modelContext(),prefix=await readAdmittedSessionQuery({sessionId:f.session.id,throughSequence:3,authority:current})
-  current.accumulator.note({sources:boundScopeSources(prefix)});await expect(assertSourceModelInputAuthority({...executionToolContext(current.execution,{appId:'fixture'}),scopeAccumulator:current.accumulator})).resolves.toBeUndefined();await unchanged()
+  current.accumulator.note({sources:boundScopeSources(prefix)});await expect(admitModelInput({...executionToolContext(current.execution,{appId:'fixture'}),scopeAccumulator:current.accumulator})).resolves.toBeUndefined();await unchanged()
  })
 })

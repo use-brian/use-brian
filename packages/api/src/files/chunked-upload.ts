@@ -11,15 +11,13 @@ import type { DerivedWorkspaceFilesStore } from '../db/workspace-files-store.js'
  */
 
 import { createHash, randomUUID } from 'node:crypto'
-import { workspaceCredentialDelegation, ContextScopeAccumulator } from '@use-brian/core'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { workspaceCredentialDelegation } from '@use-brian/agent-runtime/security/workspace-delegation.js'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
-import type {
-  AccessContext,
-  FilesContext,
-  WorkspaceFile,
-  WorkspaceFilesStore,
-} from '@use-brian/core'
+import type { FilesContext } from '@use-brian/core/workspace-files/api.js'
+import type { WorkspaceFile, WorkspaceFilesStore } from '@use-brian/core/workspace-files/types.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import type { WorkspaceAuditStore } from '../db/workspace-audit-store.js'
 import type {
   WorkspaceFileUpload,

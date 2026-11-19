@@ -115,7 +115,7 @@ test('[COMP:api/migration-execution-sql] authenticates every adapted immutable s
     const sql = await readFile(new URL(name, migrations), 'utf8')
     const executable = toMigrationExecutionSql(sql, name)
     if (executable === sql) {
-      // A matching loop in an unreviewed migration (including8268) does not
+      // A matching loop in an unreviewed migration does not
       // authorize an execution rewrite or enroll its bytes as historical SQL.
       assert.equal(toMigrationExecutionSql(sql + '\n', name), sql + '\n')
       continue
@@ -126,9 +126,17 @@ test('[COMP:api/migration-execution-sql] authenticates every adapted immutable s
     adaptedFiles.push(Number(name.split('_')[0]))
   }
   assert.deepEqual(adaptedFiles.sort((a,b)=>a-b), [8188,8196,8197,8198,8199,8200,8201,8204,8205,8229,
-    8234,8235,8236,8242,8243,8245,8246,8247,8248,8249,8250,8251])
+    8234,8235,8236,8242,8243,8245,8246,8247,8248,8249,8250,8251,8268,8290,8296])
   assert.equal(toMigrationExecutionSql('SELECT 1;', 'future.sql'), 'SELECT 1;')
   assert.equal(toMigrationExecutionSql(source, 'future.sql'), source)
+})
+
+test('[COMP:api/migration-execution-sql] stabilizes the two 8268 registries inside its existing transaction', async () => {
+  const name = '8268_private_transcript_preparation_eligibility.sql'
+  const sql = await readFile(new URL(name, migrations), 'utf8')
+  const lock = 'LOCK TABLE public.native_turn_contract_helpers, public.native_retained_contract_helpers IN SHARE MODE;\n'
+  assert.equal(toMigrationExecutionSql(sql, name), sql.replace('\nBEGIN;\n', `\nBEGIN;\n${lock}`))
+  assert.equal(toMigrationExecutionSql(sql, 'future.sql'), sql)
 })
 
 const memoryFile = '8246_native_private_memory_empty_domain.sql'

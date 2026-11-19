@@ -7,7 +7,7 @@ import {
 } from '../attachments.js'
 import type { FilesApi } from '../api.js'
 import type { WorkspaceFile } from '../types.js'
-import type { ToolContext } from '../../tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 // ── Fixtures ─────────────────────────────────────────────────
 

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { TaskRecord, TaskResponsibility, TaskStore } from '@use-brian/core'
+import type { TaskResponsibility } from '@use-brian/core/tasks/responsibility.js'
+import type { TaskRecord, TaskStore } from '@use-brian/core/tasks/types.js'
 
 const sql = vi.hoisted(() => ({ rows: [] as Record<string, unknown>[] }))
 vi.mock('../../db/client.js', () => ({ query: vi.fn(async () => ({ rows: sql.rows })) }))

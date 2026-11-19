@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
-import { bindScopeSource, createdRowEvidence, scopeEvidenceFromRows, type AccessCeiling, type ScopeSource } from '@use-brian/core'
+import type { AccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import { createdRowEvidence, scopeEvidenceFromRows } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { bindScopeSource } from '@use-brian/agent-runtime/security/source-evidence.js'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
 import type { Session } from '../../db/sessions.js'
 import {

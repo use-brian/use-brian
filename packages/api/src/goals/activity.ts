@@ -9,7 +9,9 @@
  *
  * [COMP:goals/live-activity]
  */
-import type { GoalRecord, QueryEvent, WorkflowRunRecord } from '@use-brian/core'
+import type { GoalRecord } from '@use-brian/core/goals/types.js'
+import type { WorkflowRunRecord } from '@use-brian/core/workflow/types.js'
+import type { QueryEvent } from '@use-brian/agent-runtime/engine/query-loop.js'
 
 export type GoalActivityEventName =
   | 'status'

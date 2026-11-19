@@ -20,13 +20,10 @@
  * [COMP:api/doc-auto-title]
  */
 
-import {
-  generatePageTitle,
-  type DocPageStore,
-  type LLMProvider,
-  type SavedViewStore,
-  type TokenUsage,
-} from '@use-brian/core'
+import { generatePageTitle } from '@use-brian/core/doc/auto-title.js'
+import type { DocPageStore } from '@use-brian/core/doc/tools.js'
+import type { SavedViewStore } from '@use-brian/core/views/types.js'
+import type { LLMProvider, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
 import { pageToPlaintext } from '@use-brian/doc-model'
 
 export type RunDocAutoTitleParams = {

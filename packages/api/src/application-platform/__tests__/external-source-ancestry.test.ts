@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ScopeSource } from '@use-brian/core'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 vi.mock('../../db/client.js', () => ({ getPool: vi.fn() }))
 import { getPool } from '../../db/client.js'
 import { readExternalSourceAncestors } from '../external-source-ancestry.js'

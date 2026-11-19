@@ -1,9 +1,12 @@
 import express from 'express'
 import request from 'supertest'
 import { describe, expect, it, vi } from 'vitest'
-import { applyOps, transcribeAudio, type Page, type SavedView } from '@use-brian/core'
-vi.mock('@use-brian/core', async importOriginal => ({
-  ...await importOriginal<typeof import('@use-brian/core')>(),
+import { applyOps } from '@use-brian/core/doc/ops.js'
+import { transcribeAudio } from '@use-brian/core/media/transcribe.js'
+import type { Page } from '@use-brian/core/views/blocks.js'
+import type { SavedView } from '@use-brian/core/views/types.js'
+vi.mock('@use-brian/core/media/transcribe.js', async importOriginal => ({
+  ...await importOriginal<typeof import('@use-brian/core/media/transcribe.js')>(),
   transcribeAudio: vi.fn(async () => ({ text: 'Hey Brian configured ASR', model: 'asr-configured', usage: null })),
 }))
 import { LIVE_MARKER_ID_PREFIX, hasLiveMarkerBlock } from '@use-brian/shared'

@@ -13,6 +13,7 @@ import {
   parseLoopbackCallback,
   exchangeCode,
   mintLocalDesktopSession,
+  isSameLocalServerOrigin,
   refreshLocalDesktopSession,
   refreshSession,
   jwtExpSeconds,
@@ -296,6 +297,35 @@ describe("[COMP:app-desktop/desktop-auth] app-origin local-owner session", () =>
     { ...minted, cookies: cookies.map((cookie) => cookie.name === "access_token" ? { ...cookie, value: jwtWithExp(1) } : cookie) },
   ])("rejects owner denial, gateway navigation, and missing or stale cookies", async (response) => {
     await expect(mintLocalDesktopSession(appUrl, vi.fn().mockResolvedValue(response))).rejects.toThrow();
+  });
+  // Regression M5D-3: the route redirects to its configured APP_URL origin, so
+  // a loopback server addressed by another loopback name answers with that name.
+  it.each([
+    ["http://127.0.0.1:3313", "http://localhost:3313/"],
+    ["http://localhost:3313", "http://127.0.0.1:3313/w/workspace"],
+    ["http://[::1]:3313", "http://localhost:3313/"],
+  ])("accepts a loopback alias of the same local server (%s redirected to %s)", async (target, location) => {
+    const fetchImpl = vi.fn().mockResolvedValue({ ...minted, location });
+    expect(await mintLocalDesktopSession(target, fetchImpl)).toMatchObject({ accessToken, user: { id: "local-owner" } });
+    expect(fetchImpl).toHaveBeenCalledWith(`${target}/api/auth/local-session`, expect.anything());
+  });
+  it.each([
+    ["http://127.0.0.1:3313", "http://localhost:3314/"],
+    ["http://127.0.0.1:3313", "https://localhost:3313/"],
+    ["http://127.0.0.1:3313", "http://brain.example.com:3313/"],
+    ["http://192.0.2.10:3313", "http://localhost:3313/"],
+    ["http://127.0.0.1:3313", "http://localhost:3313/login"],
+  ])("rejects a redirect that is not the same local server (%s redirected to %s)", async (target, location) => {
+    await expect(mintLocalDesktopSession(target, vi.fn().mockResolvedValue({ ...minted, location }))).rejects.toThrow();
+  });
+  it("treats only same-scheme, same-port loopback names as one origin", () => {
+    const same = (a: string, b: string) => isSameLocalServerOrigin(new URL(a), new URL(b));
+    expect(same("https://brain.example.com/x", "https://brain.example.com")).toBe(true);
+    expect(same("http://localhost:3313/", "http://127.0.0.1:3313")).toBe(true);
+    expect(same("http://localhost/", "http://127.0.0.1")).toBe(true);
+    expect(same("http://localhost:3313/", "http://127.0.0.1:80")).toBe(false);
+    expect(same("http://brain.example.com/", "http://127.0.0.1")).toBe(false);
+    expect(same("http://127.0.0.2:3313/", "http://127.0.0.1:3313")).toBe(false);
   });
   it("refreshes using the existing app cookie bridge", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(refreshed);

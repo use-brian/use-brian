@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { createConfirmRecordingProcessingTool } from '../base/confirm-recording-processing.js'
-import type { ToolContext } from '../types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const buildChannelSessionKey = (input: { channel: string; channelId: string; userId: string }) =>
   `${input.channel}:${input.channelId}:${input.userId}`

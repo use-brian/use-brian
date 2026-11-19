@@ -13,7 +13,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { createGoogleDocsTools, type GoogleDocsApi } from '../google-docs.js'
 import { GoogleApiError } from '../_google-error.js'
 import type { AuthorizedFile } from '../google-drive.js'
-import type { Tool, ToolContext } from '../../types.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const ctx: ToolContext = {
   userId: 'u-1',

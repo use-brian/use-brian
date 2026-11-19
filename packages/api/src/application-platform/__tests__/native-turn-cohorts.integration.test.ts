@@ -1,10 +1,13 @@
 import {randomUUID} from 'node:crypto'
 import type {PoolClient} from 'pg'
 import {afterAll,beforeAll,describe,expect,it} from 'vitest'
-import {boundScopeSources,ContextScopeAccumulator,type ExecutionContext,type ScopeSource} from '@use-brian/core'
+import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
+import type {ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
+import type {ExecutionContext} from '@use-brian/agent-runtime/security/execution-context.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {applyRLSGucs,getAppPool,getPool,rollbackAndRelease,runWithAgentAccess} from '../../db/client.js'
-import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
-import {publishNativeSessionMessage,publishNativeSessionMessageBatch} from '../../db/session-message-publication.js'
+import {readAdmittedSessionQuery} from '../../db/conversation-store.js'
+import {publishNativeSessionMessage,publishNativeSessionMessageBatch} from '../../db/conversation-store.js'
 import {withSessionMessagePublication} from '../../db/session-context-revisions.js'
 import {validateCallerScopeEvidence,readValidatedNativePublicationCohorts} from '../../context-scope/caller-evidence.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
@@ -27,13 +30,19 @@ async function frame<T>(run:(client:PoolClient)=>Promise<T>):Promise<T>{
  })}finally{await rollbackAndRelease(client)}
 }
 async function acquired(client:PoolClient,cohorts:Json[][]){
- return(await client.query('SELECT read_native_turn_publication_cohorts($1,$2) value',[f.workspaceId,JSON.stringify(cohorts)])).rows[0].value as Json|null
+ const value=(await client.query('SELECT capture_conversation_evidence($1,NULL,NULL,$2) value',
+  [f.workspaceId,JSON.stringify(cohorts)])).rows[0]?.value
+ if(value===null)return null
+ if(value?.admitted!==true)throw Object.assign(new Error('scope_source_changed'),{code:'42501'})
+ return value as Json
 }
 async function equal(client:PoolClient,cohorts:Json[][]){
  const separate=[]
- for(const input of cohorts){const full=await operation(client,'original',{roots:input});expect(full.available).toBe(true);separate.push({immutable:full.immutable,current:full.current})}
+ for(const input of cohorts){const full=await operation(client,'original',{roots:input});expect(full.admitted).toBe(true);separate.push({immutable:full.immutable,current:full.current})}
  const joint=await acquired(client,cohorts)
- expect(joint).toEqual({admitted:true,cohorts:separate})
+ const normalize=(packets:Json[])=>packets.map(packet=>Object.fromEntries(Object.entries(packet).map(([key,values])=>[key,(values as Json[]).slice().sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)))])))
+ expect(joint?.admitted).toBe(true)
+ expect(normalize(joint!.cohorts)).toEqual(normalize(separate))
  return joint!
 }
 describe.sequential('[COMP:api/native-turn-frame] exact independent publication cohorts',()=>{
@@ -50,8 +59,8 @@ describe.sequential('[COMP:api/native-turn-frame] exact independent publication 
   roots=(await f.pool.query("SELECT 'session_message' kind,id,scope_version::text version FROM session_messages WHERE session_id=$1 ORDER BY sequence_num",[f.session.id])).rows
   await f.pool.query(`CREATE FUNCTION ${port}(w uuid,action text,payload jsonb) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $fixture$
    BEGIN
-    IF action='original' THEN RETURN read_native_turn_compact_requirements(w,payload->'roots','[]');
-    ELSIF action='discover' THEN RETURN native_turn_discover_lock_requirements(w,payload->'roots','[]');
+    IF action='original' THEN RETURN capture_conversation_evidence(w,payload->'roots');
+    ELSIF action='prepare' THEN RETURN conversation_prepare_publications(w,(payload->>'sessionId')::uuid,payload->'commands');
     ELSIF action='trace' THEN PERFORM set_config('track_functions','all',true);
     ELSIF action='stats' THEN RETURN coalesce((SELECT jsonb_object_agg(p.proname,s.calls) FROM pg_stat_xact_user_functions s JOIN pg_proc p ON p.oid=s.funcid),'{}');
     ELSIF action='hold' THEN UPDATE session_messages SET scope_held=true WHERE workspace_id=w AND id=(payload->>'id')::uuid;
@@ -65,7 +74,7 @@ describe.sequential('[COMP:api/native-turn-frame] exact independent publication 
      INSERT INTO session_messages(session_id,workspace_id,role,content,sequence_num,sensitivity,user_id,assistant_id,compartments,project_ids,scope_version,scope_held)
       SELECT (payload->>'sessionId')::uuid,w,'user','[{"type":"text","text":"Fictional bounded candidate"}]'::jsonb,n+4,'internal',NULL,NULL,'{}','{}',1,false
       FROM generate_series(1,4097) n;
-    ELSIF action='helper' THEN ALTER FUNCTION native_turn_capture_publication_cohorts(uuid,jsonb,jsonb) COST 101;
+    ELSIF action='helper' THEN ALTER FUNCTION conversation_dag(uuid,jsonb,jsonb) COST 101;
     ELSIF action='context-body' THEN
      EXECUTE $attack$CREATE OR REPLACE FUNCTION public.native_turn_context() RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER
       SET search_path=pg_catalog,public,pg_temp AS $body$BEGIN RAISE EXCEPTION 'changed_cohort_context_must_not_execute';END$body$$attack$;
@@ -79,6 +88,24 @@ describe.sequential('[COMP:api/native-turn-frame] exact independent publication 
  },180_000)
  afterAll(async()=>{try{await getPool().query(`DROP FUNCTION IF EXISTS ${port}(uuid,text,jsonb)`);await f?.cleanup()}
   finally{await getAppPool().end();await getPool().end()}})
+ it.each(['identical','subset','disjoint'] as const)('prepares %s output cohorts with one graph and exact independent floors',async shape=>frame(async client=>{
+  const cohorts=shape==='identical'?[sources,sources]:shape==='subset'?[sources,[sources[0]]]:[[sources[0]],[sources[2]]]
+  const commands=cohorts.map(rows=>({producer:'fixture:preparation-cohorts',sources:rows,target:f.envelope}))
+  await operation(client,'trace')
+  const before=await operation(client,'stats')
+  const joint=await operation(client,'prepare',{sessionId:f.session.id,commands})
+  const after=await operation(client,'stats')
+  expect((after.conversation_dag??0)-(before.conversation_dag??0)).toBe(1)
+  const standalone=[]
+  for(const command of commands){const value=await operation(client,'prepare',{sessionId:f.session.id,commands:[command]});standalone.push(value[0])}
+  expect(joint).toEqual(standalone)
+  expect(joint[1].retained).toEqual(cohorts[1].slice().sort((a,b)=>a.resourceKind.localeCompare(b.resourceKind)||a.resourceId.localeCompare(b.resourceId)))
+ }),90_000)
+ it('refuses the complete prepared effect when one cohort loses a source',async()=>frame(async client=>{
+  const commands=[[sources[0]],[sources[2]]].map(rows=>({producer:'fixture:preparation-refusal',sources:rows,target:f.envelope}))
+  await operation(client,'hold',{id:sources[2].resourceId})
+  await expect(operation(client,'prepare',{sessionId:f.session.id,commands})).rejects.toThrow('scope_source_changed')
+ }))
  it.each(['identical','subset','disjoint','overlap','duplicates'] as const)('matches both complete standalone packets for %s roots',async shape=>frame(async client=>{
   const pairs=shape==='identical'?[roots,roots]:shape==='subset'?[roots,[roots[0]]]:shape==='disjoint'?[[plain[0]],[plain[2]]]
    :shape==='overlap'?[[plain[0],plain[1]],[plain[1],plain[2]]]:[[roots[3],roots[0],roots[3]],[roots[0],roots[0]]]
@@ -104,14 +131,15 @@ describe.sequential('[COMP:api/native-turn-frame] exact independent publication 
   const checked=await readValidatedNativePublicationCohorts([{sources},{sensitivity:'internal',sources:[sources[0]]}],execution.security.ceiling,client)
   const after=await operation(client,'stats');expect(checked).not.toBeNull()
   expect(checked![1].sources).toEqual([sources[0]])
-  expect((after.native_turn_capture_publication_cohorts??0)-(before.native_turn_capture_publication_cohorts??0)).toBe(1)
+  expect((after.capture_conversation_evidence??0)-(before.capture_conversation_evidence??0)).toBe(1)
+  expect((after.conversation_dag??0)-(before.conversation_dag??0)).toBe(1)
+  expect((after.native_turn_helpers_current??0)-(before.native_turn_helpers_current??0)).toBe(2)
   expect((after.read_native_turn_compact_requirements??0)-(before.read_native_turn_compact_requirements??0)).toBe(0)
-  expect((after.native_turn_discover_lock_requirements??0)-(before.native_turn_discover_lock_requirements??0)).toBe(1)
+  expect((after.native_turn_discover_lock_requirements??0)-(before.native_turn_discover_lock_requirements??0)).toBe(0)
  }),90_000)
  it.each(['hold','revoke','body'] as const)('never falls back after an eligible discovery detects a fresh %s refusal',async action=>frame(async client=>{
   await equal(client,[roots,[plain[0]]])
   await operation(client,action,{id:action==='revoke'?f.firstId:messageId})
-  expect((await operation(client,'discover',{roots})).eligibleMetadata).toBe(true)
   await expect(acquired(client,[roots,[plain[0]]])).rejects.toMatchObject({code:'42501'})
  }),90_000)
  it.each(['missing','held-parent'] as const)('retains rejecting original validation after pre-proof %s fallback',async kind=>frame(async client=>{
@@ -119,9 +147,9 @@ describe.sequential('[COMP:api/native-turn-frame] exact independent publication 
   expect(field).toBeDefined()
   const source=kind==='missing'?{...field,resourceId:randomUUID()}:field
   if(kind==='held-parent')await operation(client,'privacy',{id:f.session.id})
-  const input=[identity(source)],discovered=await operation(client,'discover',{roots:input})
-  expect(discovered).toMatchObject({eligibleMetadata:false,authorizationEvaluated:false})
-  expect(await acquired(client,[input,input])).toBeNull()
+  const input=[identity(source)]
+  const proof=await acquired(client,[input,input]).catch(error=>({admitted:false,code:error.code}))
+  expect(proof?.admitted).not.toBe(true)
   await expect(validateCallerScopeEvidence({sources:[source]},execution.security.ceiling,client)).rejects.toThrow()
  }),90_000)
  it('retains the exact metadata-only oversized saved-domain fallback',async()=>{
@@ -130,9 +158,7 @@ describe.sequential('[COMP:api/native-turn-frame] exact independent publication 
   const large=boundScopeSources(capture).map(identity)
   await frame(async client=>{
    await operation(client,'candidate-bound',{sessionId:f.session.id})
-   expect(await operation(client,'discover',{roots:large})).toEqual({eligibleMetadata:false,reason:'selector_candidate_bound'})
-   expect(await operation(client,'original',{roots:large})).toEqual({available:false,reason:'unsupported_requirements'})
-   expect(await acquired(client,[large,[plain[0]]])).toBeNull()
+   await expect(acquired(client,[large,[plain[0]]])).rejects.toMatchObject({code:'42501'})
   })
  },90_000)
  it('does not let a completed host acquisition authorize a later changed writer source',async()=>{
@@ -152,10 +178,12 @@ describe.sequential('[COMP:api/native-turn-frame] exact independent publication 
   await operation(client,action)
   const signature=action==='context-body'?'public.native_turn_context()':'public.native_turn_key(jsonb)'
   expect((await client.query("SELECT prosrc LIKE '%changed_cohort_%_must_not_execute%' changed FROM pg_proc WHERE oid=to_regprocedure($1)",[signature])).rows[0].changed).toBe(true)
-  await expect(acquired(client,[plain,plain])).rejects.toMatchObject({code:'42501',message:'native_turn_reader_contract_changed'})
+  await expect(acquired(client,[plain,plain])).rejects.toMatchObject({code:'42501',message:'scope_source_changed'})
  }))
- it.each([null,[],[[]],[[],[]],[[{kind:'session_message',id:'invalid',version:'1'}],[]],[[{kind:'session_message',id:'invalid',version:'1',payload:'forbidden'}],[{kind:'session_message',id:'invalid',version:'1'}]]])
- ('refuses malformed identity input %j',async input=>frame(async client=>{
-  await expect(client.query('SELECT read_native_turn_publication_cohorts($1,$2)',[f.workspaceId,JSON.stringify(input)])).rejects.toThrow()
+ it.each([null,[],[{kind:'session_message',id:'invalid',version:'1'}],
+  [{kind:'session_message',id:'invalid',version:'1',payload:'forbidden'}]])
+ ('never admits malformed identity input %j',async input=>frame(async client=>{
+  const result=await client.query('SELECT capture_conversation_evidence($1,$2) value',[f.workspaceId,JSON.stringify(input)]).catch(error=>({rows:[{value:{code:error.code}}]}))
+  expect(result.rows[0].value?.admitted).not.toBe(true)
  }))
 })

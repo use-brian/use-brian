@@ -14,10 +14,10 @@ import {
   type MailboxSearchHit,
 } from '../base/mailbox.js'
 import { MAX_EXTERNAL_DOCUMENT_BYTES } from '../../workspace-files/attachments.js'
-import { DerivedScopeError } from '../../security/derived-scope.js'
+import { DerivedScopeError } from '@use-brian/agent-runtime/security/derived-scope.js'
 import type { FilesApi } from '../../workspace-files/api.js'
 import type { WorkspaceFile } from '../../workspace-files/types.js'
-import type { Tool, ToolContext } from '../types.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const EMAIL = 'me@corp.com'
 

@@ -27,13 +27,15 @@ import type {
   CommentThreadStore,
   CommentThreadSummary,
   CreateThreadParams,
-  InboxPendingReply,
-  SessionContextAuthority,
-} from '@use-brian/core'
-import { deriveCommentTitle, DerivedScopeError } from '@use-brian/core'
+} from '@use-brian/core/doc/comment-types.js'
+import type { InboxPendingReply } from '@use-brian/core/doc/inbox-types.js'
+import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
+import { deriveCommentTitle } from '@use-brian/core/doc/auto-title.js'
+import { DerivedScopeError } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { query, queryWithRLS } from './client.js'
 import { findOrCreateSession, addSessionMessage, getSessionMessages } from './sessions.js'
-import { readAdmittedSessionQuery } from './session-query-reader.js'
+import { readAdmittedSessionQuery } from './conversation-store.js'
+import { pageVisitorConversationsActive, readPageConversationRows } from './conversation-visibility.js'
 
 /** The channel_type that marks a session as a comment thread's transcript.
  *  Distinct from 'web' so thread sessions never surface in the page chat
@@ -212,6 +214,19 @@ export type PublicCommentThread = {
  * (live link/published grant + clearance). Only name + body + time are surfaced.
  */
 export async function listPublicThreadsForPage(pageId: string): Promise<PublicCommentThread[]> {
+  if (pageVisitorConversationsActive()) {
+    const threads = new Map<string, PublicCommentThread>()
+    for (const row of await readPageConversationRows(pageId, null)) {
+      if (!row.body || !row.messageCreatedAt) continue
+      let thread = threads.get(row.threadId)
+      if (!thread) {
+        thread = { threadId: row.threadId, anchorBlockId: row.anchorBlockId, quote: row.quote, messages: [] }
+        threads.set(row.threadId, thread)
+      }
+      thread.messages.push({ author: row.author || 'Member', avatar: row.avatar, body: row.body, createdAt: row.messageCreatedAt.toISOString() })
+    }
+    return [...threads.values()]
+  }
   const threads = await query<ThreadRow>(
     `SELECT ${THREAD_COLS} FROM comment_threads
       WHERE page_id = $1 AND resolved_at IS NULL

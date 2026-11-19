@@ -1,14 +1,21 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { bindScopeSources, ContextScopeAccumulator, runSessionStateDiff, type ContentBlock, type SessionContextAuthority, type SessionStateStore } from '@use-brian/core'
-import { assertSourceModelInputAuthority } from '../../application-platform/model-source-authority.js'
+import { runSessionStateDiff } from '@use-brian/core/memory/session-state-diff.js'
+import type { SessionContextAuthority, SessionStateStore } from '@use-brian/core/memory/session-state-types.js'
+import type { ContentBlock } from '@use-brian/agent-runtime/providers/types.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { bindScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
+import { admitModelInput } from '../../context-scope/admission.js'
 import { runTurnSessionStateDiff } from '../session-state.js'
 
-vi.mock('@use-brian/core', async importOriginal => ({
-  ...await importOriginal<typeof import('@use-brian/core')>(),
+vi.mock('@use-brian/agent-runtime/security/execution-context.js', async importOriginal => ({
+  ...await importOriginal<typeof import('@use-brian/agent-runtime/security/execution-context.js')>(),
   executionToolContext: vi.fn(() => ({})),
+}))
+vi.mock('@use-brian/core/memory/session-state-diff.js', async importOriginal => ({
+  ...await importOriginal<typeof import('@use-brian/core/memory/session-state-diff.js')>(),
   runSessionStateDiff: vi.fn(async () => ({ upserts: 0, resolves: 0, usage: null, model: null })),
 }))
-vi.mock('../../application-platform/model-source-authority.js', () => ({ assertSourceModelInputAuthority: vi.fn(async () => {}) }))
+vi.mock('../../context-scope/admission.js', () => ({ admitModelInput: vi.fn(async () => {}) }))
 
 function fixture(user = 'hi', answer = 'Hey! What are we working on today?') {
   const controller = new AbortController(), current = vi.fn(async () => {})
@@ -37,9 +44,9 @@ describe('[COMP:api/turn-session-state] completed exchange inference admission',
     const f = fixture('hi', answer)
     await expect(runTurnSessionStateDiff(f.params)).resolves.toMatchObject({ upserts: 0, resolves: 0, usage: null })
     expect(f.listOpen).toHaveBeenCalledWith('session', f.params.authority)
-    expect(f.current).toHaveBeenCalledTimes(2)
+    expect(f.current).toHaveBeenCalledTimes(1)
     expect(runSessionStateDiff).not.toHaveBeenCalled()
-    expect(assertSourceModelInputAuthority).not.toHaveBeenCalled()
+    expect(admitModelInput).toHaveBeenCalledOnce()
   })
 
   it.each([
@@ -57,7 +64,7 @@ describe('[COMP:api/turn-session-state] completed exchange inference admission',
     const f = fixture(user, answer)
     await runTurnSessionStateDiff(f.params)
     expect(runSessionStateDiff).toHaveBeenCalledOnce()
-    expect(assertSourceModelInputAuthority).toHaveBeenCalled()
+    expect(admitModelInput).toHaveBeenCalled()
   })
 
   it('retains inference for existing commitments even when both messages look like greetings', async () => {

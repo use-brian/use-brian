@@ -6,8 +6,8 @@ import { preserveCompatText, restoreCompatText } from './compat-text.js'
 /** Native adapters to the canonical commerce service. [COMP:crm/association-tools] */
 import { z } from 'zod'
 import { WorkspaceModuleError } from '@use-brian/shared'
-import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
-import { missingToolCapability } from '../tools/capability-gate.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { missingToolCapability } from '@use-brian/agent-runtime/tools/capability-gate.js'
 import { crmOperationsToolContext } from '../crm/operations-tools.js'
 import { CrmOperationsError } from '../crm/operations-types.js'
 import {

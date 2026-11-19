@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import { getPool, getAppPool, query } from '../client.js'
 import { createSandboxTaskStore } from '../sandbox-task-store.js'
-import { browserInputScope, type SandboxTaskRecord } from '@use-brian/core'
+import { browserInputScope } from '@use-brian/core/sandbox/input-scope.js'
+import type { SandboxTaskRecord } from '@use-brian/core/sandbox/orchestrator.js'
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
 afterAll(async () => { await getAppPool().end(); await getPool().end() })

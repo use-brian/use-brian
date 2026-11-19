@@ -12,7 +12,7 @@
 import { promises as fs } from 'node:fs'
 import * as path from 'node:path'
 import { pathToFileURL } from 'node:url'
-import type { WorkspaceFile } from '@use-brian/core'
+import type { WorkspaceFile } from '@use-brian/core/workspace-files/types.js'
 import { parseStorageKey } from './gcs-client.js'
 
 export const LOCAL_DIRECTORY_IMPORT_LIMIT = 100_000

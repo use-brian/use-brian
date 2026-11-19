@@ -1,7 +1,7 @@
 /** Application browser profile. Canonical wire imports are erased. [COMP:shared/brian-app-sdk] */
 import type { ApplicationCommand, ApplicationJson, ApplicationModuleCatalog, ApplicationOperationReceipt,
   ApplicationQuery, ApplicationRecordProjection, ApplicationResourceDefinition } from '@use-brian/shared'
-import type { PropertyDef } from '@use-brian/core'
+import type { PropertyDef } from '@use-brian/core/entities/doc-types.js'
 import { ApplicationSdkError, appIdentifier, appOAuthToken, httpTransport, type ApplicationTransport,
   type HttpTransportOptions } from './transport.js'
 export { ApplicationSdkError } from './transport.js'

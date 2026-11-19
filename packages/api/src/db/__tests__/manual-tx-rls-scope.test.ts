@@ -59,10 +59,10 @@ describe('[COMP:api/manual-tx-rls-scope] updateTask scopes RLS with SET LOCAL af
 
     // BEGIN must come before any GUC scoping, and the scoping is SET LOCAL.
     expect(issued[0]).toBe('BEGIN')
-    expect(issued).toContain("SET LOCAL app.current_user_id = ''")
+    expect(client.query).toHaveBeenCalledWith(expect.stringContaining('set_config(setting.name, setting.value, true)'), [['app.current_user_id'], ['']])
 
     const beginIdx = issued.indexOf('BEGIN')
-    const userIdx = issued.indexOf("SET LOCAL app.current_user_id = ''")
+    const userIdx = issued.findIndex(sql => sql.includes('set_config'))
     expect(beginIdx).toBeLessThan(userIdx)
 
     // No bypass GUC of any kind, and no session-scoped (non-LOCAL) SET of

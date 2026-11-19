@@ -1,6 +1,6 @@
 import { z } from 'zod'
-import { buildTool } from '../types.js'
-import { toolFailure } from '../tool-failure.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
+import { toolFailure } from '@use-brian/agent-runtime/tools/tool-failure.js'
 
 /**
  * `confirmRecordingProcessing` — the agent-native commit for the channel

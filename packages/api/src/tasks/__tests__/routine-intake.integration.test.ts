@@ -1,7 +1,7 @@
 /** Actual configuration writers/authority/RLS, on the maintained owned PG18 fixture. */
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
-import { type ScopeEvidence } from '@use-brian/core'
+import type { ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
 import { getPool, getAppPool, applyRLSGucs, queryWithRLS } from '../../db/client.js'
 import { createDbWorkflowStore, createDbWorkflowRunStore } from '../../db/workflow-store.js'
 import { captureAuthoringAuthoritySystem } from '../../context-scope/workflow-authority.js'

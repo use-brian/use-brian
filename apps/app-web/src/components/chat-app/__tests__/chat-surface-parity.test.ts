@@ -27,6 +27,18 @@ const workspaceChromeSource = readFileSync(
   fileURLToPath(new URL("../../doc/workspace-chrome.tsx", import.meta.url)),
   "utf8",
 );
+const controllerSource = readFileSync(
+  fileURLToPath(new URL("../../../lib/chat/conversation-controller.ts", import.meta.url)),
+  "utf8",
+);
+const registrySource = readFileSync(
+  fileURLToPath(new URL("../../../lib/chat/conversation-registry.ts", import.meta.url)),
+  "utf8",
+);
+const transcriptSource = readFileSync(
+  fileURLToPath(new URL("../../../../../../packages/chat-ui/src/turn-transcript.ts", import.meta.url)),
+  "utf8",
+);
 const dockSuppressionSource = readFileSync(
   fileURLToPath(new URL("../../../lib/chat-dock-suppress.ts", import.meta.url)),
   "utf8",
@@ -50,7 +62,10 @@ describe("[COMP:app-web/chat-parity] Chat surface parity", () => {
     expect(source).toContain("allowEmptySend={att.hasReady || pendingRecordings.length > 0}");
     expect(source).toContain("att.uploading");
     expect(source).toContain("recordingUpload.stage(file)");
-    expect(source).toContain("attachedRecordingIds: turnRecordingIds");
+    // The conversation sends them as `attachedRecordingIds` on the first
+    // member of the turn (controller boundary test in chat-surface-ownership).
+    expect(source).toContain("recordingIds: turnRecordingIds");
+    expect(controllerSource).toContain("attachedRecordingIds: recordingIds");
   });
 
   it("routes fresh uploads with the same stable identity as the first send", () => {
@@ -66,7 +81,7 @@ describe("[COMP:app-web/chat-parity] Chat surface parity", () => {
 
   it("adopts upload sessions before navigation without rehydrating away the draft", () => {
     const adoption = source.slice(source.indexOf("onSessionReady: (id: string) =>"), source.indexOf("onRouteMedia: activeAssistant"));
-    expect(adoption).toMatch(/if \(freshChannelIdRef\.current !== channelId\) return;[\s\S]*sessionIdRef\.current = id;[\s\S]*hydratedRef\.current = id;[\s\S]*sessionAssistantRef\.current\.set\(id, assistantId\);[\s\S]*chat\.setSession\(id\);[\s\S]*selectSession\(id, "personal", true\);[\s\S]*dispatchChatSessionsRefresh\(workspaceId\)/);
+    expect(adoption).toMatch(/if \(freshChannelIdRef\.current !== channelId\) return;[\s\S]*sessionIdRef\.current = id;[\s\S]*hydratedRef\.current = id;[\s\S]*sessionAssistantRef\.current\.set\(id, assistantId\);[\s\S]*selectSession\(id, "personal", true\);[\s\S]*dispatchChatSessionsRefresh\(workspaceId\)/);
     expect(source).toMatch(/if \(activeSessionId === hydratedRef\.current\) return;[\s\S]*att\.clear\(\)/);
   });
 
@@ -77,9 +92,16 @@ describe("[COMP:app-web/chat-parity] Chat surface parity", () => {
   });
 
   it("invalidates pending uploads on pane changes and freezes routing picks while uploading", () => {
-    expect(source).toMatch(/useEffect\(\(\) => \{\s*freshChannelIdRef\.current = null;\s*att\.clear\(\);\s*\}, \[workspaceId, view, att\.clear\]\)/);
+    // Pending fresh-pane adoption is invalidated on every pane change; the
+    // chips themselves live in each conversation's own tray (M5 WP-F,
+    // chat-app.md -> "Conversation attachment trays"), so a switch shows the
+    // destination's tray instead of clearing the one being left.
+    expect(source).toMatch(/useEffect\(\(\) => \{\s*freshChannelIdRef\.current = null;\s*\}, \[workspaceId, view\]\)/);
+    expect(source).toContain("conversationAttachmentTray(workspaceId, trayPartFor(activeSessionId ?? sessionIdRef.current, view))");
+    expect(source).toContain('provisionalConversationKey("page", `fresh:${forView}`)');
+    expect(source).toContain('moveConversationAttachments(workspaceId, trayPartFor(null, "personal"), { sessionId: id })');
     const navigation = source.slice(source.indexOf("if (activeSessionId === hydratedRef.current) return;"), source.indexOf("const cached = readCachedTranscript<SurfaceMessage>"));
-    expect(navigation).toContain("att.clear()");
+    expect(navigation).toContain("Each chat keeps its own attachment tray; the one being left stays there.");
     expect(navigation).toContain("freshChannelIdRef.current = null");
     const reset = source.slice(source.indexOf("const resetPane = useCallback("), source.indexOf("const startNewChat = useCallback("));
     expect(reset).toContain("freshChannelIdRef.current = null");
@@ -92,9 +114,11 @@ describe("[COMP:app-web/chat-parity] Chat surface parity", () => {
 
   it("carries ready files and previews through a turn and restored history", () => {
     expect(source).toContain("const turnFileIds = override?.fileIds ?? att.fileIds()");
-    expect(source).toContain("{ fileIds: turnFileIds }");
+    expect(source).toContain("fileIds: turnFileIds,");
     expect(source).toContain("readyAttachments(att.attachments)");
-    expect(source).toContain("type: \"message/rekey\"");
+    // The previews ride the optimistic bubble and survive the server re-key.
+    expect(source).toContain("...(userAttachments.length > 0 ? { userAttachments } : {})");
+    expect(controllerSource).toContain('dispatch({ type: "message/rekey", messageId: run.localUserId, id })');
     expect(source).toContain("parseMessageAttachments(r.content)");
     expect(source).toContain("<MessageAttachments attachments={m.userAttachments}");
     expect(source).toContain("<ChatFileAttachments attachments={m.fileAttachments}");
@@ -119,33 +143,59 @@ describe("[COMP:app-web/chat-parity] Chat surface parity", () => {
   it("shares the dock's research and response affordances", () => {
     expect(source).not.toContain("showResearch");
     expect(source).toContain('{ mode: "research" as const }');
-    expect(source).toContain('case "citation"');
+    // Citations accumulate in the page preset of the turn transcript.
+    expect(source).toContain("const citations = activity.citations;");
+    expect(transcriptSource).toContain("case 'citation':");
     expect(source).toContain("<ChatCitationList");
     expect(source).toContain("components={CHAT_MARKDOWN_COMPONENTS}");
     expect(source).toContain("retryAssistantMessage");
     expect(source).toContain("retryUserMessage");
   });
 
-  it.each([
-    ["full-page Chat", source],
-    ["universal workspace dock", floatingChatSource],
-    ["Feed assistant dock", feedTuningChatSource],
-  ])("surfaces server SSE error messages in %s", (_name, hostSource) => {
-    expect(hostSource).toMatch(
-      /typeof payload\.message === "string"\s*\? payload\.message\s*:\s*typeof payload\.error === "string"\s*\? payload\.error/,
-    );
+  it("surfaces server SSE error messages in full-page Chat", () => {
+    // The conversation keeps the server's text next to the code, and the page
+    // shows it for codes this build does not translate (pageNoticeCopy, with
+    // behavior tests in chat-surface-notices).
+    expect(controllerSource).toContain("const message = str(payload.message) ?? str(payload.error);");
+    expect(source).toContain('"message" in notice && typeof notice.message === "string"');
+    expect(source).toContain("return { slot: \"error\", text: serverText ?? copy.chatApp.errorGeneric };");
+  });
+
+  it("surfaces server SSE error messages in universal workspace dock", () => {
+    // The dock is a conversation presentation too (WP-C): the server text is
+    // read at the controller boundary and the dock shows the notice's text.
+    expect(controllerSource).toContain("const message = str(payload.message) ?? str(payload.error);");
+    expect(floatingChatSource).toContain("useConversation(");
+    expect(floatingChatSource).toMatch(/notice\.message \?\?/);
+  });
+
+  it("surfaces server SSE error messages in Feed assistant dock", () => {
+    // Feed is a conversation presentation too (M5 WP-E): the server text is
+    // read at the controller boundary and the rail shows the notice's text.
+    expect(controllerSource).toContain("const message = str(payload.message) ?? str(payload.error);");
+    expect(feedTuningChatSource).toContain("useConversation(");
+    expect(feedTuningChatSource).toMatch(/errorNotice\.message \?\?/);
   });
 
   it("restores current-turn tool confirmations and resolves them durably", () => {
-    expect(source).toContain("fetchPendingSessionInput(sessionId)");
-    expect(source).toContain("toRestoredConfirmation(toolConfirmation, sessionId)");
-    expect(source).toContain('{ id: confirmation.approvalId, kind: "tool_invocation" }');
-    expect(source).toContain("respondByKind(");
+    // The conversation runs the one `GET /pending` read (hydrate attach and
+    // every re-probe) and restores the current turn's confirmation from it.
+    expect(source).toContain("void owner.refreshPendingInput();");
+    expect(source).not.toContain("fetchPendingSessionInput(");
+    expect(registrySource).toContain("await fetchPendingSessionInput(sessionId)");
+    expect(registrySource).toContain("toRestoredConfirmation(toolConfirmation, sessionId)");
+    // A restored card resolves through the canonical approval route.
+    expect(registrySource).toContain('respondByKind({ id: approvalId, kind: "tool_invocation" }');
+    expect(controllerSource).toContain("if (confirmation?.restored && confirmation.approvalId)");
+    expect(source).toContain("controllerRef.current?.respondConfirmation(toolCallId, action, comment)");
   });
 
   it("renders followed room research with the sender's activity chrome", () => {
-    expect(source).toContain('kind === "worker_start"');
-    expect(source).toContain('phase === "research_starting"');
+    // The mirror keeps worker labels and research phases (controller), and
+    // the page renders them through the same feed as the sender.
+    expect(transcriptSource).toContain("case 'worker_start':");
+    expect(controllerSource).toContain('payload.phase === "research_starting" ? "starting"');
+    expect(source).toContain("const remoteResearchPhase = mirror?.researchPhase ?? null;");
     expect(source).toContain("researchPhase={remoteResearchPhase}");
     expect(source).toContain("startedAt={remoteStartedAt}");
     expect(source).not.toContain("researchPhase={null}");
@@ -182,8 +232,9 @@ describe("[COMP:app-web/chat-parity] Chat surface parity", () => {
     // A files-only voice send paints the voice-note marker, never a blank
     // bubble.
     expect(source).toContain(
-      "(!usesComposerTray && turnFileIds.length > 0 ? t.voiceNote : \"\")",
+      "...(!trimmed && !usesComposerTray && turnFileIds.length > 0 ? { voiceNote: true } : {})",
     );
+    expect(source).toContain("{m.text || t.voiceNote}");
   });
 
   it("consumes the Home handoff only after Personal-chat roster validation", () => {

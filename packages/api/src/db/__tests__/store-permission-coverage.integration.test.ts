@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest'
 import pg from 'pg'
-import type { AccessContext, RetrievalActor } from '@use-brian/core'
+import type { RetrievalActor } from '@use-brian/core/retrieval/types.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 
 /**
  * [COMP:brain/store-permission-coverage] — WU-4.2 spec gate.

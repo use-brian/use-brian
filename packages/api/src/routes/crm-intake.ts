@@ -17,9 +17,9 @@ import {
   CrmIntakeIdentityProofSchema,
   CrmSubmissionAttachmentSchema,
   boundedCrmObject,
-  createRateLimiter,
   type CrmOperationsServicePort,
-} from '@use-brian/core'
+} from '@use-brian/core/crm/operations-types.js'
+import { createRateLimiter } from '@use-brian/core/security/rate-limiter.js'
 import {
   parseCrmIntakeToken,
   type CrmIntakeReadStore,

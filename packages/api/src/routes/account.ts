@@ -22,6 +22,7 @@ import { buildStorageKey, buildStorageUri } from '../files/gcs-client.js'
 import type { FilesClientResolver } from '../files/files-api.js'
 import { authSessionStore, type AuthSessionStore } from '../db/auth-session-store.js'
 import { AccountTeardownBlockedError, deleteAccountFootprint, type AccountTeardownResult, type AccountTeardownRule } from '../db/account-teardown.js'
+import { reassignDepartingAssignments } from '../db/account-departure.js'
 
 type AccountRouteOptions = {
   /**
@@ -769,6 +770,15 @@ export function accountRoutes(options: AccountRouteOptions = {}): Router {
           })),
         })
         return
+      }
+
+      // ── Departure phase (privacy-controls.md) ───────────────
+      // Assigned tasks move to each workspace owner through the canonical
+      // non-owner task writer, while the user is still a member; the owner
+      // transaction below cannot change a canonical task.
+      const departure = await reassignDepartingAssignments(userId)
+      if (departure.unassigned > 0) {
+        console.warn(`[account-delete] ${departure.unassigned} assigned tasks could not move for user ${userId}; they are unassigned with the membership`)
       }
 
       // ── Transactional teardown ───────────────────────────────

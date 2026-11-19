@@ -1,11 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
-import { bindScopeSource, ContextScopeAccumulator, type FilesApi, type ToolContext } from '@use-brian/core'
+import type { FilesApi } from '@use-brian/core/workspace-files/api.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { bindScopeSource } from '@use-brian/agent-runtime/security/source-evidence.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { attachWorkspaceFiles } from '../workspace-attachments.js'
 const frame = vi.hoisted(() => ({ query: vi.fn() }))
 vi.mock('../../db/session-context-revisions.js', () => ({
   writeRetainedContextFrame: async (_authority: unknown, _sources: unknown, publish: (client: unknown) => Promise<unknown>) => publish(frame),
 }))
-vi.mock('../../application-platform/model-source-authority.js', () => ({ assertSourceModelInputAuthority: vi.fn() }))
+vi.mock('../../context-scope/admission.js', () => ({ admitModelInput: vi.fn() }))
 const source = { resourceKind: 'workspace_file', resourceId: 'file-1', version: '2', workspaceId: 'workspace-1',
   userId: null, assistantId: null, sensitivity: 'internal' as const, compartments: [], projectIds: [] }
 function fixture(bound = true) {

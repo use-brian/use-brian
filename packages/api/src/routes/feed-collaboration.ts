@@ -5,7 +5,7 @@ import type { FeedReviewContextLoader } from '../content-planning/review-context
 /** Authenticated shared Feed collaboration routes. [COMP:feed/draft-comments] */
 import { exportFeedArticle, feedOutputProjection } from '../content-planning/projection.js'
 import { readFeedCopy, requireFeedComposition } from '../db/feed-collaboration-store.js'
-import type { FilesApi } from '@use-brian/core'
+import type { FilesApi } from '@use-brian/core/workspace-files/api.js'
 import type { FeedGenerationService } from '../content-planning/generation.js'
 import { Router } from 'express'
 import { z } from 'zod'

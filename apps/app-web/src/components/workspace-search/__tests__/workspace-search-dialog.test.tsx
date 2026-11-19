@@ -20,16 +20,17 @@ vi.mock('@/lib/surface-cache-invalidation',()=>({SURFACE_CACHE_SPINE_EVENTS:['si
 const strong:WorkspaceSearchItem={key:'task:1',id:'1',kind:'tasks',title:'Atlas',snippet:'<img src=x onerror=alert(1)>',source:'tasks',match:'exact',target:{type:'brain',id:'1',primitive:'tasks'}}
 let host:HTMLDivElement,root:Root
 const response=(items:WorkspaceSearchItem[]=[],completeness:'complete'|'partial'='complete'):WorkspaceSearchResponse=>({items,completeness,nextCursor:null,unavailableFamilies:completeness==='partial'?['office']:[]})
-const tick=async()=>{await act(async()=>{await new Promise(resolve=>setTimeout(resolve,230))})}
+const tick=async(ms=230)=>{await act(async()=>{await vi.advanceTimersByTimeAsync(ms)})}
 function render(node:React.ReactNode){act(()=>root.render(<I18nProvider locale="en" dict={en}>{node}</I18nProvider>))}
-async function type(text:string){const input=document.querySelector<HTMLInputElement>('[data-workspace-search-input]')!;act(()=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')!.set!.call(input,text);input.dispatchEvent(new Event('input',{bubbles:true}))});await tick();return input}
+async function type(text:string,settle=true){const input=document.querySelector<HTMLInputElement>('[data-workspace-search-input]')!;act(()=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')!.set!.call(input,text);input.dispatchEvent(new Event('input',{bubbles:true}))});if(settle)await tick();return input}
 function key(input:HTMLElement,name:string,extra:KeyboardEventInit={}){act(()=>{input.dispatchEvent(new KeyboardEvent('keydown',{key:name,bubbles:true,cancelable:true,...extra}))})}
 beforeEach(()=>{
+  vi.useFakeTimers({toFake:['setTimeout','clearTimeout','requestAnimationFrame','cancelAnimationFrame']});
   (globalThis as unknown as {IS_REACT_ACT_ENVIRONMENT:boolean}).IS_REACT_ACT_ENVIRONMENT=true
   host=document.createElement('div');document.body.append(host);root=createRoot(host);vi.clearAllMocks()
   mocks.path='/w/ws/p';mocks.stash.mockReturnValue('request-id');mocks.roster.mockResolvedValue([{id:'assistant',name:'Fixture assistant'}]);mocks.search.mockResolvedValue(response());mocks.preview.mockResolvedValue({...strong,text:'Authorized detail'})
 })
-afterEach(()=>{act(()=>root.unmount());host.remove()})
+afterEach(()=>{try{act(()=>root.unmount());host.remove()}finally{vi.useRealTimers()}})
 describe('[COMP:app-web/workspace-search] persistent modal behavior',()=>{
   it('keeps workspace search in the shared headers alongside persistent app navigation',()=>{
     const source=readFileSync('src/components/doc/doc-sidebar.tsx','utf8')
@@ -45,7 +46,11 @@ describe('[COMP:app-web/workspace-search] persistent modal behavior',()=>{
   })
   it('autofocuses, escapes previews, selects a strong hit and Enter opens without sending',async()=>{
     mocks.search.mockResolvedValue(response([strong]));render(<WorkspaceSearchDialog workspaceId="ws" open onClose={mocks.close}/>);await tick()
-    const input=await type('Atlas');expect(document.activeElement).toBe(input)
+    const input=await type('Atlas',false)
+    expect(mocks.search).not.toHaveBeenCalled()
+    await tick(199);expect(mocks.search).not.toHaveBeenCalled()
+    await tick(1);expect(mocks.search).toHaveBeenCalledTimes(1)
+    expect(document.activeElement).toBe(input)
     expect(input.getAttribute('aria-activedescendant')).toContain('task%3A1');expect(document.querySelector('img')).toBeNull()
     key(input,'Enter');await tick();expect(mocks.push).toHaveBeenCalledWith('/w/ws/brain?row=1');expect(mocks.stash).not.toHaveBeenCalled()
   })

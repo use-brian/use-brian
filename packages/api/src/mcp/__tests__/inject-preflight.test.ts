@@ -1,9 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { runPreflight } from '@use-brian/core/workers/preflight.js'
+import type { LLMProvider, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import {
-  ContextScopeAccumulator, createExecutionContext, executionToolContext, runPreflight,
-  type LLMProvider, type Tool, type StreamChunk,
-} from '@use-brian/core'
-import { injectMcpTools } from '../inject.js'
+  createExecutionContext,
+  executionToolContext,
+} from '@use-brian/agent-runtime/security/execution-context.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
+import { composeForTest, discoverSources } from './surface-harness.js'
 import type { ConnectorSourceRuntime } from '../../application-platform/source-runtime.js'
 
 const mocks = vi.hoisted(() => ({ read: vi.fn(), current: vi.fn() }))
@@ -46,7 +50,7 @@ async function setup() {
     call: vi.fn(), assertCurrent: async () => {}, authorize: vi.fn(),
   }
   const tools = new Map<string, Tool>()
-  await injectMcpTools({
+  await composeForTest({
     userId: 'user-example', assistantId: 'assistant-example', assistantTeamId: 'workspace-example', tools,
     executionContext: execution, scopeAccumulator: accumulator, exposeLocalReadTools: true,
     contextScope: { access: execution.security.access, effectiveCompartments: [], effectiveProjectIds: [] },
@@ -61,6 +65,9 @@ async function setup() {
     } as never,
     connectorSourceRuntimeFactory: async () => source,
   })
+  // Protected sources are discovered lazily, when a search names them.
+  expect(source.discover).not.toHaveBeenCalled()
+  await discoverSources(tools, 'Protected source', { ...executionToolContext(execution, { appId: 'test' }), scopeAccumulator: accumulator, requestTools: tools })
   expect(source.discover).toHaveBeenCalled()
   expect(tools.has('googleCalendarListEvents')).toBe(true)
   return { execution, accumulator, tools }
@@ -71,7 +78,7 @@ beforeEach(() => {
   mocks.read.mockReset().mockResolvedValue({ items: [] })
 })
 
-describe('[COMP:api/mcp-inject] protected connector preflight', () => {
+describe('[COMP:api/mcp-surface] protected connector preflight', () => {
   it('keeps the admitted turn context for preliminary reads while rejecting substituted contexts and revoked authority', async () => {
     const { execution, accumulator, tools } = await setup()
     const provider: LLMProvider = {

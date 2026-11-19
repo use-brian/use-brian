@@ -1,6 +1,6 @@
 import { Decimal } from 'decimal.js'
 import { z } from 'zod'
-import { buildTool } from '../types.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
 
 // Isolate configuration from other Decimal users. Decimal arithmetic avoids
 // binary floating-point surprises such as 0.1 + 0.2 = 0.30000000000000004.

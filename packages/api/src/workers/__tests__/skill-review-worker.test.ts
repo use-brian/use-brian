@@ -19,7 +19,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { reviewSession, selectCandidateSessions, type SkillReviewLLM } from '../skill-review-worker.js'
 import { query } from '../../db/client.js'
-import { bindScopeSource, createSkillManageTool } from '@use-brian/core'
+import { createSkillManageTool } from '@use-brian/core/skills/manage-tool.js'
+import { bindScopeSource } from '@use-brian/agent-runtime/security/source-evidence.js'
 
 const { recentMessagesMock } = vi.hoisted(() => ({ recentMessagesMock: vi.fn() }))
 
@@ -33,10 +34,10 @@ vi.mock('../../db/sessions.js', () => ({
 }))
 
 // `createSkillManageTool` from @use-brian/core is the action dispatch path.
-// We mock the entire core module so the worker's lazy import returns a
+// We mock core's skill manage-tool module so the worker's lazy import returns a
 // tool whose execute method delegates to our fakes.
-vi.mock('@use-brian/core', async (importOriginal) => {
-  const orig = await importOriginal<typeof import('@use-brian/core')>()
+vi.mock('@use-brian/core/skills/manage-tool.js', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('@use-brian/core/skills/manage-tool.js')>()
   return {
     ...orig,
     createSkillManageTool: vi.fn(() => ({
@@ -203,7 +204,7 @@ describe('[COMP:workers/skill-review-worker] reviewSession', () => {
       workspaceSkillStore,
       fileStore,
       approvalsStore,
-      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core/analytics/logger.js').AnalyticsStore,
       reviewLLM: llm,
       leaseHolderId: 'lease-1',
       leaseMinutes: 5,
@@ -226,7 +227,7 @@ describe('[COMP:workers/skill-review-worker] reviewSession', () => {
       workspaceSkillStore,
       fileStore,
       approvalsStore,
-      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core/analytics/logger.js').AnalyticsStore,
       reviewLLM: llm,
       leaseHolderId: 'lease-1',
       leaseMinutes: 5,
@@ -255,7 +256,7 @@ describe('[COMP:workers/skill-review-worker] reviewSession', () => {
       workspaceSkillStore,
       fileStore,
       approvalsStore,
-      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core/analytics/logger.js').AnalyticsStore,
       reviewLLM: llm,
       leaseHolderId: 'lease-1',
       leaseMinutes: 5,
@@ -284,7 +285,7 @@ describe('[COMP:workers/skill-review-worker] reviewSession', () => {
       workspaceSkillStore,
       fileStore,
       approvalsStore,
-      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core/analytics/logger.js').AnalyticsStore,
       reviewLLM: llm,
       leaseHolderId: 'lease-1',
       leaseMinutes: 5,
@@ -310,7 +311,7 @@ describe('[COMP:workers/skill-review-worker] reviewSession', () => {
       workspaceSkillStore,
       fileStore,
       approvalsStore,
-      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core/analytics/logger.js').AnalyticsStore,
       reviewLLM: llm,
       leaseHolderId: 'lease-1',
       leaseMinutes: 5,
@@ -332,7 +333,7 @@ describe('[COMP:workers/skill-review-worker] reviewSession', () => {
       workspaceSkillStore,
       fileStore,
       approvalsStore,
-      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core/analytics/logger.js').AnalyticsStore,
       reviewLLM: llm,
       leaseHolderId: 'lease-1',
       leaseMinutes: 5,
@@ -366,7 +367,7 @@ describe('[COMP:workers/skill-review-worker] reviewSession', () => {
       workspaceSkillStore,
       fileStore,
       approvalsStore,
-      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core/analytics/logger.js').AnalyticsStore,
       reviewLLM: llm,
       leaseHolderId: 'lease-1',
       leaseMinutes: 5,
@@ -400,7 +401,7 @@ describe('[COMP:workers/skill-review-worker] reviewSession', () => {
       workspaceSkillStore,
       fileStore,
       approvalsStore,
-      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core/analytics/logger.js').AnalyticsStore,
       reviewLLM: llm,
       leaseHolderId: 'lease-1',
       leaseMinutes: 5,
@@ -448,7 +449,7 @@ describe('[COMP:workers/skill-review-worker] reviewSession', () => {
       workspaceSkillStore,
       fileStore,
       approvalsStore,
-      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core/analytics/logger.js').AnalyticsStore,
       reviewLLM: llm,
       leaseHolderId: 'lease-1',
       leaseMinutes: 5,
@@ -490,7 +491,7 @@ describe('[COMP:workers/skill-review-worker] reviewSession', () => {
       workspaceSkillStore,
       fileStore,
       approvalsStore,
-      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core/analytics/logger.js').AnalyticsStore,
       reviewLLM: llm,
       leaseHolderId: 'lease-1',
       leaseMinutes: 5,
@@ -612,7 +613,7 @@ describe('[COMP:workers/skill-review-worker] workflow-origin review cycle', () =
       workspaceSkillStore,
       fileStore,
       approvalsStore,
-      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core/analytics/logger.js').AnalyticsStore,
       reviewLLM: llm,
       leaseHolderId: 'lease-1',
       leaseMinutes: 5,

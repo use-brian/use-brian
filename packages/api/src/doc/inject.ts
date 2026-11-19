@@ -65,40 +65,41 @@
  * `docs/architecture/features/doc.md`.
  */
 
+import type { CrmStore } from '@use-brian/core/crm/types.js'
+import type { CommentThreadStore } from '@use-brian/core/doc/comment-types.js'
 import type {
   DocGateway,
-  DocEntityStore,
   DocOpObserver,
   DocToolEvent,
   DocToolEventContext,
   DocPageStore,
-  FilesApi,
-  FileStore,
-  CommentThreadStore,
-  CrmStore,
-  LLMProvider,
-  SavedViewStore,
-  TaskStore,
-  Tool,
-  WorkflowRunStore,
+} from '@use-brian/core/doc/tools.js'
+import type { EntityStore as DocEntityStore } from '@use-brian/core/entities/doc-types.js'
+import type { FileStore } from '@use-brian/core/files/types.js'
+import type { TaskStore } from '@use-brian/core/tasks/types.js'
+import type { SavedViewStore } from '@use-brian/core/views/types.js'
+import type { WorkflowRunStore } from '@use-brian/core/workflow/types.js'
+import type { FilesApi } from '@use-brian/core/workspace-files/api.js'
+import type {
   WorkspaceDirectoryStore,
   WorkspaceMemberInfo,
-} from '@use-brian/core'
+} from '@use-brian/core/workspace/types.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 import type { CustomThemePayload } from '@use-brian/shared'
 import {
-  createDocEntityTools,
-  createDocTools,
   createPostCommentTool,
   createResolveCommentTool,
   createGetCommentThreadTool,
-  createIngestPageTool,
-  createDelegateDocEditTool,
-  DOC_MUTATION_TOOLS,
-  buildDocEditAgentPrompt,
-  buildOutline,
-  renderActivePageOutline,
-  listBuiltInEntityTypes,
-} from '@use-brian/core'
+} from '@use-brian/core/doc/comment-tools.js'
+import { createDelegateDocEditTool, DOC_MUTATION_TOOLS } from '@use-brian/core/doc/edit-agent.js'
+import { createIngestPageTool } from '@use-brian/core/doc/ingest-page-tool.js'
+import { buildOutline } from '@use-brian/core/doc/outline.js'
+import { renderActivePageOutline } from '@use-brian/core/doc/page-retrieval.js'
+import { buildDocEditAgentPrompt } from '@use-brian/core/doc/soul.js'
+import { createDocTools } from '@use-brian/core/doc/tools.js'
+import { listBuiltInEntityTypes } from '@use-brian/core/entities/doc-built-ins.js'
+import { createDocEntityTools } from '@use-brian/core/entities/doc-tools.js'
 import { createDbDocEntityStore } from '../db/doc-entity-store.js'
 import { createDbDocPageStore } from '../db/doc-page-store.js'
 import { createDbDocThemesStore, type DocThemeStore } from '../db/doc-themes-store.js'
@@ -183,7 +184,7 @@ export type InjectDocToolsOptions = {
   /** Child-attempt metering hook (`overhead:doc-edit` in the chat route). */
   onEditUsage?: (event: {
     model: string
-    usage: import('@use-brian/core').TokenUsage
+    usage: import('@use-brian/agent-runtime/providers/types.js').TokenUsage
     attempt: 'background' | 'standard_fallback'
   }) => void | Promise<void>
   /** Selected child tool results can be projected to live UI events without
@@ -503,7 +504,7 @@ export async function injectDocTools(
   const loadPageContext = async (
     instruction: string,
     selectedPageId?: string | null,
-    context?: import('@use-brian/core').ToolContext,
+    context?: import('@use-brian/agent-runtime/tools/types.js').ToolContext,
   ): Promise<string> => {
     const pageId = selectedPageId ?? null
     if (!pageId) {

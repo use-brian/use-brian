@@ -1,6 +1,10 @@
 /** Transactional native sender identity and mailbox grants. [COMP:crm/delivery-policy] */
 import type { PoolClient } from 'pg'
-import { actorAuditIdentity, parseAuthoringAuthority, intersectScopeGrants, intersectDepartmentReadGrants, type AssociationActor, CrmOperationsError, type CrmOperationsActor, type CrmNativeDeliveryAuthority } from '@use-brian/core'
+import type { AssociationActor } from '@use-brian/core/association/domain.js'
+import { actorAuditIdentity, CrmOperationsError, type CrmOperationsActor, type CrmNativeDeliveryAuthority } from '@use-brian/core/crm/operations-types.js'
+import { parseAuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import { intersectScopeGrants } from '@use-brian/agent-runtime/security/context-scope.js'
+import { intersectDepartmentReadGrants } from '@use-brian/agent-runtime/security/department-read.js'
 import { defaultGrantedConnectorActions } from '@use-brian/shared'
 import { connectorExposureAllowed } from '../context-scope/connector-exposure.js'
 import { loadDepartmentSnapshot, resolveDepartmentReadGrant } from '../context-scope/department-resolver.js'

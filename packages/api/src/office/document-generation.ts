@@ -3,7 +3,9 @@ import { replaceTemplateRuns, templateFieldGuidance, validateTemplateFieldValues
  * [COMP:api/office-generation] */
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { collectStream, type LLMProvider, type Message, type OfficeGenerationFitPolicy } from '@use-brian/core'
+import type { OfficeGenerationFitPolicy } from '@use-brian/core/office/generation/pipeline.js'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
+import type { LLMProvider, Message } from '@use-brian/agent-runtime/providers/types.js'
 import {
   assertOfficeArtifactSnapshot,
   officeTemplateTokenTargets,

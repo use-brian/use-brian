@@ -8,7 +8,7 @@
  */
 import { z } from 'zod'
 import { MembershipSiteSchema } from './membership-catalogue.js'
-import { tolerantBoolean } from '../tools/schema-tolerance.js'
+import { tolerantBoolean } from '@use-brian/agent-runtime/tools/schema-tolerance.js'
 
 export const SITE_CONTENT_COLLECTIONS = ['people', 'partners', 'settings', 'news', 'home-oasa', 'home-sea', 'event-pages'] as const
 export const SiteContentCollectionSchema = z.enum(SITE_CONTENT_COLLECTIONS)

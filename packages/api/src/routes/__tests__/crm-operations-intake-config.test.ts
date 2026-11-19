@@ -1,7 +1,7 @@
 import express from 'express'
 import request from 'supertest'
 import { describe, expect, it, vi } from 'vitest'
-import { CrmOperationsError } from '@use-brian/core'
+import { CrmOperationsError } from '@use-brian/core/crm/operations-types.js'
 import { crmOperationsRoutes, EventsQuery } from '../crm-operations.js'
 
 const WORKSPACE_ID = '11111111-1111-4111-8111-111111111111'

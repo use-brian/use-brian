@@ -1,9 +1,9 @@
 /** App ceilings compose with the existing kernel and module/source floors. [COMP:security/application-access] */
 import { ApplicationPlatformError, applicationGrantSchema, applicationGrantMaximumSchema, type ApplicationAccessGrant, type ApplicationGrantMaximum, type ApplicationPrincipal,
   type ApplicationQuery, type ApplicationResourceRef } from '@use-brian/shared'
-import type { ResourceScope } from '../security/derived-scope.js'
-import { canRead, minSensitivity, type Sensitivity } from '../security/sensitivity.js'
-import { scopeGrantContains } from '../security/context-scope.js'
+import type { ResourceScope } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { canRead, minSensitivity, type Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { scopeGrantContains } from '@use-brian/agent-runtime/security/context-scope.js'
 
 export interface ApplicationGrantLayer {
   appId: string

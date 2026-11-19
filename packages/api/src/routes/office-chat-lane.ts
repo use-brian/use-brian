@@ -16,8 +16,10 @@
  * [COMP:api/office-chat-lane]
  */
 import { z } from 'zod'
-import { ambientSurfaceLine, type AccessCeiling, type Tool } from '@use-brian/core'
-import { resolveOfficeAccess, type ResolvedOfficeAccess } from '../office/access.js'
+import { ambientSurfaceLine } from '@use-brian/core/doc/soul.js'
+import type { AccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
+import type { ResolvedOfficeAccess } from '../office/access.js'
 import {
   findOfficeArtifactForSessionSystem,
   latestOfficeJobSystem,
@@ -184,7 +186,9 @@ export function officeLaneExecutionBounds(lane: OfficeLane, userId: string, deps
 
 export const DEFAULT_OFFICE_LANE_DEPS: OfficeLaneDeps = {
   findLink: findOfficeArtifactForSessionSystem,
-  resolveAccess: resolveOfficeAccess,
+  // Office access loads at the first Office-anchored check, never on an
+  // ordinary chat turn (chat import graph); a load failure throws, never grants.
+  resolveAccess: async (...args) => (await import('../office/access.js')).resolveOfficeAccess(...args),
   getArtifact: readOfficeLaneArtifactSystem,
   latestJob: latestOfficeJobSystem,
 }

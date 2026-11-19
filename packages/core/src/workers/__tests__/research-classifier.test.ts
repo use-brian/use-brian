@@ -15,7 +15,7 @@
 
 import { afterEach, describe, it, expect, vi } from 'vitest'
 import { classifyResearchIntent, detectOperateSiteIntent } from '../research-classifier.js'
-import type { LLMProvider, StreamChunk } from '../../providers/types.js'
+import type { LLMProvider, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
 import { executionFixture, fixtureDecisionProvider } from '../../decisions/__tests__/execution-fixture.js'
 
 function makeProvider(rawText: string, responseModel = 'gemini-3.5-flash-lite'): LLMProvider {

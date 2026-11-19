@@ -12,7 +12,7 @@ import {
   parseDecisionEventWrite,
   type DecisionEvent,
   type DecisionEventWrite,
-} from '@use-brian/core'
+} from '@use-brian/core/decision-learning/types.js'
 import type pg from 'pg'
 
 import { getPool } from './client.js'

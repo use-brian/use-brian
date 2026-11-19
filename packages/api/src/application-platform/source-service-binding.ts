@@ -1,7 +1,11 @@
 /** Server-owned references to existing app/source authority, never a second ACL. [COMP:api/source-service-binding] */
 import { randomUUID } from 'node:crypto'
 import type { PoolClient } from 'pg'
-import { canRead, scopeGrantContains, decideApplicationAuthority, type ExecutionContext, type ScopeSource } from '@use-brian/core'
+import { decideApplicationAuthority } from '@use-brian/core/application-platform/access.js'
+import { scopeGrantContains } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { canRead } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { SourceProtocolError, type SourceAuthorizationRequest, type SourceSubject } from '@use-brian/brian-app/connector'
 import { getPool } from '../db/client.js'
 import { eff, type AccessSnapshot } from '../context-scope/reference-predicate.js'
@@ -143,7 +147,7 @@ async function serviceRuntime(execution:ExecutionContext){
  if(!binding||!wiring||!instances)denied()
  const profile=(await getPool().query<{instance:string}>('SELECT connector_instance_id AS instance FROM connector_source_profiles WHERE id=$1',[binding.row.profileId])).rows[0]
  const credentials=profile?.instance&&await instances.getAuthCredentialsSystem(profile.instance);if(!credentials)denied()
- const {ContextScopeAccumulator}=await import('@use-brian/core')
+ const {ContextScopeAccumulator}=await import('@use-brian/agent-runtime/security/context-scope.js')
  const runtime=await wiring.factory({workspaceId:binding.row.workspaceId,instanceId:profile.instance,execution,accumulator:new ContextScopeAccumulator(),headers:buildConnectorAuthHeaders(credentials)??{}})
  if(!runtime?.authorizeRelease)denied();return runtime
 }

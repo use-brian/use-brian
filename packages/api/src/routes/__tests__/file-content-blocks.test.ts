@@ -2,7 +2,6 @@ import { describe, it, expect, vi } from 'vitest'
 
 vi.mock('../../db/users.js', () => ({ findOrCreateUser: vi.fn(), findUserById: vi.fn() }))
 vi.mock('../../db/client.js', () => ({ query: vi.fn() }))
-vi.mock('../../mcp/inject.js', () => ({ injectMcpTools: vi.fn() }))
 
 import { buildFileContentBlocks } from '../route-helpers.js'
 

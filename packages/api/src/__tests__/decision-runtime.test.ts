@@ -1,21 +1,20 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createTypeSafeDecisionProvider } from '@use-brian/core/decisions/adapters/typesafe.js'
+import { DecisionAdapterRegistry } from '@use-brian/core/decisions/registry.js'
+import type { DecisionProvider, DecisionResponse } from '@use-brian/core/decisions/types.js'
+import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
+import { classifyTopic } from '@use-brian/core/memory/topic-classifier.js'
+import { classifyResearchIntent } from '@use-brian/core/workers/research-classifier.js'
+import { createGeminiProvider } from '@use-brian/agent-runtime/providers/gemini.js'
+import { createRoutingProvider } from '@use-brian/agent-runtime/providers/routing.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import { wrapProvider } from '@use-brian/agent-runtime/providers/wrappers.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { createExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import {
-  DecisionAdapterRegistry,
-  classifyResearchIntent,
-  classifyTopic,
-  createTypeSafeDecisionProvider,
-  createGeminiProvider,
-  createRoutingProvider,
-  wrapProvider,
   bindScopeSources,
   boundScopeSources,
-  ContextScopeAccumulator,
-  createExecutionContext,
-  type DecisionProvider,
-  type DecisionResponse,
-  type LLMProvider,
-  type SessionContextAuthority,
-} from '@use-brian/core'
+} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {
   createDecisionAttemptUsageRecorder,
   createDecisionRuntime,

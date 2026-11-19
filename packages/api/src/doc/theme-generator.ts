@@ -17,7 +17,8 @@
  * [COMP:doc/theme-generator]
  */
 
-import { collectStream, type LLMProvider, type Message, type TokenUsage } from '@use-brian/core'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
+import type { LLMProvider, Message, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
 import {
   buildThemeTokens,
   seedAppearance,

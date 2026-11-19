@@ -2,11 +2,9 @@ import { randomUUID } from 'node:crypto'
 import { setTimeout } from 'node:timers/promises'
 import pg from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
-import { CrmOperationsCommandSchema, type CrmOperationsContext } from '@use-brian/core'
+import { CrmOperationsCommandSchema, type CrmOperationsContext } from '@use-brian/core/crm/operations-types.js'
 import { createDbCrmOperationsStore } from '../crm-operations-store.js'
 import { createCrmOperationsService } from '../../crm-operations/service.js'
-import { createAssociationStore } from '../association-store.js'
-import { ConsentInputSchema } from '../../association/domain.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -123,23 +121,5 @@ describe('[COMP:crm/operations-store] Actual provider evidence replay', () => {
       expect(await service.execute(f.context, input)).toMatchObject({ duplicate: true, record: { id: first.record.id } })
       await expect(service.execute(f.context, command(kind, f.contactId, { occurredAt: '2026-01-01T00:00:00.123457Z' }))).rejects.toMatchObject({ code: 'idempotency_conflict' })
     }
-  })
-
-  it('uses the same full-payload comparison for the legacy consent adapter', async () => {
-    const f = await fixture(), legacy = createAssociationStore(pool)
-    const actor = { credentialKind: 'user' as const, credentialId: f.userId, actingUserId: f.userId }
-    const input = ConsentInputSchema.parse({ contactId: f.contactId, purpose: 'updates', action: 'granted', wordingVersion: '1', source: 'fixture', provider: 'fixture', providerEventId: 'legacy_1', metadata: { original: true } })
-    const first = await legacy.appendConsent(f.workspaceId, input, actor)
-    const before = await counts(f.workspaceId)
-    expect(await legacy.appendConsent(f.workspaceId, input, actor)).toMatchObject({ created: false, record: { id: first.record.id } })
-    for (const change of [{ metadata: { original: false } }, { wordingVersion: '2' }, { occurredAt: '2026-01-01T00:00:00Z' }]) {
-      await expect(legacy.appendConsent(f.workspaceId, { ...input, ...change }, actor)).rejects.toMatchObject({ code: 'idempotency_conflict' })
-    }
-    expect(await counts(f.workspaceId)).toEqual(before)
-    const originalAt = '2026-01-01T00:00:00.123456Z'
-    await pool.query(`UPDATE association_consent_events SET request_fingerprint=NULL,occurred_at=$2 WHERE workspace_id=$1`, [f.workspaceId, originalAt])
-    await expect(legacy.appendConsent(f.workspaceId, input, actor)).rejects.toMatchObject({ code: 'idempotency_conflict', details: { reason: 'legacy_evidence_requires_occurred_at' } })
-    expect(await legacy.appendConsent(f.workspaceId, { ...input, occurredAt: originalAt }, actor)).toMatchObject({ created: false, record: { id: first.record.id } })
-    await expect(legacy.appendConsent(f.workspaceId, { ...input, wordingVersion: '2', occurredAt: originalAt }, actor)).rejects.toMatchObject({ code: 'idempotency_conflict' })
   })
 })

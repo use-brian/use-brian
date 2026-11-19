@@ -1,0 +1,670 @@
+import type { AuthoritySource } from '../security/authority-source.js'
+import type { HomeAppToolSet } from '@use-brian/shared'
+import type { ProgressClock } from '../engine/stall-watchdog.js'
+import type { TurnLedger } from '../engine/turn-ledger.js'
+import type { z } from 'zod'
+import type { CacheStore } from '../compaction/cache-tool.js'
+import type { ConfirmationResolver, ToolConfirmationRequest } from '../mcp/types.js'
+import type { Sensitivity, SensitivityAccumulator } from '../security/sensitivity.js'
+import type { CompartmentAccumulator } from '../security/compartments.js'
+import type { ContextScopeAccumulator, ScopeEvidence } from '../security/context-scope.js'
+import type { EvidenceAccumulator } from '../security/evidence.js'
+import type { LLMProvider } from '../providers/types.js'
+import type { AccessContext } from '../security/access-context.js'
+import type { ExecutionContext } from '../security/execution-context.js'
+
+type TaskAuthorityContext = {
+  kind: 'realtime_thread_target'
+  targetId: string
+  channelType: string
+  channelRef: string
+  threadRef: string
+  /** Lineage anchors; task tools forward-resolve each one before comparison. */
+  taskIds: readonly string[]
+  expiresAt: string
+}
+
+/** Host-owned live authorization boundary for a running model/tool turn. */
+export type CurrentAuthorityBoundary = {
+  /** Host-authenticated native credential, separate from durable source eligibility.
+   * A domain must revalidate it and the live session before persisting a job. */
+  snapshotNativeSessionCredential?(): { userId: string; sessionId: string; authVersion: number } | null
+  /** Detached, host-owned source evidence; never model-supplied. */
+  snapshotSource?(): AuthoritySource
+  assertCurrent(): Promise<void>
+  /** Check both sides of an operation; post-check failure may be ambiguous. */
+  execute<T>(operation: () => Promise<T>): Promise<T>
+}
+
+// ── Background workers (engine-facing port) ────────────────────
+
+export type WorkerStatus = 'running' | 'completed' | 'failed' | 'stopped'
+
+export type WorkerResult = {
+  workerId: string
+  description: string
+  status: WorkerStatus
+  result: string
+  /**
+   * Session that spawned this worker. Set at spawn time from the spawning
+   * turn's `context.sessionId`. The notification queue + drain are scoped by
+   * this so a worker's result is delivered ONLY to its own session's turns —
+   * the `createWorkerManager` singleton is shared process-wide across every
+   * user and channel, and without this scope a background worker completing
+   * during another user's turn bled its research into that turn (cross-tenant
+   * leak, 2026-06-02). `null` only in non-route contexts (smoke / scheduled
+   * jobs) where there is no session boundary.
+   */
+  ownerSessionId?: string | null
+}
+
+/**
+ * The part of the background worker manager the query loop reads: per-session
+ * pending/notification state, the drain, and session release. Core's
+ * `WorkerManager` (`workers/worker.ts`) satisfies it and widens
+ * `ToolContext.workerManager` to itself through `ToolContextExtensions`.
+ */
+export type WorkerCoordinator = {
+  pendingCountFor(sessionId: string): number
+  hasNotificationsFor(sessionId: string): boolean
+  waitForNext(forSessionId?: string): Promise<void>
+  drainNotifications(forSessionId?: string): WorkerResult[]
+  formatNotification(result: WorkerResult): string
+  cancelForSession?(sessionId: string): number
+  releaseSession?(sessionId: string): void
+  clearSessionConfig?(sessionId: string): void
+}
+
+// ── Tool context ───────────────────────────────────────────────
+
+/**
+ * Core-owned `ToolContext` fields. The runtime declares it empty; each core
+ * domain module that owns a field adds it with
+ * `declare module '@use-brian/agent-runtime/tools/types.js' { interface ToolContextExtensions { … } }`
+ * next to the type it uses. Name this package specifier, never a core forwarding
+ * shim path: augmenting an `export *` re-export merges nothing. Every extension field is optional, and runtime
+ * code never reads one. See docs/architecture/engine/tool-hooks.md →
+ * "Runtime ports and core-owned context extensions".
+ */
+export interface ToolContextExtensions {}
+
+export type ToolContext = {
+  /** Validated production execution facts; flat fields below are its compatibility projection. */
+  executionContext?: ExecutionContext
+  /** Complete host-owned model-input admission, including fresh authority and
+   * sources. Nested loops pass their current context; never serialized. */
+  admitModelInput?: (context: ToolContext) => Promise<void>
+  /** Complete host-owned output admission, including fresh authority and the
+   * actual destination. Core owns the final identity/Stop/dispatch fence. */
+  admitModelOutput?: (context: ToolContext) => Promise<void>
+  userId: string
+  /** Verified human actor for workspace administration. Set only by attended,
+   * authenticated entrypoints; a billing owner or callee owner is not an actor. */
+  workspaceActorUserId?: string
+  assistantId: string
+  sessionId: string
+  /**
+   * The invoking loop's turn ledger, stamped by `queryLoop` itself onto the
+   * ToolContext it hands every tool — so a NESTED loop (worker, doc
+   * edit-agent) inherits the parent lane's recorder and starts its own
+   * child trace without any hand-threading. Optional only because contexts
+   * are also constructed outside a loop (tests); inside a loop it is
+   * always set. See docs/architecture/engine/turn-ledger.md.
+   */
+  turnLedger?: TurnLedger
+  appId: string
+  channelType: string
+  channelId: string
+  /**
+   * The wire carrying this turn (`web`, `telegram`, ...). Transport
+   * capabilities (document upload, view mounting) key on it, never on
+   * `channelType`, which on an anchored web thread names the anchor.
+   * Absent = `channelType`. Read through `toolTransport(context)`.
+   */
+  transport?: string
+  /**
+   * True when an attended human principal drives this turn and can answer a
+   * confirmation in-band (unified-sessions D13). Interactivity comes from the
+   * principal, never from the channel: a person in a doc thread is attended,
+   * a workflow on Telegram is not. Read through `isAttendedTurn(context)`.
+   */
+  attended?: boolean
+  /**
+   * False when `sessionId` is synthetic (a workflow run id, a brain-key
+   * namespace), not a `sessions` row. Read through `provenanceSessionId`.
+   */
+  sessionPersisted?: boolean
+  /**
+   * Authenticated principal for a programmatic tool call. Brain MCP fills
+   * this from the credential that actually authenticated the request so
+   * domain services can audit API keys, OAuth grants, and Home apps without
+   * guessing from the channel label or accepting actor data from tool input.
+   */
+  programmaticPrincipal?: {
+    kind: 'brain_key' | 'oauth_token' | 'home_app'
+    credentialId: string
+    userId?: string
+  }
+  /**
+   * Session-scoped provider conversation id when it is narrower than the
+   * physical delivery channel. Threaded Slack turns use
+   * `<channelId>:thread:<threadTs>` here while `channelId` remains the bare
+   * Slack API destination. Consumers that correlate conversation-local state
+   * fall back to `channelId` when this field is absent.
+   */
+  channelSessionId?: string
+  /**
+   * Narrow delegated task authority carried by a temporary channel thread
+   * target. Presence never means "allow": task tools require a bound lineage
+   * plus a matching active task rule for every requested operation.
+   */
+  taskAuthority?: TaskAuthorityContext
+  /** Team ID when the assistant is team-owned. Used by saveMemory for team scope. */
+  workspaceId?: string | null
+  /** Immutable provider lane captured by workers spawned from this turn. */
+  workerRuntime?: {
+    provider: LLMProvider
+    model: string
+    modelTier?: string
+    providerKeySource?: 'user' | 'platform'
+    inputTokenLimit?: number
+    maxTokens?: number
+  }
+  /**
+   * The calling assistant's kind. When 'app' (team-owned distribution
+   * assistants), saveMemory defaults scope to 'team' instead of 'user' so
+   * voice/brand/policy facts land in team memory by default. Absent = legacy
+   * caller that predates the kind=app split; treated as 'standard'.
+   */
+  assistantKind?: 'standard' | 'app' | 'primary'
+  /** Shared turns cannot read or create a member's personal memory. */
+  sharedAudience?: boolean
+  /** Additional visibility ceiling inherited by delegated execution. */
+  visibilityAssistantIds?: string[] | null
+  /**
+   * Named capability grants active on the calling assistant. Populated once
+   * per turn from `CapabilityStore.listActive(assistantId)`. Used by the tool
+   * executor's belt-and-braces gate (a hallucinated call for a tool that
+   * declares `requiresCapability` lands there and is rejected if the
+   * capability is absent). The per-turn tool-list filter at route boundaries
+   * uses the same set to hide privileged tools from the model in the first
+   * place. Absent = empty set.
+   */
+  activeCapabilities?: ReadonlySet<string>
+  /** Most-active messaging channel (telegram/slack). Null if user has only used web. */
+  preferredChannel?: { channelType: string; channelId: string } | null
+  /**
+   * The Doc view the chat is currently anchored to. Set by the chat
+   * route when the request originates from `apps/app-web` with a
+   * `viewId` in the URL. `renderView` reads this: when present, the
+   * tool appends a `data` block to the active draft's page instead of
+   * minting a new draft. Absent for non-doc chat surfaces.
+   */
+  docViewId?: string | null
+  /**
+   * The current turn's user message (the plain text the user sent this turn).
+   * Set by the chat route. Doc page creation (`renderPage` /
+   * `createSubPage`) snapshots it as the new page's `origin_prompt` — the
+   * "first prompt" the doc History panel shows. Absent on turns with no
+   * fresh user message (resume / continuation turns) and in non-route
+   * contexts (workers, scheduled jobs).
+   */
+  userMessageText?: string
+  /** Host-stamped original current user message, never a tool argument. */
+  userMessageId?: string
+  /** Opaque ids from `<attached_file>` envelopes admitted on this exact user
+   * turn. Binary-intake tools must use this set instead of accepting an old
+   * file-cache id copied from history or invented by the model. */
+  currentTurnAttachmentIds?: ReadonlySet<string>
+  /** Server-authenticated receipt for the one approved tool invocation that
+   * is executing now. The executor stamps live approvals; durable chat resume
+   * reconstructs it from the settled approval row. Tool input can never set
+   * this value. */
+  approvedToolInvocation?: {
+    approvalId: string
+    approverUserId: string
+    toolName: string
+  }
+  /** Server-stamped exact staged-write review, supplied only by authenticated
+   * native approval apply. A credential or tool input cannot construct it. */
+  approvedStagedWrite?: { approvalId: string; approverUserId: string; authSessionId: string }
+  /**
+   * The user's current effective timezone (IANA, e.g. 'Asia/Hong_Kong').
+   * Resolved per-request in this order: (1) `X-Client-Timezone` header
+   * from the originating request, (2) `users.timezone`, (3) 'UTC'.
+   * Used by scheduling tools so "remind me at 2pm" binds to the zone
+   * the user was in when they said it, without forcing the model to
+   * guess.
+   */
+  userTimezone?: string
+  /**
+   * Latest unconsumed workflow proposal receipt recovered by the route from
+   * persisted tool-result history. Workflow writes consume this trusted value
+   * so the model never has to copy or reconstruct proposal arguments.
+   */
+  workflowProposalReceipt?: string
+  /**
+   * The originating workflow RUN id when this turn executes a workflow
+   * `assistant_call` step (set by the callee executor from
+   * `ConsultRequest.workflowRunId`). Blueprint record saves use it as their
+   * provenance (`source_kind='workflow', source_id=<runId>`) so the next
+   * run's `{{lastRun.output.<key>}}` resolves to this run's typed output.
+   * Absent on every non-workflow surface.
+   */
+  workflowRunId?: string | null
+  abortSignal: AbortSignal
+  /** Sticky live authority. Once invalidated, this turn can never revive. */
+  authority?: CurrentAuthorityBoundary
+  /**
+   * The enclosing loop's liveness clock. A long-running tool calls
+   * `progress?.touch('<what>')` while it works so the loop's stall watchdog
+   * (and every parent loop's, transitively) sees it as alive; a nested loop
+   * created inside a tool passes this as its watchdog's `parent`. Absent
+   * when no loop above opted into a watchdog. See
+   * `packages/core/src/engine/stall-watchdog.ts`.
+   */
+  progress?: ProgressClock
+  /**
+   * Register best-effort resource cleanup for the enclosing `queryLoop`
+   * invocation. Registrations are keyed: repeated tool calls replace the
+   * same cleanup instead of stacking duplicates. The loop runs every
+   * registered finalizer from `finally`, including normal completion,
+   * cancellation, thrown errors, and an early-stopping consumer.
+   *
+   * Browser tasks use this to capture/pull/kill a running cloud sandbox when
+   * the assistant is done. Absent outside `queryLoop` (direct route actions,
+   * unit calls), where the resource's explicit lifecycle/reaper remains
+   * authoritative.
+   */
+  registerInvocationFinalizer?: (
+    key: string,
+    finalizer: () => void | Promise<void>,
+  ) => void
+  /** DB-backed cache store for cross-restart tool result persistence. */
+  cacheStore?: CacheStore
+
+  /**
+   * Q10 unification port (WU-6.3): persist a `kind='tool_invocation'` row
+   * to `pending_approvals` when a `requiresConfirmation` tool pauses. The
+   * returned approvalId is forwarded on the `ToolConfirmationRequest` so
+   * the channel's resolve endpoint can flip the DB row on user click.
+   *
+   * Absent in non-route contexts (smoke tests, scheduled-job execution,
+   * worker contexts) — the executor falls back to Path A (in-memory only).
+   * See docs/plans/company-brain/approvals.md.
+   */
+  createToolInvocationApproval?: (params: {
+    toolName: string
+    toolInput: Record<string, unknown>
+    description: string
+    displayLines?: string[]
+    allowPersistentApproval?: boolean
+    expiresAt: Date
+  }) => Promise<string>
+  /**
+   * askQuestion suspend-resume — persist a `kind='question'` row to
+   * `pending_approvals` and return its approvalId. The query loop calls
+   * this when:
+   *   1. `askQuestion` is the sole tool this turn, AND
+   *   2. No background workers are pending or have undrained notifications,
+   *      AND
+   *   3. The caller opted in via `options.questionResumeEnabled`.
+   * The chat route mounts this hook for user-facing sessions. Worker /
+   * scheduled-job / smoke-test contexts leave it absent → the engine
+   * falls back to the legacy terminal-exit behavior. See
+   * docs/architecture/engine/askquestion-suspend-resume.md.
+   */
+  createPendingQuestion?: (params: {
+    /** The model's question text — surfaced verbatim to the user. */
+    question: string
+    /** The askQuestion tool_use id. The resume worker keys its synthesized
+     *  tool_result by this id so the queryLoop tool_use/tool_result pairing
+     *  invariant holds at re-entry. */
+    toolUseId: string
+    /** Optional structured interaction metadata from askQuestion. */
+    actionId?: string
+    version?: string | number
+    context?: string
+    allowCustom?: boolean
+    options?: string[]
+    /** Defaults to now + 24h at the route layer. */
+    expiresAt: Date
+  }) => Promise<string>
+  /**
+   * Path B durability hook for **gateway tools** (notably `mcp_call`) whose
+   * own `execute()` suspends for an inner tool's confirmation. The
+   * tool-executor fires `options.onAwaitingApproval` only for tools it
+   * sees directly; when a gateway tool routes to a hidden underlying tool,
+   * the parent executor can't write `session_resume_points` because it
+   * sees the wrapper's name, not the underlying one. This hook lets the
+   * gateway fire the same Path B checkpoint with the **canonical
+   * underlying tool name + frozen input**, so a Cloud Run restart mid-
+   * confirmation replays the right tool.
+   *
+   * Absent in non-route contexts (smoke tests, scheduled-job execution).
+   * See docs/architecture/integrations/mcp.md → Tool search pattern.
+   */
+  onInnerAwaitingApproval?: (event: {
+    approvalId: string
+    toolCallId: string
+    toolName: string
+    toolInput: Record<string, unknown>
+    describeText: string
+    expiresAt: Date
+  }) => void
+  /** Full tool set for the current request (used by workers to inherit MCP tools). */
+  requestTools?: Map<string, Tool>
+  /** Worker manager for tracking background worker lifecycle. The loop reads
+   * only the `WorkerCoordinator` port; core widens it to `WorkerManager`. */
+  workerManager?: WorkerCoordinator
+
+  // ── Inner-tool confirmation ──────────────────────────────────
+  // These are set by the tool executor so gateway tools (mcp_call)
+  // can pause for confirmation inside execute(). The notify callback
+  // pushes to the query loop's pending queue and wakes the executor.
+
+  /** Resolver for tools that need inner confirmation (e.g. mcp_call with ask policy). */
+  confirmationResolver?: ConfirmationResolver
+  /** Emit a confirmation request through the query loop. Wakes the executor so the event gets flushed. */
+  notifyConfirmationRequired?: (request: ToolConfirmationRequest) => void
+  /** Timeout for inner confirmation prompts in ms. */
+  confirmationTimeoutMs?: number
+  /**
+   * Run `wait` OUTSIDE the executor's exclusive execution slot, then
+   * re-acquire the slot before returning.
+   *
+   * A gateway tool raises its confirmation prompt inside `execute()`, by
+   * which point it already holds the slot. Holding it across a human wait
+   * stops the executor from starting any sibling — and since each sibling's
+   * prompt lives inside its own `execute()`, those siblings can never prompt
+   * at all, so they expire against `confirmationTimeoutMs` unseen. Wrapping
+   * the wait in this port hands the slot back for the duration, which is what
+   * gives the MCP path the same prompt-in-parallel / execute-in-series
+   * ordering the executor applies to its own confirmation gate.
+   *
+   * Absent outside the tool executor (smoke tests, workflow steps) — callers
+   * must fall back to awaiting directly. See
+   * docs/architecture/engine/tool-executor.md → "Gateway tools confirm
+   * inside `execute()`".
+   */
+  parkForConfirmation?: <T>(wait: () => Promise<T>) => Promise<T>
+
+  // ── Sensitivity enforcement ──────────────────────────────────
+  // See docs/architecture/platform/sensitivity.md.
+
+  /**
+   * Per-channel-INSTANCE document capability, for channel types where file
+   * delivery is a per-connection fact rather than a per-type one. A `custom`
+   * bridge declares `capabilities.documents` in its state report and the
+   * route threads the answer here; `sendFile` admits the channel when this is
+   * true even though `custom` stays out of the static
+   * `DOCUMENT_CAPABLE_CHANNELS` set (an undeclared bridge would silently drop
+   * the enqueued documents). Absent everywhere else — the static set decides.
+   */
+  channelDocumentsSupported?: boolean
+
+  /**
+   * Per-turn accumulator. Every read of a KB entry / memory / episodic row
+   * calls `note(row.sensitivity)` so that subsequent write tools (saveMemory,
+   * addKnowledgeEntry) can stamp rows with the max sensitivity of what the
+   * model saw. Undefined = feature disabled (pre-migration / legacy paths).
+   */
+  sensitivity?: SensitivityAccumulator
+  /**
+   * Per-turn compartment accumulator (the union analogue of `sensitivity`).
+   * Every read of a row calls `note(row.compartments)` so write tools stamp
+   * derived rows with the high-water union of what the model saw (the
+   * compartment laundering guard). Undefined = feature disabled / legacy.
+   * See docs/plans/compartment-axis.md.
+   */
+  compartmentAccumulator?: CompartmentAccumulator
+  /** Canonical Team + Project + sensitivity high-water accumulator. */
+  scopeAccumulator?: ContextScopeAccumulator
+  /**
+   * Per-run identifier-evidence accumulator (the mechanical anti-fabrication
+   * gate for unattended runs). The tool executor `note()`s every tool
+   * result; before a gated write tool executes, its validated input is
+   * scanned and rejected if it contains an identifier (email / URL / handle
+   * / phone) never observed this run. Threaded only by unattended callers
+   * (the workflow callee executor); undefined = accumulate-and-gate off.
+   * See docs/architecture/engine/identifier-provenance-gate.md.
+   */
+  evidence?: EvidenceAccumulator
+  /**
+   * True when this is a research-mode turn (the explicit `mode:'research'`
+   * toggle or the adaptive research-intent upgrade). Research findings are
+   * sourced from the public web, so model-driven saves (saveMemory,
+   * addKnowledgeEntry, saveContact/Company/Deal) stamp `public` rather than
+   * inheriting the `internal` tier of the brain-first orientation reads —
+   * see `researchWriteFloor` in ../security/sensitivity.ts and
+   * docs/architecture/platform/sensitivity.md → "Research-mode provenance".
+   * A `confidential` source seen this turn is still a hard floor.
+   */
+  researchMode?: boolean
+  /**
+   * The viewer's max READABLE sensitivity tier — the read-filter ceiling.
+   * Store predicates reject rows whose sensitivity exceeds this. For a
+   * workspace turn this is `min(actingMember.clearance, assistant.clearance)`
+   * so a member never reads above their own tier through a higher-clearance
+   * assistant (incident 2026-06-01; see docs/architecture/platform/sensitivity.md
+   * → "Read-side clearance"). Undefined = 'confidential' (passthrough) for
+   * system callers like the sync worker.
+   */
+  clearance?: Sensitivity
+  /**
+   * The viewer's effective READ compartment grant (`member ∩ assistant`, the
+   * MLS category axis). Threaded onto `AccessContext.compartments` for the
+   * `row.compartments <@ $grant` superset clause. `null`/`undefined` = universe
+   * (clause dropped); `[]` = cleared into nothing (only uncompartmented rows).
+   * The read-side analogue of `clearance`. See docs/plans/compartment-axis.md.
+   */
+  compartments?: string[] | null
+  /** Trusted source-mutation reach; cannot be enlarged by a read-only grant. */
+  mutationCompartments?: string[] | null
+  /** Effective Project READ grant. null/undefined is universe; [] is General-only. */
+  projectIds?: string[] | null
+  /** Immutable active context identifiers, resolved outside the model. */
+  activeGroupId?: string | null
+  activeProjectId?: string | null
+  /**
+   * Authenticated external-client self-memory projection. Memory tools alone
+   * thread this onto their AccessContext; every other tool continues to see
+   * the ordinary public clearance + empty compartment grant.
+   */
+  clientSelfMemory?: AccessContext['clientSelfMemory']
+  /** Minimum sensitivity for memory creates on this turn. */
+  memoryWriteSensitivityFloor?: Sensitivity
+  /**
+   * Memory-specific compartment stamp. When present it replaces the
+   * assistant default source for saveMemory (the read high-water accumulator
+   * is still unioned), keeping client self-memory exactly client-scoped.
+   */
+  memoryWriteCompartments?: string[]
+  /**
+   * Threaded onto `AccessContext.systemRead` for this turn's brain READS.
+   * Set only where `userId` is a synthetic principal that holds no
+   * `workspace_members` row and would therefore be hidden by member RLS
+   * before the clearance ladder is ever consulted — today that is the
+   * `assistant-full` public lane (chat link, and a keyed API key whose
+   * `anonymous_context = 'full'`). See `routes/public-turn.ts`.
+   *
+   * READ paths only. Writes keep running through `queryWithRLS` under the
+   * synthetic principal, so member RLS still refuses them — that is what
+   * keeps "external chat has no write access" enforced by the database
+   * rather than by tool-list hygiene (`isReadOnly` is declared on only
+   * ~half of `buildTool` sites, so it cannot carry a security boundary).
+   *
+   * SAFETY: only ever set together with a pinned `clearance` — the
+   * predicate's clearance clause is the entire containment once RLS is out
+   * of the picture. See `AccessContext.systemRead`.
+   */
+  systemRead?: boolean
+  /**
+   * The assistant's OWN clearance — the WRITE ceiling. The tool-executor
+   * write gate rejects a write whose requested `sensitivity` exceeds this,
+   * independent of the read ceiling above — so a member using a higher-
+   * clearance assistant can still author at the assistant's tier while
+   * reads stay bounded to the member. Undefined → falls back to `clearance`
+   * (pre-split behavior / system callers).
+   */
+  assistantClearance?: Sensitivity
+  /**
+   * The assistant's OWN compartment grant — the WRITE ceiling for the
+   * compartment axis. The tool-executor write-gate rejects a write whose
+   * resolved `compartments` are not ⊆ this grant (you cannot author into a
+   * compartment you are not cleared for). `null`/`undefined` = universe (no
+   * gate). Also the third source of the write stamp's union (alongside the
+   * explicit arg + the accumulator), via the assistant's `default_compartments`.
+   */
+  assistantCompartments?: string[] | null
+  /**
+   * The assistant's `default_compartments` — the auto-stamp the write path
+   * unions onto every row this assistant authors (must be ⊆ `assistantCompartments`).
+   * The compartment analogue of how the assistant's clearance seeds default
+   * extraction sensitivity. See docs/plans/compartment-axis.md.
+   */
+  assistantDefaultCompartments?: string[]
+  /** Assistant Project WRITE ceiling. null/undefined is universe. */
+  assistantProjectIds?: string[] | null
+  /** Project requirements automatically stamped on writes for this turn. */
+  assistantDefaultProjectIds?: string[]
+} & ToolContextExtensions
+
+// ── Tool result ────────────────────────────────────────────────
+
+/**
+ * Internal-only metadata a tool can attach to its result for observability.
+ * Never serialized to the model (tool-executor only serializes `.data`/`.isError`)
+ * and never persisted to the session_messages JSONB. Consumed by the analytics
+ * log site in the chat route to enrich `tool_executed` event metadata —
+ * e.g. which search provider served a `webSearch` call.
+ */
+export type ToolResultMeta = Record<string, string | number | boolean>
+
+/** Inline base64 image a tool produces for the model to SEE (not just read as text). */
+export type ToolResultImage = { mimeType: string; data: string }
+
+export type ToolResult<T = unknown> = {
+  data: T
+  isError?: boolean
+  /** Public native continuation. Staging an effect is not completing it. */
+  continuation?: { kind: 'approval'; approvalId: string }
+  meta?: ToolResultMeta
+  /** Internal high-water provenance; stripped before model serialization. */
+  scopeEvidence?: ScopeEvidence
+  /**
+   * Optional inline images the tool produced for the model to look at. The
+   * engine emits these as `image` content blocks appended to the tool-results
+   * user turn, so a multimodal provider (Gemini → inlineData) sees them; a
+   * text-only provider drops them. The primary producer is an MCP tool whose
+   * CallToolResult carries `type:'image'` content (see mcp/client.ts).
+   */
+  images?: ToolResultImage[]
+}
+
+// ── Tool definition ────────────────────────────────────────────
+
+export type Tool<Input extends z.ZodType = z.ZodType> = {
+  name: string
+  description: string
+  inputSchema: Input
+
+  execute(input: z.infer<Input>, context: ToolContext): Promise<ToolResult>
+
+  // Safety metadata (fail-closed defaults applied by buildTool)
+  isConcurrencySafe: boolean
+  isReadOnly: boolean
+  requiresConfirmation: boolean
+  /**
+   * Capability name required to use this tool (e.g. `bug_triage`). When set,
+   * the per-turn tool-list filter excludes this tool unless the calling
+   * assistant carries an active grant for the named capability. The tool
+   * executor also re-checks at invocation so a stale toolset reference or
+   * hallucinated call from a non-privileged assistant cannot slip through.
+   * See `packages/core/src/tools/capability-gate.ts`.
+   */
+  requiresCapability?: string
+  /** Optional named mini-app set; otherwise inferred from the app capability and isReadOnly. */
+  homeAppToolSet?: HomeAppToolSet
+
+  /**
+   * When true, this tool is dropped from the *model-visible* tool list — it
+   * never appears in any assistant's toolset, so the model can't choose it —
+   * yet it stays a callable function for back-compat: server-side/internal
+   * invocation, tests, and gateway tools that route to it by name. Use for
+   * deprecated aliases that must keep working while being removed from the
+   * model's surface (the scheduled-job verbs folded into the workflow surface).
+   * Enforced in `tools/capability-gate.ts` (the single model-visibility gate).
+   */
+  hiddenFromModel?: boolean
+  /** Optional schema adapter; expose only when the loop selects deferred schemas. */
+  deferredSchemaOnly?: boolean
+
+  /**
+   * Dynamic confirmation check — called at execution time instead of
+   * the static `requiresConfirmation` flag. Used by MCP tools to
+   * check the effective policy (user override) from the database,
+   * and by built-in tools to check whitelists against the tool input.
+   */
+  resolveConfirmation?: (context: ToolContext, input?: unknown) => Promise<boolean>
+
+  /**
+   * Build human-readable lines for the confirmation prompt. Called by the
+   * tool executor just before emitting the confirmation event. Returning
+   * `null`/`undefined` falls back to the generic `formatConfirmationInput`
+   * renderer in the channel route. Used by `deleteMemory` to show memory
+   * summaries instead of opaque UUIDs. Input is typed as `unknown` so the
+   * non-generic `Tool` surface used by the tool map doesn't collapse — the
+   * hook can cast / re-parse as needed.
+   */
+  describeConfirmation?: (
+    input: unknown,
+    context: ToolContext,
+  ) => Promise<string[] | null | undefined>
+
+  /**
+   * Whether "Always Allow" / "Always Deny" make sense for this tool. Only
+   * MCP tools persist the decision (via `mcp_tool_settings`), so built-in
+   * tools default to `false` — each call targets a distinct entity and a
+   * persistent decision would be misleading.
+   */
+  allowPersistentApproval?: boolean
+
+  /** Require a persisted approval row and an attended confirmation. Unlike a
+   * normal `ask` tool, this mode cannot be satisfied by workflow grants and
+   * cannot park from an unattended lane for later execution. */
+  confirmationMode?: 'durable_attended'
+
+  /**
+   * When true, repeated calls with IDENTICAL input are legitimate for this
+   * tool, and the loop detector's (name, input) nudge/block thresholds skip
+   * it — the per-turn hard limit and the failure fuses still apply. For
+   * polling / re-read tools whose input is empty by design (browserSnapshot,
+   * browserCurrentUrl): five identical no-arg calls is normal re-checking of
+   * a changing page, not a loop, and the block message's "change the input
+   * meaningfully" is impossible advice for a no-arg tool.
+   */
+  allowsRepeatCalls?: boolean
+
+  // Optional
+  abortSiblingsOnError?: boolean
+  interruptBehavior?: 'cancel' | 'block'
+  timeoutMs?: number
+  maxResultSizeChars?: number
+}
+
+// ── buildTool factory ──────────────────────────────────────────
+
+type ToolDefaults = Pick<Tool, 'isConcurrencySafe' | 'isReadOnly' | 'requiresConfirmation'>
+
+const TOOL_DEFAULTS: ToolDefaults = {
+  isConcurrencySafe: false,
+  isReadOnly: false,
+  requiresConfirmation: false,
+}
+
+export type ToolInput<Input extends z.ZodType> = Omit<Tool<Input>, keyof ToolDefaults> & Partial<ToolDefaults>
+
+export function buildTool<Input extends z.ZodType>(def: ToolInput<Input>): Tool<Input> {
+  return { ...TOOL_DEFAULTS, ...def }
+}

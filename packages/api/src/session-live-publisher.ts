@@ -67,6 +67,7 @@ export type TurnStreamPublisher = {
  */
 export function createTurnStreamPublisher(params: {
   sessionId: string
+  turnId?:()=>string|null
   publishSessionEvent: PublishSessionEvent
   shouldPublish?: () => boolean
   /**
@@ -96,6 +97,7 @@ export function createTurnStreamPublisher(params: {
       kind: 'turn_stream',
       sessionId: params.sessionId,
       payload: {
+        turnId:params.turnId?.()??null,
         text: pendingAnswerReset ? '' : text.slice(-STREAM_TEXT_CAP),
         activity,
         replyPhase,
@@ -160,6 +162,7 @@ export function createTurnStreamPublisher(params: {
 export function publishRoomTurnActivity(params: {
   mirror: boolean
   sessionId: string
+  turnId?:string|null
   senderUserId: string | null
   event: string
   data: Record<string, unknown>
@@ -187,6 +190,7 @@ export function publishRoomTurnActivity(params: {
       event: params.event,
       senderUserId: params.senderUserId,
       ...data,
+      turnId:params.turnId??null,
     },
   })
 }
@@ -199,15 +203,17 @@ export function publishRoomTurnActivity(params: {
  */
 export function publishTurnCompleted(params: {
   sessionId: string
+  turnId?:string|null
   senderUserId: string | null
   publishSessionEvent: PublishSessionEvent
-  reason?: 'stopped_by_user' | 'stalled_reclaimed' | 'timeout'
+  reason?: 'stopped_by_user' | 'stalled_reclaimed' | 'publication_recovered' | 'timeout' | 'failed'
 }): void {
   params.publishSessionEvent({
     kind: 'turn_completed',
     sessionId: params.sessionId,
     payload: {
       senderUserId: params.senderUserId,
+      turnId:params.turnId??null,
       ...(params.reason ? { reason: params.reason } : {}),
     },
   })

@@ -1,6 +1,6 @@
 /** Complete CRM CSV consumer proof and canonical retirement. [COMP:crm/privacy-copies] */
 import type { PoolClient } from 'pg'
-import type { CrmPrivacyBlocker } from '@use-brian/core'
+import type { CrmPrivacyBlocker } from '@use-brian/core/crm/operations-types.js'
 import { readCrmPrivacyPolicy } from './privacy-policy.js'
 
 export async function prepareCrmImportCopies(client: PoolClient, workspaceId: string, contactId: string | null): Promise<void> {

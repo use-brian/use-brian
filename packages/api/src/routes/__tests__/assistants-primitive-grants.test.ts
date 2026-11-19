@@ -19,7 +19,7 @@ vi.mock('../../db/users.js', () => ({
 import { assistantRoutes } from '../assistants.js'
 import { query, queryWithRLS } from '../../db/client.js'
 import { resolveAssistantAccess } from '../../db/users.js'
-import { DuplicateGrantError } from '@use-brian/core'
+import { DuplicateGrantError } from '@use-brian/core/authorization/types.js'
 
 const mockQuery = vi.mocked(query)
 const mockQueryWithRLS = vi.mocked(queryWithRLS)

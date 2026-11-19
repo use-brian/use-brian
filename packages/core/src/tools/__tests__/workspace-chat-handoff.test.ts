@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import {
   createWorkspaceChatHandoffTool,
   WORKSPACE_CHAT_HANDOFF_MAX_CHARS,
   workspaceChatHandoffInputSchema,
-  type ToolContext,
   type WorkspaceChatHandoffPort,
-} from '../../index.js'
+} from '../base/workspace-chat-handoff.js'
 
 function context(overrides: Partial<ToolContext> = {}): ToolContext {
   return {

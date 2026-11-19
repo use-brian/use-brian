@@ -10,7 +10,7 @@
  *   §Pending-reclassification queue
  */
 
-import type { AccessContext } from '../security/access-context.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import type { ClassifierBoundary } from './types.js'
 
 export type PendingClassificationPrimitive = 'entity' | 'edge' | 'memory' | 'episode'

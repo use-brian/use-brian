@@ -21,23 +21,29 @@ import { createHash } from 'node:crypto'
 import type { GcsFilesClient } from '../files/gcs-client.js'
 import {
   getPayloadIndexRow,
-  insertPayloadIndex,
+  getPayloadIndexStates,
+  insertPayloadIndexes,
   markPayloadsErased,
-  payloadExists,
   payloadScope,
+  PAYLOAD_INDEX_BATCH_SIZE,
+  type PayloadIndexInsert,
 } from '../db/turn-ledger-store.js'
+
+export type LedgerPayloadInput = {
+  workspaceId?: string | null
+  content: string
+  mediaType?: string
+  sensitivity?: string
+}
 
 export type LedgerPayloadStore = {
   /**
    * Content-address `content` and persist it (skipping the object write
    * when the hash already exists for this scope). Returns the hash ref.
    */
-  put(args: {
-    workspaceId?: string | null
-    content: string
-    mediaType?: string
-    sensitivity?: string
-  }): Promise<string>
+  put(args: LedgerPayloadInput): Promise<string>
+  /** Ordered references, with bounded set-wise index work per workspace. */
+  putMany?(args: LedgerPayloadInput[]): Promise<string[]>
   /**
    * Resolve a hash to its bytes. Returns `{ erased: true }` for a
    * tombstoned payload (plan §7 — explicit marker, never silent absence),
@@ -60,26 +66,53 @@ export function ledgerStorageKey(workspaceId: string | null | undefined, hash: s
 }
 
 export function createLedgerPayloadStore(files: GcsFilesClient): LedgerPayloadStore {
+  const putMany = async (args: LedgerPayloadInput[]): Promise<string[]> => {
+    const refs = args.map((p) => hashPayload(p.content))
+    const groups = new Map<string, Map<string, LedgerPayloadInput>>()
+    args.forEach((p, i) => {
+      const scope = payloadScope(p.workspaceId)
+      let group = groups.get(scope)
+      if (!group) groups.set(scope, group = new Map())
+      if (!group.has(refs[i])) group.set(refs[i], p)
+    })
+    for (const group of groups.values()) {
+      const entries = [...group.entries()]
+      for (let offset = 0; offset < entries.length; offset += PAYLOAD_INDEX_BATCH_SIZE) {
+        const batch = entries.slice(offset, offset + PAYLOAD_INDEX_BATCH_SIZE)
+        const workspaceId = batch[0][1].workspaceId
+        const existing = new Set((await getPayloadIndexStates(workspaceId, batch.map(([hash]) => hash))).map((r) => r.hash))
+        const written: PayloadIndexInsert[] = []
+        let failed = false
+        let failure: unknown
+        for (const [hash, p] of batch) {
+          if (existing.has(hash)) continue
+          const key = ledgerStorageKey(workspaceId, hash)
+          const bytes = Buffer.from(p.content, 'utf8')
+          try {
+            await files.writeBlob(key, bytes, { workspaceId: payloadScope(workspaceId), mime: p.mediaType ?? 'application/json' })
+          } catch (err) {
+            failed = true
+            failure = err
+            break
+          }
+          written.push({ workspaceId, hash, byteSize: bytes.byteLength, mediaType: p.mediaType ?? 'application/json', storageRef: key, sensitivity: p.sensitivity })
+        }
+        const inserted = new Set(await insertPayloadIndexes(written))
+        const conflicts = written.filter((p) => !inserted.has(p.hash))
+        if (conflicts.length) {
+          const states = await getPayloadIndexStates(workspaceId, conflicts.map((p) => p.hash))
+          for (const row of states) {
+            if (row.erasedAt) await files.deleteBlob(ledgerStorageKey(workspaceId, row.hash))
+          }
+        }
+        if (failed) throw failure
+      }
+    }
+    return refs
+  }
   return {
-    async put({ workspaceId, content, mediaType = 'application/json', sensitivity }) {
-      const hash = hashPayload(content)
-      if (await payloadExists(workspaceId, hash)) return hash
-      const key = ledgerStorageKey(workspaceId, hash)
-      const bytes = Buffer.from(content, 'utf8')
-      await files.writeBlob(key, bytes, {
-        workspaceId: payloadScope(workspaceId),
-        mime: mediaType,
-      })
-      await insertPayloadIndex({
-        workspaceId: workspaceId ?? null,
-        hash,
-        byteSize: bytes.byteLength,
-        mediaType,
-        storageRef: key,
-        sensitivity,
-      })
-      return hash
-    },
+    putMany,
+    async put(args) { return (await putMany([args]))[0] },
 
     async get(workspaceId, hash) {
       const row = await getPayloadIndexRow(workspaceId, hash)

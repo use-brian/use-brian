@@ -1,18 +1,18 @@
 /** Native campaign Email revision, preview, and audience boundary. [COMP:campaigns/email] */
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import {
-  CampaignError,
-  evaluateCrmSendability,
-  type CrmDeliveryServicePort,
-  type CrmOperationsContext,
-} from '@use-brian/core'
+import { CampaignError } from '@use-brian/core/campaigns/types.js'
+import type {
+  CrmDeliveryServicePort,
+  CrmOperationsContext,
+} from '@use-brian/core/crm/operations-types.js'
+import { evaluateCrmSendability } from '@use-brian/core/crm/sendability.js'
 import {
   CAMPAIGN_LIMITS,
   campaignEmailMetadataSchema,
   type CampaignEmailMetadata,
 } from '@use-brian/shared/campaigns'
-import { feedCompositionHtml, projectFeed } from '@use-brian/doc-model'
+import { feedCompositionHtml, projectFeed } from '@use-brian/doc-model/feed.js'
 import { getPool, query } from '../db/client.js'
 import {
   executeFeedCommands,
@@ -22,7 +22,8 @@ import {
 } from '../db/feed-collaboration-store.js'
 import { createDbCrmSegmentStore } from '../db/crm-segment-store.js'
 import { crmSegmentReadScope, type CrmSegmentReadScope } from '../association/source-scope.js'
-import type { AssociationActor, CampaignActor } from '@use-brian/core'
+import type { AssociationActor } from '@use-brian/core/association/domain.js'
+import type { CampaignActor } from '@use-brian/core/campaigns/types.js'
 
 /** The campaign actor as the Association/CRM read principal; unknown kinds fail closed downstream. */
 export function campaignReadActor(actor: CampaignActor): AssociationActor {

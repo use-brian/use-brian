@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { delimiter, join, resolve } from 'node:path'
@@ -29,6 +29,21 @@ export function validateAmbientDatabase(env) {
 export function cleanRuntimeEnvironment(env) {
   return Object.fromEntries(['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'SystemRoot']
     .filter((key) => env[key] !== undefined).map((key) => [key, env[key]]))
+}
+
+/**
+ * The fixture command's environment: the fixture's own values (runtime
+ * prerequisites and database settings) plus the caller's harness controls,
+ * the `BRIAN_*` and `CAMPAIGN_*` variables such as `BRIAN_CHAT_COST_OUTPUT`.
+ * Fixture markers, database selectors and credential-shaped names are never
+ * forwarded, and nothing else from the caller (provider credentials included)
+ * reaches the command, so it can only connect to this owned cluster.
+ */
+export function fixtureCommandEnvironment(callerEnv, fixtureEnv) {
+  const forwarded = Object.entries(callerEnv).filter(([key, value]) => typeof value === 'string'
+    && /^(?:BRIAN|CAMPAIGN)_[A-Z0-9_]+$/.test(key) && !key.startsWith('BRIAN_ASSURANCE_') && !key.includes('DATABASE')
+    && !/SECRET|PASSWORD|PASSWD|TOKEN|CREDENTIAL|PRIVATE|KEY/.test(key))
+  return { ...Object.fromEntries(forwarded), ...fixtureEnv }
 }
 
 export async function runCommand(command, args, { env, cwd = ossRoot, logPath, inherit = false, onOutput } = {}) {
@@ -67,9 +82,14 @@ async function availablePort() {
 }
 
 /** Creates only a new cluster. No caller-supplied database or data directory. */
-export async function createLocalFixture({ pgBin, migrationDirs = [], env = process.env, walArchive = false, beforeApply, beforeApplyFile, runtimeRole = 'app_user', prepareTemplate = false, migrationProgress = false, ordinaryOwner = false } = {}) {
+export async function createLocalFixture({ pgBin, migrationDirs = [], env = process.env, walArchive = false, beforeApply, beforeApplyFile, runtimeRole = 'app_user', prepareTemplate = false, migrationProgress = false, ordinaryOwner = true, statementStatistics = false, executorProbe } = {}) {
   validateAmbientDatabase(env)
+  if (typeof statementStatistics !== 'boolean') throw new Error('Invalid statement statistics profile')
   if (typeof ordinaryOwner !== 'boolean') throw new Error('Invalid ordinary owner profile')
+  // Migration 8274 admits only an ordinary owner and refuses a superuser-run chain
+  // (installation_runtime_role_unsafe). A superuser owner cannot reach the current
+  // schema, so the fixture refuses that profile before creating a cluster.
+  if (!ordinaryOwner) throw new Error('Superuser-owned fixtures cannot apply migration 8274 (installation_runtime_role_unsafe). Use the default ordinary-owner profile; perform fixture-only role setup through the bootstrap role.')
   if (runtimeRole !== 'app_user') throw new Error('Unsupported fixture runtime role')
   if ((beforeApply === undefined) !== (beforeApplyFile === undefined) || (beforeApply !== undefined && (typeof beforeApply !== 'function' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*\.sql$/.test(beforeApplyFile)))) throw new Error('Upgrade callback requires one explicit pending migration filename')
   const runtime = cleanRuntimeEnvironment(env)
@@ -113,6 +133,28 @@ export async function createLocalFixture({ pgBin, migrationDirs = [], env = proc
     stopped = true
     await rm(directory, { recursive: true })
   }
+  const startArguments = ['-D', data, '-l', join(directory, 'postgres.log'), '-o', `-h 127.0.0.1 -p ${port} -k ''`, '-w', 'start']
+  /**
+   * Owned restart for cold measurements: a fast shutdown of this cluster and a
+   * new postmaster on the same data directory, port and settings. Shared
+   * buffers and every backend cache start empty and existing connections end,
+   * so callers reconnect with fresh pools. The OS page cache is not flushed
+   * (that needs elevated privileges), so "cold" means a restarted PostgreSQL,
+   * not cold storage.
+   */
+  async function restart() {
+    if (stopped || !started) throw new Error('Fixture is not running; refusing restart')
+    const owned = JSON.parse(await readFile(marker, 'utf8'))
+    if (owned.token !== token || owned.directory !== directory) throw new Error('Fixture ownership changed; refusing restart')
+    await runCommand(executable('pg_ctl'), ['-D', data, '-m', 'fast', '-w', 'stop'], { env: runtime })
+    // As at first start, disposal keeps attempting a stop while pg_ctl starts.
+    try { await runCommand(executable('pg_ctl'), startArguments, { env: runtime }) }
+    catch (error) {
+      // Only an absent pid file proves that no postmaster runs on this data directory.
+      if (await readFile(join(data, 'postmaster.pid')).then(() => false, () => true)) started = false
+      throw error
+    }
+  }
   try {
     const pwfile = join(directory, 'password')
     await writeFile(pwfile, password, { mode: 0o600 })
@@ -128,10 +170,15 @@ export async function createLocalFixture({ pgBin, migrationDirs = [], env = proc
       await writeFile(join(data,'postgresql.auto.conf'),"archive_mode=on\narchive_command='"+command.replaceAll("'","''")+"'\n",{mode:0o600})
       fixtureEnv.BRIAN_ASSURANCE_WAL_CONFIG=config
     }
+    if(statementStatistics) await appendFile(join(data,'postgresql.auto.conf'),"shared_preload_libraries='pg_stat_statements'\npg_stat_statements.track='all'\npg_stat_statements.max=100000\n",{mode:0o600})
+    if(executorProbe){
+      if(!/^\/[a-zA-Z0-9_/.@-]+$/.test(executorProbe.library)||!/^\/[a-zA-Z0-9_/.@-]+$/.test(executorProbe.output))throw new Error('Executor probe requires simple absolute owned paths')
+      await appendFile(join(data,'postgresql.auto.conf'),`shared_preload_libraries='${statementStatistics?'pg_stat_statements,':''}${executorProbe.library}'\n`,{mode:0o600})
+    }
     // A watchdog may interrupt pg_ctl after PostgreSQL has daemonized.
     // Disposal must attempt to stop this owned cluster in that window too.
     started = true
-    await runCommand(executable('pg_ctl'), ['-D', data, '-l', join(directory, 'postgres.log'), '-o', `-h 127.0.0.1 -p ${port} -k ''`, '-w', 'start'], { env: runtime })
+    await runCommand(executable('pg_ctl'), startArguments, { env: runtime })
     const admin = new pg.Client({ connectionString: makeUrl(bootstrapRole, password, 'postgres') })
     await admin.connect()
     try {
@@ -143,6 +190,10 @@ export async function createLocalFixture({ pgBin, migrationDirs = [], env = proc
       const client = new pg.Client({ connectionString: makeUrl(bootstrapRole, password, 'brian_assurance') })
       await client.connect()
       try { return await run(client) } finally { await client.end() }
+    }
+    if(statementStatistics){
+      await bootstrap(client=>client.query('CREATE EXTENSION pg_stat_statements'))
+      fixtureEnv.BRIAN_ASSURANCE_STATEMENT_STATS='true'
     }
     if (ordinaryOwner) await bootstrap(async client => {
       // The immutable baseline moves extensions into public, which requires
@@ -195,6 +246,7 @@ export async function createLocalFixture({ pgBin, migrationDirs = [], env = proc
         })
       }
       await activate()
+      if(executorProbe)await bootstrap(client=>client.query(['assurance_owner','app_user'].map(role=>`ALTER ROLE ${role} SET m6_probe.capture='${executorProbe.capture === false ? 'off' : 'on'}';ALTER ROLE ${role} SET m6_probe.output='${executorProbe.output}'`).join(';')))
     } finally { await connection.end() }
     if (prepareTemplate) {
       const admin = new pg.Client({ connectionString: makeUrl(bootstrapRole, password, 'postgres') })
@@ -204,7 +256,13 @@ export async function createLocalFixture({ pgBin, migrationDirs = [], env = proc
       fixtureEnv.BRIAN_ASSURANCE_TEMPLATE = 'brian_assurance_template'
       await writeFile(marker, JSON.stringify({ ...ownership, template: 'brian_assurance_template' }), { mode: 0o600 })
     }
-    return { directory, env: fixtureEnv, adminUrl, appUrl, dispose }
+    // Replay creates tens of thousands of distinct statements. They are setup,
+    // not part of the measured operation, and must not evict workload entries.
+    // Only this owned fixture's existing bootstrap observer resets statistics;
+    // owner/app_user retain their unchanged production privilege floor.
+    if (statementStatistics) await bootstrap(client => client.query('SELECT pg_stat_statements_reset()'))
+    return { directory, env: fixtureEnv, adminUrl, appUrl, dispose, restart,
+      ...(statementStatistics ? { statistics: { maxStatements: 100000, resetAfterMigrations: true, observer: bootstrapRole } } : {}) }
   } catch (error) {
     // Keep failure diagnostics outside the owned cluster before cleanup.
     const evidence = await mkdtemp(join(tmpdir(), 'brian-crm-failure-'))
@@ -287,12 +345,15 @@ export function parseLocalFixtureArguments(values) {
   let pgBin
   let runtimeRole='app_user'
   let walArchive=false
-  let ordinaryOwner=false
+  let statementStatistics=false
+  // Ordinary owner is the only supported profile; the flag stays accepted as explicit.
+  let ordinaryOwner=true
   const migrationDirs = []
   while (args[0] && args[0] !== '--') {
     const option = args.shift()
     if(option==='--wal-archive-fixture'){walArchive=true;continue}
     if(option==='--ordinary-owner'){ordinaryOwner=true;continue}
+    if(option==='--statement-statistics'){statementStatistics=true;continue}
     const value = args.shift()
     if (!value || value.startsWith('--')) throw new Error(`Missing value for ${option}`)
     if (option === '--pg-bin') pgBin = value
@@ -304,15 +365,15 @@ export function parseLocalFixtureArguments(values) {
     else throw new Error(`Unknown option ${option}`)
   }
   if (args.shift() !== '--' || !args.length) throw new Error('Supply an explicit test command after --; see --help')
-  return {pgBin,migrationDirs,walArchive,runtimeRole,ordinaryOwner,command:args}
+  return {pgBin,migrationDirs,walArchive,runtimeRole,ordinaryOwner,statementStatistics,command:args}
 }
 
 async function main(args) {
   if (args.includes('--help')) {
-    console.log('Usage: node scripts/crm/local-fixture.mjs [--pg-bin DIR] [--migration-dir DIR] [--wal-archive-fixture] [--ordinary-owner] [--runtime-role app_user] -- COMMAND [ARGS...]\nCreates a disposable loopback PostgreSQL 18 database using actual migrations. Requires pgvector/pg_trgm. Never uses an ambient DB.')
+    console.log('Usage: node scripts/crm/local-fixture.mjs [--pg-bin DIR] [--migration-dir DIR] [--wal-archive-fixture] [--ordinary-owner (default)] [--statement-statistics] [--runtime-role app_user] -- COMMAND [ARGS...]\nCreates a disposable loopback PostgreSQL 18 database using actual migrations. Requires pgvector/pg_trgm. Never uses an ambient DB.\n--statement-statistics preloads pg_stat_statements (track=all) for nested-statement counts.\nCOMMAND receives the fixture environment plus the caller BRIAN_* and CAMPAIGN_* harness controls (never fixture markers, database selectors or credential-shaped names).')
     return
   }
-  const {pgBin,migrationDirs,walArchive,runtimeRole,ordinaryOwner,command:argsCommand}=parseLocalFixtureArguments(args)
+  const {pgBin,migrationDirs,walArchive,runtimeRole,ordinaryOwner,statementStatistics,command:argsCommand}=parseLocalFixtureArguments(args)
   let interrupted = false
   // Group termination also stops the active child. Keep this owner alive long
   // enough for that failure to unwind through PostgreSQL disposal.
@@ -321,9 +382,9 @@ async function main(args) {
   process.on('SIGINT', onInterrupt)
   let fixture
   try {
-    fixture = await createLocalFixture({ pgBin, migrationDirs, walArchive, runtimeRole, ordinaryOwner })
+    fixture = await createLocalFixture({ pgBin, migrationDirs, walArchive, runtimeRole, ordinaryOwner, statementStatistics })
     if (interrupted) throw new Error('Disposable fixture interrupted')
-    await runCommand(argsCommand[0], argsCommand.slice(1), { env: fixture.env, inherit: true })
+    await runCommand(argsCommand[0], argsCommand.slice(1), { env: fixtureCommandEnvironment(process.env, fixture.env), inherit: true })
     if (interrupted) throw new Error('Disposable fixture interrupted')
   } finally {
     try { await fixture?.dispose() }

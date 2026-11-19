@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { createExecutionContext, type ScopeSource } from '@use-brian/core'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { createExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import type { PoolClient } from 'pg'
 import { SOURCE_PROTOCOL_VERSION, type SourceAuthorizationRequest } from '@use-brian/brian-app/connector'
 vi.mock('../../db/client.js', () => ({ query: async () => { throw new Error('Unexpected direct database query in retained-source-authority fixture') }, getPool: vi.fn() }))

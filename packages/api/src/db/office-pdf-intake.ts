@@ -1,6 +1,6 @@
 import {createHash} from 'node:crypto'
 import type {PoolClient} from 'pg'
-import {deriveResourceScope,resourceScopeKey,type ScopeSource,type ResourceScope} from '@use-brian/core'
+import {deriveResourceScope, resourceScopeKey, type ScopeSource, type ResourceScope} from '@use-brian/agent-runtime/security/derived-scope.js'
 import {applyRLSGucs,getAppPool,rollbackAndRelease,queryWithRLS} from './client.js'
 import {buildAccessPredicate,buildCurrentMemberSourcePredicate,assertExecutionResourceScope} from './access-predicate.js'
 import {admitWorkspaceResource} from '../workspace-access/resource-admission.js'

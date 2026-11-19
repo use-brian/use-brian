@@ -4,7 +4,7 @@ import type { StructuredFeedContent } from '../db/feed-collaboration-store.js'
 /** Five independent Review checks create ordinary anchored comments, never edits. [COMP:feed/draft-review] */
 import { randomUUID } from 'node:crypto'
 import { FEED_REVIEW_DIMENSIONS, FEED_EDITORIAL_LIMITS, feedReviewRequestSchema, feedReviewOutputSchema, type FeedReviewRequest, type FeedReviewContext, type FeedReviewDimension, type FeedReviewFinding, type FeedReviewCoverage, type FeedCommand } from '@use-brian/shared'
-import { applyFeedEdits, createFeedAnchor, canonicalFeedValue } from '@use-brian/doc-model'
+import { applyFeedEdits, createFeedAnchor, canonicalFeedValue } from '@use-brian/doc-model/feed.js'
 import { FeedCollaborationError, withFeedTransaction, readFeedCopy, requireFeedComposition, executeFeedCommands, type FeedActor } from '../db/feed-collaboration-store.js'
 import { enqueueFeedRun, readFeedRun, feedEditorialHash, markFeedDispatch, saveFeedPart, finishFeedRun, editorialActor, type FeedEditorialRun } from '../db/feed-editorial-runs-store.js'
 import { loadFeedReviewContext, type FeedReviewContextLoader } from './review-context.js'

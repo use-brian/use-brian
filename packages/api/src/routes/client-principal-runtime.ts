@@ -11,7 +11,8 @@
  * [COMP:api/client-principal-runtime]
  */
 
-import { canRead, clientCompartment } from '@use-brian/core'
+import { clientCompartment } from '@use-brian/agent-runtime/security/compartments.js'
+import { canRead } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type { ApiKeyRow, ApiKeyStore, ApiKeyToolPolicy } from '../db/api-key-store.js'
 import { isExternalPrincipal } from '../db/external-principal.js'
 import {

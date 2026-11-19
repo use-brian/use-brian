@@ -1,4 +1,4 @@
-import type { SavedViewStore } from '@use-brian/core'
+import type { SavedViewStore } from '@use-brian/core/views/types.js'
 
 const MEETING_NOTES_FOLDER_ANCHOR = 'meeting-notes-folder'
 

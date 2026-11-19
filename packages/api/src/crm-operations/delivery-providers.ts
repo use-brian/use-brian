@@ -1,5 +1,5 @@
 /** Production mail transports for the canonical CRM command. [COMP:crm/delivery-receipts] */
-import { CrmOperationsError } from '@use-brian/core'
+import { CrmOperationsError } from '@use-brian/core/crm/operations-types.js'
 import { renderEmailBody } from '@use-brian/channels'
 import { query } from '../db/client.js'
 import { decryptCredentials } from '../db/credential-crypto.js'

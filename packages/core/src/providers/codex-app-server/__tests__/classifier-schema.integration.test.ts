@@ -8,10 +8,10 @@ import { describe, expect, it } from 'vitest'
 import { createLlmDecisionProvider, type LlmDecisionAnswerFormat } from '../../../decisions/adapters/llm.js'
 import type { DecisionQuestion, DecisionRequest } from '../../../decisions/types.js'
 import { buildToolSelectionQuestions } from '../../../engine/tool-selection.js'
-import { buildCodexEnvironment, buildCodexToolSurfaceArgs, resolvePinnedCodexCommand } from '../process.js'
-import { InitializeResponseSchema, PINNED_CODEX_VERSION } from '../protocol.js'
-import { createCodexAppServerProvider } from '../provider.js'
-import { CodexRpcPeer } from '../rpc.js'
+import { buildCodexEnvironment, buildCodexToolSurfaceArgs, resolvePinnedCodexCommand } from '@use-brian/agent-runtime/providers/codex-app-server/process.js'
+import { InitializeResponseSchema, PINNED_CODEX_VERSION } from '@use-brian/agent-runtime/providers/codex-app-server/protocol.js'
+import { createCodexAppServerProvider } from '@use-brian/agent-runtime/providers/codex-app-server/provider.js'
+import { CodexRpcPeer } from '@use-brian/agent-runtime/providers/codex-app-server/rpc.js'
 
 type Schema = {
   type?: string | string[]

@@ -11,7 +11,9 @@
  * [COMP:api/connector-context]
  */
 
-import { intersectAccessCeilings, pinAccessCeiling, intersectScopeGrants, scopeGrantContains, type ScopeGrant, type DepartmentReadGrant } from '@use-brian/core'
+import { intersectAccessCeilings, pinAccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import { intersectScopeGrants, scopeGrantContains, type ScopeGrant } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { DepartmentReadGrant } from '@use-brian/agent-runtime/security/department-read.js'
 import { currentAgentAccess } from '../db/agent-access-context.js'
 import { query } from '../db/client.js'
 import { loadDepartmentSnapshot, resolveDepartmentReadGrant } from './department-resolver.js'

@@ -70,8 +70,8 @@ import type {
   EmbeddingPrimitive,
   EmbeddingResult,
   EmbeddingStore,
-} from '@use-brian/core'
-import { resolveEmbedBudgetSegments, resolveEmbedRecencyWindowMonths } from '@use-brian/core'
+} from '@use-brian/core/embeddings/worker.js'
+import { resolveEmbedBudgetSegments, resolveEmbedRecencyWindowMonths } from '@use-brian/core/embeddings/worker.js'
 import { getPool } from './client.js'
 
 type PrimitiveConfig = {

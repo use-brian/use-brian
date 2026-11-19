@@ -23,14 +23,14 @@
  * [COMP:doc-model/mapping]
  */
 
-import { normalizeRichTextNodes } from '@use-brian/core/dist/views/blocks.js'
+import { normalizeRichTextNodes } from '@use-brian/core/views/blocks.js'
 import type {
   Block,
   Page,
   RichNode,
   RichTextContent,
   TableBlock,
-} from '@use-brian/core/dist/views/blocks.js'
+} from '@use-brian/core/views/blocks.js'
 
 // Loose JSON node — we never construct prosemirror-model nodes here.
 export type PMNode = {

@@ -31,16 +31,14 @@
 import { Router } from 'express'
 import { z } from 'zod'
 import {
-  advanceWorkflowRun,
   CreatePageActionSchema,
   UpdatePageActionSchema,
-  type ExecutorDeps,
-  type GoalStore,
   type PageAction,
-  type SavedViewStore,
-  type WorkflowRunStore,
-  type WorkflowStore,
-} from '@use-brian/core'
+} from '@use-brian/core/doc/page-action-types.js'
+import type { GoalStore } from '@use-brian/core/goals/types.js'
+import type { SavedViewStore } from '@use-brian/core/views/types.js'
+import { advanceWorkflowRun, type ExecutorDeps } from '@use-brian/core/workflow/executor.js'
+import type { WorkflowRunStore, WorkflowStore } from '@use-brian/core/workflow/types.js'
 
 import type { PageActionsStore } from '../db/page-actions-store.js'
 import type { PageTemplateStore } from '../db/page-templates-store.js'
@@ -56,7 +54,7 @@ export type PageActionsRouteOptions = {
   executorDeps: ExecutorDeps
   /** P2 — goal-kind dispatch. Absent → invoking a goal action returns 501. */
   goalStore?: Pick<GoalStore, 'create'>
-  resolveGoalAuthoringAuthority?: (params: { userId: string; workspaceId: string }) => Promise<import('@use-brian/core').AuthoringAuthority>
+  resolveGoalAuthoringAuthority?: (params: { userId: string; workspaceId: string }) => Promise<import('@use-brian/agent-runtime/security/access-ceiling.js').AuthoringAuthority>
 }
 
 function unauthorized(res: { status: (n: number) => { json: (b: unknown) => void } }) {

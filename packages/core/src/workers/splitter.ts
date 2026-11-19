@@ -10,12 +10,12 @@
  */
 
 import { decisionUsageModelId } from '../decisions/usage.js'
-import type { LLMProvider, TokenUsage } from '../providers/types.js'
-import { collectStream } from '../providers/accumulator.js'
-import { bindScopeSources, boundScopeSources } from '../security/source-evidence.js'
-import { DerivedScopeError } from '../security/derived-scope.js'
+import type { LLMProvider, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
+import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
+import { DerivedScopeError } from '@use-brian/agent-runtime/security/derived-scope.js'
 import type { SessionContextAuthority } from '../memory/session-state-types.js'
-import { assertInputAuthority, assertProviderInputPreparation, captureInputAdmissionProvider, isInputAuthorityError, ownsInputAdmission } from '../providers/input-authority.js'
+import { assertInputAuthority, assertProviderInputPreparation, captureInputAdmissionProvider, isInputAuthorityError, ownsInputAdmission } from '@use-brian/agent-runtime/providers/input-authority.js'
 import { captureClassifierDecisionRuntime, assertClassifierBookkeeping, registerClassifierLlmCompletion } from '../decisions/authority-ownership.js'
 import { decisionCompletionInput } from '../decisions/invocation.js'
 import type { DecisionExecutionOperation } from '../decisions/index.js'

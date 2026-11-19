@@ -1,5 +1,6 @@
 import type { PoolClient } from 'pg'
-import { deriveResourceScope, resourceScopeKey, type AccessContext, type DerivedWriteEvidence, type ResourceScope, type ScopeSource } from '@use-brian/core'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import { deriveResourceScope, resourceScopeKey, type DerivedWriteEvidence, type ResourceScope, type ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { applyRLSGucs, getAppPool, rollbackAndRelease } from './client.js'
 import { assertExecutionResourceScope, buildAccessPredicate, mutationActorAccess } from './access-predicate.js'
 import { assertCurrentFileAssistant } from '../workspace-access/file-publication-admission.js'

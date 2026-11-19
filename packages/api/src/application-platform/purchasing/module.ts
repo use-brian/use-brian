@@ -2,8 +2,8 @@
 import type { ApplicationModuleDefinition, ApplicationOperationContext, ApplicationRegisteredCommand } from '@use-brian/brian-app/module'
 import type { PoolClient } from 'pg'
 import type { ApplicationRecordProjection, ApplicationResourceRef, ApplicationResourceDefinition } from '@use-brian/brian-app/application'
-import type { PropertyDef } from '@use-brian/core'
-import type { CellValue } from '@use-brian/core'
+import type { PropertyDef } from '@use-brian/core/entities/doc-types.js'
+import type { CellValue } from '@use-brian/core/entities/doc-types.js'
 type CanonicalApplicationRecordMutation = {operation:'create'|'patch'|'delete';type:string;id:string;expectedVersion?:string;data:Record<string,CellValue>}
 
 type Context = ApplicationOperationContext<PoolClient>

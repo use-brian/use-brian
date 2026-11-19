@@ -1,9 +1,10 @@
 import {afterAll,describe,expect,it} from 'vitest'
 import type {PoolClient} from 'pg'
-import {boundScopeSources,ContextScopeAccumulator,type ScopeEvidence} from '@use-brian/core'
+import {ContextScopeAccumulator, type ScopeEvidence} from '@use-brian/agent-runtime/security/context-scope.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {addSessionMessage} from '../../db/sessions.js'
-import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
+import {readAdmittedSessionQuery} from '../../db/conversation-store.js'
 import {readRetainedContextFrame} from '../../db/session-context-revisions.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
 import {listWorkspaceFilesIndexRanked} from '../../db/workspace-files.js'
@@ -36,11 +37,11 @@ async function setup(){
  return {f,authority,evidence}
 }
 
-/** Bypass only the new optimization to compare against the real original SQL. */
+/** Decline canonical capture to compare with the remaining general-source owner. */
 function observed(client:PoolClient,baseline:boolean,queries:string[]){
  return {query:async(sql:string,args?:unknown[])=>{
   queries.push(sql)
-  if(baseline&&(sql.includes('read_native_turn_scope_evidence')||sql.includes('read_native_file_session_evidence')||sql.includes('read_native_empty_query_evidence')))return {rows:[{value:null}]}
+  if(baseline&&sql.includes('capture_conversation_evidence'))return {rows:[{value:null}]}
   return client.query(sql,args)
  }} as Pick<PoolClient,'query'>
 }
@@ -55,12 +56,10 @@ describe.sequential('[COMP:api/application-persistence] file-backed native evide
    const authority={execution:await c.f.execution(c.f.firstId),accumulator:new ContextScopeAccumulator()}
    await readRetainedContextFrame(authority,[],async client=>{
     const args=[c.f.workspaceId,c.f.session.id,title!.revisionId]
-    const baseline=(await client.query('SELECT read_session_title_revision($1,$2,$3) AS value',args)).rows[0].value
-    const current=(await client.query('SELECT read_native_file_session_title_revision($1,$2,$3) AS value',args)).rows[0].value
-    expect(current).toEqual(baseline)
+    const current=(await client.query('SELECT read_session_title_revision($1,$2,$3) AS value',args)).rows[0].value
     expect(current).toEqual(held?null:{title:'Fictional file discussion',manual:false})
-    expect((await client.query("SELECT has_function_privilege(current_user,'session_context_file_revision_allowed(uuid,uuid)','execute') AS allowed")).rows[0].allowed).toBe(false)
-    expect((await client.query('SELECT read_native_file_session_title_revision($1,$2,$3) AS value',
+    expect((await client.query("SELECT to_regprocedure('session_context_file_revision_allowed(uuid,uuid)') AS value")).rows[0].value).toBeNull()
+    expect((await client.query('SELECT read_session_title_revision($1,$2,$3) AS value',
      [c.f.workspaceId,c.f.session.id,crypto.randomUUID()])).rows[0].value).toBeNull()
    })
   }
@@ -68,7 +67,7 @@ describe.sequential('[COMP:api/application-persistence] file-backed native evide
   await c.f.pool.query(`INSERT INTO scope_resource_states(workspace_id,resource_kind,resource_id,resource_version,review_state,classification_revision,holding_reason)
    SELECT workspace_id,'workspace_file',id,scope_version::text,'held',1,'Fictional review hold' FROM workspace_files WHERE workspace_id=$1`,[c.f.workspaceId])
   await compare(true)
-  expect((await c.f.pool.query('SELECT read_native_file_session_title_revision($1,$2,$3) AS value',
+  expect((await c.f.pool.query('SELECT read_session_title_revision($1,$2,$3) AS value',
    [c.f.workspaceId,c.f.session.id,title!.revisionId])).rows[0].value).toBeNull()
  })
  it('matches complete original validation for fifty file leaves and derived Memory without repeated field reads',async()=>{
@@ -80,9 +79,8 @@ describe.sequential('[COMP:api/application-persistence] file-backed native evide
    expect(canonical(after)).toEqual(canonical(before));expected=before
   })
   expect(original.some(sql=>sql.includes('read_native_session_field_dependencies'))).toBe(true)
-  expect(batched.some(sql=>sql.includes('read_native_session_field_dependencies'))).toBe(false)
-  expect(batched.some(sql=>sql.includes('read_native_file_session_evidence'))).toBe(true)
-  expect(batched.some(sql=>sql.includes('read_native_empty_query_evidence'))).toBe(false)
+  expect(batched).toHaveLength(1)
+  expect(batched[0]).toContain('capture_conversation_evidence')
   const invocation=await tryNativeInvocationEvidence(c.authority.execution,c.evidence,c.authority.execution.security.ceiling,'caller')
   expect(invocation).not.toBeNull();expect(canonical(invocation!)).toEqual(canonical(expected!))
  })

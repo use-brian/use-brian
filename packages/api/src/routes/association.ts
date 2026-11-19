@@ -11,19 +11,26 @@
 import { Router, type Request, type RequestHandler, type Response } from 'express'
 import { z } from 'zod'
 import { WorkspaceModuleError } from '../db/workspace-modules-store.js'
+import { CrmOperationsError } from '@use-brian/core/application-platform/operation-contract.js'
 import {
-  AssociationDestinationPreviewSchema, CrmOperationsError,
-  CrmIntegrationScopeError,
-  AssociationWaitlistOfferInputSchema,
+  AssociationDestinationPreviewSchema,
   AssociationProviderBindingInputSchema,
+} from '@use-brian/core/association/domain.js'
+import type {
+  AssociationContext,
+  AssociationServicePort,
+} from '@use-brian/core/association/operations.js'
+import {
   ProviderEntitlementEventSchema,
   ProviderReceiptStateSchema,
-  type AssociationContext,
-  type AssociationServicePort,
-  type CrmOperationsActor,
-  type CrmOperationsContext,
-  type CrmOperationsServicePort,
-} from '@use-brian/core'
+} from '@use-brian/core/association/provider-inbox.js'
+import { AssociationWaitlistOfferInputSchema } from '@use-brian/core/association/waitlist.js'
+import { CrmIntegrationScopeError } from '@use-brian/core/crm/integration-authority.js'
+import type {
+  CrmOperationsActor,
+  CrmOperationsContext,
+  CrmOperationsServicePort,
+} from '@use-brian/core/crm/operations-types.js'
 import { authenticateBrainRequest, type BrainAuth } from '../brain-mcp/auth.js'
 import type { BrainKeyStore } from '../db/brain-keys-store.js'
 import type { OAuthAuthorizationStore } from '../db/oauth-authorization-store.js'

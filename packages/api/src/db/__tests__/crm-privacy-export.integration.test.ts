@@ -7,7 +7,8 @@ import {prepareCrmPrivacyCopies} from '../../crm-operations/privacy-copy-resolve
 
 import express from 'express'
 import request from 'supertest'
-import {CrmOperationsCommandSchema,type CrmOperationsContext,type AssociationServicePort} from '@use-brian/core'
+import type {AssociationServicePort} from '@use-brian/core/association/operations.js'
+import {CrmOperationsCommandSchema, type CrmOperationsContext} from '@use-brian/core/crm/operations-types.js'
 import {loadAssociationOrderScope} from '../../association/source-scope.js'
 import {createCrmPrivacyService,readCrmErasureReview} from '../../crm-operations/privacy-previews.js'
 import {exportCrmOperationsPrivacy} from '../../crm-operations/privacy.js'

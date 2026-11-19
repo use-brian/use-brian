@@ -20,9 +20,9 @@ import {
   extractXaiUsage,
   postXaiResponses,
   XAI_X_URL_QUOTE_MODEL,
-} from '../../providers/xai.js'
-import type { ExternalCredentialPool } from '../../providers/credential-pool.js'
-import { calculateCost } from '../../billing/cost-tracker.js'
+} from '@use-brian/agent-runtime/providers/xai.js'
+import type { ExternalCredentialPool } from '@use-brian/agent-runtime/providers/credential-pool.js'
+import { calculateCost } from '@use-brian/agent-runtime/billing/cost-tracker.js'
 import { recordToolSpend, resolveToolCredential } from './provider-credential.js'
 
 const X_HOSTS = new Set([

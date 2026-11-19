@@ -12,7 +12,7 @@ const oldBody = migration.split('$canonical$')[1]
 // Later canonical successors legitimately change the native reader roster. Replay
 // this exact transition in the maintained pre-8196 upgrade fixture only.
 const upgradeBoundary = process.env.BRIAN_NATIVE_PUBLICATION_UPGRADE_BOUNDARY === '8195'
-  || (await pool.query(`SELECT to_regprocedure('public.publish_native_turn_annotation(uuid,uuid,uuid,uuid,jsonb,text,jsonb,uuid,bigint)') IS NULL AS predecessor`)).rows[0].predecessor
+  || (await pool.query(`SELECT to_regprocedure('public.publish_native_turn_annotation(uuid,uuid,uuid,uuid,jsonb,text,jsonb,uuid,bigint)') IS NULL AND to_regprocedure('public.conversation_prepare_publications(uuid,uuid,jsonb)') IS NULL AS predecessor`)).rows[0].predecessor
 afterAll(async () => { await pool.end() })
 
 describe.sequential('[COMP:api/native-turn-frame] current query helper compatibility', () => {

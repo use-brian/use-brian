@@ -15,24 +15,51 @@
  * See docs/architecture/context-engine/compaction.md.
  */
 
+import { sanitize as sanitizeAnalytics } from '@use-brian/core/analytics/logger.js'
+import { isTopicIdentity } from '@use-brian/core/memory/topic-identity.js'
 import {
-  needsCompaction, compactionThreshold, compactConversation, extractMemoriesBeforeCompaction,
-  ensureToolResultPairing,
-  createCompactionCircuitBreaker, estimateTokens,
-  fitMessagesToBudget, resolveInputTokenLimit, MODEL_CONTEXT_FIT_RATIO,
+  needsCompaction,
+  compactionThreshold,
+  compactConversation,
+  extractMemoriesBeforeCompaction,
+  createCompactionCircuitBreaker,
+  estimateTokens,
+} from '@use-brian/agent-runtime/compaction/compact.js'
+import { ensureToolResultPairing } from '@use-brian/agent-runtime/engine/tool-pairing.js'
+import {
+  fitMessagesToBudget,
+  resolveInputTokenLimit,
+  MODEL_CONTEXT_FIT_RATIO,
   isContextOverflowError,
-  sanitize as sanitizeAnalytics,
-  ContextScopeAccumulator, executionToolContext, scopeEvidenceFromRows,
-  boundScopeSources, bindScopeSources, DerivedScopeError, isTopicIdentity,
-} from '@use-brian/core'
+} from '@use-brian/agent-runtime/providers/context-budget.js'
+import {
+  ContextScopeAccumulator,
+  scopeEvidenceFromRows,
+} from '@use-brian/agent-runtime/security/context-scope.js'
+import { DerivedScopeError } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import {
+  boundScopeSources,
+  bindScopeSources,
+} from '@use-brian/agent-runtime/security/source-evidence.js'
+import type { AnalyticsLogger } from '@use-brian/core/analytics/logger.js'
+import type { EpisodicStore, EpisodicMemoryRecord } from '@use-brian/core/memory/episodic-types.js'
 import type {
-  Message, LLMProvider, MemoryStore, AnalyticsLogger,
-  CompactionTier, CompactionProfile, ChannelClass, EpisodeSection, CompactionTopicGroup,
-  EpisodicStore, EpisodicMemoryRecord, UsageStore,
   SessionStateStore,
-  CurrentAuthorityBoundary,
-  ExecutionContext, SessionContextAuthority,
-} from '@use-brian/core'
+  SessionContextAuthority,
+} from '@use-brian/core/memory/session-state-types.js'
+import type { MemoryStore } from '@use-brian/core/memory/types.js'
+import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
+import type {
+  CompactionTier,
+  CompactionProfile,
+  ChannelClass,
+  EpisodeSection,
+  CompactionTopicGroup,
+} from '@use-brian/agent-runtime/compaction/compact.js'
+import type { Message, LLMProvider, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import type { CurrentAuthorityBoundary } from '@use-brian/agent-runtime/tools/types.js'
 import {
   setCompactSummaryAndBoundary, readCompactSummary, toStampedMessages,
 } from '../db/sessions.js'
@@ -49,7 +76,8 @@ import type { Session, SessionMessage } from '../db/sessions.js'
 import { recordOverheadUsage } from './_overhead-usage.js'
 import type { ChatEpisodeIngestor } from '../ingest-port.js'
 import { isAuthorityChangedError } from '../context-scope/authority-lease.js'
-import { assertSourceModelInputAuthority } from '../application-platform/model-source-authority.js'
+import { admitModelInput } from '../context-scope/admission.js'
+import type {ConversationFrame} from '../db/conversation-store.js'
 import {readPrivateTranscript,PRIVATE_TRANSCRIPT_INSTRUCTION} from '../db/private-transcript.js'
 import { getApplicationExecutionBinding } from '../application-platform/execution-context.js'
 
@@ -322,6 +350,9 @@ export type ProactiveCompactionParams = {
   authority?: CurrentAuthorityBoundary
   /** The already-resolved R1 actor and complete host-owned model evidence. */
   modelContext?: { execution: ExecutionContext; accumulator: ContextScopeAccumulator }
+  /** Complete canonical data, not a dispatch/publication authorization receipt. */
+  conversationFrame?: ConversationFrame
+  readCompleteRecord?: (authority: SessionContextAuthority) => Promise<SessionMessage[]>
 }
 
 export type ProactiveCompactionResult = {
@@ -384,6 +415,7 @@ export async function runProactiveCompaction(
   const persistLongTermContext = params.persistLongTermContext !== false
   const persistSessionSummary = params.persistSessionSummary !== false
   const compactionModel = params.model ?? 'gemini-3.6-flash-pro'
+  const usageAttribution = { modelTier: params.modelTier, providerKeySource: params.providerKeySource }
   const binding = params.modelContext
   const execution = binding?.execution, accumulator = binding?.accumulator
   const authority = params.authority, assertCurrent = authority?.assertCurrent, execute = authority?.execute
@@ -426,7 +458,7 @@ export async function runProactiveCompaction(
     if (!modelContext) return
     await assertInputCurrent!.call(inputAuthority)
     assertModelBinding()
-    await assertSourceModelInputAuthority(modelContext)
+    await admitModelInput(modelContext)
     assertModelBinding()
   }
   const guarded = async <T>(operation: () => Promise<T>): Promise<T> => {
@@ -448,7 +480,12 @@ export async function runProactiveCompaction(
   // summary. Rebuild from its complete transcript without admitting that
   // summary's obsolete source graph, including when the graph is unavailable.
   const recoveredTranscript = persistSessionSummary && binding
-    ? await readPrivateTranscript(binding, session.id, 2147483647) : null
+    ? params.readCompleteRecord
+      ? await params.readCompleteRecord(binding)
+      : params.conversationFrame
+      ? params.conversationFrame.privateTranscript(binding)
+      : await readPrivateTranscript(binding, session.id, 2147483647)
+    : null
   const priorSummary = !recoveredTranscript && persistSessionSummary
     ? await readCompactSummary(session.id, binding) : null
   if (recoveredTranscript) {
@@ -601,19 +638,24 @@ export async function runProactiveCompaction(
     // Best-effort: extraction failure must not block compaction, except
     // authority loss, which always aborts the turn.
     if (persistLongTermContext && modelContext) {
+      let reportedUsage: { model: string | null; usage: TokenUsage | null } | undefined
       try {
         const existingIndex = await guarded(() => memoryStore.getIndex(modelContext.executionContext!.security.access))
         modelContext.scopeAccumulator.note(scopeEvidenceFromRows(existingIndex))
         await assertModelInput()
         const existingSummaries = existingIndex.map((m) => m.summary)
-        const extracted = await guarded(() => extractMemoriesBeforeCompaction({
+        const extracted = await guarded(async () => {
+          const result = await extractMemoriesBeforeCompaction({
           provider,
           model: compactionModel,
           messages: compactableForLLM,
           existingMemories: existingSummaries,
           assertInputAuthority: assertModelInput,
           sourceEvidence: modelContext.scopeAccumulator.evidence.sources,
-        }))
+          })
+          reportedUsage = { model: result.model, usage: structuredClone(result.usage) }
+          return result
+        })
         for (const fact of extracted.facts) {
           // Post-Phase-4 (retire-memory-type): no `type` field on the
           // memory write. The fact's categorical signal (if any) can
@@ -642,42 +684,40 @@ export async function runProactiveCompaction(
             metadata: { count: extracted.facts.length },
           })
         }
-        await guarded(() => recordOverheadUsage({
-          usageStore, userId: ownerId, actorUserId: userId,
-          assistantId, sessionId, userMessageId,
-          model: extracted.model, usage: extracted.usage,
-          source: 'overhead:extraction',
-          triggerKey: 'pattern_extractor',
-          modelTier: params.modelTier,
-          providerKeySource: params.providerKeySource,
-        }))
       } catch (err) {
         if (isAuthorityChangedError(err)) throw err
         console.error('[pre-compaction extraction] Failed:', err)
+      } finally {
+        if (reportedUsage) await recordOverheadUsage({
+          usageStore, userId: ownerId, actorUserId: userId,
+          assistantId, sessionId, userMessageId, ...reportedUsage,
+          source: 'overhead:extraction', triggerKey: 'pattern_extractor', ...usageAttribution,
+        })
       }
     }
 
-    // 8. Summarize.
-    const compactResult = await guarded(() => compactConversation({
-      provider,
-      model: compactionModel,
-      messages: compactableForLLM,
-      topicGroups,
-      systemPrompt: modelContext?.scopeAccumulator.evidence.sources?.some(source => source.resourceKind === 'private_transcript')
-        ? systemPrompt + '\n' + PRIVATE_TRANSCRIPT_INSTRUCTION : systemPrompt,
-      profile,
-      channelClass,
-      assertInputAuthority: assertModelInput,
-    }))
-    await guarded(() => recordOverheadUsage({
-      usageStore, userId: ownerId, actorUserId: userId,
-      assistantId, sessionId, userMessageId,
-      model: compactResult.model, usage: compactResult.usage,
-      source: 'overhead:compaction',
-      triggerKey: 'compaction_full',
-      modelTier: params.modelTier,
-      providerKeySource: params.providerKeySource,
-    }))
+    // 8. Summarize. Capture returned spend before the closing authority
+    // check; a refusal still withholds every summary/derived-content write.
+    let compactResult: Awaited<ReturnType<typeof compactConversation>>
+    let reportedCompactionUsage: { model: string; usage: TokenUsage } | undefined
+    try {
+      compactResult = await guarded(async () => {
+        const result = await compactConversation({
+          provider, model: compactionModel, messages: compactableForLLM, topicGroups,
+          systemPrompt: modelContext?.scopeAccumulator.evidence.sources?.some(source => source.resourceKind === 'private_transcript')
+            ? systemPrompt + '\n' + PRIVATE_TRANSCRIPT_INSTRUCTION : systemPrompt,
+          profile, channelClass, assertInputAuthority: assertModelInput,
+        })
+        reportedCompactionUsage = { model: result.model, usage: structuredClone(result.usage) }
+        return result
+      })
+    } finally {
+      if (reportedCompactionUsage) await recordOverheadUsage({
+        usageStore, userId: ownerId, actorUserId: userId,
+        assistantId, sessionId, userMessageId, ...reportedCompactionUsage,
+        source: 'overhead:compaction', triggerKey: 'compaction_full', ...usageAttribution,
+      })
+    }
 
     // Defensive cap: if the summarizer exceeded the budget (unusual for
     // a 4K-token output cap but possible with CJK + multi-topic), hard-

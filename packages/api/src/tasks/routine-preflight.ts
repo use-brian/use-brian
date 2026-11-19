@@ -1,7 +1,9 @@
 /** Current native source, capability and registry eligibility at human apply.
  * [COMP:api/routine-proposals]
  */
-import { pinAccessCeiling, type Tool, type TurnScope } from '@use-brian/core'
+import { pinAccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import type { TurnScope } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { captureAuthoringAuthoritySystem, resolveWorkflowAuthoringScope } from '../context-scope/workflow-authority.js'
 import { validateCallerScopeEvidence } from '../context-scope/caller-evidence.js'
 import { createDbCapabilityStore } from '../db/capability-store.js'

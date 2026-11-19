@@ -1,7 +1,16 @@
 import { z } from 'zod'
 import { getPool } from './client.js'
-import { DerivedScopeError, bindScopeSources, boundScopeSources,
-  type SessionStateSource, type SessionStateStatus, type SessionStateStore, type SessionContextAuthority } from '@use-brian/core'
+import type {
+  SessionStateSource,
+  SessionStateStatus,
+  SessionStateStore,
+  SessionContextAuthority
+} from '@use-brian/core/memory/session-state-types.js'
+import { DerivedScopeError } from '@use-brian/agent-runtime/security/derived-scope.js'
+import {
+  bindScopeSources,
+  boundScopeSources
+} from '@use-brian/agent-runtime/security/source-evidence.js'
 import { readSessionContextRevisions, writeSessionContextRevision, mutateSessionContextParents, sessionContextGeneration,
   type SessionContextRevision } from './session-context-revisions.js'
 

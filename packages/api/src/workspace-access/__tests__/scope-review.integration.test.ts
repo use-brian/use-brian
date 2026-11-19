@@ -68,15 +68,35 @@ describe('[COMP:api/workspace-scope-review] durable classification with real dat
     }finally{await reader.query('ROLLBACK');reader.release()}
     expect((await f.apply(job)).status).toBe('complete')
   })
-  it.each(['bare','scope_actor','current_actor','set_role'])('does not convert raw owner %s writes into review authority',async(mode)=>{
-    const f=await fixture(),id=await task(f),client=await pool.connect()
+  it.each(['bare','scope_actor','current_actor','app_user'])('does not grant raw %s writes review authority on another member private task',async(mode)=>{
+    const f=await fixture(),id=await task(f,f.member),client=await (mode==='app_user'?getAppPool():pool).connect()
     try{
       await client.query('BEGIN')
+      if(mode==='app_user'){
+        const identity=(await client.query("SELECT session_user=current_user AS direct,current_user::text AS role")).rows[0]
+        expect(identity).toEqual({direct:true,role:'app_user'})
+      }
       if(mode!=='bare')await client.query("SELECT set_config('app.scope_review_actor',$1,true)",[f.owner])
-      if(mode==='current_actor'||mode==='set_role')await client.query("SELECT set_config('app.current_user_id',$1,true)",[f.owner])
-      if(mode==='set_role')await client.query('SET LOCAL ROLE app_user')
-      await expect(client.query('UPDATE tasks SET compartments=ARRAY[$2::text] WHERE id=$1',[id,f.team.compartmentKey])).rejects.toMatchObject({code:'42501'})
+      if(mode==='current_actor'||mode==='app_user')await client.query("SELECT set_config('app.current_user_id',$1,true)",[f.owner])
+      const write=client.query('UPDATE tasks SET compartments=ARRAY[$2::text] WHERE id=$1',[id,f.team.compartmentKey])
+      if(mode==='app_user'){
+        expect((await write).rowCount).toBe(0)
+        expect((await client.query('SELECT compartments FROM tasks WHERE id=$1',[id])).rows).toEqual([])
+        await client.query('COMMIT')
+      }else await expect(write).rejects.toMatchObject({code:'42501'})
     }finally{await client.query('ROLLBACK');client.release()}
+    expect((await pool.query('SELECT compartments FROM tasks WHERE id=$1',[id])).rows[0].compartments).toEqual([])
+  })
+  it('retains ordinary app-role writes on a task the actor already owns',async()=>{
+    const f=await fixture(),id=await task(f),client=await getAppPool().connect()
+    try{
+      await client.query('BEGIN')
+      await client.query("SELECT set_config('app.current_user_id',$1,true)",[f.owner])
+      expect((await client.query('UPDATE tasks SET compartments=ARRAY[$2::text] WHERE id=$1',[id,f.team.compartmentKey])).rowCount).toBe(1)
+      await client.query('COMMIT')
+    }finally{await client.query('ROLLBACK');client.release()}
+    expect((await pool.query('SELECT compartments FROM tasks WHERE id=$1',[id])).rows[0].compartments).toEqual([f.team.compartmentKey])
+    expect((await pool.query("SELECT count(*)::int AS n FROM workspace_access_events WHERE workspace_id=$1 AND kind='scope.review.apply'",[f.workspaceId])).rows[0].n).toBe(0)
   })
   it('keeps the saved-review private functions and ledger inaccessible to actual app_user',async()=>{
     const f=await fixture(),id=await task(f),job=await f.preview([id],'assign_team','task'),client=await getAppPool().connect(),host=await pool.connect()

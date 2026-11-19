@@ -8,7 +8,7 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool, type ToolContext } from '../types.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 export const WORDPRESS_MAX_IMAGE_BYTES = 20 * 1024 * 1024
 export const WORDPRESS_IMAGE_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp'] as const

@@ -17,7 +17,7 @@ importers:
         specifier: ^8.11.10
         version: 8.20.0
       pg:
-        specifier: ^8.13.1
+        specifier: ^8.21.0
         version: 8.21.0
       tsx:
         specifier: ^4.19.2
@@ -464,6 +464,9 @@ importers:
       '@hocuspocus/server':
         specifier: 4.2.0
         version: 4.2.0(y-protocols@1.0.7(yjs@13.6.31))(yjs@13.6.31)
+      '@use-brian/agent-runtime':
+        specifier: workspace:*
+        version: link:../../packages/agent-runtime
       '@use-brian/api':
         specifier: workspace:*
         version: link:../../packages/api
@@ -570,7 +573,7 @@ importers:
         specifier: ^5
         version: 5.2.1
       pg:
-        specifier: ^8
+        specifier: ^8.21.0
         version: 8.21.0
       pino:
         specifier: ^9.6.0
@@ -651,6 +654,49 @@ importers:
         specifier: ^3
         version: 3.2.6(@types/debug@4.1.13)(@types/node@20.19.43)(jiti@2.7.0)(jsdom@29.1.1(@noble/hashes@1.8.0))(lightningcss@1.32.0)(sass@1.51.0)(tsx@4.22.4)
 
+  packages/agent-runtime:
+    dependencies:
+      '@anthropic-ai/sdk':
+        specifier: ^0.98.0
+        version: 0.98.1(zod@3.25.76)
+      '@openai/codex':
+        specifier: 0.165.0
+        version: 0.165.0
+      '@openai/codex-catalog':
+        specifier: npm:@openai/codex@0.165.0
+        version: '@openai/codex@0.165.0'
+      '@use-brian/shared':
+        specifier: workspace:*
+        version: link:../shared
+      ajv:
+        specifier: ^8.20.0
+        version: 8.20.0
+      ajv-formats:
+        specifier: ^3.0.1
+        version: 3.0.1(ajv@8.20.0)
+      sharp:
+        specifier: ^0.34.3
+        version: 0.34.5
+      undici:
+        specifier: 7.28.0
+        version: 7.28.0
+      zod:
+        specifier: ^3.24
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: ^20.19.39
+        version: 20.19.43
+      dotenv:
+        specifier: ^16
+        version: 16.6.1
+      typescript:
+        specifier: ^5.7
+        version: 5.9.3
+      vitest:
+        specifier: ^3
+        version: 3.2.6(@types/debug@4.1.13)(@types/node@20.19.43)(jiti@2.7.0)(jsdom@29.1.1(@noble/hashes@1.8.0))(lightningcss@1.32.0)(sass@1.51.0)(tsx@4.22.4)
+
   packages/api:
     dependencies:
       '@aws-sdk/client-s3':
@@ -674,6 +720,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@3.25.76)
+      '@use-brian/agent-runtime':
+        specifier: workspace:*
+        version: link:../agent-runtime
       '@use-brian/brian-app':
         specifier: workspace:*
         version: link:../brian-app
@@ -714,7 +763,7 @@ importers:
         specifier: ^8.0.9
         version: 8.0.11
       pg:
-        specifier: ^8
+        specifier: ^8.21.0
         version: 8.21.0
       tsx:
         specifier: ^4
@@ -844,9 +893,6 @@ importers:
 
   packages/core:
     dependencies:
-      '@anthropic-ai/sdk':
-        specifier: ^0.98.0
-        version: 0.98.1(zod@3.25.76)
       '@cantoo/fontkit':
         specifier: 2.0.12
         version: 2.0.12
@@ -871,12 +917,9 @@ importers:
       '@napi-rs/canvas':
         specifier: ^0.1.100
         version: 0.1.100
-      '@openai/codex':
-        specifier: 0.165.0
-        version: 0.165.0
-      '@openai/codex-catalog':
-        specifier: npm:@openai/codex@0.165.0
-        version: '@openai/codex@0.165.0'
+      '@use-brian/agent-runtime':
+        specifier: workspace:*
+        version: link:../agent-runtime
       '@use-brian/brian-kb':
         specifier: workspace:*
         version: link:../brian-kb
@@ -889,12 +932,6 @@ importers:
       '@use-brian/shared':
         specifier: workspace:*
         version: link:../shared
-      ajv:
-        specifier: ^8.20.0
-        version: 8.20.0
-      ajv-formats:
-        specifier: ^3.0.1
-        version: 3.0.1(ajv@8.20.0)
       crc-32:
         specifier: ^1.2.2
         version: 1.2.2
@@ -937,9 +974,6 @@ importers:
       turndown-plugin-gfm:
         specifier: ^1.0.2
         version: 1.0.2
-      undici:
-        specifier: 7.28.0
-        version: 7.28.0
       unpdf:
         specifier: ^1.6.2
         version: 1.6.2(@napi-rs/canvas@0.1.100)
@@ -956,9 +990,6 @@ importers:
       '@types/turndown':
         specifier: ^5.0.6
         version: 5.0.6
-      dotenv:
-        specifier: ^16
-        version: 16.6.1
       typescript:
         specifier: ^5.7
         version: 5.9.3
@@ -1701,9 +1732,6 @@ packages:
 
   '@emnapi/runtime@1.10.0':
     resolution: {integrity: sha512-ewvYlk86xUoGI0zQRNq/mC+16R1QeDlKQy21Ki3oSYXNgLb45GV1P6A0M+/s6nyCuNDqe5VpaY84BzXGwVbwFA==}
-
-  '@emnapi/runtime@1.11.1':
-    resolution: {integrity: sha512-vgj7R3y3Wgx24IQaGPA/R6YFXLHVMOZ0uVEyIQPaWs+rd1AzfEMXlAC22FYwO1XkKR6NPsq7mUandH8oIRdZFw==}
 
   '@emnapi/runtime@1.11.3':
     resolution: {integrity: sha512-Xz4Tpyki7XyrpbUK1jR1AhdAdaXyhhY4lZ3neLodmhpuWfy2PAQN5B46sAiU4liOXGLkHypn/qU+jvfWSCYYLA==}
@@ -10334,7 +10362,7 @@ snapshots:
       node-gyp: 9.4.1
       ora: 5.4.1
       read-binary-file-arch: 1.0.6
-      semver: 7.8.4
+      semver: 7.8.5
       tar: 6.2.1
       yargs: 17.7.2
     transitivePeerDependencies:
@@ -10360,11 +10388,6 @@ snapshots:
     optional: true
 
   '@emnapi/runtime@1.10.0':
-    dependencies:
-      tslib: 2.8.1
-    optional: true
-
-  '@emnapi/runtime@1.11.1':
     dependencies:
       tslib: 2.8.1
     optional: true
@@ -11051,7 +11074,7 @@ snapshots:
 
   '@img/sharp-wasm32@0.34.5':
     dependencies:
-      '@emnapi/runtime': 1.11.1
+      '@emnapi/runtime': 1.11.3
     optional: true
 
   '@img/sharp-wasm32@0.35.4':
@@ -11315,7 +11338,7 @@ snapshots:
   '@npmcli/fs@2.1.2':
     dependencies:
       '@gar/promisify': 1.1.3
-      semver: 7.8.4
+      semver: 7.8.5
 
   '@npmcli/move-file@2.0.1':
     dependencies:
@@ -12565,7 +12588,7 @@ snapshots:
       '@typescript-eslint/visitor-keys': 8.61.1
       debug: 4.4.3
       minimatch: 10.2.5
-      semver: 7.8.4
+      semver: 7.8.5
       tinyglobby: 0.2.17
       ts-api-utils: 2.5.0(typescript@5.9.3)
       typescript: 5.9.3
@@ -13450,7 +13473,7 @@ snapshots:
       json-schema-typed: 7.0.3
       onetime: 5.1.2
       pkg-up: 3.1.0
-      semver: 7.8.4
+      semver: 7.8.5
 
   config-file-ts@0.2.8-rc1:
     dependencies:
@@ -15364,7 +15387,7 @@ snapshots:
 
   is-bun-module@2.0.0:
     dependencies:
-      semver: 7.8.4
+      semver: 7.8.5
 
   is-callable@1.2.7: {}
 
@@ -16687,14 +16710,14 @@ snapshots:
 
   node-abi@3.92.0:
     dependencies:
-      semver: 7.8.4
+      semver: 7.8.5
 
   node-addon-api@1.7.2:
     optional: true
 
   node-api-version@0.2.1:
     dependencies:
-      semver: 7.8.4
+      semver: 7.8.5
 
   node-domexception@1.0.0: {}
 
@@ -16727,7 +16750,7 @@ snapshots:
       nopt: 6.0.0
       npmlog: 6.0.2
       rimraf: 3.0.2
-      semver: 7.8.4
+      semver: 7.8.5
       tar: 6.2.1
       which: 2.0.2
     transitivePeerDependencies:
@@ -17896,7 +17919,7 @@ snapshots:
     dependencies:
       '@img/colour': 1.1.0
       detect-libc: 2.1.2
-      semver: 7.8.4
+      semver: 7.8.5
     optionalDependencies:
       '@img/sharp-darwin-arm64': 0.34.5
       '@img/sharp-darwin-x64': 0.34.5

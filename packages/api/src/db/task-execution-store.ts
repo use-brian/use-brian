@@ -26,7 +26,7 @@ import {
   type ExecutionPlan,
   type ExecutionSourceRef,
   type ExecutionStreaks,
-} from '@use-brian/core'
+} from '@use-brian/core/goals/execution.js'
 import { applyRLSGucs, getAppPool, getPool, rollbackAndRelease } from './client.js'
 
 type Db = Pick<pg.PoolClient, 'query'>

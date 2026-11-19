@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
+import { unitTestExclusions } from "../../scripts/testing/unit-partition.mjs";
 import { resolveCollabSingletonAliases } from "../../scripts/collab-singletons.mjs";
 
 const collabSingletonAliases = resolveCollabSingletonAliases(import.meta.url);
@@ -22,6 +23,7 @@ export default defineConfig({
     },
   },
   test: {
+    exclude: [...configDefaults.exclude, ...unitTestExclusions('apps/app-web')],
     // Optimize the actual subpath imports, not only the unused package barrel.
     // This also routes CJS hook shims through React dedupe instead of Node.
     deps: {

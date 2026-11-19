@@ -10,7 +10,7 @@ import type {
   BrowserCredentialMetadata,
   BrowserCredentialSecret,
   BrowserCredentialStore,
-} from '@use-brian/core'
+} from '@use-brian/core/sandbox/browser-credentials.js'
 import { query } from './client.js'
 import { decryptCredentials, encryptCredentials } from './credential-crypto.js'
 import { createBrowserProfileStore, withBrowserProfileOwnerMutation } from './browser-profile-store.js'

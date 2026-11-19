@@ -1,7 +1,8 @@
 /** One app-scoped source setup over existing deployment trust and source protocol. [COMP:api/source-service-binding] */
 import {createHash,randomUUID} from 'node:crypto'
 import type {PoolClient} from 'pg'
-import {maxSensitivity,type ExecutionContext} from '@use-brian/core'
+import type {ExecutionContext} from '@use-brian/agent-runtime/security/execution-context.js'
+import {maxSensitivity} from '@use-brian/agent-runtime/security/sensitivity.js'
 import {ApplicationPlatformError} from '@use-brian/shared'
 import {SourceProtocolError} from '@use-brian/brian-app/connector'
 import {getPool} from '../../../db/client.js'

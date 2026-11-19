@@ -12,7 +12,8 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import request from 'supertest'
-import type { PageLifecycleEvent, SavedViewStore } from '@use-brian/core'
+import type { SavedViewStore } from '@use-brian/core/views/types.js'
+import type { PageLifecycleEvent } from '@use-brian/core/workflow/page-event-trigger.js'
 import { createTestApp } from '../../routes/__tests__/helpers.js'
 import { internalPageEventRoutes } from '../internal-page-event-route.js'
 

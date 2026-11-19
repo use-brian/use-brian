@@ -9,8 +9,8 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { NOOP_TURN_LEDGER } from '@use-brian/core'
-import type { LLMProvider, ProviderSession, StreamChunk, Message } from '@use-brian/core'
+import { NOOP_TURN_LEDGER } from '@use-brian/agent-runtime/engine/turn-ledger.js'
+import type { LLMProvider, ProviderSession, StreamChunk, Message } from '@use-brian/agent-runtime/providers/types.js'
 import { hashPayload, type LedgerPayloadStore } from '../payload-store.js'
 import { reconstructTurnInputs, replayTurn } from '../replay.js'
 import type { TurnEventRow } from '../../db/turn-ledger-store.js'

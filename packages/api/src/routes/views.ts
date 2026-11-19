@@ -1,4 +1,4 @@
-import { crmAmountSchema } from '@use-brian/core'
+import { crmAmountSchema } from '@use-brian/core/crm/types.js'
 import { applicationJsonSchema } from '@use-brian/shared'
 /**
  * Q5 Views routes — saved-views CRUD + per-entity primitive read routes
@@ -42,56 +42,58 @@ import {
 } from '@use-brian/shared/page-slugs'
 import type { PageDomain, PageDomainStore } from '../db/page-domain-store.js'
 import type { DomainProvisioner } from '../domains/provisioner.js'
+import { type AnalyticsLogger, sanitize } from '@use-brian/core/analytics/logger.js'
 import {
-  AUTO_TITLE_MIN_CHARS,
-  type AnalyticsLogger,
-  bindingConfigSchema,
-  blueprintRecordToBlocks,
-  buildPayload,
-  canRead,
-  DEAL_STAGES,
-  emptyPage,
-  pageSchema,
-  renderPage,
-  blocksToMarkdown,
-  pageToMarkdown,
-  markdownToBlocks,
-  blocksToDocx,
+  softDelete,
+  SoftDeleteError,
+  type SoftDeletePrimitive,
+  type SoftDeleteRepository,
+} from '@use-brian/core/corrections/soft-delete.js'
+import { DEAL_STAGES, type CrmStore, type DealStage } from '@use-brian/core/crm/types.js'
+import { AUTO_TITLE_MIN_CHARS } from '@use-brian/core/doc/auto-title.js'
+import { blueprintRecordToBlocks } from '@use-brian/core/doc/blueprint-record.js'
+import { blocksToDocx } from '@use-brian/core/doc/convert/to-docx.js'
+import {
   defaultPdfRenderer,
   PdfRenderError,
   type PdfRenderer,
-  parseDocxToMarkdown,
-  sanitize,
-  softDelete,
-  SoftDeleteError,
-  TASK_STATUSES,
-  type BindingConfig,
-  type BindingDeps,
-  type DocEntityStore,
-  type DocPageStore,
-  type CrmStore,
-  type DealStage,
-  type JobStore,
-  type LLMProvider,
-  type NameOrigin,
-  type Page,
-  type SavedView,
-  type SavedViewStore,
-  type ScheduledJob,
-  type SoftDeletePrimitive,
-  type SoftDeleteRepository,
-  type TaskRecordStatus,
-  type TaskStore,
-  type ViewEntity,
-  type WorkflowRunStore,
-  type WorkspaceDirectoryStore,
-  savedViewCreateInputSchema,
-  savedViewUpdateInputSchema,
-  viewEntitySchema,
+} from '@use-brian/core/doc/convert/to-pdf.js'
+import {
   customTemplateCreateInputSchema,
   customTemplateUpdateInputSchema,
   extractionSpecToBlocks,
-} from '@use-brian/core'
+} from '@use-brian/core/doc/custom-template-types.js'
+import { markdownToBlocks } from '@use-brian/core/doc/markdown.js'
+import { blocksToMarkdown, pageToMarkdown } from '@use-brian/core/doc/to-markdown.js'
+import type { DocPageStore } from '@use-brian/core/doc/tools.js'
+import type { EntityStore as DocEntityStore } from '@use-brian/core/entities/doc-types.js'
+import { parseDocxToMarkdown } from '@use-brian/core/files/parsers.js'
+import type { JobStore, ScheduledJob } from '@use-brian/core/scheduling/types.js'
+import {
+  TASK_STATUSES,
+  type TaskRecordStatus,
+  type TaskStore,
+} from '@use-brian/core/tasks/types.js'
+import { buildPayload, type BindingDeps } from '@use-brian/core/views/bindings.js'
+import { emptyPage, pageSchema, type Page } from '@use-brian/core/views/blocks.js'
+import { renderPage } from '@use-brian/core/views/page-render.js'
+import {
+  bindingConfigSchema,
+  savedViewCreateInputSchema,
+  savedViewUpdateInputSchema,
+  viewEntitySchema,
+} from '@use-brian/core/views/schemas.js'
+import type {
+  BindingConfig,
+  NameOrigin,
+  SavedView,
+  SavedViewStore,
+  ViewEntity,
+} from '@use-brian/core/views/types.js'
+import type { WorkflowRunStore } from '@use-brian/core/workflow/types.js'
+import type { WorkspaceDirectoryStore } from '@use-brian/core/workspace/types.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import { canRead } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { getRecording } from '../db/recordings-store.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import type { PageTemplateStore } from '../db/page-templates-store.js'
@@ -741,7 +743,7 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
       parsed.data.name !== undefined
         ? { ...parsed.data, nameOrigin: 'user' as NameOrigin }
         : parsed.data
-    let expectedMetadata: import('@use-brian/core').SavedViewUpdateFields['expectedMetadata']
+    let expectedMetadata: import('@use-brian/core/views/types.js').SavedViewUpdateFields['expectedMetadata']
     const condition = req.get('X-Brian-Metadata-Base')
     if (condition) {
       try {

@@ -1,7 +1,23 @@
 /** Transactional draft/publication authority for website content collections. [COMP:crm/site-content] */
 import type { Pool, PoolClient } from 'pg'
-import { AssociationError, applySiteContentOperations, parseSiteContent, resolveSiteContent, siteContentMediaIds, siteContentPublicationIssueDetails, siteContentSchema, SITE_CONTENT_COLLECTIONS, SITE_CONTENT_READERS,
-  type AssociationActor, type SiteContentCollection, type SiteContentDocument, type SiteContentIssue, type SiteContentOperation, type SiteContentSite } from '@use-brian/core'
+import { AssociationError, type AssociationActor } from '@use-brian/core/association/domain.js'
+import {
+  applySiteContentOperations,
+  siteContentMediaIds,
+  type SiteContentOperation
+} from '@use-brian/core/association/site-content-edit.js'
+import {
+  parseSiteContent,
+  resolveSiteContent,
+  siteContentPublicationIssueDetails,
+  siteContentSchema,
+  SITE_CONTENT_COLLECTIONS,
+  SITE_CONTENT_READERS,
+  type SiteContentCollection,
+  type SiteContentDocument,
+  type SiteContentIssue,
+  type SiteContentSite
+} from '@use-brian/core/association/site-content.js'
 import { getPool } from './client.js'
 import { WEBSITE_MEDIA_MIME, WEBSITE_MEDIA_PREFIX } from './website-media-store.js'
 

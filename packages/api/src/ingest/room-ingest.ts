@@ -40,14 +40,16 @@
  */
 
 import {
-  composeFilters,
-  computeNextRun,
   createIngestEngine,
-  universalFilters,
   type IngestEngine,
-  type IngestEvent,
   type IngestRule,
-} from '@use-brian/core'
+} from '@use-brian/core/ingest/engine.js'
+import {
+  composeFilters,
+  universalFilters,
+  type IngestEvent,
+} from '@use-brian/core/ingest/filters.js'
+import { computeNextRun } from '@use-brian/core/scheduling/schedule.js'
 import { appendBatchEvent } from '../db/pending-ingest-batches-store.js'
 import { resolveIngestPlaceholders } from './placeholder-resolver.js'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'

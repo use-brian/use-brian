@@ -12,13 +12,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import request from 'supertest'
 import { createTestApp } from './helpers.js'
-import {
-  loadBuiltinSkills,
-  type LLMProvider,
-  type Message,
-  type PreflightOptions,
-  type StreamChunk,
-} from '@use-brian/core'
+import type { PreflightOptions } from '@use-brian/core/media/preflight.js'
+import { loadBuiltinSkills } from '@use-brian/core/skills/loader.js'
+import type { LLMProvider, Message, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
 
 import { skillRoutes } from '../skills.js'
 
@@ -88,7 +84,7 @@ type DraftAppOptions = {
   budgetStatus?: 'ok' | 'downgraded' | 'blocked'
   fileStore?: { get: (id: string, ctx?: unknown) => Promise<unknown> }
   voiceTranscription?: PreflightOptions
-  communityRegistry?: import('@use-brian/core').SkillContent[]
+  communityRegistry?: import('@use-brian/core/skills/types.js').SkillContent[]
   nativeInstall?: boolean
   resolveWorkspaceCustomLlm?: import('../../custom-llm-runtime.js').WorkspaceCustomLlmResolver
 }

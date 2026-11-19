@@ -24,14 +24,10 @@
  * Component tag: [COMP:agent-surface/toolset].
  */
 
-import {
-  buildTool,
-  CONFIGURE_CAPABILITY,
-  createControlPlaneTools,
-  type ControlPlaneReader,
-  type Tool,
-  type ToolContext,
-} from '@use-brian/core'
+import { CONFIGURE_CAPABILITY } from '@use-brian/core/authorization/types.js'
+import { createControlPlaneTools } from '@use-brian/core/control-plane/tools.js'
+import type { ControlPlaneReader } from '@use-brian/core/control-plane/types.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import type { PendingApprovalsStore } from '../db/pending-approvals-store.js'
 import { bandOf } from './banding.js'
 import { createAgentWriteTools, workspaceGateFailure, type AgentWriteToolDeps } from './write-tools.js'

@@ -2,7 +2,7 @@ import express from 'express'
 import request from 'supertest'
 import { describe, it, expect, vi } from 'vitest'
 import { protectedBrowserFillRoutes } from '../protected-browser-fill.js'
-import { createProtectedFillService } from '../../../../core/src/sandbox/protected-fill.js'
+import { createProtectedFillService } from '@use-brian/core/sandbox/protected-fill.js'
 import { signBrowserExtPairToken, signBrowserExtSessionToken } from '../../auth/browser-ext-pair-token.js'
 const origin = 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 const scope = { userId: 'user', workspaceId: 'workspace', browserProfileId: 'profile', sessionId: 'session', taskId: 'task', destinationOrigin: 'https://example.com' }

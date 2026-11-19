@@ -1,6 +1,6 @@
 import { workspaceMcpContextBinding } from './contexts.js'
 /** Governed native skills with connection-bound activation. [COMP:api/workspace-mcp] */
-import type { ToolContext } from '@use-brian/core'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { queryWithRLS } from '../db/client.js'
 import { injectSkills } from '../routes/route-helpers.js'
 

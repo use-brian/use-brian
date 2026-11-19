@@ -4,7 +4,7 @@ import type {
   SessionStateRecord,
   SessionStateStore,
 } from '../session-state-types.js'
-import type { LLMProvider, StreamChunk } from '../../providers/types.js'
+import type { LLMProvider, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
 
 function record(overrides: Partial<SessionStateRecord> = {}): SessionStateRecord {
   return {

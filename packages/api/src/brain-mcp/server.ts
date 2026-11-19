@@ -1,7 +1,7 @@
 import type { WorkspaceMcpProfile } from '../workspace-mcp/profile.js'
 import { buildWorkspaceMcpCatalog } from '../workspace-mcp/catalog.js'
 import { workspaceDiscoveryNames } from '../workspace-mcp/discovery.js'
-import type { ToolContext } from '@use-brian/core'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import type { CaptureConfiguration,EngineeringHistoryCommand } from '@use-brian/shared'
 /**
  * Brain MCP server — Streamable HTTP endpoint.
@@ -23,7 +23,9 @@ import type { CaptureConfiguration,EngineeringHistoryCommand } from '@use-brian/
 
 import { Router } from 'express'
 import { serveStatelessMcp } from './stateless.js'
-import type { Tool, Embedder, AssociationTools } from '@use-brian/core'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
+import type { AssociationTools } from '@use-brian/core/association/tools.js'
+import type { Embedder } from '@use-brian/core/embeddings/embedder.js'
 import type { BrainKeyStore } from '../db/brain-keys-store.js'
 import type { OAuthAuthorizationStore } from '../db/oauth-authorization-store.js'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'
@@ -34,7 +36,7 @@ import type {
   ProgrammaticCaptureResult,
 } from '../ingest/programmatic-capture.js'
 import type { AppStoreScope } from '@use-brian/brian-app'
-import type { Sensitivity } from '@use-brian/core'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type { BrainKeyScope } from '../db/brain-keys-store.js'
 import {
   buildBrainTools,
@@ -119,12 +121,12 @@ type Options = {
    * Computer-use R2: the logic-block store behind `writeBrowserSkill` — the
    * OSS authoring skill's brain-sync tool. Optional; write-scope keys only.
    */
-  browserSkills?: import('@use-brian/core').BrowserSkillStore
+  browserSkills?: import('@use-brian/core/sandbox/browser-skills.js').BrowserSkillStore
   /** Task execution read/pause and external progress reporting. */
-  taskExecutionTools?: Record<'getTaskExecution' | 'controlTaskExecution' | 'bindExternalTaskExecution' | 'reportTaskProgress', import('@use-brian/core').Tool>
+  taskExecutionTools?: Record<'getTaskExecution' | 'controlTaskExecution' | 'bindExternalTaskExecution' | 'reportTaskProgress', import('@use-brian/agent-runtime/tools/types.js').Tool>
   /** Saved research command tools (features/research.md). */
-  researchTools?: Record<string, import('@use-brian/core').Tool>
-  approvalReviewTools?: Record<string, import('@use-brian/core').Tool>
+  researchTools?: Record<string, import('@use-brian/agent-runtime/tools/types.js').Tool>
+  approvalReviewTools?: Record<string, import('@use-brian/agent-runtime/tools/types.js').Tool>
   /**
    * Resolve a custom Home app's commerce-store tools, bound to the workspace
    * primary assistant — the same binding the agent capability toolset uses.

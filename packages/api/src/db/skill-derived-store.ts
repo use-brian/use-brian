@@ -1,14 +1,16 @@
 import {
-  bindScopeSource,
   bornActivated,
   bornConfidence,
   bornVerified,
   SKILL_USAGE_CONFIDENCE_CAP,
   SKILL_USAGE_CONFIDENCE_INCREMENT,
-  type DerivedWriteEvidence,
-  type ResourceScope,
-  type ScopeSource,
-} from '@use-brian/core'
+} from '@use-brian/core/skills/governance.js'
+import type {
+  DerivedWriteEvidence,
+  ResourceScope,
+  ScopeSource,
+} from '@use-brian/agent-runtime/security/derived-scope.js'
+import { bindScopeSource } from '@use-brian/agent-runtime/security/source-evidence.js'
 import type pg from 'pg'
 import { getPool } from './client.js'
 import { recordDerivedResource, validateDerivedMemoryInputs } from './derived-scope-store.js'

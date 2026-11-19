@@ -45,7 +45,7 @@ vi.mock('../../feishu/client.js', () => ({ createFeishuApi: vi.fn(() => ({})) })
 
 import { createWorkflowChannelDelivery } from '../channel-delivery.js'
 import { createWorkflowPublicationDispatcher, type AuthorizeWorkflowPublication, type PublicationConsentStore } from '../publication-consent.js'
-import type { WorkflowRunRecord } from '@use-brian/core'
+import type { WorkflowRunRecord } from '@use-brian/core/workflow/types.js'
 import {
   createSlackAdapter as mockedCreateSlackAdapter,
   createTelegramAdapter as mockedCreateTelegramAdapter,

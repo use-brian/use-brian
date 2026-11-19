@@ -1,5 +1,5 @@
 import {inspectMigrationInventory, getMigrationInventory, migrationInventoryPageInput} from './migration-inventory.js'
-import { buildTool, type Tool, type ToolContext } from '@use-brian/core'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { z } from 'zod'
 import { WorkspaceAccessError } from './policy.js'
 import { getWorkspaceAccessMode } from './mode-policy.js'

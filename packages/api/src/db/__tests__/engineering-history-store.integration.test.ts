@@ -2,7 +2,8 @@ import {archiveReceipt,discardOwnPendingArchives} from '../engineering-history-s
 import {Client} from '@modelcontextprotocol/sdk/client/index.js'
 import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import {z} from 'zod'
-import {buildTool,workspaceFilesCtxFor} from '@use-brian/core'
+import {ctxFor as workspaceFilesCtxFor} from '@use-brian/core/workspace-files/tool-helpers.js'
+import {buildTool} from '@use-brian/agent-runtime/tools/types.js'
 import {brainMcpRoutes} from '../../brain-mcp/server.js'
 import {mkdtempSync,rmSync} from 'node:fs'
 import {tmpdir} from 'node:os'
@@ -30,7 +31,7 @@ import { createDbBrainKeyStore } from '../brain-keys-store.js'
 import { withExternalKeyActor } from '../external-key-admission.js'
 import { enqueueFileIngestJob } from '../file-ingest-jobs-store.js'
 import type { BrainAuth } from '../../brain-mcp/auth.js'
-import type { FilesContext } from '@use-brian/core'
+import type { FilesContext } from '@use-brian/core/workspace-files/api.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 const pool=getPool()
@@ -135,7 +136,14 @@ describe('[COMP:api/engineering-history] native publication and identity',()=>{
   expect((await f.send()).outcome).toBe('queued')
   const claims=(await pool.query("SELECT id FROM pending_ingest_batches WHERE workspace_id=$1 AND source='programmatic' AND NOT scope_held AND processed_at IS NULL",[f.workspaceId])).rows
   expect(claims).toEqual([])
-  await createDbProgrammaticBatchStore().withClaimedBatches(10,async batches=>{expect(batches).toEqual([])})
+  // The claimant is global and other suites on the same database can leave due
+  // extraction batches. Claim past all of them (the handler marks nothing) and
+  // require that none of this workspace's archive batches is among them.
+  const pending=(await pool.query('SELECT count(*)::int AS n FROM pending_ingest_batches')).rows[0].n as number
+  await createDbProgrammaticBatchStore().withClaimedBatches(pending+1,async batches=>{
+   expect(batches.length).toBeLessThanOrEqual(pending)
+   expect(batches.filter(batch=>batch.workspaceId===f.workspaceId)).toEqual([])
+  })
   await f.store.updateProfile({actingUserId:f.userId,workspaceId:f.workspaceId,profileId:f.profile.id,name:'Extraction',partitionBy:'session',enabled:true,processingMode:'extract'})
   expect((await pool.query('SELECT processing_purpose,purpose_held,scope_held FROM pending_ingest_batches WHERE workspace_id=$1',[f.workspaceId])).rows[0]).toMatchObject({processing_purpose:'archive_only',purpose_held:true,scope_held:true})
   expect(await f.publisher.drain((await pool.query('SELECT id FROM pending_ingest_batches WHERE workspace_id=$1',[f.workspaceId])).rows[0].id)).toBeNull();expect(f.ingest).not.toHaveBeenCalled()

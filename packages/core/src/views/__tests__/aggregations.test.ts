@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from 'vitest'
 import type { CrmStore } from '../../crm/types.js'
-import type { AccessContext } from '../../security/access-context.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import type { TaskStore } from '../../tasks/types.js'
 import {
   aggregateBindingSchema,

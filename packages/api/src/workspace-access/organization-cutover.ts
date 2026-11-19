@@ -7,7 +7,7 @@ import {getContextReadinessSystem,type ContextReadiness} from '../context-scope/
 import {hashCommandReviewIntent} from './command-review.js'
 import {lockOrganizationCutoverInventory,organizationCutoverInventory} from './migration-inventory.js'
 import {readWorkflowScheduleAuthority} from './operational-admission.js'
-import {parseAuthoringAuthority} from '@use-brian/core'
+import {parseAuthoringAuthority} from '@use-brian/agent-runtime/security/access-ceiling.js'
 import {resolveWorkflowAuthoringScope} from '../context-scope/workflow-authority.js'
 import {WorkspaceAccessError} from './policy.js'
 

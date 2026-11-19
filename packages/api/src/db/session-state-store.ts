@@ -1,4 +1,5 @@
-import { bindScopeSources,boundScopeSources,type SessionStateRecord,type SessionStateStore } from '@use-brian/core'
+import type { SessionStateRecord, SessionStateStore } from '@use-brian/core/memory/session-state-types.js'
+import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import {
   upsertSessionState,
   resolveSessionState,

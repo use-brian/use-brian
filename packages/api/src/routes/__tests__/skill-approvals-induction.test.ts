@@ -30,7 +30,7 @@ vi.mock('../../db/skill-derived-store.js', () => ({
 }))
 
 import { skillApprovalsRoutes, type SkillApprovalRouteOptions } from '../skill-approvals.js'
-import { bindScopeSource } from '@use-brian/core'
+import { bindScopeSource } from '@use-brian/agent-runtime/security/source-evidence.js'
 
 const WS = 'ws-1'
 const APPROVER = 'user-1'

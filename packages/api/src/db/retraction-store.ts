@@ -33,8 +33,11 @@ import type {
   EpisodeReExtractionRepository,
   MemoryRetractionRepository,
   MemoryRetractionSnapshot,
-} from '@use-brian/core'
-import { ContextScopeAccumulator, DerivedScopeError, boundScopeSources, deriveWriteScope, resourceScopeKey, RANK, scopeGrantContains } from '@use-brian/core'
+} from '@use-brian/core/corrections/retraction.js'
+import { ContextScopeAccumulator, scopeGrantContains } from '@use-brian/agent-runtime/security/context-scope.js'
+import { DerivedScopeError, deriveWriteScope, resourceScopeKey } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { RANK } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { getPool, query } from './client.js'
 import { getMemoryById } from './memories.js'
 import { writeRetainedContextFrame } from './session-context-revisions.js'

@@ -1,7 +1,9 @@
 /** Explicit credential-bound logical work selection. [COMP:api/workspace-mcp] */
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { buildTool, intersectAccessCeilings, scopeGrantContains, type ToolContext } from '@use-brian/core'
+import { intersectAccessCeilings } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import { scopeGrantContains } from '@use-brian/agent-runtime/security/context-scope.js'
+import { buildTool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { queryWithRLS } from '../db/client.js'
 import { workspaceMcpMaximum, type WorkspaceMcpConsent } from './consent.js'
 import { resolveLiveAccessCeilingSystem } from '../context-scope/resolve-turn-scope.js'

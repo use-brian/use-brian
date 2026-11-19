@@ -137,7 +137,7 @@ function buildApp(
     customChannelStore?: CustomChannelStore
     whatsappCloudManagedGroupStore?: WhatsAppCloudManagedGroupStore
     skillStore?: import('../../db/skill-store.js').SkillStore
-    workflowStore?: import('@use-brian/core').WorkflowStore
+    workflowStore?: import('@use-brian/core/workflow/types.js').WorkflowStore
   } = {},
 ) {
   const role = opts.role === undefined ? 'admin' : opts.role

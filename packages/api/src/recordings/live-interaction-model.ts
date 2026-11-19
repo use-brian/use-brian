@@ -1,8 +1,13 @@
 import { z } from 'zod'
-import {
-  queryLoop, type LLMProvider, type TokenUsage, type Tool, type ToolContext,
-  type TurnLedger, type ContentBlock, type Message,
-} from '@use-brian/core'
+import { queryLoop } from '@use-brian/core/engine/query-loop-defaults.js'
+import type { TurnLedger } from '@use-brian/agent-runtime/engine/turn-ledger.js'
+import type {
+  LLMProvider,
+  TokenUsage,
+  ContentBlock,
+  Message,
+} from '@use-brian/agent-runtime/providers/types.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 export const interactionRuleDecisionSchema = z.object({
   action: z.enum(['ignore', 'begin', 'continue', 'submit', 'cancel']),

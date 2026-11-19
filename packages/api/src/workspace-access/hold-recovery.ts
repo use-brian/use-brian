@@ -13,7 +13,8 @@
  * retires the held row, which stays held as history.
  */
 import type { PoolClient } from 'pg'
-import { DerivedScopeError, deriveWriteScope, resourceScopeKey, type ResourceScope, type ScopeSource, type Sensitivity } from '@use-brian/core'
+import { DerivedScopeError, deriveWriteScope, resourceScopeKey, type ResourceScope, type ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type { HeldMemorySummary, ScopeHoldBlockedReason, ScopeHoldReleasePlan, ScopeReviewKind } from '@use-brian/shared'
 import { getPool } from '../db/client.js'
 import { recordDerivedResource, validateDerivedWriteInputs } from '../db/derived-scope-store.js'

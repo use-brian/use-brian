@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
-import { readFileSync } from 'node:fs'
 import { createTokens } from '../../auth/jwt.js'
 import { packMsGraphTokens } from '../../msgraph/token.js'
 import { CALENDAR_KEY_PROPERTY } from '../client.js'
 import { createCalendarCredentials } from '../credentials.js'
 import { externalAppCalendarRoutes } from '../routes.js'
+import { bootCompositionSource } from '../../boot/__tests__/composition-source.js'
 
 const userId = '10000000-0000-4000-8000-000000000001', workspaceId = '10000000-0000-4000-8000-000000000002'
 const connectorInstanceId = '10000000-0000-4000-8000-000000000003', sessionId = '10000000-0000-4000-8000-000000000004'
@@ -195,7 +195,7 @@ describe('[COMP:api/external-app-outlook-calendar] authenticated route and contr
     expect(f.graph).toHaveBeenCalledTimes(1)
   })
   it('mounts the OSS route with real server-owned credential and exposure dependencies', () => {
-    const boot = readFileSync(new URL('../../boot.ts', import.meta.url), 'utf8')
+    const boot = bootCompositionSource()
     expect(boot).toContain("app.use('/api/external-app', externalAppCalendarRoutes({")
     expect(boot).toContain('withCalendar: createCalendarCredentials({')
     expect(boot).toContain('instances: connectorInstanceStore')

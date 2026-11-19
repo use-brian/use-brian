@@ -1,0 +1,70 @@
+[
+  {
+    "signature": "native_turn_helpers_current()",
+    "language": "sql",
+    "volatility": "s",
+    "bodyTemplate": "803d9cd34a7c94347e32172c77ea7387d5cb8e642f905ca08f7f18b796451255",
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "native_turn_helpers_current",
+      "prorows": 0,
+      "pronargs": 0,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "16",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": null,
+      "proargtypes": [],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "s",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    }
+  },
+  {
+    "signature": "native_turn_publication_contract()",
+    "language": "sql",
+    "volatility": "s",
+    "bodyTemplate": "publication-tables-8196",
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "native_turn_publication_contract",
+      "prorows": 0,
+      "pronargs": 0,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "16",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": null,
+      "proargtypes": [],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "s",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    }
+  }
+]

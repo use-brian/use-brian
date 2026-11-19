@@ -1,22 +1,23 @@
-import {ContextScopeAccumulator} from '@use-brian/core'
+import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
 import {findAssistantById} from '../../db/users.js'
 import {resolveExecutionContextSystem} from '../../context-scope/execution-context.js'
 import {publishSessionTitle} from '../../db/session-title-store.js'
 import {Socket} from 'node:net'
 import {z} from 'zod'
-import {buildTool,boundScopeSources,type Tool} from '@use-brian/core'
-import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
+import {buildTool, type Tool} from '@use-brian/agent-runtime/tools/types.js'
+import {readAdmittedSessionQuery} from '../../db/conversation-store.js'
 import type {PoolClient} from 'pg'
 import express from 'express'
 import request from 'supertest'
 import {afterAll,afterEach,describe,expect,it,vi} from 'vitest'
-import type {ContentBlock,LLMProvider,Message,ProviderSession,StreamChunk} from '@use-brian/core'
+import type {ContentBlock, LLMProvider, Message, ProviderSession, StreamChunk} from '@use-brian/agent-runtime/providers/types.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {createDbCapabilityStore} from '../../db/capability-store.js'
 import {createPendingApprovalsStore} from '../../db/pending-approvals-store.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
 import {authSessionStore} from '../../db/auth-session-store.js'
-import {createPersonalWebSession,requestTurnCancel,startTurnLease,TURN_HEARTBEAT_INTERVAL_MS} from '../../db/sessions.js'
+import {createPersonalWebSession,requestTurnCancel,claimTurnLease,TURN_HEARTBEAT_INTERVAL_MS} from '../../db/sessions.js'
 import {chatRoutes} from '../../routes/chat.js'
 import * as recovery from '../../routes/_recovery-message.js'
 import * as emptyTurn from '../../routes/_empty-turn-synthesis.js'
@@ -104,7 +105,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
   expect(closures[0].senderAssistantId).toBe(current.f.assistantId)
   expect(events.filter(event=>event.event==='text_delta'&&String(event.data.text).includes('timed out'))).toHaveLength(1)
   expect(rows.filter(row=>row.role==='assistant')).toHaveLength(toolTurns+1)
-  const ancestry=(await current.f.pool.query<{source_id:string}>("SELECT edge.source_id FROM scope_derivations d JOIN scope_derivation_sources edge ON edge.workspace_id=d.workspace_id AND edge.derivation_id=d.id WHERE d.workspace_id=$1 AND d.resource_kind='session_message' AND d.resource_id=$2 AND edge.source_kind='memory'",[current.f.workspaceId,closures[0].id])).rows.map(row=>row.source_id)
+  const ancestry=(await current.f.pool.query<{source_id:string}>("SELECT id AS source_id FROM application_scope_lineage($1,ARRAY['session_message'],ARRAY[$2::uuid],ARRAY['1']) WHERE kind='memory'",[current.f.workspaceId,closures[0].id])).rows.map(row=>row.source_id)
   for(const memoryId of current.memoryIds)expect(ancestry).toContain(memoryId)
   expect(await Promise.all(current.committedObservations)).not.toContain(false)
   const lease=(await current.f.pool.query('SELECT status,turn_lease_token FROM sessions WHERE id=$1',[current.session.id])).rows[0]
@@ -125,7 +126,12 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
     LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
     SELECT (identity_profile_field_catalog(w,o,t)-'scope')||jsonb_build_object('recordVersion',e.scope_version::text,'source',read_scope_source(w,'entity',e.id))
      FROM entities e WHERE e.workspace_id=w AND e.id=i::uuid $$;
-    REVOKE ALL ON FUNCTION identity_profile_field_catalog(uuid,jsonb,text),identity_profile_field_reader(uuid,jsonb,text,text) FROM PUBLIC;
+    REVOKE ALL ON FUNCTION identity_profile_field_catalog(uuid,jsonb,text),identity_profile_field_reader(uuid,jsonb,text,text) FROM PUBLIC,app_user;
+    DO $owner$ DECLARE owner_name text; BEGIN
+     SELECT pg_get_userbyid(relowner) INTO owner_name FROM pg_class WHERE oid='application_native_field_contracts'::regclass;
+     EXECUTE format('ALTER FUNCTION identity_profile_field_catalog(uuid,jsonb,text) OWNER TO %I',owner_name);
+     EXECUTE format('ALTER FUNCTION identity_profile_field_reader(uuid,jsonb,text,text) OWNER TO %I',owner_name);
+    END $owner$;
     INSERT INTO application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader,catalog_reader)
      VALUES('native','1',ARRAY['profile_reader'],'identity_profile_field_reader(uuid,jsonb,text,text)'::regprocedure,'identity_profile_field_catalog(uuid,jsonb,text)'::regprocedure)`)
    registered=true
@@ -136,14 +142,11 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
    expect(frames(response.text).filter(frame=>frame.event==='error'),response.text).toEqual([])
    expect(prompts).toHaveLength(1);expect(prompts[0]).toContain("User's role: Fictional planning lead");expect(prompts[0]).toContain("User's name is Fictional self identity")
    const message=(await current.rows()).find(row=>row.role==='assistant')!;expect(message).toBeTruthy()
-   const fields=(await f.pool.query(`SELECT resources.fields FROM scope_derivations d
-    JOIN scope_derivation_sources edge ON edge.workspace_id=d.workspace_id AND edge.derivation_id=d.id AND edge.source_kind='application_field'
-    JOIN application_field_resources resources ON resources.workspace_id=edge.workspace_id AND resources.id=edge.source_id
-    WHERE d.workspace_id=$1 AND d.resource_kind='session_message' AND d.resource_id=$2`,[f.workspaceId,message.id])).rows
+   const fields=(await f.pool.query(`SELECT resources.fields FROM application_scope_lineage($1,ARRAY['session_message'],ARRAY[$2::uuid],ARRAY['1']) edge
+    JOIN application_field_resources resources ON resources.workspace_id=$1 AND resources.id=edge.id WHERE edge.kind='application_field'`,[f.workspaceId,message.id])).rows
    expect(fields.some(row=>row.fields.includes(profileField))).toBe(true)
    expect(JSON.parse(prompts[0]).systemPrompt).toContain('Licenses: ["Fictional qualification"]')
-   expect((await f.pool.query(`SELECT edge.source_id FROM scope_derivations d JOIN scope_derivation_sources edge ON edge.workspace_id=d.workspace_id AND edge.derivation_id=d.id
-    WHERE d.workspace_id=$1 AND d.resource_kind='session_message' AND d.resource_id=$2 AND edge.source_kind='entity'`,[f.workspaceId,message.id])).rows).toContainEqual({source_id:self.id})
+   expect((await f.pool.query(`SELECT id AS source_id FROM application_scope_lineage($1,ARRAY['session_message'],ARRAY[$2::uuid],ARRAY['1']) WHERE kind='entity'`,[f.workspaceId,message.id])).rows).toContainEqual({source_id:self.id})
    const observations=(await f.pool.query('SELECT resource_id,version,source_scope FROM application_field_observations WHERE workspace_id=$1 ORDER BY resource_id,version',[f.workspaceId])).rows
    await f.pool.query("UPDATE application_native_role_assignments SET status='revoked' WHERE workspace_id=$1 AND module_key='native'",[f.workspaceId])
    const fresh=await createPersonalWebSession({assistantId:f.assistantId,userId:f.ownerId,workspaceId:f.workspaceId,channelType:'web',channelId:crypto.randomUUID(),appOrigin:'chat'},
@@ -166,7 +169,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
   const current=await setup(),authored:boolean[]=[],inputs:string[]=[]
   current.setBackground(async function*(input){
    const serialized=JSON.stringify(input.messages)
-   if(input.maxTokens===128&&serialized.includes('recentConversation')){
+   if(serialized.includes('recentConversation')){
     inputs.push(serialized);authored.push((await current.rows()).some(row=>row.role==='user'))
     yield* textChunks('{"research":false}');return
    }
@@ -181,7 +184,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
  it('does not enter the main web provider after assessment authority is withdrawn',async()=>{
   const current=await setup();let assessments=0
   current.setBackground(async function*(input){
-   if(input.maxTokens===128&&JSON.stringify(input.messages).includes('recentConversation')){
+   if(JSON.stringify(input.messages).includes('recentConversation')){
     assessments++;expect((await current.rows()).some(row=>row.role==='user')).toBe(true)
     await current.f.pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[current.f.workspaceId,current.f.ownerId])
     yield* textChunks('{"research":false}');return
@@ -205,7 +208,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
  it('admits one automatic research slot after current web assessment',async()=>{
   const current=await setup();let assessments=0
   current.setBackground(async function*(input){
-   if(input.maxTokens===128&&JSON.stringify(input.messages).includes('recentConversation')){assessments++;yield* textChunks('{"research":true}');return}
+   if(JSON.stringify(input.messages).includes('recentConversation')){assessments++;yield* textChunks('{"research":true}');return}
    yield* textChunks('{"topic_label":"fictional assessment","state":"continue","confidence":0.9}')
   })
   current.scripts.push({chunks:textChunks('Fictional admitted research response')})
@@ -219,7 +222,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
   const current=await setup()
   await current.f.pool.query("UPDATE workspaces SET plan='free',research_used_count=4 WHERE id=$1",[current.f.workspaceId])
   current.setBackground(async function*(input){
-   if(input.maxTokens===128&&JSON.stringify(input.messages).includes('recentConversation')){
+   if(JSON.stringify(input.messages).includes('recentConversation')){
     await current.f.pool.query('UPDATE workspaces SET research_used_count=5 WHERE id=$1',[current.f.workspaceId])
     yield* textChunks('{"research":true}');return
    }
@@ -230,7 +233,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
   expect(current.sessions()).toBe(0);expect((await current.rows()).filter(row=>row.role==='user')).toHaveLength(1)
   expect((await current.f.pool.query('SELECT research_used_count FROM workspaces WHERE id=$1',[current.f.workspaceId])).rows[0].research_used_count).toBe(5)
  })
- it('preserves actual query-tool field ancestry on every committed web transcript pair',async()=>{
+ it('preserves actual private query-tool ancestry on every committed web transcript pair',async()=>{
   const current=await setup();let originalSources:ReturnType<typeof boundScopeSources>=[]
   current.extraTools.set('fixtureReadSession',buildTool({name:'fixtureReadSession',description:'Read current fixture history',inputSchema:z.object({read:z.literal(true)}),isReadOnly:true,isConcurrencySafe:true,
    async execute(_input,context){
@@ -245,12 +248,12 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
    {chunks:textChunks('Fictional current query answer')})
   const response=await current.send(),rows=await current.rows()
   expect(frames(response.text).filter(frame=>frame.event==='error'),response.text).toEqual([])
-  expect(originalSources.some(source=>source.resourceKind==='application_field'),JSON.stringify(rows)).toBe(true)
+  expect(originalSources.some(source=>source.resourceKind==='private_transcript'),JSON.stringify(rows)).toBe(true)
   const pair=rows.filter(row=>row.content.some(block=>block.type==='tool_use'||block.type==='tool_result'))
   expect(pair).toHaveLength(2)
   for(const row of pair){
-   const sources=(await current.f.pool.query<{source_id:string;source_version:string}>(`SELECT edge.source_id,edge.source_version FROM scope_derivations d JOIN scope_derivation_sources edge ON edge.workspace_id=d.workspace_id AND edge.derivation_id=d.id WHERE d.workspace_id=$1 AND d.resource_kind='session_message' AND d.resource_id=$2 AND edge.source_kind='application_field'`,[current.f.workspaceId,row.id])).rows
-   for(const original of originalSources.filter(source=>source.resourceKind==='application_field'))expect(sources).toContainEqual({source_id:original.resourceId,source_version:original.version})
+   const sources=(await current.f.pool.query<{source_id:string;source_version:string}>(`SELECT id AS source_id,version AS source_version FROM application_scope_lineage($1,ARRAY['session_message'],ARRAY[$2::uuid],ARRAY['1']) WHERE kind='private_transcript'`,[current.f.workspaceId,row.id])).rows
+   for(const original of originalSources.filter(source=>source.resourceKind==='private_transcript'))expect(sources).toContainEqual({source_id:original.resourceId,source_version:original.version})
   }
   expect(await Promise.all(current.committedObservations)).not.toContain(false)
  })
@@ -356,7 +359,10 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
   current.scripts.push({chunks:[...textChunks('Fictional stopped partial').slice(0,-1),{type:'message_end',stopReason:'incomplete',usage}]})
   current.scripts.push({before:async()=>{
    expect((await current.stop()).status).toBe(200)
-   if(successor)await startTurnLease(current.session.id)
+   if(successor){
+    await current.f.pool.query("UPDATE sessions SET turn_heartbeat_at=now()-interval '2 minutes',last_active_at=now()-interval '2 minutes' WHERE id=$1",[current.session.id])
+    expect(await claimTurnLease(current.session.id)).toBeTruthy()
+   }
   },error:new Error('Stream idle 30000ms')})
   const response=await current.send()
   expect(current.sessions(),response.text).toBe(1)
@@ -369,7 +375,10 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
   const current=await setup()
   current.scripts.push({before:async()=>{
    if(kind==='remote-stop')expect(await requestTurnCancel(current.session.id)).toBe(true)
-   if(kind==='lease-lost')await startTurnLease(current.session.id)
+   if(kind==='lease-lost'){
+    await current.f.pool.query("UPDATE sessions SET turn_heartbeat_at=now()-interval '2 minutes' WHERE id=$1",[current.session.id])
+    expect(await claimTurnLease(current.session.id)).toBeTruthy()
+   }
    if(kind==='local-stop')expect((await current.stop()).status).toBe(200)
   },error:new Error('Stream idle 30000ms')})
   const response=await current.send()
@@ -393,8 +402,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/turn-lease] ac
    JOIN session_context_revision_contents c ON c.workspace_id=h.workspace_id AND c.revision_id=h.scope_revision_id WHERE h.session_id=$1`,[current.session.id])).rows[0]
   expect(title.content).toEqual({title:'Fictional scoped browser title',manual:false})
   expect((await current.f.pool.query('SELECT title FROM sessions WHERE id=$1',[current.session.id])).rows).toEqual([{title:null}])
-  const edges=(await current.f.pool.query(`SELECT edge.source_kind FROM scope_derivations d JOIN scope_derivation_sources edge
-   ON edge.workspace_id=d.workspace_id AND edge.derivation_id=d.id WHERE d.workspace_id=$1 AND d.resource_id=$2`,[current.f.workspaceId,title.scope_revision_id])).rows
+  const edges=(await current.f.pool.query(`SELECT kind AS source_kind FROM application_scope_lineage($1,ARRAY['session_context_revision'],ARRAY[$2::uuid],ARRAY['1'])`,[current.f.workspaceId,title.scope_revision_id])).rows
   expect(edges.some(edge=>edge.source_kind==='application_field')).toBe(true)
  })
  it('holds generated title output after original device revocation and accepts a separate current device',async()=>{

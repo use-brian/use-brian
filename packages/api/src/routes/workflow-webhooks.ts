@@ -31,13 +31,9 @@
 
 import { Router, raw } from 'express'
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
-import {
-  advanceWorkflowRun,
-  evaluateBoolean,
-  type ExecutorDeps,
-  type WorkflowRunStore,
-  type WorkflowStore,
-} from '@use-brian/core'
+import { evaluateBoolean } from '@use-brian/core/workflow/condition.js'
+import { advanceWorkflowRun, type ExecutorDeps } from '@use-brian/core/workflow/executor.js'
+import type { WorkflowRunStore, WorkflowStore } from '@use-brian/core/workflow/types.js'
 
 export type WorkflowWebhookRouteOptions = {
   workflowStore: WorkflowStore

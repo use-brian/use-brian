@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
-import { WorkflowDefinitionSchema, WorkflowTriggerSchema } from '@use-brian/core'
+import { WorkflowDefinitionSchema, WorkflowTriggerSchema } from '@use-brian/core/workflow/schemas.js'
 
 vi.mock('../../db/client.js', () => ({
   query: vi.fn(),

@@ -10,7 +10,7 @@ import { getWorkspaceMembershipWithReadScopeSystem } from './db/workspace-store.
 import { decideSessionRead } from './session-read-access.js'
 import { findOfficeArtifactForSessionSystem } from './db/office-artifact-sessions.js'
 import { policyFor } from './session-kind.js'
-import { resolveOfficeAccess } from './office/access.js'
+import { conversationReadersActive, readConversationMemberTiers } from './db/conversation-visibility.js'
 
 /** A session whose read-access we gate (the subset of fields the gate reads). */
 type GatedSession = {
@@ -71,7 +71,11 @@ export async function anchorReadGate(
       // audience: the Office access predicate decides, never workspace
       // membership. A caller who cannot read the file learns nothing.
       const link = session.id ? await findOfficeArtifactForSessionSystem(session.id) : null
-      if (!link || !(await resolveOfficeAccess(jwtUserId, link.artifactId))) return { status: 404, error: 'Session not found' }
+      if (!link) return { status: 404, error: 'Session not found' }
+      // The Office predicate loads only for Office threads, never on the
+      // ordinary chat path (M4 step 5). A load failure throws: it never grants.
+      const { resolveOfficeAccess } = await import('./office/access.js')
+      if (!(await resolveOfficeAccess(jwtUserId, link.artifactId))) return { status: 404, error: 'Session not found' }
       return null
     }
   }
@@ -98,6 +102,10 @@ export async function gateSessionRead(
   jwtUserId: string,
   session: GatedSession,
 ): Promise<{ status: number; error: string } | null> {
+  if (conversationReadersActive()) {
+    const allowed = session.id && (await readConversationMemberTiers(jwtUserId, [session.id])).get(session.id) === 'full'
+    return allowed ? null : { status: 403, error: 'conversation_access_denied' }
+  }
   if (session.id && !(await query<{ allowed: boolean }>('SELECT session_recording_read_allowed($1) AS allowed', [session.id])).rows[0]?.allowed) {
     return { status: 404, error: 'Session not available' }
   }

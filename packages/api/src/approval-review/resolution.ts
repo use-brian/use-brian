@@ -25,7 +25,7 @@ import {
   type ReviewOutcome,
   type ReviewReason,
   type SupportEvaluation,
-} from '@use-brian/core'
+} from '@use-brian/core/approval-review/contracts.js'
 import { getPool } from '../db/client.js'
 import { createPendingApprovalsStore, type PendingApproval } from '../db/pending-approvals-store.js'
 import {

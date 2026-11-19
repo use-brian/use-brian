@@ -1,17 +1,18 @@
 /** Runtime construction and verification for workspace custom LLM endpoints. */
 
 import {
-  createOpenAICompatProvider,
-  bindExactModelProvider,
   wrapDocumentAdaptation,
-  wrapEndpointFallback,
-  wrapProvider,
-  type ContentBlock,
   type DistillateCachePort,
   type DocumentDistillPort,
+} from '@use-brian/agent-runtime/providers/document-adaptation.js'
+import { createOpenAICompatProvider } from '@use-brian/agent-runtime/providers/openai-compat.js'
+import { bindExactModelProvider } from '@use-brian/agent-runtime/providers/routing.js'
+import type { ContentBlock, LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import {
+  wrapEndpointFallback,
   type EndpointFallbackEvent,
-  type LLMProvider,
-} from '@use-brian/core'
+} from '@use-brian/agent-runtime/providers/wrap-endpoint-fallback.js'
+import { wrapProvider } from '@use-brian/agent-runtime/providers/wrappers.js'
 import { registryRow } from '@use-brian/shared/model-registry'
 import type {
   WorkspaceCustomLlmProfileRuntime,

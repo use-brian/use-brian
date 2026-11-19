@@ -1,6 +1,7 @@
 /** Current human context for independently deployed services. [COMP:api/external-services] */
 import { createHash } from 'node:crypto'
-import type { DepartmentReadGrant, Sensitivity } from '@use-brian/core'
+import type { DepartmentReadGrant } from '@use-brian/agent-runtime/security/department-read.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { query } from '../db/client.js'
 import { createDbOAuthAuthorizationStore, parseOAuthBearerToken } from '../db/oauth-authorization-store.js'
 import { verifySecret } from '../db/api-key-store.js'

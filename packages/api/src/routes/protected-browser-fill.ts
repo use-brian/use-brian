@@ -1,6 +1,6 @@
 import { Router, type RequestHandler, type Response } from 'express'
 import { z } from 'zod'
-import { type ProtectedFillService } from '@use-brian/core'
+import type { ProtectedFillService } from '@use-brian/core/sandbox/protected-fill.js'
 import { verifyBrowserExtSessionToken } from '../auth/browser-ext-pair-token.js'
 
 const identity = z.object({

@@ -11,7 +11,8 @@
  *
  * Spec: docs/architecture/features/approval-review.md → "Review and resolution"
  */
-import { CONFIGURE_CAPABILITY, deriveActionDescriptor, type DescriptorResult } from '@use-brian/core'
+import { deriveActionDescriptor, type DescriptorResult } from '@use-brian/core/approval-review/contracts.js'
+import { CONFIGURE_CAPABILITY } from '@use-brian/core/authorization/types.js'
 import { getPool } from '../db/client.js'
 import type { PendingApproval } from '../db/pending-approvals-store.js'
 import type { Queryable } from '../db/approval-review-store.js'

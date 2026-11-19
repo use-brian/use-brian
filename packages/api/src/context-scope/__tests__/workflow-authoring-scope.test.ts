@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { AuthoringAuthority } from '@use-brian/core'
+import type { AuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { resolveWorkflowAuthoringScope } from '../workflow-authority.js'
 import { findAssistantById } from '../../db/users.js'
 import { query } from '../../db/client.js'

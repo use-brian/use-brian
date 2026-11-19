@@ -3284,6 +3284,8 @@ export const zhCN: Dictionary = {
     pendingQuestion: {
       heading: "需要您的补充",
       placeholder: "输入您的回复…",
+      chooseAnswer: "选择回答",
+      customAnswer: "输入其他回答",
       submit: "送出回复",
       submitting: "送出中…",
       cancel: "取消",
@@ -9099,6 +9101,37 @@ export const zhCN: Dictionary = {
     "noProjects": "没有可用的项目"
 },
   chatApp: {
+    offlineRetainedHistory: "离线记录。上次同步：{time}",
+    visibility: {
+      membersUnavailable: "无法获取工作区成员。已暂停更改参与者。",
+      projectsUnavailable: "无法获取项目。已暂停更改项目。",
+      "raiseCap": "提高保密级别上限",
+      "capNotice": "上限只能提高。如需降低上限，请开启新对话。",
+      "project": "项目",
+      "noProject": "无项目",
+      "projectNotice": "私密对话保持私密。将工作区对话移入项目会缩小权限，移出需要管理员。",
+      "saveProject": "保存项目",
+
+      "title": "对话可见范围",
+      "cap": "保密级别上限：{cap}",
+      "boundaries": "部门与项目范围：{count}",
+      "caps": {
+            "public": "公开",
+            "internal": "内部",
+            "confidential": "机密"
+      },
+      "privateByKind": "此一对一对话保持私密。只有所有者可以通过交接分享内容。",
+      "private": "私密",
+      "workspace": "工作区",
+      "participants": "参与者（始终包含发起者）",
+      "unnamedParticipant": "参与者",
+      "narrowNotice": "先前的读者可能已看过此对话。他们的离线副本将在24小时内到期。",
+      "widenNotice": "添加读者将分享整段对话。参与者会收到通知，变更也会记入审计。",
+      "save": "保存可见范围",
+      "saving": "保存中",
+      "failed": "无法更新可见范围。请重试。",
+      "conflict": "可见范围已在其他地方变更。请刷新对话后重试。"
+},
     displayHistory: {
       "label": "已保存消息",
       "notice": "这些已保存消息仅供参考，不会发送给助手。",
@@ -9235,6 +9268,7 @@ export const zhCN: Dictionary = {
     queuedNotice: "助理会在目前回合结束后回复。",
     postFailed: "无法发布消息，请再试一次。",
     stopTurnFailed: "无法停止这个回合，请再试一次。",
+    sendWhileTurnRunning: "助手仍在处理这个对话。请等待回复或停止后再发送。",
     mentionInsertAria: "提及 {name}",
     slashMenuLabel: "命令",
     slashInsertAria: "运行 /{slug}",
@@ -9325,12 +9359,17 @@ export const zhCN: Dictionary = {
     liveWorkStopTitle: "停止这个回合",
     liveWorkNoProgress: "已有 {minutes} 分钟没有进展",
     turnStoppedBy: "{name} 停止了这个回合。",
+    turnStopped: "这个回合已停止。",
     turnStoppedByYou: "你已停止这个回合。",
     turnFailed: "未能完成这次回复。再次尝试前，请先检查对话内容。",
     turnReconnecting: "连接已中断。助理仍在继续处理，完成后回复会显示在这里。",
     turnReclaimed: "上一个回合停止回应，系统已将它重设并解除聊天阻止。消息都还在，重新发送即可继续。",
     pinnedContext: "钉选",
     assistantClearanceBlocked: "该助理的权限层级高于此聊天室，无法在这里回答。",
+    clearanceBelowRejectedRoom: "{name} 没有读取这个聊天室的权限，因此无法在这里回答。请移除提及，或请工作区管理员提高它的权限。",
+    clearanceBelowRejectedMessage: "{name} 没有读取这条消息的权限，因此无法在这里回答。请移除提及，或请工作区管理员提高它的权限。",
+    clearanceBelowSkippedRoom: "{name} 没有读取这个聊天室的权限，因此已跳过。工作区管理员可以提高它的权限。",
+    clearanceBelowSkippedMessage: "{name} 没有读取这条消息的权限，因此已跳过。工作区管理员可以提高它的权限。",
     deliveryAudienceBlocked: "这个回答用到了并非此共享聊天中所有人都能查看的信息，因此没有在这里发布。请在个人聊天中再问一次。",
     // The Chat side pane: Work + pinned + open tabs (chat-parity D4-D8).
     // [COMP:app-web/chat-side-pane]

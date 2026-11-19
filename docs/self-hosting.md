@@ -145,6 +145,29 @@ app-web:
     USEBRIAN_EDITION: oss
 ```
 
+Two things the built app image does differently from `pnpm dev`:
+
+- **Sign-in cookies stay on the app's own host by default.** With
+  `USEBRIAN_EDITION: oss` (or `outpost`) and `COOKIE_DOMAIN` unset, the app
+  sets host-only cookies, which work on `localhost` and on a single host such
+  as `app.brian.customer.example`, so the example above leaves the variable
+  out. The API never reads cookies, so it does not need to share them. Set
+  `COOKIE_DOMAIN` to your own parent domain (for example
+  `.brian.customer.example`) only to share sign-in across sibling hosts; an
+  Outpost auth portal requires it. `COOKIE_DOMAIN=` (empty) always means
+  host-only. Keep `USEBRIAN_EDITION` set: an image started without an edition
+  runs the hosted profile, whose default is the hosted service's
+  `.usebrian.ai` parent, and the browser drops those cookies on your host.
+- **Give the browser a way to reach the API.** `pnpm dev` proxies `/api` from
+  the app origin to the API; the built image does not. Either serve the API on
+  the app's origin (route `/api/*` on the app host to the API container), or set
+  `API_DOMAIN` or `PUBLIC_API_URL` and put the app's origin in the API's
+  `APP_URL` or `AUTHED_APP_URL` so its CORS check admits the browser. Set
+  `DOC_SYNC_DOMAIN` or `PUBLIC_DOC_SYNC_URL` the same way for document sync.
+
+Under `pnpm dev` the `/api` proxy keeps a quiet response open for up to 30
+minutes, so a long silent model step does not drop the chat stream.
+
 ### App runtime variables
 
 Only these values are serialized into browser JavaScript. Database URLs, OAuth

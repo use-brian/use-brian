@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { createGoalVerifier, parseVerifyVerdict } from '../verify.js'
-import type { LLMProvider, StreamChunk } from '../../providers/types.js'
+import type { LLMProvider, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
 
 /**
  * [COMP:goals/verifier] The adversarial completion verifier (task-goal-seeker.md

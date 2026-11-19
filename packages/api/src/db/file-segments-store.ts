@@ -37,7 +37,7 @@
  * [COMP:brain/file-segments-store]
  */
 
-import { stripDataUris } from '@use-brian/core'
+import { stripDataUris } from '@use-brian/core/files/data-uri.js'
 
 import { publishRecordingIntakeSegments, type RecordingSegmentProvenance } from './recording-intake-admission.js'
 

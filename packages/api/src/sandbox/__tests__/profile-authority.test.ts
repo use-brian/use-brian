@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { DepartmentReadGrant, ToolContext } from '@use-brian/core'
+import type { DepartmentReadGrant } from '@use-brian/agent-runtime/security/department-read.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import type { AccessSnapshot } from '../../context-scope/reference-predicate.js'
 
 vi.mock('../../db/workspace-store.js', () => ({ getWorkspaceMembershipWithReadScopeSystem: vi.fn() }))

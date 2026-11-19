@@ -16,7 +16,7 @@
  * Spec: docs/architecture/features/teamspaces.md. [COMP:api/teamspace-store]
  */
 
-import type { Sensitivity } from '@use-brian/core'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { readAdmissionPolicy, usesClassicModeAdmission } from '../workspace-access/admission-policy-read.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { getPool, query, queryWithRLS } from './client.js'

@@ -1,10 +1,12 @@
 /** Current-authority title queue drain. [COMP:api/session-title-jobs] */
-import { accessCeilingContains, type LLMProvider, type SessionContextAuthority } from '@use-brian/core'
+import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import { accessCeilingContains } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { claimSessionTitleJob, finishSessionTitleJob, parseSessionTitleJobAuthority, sessionTitleJobCurrent, type SessionTitleJob } from '../db/session-title-jobs.js'
 import { resolveSessionTitleAuthority } from '../routes/session-title-authority.js'
 import { generateAttendedSessionTitle } from '../routes/attended-session-title.js'
 import { readSessionTitle } from '../db/session-title-store.js'
-import { attendedSessionTurnCount, readAttendedSessionHistory } from '../routes/attended-session-context.js'
+import { readAttendedSessionHistory } from '../routes/attended-session-context.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import { inheritPrivateTranscriptCredential } from '../db/private-transcript.js'
 
@@ -13,13 +15,13 @@ type Generated = Awaited<ReturnType<typeof generateAttendedSessionTitle>>
 type Deps = {
  claim: typeof claimSessionTitleJob; finish: typeof finishSessionTitleJob; current: typeof sessionTitleJobCurrent
  resolveAuthority: typeof resolveSessionTitleAuthority; readTitle: typeof readSessionTitle
- readHistory: typeof readAttendedSessionHistory; countTurns: typeof attendedSessionTurnCount
+ readHistory: typeof readAttendedSessionHistory
  generate: typeof generateAttendedSessionTitle; notify: (workspaceId: string, sessionId: string) => void
 }
 const defaultDeps: Deps = {
  claim: claimSessionTitleJob, finish: finishSessionTitleJob, current: sessionTitleJobCurrent,
  resolveAuthority: resolveSessionTitleAuthority, readTitle: readSessionTitle,
- readHistory: readAttendedSessionHistory, countTurns: attendedSessionTurnCount, generate: generateAttendedSessionTitle,
+ readHistory: readAttendedSessionHistory, generate: generateAttendedSessionTitle,
  notify: (workspaceId,sessionId) => notifyWorkspaceChange(workspaceId,'session','update',sessionId),
 }
 class TitleJobChanged extends Error { constructor() { super('title_job_changed') } }
@@ -83,7 +85,7 @@ export function createSessionTitleWorker(options: {
    if (previous?.manual) return
    if (previous && !options.isPlaceholderTitle?.(previous.title)) {
     const history = await deps.readHistory(authority,job.sessionId)
-    const count = await deps.countTurns(authority,history)
+    const count = await history.readTurnCount(authority)
     if (count <= 1 || count % 10 !== 0) return
    }
    const runtime = await options.resolveRuntime(job.workspaceId)

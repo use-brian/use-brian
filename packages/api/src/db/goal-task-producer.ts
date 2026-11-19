@@ -1,4 +1,4 @@
-import type { GoalBrief } from '@use-brian/core'
+import type { GoalBrief } from '@use-brian/core/goals/types.js'
 import { captureTaskGoalSource, taskGoalProducerInput, executeTaskGoalProducer } from '../workspace-access/goal-source-admission.js'
 import { createGoal } from './goals.js'
 

@@ -3,10 +3,10 @@ import { classifyTopic, type TopicClassifierOptions } from '../topic-classifier.
 import { createTopicIdentity, isTopicIdentity } from '../topic-identity.js'
 import { executionFixture, fixtureDecisionProvider } from '../../decisions/__tests__/execution-fixture.js'
 import type { DecisionAnswer, DecisionRequest } from '../../decisions/index.js'
-import { bindScopeSources, boundScopeSources } from '../../security/source-evidence.js'
-import { ContextScopeAccumulator } from '../../security/context-scope.js'
+import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import type { SessionContextAuthority } from '../session-state-types.js'
-import type { LLMProvider } from '../../providers/types.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
 
 const opaque = createTopicIdentity({ workspaceId: 'workspace', runId: 'earlier' })
 function provider(json = '{}'): LLMProvider {

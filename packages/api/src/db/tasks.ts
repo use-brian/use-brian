@@ -4,8 +4,16 @@ import { isDeepStrictEqual } from 'node:util'
 import { z } from 'zod'
 import { ApplicationPlatformError, applicationJsonSchema, applicationResourceRefSchema } from '@use-brian/shared'
 import { admitTaskCreate } from '../workspace-access/task-create-admission.js'
-import { applyResponsibilityPatch, boundScopeSources, bindScopeSource, executorChanged, maxSensitivity, unionScopeRequirements, TASK_STATUSES } from '@use-brian/core'
-import type { AccessContext, EntityLinksStore, Sensitivity, TaskHome, TaskListFilters, TaskListRow, TaskRecord, TaskRecordStatus, TaskResponsibility, TaskUpdateFields, TaskWriteActor, TaskStore, TaskAssignmentProvenance } from '@use-brian/core'
+import { applyResponsibilityPatch, executorChanged } from '@use-brian/core/tasks/responsibility.js'
+import { TASK_STATUSES } from '@use-brian/core/tasks/types.js'
+import { unionScopeRequirements } from '@use-brian/agent-runtime/security/context-scope.js'
+import { maxSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { boundScopeSources, bindScopeSource } from '@use-brian/agent-runtime/security/source-evidence.js'
+import type { EntityLinksStore } from '@use-brian/core/entities/types.js'
+import type { TaskHome, TaskResponsibility } from '@use-brian/core/tasks/responsibility.js'
+import type { TaskListFilters, TaskListRow, TaskRecord, TaskRecordStatus, TaskUpdateFields, TaskWriteActor, TaskStore, TaskAssignmentProvenance } from '@use-brian/core/tasks/types.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type pg from 'pg'
 import { assertExecutionResourceScope, buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
@@ -13,6 +21,7 @@ import { applyRLSGucs, getAppPool, query, queryWithRLS, rollbackAndRelease } fro
 import { emitDependsOnEdges, emitMentionedEdges } from './edge-hooks.js'
 import { abandonGoalsForHostTaskSystem } from './goals.js'
 import { currentAgentAccess } from './agent-access-context.js'
+import { retainedConversationOutputFilter } from './conversation-visibility.js'
 import { publishTaskLifecycle } from '../task-event-fanout.js'
 import { validateTaskResponsibility } from '../tasks/responsibility.js'
 import { getApplicationTransactionBinding } from '../application-platform/execution-context.js'
@@ -238,7 +247,7 @@ export async function createTask(
   params: {
     workspaceId: string
     expectedPolicyRevision?: string
-    derivation?: import('@use-brian/core').DerivedWriteEvidence
+    derivation?: import('@use-brian/agent-runtime/security/derived-scope.js').DerivedWriteEvidence
     title: string
     status?: TaskRecordStatus
     /** PERSON executor. Never together with `executorAssistantId` (task_executor_conflict). */
@@ -634,7 +643,7 @@ export async function authorizeCanonicalTaskPatch(userId:string,workspaceId:stri
  return state
 }
 export async function patchCanonicalTaskFields(userId:string,workspaceId:string,id:string,fields:TaskUpdateFields,client:pg.PoolClient,access?:AccessContext,
- operation?:{expectedVersion?:string;scope?:import('@use-brian/core').TaskWriteScope}) {
+ operation?:{expectedVersion?:string;scope?:import('@use-brian/core/tasks/types.js').TaskWriteScope}) {
  const before=await authorizeCanonicalTaskPatch(userId,workspaceId,id,fields,client,access)
  if(!before)return null
  let value:unknown
@@ -773,6 +782,13 @@ export async function updateTask(
       nextUserId=admitted.visibility.userId;nextAssistantId=admitted.visibility.assistantId
       assertExecutionResourceScope({workspaceId:old.workspace_id,userId:nextUserId,assistantId:nextAssistantId,
         sensitivity:nextSensitivity,compartments:nextCompartments,projectIds:nextProjectIds},'mutation',access)
+      // The acting member's current Team reach bounds the proposed destination,
+      // inherited labels included, exactly as the create INSERT does; a denied
+      // destination is the same content-free scope error (tasks.md).
+      const reach=await client.query<{allowed:boolean}>(`SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$2)
+        AND (effective_member_team_compartments($2,$1) IS NULL OR $3::text[] <@ effective_member_team_compartments($2,$1)) AS allowed`,
+      [old.workspace_id,userId,nextCompartments])
+      if(reach.rows[0]?.allowed!==true)throw Object.assign(new Error('The task operation is outside the current access scope.'),{code:'scope_operation_denied'})
       await validateTaskResponsibility(client, userId, {
         workspaceId: old.workspace_id, sensitivity: nextSensitivity, compartments: nextCompartments,
         projectIds: nextProjectIds, privateUserId: nextUserId, privateAssistantId: nextAssistantId,
@@ -881,7 +897,8 @@ export async function updateTask(
 export async function getTaskByIdSystem(id: string): Promise<TaskRecord | null> {
   const result = await query<TaskRow>(
     `SELECT ${FULL_SELECT} FROM tasks WHERE id = $1 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
-      AND NOT (${taskNeedsIndependentSourceAuthoritySql('tasks')})`,
+      AND NOT (${taskNeedsIndependentSourceAuthoritySql('tasks')})
+      ${retainedConversationOutputFilter('task')}`,
     [id],
   )
   if (result.rows.length === 0) return null
@@ -907,6 +924,7 @@ export async function findTasksByExternalRefSystem(
        AND status <> 'archived'
        AND retracted_at IS NULL AND NOT scope_held
        AND NOT (${taskNeedsIndependentSourceAuthoritySql('tasks')})
+       ${retainedConversationOutputFilter('task')}
      ORDER BY created_at DESC`,
     [workspaceId, JSON.stringify(match)],
   )

@@ -1,4 +1,4 @@
-import { countDecisionEvidence } from '@use-brian/core'
+import { countDecisionEvidence } from '@use-brian/core/decision-learning/evidence.js'
 /**
  * Assistant playbook rules - the admission-gated learned layer of the
  * growth loop (docs/plans/assistant-growth-loop.md §3 Phase 3, migration

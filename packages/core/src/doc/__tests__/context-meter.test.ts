@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import type { Message } from '../../providers/types.js'
+import type { Message } from '@use-brian/agent-runtime/providers/types.js'
 import {
   measureDocContext,
   LARGE_DOC_RESULT_TOKENS,

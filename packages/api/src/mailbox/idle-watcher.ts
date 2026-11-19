@@ -37,9 +37,8 @@
  * [COMP:api/mailbox-idle-watcher]
  */
 
-import { ImapFlow } from 'imapflow'
 import type { ConnectorInstance, ConnectorInstanceStore } from '../db/connector-instance-store.js'
-import { MAILBOX_GREETING_TIMEOUT_MS } from './imap-session.js'
+import { MAILBOX_GREETING_TIMEOUT_MS, imapFlowClass } from './imap-session.js'
 import type { MailboxSyncSummary } from './sync-worker.js'
 import type { MailboxAccountSettings } from './types.js'
 
@@ -147,6 +146,7 @@ function isAuthFailure(err: unknown): boolean {
 }
 
 function createIdleImapClient(settings: MailboxAccountSettings, opts: { maxIdleTimeMs: number }): IdleClientLike {
+  const ImapFlow = imapFlowClass()
   return new ImapFlow({
     host: settings.imapHost,
     port: settings.imapPort,
@@ -289,7 +289,15 @@ export function createMailboxIdleWatcher(deps: MailboxIdleWatcherDeps): MailboxI
       return
     }
     const { type: _t, ...settings } = creds
-    const client = createClient(settings, { maxIdleTimeMs })
+    let client: IdleClientLike
+    try {
+      client = createClient(settings, { maxIdleTimeMs })
+    } catch (err) {
+      // The IMAP client library failed to load (it loads on first use):
+      // nothing connected; the same capped reconnect retries the load.
+      scheduleReconnect(entry, `client: ${errText(err)}`)
+      return
+    }
     entry.client = client
     // Rule 1: every ImapFlow instance carries an 'error' listener - unlistened,
     // Node rethrows off the socket-timer stack and kills the process.

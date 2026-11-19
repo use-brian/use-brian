@@ -24,8 +24,9 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { promisify } from 'node:util'
-import type { RecordingTranscriber } from '@use-brian/core'
-import { detectDocumentFormat, parseFileContent } from '@use-brian/core'
+import type { RecordingTranscriber } from '@use-brian/core/media/recording-transcriber.js'
+import { detectDocumentFormat } from '@use-brian/core/files/document-formats.js'
+import { parseFileContent } from '@use-brian/core/files/parsers.js'
 import { extractRecordingAudio, probeRecordingDuration } from '../recordings/ffmpeg.js'
 
 const execFileAsync = promisify(execFile)

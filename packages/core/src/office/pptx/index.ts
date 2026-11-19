@@ -1,5 +1,6 @@
 /** Safe Brian-owned PPTX import/export/reparse adapter. [COMP:office/pptx-engine] */
-import PptxGenJSImport from 'pptxgenjs'
+import type PptxGenJSImport from 'pptxgenjs'
+import { isImplementationUnavailable, lazyImplementation } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
 import {
   assertOfficeArtifactSnapshot,
   preflightOfficeCandidate,
@@ -23,8 +24,13 @@ import { importExternalPresentation } from './external.js'
 
 export * from './pdf.js'
 
-const PptxGenJS = (PptxGenJSImport as { default?: typeof PptxGenJSImport }).default ?? PptxGenJSImport
-type Pptx = InstanceType<typeof PptxGenJS>
+type PptxGenJSCtor = typeof PptxGenJSImport
+// The PPTX writer loads on the first presentation export, not with the Office modules (M4 step 5).
+const loadPptxGenJS = lazyImplementation('The presentation writer (PptxGenJS)', () => import('pptxgenjs').then((m): PptxGenJSCtor => {
+  const binding = m.default as PptxGenJSCtor & { default?: PptxGenJSCtor }
+  return binding.default ?? binding
+}))
+type Pptx = InstanceType<PptxGenJSCtor>
 type Slide = ReturnType<Pptx['addSlide']>
 type ShapeName = Parameters<Slide['addShape']>[0]
 type ChartName = Parameters<Slide['addChart']>[0]
@@ -105,6 +111,7 @@ export async function exportOfficePresentation(
   const diagnostics = [...preflight.diagnostics, ...layout.issues.map((issue) => ({ severity: 'error' as const, code: `layout.${issue.code}`, path: issue.objectId, message: issue.message }))]
   if (diagnostics.some((diagnostic) => diagnostic.severity === 'error')) throw new Error(`PPTX preflight failed: ${diagnostics.map((diagnostic) => `${diagnostic.path}: ${diagnostic.message}`).join('; ')}`)
 
+  const PptxGenJS = await loadPptxGenJS()
   const pptx = new PptxGenJS()
   pptx.defineLayout({ name: 'BRIAN', width: inch(snapshot.slideSize.widthPt), height: inch(snapshot.slideSize.heightPt) })
   pptx.layout = 'BRIAN'
@@ -130,6 +137,8 @@ export async function importOfficePresentation(bytes: Uint8Array, context: Offic
     const diagnostics = [...packageResult.diagnostics, ...model.diagnostics]
     return { ok: diagnostics.every((diagnostic) => diagnostic.severity !== 'error'), snapshot, resources: external?.resources ?? [], diagnostics }
   } catch (cause) {
+    // The XML parser failing to load is unavailable, not a defect of the file.
+    if (isImplementationUnavailable(cause)) throw cause
     return { ok: false, resources: [], diagnostics: [...packageResult.diagnostics, { severity: 'error', code: 'pptx.import_failed', path: 'ppt/presentation.xml', message: cause instanceof Error ? cause.message : 'PPTX import failed' }] }
   }
 }

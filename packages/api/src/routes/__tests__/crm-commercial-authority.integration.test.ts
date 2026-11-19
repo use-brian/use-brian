@@ -3,8 +3,16 @@ import express from 'express'
 import request from 'supertest'
 import pg from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
-import { CRM_INTEGRATION_OPERATIONS, CRM_INTEGRATION_RESOURCE_CATALOG, type AssociationServicePort, type CrmIntegrationGrant,
-  type CrmOperationsCommand, type CrmOperationsContext } from '@use-brian/core'
+import type { AssociationServicePort } from '@use-brian/core/association/operations.js'
+import {
+  CRM_INTEGRATION_OPERATIONS,
+  CRM_INTEGRATION_RESOURCE_CATALOG,
+  type CrmIntegrationGrant
+} from '@use-brian/core/crm/integration-authority.js'
+import type {
+  CrmOperationsCommand,
+  CrmOperationsContext
+} from '@use-brian/core/crm/operations-types.js'
 import { createCrmOperationsService } from '../../crm-operations/service.js'
 import { createDbCrmOperationsStore } from '../../db/crm-operations-store.js'
 import { createCrmIntegrationStore } from '../../db/crm-integration-store.js'

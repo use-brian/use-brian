@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
-import type { AccessContext } from '@use-brian/core'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import pg from 'pg'
 
 /** Build the viewer's AccessContext from the (userId, workspaceId)
@@ -384,7 +384,7 @@ describeIf('[COMP:brain/entities-store] entities store (integration)', () => {
     }
 
     async function merge(survivingId: string, mergedId: string, at: Date) {
-      const { mergeEntities } = await import('@use-brian/core')
+      const { mergeEntities } = await import('@use-brian/core/corrections/entity-merge.js')
       const { createEntityMergeStore } = await import('../entity-merge-store.js')
       return mergeEntities({ workspaceId, survivingId, mergedId, actorUserId: userId,
         mode: 'survivor-wins', cascade: false }, { repo: createEntityMergeStore(), clock: () => at })

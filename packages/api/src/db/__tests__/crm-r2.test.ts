@@ -4,10 +4,10 @@ import {
   buildCrmEmailReviewThread,
   crmRowsToCsv,
   findCrmDuplicateGroups,
-  validateCustomFieldValue,
   type CrmConfig,
   type CrmRecordRow,
 } from '../crm-r2.js'
+import { validateCrmCustomFieldValue as validateCustomFieldValue } from '@use-brian/core/crm/types.js'
 
 const CONFIG: CrmConfig = {
   pipelines: [{

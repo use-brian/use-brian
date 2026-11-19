@@ -6,7 +6,7 @@ import { join,resolve,dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { verificationCommandCatalog,REQUIREMENTS,FAMILIES,safeRunId,sha256,parseMachineResults,verifyReceipt,verifyManifest,importGuardedReceipt,captureSourceSnapshot,importMaintainedBrowserReceipt } from '../verify-local.mjs'
+import { verificationCommandCatalog,REQUIREMENTS,FAMILIES,safeRunId,sha256,parseMachineResults,verifyReceipt,verifyManifest,importGuardedReceipt,captureSourceSnapshot,importMaintainedBrowserReceipt,ORIGINAL_IDS_SHA256,MOVED_CONSUMER_PATHS } from '../verify-local.mjs'
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'../../..'),script=join(root,'scripts/application-platform/verify-local.mjs')
 function fixture(operation){const temp=mkdtempSync(join(tmpdir(),'application-verifier-negative-'));try{return operation(temp)}finally{rmSync(temp,{recursive:true,force:true})}}
 function receipt(temp){mkdirSync(join(temp,'packages/demo/src'),{recursive:true});const source='packages/demo/src/demo.ts';writeFileSync(join(temp,source),'export const boundary = true\n');writeFileSync(join(temp,'command.log'),'safe local command output\n');const result={success:true,numTotalTests:1,numPassedTests:1,numFailedTests:0,numPendingTests:0,numTodoTests:0,testResults:[{name:source,assertionResults:[{fullName:'[COMP:tooling/application-platform-verifier] current boundary',status:'passed'}]}]};writeFileSync(join(temp,'results.json'),JSON.stringify(result));return{exitCode:0,timedOut:false,argv:['node','local-test.mjs'],sources:{[source]:sha256(readFileSync(join(temp,source)))},format:'vitest-json',log:{path:'command.log',sha256:sha256(readFileSync(join(temp,'command.log')))},result:{path:'results.json',sha256:sha256(readFileSync(join(temp,'results.json')))}}}
@@ -126,4 +126,29 @@ test('future catalogs pin a selected PostgreSQL directory alias before generatin
  assert.equal(selected['sql-matrix'].argv[selected['sql-matrix'].argv.indexOf('--pg-bin')+1],directory)
  assert.equal(verificationCommandCatalog('','/tmp/collect-only')['fresh-oss'].argv.at(-1),'')
  assert.throws(()=>verificationCommandCatalog(join(temp,'missing-installation'),'/tmp/future-proof'))
+}))
+test('[COMP:tooling/application-platform-verifier] moved consumer callers keep their pinned original IDs and prove the move',()=>{
+ const platform=resolve(root,'..'),ledger=JSON.parse(readFileSync(join(platform,'docs/workflow/shared-application-platform-coverage.json'),'utf8'))
+ // The original 503-ID inventory stays pinned; a move never rewrites an ID or a ledger path.
+ assert.equal(ledger.consumers.length,503)
+ assert.equal(sha256(JSON.stringify(ledger.consumers.map(row=>row.id).sort())),ORIGINAL_IDS_SHA256)
+ const moved=Object.entries(MOVED_CONSUMER_PATHS),ledgerPaths=new Set(ledger.consumers.map(row=>row.path))
+ assert.equal(moved.length,18)
+ for(const[from,to]of moved){
+  assert.ok(ledgerPaths.has(from),'moved path is not a ledger consumer: '+from)
+  assert.equal(existsSync(join(platform,from)),false,'deleted shim path exists again: '+from)
+  assert.ok(existsSync(join(platform,to)),'declaring file is missing: '+to)
+  assert.match(to,/^use-brian\/packages\/agent-runtime\/src\//)
+ }
+})
+test('a moved consumer is proved at its declaring file only while the original path stays recorded absent',()=>fixture(temp=>{
+ const[from,to]=Object.entries(MOVED_CONSUMER_PATHS)[0],row={id:'model-input:'+from,path:from}
+ const errorsFor=(sources,callerPath)=>verifyManifest({version:1,sourceFrozen:true,sources,consumers:{[row.id]:{disposition:'verified_delegation',callerPath,canonicalCallee:{path:to,symbol:'x'}}}},{platformRoot:temp,runRoot:temp,ledger:{consumers:[row]}}).errors
+ const original=errorsFor({[from]:'0'.repeat(64)},from)
+ assert.ok(original.some(error=>error==='Consumer source absent: '+row.id),'the deleted original caller cannot stand in for the move')
+ assert.ok(original.some(error=>error==='Consumer caller does not match original ledger: '+row.id))
+ const unrecorded=errorsFor({[to]:'0'.repeat(64)},to)
+ assert.ok(unrecorded.some(error=>error==='Moved consumer original path not recorded absent: '+row.id))
+ const proved=errorsFor({[to]:'0'.repeat(64),[from]:null},to)
+ for(const message of ['Consumer source absent: ','Moved consumer original path not recorded absent: ','Consumer caller does not match original ledger: '])assert.equal(proved.includes(message+row.id),false,message)
 }))

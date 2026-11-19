@@ -27,7 +27,7 @@
  * [COMP:doc-sync/clearance-gate]
  */
 
-import { canRead, type Sensitivity } from '@use-brian/core/dist/security/sensitivity.js'
+import { canRead, type Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { parseSyncDocumentName } from './document-router.js'
 
 export class PageAccessDenied extends Error {

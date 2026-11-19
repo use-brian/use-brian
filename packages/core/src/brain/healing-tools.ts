@@ -35,11 +35,11 @@
 
 import { z } from 'zod'
 import { createEntityAliasTools } from '../entities/alias-tools.js'
-import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
-import { isAttendedTurn } from '../tools/capability-gate.js'
-import type { AccessContext } from '../security/access-context.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { isAttendedTurn } from '@use-brian/agent-runtime/tools/capability-gate.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import { createRateLimiter } from '../security/rate-limiter.js'
-import { notFoundFailure, toolFailure } from '../tools/tool-failure.js'
+import { notFoundFailure, toolFailure } from '@use-brian/agent-runtime/tools/tool-failure.js'
 import {
   promoteMemoryToEntity,
   type MemoryToEntityPromotionPorts,
@@ -74,7 +74,7 @@ import type {
   EntityStore,
 } from '../entities/types.js'
 import type { MemoryStore } from '../memory/types.js'
-import type { LLMProvider } from '../providers/types.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
 import type { TaskStore } from '../tasks/types.js'
 import type { DecisionExecutionPort } from '../decisions/index.js'
 

@@ -1,5 +1,5 @@
 /** Private classifier boundary ownership, never permission receipts. [COMP:decisions/hydra] */
-import { assertInputAuthority } from '../providers/input-authority.js'
+import { assertInputAuthority } from '@use-brian/agent-runtime/providers/input-authority.js'
 import type { DecisionExecutionPort, DecisionCompletionRoute, DecisionExecutionOperation, DecisionCascadeResult } from './hydra.js'
 import type { DecisionRequest } from './types.js'
 

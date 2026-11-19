@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
-import { hardPurge } from '@use-brian/core'
+import { hardPurge } from '@use-brian/core/corrections/soft-delete.js'
 import { getPool } from '../client.js'
 import { createSoftDeleteStore } from '../soft-delete-store.js'
 

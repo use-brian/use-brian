@@ -2,10 +2,17 @@ import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { afterAll, describe, expect, it } from 'vitest'
 import {
-  AttachmentCollector, ContextScopeAccumulator, boundScopeSource, createMailboxTools,
-  createSendFileTool, executionToolContext, singleMailboxRouter,
-  type MailboxApi, type ScopeSource, type ToolContext,
-} from '@use-brian/core'
+  createMailboxTools,
+  singleMailboxRouter,
+  type MailboxApi,
+} from '@use-brian/core/tools/base/mailbox.js'
+import { AttachmentCollector } from '@use-brian/core/workspace-files/attachments.js'
+import { createSendFileTool } from '@use-brian/core/workspace-files/send-file.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { boundScopeSource } from '@use-brian/agent-runtime/security/source-evidence.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { applyRLSGucs, getAppPool, getPool, rollbackAndRelease } from '../client.js'
 import { runWithAgentAccess } from '../agent-access-context.js'
 import { createDbWorkspaceFilesStore } from '../workspace-files-store.js'
@@ -94,8 +101,17 @@ async function fixture(v2 = true, personal = false, project = false, unbound = f
       return (await tx.query('SELECT read_entity_derivation_source($1,$2,$3) AS source', [workspaceId, kind, id])).rows[0].source
     } finally { await rollbackAndRelease(tx) }
   })
+  const captureConversation = (source: ScopeSource) => runWithAgentAccess(access, async () => {
+    const tx = await getAppPool().connect()
+    try {
+      await tx.query('BEGIN')
+      await applyRLSGucs(tx, actor, assistantId)
+      return (await tx.query('SELECT capture_conversation_evidence($1,$2) AS value',
+        [workspaceId, JSON.stringify([{kind: source.resourceKind, id: source.resourceId, version: source.version}])])).rows[0].value
+    } finally { await rollbackAndRelease(tx) }
+  })
   const rows = async () => (await pool.query("SELECT * FROM workspace_files WHERE workspace_id=$1 AND path LIKE '/uploads/email/%'", [workspaceId])).rows
-  return { workspaceId, owner, actor, assistantId, team, key, projectId, session, message, source, sources, store, api, access, context, save, read, rows, blobs, audits,
+  return { workspaceId, owner, actor, assistantId, team, key, projectId, session, message, source, sources, captureConversation, store, api, access, context, save, read, rows, blobs, audits,
     during(fn: () => Promise<void>) { duringWrite = fn } }
 }
 
@@ -107,6 +123,7 @@ describe('[COMP:api/conversation-file-derivation] admitted conversation sources'
     const role = (await getAppPool().query('SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')).rows[0]
     expect(role).toEqual({ rolsuper: false, rolbypassrls: false })
     expect(await f.read()).toMatchObject({ ...f.source, held: false })
+    expect(await f.captureConversation(f.source)).toMatchObject({admitted: true})
     const result = await f.save()
     expect(result.isError).not.toBe(true)
     const [file] = await f.rows()
@@ -239,6 +256,7 @@ describe('[COMP:api/conversation-file-derivation] admitted conversation sources'
         derivation: { producer: 'archive-transcript-fixture', sources: [source] } })
       source = (await readSessionMessageScopeSource(f.workspaceId, message.id))!
       expect(await f.read('session_message', message.id)).toBeNull()
+      expect(await f.captureConversation(source)).toEqual({admitted: false})
     }
     f.sources.splice(0, f.sources.length, source)
     f.audits.length = 0
@@ -256,6 +274,8 @@ describe('[COMP:api/conversation-file-derivation] admitted conversation sources'
     const tx = await pool.connect()
     try {
       await tx.query('BEGIN'); await applyRLSGucs(tx, f.actor)
+      // Replay as the deployment schema owner, including on bootstrap-backed fixtures.
+      await tx.query("SELECT set_config('role',pg_get_userbyid(relowner),true) FROM pg_class WHERE oid='sessions'::regclass")
       const facade = (await tx.query("SELECT oid::text,prosrc FROM pg_proc WHERE oid='read_entity_derivation_source(uuid,text,uuid)'::regprocedure")).rows[0]
       await tx.query('DROP FUNCTION read_media_parent_snapshot(uuid,text,uuid)')
       await tx.query('ALTER FUNCTION read_media_parent_snapshot_before_conversation(uuid,text,uuid) RENAME TO read_media_parent_snapshot')
@@ -269,7 +289,6 @@ describe('[COMP:api/conversation-file-derivation] admitted conversation sources'
       expect((await read()).rows[0].source).toMatchObject(f.source)
       expect((await media()).rows[0].source).toMatchObject(f.source)
       expect((await tx.query("SELECT oid::text,prosrc FROM pg_proc WHERE oid='read_entity_derivation_source(uuid,text,uuid)'::regprocedure")).rows[0]).toEqual(facade)
-      expect(facade.prosrc).toContain('engineering_archive')
     } finally { await rollbackAndRelease(tx) }
   })
 })

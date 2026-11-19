@@ -1,27 +1,36 @@
 /** Exact-head Office review/release and safe derivative policy.
  * [COMP:api/office-release] */
+import { exportOfficeDocument, reparseOfficeDocument } from '@use-brian/core/office/docx/index.js'
 import {
-  exportOfficeDocument,
   exportOfficeDocumentPdf,
-  exportOfficePresentation,
-  exportOfficePresentationPdf,
-  exportOfficeSpreadsheet,
-  exportOfficeSpreadsheetPdf,
-  preflightSpreadsheetPdf,
-  reparseOfficeDocument,
-  reparseOfficePresentation,
-  reparseOfficeSpreadsheet,
-  type SpreadsheetPdfReceipt,
-  type SpreadsheetPdfRequest,
-  type OfficeResourceResolver,
   type DocumentPdfPort,
   type DocumentPdfReceipt,
-  type PresentationPdfPort,
-  type PresentationPdfReceipt,
-  type PdfWriterPort,
+} from '@use-brian/core/office/docx/pdf.js'
+import type { OfficeResourceResolver } from '@use-brian/core/office/package.js'
+import {
   type ValidatedPdfOutput,
   validateRenderedPdf,
-} from '@use-brian/core'
+} from '@use-brian/core/office/pdf/validate.js'
+import type { PdfWriterPort } from '@use-brian/core/office/pdf/writer.js'
+import {
+  exportOfficePresentation,
+  reparseOfficePresentation,
+} from '@use-brian/core/office/pptx/index.js'
+import {
+  exportOfficePresentationPdf,
+  type PresentationPdfPort,
+  type PresentationPdfReceipt,
+} from '@use-brian/core/office/pptx/pdf.js'
+import {
+  exportOfficeSpreadsheet,
+  reparseOfficeSpreadsheet,
+} from '@use-brian/core/office/xlsx/index.js'
+import {
+  exportOfficeSpreadsheetPdf,
+  preflightSpreadsheetPdf,
+  type SpreadsheetPdfReceipt,
+  type SpreadsheetPdfRequest,
+} from '@use-brian/core/office/xlsx/pdf.js'
 import {
   preflightOfficeCandidate,
   type OfficeArtifactSnapshot,

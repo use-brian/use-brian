@@ -1,4 +1,4 @@
-import type { LLMProvider } from '../../providers/types.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
 import {
   executeDecisionCascade,
   executeDecisionObservation,

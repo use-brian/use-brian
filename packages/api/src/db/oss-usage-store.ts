@@ -9,7 +9,7 @@
  * [COMP:goals/oss-metering]
  */
 import { registryRowForPricing } from '@use-brian/shared/model-registry'
-import type { UsageStore } from '@use-brian/core'
+import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
 import { tierForModel } from '../model-resolution.js'
 import { query } from './client.js'
 

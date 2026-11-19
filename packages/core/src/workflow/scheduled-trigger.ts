@@ -20,7 +20,7 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '../tools/types.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { computeNextRun, type StructuredSchedule } from '../scheduling/schedule.js'
 import { formatRelativeTime } from '../scheduling/delivery-resolution.js'
 import type { JobStore, ScheduledJob, ScheduledJobMode } from '../scheduling/types.js'

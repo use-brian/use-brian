@@ -1,11 +1,16 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { AuthoringAuthority, SandboxTaskRecord } from '@use-brian/core'
+import type { SandboxTaskRecord } from '@use-brian/core/sandbox/orchestrator.js'
+import type { AuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { createAuthorityLease } from '../../context-scope/authority-lease.js'
 import { resolveBrowserTaskExecutionAuthority } from '../task-execution-authority.js'
 
 const nativeAuth=vi.hoisted(()=>({valid:true,seen:[] as unknown[]}))
 vi.mock('../../db/auth-session-store.js',()=>({authSessionStore:{validateAccess:async(claims:unknown)=>{nativeAuth.seen.push(structuredClone(claims));return nativeAuth.valid}}}))
 const state = vi.hoisted(() => ({ assistant: { id: 'assistant', workspaceId: 'workspace' } as unknown, current: null as unknown, session: null as Record<string, unknown> | null, denied: false }))
+vi.mock('../../context-scope/session-authority-facts.js', () => ({ readSessionAuthorityFacts: async (input: { credential?: unknown }) => {
+  if (input.credential) nativeAuth.seen.push(structuredClone(input.credential))
+  return { session: state.session, assistant: state.assistant, member: null, credentialCurrent: !input.credential || nativeAuth.valid }
+} }))
 vi.mock('../../db/sessions.js', () => ({ findSessionAuthorityById: async () => state.session }))
 vi.mock('../../db/client.js', () => ({ query: async () => ({ rows: state.session ? [state.session] : [] }) }))
 vi.mock('../../session-read-authority.js', () => ({ gateSessionRead: async () => state.denied ? { status: 403, error: 'private source' } : null }))

@@ -3,7 +3,7 @@
  */
 import { z } from 'zod'
 import { CrmPageQuerySchema } from './pagination.js'
-import type { AccessContext } from '../security/access-context.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 
 const Uuid = z.string().uuid()
 const Text = z.string().trim().min(1).max(2000)

@@ -26,7 +26,11 @@
  * [COMP:api/doc-page-store]
  */
 
-import type { DocPageRead, DocPageStore, NameOrigin, Page, ScopeSource, ToolContext } from '@use-brian/core'
+import type { DocPageRead, DocPageStore } from '@use-brian/core/doc/tools.js'
+import type { Page } from '@use-brian/core/views/blocks.js'
+import type { NameOrigin } from '@use-brian/core/views/types.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { validateCallerScopeEvidence, validateAudienceScopeEvidence } from '../context-scope/caller-evidence.js'
 import { runWithAgentAccess } from './agent-access-context.js'
 import { queryWithRLS } from './client.js'

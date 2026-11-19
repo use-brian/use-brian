@@ -1,20 +1,21 @@
 import { z } from 'zod'
+import { provenanceSessionId } from '@use-brian/agent-runtime/tools/capability-gate.js'
 import { memoryLearningProposalSchema, memoryActivityFromText } from './learning.js'
-import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
-import { MODEL_HIDDEN_PARAM_MARKER } from '../engine/query-loop.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { MODEL_HIDDEN_PARAM_MARKER } from '@use-brian/agent-runtime/engine/query-loop.js'
 import { decideMemoryScope } from '../classification/rules/memory-scope/index.js'
 import type { MemoryStore } from './types.js'
 import type { SessionContextAuthority } from './session-state-types.js'
 import { createHash } from 'node:crypto'
-import type { AccessContext } from '../security/access-context.js'
-import type { Sensitivity } from '../security/sensitivity.js'
-import { maxSensitivity, researchWriteFloor } from '../security/sensitivity.js'
-import { createdRowEvidence, resolveWriteScope, scopeEvidenceFromRows } from '../security/context-scope.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { maxSensitivity, researchWriteFloor } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { createdRowEvidence, resolveWriteScope, scopeEvidenceFromRows } from '@use-brian/agent-runtime/security/context-scope.js'
 import { looksLikeCronOperationalState } from '../consolidation/phases.js'
 import type { EntityStore, EntityLinksStore } from '../entities/types.js'
 import { applyExplicitLinks, explicitLinksField, formatLinksSummary } from '../entities/explicit-links.js'
 import type { MemoryRecallBuffer } from './recall-buffer.js'
-import { notFoundMessage } from '../tools/tool-failure.js'
+import { notFoundMessage } from '@use-brian/agent-runtime/tools/tool-failure.js'
 
 /**
  * Build an `AccessContext` from the live `ToolContext`. The four-axis
@@ -608,7 +609,7 @@ export function createMemoryTools(
         } } : {}),
         source: opts?.writeSource ?? 'model',
         ...(opts?.writeSourceEpisodeId ? { sourceEpisodeId: opts.writeSourceEpisodeId } : {}),
-        sourceSessionId: context.sessionId,
+        sourceSessionId: provenanceSessionId(context) ?? undefined,
         workspaceId: effectiveScope === 'team' ? context.workspaceId! : undefined,
         sensitivity: createStamp.sensitivity,
         compartments: stampedCompartments,

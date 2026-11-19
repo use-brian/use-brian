@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'node:url'
 import { configDefaults, defineConfig } from 'vitest/config'
+import { unitTestExclusions } from '../../scripts/testing/unit-partition.mjs'
 
 // Default `pnpm test` runs UNIT tests only — see the test table in the
 // root CLAUDE.md (`pnpm test` = unit, `pnpm test:integration` =
@@ -22,7 +23,7 @@ export default defineConfig({
     },
   },
   test: {
-    exclude: [...configDefaults.exclude, '**/*.integration.test.ts'],
+    exclude: [...configDefaults.exclude, '**/*.integration.test.ts', ...unitTestExclusions('packages/api')],
     // API route tests open many short-lived Supertest servers. CI shards this
     // large suite across runners, so one worker per shard avoids intra-runner
     // socket/RPC contention without putting the whole suite on one serial path.

@@ -1,13 +1,12 @@
 /** Immutable campaign approval and leased SMTP dispatch. [COMP:campaigns/dispatch] */
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import type { PoolClient } from 'pg'
-import {
-  CampaignError,
-  type CampaignContext,
-  type CrmDeliveryReceipt,
-  type CrmDeliveryServicePort,
-  type CrmOperationsContext,
-} from '@use-brian/core'
+import { CampaignError, type CampaignContext } from '@use-brian/core/campaigns/types.js'
+import type {
+  CrmDeliveryReceipt,
+  CrmDeliveryServicePort,
+  CrmOperationsContext,
+} from '@use-brian/core/crm/operations-types.js'
 import {
   CAMPAIGN_LIMITS,
   campaignEmailMetadataSchema,
@@ -16,7 +15,7 @@ import {
 } from '@use-brian/shared/campaigns'
 import { getPool, query } from '../db/client.js'
 import { associationOrderReadPredicate, loadAssociationOrderScope } from '../association/source-scope.js'
-import type { AssociationActor } from '@use-brian/core'
+import type { AssociationActor } from '@use-brian/core/association/domain.js'
 import {
   campaignReadActor,
   createCampaignEmailService,

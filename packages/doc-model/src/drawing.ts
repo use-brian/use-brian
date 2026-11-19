@@ -1,5 +1,5 @@
 import * as Y from 'yjs'
-import { blockSchema, type Block } from '@use-brian/core/dist/views/blocks.js'
+import { blockSchema, type Block } from '@use-brian/core/views/blocks.js'
 import { FRAGMENT_FIELD } from './schema.js'
 import type { PMNode } from './block-mapping.js'
 

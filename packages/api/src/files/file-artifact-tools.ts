@@ -19,13 +19,10 @@
 // DESCRIPTOR search) already exists and the pair would be model-confusable.
 
 import { z } from 'zod'
-import {
-  buildTool,
-  actorFromContext,
-  type Embedder,
-  type RetrievalActor,
-  type Tool,
-} from '@use-brian/core'
+import type { Embedder } from '@use-brian/core/embeddings/embedder.js'
+import { actorFromContext } from '@use-brian/core/retrieval/tools.js'
+import type { RetrievalActor } from '@use-brian/core/retrieval/types.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import {
   searchFileSegments,
   readFileSegmentRange,

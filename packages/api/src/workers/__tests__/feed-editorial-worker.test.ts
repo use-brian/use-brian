@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createFeedEditorialWorker } from '../feed-editorial-worker.js'
 import { claimFeedRun, failFeedRun, type FeedEditorialRun } from '../../db/feed-editorial-runs-store.js'
 import { FeedCollaborationError } from '../../db/feed-collaboration-store.js'
-import { GoogleRequestNotDispatchedError } from '@use-brian/core'
+import { GoogleRequestNotDispatchedError } from '@use-brian/agent-runtime/providers/google-auth.js'
 
 vi.mock('../../db/feed-editorial-runs-store.js', () => ({ claimFeedRun: vi.fn(), failFeedRun: vi.fn(), renewFeedLease: vi.fn() }))
 vi.mock('../../db/feed-collaboration-store.js', () => ({

@@ -7,19 +7,65 @@
 import { Router, type Request, type Response } from 'express'
 import { z } from 'zod'
 import {
-  DeliveryCommandSchema, DeliveryListQuerySchema, isDeliveryCommand, type DeliveryReadPort,
   AssociationPlanInputSchema,
   AssociationEventInputSchema,
-  CrmConfigCommandSchema,
+} from '@use-brian/core/association/domain.js'
+import {
+  CrmBusinessReferenceCommandSchema,
+  CrmReferenceLookupQuerySchema,
+  CrmReferencePreviewQuerySchema,
+  isCrmBusinessReferenceCommand,
+  type CrmReferenceReadPort,
+} from '@use-brian/core/crm/business-references.js'
+import {
+  CrmCommercialContextCommandSchema,
+  isCrmCommercialContextCommand,
+  CrmAccountListQuerySchema,
+  CrmCommercialProfileQuerySchema,
+  CrmResolutionQuerySchema,
+  type CrmCommercialContextReadPort,
+} from '@use-brian/core/crm/commercial-context.js'
+import { CrmConfigCommandSchema } from '@use-brian/core/crm/config-commands.js'
+import {
+  DeliveryCommandSchema,
+  DeliveryListQuerySchema,
+  isDeliveryCommand,
+  type DeliveryReadPort,
+} from '@use-brian/core/crm/delivery-oversight.js'
+import {
+  CrmErpCommandSchema,
+  isCrmErpCommand,
+  CrmLegacyMappingQuerySchema,
+  CrmProjectionEventQuerySchema,
+} from '@use-brian/core/crm/erp-bridge.js'
+import {
+  PreviewCrmImportFileCleanupCommandSchema,
+  ExecuteCrmImportFileCleanupCommandSchema,
+} from '@use-brian/core/crm/file-cleanup-types.js'
+import {
+  CrmChangeRequestQuerySchema,
+  CrmGovernedCommandSchema,
+  isCrmGovernedCommand,
+  CrmEngagementQuerySchema,
+  CrmBillingRequestQuerySchema,
+  CrmBillingBalanceQuerySchema,
+  CrmRecurringPreviewQuerySchema,
+  type CrmGovernedReadPort,
+} from '@use-brian/core/crm/governed-records.js'
+import { CrmIntegrationScopeError } from '@use-brian/core/crm/integration-authority.js'
+import {
+  CrmCommercialDocumentCommandSchema,
+  isCrmCommercialDocumentCommand,
+  CrmInvoiceListQuerySchema,
+  type CrmCommercialDocumentReadPort,
+} from '@use-brian/core/crm/invoice-preparation.js'
+import {
   CreateCrmIntakeCredentialCommandSchema,
-  CrmDeliveryChannelSchema,
   GrantCrmEntitlementCommandSchema,
   CrmOperationsError,
-  CrmIntegrationScopeError,
   CrmOperationsStableKeySchema,
   CrmOperationsUuidSchema,
   CrmWordingLocaleSchema,
-  CrmPageQuerySchema,
   RecordCrmConsentCommandSchema,
   RecordCrmParticipationCommandSchema,
   RecordCrmSuppressionCommandSchema,
@@ -27,10 +73,6 @@ import {
   SaveCrmConsentPurposeCommandSchema,
   SaveCrmSegmentCommandSchema,
   SaveCrmPrivacyPolicyCommandSchema,
-  PreviewCrmImportFileCleanupCommandSchema,
-  ExecuteCrmImportFileCleanupCommandSchema,
-  PreviewCrmRetentionCommandSchema,
-  ExecuteCrmRetentionCommandSchema,
   PreviewCrmContactErasureCommandSchema,
   EraseCrmContactWithPreviewCommandSchema,
   ReleaseCrmAddressSuppressionCommandSchema,
@@ -42,36 +84,15 @@ import {
   UpdateCrmEntitlementCommandSchema,
   UpdateCrmParticipationCommandSchema,
   SetDealPipelineStageCommandSchema,
-  CrmBusinessReferenceCommandSchema,
-  CrmReferenceLookupQuerySchema,
-  CrmReferencePreviewQuerySchema,
-  isCrmBusinessReferenceCommand,
-  CrmCommercialContextCommandSchema,
-  isCrmCommercialContextCommand,
-  CrmCommercialDocumentCommandSchema,
-  isCrmCommercialDocumentCommand,
-  CrmInvoiceListQuerySchema,
-  type CrmCommercialDocumentReadPort,
-  CrmChangeRequestQuerySchema,
-  CrmGovernedCommandSchema,
-  isCrmGovernedCommand,
-  CrmErpCommandSchema,
-  isCrmErpCommand,
-  CrmEngagementQuerySchema,
-  CrmBillingRequestQuerySchema,
-  CrmBillingBalanceQuerySchema,
-  CrmRecurringPreviewQuerySchema,
-  type CrmGovernedReadPort,
-  CrmLegacyMappingQuerySchema,
-  CrmProjectionEventQuerySchema,
-  CrmAccountListQuerySchema,
-  CrmCommercialProfileQuerySchema,
-  CrmResolutionQuerySchema,
-  type CrmCommercialContextReadPort,
-  type CrmReferenceReadPort,
   type CrmOperationsContext,
   type CrmOperationsServicePort,
-} from '@use-brian/core'
+} from '@use-brian/core/crm/operations-types.js'
+import { CrmPageQuerySchema } from '@use-brian/core/crm/pagination.js'
+import {
+  PreviewCrmRetentionCommandSchema,
+  ExecuteCrmRetentionCommandSchema,
+} from '@use-brian/core/crm/retention-types.js'
+import { CrmDeliveryChannelSchema } from '@use-brian/core/crm/sendability.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import type { DbCrmOperationsReadStore } from '../db/crm-intake-store.js'
 import {

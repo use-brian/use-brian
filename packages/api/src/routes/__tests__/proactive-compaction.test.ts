@@ -22,7 +22,7 @@ vi.mock('../../db/sessions.js', async () => {
     readCompactSummary: mockReadCompactSummary,
   }
 })
-vi.mock('../../application-platform/model-source-authority.js', () => ({ assertSourceModelInputAuthority: mockSourceAuthority }))
+vi.mock('../../context-scope/admission.js', () => ({ admitModelInput: mockSourceAuthority }))
 
 // `recordOverheadUsage` touches the (here-unmocked) UsageStore only when
 // a usageStore is passed, so tests omit it and the helper no-ops.
@@ -31,8 +31,16 @@ import {
   findRecentSplit, houseKeepEpisodic, runProactiveCompaction,
   recentTailBudgetTokens, RECENT_TAIL_BUDGET_RATIO,
 } from '../proactive-compaction.js'
-import { createCompactionCircuitBreaker, compactionThreshold, estimateTokens, createExecutionContext, ContextScopeAccumulator, bindScopeSources, boundScopeSources } from '@use-brian/core'
-import type { Message, EpisodicMemoryRecord, EpisodicStore, MemoryStore, LLMProvider, StreamChunk, AnalyticsLogger, ScopeSource } from '@use-brian/core'
+import { createCompactionCircuitBreaker, compactionThreshold, estimateTokens } from '@use-brian/agent-runtime/compaction/compact.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { createExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
+import type { AnalyticsLogger } from '@use-brian/core/analytics/logger.js'
+import type { EpisodicMemoryRecord, EpisodicStore } from '@use-brian/core/memory/episodic-types.js'
+import type { MemoryStore } from '@use-brian/core/memory/types.js'
+import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
+import type { Message, LLMProvider, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import type { Session, SessionMessage } from '../../db/sessions.js'
 
 const userText = (text: string): Message => ({
@@ -448,6 +456,51 @@ describe('[COMP:api/proactive-compaction] canonical native assembly boundaries',
     expect(c.stream).not.toHaveBeenCalled()
     expect(mockSetCompactSummaryAndBoundary).not.toHaveBeenCalled()
   })
+
+  it.each(['extraction', 'summary'] as const)('awaits reported %s spend after closing authority refuses all writes', async stage => {
+    const c = native()
+    const refusal = Object.assign(new Error('Synthetic closing authority refusal'), { reason: 'authority_changed', retrySafe: false })
+    let releaseBilling!: () => void
+    const billing = new Promise<void>(resolve => { releaseBilling = resolve })
+    const recordUsage = vi.fn(async () => { await billing })
+    const params = { ...c.params, unconditional: true, persistLongTermContext: stage === 'extraction',
+      ownerId: 'original-payer', modelTier: 'standard', providerKeySource: 'user' as 'user' | 'platform',
+      usageStore: { recordUsage } as unknown as UsageStore,
+      sessionMessages: [
+        bindScopeSources(makeSessionMessage({ sequenceNum: 1, role: 'user', content: [{ type: 'text', text: 'Earlier fictional request' }] }), [source]),
+        bindScopeSources(makeSessionMessage({ sequenceNum: 2, role: 'assistant', content: [{ type: 'text', text: 'Earlier fictional answer' }] }), [source]),
+        bindScopeSources(makeSessionMessage({ sequenceNum: 3, role: 'user', content: [{ type: 'text', text: 'Current fictional request' }] }), [source]),
+      ],
+    }
+    c.stream.mockImplementation(async function* () {
+      yield { type: 'message_start', model: 'gemini-flash' }
+      yield { type: 'text_delta', text: stage === 'extraction' ? '[]' : 'Fictional summary' }
+      yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 11, outputTokens: 3 } }
+    })
+    c.authority.execute = async <T>(run: () => Promise<T>): Promise<T> => {
+      const result = await run()
+      if (result && typeof result === 'object' && (stage === 'extraction' ? 'facts' in result : 'boundaryMessage' in result)) {
+        params.ownerId = 'successor-payer'; params.providerKeySource = 'platform'
+        throw refusal
+      }
+      return result
+    }
+    let settled = false
+    const outcome = runProactiveCompaction(params).then(value => { settled = true; return value }, error => { settled = true; return error })
+    await vi.waitFor(() => expect(recordUsage).toHaveBeenCalledOnce())
+    expect(settled).toBe(false)
+    expect(recordUsage).toHaveBeenCalledWith(expect.objectContaining({ userId: 'original-payer', actorUserId: 'u1', assistantId: 'a1', sessionId: 's1',
+      model: 'gemini-flash', inputTokens: 11, outputTokens: 3, providerKeySource: 'user', actualCostUsd: 0,
+      source: stage === 'extraction' ? 'overhead:extraction' : 'overhead:compaction',
+    }))
+    expect(mockSetCompactSummaryAndBoundary).not.toHaveBeenCalled()
+    expect(params.memoryStore.create).not.toHaveBeenCalled()
+    releaseBilling()
+    expect(await outcome).toBe(refusal)
+    expect(recordUsage).toHaveBeenCalledOnce()
+    expect(mockSetCompactSummaryAndBoundary).not.toHaveBeenCalled()
+  })
+
 })
 
 describe('[COMP:api/proactive-compaction] runProactiveCompaction — persistence invariants', () => {

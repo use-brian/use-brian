@@ -2,12 +2,15 @@
  * managed model request and Telegram delivery after large-history recovery.
  * Google/model HTTP and blob storage are synthetic; injection, policy, preparation, kernel,
  * source admission, publication and the receiving adapter remain real. */
-import {randomBytes,randomUUID} from 'node:crypto'
-import {mkdtemp,rm,writeFile} from 'node:fs/promises'
+import {createHash,randomBytes,randomUUID} from 'node:crypto'
+import {mkdtemp,readFile,rm,writeFile} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {afterAll,beforeAll,describe,expect,it,onTestFinished,vi} from 'vitest'
-import {ContextScopeAccumulator,createGeminiProvider,createRoutingProvider,wrapProvider} from '@use-brian/core'
+import {createGeminiProvider} from '@use-brian/agent-runtime/providers/gemini.js'
+import {createRoutingProvider} from '@use-brian/agent-runtime/providers/routing.js'
+import {wrapProvider} from '@use-brian/agent-runtime/providers/wrappers.js'
+import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
 import {createTelegramAdapter} from '@use-brian/channels'
 import {getAppPool,getPool,query,queryWithRLS,runWithAgentAccess} from '../db/client.js'
 import {admitTelegramRecording,recordDeliveredTelegramMessage} from '../channel-recording.js'
@@ -22,7 +25,7 @@ import {createDbMemoryStore} from '../db/memory-store.js'
 import {createDbCapabilityStore} from '../db/capability-store.js'
 import {createMemory} from '../db/memories.js'
 import {readSessionById,readSessionMessageScopeSource} from '../db/sessions.js'
-import {readAdmittedSessionQuery} from '../db/session-query-reader.js'
+import {readAdmittedSessionQuery} from '../db/conversation-store.js'
 import {withSessionMessagePublication} from '../db/session-context-revisions.js'
 import {resolveExecutionContextSystem} from '../context-scope/execution-context.js'
 import {createDbWorkspaceFilesStore} from '../db/workspace-files-store.js'
@@ -33,7 +36,8 @@ import {createDecisionRuntime} from '../decision-runtime.js'
 import {_resetConnectorConfigCache} from '../connector-config.js'
 import {processChannelMessage,type ChannelPipelineParams} from '../routes/channel-pipeline.js'
 import {deliveryFailureMetadata} from '../context-scope/delivery-failure.js'
-import {countRetainedNativeExpandedGraph} from './fixtures/native-session-capacity.js'
+import {currentTurnFrame,readTurnSqlLedger,setTurnSqlRecording,type TurnSqlFingerprint} from '../db/turn-sql-accounting.js'
+import {countConversationExpandedGraph} from './fixtures/native-session-capacity.js'
 import {createRecordingTranscriptFixture} from './fixtures/recording-transcript-chain.js'
 
 const {assertLocalFixture}=await import(new URL('../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
@@ -174,6 +178,7 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
   retainedBindings=await readRetainedBindings();expect(retainedBindings).toHaveLength(1)
  })
  afterAll(async()=>{
+  setTurnSqlRecording(undefined)
   vi.unstubAllGlobals();vi.unstubAllEnvs();_resetConnectorConfigCache()
   // Keep the recording's immutable ancestry and failure evidence together.
   // The maintained owned fixture disposes this complete synthetic database.
@@ -196,8 +201,27 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
    if(args.some(value=>typeof value==='string'&&value.includes('[topic-classifier]')&&value.includes('deadline exceeded')))classifierDeadlines++
    originalWarn(...args)
   }):undefined
-  const milestones:Array<{phase:string;elapsedMs:number}>=[],started=performance.now()
-  const mark=(phase:string)=>milestones.push({phase,elapsedMs:Math.round(performance.now()-started)})
+  const milestones:Array<{phase:string;elapsedMs:number;at:string}>=[],started=performance.now()
+  const accountSql=process.env.BRIAN_CALENDAR_RECOVERY_SQL==='1'
+  const sqlPhases:Array<{phase:string;throughStatement:number;queries:TurnSqlFingerprint[]}>=[]
+  let previousQueries=new Map<string,TurnSqlFingerprint>()
+  let sqlTurnId:string|undefined
+  if(accountSql)setTurnSqlRecording(true)
+  const mark=(phase:string)=>{
+   milestones.push({phase,elapsedMs:Math.round(performance.now()-started),at:new Date().toISOString()})
+   if(accountSql){
+    sqlTurnId??=currentTurnFrame()?.turnId
+    const ledger=sqlTurnId?readTurnSqlLedger(sqlTurnId):undefined
+    const fingerprints=ledger?.fingerprints??[]
+    const queries=fingerprints.flatMap(row=>{
+     const prior=previousQueries.get(row.hash)
+     const count=row.count-(prior?.count??0)
+     return count>0?[{...row,count,elapsedMs:row.elapsedMs-(prior?.elapsedMs??0)}]:[]
+    }).sort((a,b)=>b.elapsedMs-a.elapsedMs).slice(0,8)
+    previousQueries=new Map(fingerprints.map(row=>[row.hash,row]))
+    sqlPhases.push({phase,throughStatement:ledger?.totals.statements??0,queries})
+   }
+  }
   const abortController=new AbortController()
   let pending:Promise<void>|undefined
   onTestFinished(async()=>{abortController.abort();await pending?.catch(()=>undefined)})
@@ -221,9 +245,9 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
     googleRequests.push(url);mark('calendar-http')
     expect(new Headers(init?.headers).get('authorization')).toBe('Bearer fictional-speaker-access')
     expect(url.searchParams.get('timeMin')).toBe(timeMin);expect(url.searchParams.get('timeMax')).toBe(timeMax)
-    if(change==='hold-before-continuation')await query('UPDATE session_messages SET scope_held=true WHERE session_id=$1 AND sequence_num=1',[recovered])
-    if(change==='hold-file-before-continuation')await query(`INSERT INTO scope_resource_states(workspace_id,resource_kind,resource_id,resource_version,review_state,classification_revision,holding_reason)
-     SELECT workspace_id,'workspace_file',id,scope_version::text,'held',1,'Fictional recording source hold' FROM workspace_files WHERE id=$1`,[mediaFileId])
+    if(change==='hold-before-continuation'){await query('UPDATE session_messages SET scope_held=true WHERE session_id=$1 AND sequence_num=1',[recovered]);mark('historical-hold-committed')}
+    if(change==='hold-file-before-continuation'){await query(`INSERT INTO scope_resource_states(workspace_id,resource_kind,resource_id,resource_version,review_state,classification_revision,holding_reason)
+     SELECT workspace_id,'workspace_file',id,scope_version::text,'held',1,'Fictional recording source hold' FROM workspace_files WHERE id=$1`,[mediaFileId]);mark('media-hold-committed')}
     return Response.json({items:[{id:'fictional-event',summary:eventLabel,start:{dateTime:'2030-12-09T10:00:00Z'},end:{dateTime:'2030-12-09T11:00:00Z'}}]})
    }
    // This allowlist guarantees the test can never make a live provider request.
@@ -287,7 +311,8 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
    decisionRuntime:createDecisionRuntime({llmProvider:provider,defaultLlmModel:'gemini-3.6-flash-standard'}),configuredProviders:new Set(['gemini']),provider,
    systemPrompt:'Use the actual Calendar read tool for this fictional request.',tools:new Map(),memoryStore:createDbMemoryStore(),capabilityStore,workspaceFilesStore,
    connectorStore,mcpSettingsStore:settings,assistantConnectorStore:assistantConnectors,connectorInstanceStore:instances,connectorGrantStore:grants,
-   hooks:{onConfirmationRequired:async()=>{throw new Error('Read-only Calendar request unexpectedly required confirmation')},sendError:async(error:Error)=>{throw error},
+   hooks:{onProcessingStart:async()=>{if(accountSql)mark('processing-start')},
+    onConfirmationRequired:async()=>{throw new Error('Read-only Calendar request unexpectedly required confirmation')},sendError:async(error:Error)=>{throw error},
     sendResponse:async(text:string)=>{
      const channelMessageId=await telegram.sendMessage(conversation,{text,format:'markdown'})
      expect(channelMessageId).toBe(providerMessageId);expect(deliveryRecorded).toBe(true)
@@ -295,7 +320,26 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
   let error:unknown
   try{await pending}catch(caught){error=caught}finally{warningObserver?.mockRestore();mark('turn-finished')}
   const failure=error as {name?:string;code?:string;reason?:string;diagnostic?:string;verificationPhase?:string;verificationSqlstateClass?:string}|undefined
-  console.info('[recovered Telegram Calendar timing]',{historyRows,privateRows,milestones,
+  const ledger=sqlTurnId?readTurnSqlLedger(sqlTurnId):undefined
+  if(ledger){
+   let previous=0
+   const phases=sqlPhases.map(({phase,throughStatement,queries})=>{
+    const owners=new Map<string,{count:number;elapsedMs:number;failed:number}>()
+    for(const row of ledger.statements.filter(row=>row.seq>previous&&row.seq<=throughStatement)){
+     const key=`${row.frameId} | ${row.shape}`
+     const owner=owners.get(key)??{count:0,elapsedMs:0,failed:0}
+     owner.count++;owner.elapsedMs+=row.elapsedMs;if(!row.ok)owner.failed++
+     owners.set(key,owner)
+    }
+    previous=throughStatement
+    return{phase,throughStatement,queries,retainedFrames:[...owners].sort(([,a],[,b])=>b.elapsedMs-a.elapsedMs).slice(0,8)}
+   })
+   console.info('[recovered Telegram Calendar SQL]',JSON.stringify({id,totals:ledger.totals,overflow:ledger.overflow,phases}))
+  }
+  console.info('[recovered Telegram Calendar timing]',{id,change,historyRows,privateRows,milestones,
+   receiving:{mainRequests:mainRequests.length,googleRequests:googleRequests.length,receivedReplies:sent.length,
+    persistedReplies:(await query('SELECT count(*)::int count FROM session_messages WHERE session_id=$1 AND channel_message_id=$2',[recovered,providerMessageId])).rows[0].count,
+    session:(await query('SELECT status,turn_end_reason,turn_lease_token IS NULL AS lease_released FROM sessions WHERE id=$1',[recovered])).rows[0]},
    failure:failure?{name:failure.name,code:failure.code,reason:failure.reason,diagnostic:failure.diagnostic,
     ...deliveryFailureMetadata(error)}:undefined})
   return{mainRequests,googleRequests,oauthTokens,sent,error,classifierDeadlines,priorReply,replyText,providerMessageId,telegramRequests,milestones,elapsedMs:performance.now()-started}
@@ -316,8 +360,9 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
    currentMessageId:message.id,currentMessageSequence:message.sequence_num,authority})
   const parent=await readSessionMessageScopeSource(workspace,message.id);expect(parent).not.toBeNull()
   const sources=new ContextScopeAccumulator({sources:[...(authority.accumulator.evidence.sources??[]),parent!]}).evidence.sources??[]
-  // Select the actual canonical historical generic branch in this disposable
-  // fixture. The only removed code is its optional native-frame dispatch;
+  // Replay the checksum-bound pre-cutover writer in this disposable fixture.
+  // Its generic branch no longer exists in the installed runtime. The only
+  // removed historical code is its optional native-frame dispatch;
   // every source/actor/destination check, write and deferred guard is retained.
   // Canonical helpers, owners, grants and fingerprints are never modified.
   const signature='publish_native_session_context_revision(uuid,uuid,text,uuid,uuid,jsonb,text,jsonb,uuid,bigint,integer)'
@@ -325,10 +370,14 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
    quote_ident(pg_get_userbyid(proowner)) "ownerSql",jsonb_build_object('owner',proowner,'definer',prosecdef,'config',proconfig,'volatility',provolatile,'parallel',proparallel,'language',prolang) security
    FROM pg_proc WHERE oid=$1::regprocedure`,[signature])).rows[0]
   const dispatch=" IF k='message_annotation' AND native_turn_helpers_current() IS TRUE THEN\n  framed:=publish_native_turn_annotation(w,s,p,i,payload,producer,sources,expected_revision,expected_generation);\n  IF framed IS NOT NULL THEN RETURN NULLIF(framed->'value','null'::jsonb);END IF;\n END IF;\n"
-  expect(original.body.split(dispatch)).toHaveLength(2)
+  const historicalTemplate=await readFile(new URL('./fixtures/pre-canonical-annotation.sql',import.meta.url),'utf8')
+  expect(createHash('sha256').update(historicalTemplate).digest('hex')).toBe('c189e8e07eb23055f8047f977f8b54cf7cf7d4aed91e9bcde3261242147d577d')
+  const pin=(await query<{pin:string}>("SELECT encode(sha256(convert_to(to_jsonb(p)::text,'UTF8')),'hex') pin FROM pg_proc p WHERE oid='application_native_context_fields_current()'::regprocedure")).rows[0].pin
+  const historicalBody=historicalTemplate.replaceAll('__PIN__',pin)
+  expect(historicalBody.split(dispatch)).toHaveLength(2)
   const port=`fixture_legacy_annotation_${randomUUID().replaceAll('-','')}`
   const guard=` IF w IS DISTINCT FROM '${workspace}'::uuid OR s IS DISTINCT FROM '${recovered}'::uuid OR k IS DISTINCT FROM 'message_annotation' THEN RAISE EXCEPTION 'Fictional legacy publisher boundary' USING ERRCODE='42501';END IF;\n`
-  const body=original.body.replace(dispatch,()=>guard)
+  const body=historicalBody.replace(dispatch,()=>guard)
   const definition=original.definition.replace('FUNCTION public.publish_native_session_context_revision(',`FUNCTION public.${port}(`).replace(original.body,()=>body)
   expect(definition).not.toBe(original.definition)
   const annotationId=randomUUID()
@@ -339,7 +388,7 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
     GRANT EXECUTE ON FUNCTION public.${port}(uuid,uuid,text,uuid,uuid,jsonb,text,jsonb,uuid,bigint,integer) TO app_user`)
    expect((await query<{security:unknown}>(`SELECT jsonb_build_object('owner',proowner,'definer',prosecdef,'config',proconfig,'volatility',provolatile,'parallel',proparallel,'language',prolang) security
     FROM pg_proc WHERE oid=$1::regprocedure`,[`${port}(uuid,uuid,text,uuid,uuid,jsonb,text,jsonb,uuid,bigint,integer)`])).rows[0].security).toEqual(original.security)
-   expect((await query<{body:string}>('SELECT prosrc body FROM pg_proc WHERE oid=$1::regprocedure',[`${port}(uuid,uuid,text,uuid,uuid,jsonb,text,jsonb,uuid,bigint,integer)`])).rows[0].body.replace(guard,'')).toBe(original.body.replace(dispatch,''))
+   expect((await query<{body:string}>('SELECT prosrc body FROM pg_proc WHERE oid=$1::regprocedure',[`${port}(uuid,uuid,text,uuid,uuid,jsonb,text,jsonb,uuid,bigint,integer)`])).rows[0].body.replace(guard,'')).toBe(historicalBody.replace(dispatch,''))
    const annotation=await withSessionMessagePublication(authority,sources,async client=>{
     expect((await client.query('SELECT current_user,rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')).rows[0]).toEqual({current_user:'app_user',rolsuper:false,rolbypassrls:false})
     // Constructing this historical generic graph is fixture setup. Flush all
@@ -446,7 +495,7 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
   const result=await readAdmittedSessionQuery({sessionId:recovered,throughSequence:through,authority})
   expect(result.history).toHaveLength(through)
   expect(JSON.stringify(result.history.at(-1)?.content)).toContain(eventMarker)
-  const expanded=await countRetainedNativeExpandedGraph(authority)
+  const expanded=await countConversationExpandedGraph(authority)
   console.info('[recorded Calendar retained expanded graph]',expanded)
   expect(expanded.edges).toBeGreaterThan(16_384)
   expect(await readRetainedHistory()).toEqual(retainedHistory)
@@ -467,6 +516,7 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
   const stored=(await query(`SELECT role,content FROM session_messages WHERE session_id=$1 AND channel_message_id=$2`,
    [recovered,result.providerMessageId])).rows
   expect(stored).toEqual([{role:'assistant',content:[{type:'text',text:result.replyText}]}])
+  const retainedReadStarted=performance.now()
   const authority=await recordingAuthority()
   const history=await readAdmittedSessionQuery({sessionId:recovered,throughSequence:historyRows+36,authority})
   expect(history.history).toHaveLength(historyRows+36)
@@ -474,6 +524,10 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
   expect(await readRetainedHistory()).toEqual(retainedHistory)
   expect(await readRetainedBindings()).toEqual(retainedBindings)
   expect(await readRetainedLegacyAnnotation()).toEqual(retainedLegacyAnnotation)
+  console.info('[recovered Telegram Calendar follow-up reopen]',{
+   elapsedMs:Math.round(result.elapsedMs),retainedReadMs:Math.round(performance.now()-retainedReadStarted),
+   historyRows:history.history.length,
+  })
  },retainedJourneyTestTimeout)
  it('withdraws a disconnected account before the emitted Calendar call reaches Google',async()=>{
   try{
@@ -490,11 +544,17 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
  ] as const)('withholds the second provider request after a $label hold during the actual Calendar response',async({id,change})=>{
   try{
    const result=await runCalendarTurn(id,change)
-   expect(result.error).toMatchObject({name:'SourceProtocolError',code:'source_unavailable',reason:'authority_changed'})
+   expect(result.error).toMatchObject({name:'DeliveryAudienceUnverifiedError',reason:'delivery_audience_unverified',
+    diagnostic:'source_unverifiable',verificationPhase:'native_proof',retrySafe:false})
    // A nested statement timeout must never masquerade as authority contraction.
    expect(deliveryFailureMetadata(result.error).verificationSqlstateClass).not.toBe('57')
+   const boundary=result.milestones.map(row=>row.phase)
+   const hold=change==='hold-file-before-continuation'?'media-hold-committed':'historical-hold-committed'
+   expect(boundary).toContain(hold)
+   expect(boundary.indexOf('calendar-http')).toBeLessThan(boundary.indexOf(hold))
+   expect(boundary.indexOf(hold)).toBeLessThan(boundary.indexOf('turn-finished'))
    expect(result.mainRequests).toHaveLength(1);expect(result.googleRequests).toHaveLength(1)
-   expect(JSON.stringify(result.sent)).not.toContain(eventMarker)
+   expect(result.sent).toEqual([]);expect(result.telegramRequests).toEqual([])
    expect((await query('SELECT id FROM session_messages WHERE session_id=$1 AND channel_message_id=$2',[recovered,result.providerMessageId])).rows).toEqual([])
   }finally{
    if(change==='hold-file-before-continuation')await query("DELETE FROM scope_resource_states WHERE workspace_id=$1 AND resource_kind='workspace_file' AND resource_id=$2",[workspace,mediaFileId])

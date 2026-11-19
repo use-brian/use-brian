@@ -6,7 +6,7 @@ vi.mock('../../context-scope/execution-context.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../../context-scope/execution-context.js')>()
   return { ...actual,resolveExecutionContextSystem: (input: Parameters<typeof actual.resolveExecutionContextSystem>[0],
     deps: Parameters<typeof actual.resolveExecutionContextSystem>[1] = {}) => actual.resolveExecutionContextSystem(input,{
-      ...deps,pinPolicyEpoch: async () => async () => true,resolveAssistant: async () => input.assistant,
+      ...deps,pinPolicyEpoch: async () => ({isCurrent: async () => true, matches: () => true}),resolveAssistant: async () => input.assistant,
     }) }
 })
 vi.mock('../../workflow/channel-questions.js', () => ({ createChannelQuestionStore: vi.fn() }))

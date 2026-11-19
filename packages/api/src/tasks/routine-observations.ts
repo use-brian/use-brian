@@ -3,8 +3,16 @@
  * [COMP:api/routine-proposals]
  */
 import { createHash } from 'node:crypto'
-import { CONFIGURE_CAPABILITY, provenanceSessionId, ContextScopeAccumulator, normalizeTaskTitle, scopeEvidenceFromRows,
-  type AccessContext, type TaskListRow, type ToolContext } from '@use-brian/core'
+import { CONFIGURE_CAPABILITY } from '@use-brian/core/authorization/types.js'
+import { normalizeTaskTitle } from '@use-brian/core/tasks/admission.js'
+import type { TaskListRow } from '@use-brian/core/tasks/types.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import {
+  ContextScopeAccumulator,
+  scopeEvidenceFromRows
+} from '@use-brian/agent-runtime/security/context-scope.js'
+import { provenanceSessionId } from '@use-brian/agent-runtime/tools/capability-gate.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { createDbCapabilityStore } from '../db/capability-store.js'
 import { getTaskById } from '../db/tasks.js'
 import { listRoutineProposals, prepareNewRoutineProposal, RoutineConfigurationError } from './routine-proposals.js'

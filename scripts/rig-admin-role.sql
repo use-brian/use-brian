@@ -33,7 +33,7 @@ END $$;
 -- fingerprints/constants remain unchanged; currentness is checked by the
 -- original callable after alias narrowing, never during this safety phase.
 DO $fixture_guard_shape$
-DECLARE guard pg_proc;canonical_owner oid;previous_oid oid;source_oid oid;dispatcher_oid oid;
+DECLARE typed_contract boolean:=false;registry_matches boolean;guard pg_proc;canonical_owner oid;previous_oid oid;source_oid oid;dispatcher_oid oid;
  pinned boolean:=false;feedback boolean:=false;amended boolean:=false;history boolean:=false;privacy boolean:=false;
  chat_read_frame boolean:=false;typed_manifest boolean:=false;edge_dispatch boolean:=false;helper pg_proc;frame_helper pg_proc;
  columns_sql text;row_sql text;comparisons text;rows_sql text;catalog_shape jsonb;projection text;alias_oids oid[];
@@ -44,6 +44,116 @@ DECLARE guard pg_proc;canonical_owner oid;previous_oid oid;source_oid oid;dispat
  IF memo#>>'{memoryStatement,workspaceId}' IS DISTINCT FROM w::text THEN RETURN NULL;END IF;
  -- Read every original field under the current actor and original selector.$chat_fields_after$;
 BEGIN
+ -- Canonical installation has one protected executable-contract owner. Read
+ -- its migration-owned records before invoking any installed executable.
+ IF to_regclass('public._migrations') IS NOT NULL AND to_regclass('public.native_turn_contract_helpers') IS NOT NULL THEN
+  IF EXISTS(SELECT FROM public._migrations WHERE name='8269_canonical_conversation_publication.sql')
+   AND to_regprocedure('public.application_memory_statement_helpers_current()') IS NULL THEN
+   SELECT relowner INTO canonical_owner FROM pg_class WHERE oid='public.memories'::regclass;
+   IF NOT EXISTS(SELECT 1 FROM pg_class c WHERE c.oid='public.native_turn_contract_helpers'::regclass
+    AND c.relkind='r' AND c.relpersistence='p' AND c.relrowsecurity AND NOT c.relforcerowsecurity AND c.relowner=canonical_owner
+    AND NOT EXISTS(SELECT 1 FROM aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a WHERE a.grantee<>c.relowner OR a.grantor<>c.relowner)
+    AND NOT EXISTS(SELECT 1 FROM pg_policy WHERE polrelid=c.oid)
+    AND NOT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=c.oid AND attacl IS NOT NULL)
+    AND (SELECT array_agg(attname::text ORDER BY attnum) FROM pg_attribute WHERE attrelid=c.oid AND attnum>0 AND NOT attisdropped)=ARRAY['signature','contract'])
+    OR NOT EXISTS(SELECT FROM public._migrations WHERE name='8155_native_validation_query_plans.sql')
+    OR NOT EXISTS(SELECT FROM public._migrations WHERE name='8168_native_source_edge_dispatch.sql')
+   THEN RAISE EXCEPTION 'Unknown fixture canonical guard: registry or migration phase' USING ERRCODE='55000';END IF;
+   SELECT * INTO guard FROM pg_proc WHERE oid=to_regprocedure('public.native_turn_helpers_current()');
+   typed_contract:=EXISTS(SELECT 1 FROM public._migrations WHERE name='8274_inputtable_executable_contracts.sql');
+   IF typed_contract THEN
+    -- Exact source-owned representation is authenticated before its first cast.
+    IF (
+ SELECT t.typtype='c' AND t.typnamespace='public'::regnamespace
+ AND t.typowner=(SELECT relowner FROM pg_class WHERE oid='public.sessions'::regclass)
+ AND t.typinput='pg_catalog.record_in'::regproc AND t.typoutput='pg_catalog.record_out'::regproc
+ AND t.typreceive='pg_catalog.record_recv'::regproc AND t.typsend='pg_catalog.record_send'::regproc
+ AND t.typmodin=0 AND t.typmodout=0 AND t.typsubscript=0 AND t.typanalyze=0
+ AND t.typelem=0 AND t.typbasetype=0 AND t.typnotnull=false AND t.typisdefined
+ AND t.typcategory='C' AND t.typlen=-1 AND NOT t.typbyval AND t.typalign='d' AND t.typstorage='x'
+ AND t.typcollation=0 AND t.typdefault IS NULL AND t.typdefaultbin IS NULL
+ AND t.typacl IS NOT DISTINCT FROM ARRAY[makeaclitem(t.typowner,t.typowner,'USAGE',false)]
+ AND EXISTS(SELECT 1 FROM pg_attribute registry_column WHERE registry_column.attrelid='public.native_turn_contract_helpers'::regclass
+  AND registry_column.attname='contract' AND registry_column.atttypid=t.oid AND registry_column.attnotnull
+  AND NOT registry_column.attisdropped AND NOT registry_column.atthasdef AND registry_column.attacl IS NULL)
+ AND(SELECT count(*) FROM pg_attribute a WHERE a.attrelid=t.typrelid AND a.attnum>0)=30
+ AND NOT EXISTS(SELECT 1 FROM pg_attribute a FULL JOIN(VALUES
+ (1,'oid','pg_catalog.oid'::regtype::oid,0::oid),
+ (2,'proname','pg_catalog.name'::regtype::oid,'pg_catalog."C"'::regcollation::oid),
+ (3,'pronamespace','pg_catalog.oid'::regtype::oid,0::oid),
+ (4,'proowner','pg_catalog.oid'::regtype::oid,0::oid),
+ (5,'prolang','pg_catalog.oid'::regtype::oid,0::oid),
+ (6,'procost','pg_catalog.float4'::regtype::oid,0::oid),
+ (7,'prorows','pg_catalog.float4'::regtype::oid,0::oid),
+ (8,'provariadic','pg_catalog.oid'::regtype::oid,0::oid),
+ (9,'prosupport','pg_catalog.regproc'::regtype::oid,0::oid),
+ (10,'prokind','pg_catalog."char"'::regtype::oid,0::oid),
+ (11,'prosecdef','pg_catalog.bool'::regtype::oid,0::oid),
+ (12,'proleakproof','pg_catalog.bool'::regtype::oid,0::oid),
+ (13,'proisstrict','pg_catalog.bool'::regtype::oid,0::oid),
+ (14,'proretset','pg_catalog.bool'::regtype::oid,0::oid),
+ (15,'provolatile','pg_catalog."char"'::regtype::oid,0::oid),
+ (16,'proparallel','pg_catalog."char"'::regtype::oid,0::oid),
+ (17,'pronargs','pg_catalog.int2'::regtype::oid,0::oid),
+ (18,'pronargdefaults','pg_catalog.int2'::regtype::oid,0::oid),
+ (19,'prorettype','pg_catalog.oid'::regtype::oid,0::oid),
+ (20,'proargtypes','pg_catalog.oidvector'::regtype::oid,0::oid),
+ (21,'proallargtypes','pg_catalog.oid[]'::regtype::oid,0::oid),
+ (22,'proargmodes','pg_catalog."char"[]'::regtype::oid,0::oid),
+ (23,'proargnames','pg_catalog.text[]'::regtype::oid,'pg_catalog."C"'::regcollation::oid),
+ (24,'proargdefaults','pg_catalog.text'::regtype::oid,'pg_catalog."C"'::regcollation::oid),
+ (25,'protrftypes','pg_catalog.oid[]'::regtype::oid,0::oid),
+ (26,'prosrc','pg_catalog.text'::regtype::oid,'pg_catalog."C"'::regcollation::oid),
+ (27,'probin','pg_catalog.text'::regtype::oid,'pg_catalog."C"'::regcollation::oid),
+ (28,'prosqlbody','pg_catalog.text'::regtype::oid,'pg_catalog."C"'::regcollation::oid),
+ (29,'proconfig','pg_catalog.text[]'::regtype::oid,'pg_catalog."C"'::regcollation::oid),
+ (30,'proacl','pg_catalog.aclitem[]'::regtype::oid,0::oid)
+ ) expected(position,name,type_oid,collation_oid) ON a.attnum=expected.position
+ WHERE a.attrelid=t.typrelid AND a.attnum>0 AND(a.attname::text IS DISTINCT FROM expected.name OR a.atttypid IS DISTINCT FROM expected.type_oid
+ OR a.attcollation IS DISTINCT FROM expected.collation_oid OR a.atttypmod<>-1 OR a.attnotnull OR a.attisdropped
+ OR a.atthasdef OR a.atthasmissing OR a.attgenerated<>'' OR a.attidentity<>'' OR a.attacl IS NOT NULL))
+ FROM pg_type t WHERE t.oid='public.native_executable_contract_v1'::regtype
+) IS NOT TRUE THEN RAISE EXCEPTION 'Unknown fixture canonical guard: executable record shape' USING ERRCODE='55000';END IF;
+    SELECT EXISTS(SELECT 1 FROM public.native_turn_contract_helpers h WHERE h.signature='native_turn_helpers_current()' AND ROW(guard.oid,guard.proname,guard.pronamespace,guard.proowner,guard.prolang,guard.procost,guard.prorows,guard.provariadic,guard.prosupport,guard.prokind,guard.prosecdef,guard.proleakproof,guard.proisstrict,guard.proretset,guard.provolatile,guard.proparallel,guard.pronargs,guard.pronargdefaults,guard.prorettype,guard.proargtypes,guard.proallargtypes,guard.proargmodes,guard.proargnames,guard.proargdefaults::text,guard.protrftypes,guard.prosrc,guard.probin,guard.prosqlbody::text,guard.proconfig,guard.proacl)::public.native_executable_contract_v1 IS NOT DISTINCT FROM h.contract) INTO registry_matches;
+   ELSE
+    -- Historical migration prefixes use only their original stored type. An
+    -- installed8274 ledger never falls back when its current type is missing.
+    SELECT EXISTS(SELECT 1 FROM public.native_turn_contract_helpers h WHERE h.signature='native_turn_helpers_current()' AND h.contract IS NOT DISTINCT FROM guard) INTO registry_matches;
+   END IF;
+   IF guard.oid IS NULL OR guard.proowner<>canonical_owner OR guard.pronamespace<>'public'::regnamespace
+    OR guard.prolang<>(SELECT oid FROM pg_language WHERE lanname=CASE WHEN typed_contract THEN 'plpgsql' ELSE 'sql' END) OR NOT guard.prosecdef OR guard.provolatile<>'s'
+    OR guard.proconfig IS DISTINCT FROM ARRAY['search_path=pg_catalog, public, pg_temp']::text[]
+    OR NOT registry_matches
+   THEN RAISE EXCEPTION 'Unknown fixture canonical guard: executable root' USING ERRCODE='55000';END IF;
+   SELECT 'ARRAY['||string_agg(quote_literal(signature),',' ORDER BY signature)||']::text[]' INTO expected_body FROM public.native_turn_contract_helpers;
+   IF strpos(guard.prosrc,'array_agg(h.signature ORDER BY h.signature)='||expected_body)=0
+    OR NOT EXISTS(SELECT 1 FROM public.native_turn_contract_helpers WHERE signature='native_turn_publication_contract()')
+   THEN RAISE EXCEPTION 'Unknown fixture canonical guard: roster' USING ERRCODE='55000';END IF;
+   FOR helper IN SELECT p.* FROM public.native_turn_contract_helpers h LEFT JOIN pg_proc p ON p.oid=(h.contract).oid LOOP
+    IF helper.oid IS NULL THEN RAISE EXCEPTION 'Unknown fixture canonical guard: missing executable' USING ERRCODE='55000';END IF;
+    -- The same narrow aliases accepted by the historical transition may be
+    -- removed. No current function body or contract record is rewritten.
+    IF helper.oid::regprocedure::text=ANY(ARRAY[
+     'read_admitted_native_scope_snapshot(uuid,text,uuid)','read_entity_derivation_source(uuid,text,uuid)',
+     'read_admitted_native_scope_snapshot_before_knowledge_versions(uuid,text,uuid)','read_entity_derivation_source_before_memory_successor(uuid,text,uuid)',
+     'read_entity_derivation_source_before_persistent_context(uuid,text,uuid)','read_entity_derivation_source_before_knowledge_versions(uuid,text,uuid)',
+     'read_admitted_native_scope_snapshot_before_public_share(uuid,text,uuid)','read_entity_derivation_source_before_knowledge_source_parent(uuid,text,uuid)',
+     'read_admitted_native_scope_snapshot_before_persistent_context(uuid,text,uuid)','read_entity_derivation_source_before_engineering_archive(uuid,text,uuid)']) THEN
+     SELECT array_agg(acl ORDER BY position) INTO helper.proacl FROM unnest(helper.proacl) WITH ORDINALITY v(acl,position)
+      WHERE NOT EXISTS(SELECT 1 FROM aclexplode(ARRAY[v.acl]) a JOIN pg_roles r ON r.oid=a.grantee
+       WHERE r.rolname IN('assurance_app','admin_fixture_app') AND a.grantor=canonical_owner AND a.privilege_type='EXECUTE' AND NOT a.is_grantable);
+    END IF;
+    IF typed_contract THEN
+     SELECT EXISTS(SELECT 1 FROM public.native_turn_contract_helpers h WHERE h.signature=helper.oid::regprocedure::text AND ROW(helper.oid,helper.proname,helper.pronamespace,helper.proowner,helper.prolang,helper.procost,helper.prorows,helper.provariadic,helper.prosupport,helper.prokind,helper.prosecdef,helper.proleakproof,helper.proisstrict,helper.proretset,helper.provolatile,helper.proparallel,helper.pronargs,helper.pronargdefaults,helper.prorettype,helper.proargtypes,helper.proallargtypes,helper.proargmodes,helper.proargnames,helper.proargdefaults::text,helper.protrftypes,helper.prosrc,helper.probin,helper.prosqlbody::text,helper.proconfig,helper.proacl)::public.native_executable_contract_v1 IS NOT DISTINCT FROM h.contract) INTO registry_matches;
+    ELSE
+     SELECT EXISTS(SELECT 1 FROM public.native_turn_contract_helpers h WHERE h.signature=helper.oid::regprocedure::text AND h.contract IS NOT DISTINCT FROM helper) INTO registry_matches;
+    END IF;
+    IF NOT registry_matches
+    THEN RAISE EXCEPTION 'Unknown fixture canonical guard: executable contract %',helper.oid::regprocedure USING ERRCODE='55000';END IF;
+   END LOOP;
+   RETURN;
+  END IF;
+ END IF;
  SELECT * INTO guard FROM pg_proc WHERE oid=to_regprocedure('public.application_memory_statement_helpers_current()');
  IF to_regclass('public._migrations') IS NOT NULL THEN
   pinned:=EXISTS(SELECT FROM public._migrations WHERE name='8111_native_memory_statement_visitor.sql');
@@ -461,10 +571,11 @@ END $fixture_guard_shape$;
 -- phase: transition
 DO $transition$
 DECLARE expected record;p pg_proc;before_properties jsonb;alias_name text;entry record;expected_app boolean;
- pinned boolean;amended boolean;feedback boolean;retired_legacy boolean;retired_source boolean;chat_read_frame boolean;
+ pinned boolean;amended boolean;feedback boolean;retired_legacy boolean;retired_source boolean;chat_read_frame boolean;canonical boolean;
 BEGIN
  IF to_regclass('public._migrations') IS NULL THEN RETURN;END IF;
  IF NOT EXISTS(SELECT FROM public._migrations) THEN RETURN;END IF;
+ canonical:=EXISTS(SELECT FROM public._migrations WHERE name='8269_canonical_conversation_publication.sql') AND to_regprocedure('public.application_memory_statement_helpers_current()') IS NULL;
  pinned:=EXISTS(SELECT FROM public._migrations WHERE name='8111_native_memory_statement_visitor.sql');
  amended:=EXISTS(SELECT FROM public._migrations WHERE name='8113_native_memory_statement_helper_projection_guard.sql');
  feedback:=EXISTS(SELECT FROM public._migrations WHERE name='8112_native_feedback_outcome_projection.sql');
@@ -472,7 +583,7 @@ BEGIN
  retired_source:=EXISTS(SELECT FROM public._migrations WHERE name='8124_application_source_host_retirement.sql');
  chat_read_frame:=EXISTS(SELECT FROM public._migrations WHERE name='8148_native_chat_read_frame.sql');
  IF feedback AND NOT amended THEN RAISE EXCEPTION 'Unsupported 8112-only fixture phase; preserve stopped fixture';END IF;
- IF pinned IS DISTINCT FROM (to_regprocedure('public.application_memory_statement_helpers_current()') IS NOT NULL)
+ IF pinned IS DISTINCT FROM (canonical OR to_regprocedure('public.application_memory_statement_helpers_current()') IS NOT NULL)
   OR amended AND NOT pinned OR amended AND NOT feedback OR feedback AND NOT pinned
   OR retired_legacy AND NOT amended OR retired_source AND NOT retired_legacy
   OR chat_read_frame AND(NOT EXISTS(SELECT FROM public._migrations WHERE name='8128_native_memory_history_admission.sql')
@@ -554,7 +665,9 @@ BEGIN
   IF (SELECT to_jsonb(current_row)-'proacl' FROM pg_proc current_row WHERE oid=p.oid) IS DISTINCT FROM before_properties THEN
    RAISE EXCEPTION 'Fixture cleanup changed function properties: %',expected.signature;END IF;
  END LOOP;
- IF pinned THEN
+ IF canonical THEN
+  IF public.native_turn_helpers_current() IS DISTINCT FROM true THEN RAISE EXCEPTION 'Canonical executable contract unavailable after transition';END IF;
+ ELSIF pinned THEN
   IF public.application_memory_statement_helpers_current() IS DISTINCT FROM true THEN RAISE EXCEPTION 'Original Memory helper guard not restored; cleanup rolled back';END IF;
  END IF;
 END $transition$;
@@ -562,7 +675,9 @@ END $transition$;
 DO $$ BEGIN
  IF to_regclass('public._migrations') IS NULL THEN RAISE EXCEPTION 'Cannot activate runtime before successful migration prefix';END IF;
  IF NOT EXISTS(SELECT FROM public._migrations) THEN RAISE EXCEPTION 'Cannot activate runtime before successful migration prefix';END IF;
- IF to_regprocedure('public.application_memory_statement_helpers_current()') IS NOT NULL THEN
+ IF EXISTS(SELECT FROM public._migrations WHERE name='8269_canonical_conversation_publication.sql') AND to_regprocedure('public.application_memory_statement_helpers_current()') IS NULL THEN
+  IF public.native_turn_helpers_current() IS DISTINCT FROM true THEN RAISE EXCEPTION 'Canonical executable contract unavailable';END IF;
+ ELSIF to_regprocedure('public.application_memory_statement_helpers_current()') IS NOT NULL THEN
   IF public.application_memory_statement_helpers_current() IS DISTINCT FROM true THEN RAISE EXCEPTION 'Canonical Memory helper guard unavailable';END IF;
  END IF;
  IF EXISTS(SELECT FROM public._migrations WHERE name='8148_native_chat_read_frame.sql') THEN
@@ -588,7 +703,9 @@ DO $$ BEGIN
  IF to_regclass('public._migrations') IS NULL THEN RAISE EXCEPTION 'Runtime migration ledger missing';END IF;
  IF has_table_privilege('app_user','public._migrations','SELECT,INSERT,UPDATE,DELETE') THEN
   RAISE EXCEPTION 'Runtime migration ledger must remain private';END IF;
- IF to_regprocedure('public.application_memory_statement_helpers_current()') IS NOT NULL THEN
+ IF EXISTS(SELECT FROM public._migrations WHERE name='8269_canonical_conversation_publication.sql') AND to_regprocedure('public.application_memory_statement_helpers_current()') IS NULL THEN
+  IF public.native_turn_helpers_current() IS DISTINCT FROM true THEN RAISE EXCEPTION 'Canonical executable contract unavailable';END IF;
+ ELSIF to_regprocedure('public.application_memory_statement_helpers_current()') IS NOT NULL THEN
   IF public.application_memory_statement_helpers_current() IS DISTINCT FROM true THEN RAISE EXCEPTION 'Canonical Memory helper guard unavailable';END IF;
  END IF;
  IF EXISTS(SELECT FROM public._migrations WHERE name='8148_native_chat_read_frame.sql') THEN

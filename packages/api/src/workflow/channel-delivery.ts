@@ -27,7 +27,11 @@
 
 import { createWorkflowPublicationAuthorizer, createWorkflowPublicationDispatcher, type AuthorizeWorkflowPublication, type DispatchWorkflowPublication } from './publication-consent.js'
 import { createChannelQuestionStore, workflowQuestionActions, workflowQuestionReplyHint, type ChannelQuestionStore } from './channel-questions.js'
-import { formatAssistantQuestion, type DeliverToChannel, type DeliveryOutcome } from '@use-brian/core'
+import type { DeliverToChannel, DeliveryOutcome } from '@use-brian/core/workflow/executor.js'
+import { formatAssistantQuestion } from '@use-brian/agent-runtime/tools/base/ask-question.js'
+import { resolveWriteScope, type ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
+import { DerivedScopeError } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { maxSensitivity, type Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { sanitizeDeliveryText } from '@use-brian/shared'
 import {
   createSlackAdapter,
@@ -42,16 +46,21 @@ import {
 } from '@use-brian/channels'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import type { CustomChannelStore } from '../db/custom-channel-store.js'
-import { findOrCreateSession, addSessionMessage, setSessionMessageChannelId } from '../db/sessions.js'
-import { findRoomForDelivery } from '../channel-room/room.js'
-import { query } from './../db/client.js'
+import { findOrCreateSession, addSessionMessage, setSessionMessageChannelId, type Session } from '../db/sessions.js'
+import { findRoomDeliveryAddress, findRoomForDelivery } from '../channel-room/room.js'
+import { getPool, query } from '../db/client.js'
+import { conversationAnchorWriteAdmissionActive } from '../db/conversation-visibility.js'
+import { sessionKindSql } from '../session-kind.js'
 import { whatsappCloudUserAllowed } from '../whatsapp/cloud-access.js'
 import { createFeishuApi } from '../feishu/client.js'
 import type { FeishuCredentials } from '../db/channel-integrations.js'
 import {
   createDeliveryAudienceAuthorizer,
+  resolveGroupAudienceSystem,
   type AuthorizeDeliveryAudience,
+  type DeliveryAudienceInput,
 } from '../context-scope/delivery-authority.js'
+import type { PoolClient } from 'pg'
 
 export type WorkflowChannelDeliveryOptions = {
   questionStore?: ChannelQuestionStore
@@ -77,6 +86,7 @@ export type WorkflowChannelDeliveryOptions = {
 }
 
 type SlackDeliveryReceipt = NonNullable<Extract<DeliveryOutcome, { status: 'failed' }>['receipt']>
+class DeliveryAudienceWithdrawn extends Error {}
 
 // Narrow, known no-effect rejections. Unknown/provider-internal/transport errors
 // remain uncertain, even when they happen on the first chunk.
@@ -129,14 +139,101 @@ export function createWorkflowChannelDelivery(
  */
 async function deliverySession(params: {
   workspaceId: string; assistantId: string; userId: string; channelType: string; channelId: string
-}): Promise<{ id: string }> {
-  const room = await findRoomForDelivery(params)
+}): Promise<Pick<Session,'id'|'anchorKind'>> {
+  const room = conversationAnchorWriteAdmissionActive() ? await findRoomDeliveryAddress(params) : await findRoomForDelivery(params)
   return room ?? findOrCreateSession({
     assistantId: params.assistantId,
     userId: params.userId,
     channelType: params.channelType,
     channelId: params.channelId,
   })
+}
+
+type DeliveryEnvelope = {
+  version: string
+  visibility: 'workspace' | 'configured_private' | 'private_by_kind'
+  cap: Sensitivity
+  compartments: string[]
+  projects: string[]
+}
+
+async function readDeliveryEnvelope(input: DeliveryAudienceInput, sessionId: string,
+  write?: { client:PoolClient; shared:boolean }): Promise<DeliveryEnvelope | undefined> {
+  const client=write?.client
+  if (client && !write?.shared) {
+    const pin = await client.query<{ allowed:boolean }>('SELECT public.lock_conversation_member_read($1,$2,$3) AS allowed',
+      [input.workspaceId,sessionId,input.userId])
+    if (pin.rows[0]?.allowed!==true) return undefined
+  }
+  const statement = `SELECT e.version::text AS version,e.visibility,e.cap,e.compartments,
+    public.conversation_hard_project_ids(e.compartments) AS projects
+    FROM public.conversation_envelopes e JOIN public.sessions s ON s.id=e.session_id
+    JOIN public.assistants sender ON sender.id=$3 AND sender.workspace_id=e.workspace_id
+    ${write?.shared ? 'JOIN public.workspace_members actor ON actor.workspace_id=e.workspace_id AND actor.user_id=$4' : ''}
+    WHERE e.session_id=$1 AND e.workspace_id=$2 AND s.channel_type=$5 AND s.channel_id=$6
+      AND (s.anchor_kind='channel' AND s.archived_at IS NULL AND e.visibility='workspace'
+       AND (s.provider_context_identity IS NULL OR s.provider_context_identity->>'integrationId'=$7)
+       OR s.anchor_kind='none' AND s.assistant_id=$3 AND e.starter_user_id=$4 AND e.visibility<>'workspace'
+       AND NOT EXISTS(SELECT 1 FROM public.sessions room WHERE room.workspace_id=e.workspace_id
+        AND room.channel_type=$5 AND room.channel_id=$6 AND ${sessionKindSql.channelRoomDeliveryAddress('room')}))
+      ${!client ? 'AND public.conversation_member_read_allowed(e.workspace_id,e.session_id,$4)'
+        : write?.shared ? "AND s.anchor_kind='channel' FOR SHARE OF s,e,actor" : ''}`
+  const args = [sessionId,input.workspaceId,input.assistantId,input.userId,input.channelType,input.channelId,input.channelIntegrationId ?? null]
+  const result = client ? await client.query<DeliveryEnvelope>(statement,args) : await query<DeliveryEnvelope>(statement,args)
+  return result.rows[0]
+}
+
+async function persistDeliveryMessage(input: DeliveryAudienceInput, session: Pick<Session,'id'|'anchorKind'>, text: string, evidence: ScopeEvidence | undefined) {
+  const sessionId=session.id
+  const message = { sessionId,role:'assistant',content:[{type:'text',text}],senderAssistantId:input.assistantId }
+  const derivation = evidence?.sources?.length ? { producer:'delivery:workflow',sources:evidence.sources } : undefined
+  if (!conversationAnchorWriteAdmissionActive()) return { message:await addSessionMessage({...message,derivation}),version:null }
+  if (!evidence) return null
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+    await client.query('SELECT id FROM public.workspaces WHERE id=$1 FOR UPDATE',[input.workspaceId])
+    const shared=session.anchorKind==='channel'
+    const envelope = await readDeliveryEnvelope(input,sessionId,{client,shared})
+    if (!envelope) { await client.query('ROLLBACK'); return null }
+    // The destination pin holds a SHARE lock for its authority proof. Serialize
+    // actual sequence allocation with other append owners before writing.
+    await client.query('SELECT id FROM public.sessions WHERE id=$1 FOR UPDATE',[sessionId])
+    const floor = resolveWriteScope({evidence})
+    if (maxSensitivity(floor.sensitivity,envelope.cap)!==envelope.cap
+      || floor.compartments.some(label=>!envelope.compartments.includes(label))
+      || floor.projectIds.some(project=>!envelope.projects.includes(project))) {
+      await client.query('ROLLBACK'); return null
+    }
+    if (shared) {
+      if (envelope.projects.length) {
+        await client.query(`SELECT project_id FROM public.project_shared_scopes WHERE workspace_id=$1
+          AND project_id=ANY($2::uuid[]) ORDER BY project_id FOR SHARE`,[input.workspaceId,envelope.projects])
+        await client.query(`SELECT project_id FROM public.project_shared_members WHERE user_id=$1
+          AND project_id=ANY($2::uuid[]) ORDER BY project_id FOR SHARE`,[input.userId,envelope.projects])
+      }
+      const current=(await client.query<{allowed:boolean}>('SELECT public.conversation_member_read_allowed($1,$2,$3) AS allowed',
+        [input.workspaceId,sessionId,input.userId])).rows[0]?.allowed
+      const audience=await resolveGroupAudienceSystem(input,client)
+      if (!current || !audience.allowed || maxSensitivity(floor.sensitivity,audience.ceiling.clearance)!==audience.ceiling.clearance
+        || audience.ceiling.compartments!==null && floor.compartments.some(label=>!audience.ceiling.compartments?.includes(label))
+        || audience.ceiling.projectIds!==null && floor.projectIds.some(project=>!audience.ceiling.projectIds?.includes(project))) {
+        await client.query('ROLLBACK'); return null
+      }
+    }
+    const scope = { workspaceId:input.workspaceId,userId:envelope.visibility==='workspace' ? null : input.userId,
+      assistantId:null,...floor }
+    const saved = await addSessionMessage(derivation ? {...message,derivation,derivationTarget:scope} : {...message,scope},client)
+    if ((await client.query('SELECT 1 FROM public.conversation_message_quarantine WHERE message_id=$1',[saved.id])).rows.length) {
+      await client.query('ROLLBACK'); return null
+    }
+    await client.query('COMMIT')
+    return { message:saved,version:envelope.version }
+  } catch(error) {
+    await client.query('ROLLBACK')
+    if (error instanceof DerivedScopeError || (error as {code?:string}).code==='42501') return null
+    throw error
+  } finally { client.release() }
 }
 
 function createDelivery(
@@ -167,9 +264,6 @@ function createDelivery(
     // Keep every option in the portable fallback, including on non-interactive channels.
     const deliverable = question ? formatAssistantQuestion(question) : sanitizeDeliveryText(text)
     if (!deliverable) return { status: 'skipped', channelType, reason: 'empty_text' }
-    const messageDerivation = scopeEvidence?.sources?.length
-      ? { producer: 'delivery:workflow', sources: scopeEvidence.sources }
-      : undefined
 
     // Web is not a delivery target — drop it (see the file header). The web UI
     // is a pull surface; persisting here would re-introduce the scheduled-job
@@ -195,6 +289,27 @@ function createDelivery(
     }
 
     let publicationApprovalId: string | undefined
+    const authorizeAudience = (input: DeliveryAudienceInput) => (options.authorizeDeliveryAudience
+      ?? createDeliveryAudienceAuthorizer({ integrationStore: options.integrationStore }))(input)
+    const audienceInput: DeliveryAudienceInput = { workspaceId, assistantId, userId, channelType,
+      channelId:targetChannelId,channelIntegrationId,recipientType:replyToTrigger?.recipientType,scopeEvidence }
+    const refused = { status:'skipped',channelType,reason:'delivery_audience_unverified' } as const
+    let admittedEvidence = scopeEvidence
+    let addressed: { sessionId:string; version:string } | undefined
+    const append = async () => {
+      const session = await deliverySession(audienceInput)
+      const stored = await persistDeliveryMessage(audienceInput,session,deliverable,admittedEvidence)
+      if (!stored) return false
+      onPersisted(stored.message.id)
+      if (stored.version!==null) addressed = { sessionId:session.id,version:stored.version }
+      return true
+    }
+    const dispatchAllowed = async () => {
+      if (!addressed) return true // predecessor or separately consented external publication
+      const current = await authorizeAudience(audienceInput)
+      if (!current.allowed) return false
+      return (await readDeliveryEnvelope(audienceInput,addressed.sessionId))?.version===addressed.version
+    }
     const authorizePublication: AuthorizeWorkflowPublication = options.authorizeWorkflowPublication
       ?? (input => createWorkflowPublicationAuthorizer({ integrationStore: options.integrationStore })(input))
     const publicationInput = publication && !question && !questionResponse && !replyToTrigger
@@ -209,18 +324,7 @@ function createDelivery(
     // explicit empty/public snapshot. Undefined remains a compatibility path
     // for interactive callers that R3d will bind to their live turn.
     if (scopeEvidence !== undefined) {
-      const authorizeAudience = options.authorizeDeliveryAudience
-        ?? createDeliveryAudienceAuthorizer({ integrationStore: options.integrationStore })
-      const audience = await authorizeAudience({
-        workspaceId,
-        assistantId,
-        userId,
-        channelType,
-        channelId: targetChannelId,
-        channelIntegrationId,
-        recipientType: replyToTrigger?.recipientType,
-        scopeEvidence,
-      })
+      const audience = await authorizeAudience(audienceInput)
       if (!audience.allowed) {
         const consent = publicationInput ? await authorizePublication(publicationInput) : null
         if (consent?.allowed) publicationApprovalId = consent.approvalId
@@ -228,7 +332,7 @@ function createDelivery(
           status: 'skipped', channelType, reason: 'delivery_audience_unverified',
           ...(audience.detail ? { detail: audience.detail } : {}),
         }
-      }
+      } else admittedEvidence = audience.evidence ?? scopeEvidence
     }
 
     // Bind every integrated delivery through the same durable capability store.
@@ -293,18 +397,9 @@ function createDelivery(
         return { status: 'skipped', channelType, reason: 'access_denied' }
       }
 
-      const session = await deliverySession({
-        workspaceId, assistantId, userId, channelType, channelId: targetChannelId,
-      })
-      const persisted = await addSessionMessage({
-        sessionId: session.id,
-        role: 'assistant',
-        content: [{ type: 'text', text: deliverable }],
-        senderAssistantId: assistantId,
-        derivation: messageDerivation,
-      })
-      onPersisted(persisted.id)
+      if (!await append()) return refused
       const prepared = await prepareQuestion(integration.id)
+      if (!await dispatchAllowed()) return refused
       const messageId = await createWhatsAppCloudAdapter({
         accessToken: credentials.access_token,
         phoneNumberId: credentials.phone_number_id,
@@ -327,19 +422,7 @@ function createDelivery(
     // sources cannot certify one derived session row; do not drop their lineage
     // to manufacture a copy. The workflow retains the result and original
     // evidence, plus an approval receipt on successful publication.
-    if (!publicationApprovalId) {
-      const session = await deliverySession({
-        workspaceId, assistantId, userId, channelType, channelId: targetChannelId,
-      })
-      const persisted = await addSessionMessage({
-        sessionId: session.id,
-        role: 'assistant',
-        content: [{ type: 'text', text: deliverable }],
-        senderAssistantId: assistantId,
-        derivation: messageDerivation,
-      })
-      onPersisted(persisted.id)
-    }
+    if (!publicationApprovalId && !await append()) return refused
 
     if (channelType === 'telegram') {
       const tokens: Array<{ token: string; integrationId?: string; generation?: number }> = []
@@ -385,7 +468,10 @@ function createDelivery(
             const result = await dispatch(publicationInput, publicationApprovalId, send)
             if (!result.allowed) return { status: 'skipped', channelType, reason: 'delivery_audience_unverified' }
             tgMessageId = result.messageId
-          } else tgMessageId = await send()
+          } else {
+            if (!await dispatchAllowed()) return refused
+            tgMessageId = await send()
+          }
           await attachQuestion(questionToken, tgMessageId)
           return { status: 'delivered', channelType, channelId, messageId: tgMessageId || undefined,
             ...(publicationApprovalId ? { publicationApprovalId } : {}) }
@@ -419,6 +505,9 @@ function createDelivery(
         const adapter = createSlackAdapter({
           botToken: (integ.credentials as { bot_token: string }).bot_token,
           botUserId: integ.botUserId ?? undefined,
+          beforePostMessage: addressed ? async () => {
+            if (!await dispatchAllowed()) throw new DeliveryAudienceWithdrawn()
+          } : undefined,
           onOutboundAudit: async event => {
             if (event.kind !== 'post_message' || event.channel !== channelId) return
             attemptedMessages++
@@ -430,6 +519,7 @@ function createDelivery(
             // Deliberately do not retain event.text, event.error or credentials.
           },
         })
+        if (!await dispatchAllowed()) return refused
         sendStarted = true
         const slackTs = await adapter.sendMessage(
           channelId,
@@ -443,12 +533,14 @@ function createDelivery(
         await attachQuestion(prepared.token, slackTs)
         return { status: 'delivered', channelType, channelId, messageId: slackTs, receipt: receipt('complete') }
       } catch (err) {
+        const withdrawn = err instanceof DeliveryAudienceWithdrawn
+        if (withdrawn && attemptedMessages===0) return refused
         const rejected = isSlackApiError(err) && err.method === 'chat.postMessage'
           && err.httpStatus === undefined && SLACK_NO_EFFECT_REJECTIONS.has(err.code)
           && failedCalls === 1 && !missingAcknowledgement
         const effect = sendCompleted ? 'complete'
           : !sendStarted || rejected && acknowledgedCalls === 0 && attemptedMessages === 1 ? 'none'
-            : rejected && acknowledgedCalls > 0 ? 'partial' : 'unknown'
+            : (rejected || withdrawn && !missingAcknowledgement) && acknowledgedCalls > 0 ? 'partial' : 'unknown'
         const saved = receipt(effect)
         return { status: 'failed', channelType, receipt: saved, error: slackDeliveryFailure(err, saved, threadRef) }
       }
@@ -477,6 +569,7 @@ function createDelivery(
         config: { replyInThread: integ.config?.replyInThread ?? true },
       })
       const prepared = await prepareQuestion(integ.id)
+      if (!await dispatchAllowed()) return refused
       const messageId = await adapter.sendMessage(
         channelId,
         { text: prepared.text, format: 'markdown', actions: prepared.actions },
@@ -500,6 +593,7 @@ function createDelivery(
       const serviceUrl = integ.config?.msteamsServiceUrl
       if (!serviceUrl) return { status: 'skipped', channelType, reason: 'no_recipient' }
       const prepared = await prepareQuestion(integ.id)
+      if (!await dispatchAllowed()) return refused
       const msgId = await createMsTeamsAdapter({
         appId: creds.app_id,
         appPassword: creds.app_password,
@@ -532,6 +626,7 @@ function createDelivery(
       const workspaceChannelId = integ.channelId
       const enqueue = options.customChannelStore
       const prepared = await prepareQuestion(integ.id)
+      if (!await dispatchAllowed()) return refused
       const outboxId = await createCustomAdapter({
         enqueue: (item) => enqueue.enqueue(workspaceChannelId, { type: item.type, peerId: item.peerId, payload: item.payload }),
       }).sendMessage(channelId, {
@@ -557,6 +652,7 @@ function createDelivery(
       // Explicit integration is pinned: never silently deliver through system.
       if ((question || channelIntegrationId) && (!integ || (integ.credentials as { provider?: string }).provider === 'cloud_api' || !integ.channelId)) return { status: 'skipped', channelType, reason: 'no_integration' }
       const prepared = integ ? await prepareQuestion(integ.id) : { text: deliverable, token: undefined, actions }
+      if (!await dispatchAllowed()) return refused
       const messageId = await createWhatsAppAdapter({
         connectorUrl: options.waConnectorUrl,
         connectorSecret: options.waConnectorSecret,

@@ -7,9 +7,22 @@ import { isDeepStrictEqual } from 'node:util'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import {
-  ContextScopeAccumulator, WorkflowDefinitionSchema, WorkflowTriggerSchema, parseAuthoringAuthority, pinAccessCeiling, routineConfigurationIssues,
-  routineConfigurationShape, type AuthoringAuthority, type ScopeEvidence,
-} from '@use-brian/core'
+  routineConfigurationIssues,
+  routineConfigurationShape,
+} from '@use-brian/core/tasks/routine-intake.js'
+import {
+  WorkflowDefinitionSchema,
+  WorkflowTriggerSchema,
+} from '@use-brian/core/workflow/schemas.js'
+import {
+  parseAuthoringAuthority,
+  pinAccessCeiling,
+  type AuthoringAuthority,
+} from '@use-brian/agent-runtime/security/access-ceiling.js'
+import {
+  ContextScopeAccumulator,
+  type ScopeEvidence,
+} from '@use-brian/agent-runtime/security/context-scope.js'
 import { applyRLSGucs, getPool, queryWithRLS, rollbackAndRelease } from '../db/client.js'
 import { requireRoutineSchema, routineConfigurationDigest, type RoutineConfiguration } from '../db/routine-intake-store.js'
 import { admitOperationalAuthoring, lockOperationalPolicy } from '../workspace-access/operational-admission.js'

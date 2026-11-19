@@ -1,8 +1,17 @@
-import { deriveResourceScope, resourceScopeKey, type AccessContext, type DerivedWriteEvidence, type ScopeEvidence, type ScopeSource } from '@use-brian/core'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import type { ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
+import { DerivedScopeError, deriveResourceScope, resourceScopeKey, type DerivedWriteEvidence, type ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
+import { currentApplicationReadTransaction, getApplicationExecutionBinding } from '../application-platform/execution-context.js'
+import { captureSessionAuthority } from '../context-scope/authority-lease.js'
+import { sessionAuthorityFactsParameters } from '../context-scope/session-authority-facts.js'
 import { getPool, query } from './client.js'
-import { createMemory, getSoul } from './memories.js'
+import { conversationReadersActive } from './conversation-visibility.js'
+import { createMemory, legacySoulContentSql, preparePromptIdentityRead } from './memories.js'
 import { beginBrainAdmission } from '../workspace-access/brain-create-admission.js'
 import { buildMemoryAccessPredicate } from './memory-access-predicate.js'
+import { preferredDeliveryChannelSql } from './sessions.js'
+import { providerChannelIdFromSession } from './session-channel-id.js'
 
 /** Source-validated transaction; model-provided slot keys never confer authority. */
 export async function writeScopedSummary(params: {
@@ -66,36 +75,98 @@ export async function writeScopedSummary(params: {
   finally { client.release() }
 }
 
-/** Full evidence accompanies text, so prompt assembly cannot lose its floor. */
-export async function getSoulContext(
-  access: AccessContext,
-  appId?: string,
-): Promise<{ content: string | null; evidence: ScopeEvidence }> {
-  const ap = buildMemoryAccessPredicate(access,{ alias: 'm',startIdx: 5 })
-  const result = await query<ScopeSource & { content: string }>(
-    `SELECT m.detail AS content,m.id AS "resourceId",'memory' AS "resourceKind",m.scope_version::text AS version,
-       m.workspace_id AS "workspaceId",m.user_id AS "userId",m.assistant_id AS "assistantId",
-       m.sensitivity,m.compartments,m.project_ids AS "projectIds"
-     FROM memory_summary_slots s JOIN memories m ON m.id=s.memory_id AND m.workspace_id=s.workspace_id
-     WHERE s.workspace_id=$1 AND s.owner_user_id=$2 AND s.owner_assistant_id=$3 AND s.kind='soul'
-       AND s.slot_key=ANY($4::text[]) AND m.valid_to IS NULL AND m.retracted_at IS NULL AND ${ap.sql}
-     ORDER BY s.slot_key,s.scope_key`,
-    [access.workspaceId,access.userId,access.assistantId,appId ? ['shared',`app:${appId}`] : ['shared'],...ap.params],
-  )
-  const sources = result.rows.map(({ content: _content,...source }) => source)
-  if (sources.length) {
-    const floor = deriveResourceScope({ producer: 'soul-context',sources })
-    return { content: result.rows.map(row => row.content).filter(Boolean).join('\n\n') || null,
-      evidence: { sensitivity: floor.sensitivity,compartments: floor.compartments,projectIds: floor.projectIds,sources } }
+type SoulContextRow = { scoped: Array<ScopeSource & { content: string }> | null; legacyContent: string | null }
+
+function soulContextSelection(access: AccessContext, appId?: string) {
+  const ap = buildMemoryAccessPredicate(access,{ alias: 'm',startIdx: 6 })
+  return {sql:`WITH scoped AS (
+       SELECT m.detail AS content,m.id AS "resourceId",'memory' AS "resourceKind",m.scope_version::text AS version,
+         m.workspace_id AS "workspaceId",m.user_id AS "userId",m.assistant_id AS "assistantId",
+         m.sensitivity,m.compartments,m.project_ids AS "projectIds",s.slot_key,s.scope_key
+       FROM memory_summary_slots s JOIN memories m ON m.id=s.memory_id AND m.workspace_id=s.workspace_id
+       WHERE s.workspace_id=$4 AND s.owner_user_id=$2 AND s.owner_assistant_id=$1 AND s.kind='soul'
+         AND s.slot_key=ANY($5::text[]) AND m.valid_to IS NULL AND m.retracted_at IS NULL AND ${ap.sql}
+     ), visible AS (
+       SELECT jsonb_agg(to_jsonb(scoped)-'slot_key'-'scope_key' ORDER BY slot_key,scope_key) AS sources FROM scoped
+     )
+     SELECT sources AS scoped,
+       CASE WHEN sources IS NOT NULL THEN NULL
+         WHEN EXISTS(SELECT 1 FROM memory_summary_slots s JOIN memories m ON m.id=s.memory_id
+           WHERE s.workspace_id=$4 AND s.owner_user_id=$2 AND s.owner_assistant_id=$1
+             AND s.kind='soul' AND m.learning IS NOT NULL) THEN NULL
+         WHEN EXISTS(SELECT 1 FROM workspace_access_policies WHERE workspace_id=$4 AND classification_mode<>'legacy') THEN NULL
+         ELSE ${legacySoulContentSql}
+       END AS "legacyContent"
+     FROM visible`,
+    params:[access.assistantId,access.userId,appId || null,access.workspaceId,
+      appId ? ['shared',`app:${appId}`] : ['shared'],...ap.params],
   }
-  // An expired/held semantic summary must not fall back to an older unrestricted SOUL.
-  const learned = await query<{ present: boolean }>(`SELECT EXISTS(SELECT 1 FROM memory_summary_slots s
-    JOIN memories m ON m.id=s.memory_id WHERE s.workspace_id=$1 AND s.owner_user_id=$2 AND s.owner_assistant_id=$3
-    AND s.kind='soul' AND m.learning IS NOT NULL) AS present`,[access.workspaceId,access.userId,access.assistantId])
-  if (learned.rows[0]?.present) return { content: null, evidence: {} }
-  // Legacy data retains its old behavior until explicitly reviewed. It does
-  // not become certified General simply because the new table has no row.
-  const policy = await query<{ mode: string }>('SELECT classification_mode AS mode FROM workspace_access_policies WHERE workspace_id=$1',[access.workspaceId])
-  if (policy.rows[0]?.mode && policy.rows[0].mode !== 'legacy') return { content: null,evidence: {} }
-  return { content: await getSoul(access.assistantId,access.userId,appId),evidence: {} }
+}
+
+function soulContext(row?: SoulContextRow): { content: string | null; evidence: ScopeEvidence } {
+  if (!row?.scoped) return { content: row?.legacyContent ?? null, evidence: {} }
+  const sources = row.scoped.map(({ content: _content,...source }) => source)
+  const floor = deriveResourceScope({ producer: 'soul-context',sources })
+  return { content: row.scoped.map(summary => summary.content).filter(Boolean).join('\n\n') || null,
+    evidence: { sensitivity: floor.sensitivity,compartments: floor.compartments,projectIds: floor.projectIds,sources } }
+}
+
+/** Full evidence accompanies text, so prompt assembly cannot lose its floor. */
+export async function getSoulContext(access: AccessContext, appId?: string) {
+  const {sql,params}=soulContextSelection(access,appId)
+  return soulContext((await query<SoulContextRow>(sql,params)).rows[0])
+}
+
+/** The ordinary system pool's existing prompt selectors share a live private chat read. */
+export async function getNativePromptAuxiliaryContext(viewer: AccessContext, appId: string, authority: SessionContextAuthority) {
+  const execution=authority.execution, {access}=execution.security
+  if(!conversationReadersActive() || viewer.systemRead || currentApplicationReadTransaction(viewer)
+    || viewer.sharedAudience || access.sharedAudience || access.systemRead || execution.surface.systemRead || execution.surface.clientSelfMemory
+    || execution.identity.kind!=='attended' || execution.identity.principal.kind!=='workspace_member'
+    || execution.identity.principal.authenticationKind!=='native_session' || execution.identity.principal.userId!==viewer.userId
+    || execution.ownership.kind!=='workspace' || execution.ownership.workspaceId!==viewer.workspaceId
+    || execution.lifecycle.channelType!=='web' || getApplicationExecutionBinding(execution)
+    || viewer.userId!==access.userId || viewer.workspaceId!==access.workspaceId || viewer.assistantId!==execution.assistant.id) return null
+
+  const {sql,params}=soulContextSelection(viewer,appId)
+  const offset=params.length
+  const facts=Array.from({length:9},(_,index)=>`$${offset+index+1}`).join(',')
+  const session=`$${offset+4}`, token=`$${offset+10}`
+  const identityRead=preparePromptIdentityRead(viewer,authority,offset+11)
+  execution.lifecycle.abortSignal.throwIfAborted()
+  const captured=await captureSessionAuthority(execution.security.authority,async input=>{
+    if(!input.turn || !input.credential || input.workspaceId!==viewer.workspaceId || input.userId!==viewer.userId
+      || input.assistantId!==viewer.assistantId || input.sessionId!==execution.lifecycle.sessionId) return null
+    const value=(await query<{
+      authority:unknown; summary:SoulContextRow; preferred:{channelType:string;channelId:string}|null
+      workspace:{name:string;purpose:string}|null; memoryEvolution:string|null; brainEvolution:string|null
+      identitySource:ScopeSource|null
+    }>(`WITH live AS MATERIALIZED (
+      SELECT public.read_session_authority_facts(${facts}) AS authority
+      FROM public.sessions s WHERE s.workspace_id=$4 AND s.user_id=$2 AND s.assistant_id=$1 AND s.id=${session}
+        AND s.channel_type='web' AND s.app_origin='chat' AND s.anchor_kind='none' AND s.anchor_ref IS NULL
+        AND s.visibility IN('owner','personal') AND s.mode IS DISTINCT FROM 'draft'
+        AND s.status='running' AND s.turn_lease_token=${token} AND s.last_turn_lease_token=${token}
+        AND coalesce(s.turn_assistant_id,s.assistant_id)=$1 AND s.cancel_requested_at IS NULL
+        AND s.turn_heartbeat_at>clock_timestamp()-interval '90 seconds'
+    ) SELECT live.authority,
+      (SELECT to_jsonb(summary) FROM (${sql}) summary) AS summary,
+      (SELECT to_jsonb(preferred) FROM (${preferredDeliveryChannelSql()}) preferred) AS preferred,
+      (SELECT jsonb_build_object('name',w.name,'purpose',w.purpose) FROM public.workspaces w WHERE w.id=$4) AS workspace,
+      (SELECT prompt_snippet FROM public.workspace_memory_evolution WHERE workspace_id=$4) AS "memoryEvolution",
+      (SELECT prompt_snippet FROM public.workspace_brain_evolution WHERE workspace_id=$4) AS "brainEvolution",
+      (${identityRead.sql}) AS "identitySource"
+      FROM live WHERE live.authority->'credentialCurrent'='true'::jsonb
+        AND live.authority->'member'<>'null'::jsonb`,[...params,...sessionAuthorityFactsParameters(input),input.turn.token,...identityRead.params])).rows[0]
+    if(!value)throw new DerivedScopeError('scope_source_changed')
+    return {authority:value.authority,value}
+  })
+  execution.lifecycle.abortSignal.throwIfAborted()
+  if(!captured)return null
+  const {summary,preferred,workspace,memoryEvolution,brainEvolution,identitySource}=captured.value
+  const identity=await identityRead.project(identitySource)
+  execution.lifecycle.abortSignal.throwIfAborted()
+  return {soul:soulContext(summary),workspace,
+    preferred:preferred?{...preferred,channelId:providerChannelIdFromSession(preferred.channelType,preferred.channelId)}:null,
+    evolution:[memoryEvolution,brainEvolution].filter((part):part is string=>!!part).join('\n\n')||null,identity}
 }

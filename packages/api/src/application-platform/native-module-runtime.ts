@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Request } from 'express'
 import { z } from 'zod'
-import type {AccessCeiling} from '@use-brian/core'
+import type {AccessCeiling} from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { ApplicationPlatformError } from '@use-brian/shared'
 import { getPool } from '../db/client.js'
 import { authSessionStore } from '../db/auth-session-store.js'

@@ -35,13 +35,16 @@ import { findAssistantById } from '../db/users.js'
 import { withChatLock } from '../db/chat-lock.js'
 import { resolveChannelUser, type ChannelUserStore } from '../db/channel-user-store.js'
 import { resolveRoutingForSurface, getChannelForWebhook } from '../db/channels-store.js'
-import {
-  buildTool,
-  parseFileContent,
-} from '@use-brian/core'
+import { parseFileContent } from '@use-brian/core/files/parsers.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
 import { z } from 'zod'
-import type { ContentBlock } from '@use-brian/core'
-import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore } from '@use-brian/core'
+import type { ContentBlock } from '@use-brian/agent-runtime/providers/types.js'
+import type { AnalyticsLogger } from '@use-brian/core/analytics/logger.js'
+import type { MemoryStore } from '@use-brian/core/memory/types.js'
+import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
+import type { McpSettingsStore } from '@use-brian/agent-runtime/mcp/types.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 import type { ChannelIntegrationStore, ChannelIntegrationConfig, DiscordCredentials } from '../db/channel-integrations.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import { humanizeToolName, describeToolInput } from '@use-brian/shared'
@@ -56,7 +59,7 @@ export type DiscordRouteOptions = {
   /** Servable background-lane model, resolved at boot; forwarded to the
    * channel pipeline so its background calls work without a Google key. */
   backgroundModel?: string
-  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
+  decisionRuntime?: import('@use-brian/core/decisions/hydra.js').DecisionExecutionPort
   /** Shared secret the connector presents on every call (DISCORD_CONNECTOR_SECRET). */
   connectorSecret: string
   provider: LLMProvider
@@ -71,33 +74,33 @@ export type DiscordRouteOptions = {
   checkCreditBudget?: import('./route-helpers.js').CreditBudgetGate
   integrationStore: ChannelIntegrationStore
   channelUserStore?: ChannelUserStore
-  workerManager?: import('@use-brian/core').WorkerManager
+  workerManager?: import('@use-brian/core/workers/worker.js').WorkerManager
   connectorStore?: ConnectorStore
   mcpSettingsStore?: McpSettingsStore
   assistantConnectorStore?: import('../db/assistant-connector-store.js').AssistantConnectorStore
   connectorGrantStore?: import('../db/connector-grant-store.js').ConnectorGrantStore
   connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
-  knowledgeStore?: import('@use-brian/core').KnowledgeStoreInterface
+  knowledgeStore?: import('@use-brian/core/knowledge/types.js').KnowledgeStoreInterface
   knowledgeCaptureRuleStore?: import('../knowledge/capture-rules.js').KnowledgeCaptureRuleStore
-  gdriveFilesStore?: import('@use-brian/core').GDriveFilesStore
-  workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
+  gdriveFilesStore?: import('@use-brian/core/tools/base/gdrive-files.js').GDriveFilesStore
+  workspaceFilesStore?: import('@use-brian/core/workspace-files/types.js').WorkspaceFilesStore
   /** Transient upload cache (`file_cache`). When present, inbound images are
    *  cached so the turn carries a promotable `<attached_file id="…">` tag
    *  (save-on-request — see routes/channel-file-cache.ts). Absent ⇒ images
    *  ride content blocks with no reference, as before. */
-  fileStore?: import('@use-brian/core').FileStore
+  fileStore?: import('@use-brian/core/files/types.js').FileStore
   /** Promotes an over-threshold text paste to a durable artifact
    *  (large-content-artifacts §Phase 3.2). Absent ⇒ pastes pass through. */
   artifactPromoter?: import('../files/artifact-promote.js').ArtifactPromoter | null
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
-  workflowStore?: import('@use-brian/core').WorkflowStore
+  workflowStore?: import('@use-brian/core/workflow/types.js').WorkflowStore
   workspaceSkillStore?: import('../db/skill-store.js').WorkspaceSkillStore
   workspaceSkillEnablementStore?: import('../db/workspace-skill-enablement-store.js').WorkspaceSkillEnablementStore
   workspaceSkillFilesStore?: import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore
-  episodicStore?: import('@use-brian/core').EpisodicStore
-  sessionStateStore?: import('@use-brian/core').SessionStateStore
-  crmEmailDraftStore?: import('@use-brian/core').CrmEmailDraftStore
+  episodicStore?: import('@use-brian/core/memory/episodic-types.js').EpisodicStore
+  sessionStateStore?: import('@use-brian/core/memory/session-state-types.js').SessionStateStore
+  crmEmailDraftStore?: import('@use-brian/core/crm/email-drafts.js').CrmEmailDraftStore
   /**
    * Route a pulled Discord attachment (CDN URL) through the channel-media intake
    * (audio/video → recording → brain). Boot wires it over `acquireAndIngest`.
@@ -115,7 +118,7 @@ export type DiscordRouteOptions = {
     assistantId: string
     actingUserId: string
   }) => Promise<import('../ingest/channel-media-intake.js').ChannelMediaIntakeResult>
-  capabilityStore: import('@use-brian/core').CapabilityStore
+  capabilityStore: import('@use-brian/core/authorization/types.js').CapabilityStore
 }
 
 const STATUS_THROTTLE_MS = 1200

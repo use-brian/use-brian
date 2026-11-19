@@ -1,7 +1,9 @@
 /** [COMP:recordings/recovery] Fresh source derivation, never release held output. */
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { actorFromContext, buildTool, type AccessContext } from '@use-brian/core'
+import { actorFromContext } from '@use-brian/core/retrieval/tools.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
 import { readAdmissionPolicy } from '../workspace-access/admission-policy-read.js'
 import { admitWorkspaceResource } from '../workspace-access/resource-admission.js'
 import { buildAccessPredicate, mutationActorAccess } from '../db/access-predicate.js'

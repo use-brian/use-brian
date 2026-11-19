@@ -14,7 +14,7 @@ import {
   researchFeedbackCorrectionSchema,
   researchImprovementNominationSchema,
   researchLessonDecisionSchema,
-} from '@use-brian/core'
+} from '@use-brian/core/research/contracts.js'
 import {
   appendResearchFeedbackRevisionSystem,
   getResearchActivityForViewer,

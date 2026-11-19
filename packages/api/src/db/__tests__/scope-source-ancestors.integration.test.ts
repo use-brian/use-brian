@@ -133,10 +133,25 @@ describeIf('[COMP:api/workspace-scope-review] scope_source_ancestors walks the s
   })
 
   it('never serializes rows to jsonb to find the parent link', async () => {
-    const def = (await client!.query<{ def: string }>(
-      `SELECT pg_get_functiondef('scope_source_ancestors(uuid,text,uuid)'::regprocedure) AS def`,
-    )).rows[0].def
-    expect(def).not.toMatch(/to_jsonb\(r\)/)
-    expect(def).toMatch(/r\.superseded_by=a\.id/)
+    // Source-kind migrations (691, 692, 714) wrap the function by renaming the
+    // previous body to `scope_source_ancestors_before_<kind>` and delegating to
+    // it, so the column walk lives at the end of a delegation chain. Follow the
+    // chain from the installed entry point and check every body on it.
+    const defs: string[] = []
+    const pending = ['scope_source_ancestors']
+    const seen = new Set<string>()
+    while (pending.length) {
+      const name = pending.shift()!
+      if (seen.has(name)) continue
+      seen.add(name)
+      const def = (await client!.query<{ def: string }>(
+        `SELECT pg_get_functiondef(format('%I(uuid,text,uuid)', $1::text)::regprocedure) AS def`, [name],
+      )).rows[0].def
+      defs.push(def)
+      for (const [callee] of def.matchAll(/scope_source_ancestors_before_[a-z_]+/g)) pending.push(callee)
+    }
+    expect(defs.length).toBeGreaterThan(1)
+    for (const def of defs) expect(def).not.toMatch(/to_jsonb\(r\)/)
+    expect(defs.filter((def) => /r\.superseded_by=a\.id/.test(def))).toHaveLength(1)
   })
 })

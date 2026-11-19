@@ -15,8 +15,8 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '../tools/types.js'
-import { toolTransport } from '../tools/capability-gate.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
+import { toolTransport } from '@use-brian/agent-runtime/tools/capability-gate.js'
 import type { FilesApi } from './api.js'
 import {
   DOCUMENT_CAPABLE_CHANNELS,

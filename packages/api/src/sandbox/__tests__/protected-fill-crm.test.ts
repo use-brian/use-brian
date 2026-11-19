@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import type { EntityRecord, AccessContext } from '@use-brian/core'
+import type { EntityRecord } from '@use-brian/core/entities/types.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import { createProtectedCrmSource } from '../protected-fill-crm.js'
 const scope = { userId: 'u', workspaceId: 'w', sessionId: 's', taskId: 't', browserProfileId: 'p', destinationOrigin: 'https://example.com' }
 const entity = { id: 'entity', workspaceId: 'w', kind: 'person', displayName: 'SECRET_NAME', canonicalId: 'SECRET_EMAIL', attributes: { phone: 'SECRET_PHONE', company_id: 'company' } } as unknown as EntityRecord

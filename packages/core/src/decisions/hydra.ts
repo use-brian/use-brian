@@ -4,7 +4,7 @@
  * [COMP:decisions/hydra]
  */
 
-import { assertInputAuthority, isInputAuthorityError } from '../providers/input-authority.js'
+import { assertInputAuthority, isInputAuthorityError } from '@use-brian/agent-runtime/providers/input-authority.js'
 import { assertDecisionBookkeeping, bindClassifierDecisionRequest, disableClassifierDecisionOperation,
   transferClassifierDecisionOperation, isDecisionMetadataSink, ownsClassifierLlmCompletion,
   transferClassifierDecisionCheck } from './authority-ownership.js'
@@ -21,7 +21,7 @@ import type {
 import { DecisionProviderError } from './types.js'
 import { withDecisionInvocation } from './invocation.js'
 import { bindDecisionTransportBudget, captureDecisionTransport, ownsDecisionTransportBudget } from './transport-budget.js'
-import type { LLMProvider } from '../providers/types.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
 import { isJsonValue } from './validate.js'
 
 export type DecisionMode = 'llm_only' | 'shadow' | 'hybrid'

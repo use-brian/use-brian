@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
-import type { CrmOperationsCommand, CrmOperationsContext } from '@use-brian/core'
+import type { CrmOperationsCommand, CrmOperationsContext } from '@use-brian/core/crm/operations-types.js'
 import { createCrmOperationsService } from '../service.js'
 import { createDbCrmOperationsStore } from '../../db/crm-operations-store.js'
 import { createCrmReferenceReadStore } from '../../db/crm-business-reference-store.js'

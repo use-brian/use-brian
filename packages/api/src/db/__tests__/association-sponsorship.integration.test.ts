@@ -3,7 +3,7 @@ import {afterAll,describe,expect,it} from 'vitest'
 import {getAppPool,getPool} from '../client.js'
 import {createAssociationStore} from '../association-store.js'
 import {loadAssociationOrderScope} from '../../association/source-scope.js'
-import type {AssociationActor} from '@use-brian/core'
+import type {AssociationActor} from '@use-brian/core/association/domain.js'
 
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()

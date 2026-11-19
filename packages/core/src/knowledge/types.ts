@@ -11,10 +11,10 @@
  * docs/plans/company-brain/permissions.md → WU-4.2b.
  */
 
-import type { AccessContext } from '../security/access-context.js'
-import type { Sensitivity } from '../security/sensitivity.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type { SessionContextAuthority } from '../memory/session-state-types.js'
-import type {DerivedWriteEvidence} from '../security/derived-scope.js'
+import type {DerivedWriteEvidence} from '@use-brian/agent-runtime/security/derived-scope.js'
 import type {KnowledgeWriteActor} from '../workflow/knowledge-event-trigger.js'
 
 export type KnowledgeSearchResult = {

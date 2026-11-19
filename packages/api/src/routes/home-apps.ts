@@ -31,7 +31,7 @@ import { Router, type RequestHandler } from 'express'
 import multer from 'multer'
 import type { AppManifest, AppScopes } from '@use-brian/brian-app'
 import { BUNDLE_MAX_TOTAL_BYTES, contentTypeFor } from '@use-brian/brian-app'
-import type { FilesApi } from '@use-brian/core'
+import type { FilesApi } from '@use-brian/core/workspace-files/api.js'
 import {
   consumeHomeAppBudget,
   createHomeApp,

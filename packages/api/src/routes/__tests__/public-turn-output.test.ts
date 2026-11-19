@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { createTurnOutputCollector, type QueryEvent } from '@use-brian/core'
+import type { QueryEvent } from '@use-brian/agent-runtime/engine/query-loop.js'
+import { createTurnOutputCollector } from '@use-brian/agent-runtime/engine/turn-output.js'
 import { formatPublicTurnReply } from '../public-turn.js'
 
 const source = readFileSync(new URL('../public-turn.ts', import.meta.url), 'utf8')
@@ -66,6 +67,9 @@ describe('[COMP:api/public-turn-output] final JSON reply', () => {
     expect(source).toContain('turnOutput.observe(event)')
     expect(source).toMatch(/event\.type === 'text_delta'[\s\S]*?sendEvent\?\.\('text_delta'/)
     expect(source).toMatch(/await assertDeliveryAudience\(\)[\s\S]*?res\.json\(/)
-    expect(source).toContain('...currentTurnWrite()')
+    // The reply publishes through the original owner with the turn's derivation
+    // write and native transcript authority (turn-kernel.md "Reply publication").
+    expect(source).toContain("turnOwner!.publish({ disposition: 'reply', write: publicationWrite(), native: nativeTranscriptAuthority,")
+    expect(source).not.toMatch(/addSessionMessage\(\{[^}]*role: 'assistant'/)
   })
 })

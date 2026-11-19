@@ -1,7 +1,12 @@
 import { workspaceMcpContextBinding, DEFAULT_WORKSPACE_MCP_SELECTION } from './contexts.js'
 /** Durable parent proof for workspace MCP continuations. [COMP:api/workspace-mcp] */
 import { createHash } from 'node:crypto'
-import { WorkspaceCredentialDelegationSchema, bindWorkspaceCredentialDelegation, intersectAccessCeilings, ContextScopeAccumulator, executionToolContext, type CapabilityStore, type ToolContext } from '@use-brian/core'
+import type { CapabilityStore } from '@use-brian/core/authorization/types.js'
+import { intersectAccessCeilings } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { WorkspaceCredentialDelegationSchema, bindWorkspaceCredentialDelegation } from '@use-brian/agent-runtime/security/workspace-delegation.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { findSessionById } from '../db/sessions.js'
 import { query } from '../db/client.js'
 import { findAssistantById } from '../db/users.js'
@@ -9,7 +14,7 @@ import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
 import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
 import { readWorkspaceMcpConsent, workspaceMcpMaximum } from './consent.js'
 
-export type WorkspaceMcpDelegation = import('@use-brian/core').WorkspaceCredentialDelegation
+export type WorkspaceMcpDelegation = import('@use-brian/agent-runtime/security/workspace-delegation.js').WorkspaceCredentialDelegation
 
 type Parent = { actor: string; workspace: string; owner: string; assistant: string; fingerprint: string; consent: unknown; status: string; audience?: string }
 async function readParent(kind: WorkspaceMcpDelegation['kind'], id: string): Promise<Parent | null> {
@@ -57,7 +62,7 @@ export async function restoreWorkspaceMcpDelegation(parent: WorkspaceMcpDelegati
   const constraints = await Promise.all((parent.constraints ?? []).map(item => restoreWorkspaceMcpDelegation(item,capabilities)))
   if (constraints.some(item => item.context.userId !== parent.userId || item.context.workspaceId !== parent.workspaceId)) throw new Error('workspace_mcp_parent_mismatch')
   const column = parent.kind === 'brain_key' ? 'brain_key_id' : parent.kind === 'oauth_token' ? 'oauth_authorization_id' : 'api_key_id'
-  const readContext = async () => (await query<{id:string;invalidated:boolean;evidence:import('@use-brian/core').ScopeEvidence}>(
+  const readContext = async () => (await query<{id:string;invalidated:boolean;evidence:import('@use-brian/agent-runtime/security/context-scope.js').ScopeEvidence}>(
     `SELECT id,invalidated,evidence FROM workspace_mcp_contexts WHERE ${column}=$1 AND selection_id=$2 AND user_id=$3 AND workspace_id=$4 AND assistant_id=$5`,
     [parent.credentialId,parent.selectionId ?? DEFAULT_WORKSPACE_MCP_SELECTION,parent.userId,parent.workspaceId,parent.assistantId])).rows[0]
   const saved = await readContext()

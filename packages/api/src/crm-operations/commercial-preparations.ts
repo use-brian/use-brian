@@ -9,25 +9,31 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import type {
+  CrmCommercialFields,
+  CrmResolutionReceipt,
+} from '@use-brian/core/crm/commercial-context.js'
 import {
-  CRM_INVOICE_ISSUE_PATHS,
   CrmDecimalError,
-  CrmInvoiceTemplateMapSchema,
   computeCrmInvoiceTotals,
   crmDecimalAdd,
   crmDecimalCompare,
   crmDecimalRound,
-  crmOperationsSha256,
-  maxSensitivity,
-  requireCrmIntegrationResources,
-  unionScopeRequirements,
-  type CrmCommercialDocumentCommand,
-  type CrmCommercialFields,
-  type CrmInvoiceTemplateMap,
   type CrmInvoiceTotals,
+} from '@use-brian/core/crm/commercial-decimal.js'
+import { requireCrmIntegrationResources } from '@use-brian/core/crm/integration-authority.js'
+import type { CrmCommercialDocumentCommand } from '@use-brian/core/crm/invoice-preparation.js'
+import {
+  CRM_INVOICE_ISSUE_PATHS,
+  CrmInvoiceTemplateMapSchema,
+  type CrmInvoiceTemplateMap,
+} from '@use-brian/core/crm/invoice-template-map.js'
+import {
+  crmOperationsSha256,
   type CrmOperationsContext,
-  type CrmResolutionReceipt,
-} from '@use-brian/core'
+} from '@use-brian/core/crm/operations-types.js'
+import { unionScopeRequirements } from '@use-brian/agent-runtime/security/context-scope.js'
+import { maxSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type { CrmOperationsStore, CrmOperationsTransaction } from '../db/crm-operations-store.js'
 import { getPool } from '../db/client.js'
 import { readCrmReference } from '../db/crm.js'
@@ -505,7 +511,11 @@ export async function processCrmIssueAttempts(store: CrmOperationsStore, runtime
     const lease = await (async () => {
       const client = await getPool().connect()
       try {
-        await client.query('BEGIN'); await client.query(`SELECT set_config('app.system_bypass','true',true)`)
+        await client.query('BEGIN')
+        const owner = await client.query(`SELECT 1
+          FROM pg_roles r JOIN pg_class c ON c.oid='public.crm_issue_attempts'::regclass
+         WHERE r.rolname=current_user AND (r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE'))`)
+        if (owner.rowCount !== 1) throw new Error('The CRM issue attempt lease requires the owner connection.')
         const leased = await leaseIssueAttempt(client, options.attemptId ?? null, leaseToken, options.leaseMs ?? 10 * 60_000)
         await client.query('COMMIT'); return leased
       } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error } finally { client.release() }

@@ -543,6 +543,9 @@ describe('[COMP:api/skill-store] legacy SkillStore — userId resolution', () =>
     expect(mockRls.mock.calls[0][1]).toContain('workspace_id = $1')
     expect(mockRls.mock.calls[0][1]).not.toContain('author_id')
     expect(mockRls.mock.calls[0][2]).toEqual(['ws-shared'])
+    // The revision receipt is captured only for a current member of its workspace, null-safe on the actor cast.
+    expect(mockRls.mock.calls[0][1]).toContain("FROM workspace_members sm WHERE sm.workspace_id=sr.workspace_id")
+    expect(mockRls.mock.calls[0][1]).toContain("NULLIF(current_setting('app.current_user_id',true),'')::uuid")
   })
 
   it('create resolves the workspace then forwards', async () => {

@@ -8,16 +8,16 @@
  * [COMP:decisions/evaluation]
  */
 
-import {
-  createTypeSafeDecisionProvider,
-  type DecisionAnswer,
-  type DecisionEvaluationProfile,
-  type DecisionOperationRef,
-  type DecisionProvider,
-  type DecisionQuestion,
-  type DecisionUsage,
-  type JsonValue,
-} from '@use-brian/core'
+import { createTypeSafeDecisionProvider } from '@use-brian/core/decisions/adapters/typesafe.js'
+import type { DecisionEvaluationProfile } from '@use-brian/core/decisions/hydra.js'
+import type {
+  DecisionAnswer,
+  DecisionOperationRef,
+  DecisionProvider,
+  DecisionQuestion,
+  DecisionUsage,
+  JsonValue,
+} from '@use-brian/core/decisions/types.js'
 import {
   bracketFor,
   isDecisionModelRow,

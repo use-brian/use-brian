@@ -1,8 +1,8 @@
 /** Bounded confirmation synthesis over Feed-owned evidence and native artifacts. [COMP:feed/confirmation-learning] */
 import { z } from 'zod'
 import { FEED_LEARNING_LIMITS, FEED_EDITORIAL_LIMITS, feedLearningCommandRequestSchema, type FeedLearnedDecisions, type FeedLearnedArtifact, type FeedLearningCommandRequest, type FeedLearningScope } from '@use-brian/shared'
-import { retractMemory } from '@use-brian/core'
-import { feedText, walkFeed } from '@use-brian/doc-model'
+import { retractMemory } from '@use-brian/core/corrections/retraction.js'
+import { feedText, walkFeed } from '@use-brian/doc-model/feed.js'
 import { readFeedConfirmation, isFeedConfirmationRevoked, type FeedConfirmation } from './confirmation.js'
 import { withFeedTransaction, readFeedCopy, FeedCollaborationError, assertFeedFiles, type FeedActor, type FeedScope } from '../db/feed-collaboration-store.js'
 import { readFeedRun, saveFeedPart, markFeedDispatch, editorialActor, enqueueFeedRun, feedEditorialHash, summarizeFeedRun, type FeedEditorialRun } from '../db/feed-editorial-runs-store.js'

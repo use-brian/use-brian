@@ -1,7 +1,10 @@
 /** Legacy task DTOs over canonical admitted native snapshots. [COMP:api/application-records] */
 import { z } from 'zod'
 import type { PoolClient } from 'pg'
-import { bindScopeSources,boundScopeSources,TASK_STATUSES,type AccessContext,type ScopeSource,type TaskRecord,type TaskListRow,type TaskListFilters } from '@use-brian/core'
+import { TASK_STATUSES, type TaskRecord, type TaskListRow, type TaskListFilters } from '@use-brian/core/tasks/types.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { ApplicationPlatformError,type ApplicationRecordProjection } from '@use-brian/shared'
 import { currentApplicationReadTransaction } from '../application-platform/execution-context.js'
 import { currentCanonicalPublicShare } from '../application-platform/public-share-context.js'
@@ -11,6 +14,7 @@ import { captureCanonicalNativeQueryCandidates,readCanonicalNativeQueryDefinitio
 import { assertExecutionResourceScope,buildAccessPredicate } from './access-predicate.js'
 import { runWithAgentAccess } from './agent-access-context.js'
 import { applyRLSGucs,getAppPool,rollbackAndRelease } from './client.js'
+import { conversationRetainedOutputActive } from './conversation-visibility.js'
 import { nativeQueryDataCeiling,readLegacyCanonicalCrmPoint } from './crm-reader.js'
 import { readCurrentScopeSources } from './derived-scope-store.js'
 
@@ -35,6 +39,22 @@ const taskValues=z.object({title:z.string(),status:z.enum(TASK_STATUSES),assigne
   home:z.object({kind:z.enum(['department','project']),id:z.string().uuid()}).strict().nullable(),due:z.string().nullable(),tags:z.array(z.string()),
   parentId:z.string().uuid().nullable(),externalRef:z.record(z.unknown()).optional(),attributes:z.record(z.unknown()),createdAt:z.string().optional(),updatedAt:z.string()})
 const unavailable=()=>new ApplicationPlatformError('access_unavailable','The task is unavailable.')
+
+async function readTaskIdentity(client:PoolClient,workspaceId:string,id:string,resolve:boolean):Promise<unknown> {
+  const sql=conversationRetainedOutputActive()
+    ? `WITH identified AS MATERIALIZED (SELECT read_native_application_task_identity($1,$2,$3) AS value)
+       SELECT CASE WHEN value IS NOT NULL AND public.conversation_record_resource_current(
+          $1,'task',(value->>'id')::uuid,value->>'version') THEN value END AS value FROM identified`
+    : 'SELECT read_native_application_task_identity($1,$2,$3) AS value'
+  return (await client.query<{value:unknown}>(sql,[workspaceId,id,resolve])).rows[0]?.value
+}
+
+async function taskOutputCurrent(client:PoolClient,meta:Metadata):Promise<boolean> {
+  if(!conversationRetainedOutputActive())return true
+  return (await client.query<{allowed:boolean}>(
+    "SELECT public.conversation_record_resource_current($1,'task',$2,$3) AS allowed",
+    [meta.scope.workspaceId,meta.id,meta.version])).rows[0]?.allowed===true
+}
 
 async function checkScopes(client:PoolClient,access:AccessContext,sources:readonly ScopeSource[]) {
   for(const source of sources)assertExecutionResourceScope(source,'read',access)
@@ -72,7 +92,7 @@ async function legacyParent(client:PoolClient,workspaceId:string,values:Applicat
   const parentId=values.parentId
   if(parentId===null||parentId===undefined)return values
   if(typeof parentId!=='string')throw unavailable()
-  const raw=(await client.query<{value:unknown}>('SELECT read_native_application_task_identity($1,$2,true) AS value',[workspaceId,parentId])).rows[0]?.value
+  const raw=await readTaskIdentity(client,workspaceId,parentId,true)
   if(raw===null||raw===undefined)throw unavailable()
   return {...values,parentId:metadata.parse(raw).id}
 }
@@ -90,13 +110,14 @@ function record(meta:Metadata,raw:ApplicationRecordProjection['values'],sources:
 }
 export async function readLegacyCanonicalTask(access:AccessContext,id:string,transactionClient?:PoolClient,resolve=false):Promise<TaskRecord|null> {
   return withRead(access,transactionClient,async client=>{
-    const raw=(await client.query<{value:unknown}>('SELECT read_native_application_task_identity($1,$2,$3) AS value',[access.workspaceId,id,resolve])).rows[0]?.value
+    const raw=await readTaskIdentity(client,access.workspaceId,id,resolve)
     if(raw===null||raw===undefined)return null
     const meta=metadata.parse(raw),captured=await readLegacyCanonicalCrmPoint(access,'task',meta.id,LEGACY_TASK_FULL_FIELDS,client)
     if(!captured)return null
     if(captured.projection.ref.version!==meta.version)throw unavailable()
     const values=await legacyParent(client,access.workspaceId,captured.projection.values)
     await current(client,access,captured.sources)
+    if(!await taskOutputCurrent(client,meta))return null
     return record(meta,values,captured.sources)
   })
 }
@@ -132,7 +153,7 @@ export async function listLegacyCanonicalTasks(access:AccessContext,filters:Task
     const captured=await candidates(client,context,access,compactFields),sources=boundScopeSources(captured)
     // Every predicate/order field is captured before evaluation, including rows
     // excluded by a filter and rows beyond the old operator page limit.
-    const parentMeta=filters.parentId?(await client.query<{value:unknown}>('SELECT read_native_application_task_identity($1,$2,false) AS value',[access.workspaceId,filters.parentId])).rows[0]?.value:undefined
+    const parentMeta=filters.parentId?await readTaskIdentity(client,access.workspaceId,filters.parentId,false):undefined
     const parentFilter=parentMeta?metadata.parse(parentMeta).logicalId:null
     const parsed=captured.map(candidate=>({candidate,values:taskValues.parse(candidate.data)}))
     const selected=parsed.filter(({values:v})=>(!filters.assigneeId||v.assigneeId===filters.assigneeId)
@@ -144,7 +165,9 @@ export async function listLegacyCanonicalTasks(access:AccessContext,filters:Task
       &&(!filters.tag||v.tags.includes(filters.tag))&&(!filters.parentId||parentFilter!==null&&v.parentId===parentFilter))
     const rows:TaskListRow[]=[]
     for(const {candidate} of selected.sort((a,b)=>Date.parse(b.values.updatedAt)-Date.parse(a.values.updatedAt))) {
-      const meta=metadata.parse((await client.query<{value:unknown}>('SELECT read_native_application_task_identity($1,$2,false) AS value',[access.workspaceId,candidate.id])).rows[0]?.value)
+      const identity=await readTaskIdentity(client,access.workspaceId,candidate.id,false)
+      if(identity==null&&conversationRetainedOutputActive())continue
+      const meta=metadata.parse(identity)
       if(meta.version!==candidate.record_version)throw unavailable()
       if(filters.projectId!==undefined&&(filters.projectId===null?meta.scope.projectIds.length!==0:meta.scope.projectIds.length!==1||meta.scope.projectIds[0]!==filters.projectId))continue
       const full=record(meta,await legacyParent(client,access.workspaceId,candidate.data),candidate.sources),{externalRef:_,createdAt:__,...compact}=full
@@ -162,10 +185,16 @@ export async function readLegacyCanonicalTaskHistory(access:AccessContext,id:str
       'SELECT value FROM read_native_application_task_history_refs($1,$2,$3) refs(value)',[access.workspaceId,id,[...LEGACY_TASK_FULL_FIELDS]])).rows.map(row=>row.value))
     const definition=canonicalNativeResourceDefinitions().find(item=>item.typeKey==='task')!
     const sources:ScopeSource[]=[...domainSources],rows:TaskRecord[]=[]
+    // A version that is still the current physical row keeps its physical task
+    // source as the first anchor, as point and collection reads do; a retired
+    // version carries only its history field evidence (tasks.md, R2 readers).
+    // The metadata identity port resolves the live physical row and version only.
+    const liveRaw=(await client.query<{value:unknown}>('SELECT read_native_application_task_identity($1,$2,true) AS value',[access.workspaceId,id])).rows[0]?.value
+    const liveMeta=liveRaw===null||liveRaw===undefined?undefined:metadata.parse(liveRaw)
     for(const ref of refs) {
       const projection=await readCanonicalNativeTaskHistoryRecord(context,definition,ref.id,LEGACY_TASK_FULL_FIELDS,ref.version)
       if(projection.ref.version!==ref.version)throw unavailable()
-      sources.push(...boundScopeSources(projection));rows.push(record(ref,{...projection.values,parentId:canonicalNativeTaskHistoryPhysicalParent(projection)},boundScopeSources(projection),true))
+      sources.push(...boundScopeSources(projection));rows.push(record(ref,{...projection.values,parentId:canonicalNativeTaskHistoryPhysicalParent(projection)},boundScopeSources(projection),!(liveMeta&&liveMeta.id===ref.id&&liveMeta.version===ref.version)))
     }
     await current(client,access,sources)
     return bindScopeSources(rows,sources)

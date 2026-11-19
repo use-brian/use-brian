@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { buildTool, type Tool } from '../tools/types.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import type { JobStore } from './types.js'
 import { computeNextRun, type StructuredSchedule } from './schedule.js'
 import type { WorkflowStore } from '../workflow/types.js'
@@ -7,7 +7,7 @@ import { buildOneStepReminderWorkflow, frameSchedulerPrompt, type ReminderDelive
 import { generateWorkflowTitle } from '../workflow/auto-title.js'
 import { ResearchDepthConfigSchema } from '../engine/research-depth.js'
 import { pinToolAuthoringAuthority } from '../security/tool-authority.js'
-import type { LLMProvider } from '../providers/types.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
 import type { DeliverToChannel } from '../workflow/executor.js'
 import type {
   DeliveryTargetLabel,

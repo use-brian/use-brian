@@ -4,7 +4,7 @@ import { DeploymentAccounts, deploymentAccountKey, deploymentKey, type AccountTa
 import { parseDesktopConfig, serializePersistedTarget } from "../target-store.js";
 import type { StoredTokens } from "../desktop-token-store.js";
 
-const state = vi.hoisted(() => ({ browserOptions: undefined as undefined | ConstructorParameters<typeof import("../embedded-browser.js").EmbeddedBrowser>[0], files: new Map<string, Buffer>(), handlers: new Map<string, Function>(), windows: [] as any[], app: null as any, partitions: new Map<string, any>(), makeSession: null as null | (() => any), refresh: vi.fn(), request: vi.fn(), exchange: vi.fn(), openExternal: vi.fn(), servers: [] as any[] }));
+const state = vi.hoisted(() => ({ browserOptions: undefined as undefined | ConstructorParameters<typeof import("../embedded-browser.js").EmbeddedBrowser>[0], files: new Map<string, Buffer>(), handlers: new Map<string, Function>(), windows: [] as any[], app: null as any, partitions: new Map<string, any>(), makeSession: null as null | (() => any), refresh: vi.fn(), request: vi.fn(), exchange: vi.fn(), openExternal: vi.fn(), servers: [] as any[], holdLoads: false, fragmentLoadsReject: false }));
 vi.mock("../embedded-browser.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../embedded-browser.js")>();
   return { ...original, EmbeddedBrowser: class extends original.EmbeddedBrowser {
@@ -29,7 +29,7 @@ vi.mock("node:fs", async (importOriginal) => ({
   ...await importOriginal<typeof import("node:fs")>(),
   readFileSync: (path: string, encoding?: string) => {
     const value = state.files.get(String(path));
-    if (!value) throw new Error("ENOENT");
+    if (!value) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
     return encoding ? value.toString() : value;
   },
   mkdirSync: vi.fn(),
@@ -68,25 +68,54 @@ vi.mock("electron", async () => {
     });
   };
   state.makeSession = makeSession;
+  // Like Electron, a destroyed window is destroyed before "closed" is emitted,
+  // and from then on its `webContents` accessor and native methods throw
+  // "Object has been destroyed"; only `isDestroyed()` and the JS EventEmitter
+  // listeners stay usable. Tests inspect a retired renderer through `contents`.
+  const destroyedError = () => new TypeError("Object has been destroyed");
   class Window extends EventEmitter {
-    destroyed = false; preventClose = false; options: any; bounds = { x: 30, y: 40, width: 1000, height: 700 }; webContents: any;
+    destroyed = false; preventClose = false; options: any; bounds = { x: 30, y: 40, width: 1000, height: 700 }; contents: any;
     constructor(options: any) {
       super(); this.options = options;
       let url = "";
-      this.webContents = Object.assign(new EventEmitter(), {
+      // Like Electron, a new load aborts a pending one (ERR_ABORTED). With
+      // `state.holdLoads`, a load stays pending until `finishLoad()`. With
+      // `state.fragmentLoadsReject`, a load that changes only the fragment
+      // rejects with ERR_FAILED and then navigates in place, as Electron does.
+      let pending: { resolve: () => void } & { reject: (error: Error) => void } | null = null;
+      const load = (next: string): Promise<void> => {
+        if (pending) {
+          const aborted = pending; pending = null;
+          aborted.reject(Object.assign(new Error(`ERR_ABORTED (-3) loading '${next}'`), { code: "ERR_ABORTED", errno: -3 }));
+        }
+        const inPlace = state.fragmentLoadsReject && url !== "" && url !== next && url.split("#")[0] === next.split("#")[0];
+        if (inPlace) {
+          // Electron rejects first; the in-page navigation commits just after.
+          setTimeout(() => { url = next; this.contents.emit("did-navigate-in-page", {}, next, true); }, 5);
+          return Promise.reject(Object.assign(new Error(`ERR_FAILED (-2) loading '${next}'`), { code: "ERR_FAILED", errno: -2 }));
+        }
+        url = next;
+        if (!state.holdLoads) return Promise.resolve();
+        return new Promise<void>((resolve, reject) => { pending = { resolve, reject }; });
+      };
+      this.contents = Object.assign(new EventEmitter(), {
         id: state.windows.length + 1, isDestroyed: () => this.destroyed,
-        mainFrame: {}, getURL: () => url, loadFile: vi.fn(async (path: string) => { url = `file://${path}`; }),
-        loadURL: vi.fn(async (value: string) => { url = value; }), setWindowOpenHandler: vi.fn(), focus: vi.fn(), send: vi.fn(),
+        mainFrame: {}, getURL: () => url, loadFile: vi.fn((path: string, options?: { hash?: string }) => load(`file://${path}${options?.hash ? `#${options.hash}` : ""}`)),
+        loadURL: vi.fn((value: string) => load(value)), setWindowOpenHandler: vi.fn(), focus: vi.fn(), send: vi.fn(),
+        finishLoad: () => { const done = pending; pending = null; done?.resolve(); },
       });
       state.windows.push(this);
     }
-    destroy() { this.destroyed = true; this.emit("closed"); }
+    get webContents() { return this.live().contents; }
+    private live() { if (this.destroyed) throw destroyedError(); return this; }
+    destroy() { this.live().destroyed = true; this.emit("closed"); }
     isDestroyed() { return this.destroyed; }
-    isMinimized() { return false; }
-    getBounds() { return this.bounds; }
-    setBounds(value: any) { this.bounds = value; }
-    show() {} focus() {} setTitle() {} setAlwaysOnTop() {} setVisibleOnAllWorkspaces() {}
-    close() { if (this.preventClose) this.webContents.emit("will-prevent-unload", {}); else { this.destroyed = true; this.emit("closed"); } }
+    isMinimized() { return this.live() && false; }
+    getBounds() { return this.live().bounds; }
+    setBounds(value: any) { this.live().bounds = value; }
+    show() { this.live(); } focus() { this.live(); } setTitle() { this.live(); } setAlwaysOnTop() { this.live(); }
+    setVisibleOnAllWorkspaces() { this.live(); } hide() { this.live(); } isVisible() { return !!this.live(); }
+    close() { if (this.live().preventClose) this.contents.emit("will-prevent-unload", {}); else { this.destroyed = true; this.emit("closed"); } }
   }
   return { app, BrowserWindow: Window, ipcMain: { on: (name: string, fn: Function) => state.handlers.set(name, fn), handle: (name: string, fn: Function) => state.handlers.set(name, fn) },
     safeStorage: { isEncryptionAvailable: () => true, encryptString: (s: string) => Buffer.from(s), decryptString: (b: Buffer) => b.toString() },
@@ -108,11 +137,12 @@ function targetJar(target: AccountTarget) {
   return state.partitions.get(partition);
 }
 let store: DeploymentAccounts;
-async function setup(auth: AccountTarget["auth"] = "pkce", bundled = true, signedIn = true) {
+async function setup(auth: AccountTarget["auth"] = "pkce", bundled = true, signedIn = true, files: Record<string, string> = {}) {
   state.app?.removeAllListeners();
-  vi.resetModules(); state.files.clear(); state.handlers.clear(); state.windows.length = 0; state.partitions.clear();
+  vi.resetModules(); state.holdLoads = false; state.fragmentLoadsReject = false; state.files.clear(); state.handlers.clear(); state.windows.length = 0; state.partitions.clear();
   vi.stubEnv("USEBRIAN_APP_URL", ""); vi.stubEnv("USEBRIAN_API_URL", ""); vi.stubEnv("USEBRIAN_BUNDLED", String(bundled));
   state.files.set("/tmp/desktop-switch-test/target.json", Buffer.from(serializePersistedTarget(signedIn ? "local" : "cloud", local.appUrl, local.apiUrl, auth)));
+  for (const [name, value] of Object.entries(files)) state.files.set(`/tmp/desktop-switch-test/${name}`, Buffer.from(value));
   store = new DeploymentAccounts({ isAvailable: () => true, encryptString: (s) => Buffer.from(s), decryptString: (b) => b.toString() },
     () => state.files.get("/tmp/desktop-switch-test/deployment-accounts.bin")!,
     (blob) => { state.files.set("/tmp/desktop-switch-test/deployment-accounts.bin", blob); });
@@ -194,25 +224,27 @@ describe("[COMP:app-desktop/main] embedded browser IPC", () => {
 
   it("cancels pending native pairing when the main window closes", async () => {
     const { dialog } = await import("electron");
-    let approve!: (answer: Electron.MessageBoxReturnValue) => void;
-    const consent = vi.spyOn(dialog, "showMessageBox").mockReturnValueOnce(
-      new Promise(resolve => { approve = resolve; }),
-    );
+    const consent = vi.spyOn(dialog, "showMessageBox");
+    const close = vi.fn();
+    const created = vi.fn();
+    vi.stubGlobal("WebSocket", class { constructor() { created(); } close = close; readyState = 0; });
     const pending = invoke(sender(), pairInput());
-    expect(consent).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(created).toHaveBeenCalledOnce());
+    expect(consent).not.toHaveBeenCalled();
     state.windows[0].close();
-    approve({ response: 1, checkboxChecked: false });
     expect(await pending).toEqual({ ok: false });
     expect(state.windows).toHaveLength(1);
     expect(state.windows[0].destroyed).toBe(true);
+    expect(close).toHaveBeenCalled();
+    vi.unstubAllGlobals();
   });
 
-  it.each(["status", "request-control", "pair", "show", "cancel", "disconnect"])("validates the sender and main frame for %s", async (type) => {
+  it.each(["status", "request-control", "pair", "show", "cancel", "disconnect", "set-enabled"])("validates the sender and main frame for %s", async (type) => {
     const { EmbeddedBrowser } = await import("../embedded-browser.js");
     const pair = vi.spyOn(EmbeddedBrowser.prototype, "pair").mockResolvedValue(true);
     const status = vi.spyOn(EmbeddedBrowser.prototype, "status");
-    const actions = ["show", "cancelPending", "dispose"].map(method => vi.spyOn(EmbeddedBrowser.prototype, method as "show"));
-    const input = type === "pair" ? pairInput() : { type };
+    const actions = ["show", "cancelPending", "dispose", "setEnabled"].map(method => vi.spyOn(EmbeddedBrowser.prototype, method as "show"));
+    const input = type === "pair" ? pairInput() : { type, enabled: false };
     const foreignContents = { id: 999, isDestroyed: () => false, mainFrame: {} };
     expect(await invoke({ sender: foreignContents, senderFrame: foreignContents.mainFrame }, input)).toEqual({ ok: false });
     expect(await invoke({ ...sender(), senderFrame: {} }, input)).toEqual({ ok: false });
@@ -227,12 +259,25 @@ describe("[COMP:app-desktop/main] embedded browser IPC", () => {
     const { EmbeddedBrowser } = await import("../embedded-browser.js");
     const pair = vi.spyOn(EmbeddedBrowser.prototype, "pair").mockResolvedValue(true);
     for (const type of ["status", "request-control"]) {
-      expect(await invoke(sender(), { type })).toEqual({ ok: true, hasControl: true, connected: false, automaticBlocked: false, controlEpoch: 0 });
+      expect(await invoke(sender(), { type })).toEqual({ ok: true, hasControl: true, browserEnabled: true, connected: false, automaticBlocked: false, controlEpoch: 0 });
     }
     expect(await invoke(sender(), pairInput("other-user"))).toEqual({ ok: false });
     expect(pair).not.toHaveBeenCalled();
     expect(await invoke(sender(), pairInput())).toEqual({ ok: true });
     expect(pair).toHaveBeenCalledExactlyOnceWith(pairInput(), JSON.stringify([local.appUrl, "same-user"]));
+  });
+
+  it("persists the trusted device setting and blocks explicit pairing without a prompt", async () => {
+    const { dialog } = await import("electron");
+    const consent = vi.spyOn(dialog, "showMessageBox");
+    expect(await invoke(sender(), { type: "set-enabled", enabled: false })).toMatchObject({ ok: true, browserEnabled: false });
+    expect(await invoke(sender(), { type: "request-control" })).toMatchObject({ ok: true, hasControl: false, browserEnabled: false });
+    expect(await invoke(sender(), pairInput())).toEqual({ ok: false });
+    const { BrowserPreferences } = await import("../browser-preferences.js");
+    expect(new BrowserPreferences(() => "/tmp/desktop-switch-test/browser-preferences.json").enabled()).toBe(false);
+    expect(await invoke(sender(), { type: "set-enabled", enabled: "true" })).toMatchObject({ ok: false, browserEnabled: false });
+    expect(await invoke(sender(), { type: "set-enabled", enabled: true })).toMatchObject({ ok: true, browserEnabled: true });
+    expect(consent).not.toHaveBeenCalled();
   });
 
   it.each([['show', 'show'], ['cancel', 'cancelPending'], ['disconnect', 'dispose']] as const)('delegates trusted %s requests', async (type, method) => {
@@ -352,7 +397,7 @@ describe("[COMP:app-desktop/main] deployment switching", () => {
     expect(state.windows[1].webContents.loadFile).toHaveBeenCalledWith(
       expect.any(String), expect.objectContaining({ query: expect.objectContaining({ app: cloud.appUrl }) }),
     );
-    const stale = { sender: first.webContents, returnValue: undefined as unknown };
+    const stale = { sender: first.contents, returnValue: undefined as unknown };
     state.handlers.get("Use Brian:get-tokens")!(stale);
     expect(stale.returnValue).toBeNull();
     state.handlers.get("Use Brian:set-tokens")!(stale, { accessToken: "wrong", refreshToken: "wrong" });
@@ -922,5 +967,347 @@ describe("[COMP:app-desktop/main] sign-in lifecycle and return intent", () => {
   it("ignores lifecycle commands from a child frame", () => {
     state.handlers.get("Use Brian:sign-in")!({ ...sender(), senderFrame: {} });
     expect(state.openExternal).not.toHaveBeenCalled();
+  });
+});
+
+describe("[COMP:app-desktop/main] chat window identity isolation", () => {
+  const nearby = { "awake-brian.json": JSON.stringify({ v: 1, keepAwake: true }) };
+  const other = { id: "other-user", name: "Other", email: "other@example.com" };
+  const from = (win: any) => ({ sender: win.contents, senderFrame: win.contents.mainFrame, returnValue: undefined as unknown });
+  const settle = () => new Promise(resolve => setTimeout(resolve, 0));
+  const chatRoute = (win: any): string => win.contents.loadFile.mock.calls.at(-1)?.[1]?.hash ?? win.contents.getURL();
+  /** Open the Nearby chat window the way a native Use Brian request does. */
+  async function openChat(main: any, prompt = "hello") {
+    state.handlers.get("Use Brian:set-companion-context")!(from(main), "ws-a", "assistant-a");
+    state.app.emit("open-url", { preventDefault: vi.fn() }, `usebrian://use?prompt=${prompt}`);
+    const chat = state.windows.at(-1);
+    expect(chat).not.toBe(main);
+    expect(chat.options.title).toBe("Message Brian");
+    await vi.waitFor(() => expect(chatRoute(chat)).toContain("/desktop/chat/ws-a"));
+    return chat;
+  }
+  /** Cookie mode: the active trio plus one other saved account in the same deployment. */
+  async function seedCookieAccounts() {
+    const jar = targetJar(local);
+    for (const [name, value] of Object.entries({
+      access_token: "same-access", refresh_token: "same-refresh",
+      user: JSON.stringify({ id: "same-user", name: "Same", email: "person@example.com" }),
+      accounts_store: JSON.stringify({ "other-user": "other-refresh" }),
+      accounts_dir: JSON.stringify([other]),
+    })) await jar.cookies.set({ url: local.appUrl, name, value });
+    state.refresh.mockReset().mockResolvedValue({ accessToken: "other-access", refreshToken: "other-rotated", accessTokenExpiresIn: 3600, user: other });
+    return jar;
+  }
+  const activeUser = async (jar: any) => JSON.parse((await jar.cookies.get({ name: "user" }))[0].value).id;
+
+  it("closes the chat window before a same-deployment account switch activates the new identity", async () => {
+    await setup("pkce", false, true, nearby);
+    const main = state.windows[0];
+    const chat = await openChat(main);
+    const jar = await seedCookieAccounts();
+    let userWhenChatClosed: string | undefined;
+    chat.once("closed", () => { void activeUser(jar).then((id: string) => { userWhenChatClosed = id; }); });
+    const mainLoads = main.webContents.loadURL.mock.calls.length;
+
+    expect(await state.handlers.get("Use Brian:switch-account")!(from(main), "other-user")).toEqual({ ok: true });
+    await settle();
+    expect(chat.destroyed).toBe(true);
+    expect(userWhenChatClosed).toBe("same-user");
+    expect(await activeUser(jar)).toBe("other-user");
+    expect(main.destroyed).toBe(false);
+    expect(main.webContents.loadURL.mock.calls.length).toBe(mainLoads + 1);
+    // The previous account's pending prompt never reaches the new identity.
+    const stale = from(main);
+    state.handlers.get("Use Brian:take-use-brian-prompt")!(stale);
+    expect(stale.returnValue).toBeNull();
+    // Its companion context is gone too: a Nearby request waits for the
+    // replacement main window's context instead of reopening workspace ws-a.
+    const windows = state.windows.length;
+    state.app.emit("open-url", { preventDefault: vi.fn() }, "usebrian://use?prompt=again");
+    expect(state.windows).toHaveLength(windows);
+    state.handlers.get("Use Brian:set-companion-context")!(from(main), "ws-b", "assistant-b");
+    const reopened = state.windows.at(-1);
+    expect(reopened).not.toBe(chat);
+    expect(reopened).not.toBe(main);
+    await vi.waitFor(() => expect(chatRoute(reopened)).toContain("/desktop/chat/ws-b"));
+    const claim = from(reopened);
+    state.handlers.get("Use Brian:take-use-brian-prompt")!(claim);
+    expect(claim.returnValue).toBe("again");
+  });
+
+  it("keeps the identity and the chat window when the chat window vetoes its unload", async () => {
+    await setup("pkce", false, true, nearby);
+    const main = state.windows[0];
+    const chat = await openChat(main);
+    const jar = await seedCookieAccounts();
+    chat.preventClose = true;
+    expect(await state.handlers.get("Use Brian:switch-account")!(from(main), "other-user")).toEqual({ ok: false, error: "switch" });
+    expect(chat.destroyed).toBe(false);
+    expect(state.refresh).not.toHaveBeenCalled();
+    expect(await activeUser(jar)).toBe("same-user");
+  });
+
+  it.each([true, false])("closes the chat window on sign-out before credentials change (bundled: %s)", async (bundled) => {
+    await setup("pkce", bundled, true, nearby);
+    const main = state.windows[0];
+    const chat = await openChat(main);
+    const jar = bundled ? null : await seedCookieAccounts();
+    let credentialsWhenChatClosed: unknown;
+    chat.once("closed", () => { credentialsWhenChatClosed = bundled ? store.current(local)?.user?.id : "checked-below"; });
+    state.handlers.get("Use Brian:sign-out")!(from(main));
+    await vi.waitFor(() => expect(chat.destroyed).toBe(true));
+    if (bundled) {
+      expect(credentialsWhenChatClosed).toBe("same-user");
+      await vi.waitFor(() => expect(store.current(local)).toBeNull());
+    } else {
+      await vi.waitFor(async () => expect(await activeUser(jar)).toBe("other-user"));
+    }
+    expect(chat.contents.send).not.toHaveBeenCalledWith("Use Brian:session-cleared", "logout");
+    expect(main.webContents.send).toHaveBeenCalledWith("Use Brian:session-cleared", "logout");
+  });
+
+  // Regression M5D-1: Electron destroys the window before "closed", so the
+  // close helper must never read the retired window's webContents; with the
+  // throwing mock above, the old helper rejected and sign-out never ran.
+  it.each([true, false])("completes sign-out with the Nearby window open: context forgotten, session cleared (bundled: %s)", async (bundled) => {
+    await setup("pkce", bundled, true, nearby);
+    const main = state.windows[0];
+    const chat = await openChat(main);
+    const jar = bundled ? null : await seedCookieAccounts();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      state.handlers.get("Use Brian:sign-out")!(from(main));
+      await vi.waitFor(() => expect(main.contents.send).toHaveBeenCalledWith("Use Brian:session-cleared", "logout"));
+      expect(chat.destroyed).toBe(true);
+      if (bundled) await vi.waitFor(() => expect(store.current(local)).toBeNull());
+      else await vi.waitFor(async () => expect(await activeUser(jar)).toBe("other-user"));
+      await settle();
+      // Companion context and the pending native prompt are forgotten: a new
+      // Nearby request waits for the next main-window context, not ws-a.
+      const claim = from(main);
+      state.handlers.get("Use Brian:take-use-brian-prompt")!(claim);
+      expect(claim.returnValue).toBeNull();
+      const windows = state.windows.length;
+      state.app.emit("open-url", { preventDefault: vi.fn() }, "usebrian://use?prompt=after");
+      expect(state.windows).toHaveLength(windows);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("closes the Nearby window and completes a deployment change with it open", async () => {
+    await setup("pkce", true, true, nearby);
+    const main = state.windows[0];
+    const chat = await openChat(main);
+    let mainWhenChatClosed: boolean | undefined;
+    chat.once("closed", () => { mainWhenChatClosed = main.destroyed; });
+    const key = deploymentAccountKey({ target: cloud, tokens: tokens("cloud") });
+    expect(await state.handlers.get("Use Brian:select-account")!(from(main), key)).toEqual({ ok: true });
+    expect(chat.destroyed).toBe(true);
+    expect(mainWhenChatClosed).toBe(false);
+    expect(main.destroyed).toBe(true);
+    const replacement = state.windows.at(-1);
+    expect(replacement).not.toBe(chat);
+    expect(replacement.destroyed).toBe(false);
+    await vi.waitFor(() => expect(replacement.contents.loadFile).toHaveBeenCalledWith(
+      expect.any(String), expect.objectContaining({ query: expect.objectContaining({ app: cloud.appUrl }) }),
+    ));
+  });
+
+  // Regression M5D-4: the Nearby window opened from the main window's route
+  // (workspace only); the main renderer's companion context arrived during its
+  // first load, the app reloaded it, the first load aborted and its failure
+  // handler closed the window.
+  it("keeps the Nearby window open when the companion context arrives during its first load", async () => {
+    await setup("pkce", true, true, nearby);
+    const main = state.windows[0];
+    await main.contents.loadURL(`${main.contents.getURL()}#/w/ws-a/chat`);
+    main.contents.emit("did-navigate-in-page", {}, main.contents.getURL(), true);
+    state.holdLoads = true;
+    state.app.emit("open-url", { preventDefault: vi.fn() }, "usebrian://use?prompt=boot");
+    const chat = state.windows.at(-1);
+    expect(chat).not.toBe(main);
+    await vi.waitFor(() => expect(chat.contents.loadFile).toHaveBeenCalledTimes(1));
+    expect(chatRoute(chat)).toBe("/desktop/chat/ws-a");
+    const warn = vi.spyOn(console, "warn");
+    state.handlers.get("Use Brian:set-companion-context")!(from(main), "ws-a", "assistant-a");
+    await settle();
+    // The update waits for the first load instead of aborting it.
+    expect(chat.contents.loadFile).toHaveBeenCalledTimes(1);
+    chat.contents.finishLoad();
+    await vi.waitFor(() => expect(chat.contents.loadFile).toHaveBeenCalledTimes(2));
+    expect(chatRoute(chat)).toBe("/desktop/chat/ws-a?assistant=assistant-a");
+    chat.contents.finishLoad();
+    await settle();
+    expect(chat.destroyed).toBe(false);
+    expect(warn).not.toHaveBeenCalledWith("Failed to open the Brian chat window:", expect.anything());
+    // Further updates during a load collapse into one reload of the latest route.
+    state.handlers.get("Use Brian:set-companion-context")!(from(main), "ws-a", "assistant-b");
+    await vi.waitFor(() => expect(chat.contents.loadFile).toHaveBeenCalledTimes(3));
+    state.handlers.get("Use Brian:set-companion-context")!(from(main), "ws-a", "assistant-c");
+    state.handlers.get("Use Brian:set-companion-context")!(from(main), "ws-a", "assistant-d");
+    await settle();
+    expect(chat.contents.loadFile).toHaveBeenCalledTimes(3);
+    chat.contents.finishLoad();
+    await vi.waitFor(() => expect(chat.contents.loadFile).toHaveBeenCalledTimes(4));
+    expect(chatRoute(chat)).toBe("/desktop/chat/ws-a?assistant=assistant-d");
+    chat.contents.finishLoad();
+    await settle();
+    expect(chat.destroyed).toBe(false);
+  });
+
+  it("treats a fragment-only Nearby reload that Electron rejects but lands in place as loaded", async () => {
+    await setup("pkce", true, true, nearby);
+    const main = state.windows[0];
+    const chat = await openChat(main);
+    state.fragmentLoadsReject = true;
+    const warn = vi.spyOn(console, "warn");
+    state.handlers.get("Use Brian:set-companion-context")!(from(main), "ws-a", "assistant-b");
+    await vi.waitFor(() => expect(chat.contents.getURL()).toContain("#/desktop/chat/ws-a?assistant=assistant-b"));
+    await settle();
+    expect(warn).not.toHaveBeenCalledWith("Brian chat window reload failed:", expect.anything());
+    expect(chat.destroyed).toBe(false);
+    // The helper is free for the next update.
+    state.handlers.get("Use Brian:set-companion-context")!(from(main), "ws-b", "assistant-c");
+    await vi.waitFor(() => expect(chat.contents.getURL()).toContain("#/desktop/chat/ws-b?assistant=assistant-c"));
+    await settle();
+    expect(warn).not.toHaveBeenCalledWith("Brian chat window reload failed:", expect.anything());
+  });
+
+  it("does not close the Nearby window when a navigation the app did not start aborts its first load", async () => {
+    await setup("pkce", true, true, nearby);
+    const main = state.windows[0];
+    state.holdLoads = true;
+    const chat = await (async () => {
+      state.handlers.get("Use Brian:set-companion-context")!(from(main), "ws-a", "assistant-a");
+      state.app.emit("open-url", { preventDefault: vi.fn() }, "usebrian://use?prompt=boot");
+      const opened = state.windows.at(-1);
+      await vi.waitFor(() => expect(opened.contents.loadFile).toHaveBeenCalledTimes(1));
+      return opened;
+    })();
+    // A context change makes a newer route pending; the first load is then
+    // aborted by another navigation. The newer route loads; the window stays.
+    state.handlers.get("Use Brian:set-companion-context")!(from(main), "ws-b", "assistant-b");
+    const foreign = chat.contents.loadURL("about:blank").catch((error: Error) => error);
+    await vi.waitFor(() => expect(chat.contents.loadFile).toHaveBeenCalledTimes(2));
+    expect(chatRoute(chat)).toBe("/desktop/chat/ws-b?assistant=assistant-b");
+    expect(String(await foreign)).toContain("ERR_ABORTED");
+    chat.contents.finishLoad();
+    await settle();
+    expect(chat.destroyed).toBe(false);
+  });
+
+  it("cancels sign-out and shows the chat window when it vetoes its unload", async () => {
+    await setup("pkce", true, true, nearby);
+    const main = state.windows[0];
+    const chat = await openChat(main);
+    chat.preventClose = true;
+    const show = vi.spyOn(chat, "show");
+    state.handlers.get("Use Brian:sign-out")!(from(main));
+    await vi.waitFor(() => expect(show).toHaveBeenCalled());
+    await settle();
+    expect(chat.destroyed).toBe(false);
+    expect(store.current(local)?.user?.id).toBe("same-user");
+    expect(main.webContents.send).not.toHaveBeenCalledWith("Use Brian:session-cleared", "logout");
+  });
+
+  it("drops late IPC from the previous identity's chat renderer", async () => {
+    await setup("pkce", false, true, nearby);
+    const main = state.windows[0];
+    const chat = await openChat(main);
+    const jar = await seedCookieAccounts();
+    expect(await state.handlers.get("Use Brian:switch-account")!(from(main), "other-user")).toEqual({ ok: true });
+    await settle();
+    const late = from(chat);
+    const sends = chat.contents.send.mock.calls.length;
+    const refreshes = state.refresh.mock.calls.length;
+    // A late switch, sign-out, prompt claim or sign-in request is not an account sender any more.
+    expect(await state.handlers.get("Use Brian:switch-account")!(late, "same-user")).toEqual({ ok: false, error: "switch" });
+    state.handlers.get("Use Brian:sign-out")!(late);
+    state.handlers.get("Use Brian:take-use-brian-prompt")!(late);
+    expect(late.returnValue).toBeNull();
+    state.handlers.get("Use Brian:sign-in")!(late);
+    await settle();
+    expect(state.openExternal).not.toHaveBeenCalled();
+    expect(state.refresh.mock.calls.length).toBe(refreshes);
+    expect(await activeUser(jar)).toBe("other-user");
+    // Nor does any later main-process broadcast reach the closed renderer.
+    state.handlers.get("Use Brian:sign-in")!(from(main));
+    expect(state.openExternal).toHaveBeenCalledOnce();
+    expect(chat.contents.send.mock.calls.length).toBe(sends);
+  });
+
+  it("drops a late bundled token write from a chat renderer retired by sign-out", async () => {
+    await setup("pkce", true, true, nearby);
+    const main = state.windows[0];
+    const chat = await openChat(main);
+    state.handlers.get("Use Brian:sign-out")!(from(main));
+    await vi.waitFor(() => expect(store.current(local)).toBeNull());
+    // A different account signs in; the retired renderer must not obtain or
+    // overwrite its credentials.
+    state.exchange.mockResolvedValue({ ...tokens("signed-in"), user: other, accessTokenExpiresIn: 3600 });
+    state.handlers.get("Use Brian:sign-in")!(from(main));
+    const server = state.servers.at(-1);
+    const nonce = new URL(state.openExternal.mock.calls.at(-1)![0]).searchParams.get("state");
+    server.handler({ url: `/cb?code=fictional-code&state=${nonce}` }, { writeHead: vi.fn(), end: vi.fn() });
+    await vi.waitFor(() => expect(store.current(local)?.user?.id).toBe("other-user"));
+    const late = from(chat);
+    state.handlers.get("Use Brian:get-tokens")!(late);
+    expect(late.returnValue).toBeNull();
+    state.handlers.get("Use Brian:set-tokens")!(late, tokens("late-chat"));
+    expect(store.current(local)?.user?.id).toBe("other-user");
+    expect(store.current(local)?.accessToken).not.toBe("late-chat-access");
+  });
+
+  it("lets main and chat windows run on different sessions of one identity without reloading each other", async () => {
+    await setup("pkce", true, true, nearby);
+    const main = state.windows[0];
+    const chat = await openChat(main);
+    const chatLoads = chat.contents.loadFile.mock.calls.length;
+    const mainLoads = main.webContents.loadFile.mock.calls.length;
+    // The main window moves to another chat session in the same workspace and
+    // assistant (its own turn); the chat window keeps its renderer and turn.
+    await main.webContents.loadURL(`${main.webContents.getURL()}#/w/ws-a/chat?session=main-session`);
+    state.handlers.get("Use Brian:set-companion-context")!(from(main), "ws-a", "assistant-a");
+    await settle();
+    expect(chat.contents.loadFile.mock.calls.length).toBe(chatLoads);
+    expect(main.webContents.loadFile.mock.calls.length).toBe(mainLoads);
+    // Both renderers are trusted senders of the same identity.
+    for (const win of [main, chat]) {
+      const event = from(win);
+      state.handlers.get("Use Brian:get-tokens")!(event);
+      expect(event.returnValue).toMatchObject({ user: { id: "same-user" } });
+    }
+    // A same-identity sign-in restore keeps both renderers and reaches both.
+    state.handlers.get("Use Brian:sign-in")!(from(main), { userId: "same-user" });
+    const server = state.servers.at(-1);
+    const nonce = new URL(state.openExternal.mock.calls.at(-1)![0]).searchParams.get("state");
+    server.handler({ url: `/cb?code=fictional-code&state=${nonce}` }, { writeHead: vi.fn(), end: vi.fn() });
+    await vi.waitFor(() => expect(main.webContents.send).toHaveBeenCalledWith("Use Brian:session-restored"));
+    expect(chat.destroyed).toBe(false);
+    expect(chat.contents.send).toHaveBeenCalledWith("Use Brian:session-restored");
+  });
+
+  it("closes the chat window when a restored sign-in is not proven to be its identity", async () => {
+    await setup("pkce", true, true, nearby);
+    const main = state.windows[0];
+    const chat = await openChat(main);
+    state.handlers.get("Use Brian:clear-tokens")!(from(main)); // expiry: no current identity remains
+    expect(store.current(local)).toBeNull();
+    state.exchange.mockResolvedValue({ ...tokens("signed-in"), user: other, accessTokenExpiresIn: 3600 });
+    let storedWhenChatClosed: unknown = "unset";
+    chat.once("closed", () => { storedWhenChatClosed = store.current(local)?.user?.id ?? null; });
+    state.handlers.get("Use Brian:sign-in")!(from(main));
+    const server = state.servers.at(-1);
+    const nonce = new URL(state.openExternal.mock.calls.at(-1)![0]).searchParams.get("state");
+    server.handler({ url: `/cb?code=fictional-code&state=${nonce}` }, { writeHead: vi.fn(), end: vi.fn() });
+    await vi.waitFor(() => expect(store.current(local)?.user?.id).toBe("other-user"));
+    expect(chat.destroyed).toBe(true);
+    expect(storedWhenChatClosed).toBeNull();
+    expect(chat.contents.send).not.toHaveBeenCalledWith("Use Brian:session-restored");
+    expect(main.webContents.send).toHaveBeenCalledWith("Use Brian:session-restored");
   });
 });

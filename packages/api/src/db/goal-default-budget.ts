@@ -6,12 +6,12 @@
  *
  * [COMP:goals/default-budget]
  */
-import {
-  BUILTIN_GOAL_DEFAULT_BUDGET,
-  type GoalDefaultBudgetSnapshot,
-  type GoalDefaultBudgetStorePort,
-  type SetGoalDefaultBudgetResult,
-} from '@use-brian/core'
+import type {
+  GoalDefaultBudgetSnapshot,
+  GoalDefaultBudgetStorePort,
+  SetGoalDefaultBudgetResult,
+} from '@use-brian/core/goals/default-budget-tools.js'
+import { BUILTIN_GOAL_DEFAULT_BUDGET } from '@use-brian/core/goals/types.js'
 import { query } from './client.js'
 
 type BudgetRow = {

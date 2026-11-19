@@ -29,23 +29,26 @@ import { mountWorkflowPublicationRoutes } from './workflow-publication.js'
 import { mountRoutineIntakeRoutes } from './routine-intake.js'
 import type { PublicationConsentStore } from '../workflow/publication-consent.js'
 import { randomBytes } from 'node:crypto'
+import type { JobStore } from '@use-brian/core/scheduling/types.js'
+import type { SavedViewStore } from '@use-brian/core/views/types.js'
+import { stepAdvisories } from '@use-brian/core/workflow/advisories.js'
+import { advanceWorkflowRun, type ExecutorDeps } from '@use-brian/core/workflow/executor.js'
 import {
-  advanceWorkflowRun,
-  WorkflowDefinitionSchema,
-  WorkflowTriggerSchema,
-  stepAdvisories,
   syncWorkflowScheduleTrigger,
   clearWorkflowScheduleTriggers,
-  type ExecutorDeps,
-  type JobStore,
-  type SavedViewStore,
-  type WorkflowDefinition,
-  type WorkflowRecord,
-  type WorkflowRunStore,
-  type WorkflowStore,
-  type WorkflowTrigger,
-  type AuthoringAuthority,
-} from '@use-brian/core'
+} from '@use-brian/core/workflow/scheduled-trigger.js'
+import {
+  WorkflowDefinitionSchema,
+  WorkflowTriggerSchema,
+} from '@use-brian/core/workflow/schemas.js'
+import type {
+  WorkflowDefinition,
+  WorkflowRecord,
+  WorkflowRunStore,
+  WorkflowStore,
+  WorkflowTrigger,
+} from '@use-brian/core/workflow/types.js'
+import type { AuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { z } from 'zod'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import type { ValidateDeliveryTarget, PreflightConnectorTool } from '../workflow/dependency-preflight.js'
@@ -484,7 +487,7 @@ function mintWebhookCredentials(): { slug: string; secret: string } {
   }
 }
 
-function serializeWorkflow(w: import('@use-brian/core').WorkflowRecord) {
+function serializeWorkflow(w: import('@use-brian/core/workflow/types.js').WorkflowRecord) {
   return {
     id: w.id,
     workspaceId: w.workspaceId,
@@ -515,7 +518,7 @@ function serializeWorkflow(w: import('@use-brian/core').WorkflowRecord) {
   }
 }
 
-function serializeSummary(w: import('@use-brian/core').WorkflowRecord) {
+function serializeSummary(w: import('@use-brian/core/workflow/types.js').WorkflowRecord) {
   return {
     id: w.id,
     workspaceId: w.workspaceId,

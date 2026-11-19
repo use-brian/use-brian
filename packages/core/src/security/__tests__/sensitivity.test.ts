@@ -8,7 +8,7 @@ import {
   maxSensitivity,
   minSensitivity,
   researchWriteFloor,
-} from '../sensitivity.js'
+} from '@use-brian/agent-runtime/security/sensitivity.js'
 
 describe('[COMP:security/sensitivity] Sensitivity utilities', () => {
   describe('RANK', () => {

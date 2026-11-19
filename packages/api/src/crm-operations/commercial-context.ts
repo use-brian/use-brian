@@ -7,16 +7,15 @@
  * [COMP:crm/commercial-context]
  */
 
+import type { CrmCommercialContextCommand } from '@use-brian/core/crm/commercial-context.js'
+import { requireCrmIntegrationResources } from '@use-brian/core/crm/integration-authority.js'
 import {
   crmOperationsSha256,
-  maxSensitivity,
-  requireCrmIntegrationResources,
-  unionScopeRequirements,
-  type CrmCommercialContextCommand,
   type CrmOperationsContext,
-  type EntityRecord,
-  type Sensitivity,
-} from '@use-brian/core'
+} from '@use-brian/core/crm/operations-types.js'
+import type { EntityRecord } from '@use-brian/core/entities/types.js'
+import { unionScopeRequirements } from '@use-brian/agent-runtime/security/context-scope.js'
+import { maxSensitivity, type Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type { CrmOperationsTransaction } from '../db/crm-operations-store.js'
 import { readCrmReference } from '../db/crm.js'
 import {

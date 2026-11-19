@@ -47,13 +47,13 @@ vi.mock('../client.js', () => ({
 }))
 
 import { createDbDocEntityStore } from '../doc-entity-store.js'
-import { boundScopeSources } from '@use-brian/core'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { applyRLSGucs, queryWithRLS } from '../client.js'
 import type {
-  DocEntityInstance,
-  DocEntityType,
+  EntityInstance as DocEntityInstance,
+  EntityType as DocEntityType,
   PropertyDef,
-} from '@use-brian/core'
+} from '@use-brian/core/entities/doc-types.js'
 
 const mockQueryWithRLS = vi.mocked(queryWithRLS)
 

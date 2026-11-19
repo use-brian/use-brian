@@ -23,8 +23,8 @@ import {
   pageToYDocUpdate,
   yDocToSnapshot,
 } from '@use-brian/doc-model'
-import type { Page } from '@use-brian/core/dist/views/blocks.js'
-import { hashAuthoredContent } from '@use-brian/core/dist/ingest/ingest-page.js'
+import type { Page } from '@use-brian/core/views/blocks.js'
+import { hashAuthoredContent } from '@use-brian/core/ingest/ingest-page.js'
 
 /** bare query()-shaped (system bypass). */
 export type SysQuery = <T>(sql: string, params: unknown[]) => Promise<T[]>

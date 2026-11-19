@@ -1,7 +1,8 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { resolve, join, relative } from 'node:path'
-import { parseSkillBundle, skillResourceKindFromPath } from '@use-brian/core'
-import type { SkillBundleFileInput, SkillContent } from '@use-brian/core'
+import { parseSkillBundle, skillResourceKindFromPath } from '@use-brian/core/skills/bundle.js'
+import type { SkillBundleFileInput } from '@use-brian/core/skills/bundle.js'
+import type { SkillContent } from '@use-brian/core/skills/types.js'
 
 const TOOLS_DIR_CANDIDATES = [
   process.env.BRIAN_TOOLS_DIR,

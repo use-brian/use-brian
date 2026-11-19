@@ -1,5 +1,5 @@
 import {randomUUID} from 'node:crypto'
-import {ContextScopeAccumulator} from '@use-brian/core'
+import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
 import express from 'express'
 import request from 'supertest'
 import {afterAll,describe,expect,it,vi} from 'vitest'
@@ -13,6 +13,7 @@ import {addSessionMessage,createWorkspaceChatSession} from '../../db/sessions.js
 import {sessionContextGeneration,writeSessionContextRevision} from '../../db/session-context-revisions.js'
 import {workspaceAccessRoutes} from '../../routes/workspace-access.js'
 import {previewLegacyCleanup as preview,applyLegacyCleanup as apply} from '../legacy-cleanup.js'
+import {withTableTriggersSuspended} from '../../__tests__/fixtures/bootstrap-role.js'
 const {runMigrations}=await import(new URL('../../../scripts/migrate.ts',import.meta.url).href)
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -28,13 +29,14 @@ async function fixture(){
  const confirm=(r:{id:string;payloadHash:string})=>apply(f.workspaceId,f.ownerId,{reviewId:r.id,payloadHash:r.payloadHash})
  return{...f,team,memory,retained,proposal,prepare,confirm}
 }
-/** Model pre-scope rows only in the disposable fixture, never in production. */
+/** Model pre-scope rows only in the disposable fixture, never in production.
+ * The owner suspends the table's own triggers by name for this transaction. */
 async function legacyMessage(f:Awaited<ReturnType<typeof fixture>>){
  const id=randomUUID(),c=await pool.connect()
  try{
-  await c.query('BEGIN');await c.query('SET LOCAL session_replication_role=replica')
-  await c.query(`INSERT INTO session_messages(id,session_id,role,content,workspace_id,sensitivity,compartments,scope_version,sequence_num)
-   VALUES($1,$2,'user','"Fictional unclassified history"',NULL,NULL,NULL,NULL,1)`,[id,f.session.id])
+  await c.query('BEGIN')
+  await withTableTriggersSuspended(c,['session_messages'],()=>c.query(`INSERT INTO session_messages(id,session_id,role,content,workspace_id,sensitivity,compartments,scope_version,sequence_num)
+   VALUES($1,$2,'user','"Fictional unclassified history"',NULL,NULL,NULL,NULL,1)`,[id,f.session.id]))
   await c.query('COMMIT');return id
  }catch(error){await c.query('ROLLBACK');throw error}finally{c.release()}
 }
@@ -348,13 +350,15 @@ describe.sequential('[COMP:api/workspace-legacy-cleanup] owner-reviewed selectiv
  it('erases explicitly selected unclassified verification and correction history',async()=>{
   const f=await fixture(),ids=[randomUUID(),randomUUID(),randomUUID()],c=await pool.connect()
   try{
-   await c.query('BEGIN');await c.query('SET LOCAL session_replication_role=replica')
-   await c.query(`INSERT INTO memory_verifications(id,memory_id,workspace_id,verified_by,action)
-    VALUES($1,$2,$3,$4,'confirm')`,[ids[0],f.memory.id,f.workspaceId,f.ownerId])
-   await c.query(`INSERT INTO brain_verifications(id,target_kind,target_id,workspace_id,verified_by,action)
-    VALUES($1,'task',$2,$3,$4,'confirm')`,[ids[1],randomUUID(),f.workspaceId,f.ownerId])
-   await c.query(`INSERT INTO correction_audit(id,workspace_id,action,primitive,row_id,actor_user_id)
-    VALUES($1,$2,'purge','memory',$3,$4)`,[ids[2],f.workspaceId,f.memory.id,f.ownerId])
+   await c.query('BEGIN')
+   await withTableTriggersSuspended(c,['memory_verifications','brain_verifications','correction_audit'],async()=>{
+    await c.query(`INSERT INTO memory_verifications(id,memory_id,workspace_id,verified_by,action)
+     VALUES($1,$2,$3,$4,'confirm')`,[ids[0],f.memory.id,f.workspaceId,f.ownerId])
+    await c.query(`INSERT INTO brain_verifications(id,target_kind,target_id,workspace_id,verified_by,action)
+     VALUES($1,'task',$2,$3,$4,'confirm')`,[ids[1],randomUUID(),f.workspaceId,f.ownerId])
+    await c.query(`INSERT INTO correction_audit(id,workspace_id,action,primitive,row_id,actor_user_id)
+     VALUES($1,$2,'purge','memory',$3,$4)`,[ids[2],f.workspaceId,f.memory.id,f.ownerId])
+   })
    await c.query('COMMIT')
    const selections=ids.map((id,index)=>({kind:['memory_verification','brain_verification','correction_audit'][index],id}))
    const body={selections,reason:'Erase explicitly selected fictional unclassified audit history',eraseUnclassifiedLegacy:true}
@@ -369,11 +373,13 @@ describe.sequential('[COMP:api/workspace-legacy-cleanup] owner-reviewed selectiv
   try{
    const id=await legacyMessage(f)
    const version=(await pool.query("SELECT read_scope_review_source($1,'session_message',$2)->>'version' AS version",[f.workspaceId,id])).rows[0].version
-   await c.query('BEGIN');await c.query('SET LOCAL session_replication_role=replica')
-   await c.query(`INSERT INTO scope_derivations(id,workspace_id,resource_kind,resource_id,resource_version,producer,user_id,assistant_id,sensitivity,compartments,project_ids,source_policy_revision)
-    SELECT $1,workspace_id,'memory',id,scope_version::text,'fixture:historical-message',user_id,assistant_id,sensitivity,compartments,project_ids,1 FROM memories WHERE id=$2`,[derivation,f.retained.id])
-   await c.query(`INSERT INTO scope_derivation_sources(workspace_id,derivation_id,source_kind,source_id,source_version)
-    VALUES($1,$2,'session_message',$3,$4)`,[f.workspaceId,derivation,id,version])
+   await c.query('BEGIN')
+   await withTableTriggersSuspended(c,['scope_derivations','scope_derivation_sources'],async()=>{
+    await c.query(`INSERT INTO scope_derivations(id,workspace_id,resource_kind,resource_id,resource_version,producer,user_id,assistant_id,sensitivity,compartments,project_ids,source_policy_revision)
+     SELECT $1,workspace_id,'memory',id,scope_version::text,'fixture:historical-message',user_id,assistant_id,sensitivity,compartments,project_ids,1 FROM memories WHERE id=$2`,[derivation,f.retained.id])
+    await c.query(`INSERT INTO scope_derivation_sources(workspace_id,derivation_id,source_kind,source_id,source_version)
+     VALUES($1,$2,'session_message',$3,$4)`,[f.workspaceId,derivation,id,version])
+   })
    await c.query('COMMIT')
    await expect(preview(f.workspaceId,f.ownerId,{selections:[{kind:'session',id:f.session.id}],reason:'Refuse erasure under retained Personal memory',eraseUnclassifiedLegacy:true})).rejects.toMatchObject({code:'legacy_cleanup_retained_dependency'})
    expect((await pool.query('SELECT id FROM session_messages WHERE id=$1',[id])).rowCount).toBe(1)

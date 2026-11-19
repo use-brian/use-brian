@@ -8,11 +8,9 @@
  */
 
 import type { PoolClient, QueryResultRow } from 'pg'
-import {
-  CrmOperationsError,
-  type AccessContext,
-  type CrmCommercialDocumentReadPort,
-} from '@use-brian/core'
+import type { CrmCommercialDocumentReadPort } from '@use-brian/core/crm/invoice-preparation.js'
+import { CrmOperationsError } from '@use-brian/core/crm/operations-types.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import { query } from './client.js'
 import { commercialVisibility, type CrmScopeEnvelope } from './crm-commercial-context-store.js'
 import { queryCrmPage } from '../crm-operations/pagination.js'

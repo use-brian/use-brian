@@ -32,7 +32,7 @@ import { BrandRecordPatchSchema, BrandRecordSchema, mergeBrandRecordPatch } from
 import { z } from 'zod'
 import { getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
 import { getBrandStore } from '../db/brand-store.js'
-import type { BrandStore } from '@use-brian/core'
+import type { BrandStore } from '@use-brian/core/brand/types.js'
 
 type BrandRouteOptions = {
   /** Test seam. Defaults to the shared pg-backed store. */

@@ -25,10 +25,10 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '../tools/types.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import type { FilesApi } from './api.js'
 import { FILE_SENSITIVITIES, type FileSensitivity } from './types.js'
-import { scopeEvidenceFromRows } from '../security/context-scope.js'
+import { scopeEvidenceFromRows } from '@use-brian/agent-runtime/security/context-scope.js'
 import {
   applyExplicitLinks,
   explicitLinksField,
@@ -36,7 +36,7 @@ import {
   type EntityLinksStore,
 } from '../entities/index.js'
 import type { Page } from '../doc/page-types.js'
-import { PdfRenderError, defaultPdfRenderer, type PdfRenderer } from '../doc/convert/to-pdf.js'
+import type { PdfRenderer } from '../doc/convert/to-pdf.js'
 import {
   ctxFor,
   errorMessage,
@@ -85,8 +85,16 @@ export function normalizePdfPath(input: string): string | null {
   return parts.join('/')
 }
 
+// The converter (doc blocks -> .docx -> LibreOffice -> .pdf) loads on the first
+// render, not when the file tools are built (M4 step 5, D13).
+const loadPdfConverter = () => import('../doc/convert/to-pdf.js')
+const lazyDefaultPdfRenderer: PdfRenderer = {
+  fromPage: async (page, renderOpts) => (await loadPdfConverter()).defaultPdfRenderer.fromPage(page, renderOpts),
+  fromMarkdown: async (markdown, renderOpts) => (await loadPdfConverter()).defaultPdfRenderer.fromMarkdown(markdown, renderOpts),
+}
+
 export function createRenderPdfTool(api: FilesApi, opts?: RenderPdfToolOptions): Tool {
-  const renderer = opts?.renderer ?? defaultPdfRenderer
+  const renderer = opts?.renderer ?? lazyDefaultPdfRenderer
   return buildTool({
     name: 'renderPdf',
     requiresCapability: 'files',
@@ -155,7 +163,15 @@ export function createRenderPdfTool(api: FilesApi, opts?: RenderPdfToolOptions):
           rendered = await renderer.fromMarkdown(input.markdown!, { title })
         }
       } catch (error) {
-        if (error instanceof PdfRenderError) {
+        const converter = await loadPdfConverter().catch(() => null)
+        if (!converter && !opts?.renderer) {
+          console.warn('[renderPdf] converter module failed to load:', error)
+          return {
+            data: 'renderPdf did not run: the PDF converter could not be loaded on this server, so no file was written. This is a server-side availability problem, not a problem with the content; do not retry with different arguments. Offer the content as Markdown instead and say plainly that the PDF could not be produced right now.',
+            isError: true,
+          }
+        }
+        if (converter && error instanceof converter.PdfRenderError) {
           console.warn(`[renderPdf] ${error.code}:`, error.cause ?? error.message)
           return {
             data: `${error.message} Offer the content as Markdown (or a Word export from the page header) instead, and say plainly that the PDF could not be produced.`,

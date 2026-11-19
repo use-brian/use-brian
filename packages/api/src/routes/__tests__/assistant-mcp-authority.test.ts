@@ -3,9 +3,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { z } from 'zod'
-import {
-  buildTool, createExecutionContext, type ToolContext,
-} from '@use-brian/core'
+import { createExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { buildTool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { createAuthorityLease } from '../../context-scope/authority-lease.js'
 import type { ResolveExecutionContextInput } from '../../context-scope/execution-context.js'
 import { currentAgentAccess } from '../../db/agent-access-context.js'

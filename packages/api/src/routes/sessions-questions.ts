@@ -19,9 +19,12 @@
  *
  *   GET /api/sessions/:sessionId/pending
  *     Frontend recovery probe. Called on chat reload to detect durable input
- *     for the current turn: either a question or a generic tool confirmation.
- *     Tool confirmations are correlated to the session's private turn lease,
- *     so a stopped/superseded row cannot reappear in a later turn.
+ *     for the current turn: either a question (its full askQuestion payload)
+ *     or a generic tool confirmation. Tool confirmations are correlated to the
+ *     session's private turn lease, so a stopped/superseded row cannot
+ *     reappear in a later turn. With no turn running, the card of a reclaimed
+ *     (killed) last turn is restored from the session's resume point, so
+ *     answering it enqueues the Path B resume.
  *
  * See docs/architecture/engine/askquestion-suspend-resume.md.
  *
@@ -30,7 +33,10 @@
 
 import { Router } from 'express'
 import { externalActionConfirmation } from '../external-approvals/confirmation.js'
-import { CONFIGURE_CAPABILITY, type CapabilityStore, type WorkerRunsStore, type WorkerStatus } from '@use-brian/core'
+import { query } from '../db/client.js'
+import type { WorkerStatus } from '@use-brian/agent-runtime/tools/types.js'
+import { CONFIGURE_CAPABILITY, type CapabilityStore } from '@use-brian/core/authorization/types.js'
+import type { WorkerRunsStore } from '@use-brian/core/workers/worker.js'
 import {
   findSessionById,
   findSessionTurnLeaseState,
@@ -38,7 +44,7 @@ import {
 import { gateSessionRead } from './sessions.js'
 import { policyFor } from '../session-kind.js'
 import { findAssistantById } from '../db/users.js'
-import type { PendingApprovalsStore, PendingApproval } from '../db/pending-approvals-store.js'
+import { pendingQuestionPayload, type PendingApprovalsStore, type PendingApproval } from '../db/pending-approvals-store.js'
 import {
   enqueueToolInvocationResume,
   type ToolInvocationResumeDeps,
@@ -85,6 +91,28 @@ function emptySummary() {
 }
 
 const MAX_ANSWER_CHARS = 8000
+
+/** Lease end reasons that mean the holder died rather than finished or stopped. */
+const RECLAIMED_TURN_END_REASONS = ['stalled_reclaimed', 'timeout']
+
+/**
+ * The private lease token of the session's last turn when that turn was
+ * reclaimed (its process died) and nothing holds the session now. Null for a
+ * running, stopped, completed or failed turn, or when a later claimant exists:
+ * `last_turn_lease_token` names the most recent claimant only. Read after the
+ * route's session read gate; the token never leaves the server.
+ */
+async function reclaimedLastTurnToken(sessionId: string): Promise<string | null> {
+  const result = await query<{ token: string | null }>(
+    `SELECT last_turn_lease_token::text AS token
+       FROM sessions
+      WHERE id = $1 AND status <> 'running' AND turn_lease_token IS NULL
+        AND turn_end_reason = ANY($2::text[])`,
+    [sessionId, RECLAIMED_TURN_END_REASONS],
+  )
+  const token = result.rows[0]?.token
+  return typeof token === 'string' && token.length > 0 ? token : null
+}
 
 function isQuestionPendingForUser(
   approval: PendingApproval,
@@ -217,15 +245,31 @@ export function sessionQuestionRoutes(opts: SessionQuestionRouteOptions): Router
         ? turnLeaseState.turnLeaseToken
         : null
     const now = Date.now()
-    const toolConfirmation = currentTurnToken
-      ? pending.find(
-          (r) =>
-            r.kind === 'tool_invocation' &&
-            r.blockingSessionId === sessionId &&
-            r.approvalPayload.turnLeaseToken === currentTurnToken &&
-            (r.expiresAt === null || r.expiresAt.getTime() > now),
-        )
-      : undefined
+    const pendingConfirmation = (row: PendingApproval) =>
+      row.kind === 'tool_invocation' &&
+      row.status === 'pending' &&
+      row.blockingSessionId === sessionId &&
+      (row.expiresAt === null || row.expiresAt.getTime() > now)
+    let toolConfirmation: PendingApproval | undefined
+    if (currentTurnToken) {
+      // A live turn: only its own card, never an older turn's.
+      toolConfirmation = pending.find(
+        (r) => pendingConfirmation(r) && r.approvalPayload.turnLeaseToken === currentTurnToken,
+      )
+    } else if (turnLeaseState && turnLeaseState.status !== 'running') {
+      // No turn holds the session. A killed turn's card survives as its Path B
+      // checkpoint: the resume point names the approval, the approval belongs
+      // to the session's last claimant, and that turn ended by reclaim. Only a
+      // row in the caller's own visible pending list is a candidate.
+      const point = await opts.resumeDeps.sessionResumeStore.getBySessionId(sessionId)
+      const candidate = point && point.sessionId === sessionId
+        ? pending.find((r) => r.id === point.approvalId && pendingConfirmation(r))
+        : undefined
+      const token = candidate?.approvalPayload.turnLeaseToken
+      if (candidate && typeof token === 'string' && token === await reclaimedLastTurnToken(sessionId)) {
+        toolConfirmation = candidate
+      }
+    }
     // Independent of the live turn lease: these are frozen human requests,
     // not tool invocations. The store also checks the registration's live RLS authority.
     const externalConfirmations = session.channelType === 'web'
@@ -251,10 +295,9 @@ export function sessionQuestionRoutes(opts: SessionQuestionRouteOptions): Router
       pending: question
         ? {
             approvalId: question.id,
-            question:
-              typeof question.approvalPayload.question === 'string'
-                ? question.approvalPayload.question
-                : null,
+            // `question` plus every stored askQuestion schema field (options,
+            // allowCustom, context, actionId, version).
+            ...pendingQuestionPayload(question.approvalPayload),
             expiresAt: question.expiresAt,
             createdAt: question.createdAt,
             action: connectorActionAllowed && connectorEntry

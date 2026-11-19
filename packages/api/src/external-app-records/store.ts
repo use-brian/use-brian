@@ -1,6 +1,6 @@
 import type pg from 'pg'
 import { timingSafeEqual } from 'node:crypto'
-import type { AccessContext } from '@use-brian/core'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import { getPool, applyRLSGucs } from '../db/client.js'
 import { resolveWorkspaceViewpoint } from '../db/workspace-viewpoint.js'
 import { buildAccessPredicate, buildCurrentMemberSourcePredicate } from '../db/access-predicate.js'

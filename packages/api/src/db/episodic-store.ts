@@ -1,5 +1,6 @@
 import { promoteSessionContextEpisode } from './session-context-revisions.js'
-import { bindScopeSources,boundScopeSources,type EpisodicStore,type EpisodicMemoryRecord } from '@use-brian/core'
+import type { EpisodicStore, EpisodicMemoryRecord } from '@use-brian/core/memory/episodic-types.js'
+import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import {
   createEpisodicMemory,
   fetchEpisodicByTopic,

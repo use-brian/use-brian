@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ToolContext } from '@use-brian/core'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { createOrganizationTools, createWorkspaceAccessTools } from '../tools.js'
 import { WorkspaceAccessError } from '../policy.js'
 import { SCOPE_REVIEW_KINDS, sourceAdapter } from '../scope-review-registry.js'

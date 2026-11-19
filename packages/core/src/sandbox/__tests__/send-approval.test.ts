@@ -7,11 +7,11 @@
  * (WU-6.3); this test drives the in-memory resolver the chat route wires.
  */
 import { describe, it, expect } from 'vitest'
-import { createToolExecutor } from '../../engine/tool-executor.js'
-import { createLoopDetector } from '../../engine/loop-detector.js'
-import { createConfirmationResolver } from '../../mcp/types.js'
-import type { ContentBlock } from '../../providers/types.js'
-import type { Tool, ToolContext } from '../../tools/types.js'
+import { createToolExecutor } from '@use-brian/agent-runtime/engine/tool-executor.js'
+import { createLoopDetector } from '@use-brian/agent-runtime/engine/loop-detector.js'
+import { createConfirmationResolver } from '@use-brian/agent-runtime/mcp/types.js'
+import type { ContentBlock } from '@use-brian/agent-runtime/providers/types.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { createComputerTools } from '../tools.js'
 import type { BrowserProvider } from '../types.js'
 

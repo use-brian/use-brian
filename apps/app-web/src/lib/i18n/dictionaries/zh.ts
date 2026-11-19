@@ -3279,6 +3279,8 @@ export const zh: Dictionary = {
     pendingQuestion: {
       heading: "需要您的補充",
       placeholder: "輸入您的回覆…",
+      chooseAnswer: "選擇回答",
+      customAnswer: "輸入其他回答",
       submit: "送出回覆",
       submitting: "送出中…",
       cancel: "取消",
@@ -9226,6 +9228,37 @@ export const zh: Dictionary = {
     "noProjects": "沒有可用的專案"
 },
   chatApp: {
+    offlineRetainedHistory: "離線記錄。上次同步：{time}",
+    visibility: {
+      membersUnavailable: "無法取得工作區成員。已暫停變更參與者。",
+      projectsUnavailable: "無法取得專案。已暫停變更專案。",
+      "raiseCap": "提高機密等級上限",
+      "capNotice": "上限只能提高。若要降低上限，請開啟新對話。",
+      "project": "專案",
+      "noProject": "無專案",
+      "projectNotice": "私人對話維持私人。將工作區對話移入專案會縮小權限，移出需要管理員。",
+      "saveProject": "儲存專案",
+
+      "title": "對話可見範圍",
+      "cap": "機密等級上限：{cap}",
+      "boundaries": "部門與專案範圍：{count}",
+      "caps": {
+            "public": "公開",
+            "internal": "內部",
+            "confidential": "機密"
+      },
+      "privateByKind": "此一對一對話保持私人。只有擁有者可以透過交接分享內容。",
+      "private": "私人",
+      "workspace": "工作區",
+      "participants": "參與者（永遠包含發起者）",
+      "unnamedParticipant": "參與者",
+      "narrowNotice": "先前的讀者可能已看過此對話。他們的離線副本將在24小時內到期。",
+      "widenNotice": "新增讀者將分享整段對話。參與者會收到通知，變更也會記錄於稽核。",
+      "save": "儲存可見範圍",
+      "saving": "儲存中",
+      "failed": "無法更新可見範圍。請重試。",
+      "conflict": "可見範圍已在其他地方變更。請重新整理對話後重試。"
+},
     displayHistory: {
       "label": "已儲存訊息",
       "notice": "這些已儲存訊息僅供參考，不會傳送給助理。",
@@ -9362,6 +9395,7 @@ export const zh: Dictionary = {
     queuedNotice: "助理會在目前回合結束後回覆。",
     postFailed: "無法發佈訊息，請再試一次。",
     stopTurnFailed: "無法停止這個回合，請再試一次。",
+    sendWhileTurnRunning: "助理仍在處理這個對話。請等待回覆或停止後再傳送。",
     mentionInsertAria: "提及 {name}",
     slashMenuLabel: "命令",
     slashInsertAria: "執行 /{slug}",
@@ -9452,6 +9486,7 @@ export const zh: Dictionary = {
     liveWorkStopTitle: "停止這個回合",
     liveWorkNoProgress: "已有 {minutes} 分鐘沒有進展",
     turnStoppedBy: "{name} 停止了這個回合。",
+    turnStopped: "這個回合已停止。",
     turnStoppedByYou: "你已停止這個回合。",
     turnFailed: "未能完成這次回覆。再次嘗試前，請先檢查對話內容。",
     turnReconnecting:
@@ -9460,6 +9495,10 @@ export const zh: Dictionary = {
       "上一個回合停止回應，系統已將它重設並解除聊天封鎖。訊息都還在，重新傳送即可繼續。",
     pinnedContext: "釘選",
     assistantClearanceBlocked: "該助理的權限層級高於此聊天室，無法在這裡回答。",
+    clearanceBelowRejectedRoom: "{name} 沒有讀取這個聊天室的權限，因此無法在這裡回答。請移除提及，或請工作區管理員提高它的權限。",
+    clearanceBelowRejectedMessage: "{name} 沒有讀取這則訊息的權限，因此無法在這裡回答。請移除提及，或請工作區管理員提高它的權限。",
+    clearanceBelowSkippedRoom: "{name} 沒有讀取這個聊天室的權限，因此已略過。工作區管理員可以提高它的權限。",
+    clearanceBelowSkippedMessage: "{name} 沒有讀取這則訊息的權限，因此已略過。工作區管理員可以提高它的權限。",
     deliveryAudienceBlocked: "這個回答用到了並非此共享聊天中所有人都能查看的資訊，因此沒有在這裡發布。請在個人聊天中再問一次。",
     // The Chat side pane: Work + pinned + open tabs (chat-parity D4-D8).
     // [COMP:app-web/chat-side-pane]

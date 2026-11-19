@@ -3,8 +3,9 @@ import request from 'supertest'
 import { createTestApp } from '../../routes/__tests__/helpers.js'
 import { computerRoutes, createInMemoryLocalComputerTaskStore } from '../../routes/computer.js'
 import { createBrowserTaskDiscard } from '../task-discard.js'
-import type { RelayCommandTransport } from '@use-brian/core'
-import { createSandboxOrchestrator, createInMemorySandboxTaskStore, StubSandboxProvider } from '@use-brian/core'
+import type { RelayCommandTransport } from '@use-brian/core/sandbox/types.js'
+import { createSandboxOrchestrator, createInMemorySandboxTaskStore } from '@use-brian/core/sandbox/orchestrator.js'
+import { StubSandboxProvider } from '@use-brian/core/sandbox/providers/stub.js'
 
 const actor = { userId: 'user-1', workspaceId: 'ws-1', sessionId: 'session-1' }
 function fixture() {

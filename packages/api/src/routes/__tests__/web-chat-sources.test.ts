@@ -5,14 +5,9 @@ import { readFileSync } from 'node:fs'
 import { webChatSourcesHandler, WEB_CHAT_SOURCE_SQL, type WebChatSourceSession } from '../_web-chat-sources.js'
 import { dispatchPersistedWebInput } from '../_incoming-chat-event.js'
 import { setMessageEventDispatcher } from '../../message-events.js'
-import { matchesEvent, type DispatchEvent } from '../../../../core/src/workflow/event-trigger.js'
+import { matchesEvent, type DispatchEvent } from '@use-brian/core/workflow/event-trigger.js'
 import { decideSessionRead } from '../../session-read-access.js'
 
-// Exercise the real read predicate without importing the full core barrel.
-vi.mock('@use-brian/core', async () => ({
-  ...await import('../../../../core/src/security/sensitivity.js'),
-  ...await import('../../../../core/src/security/context-scope.js'),
-}))
 const WS = '11111111-1111-1111-1111-111111111111'
 const session = (overrides: Partial<WebChatSourceSession> = {}): WebChatSourceSession => ({
   id: 'session-uuid', workspaceId: WS, assistantId: 'assistant', userId: 'user',

@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
-import { ContextScopeAccumulator, scopeEvidenceFromRows, createGetCommentThreadTool, executionToolContext } from '@use-brian/core'
+import { createGetCommentThreadTool } from '@use-brian/core/doc/comment-tools.js'
+import { ContextScopeAccumulator, scopeEvidenceFromRows } from '@use-brian/agent-runtime/security/context-scope.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { getAppPool, getPool, queryWithRLS } from '../../db/client.js'
 import { createDbCommentThreadStore } from '../../db/comment-thread-store.js'
 import { createDbDocPageStore } from '../../db/doc-page-store.js'
@@ -73,10 +75,25 @@ describe.sequential('[COMP:api/page-thread-audience] current Page input and reta
     const reply = await addSessionMessage({ sessionId:t.session.id,role:'assistant',senderAssistantId:t.f.assistantId,
       content:[{type:'text',text:'The orchard has three rows and a twelve-crate target.'}],
       ...turnOutputWrite({producer:'fixture:page-reply',accumulator:t.accumulator,envelope:t.envelope}),authority:t.authority })
-    const edges = (await t.f.pool.query(`SELECT s.source_kind FROM scope_derivations d JOIN scope_derivation_sources s ON s.derivation_id=d.id
-      WHERE d.workspace_id=$1 AND d.resource_id=$2`, [t.f.workspaceId,reply.id])).rows
-    expect(edges).toContainEqual({ source_kind:'page_event_changed' })
-    const history = await readAttendedSessionHistory(t.authority,t.session.id,null)
+    const ancestry = (await t.f.pool.query(`SELECT reply_edge.source_kind AS carrier_kind,frame.format,
+      page_edge.source_id AS receipt_id,page_edge.source_version,receipt.page_id,view.page_event_revision
+      FROM scope_derivations reply
+      JOIN scope_derivation_sources reply_edge ON reply_edge.workspace_id=reply.workspace_id AND reply_edge.derivation_id=reply.id
+      JOIN native_turn_frames frame ON frame.workspace_id=reply.workspace_id AND frame.id=reply_edge.source_id AND frame.session_id=$3
+      JOIN scope_derivations frame_declaration ON frame_declaration.workspace_id=reply.workspace_id
+       AND frame_declaration.resource_kind=reply_edge.source_kind AND frame_declaration.resource_id=frame.id
+       AND frame_declaration.resource_version=reply_edge.source_version
+      JOIN scope_derivation_sources page_edge ON page_edge.workspace_id=reply.workspace_id
+       AND page_edge.derivation_id=frame_declaration.id AND page_edge.source_kind='page_event_changed'
+      JOIN workflow_page_event_receipts receipt ON receipt.workspace_id=reply.workspace_id AND receipt.revision=page_edge.source_id
+      JOIN saved_views view ON view.workspace_id=receipt.workspace_id AND view.id=receipt.page_id
+      WHERE reply.workspace_id=$1 AND reply.resource_kind='session_message' AND reply.resource_id=$2`,
+    [t.f.workspaceId,reply.id,t.session.id])).rows
+    const originalPage = t.accumulator.evidence.sources?.find(source => source.resourceKind === 'page_event_changed')
+    expect(originalPage?.resourceId).toBeDefined()
+    expect(ancestry).toEqual([{ carrier_kind:'session_context_revision',format:2,receipt_id:originalPage?.resourceId,
+      source_version:originalPage?.version,page_id:t.pageId,page_event_revision:originalPage?.resourceId }])
+    const history = (await readAttendedSessionHistory(t.authority,t.session.id,null)).messages
     expect(history.some(row => row.id === reply.id)).toBe(true)
     expect(JSON.stringify(history)).not.toContain('PRIVATE OPTIONAL')
     expect(await t.authorize({ ...t.audience,scopeEvidence:t.accumulator.evidence })).toMatchObject({ allowed:true })
@@ -111,10 +128,15 @@ describe.sequential('[COMP:api/page-thread-audience] current Page input and reta
     const reply = await addSessionMessage({ sessionId:t.session.id,role:'assistant',senderAssistantId:t.f.assistantId,
       content:[{ type:'text',text:'The owner-only orchard has three rows.' }],
       ...turnOutputWrite({ producer:'fixture:private-page-reply',accumulator:t.accumulator,envelope:t.envelope }),authority:t.authority })
-    expect((await readAttendedSessionHistory(t.authority,t.session.id,null)).some(row => row.id === reply.id)).toBe(true)
+    expect(((await readAttendedSessionHistory(t.authority,t.session.id,null)).messages).some(row => row.id === reply.id)).toBe(true)
     expect(await gateSessionRead(t.f.firstId,t.session)).toMatchObject({ status:404 })
     await t.f.pool.query('UPDATE saved_views SET teamspace_id=$2 WHERE id=$1',[t.pageId,t.space])
     expect(await t.authorize({ ...t.audience,scopeEvidence:t.accumulator.evidence })).toMatchObject({ allowed:false })
+    await expect(addSessionMessage({ sessionId:t.session.id,role:'assistant',senderAssistantId:t.f.assistantId,
+      content:[{ type:'text',text:'Fictional reply from an expired Page principal' }],
+      ...turnOutputWrite({ producer:'fixture:expired-page-principal',accumulator:t.accumulator,envelope:t.envelope }),
+      authority:t.authority })).rejects.toThrow(/page_derivation_output_not_integrated|scope_source_changed/)
+    expect((await t.f.pool.query('SELECT id FROM session_messages WHERE session_id=$1',[t.session.id])).rows).toEqual([{ id:reply.id }])
   })
 
   it('refuses copying Page-derived output to another Page thread at the actual publication constraint', async () => {
@@ -129,10 +151,21 @@ describe.sequential('[COMP:api/page-thread-audience] current Page input and reta
     const thread = await createDbCommentThreadStore().createThread({ userId:t.f.ownerId,workspaceId:t.f.workspaceId,
       assistantId:t.f.assistantId,pageId,anchorKind:'human_range' })
     const destination = (await readSessionById(thread.sessionId))!, execution = await t.f.execution(t.f.ownerId,destination)
-    await expect(addSessionMessage({ sessionId:destination.id,role:'assistant',senderAssistantId:t.f.assistantId,
-      content:[{type:'text',text:'Fictional forbidden Page copy'}],
-      ...turnOutputWrite({producer:'fixture:forbidden-page-copy',accumulator:t.accumulator,envelope:t.envelope}),
-      authority:{ execution,accumulator:t.accumulator } })).rejects.toThrow(/page_derivation_output_not_integrated/)
+    expect(await gateSessionRead(t.f.ownerId,t.session)).toBeNull()
+    expect(await gateSessionRead(t.f.ownerId,destination)).toBeNull()
+    const reply = await addSessionMessage({ sessionId:t.session.id,role:'assistant',senderAssistantId:t.f.assistantId,
+      content:[{type:'text',text:'Fictional same-Page result'}],
+      ...turnOutputWrite({producer:'fixture:accepted-page-write',accumulator:t.accumulator,envelope:t.envelope}),
+      authority:t.authority })
+    const inherited = new ContextScopeAccumulator()
+    inherited.note(scopeEvidenceFromRows([reply]))
+    expect(inherited.evidence.sources).toEqual([expect.objectContaining({resourceKind:'session_message',resourceId:reply.id})])
+    for (const accumulator of [t.accumulator,inherited]) {
+      await expect(addSessionMessage({ sessionId:destination.id,role:'assistant',senderAssistantId:t.f.assistantId,
+        content:[{type:'text',text:'Fictional forbidden Page copy'}],
+        ...turnOutputWrite({producer:'fixture:forbidden-page-copy',accumulator,envelope:t.envelope}),
+        authority:{ execution,accumulator } })).rejects.toThrow(/page_derivation_output_not_integrated/)
+    }
     expect((await t.f.pool.query('SELECT id FROM session_messages WHERE session_id=$1',[destination.id])).rows).toEqual([])
   })
 })

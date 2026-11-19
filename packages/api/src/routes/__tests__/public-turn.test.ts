@@ -38,6 +38,7 @@ import {
 import { formatPrivateRuntimeContext } from '../_prompt-builder.js'
 import { findUserByAuthProvider } from '../../db/users.js'
 import { findSessionByChannel, getSessionMessages } from '../../db/sessions.js'
+import { publicApiKeyCredential, publicChatLinkCredential } from '../../db/public-conversation.js'
 
 const mockFindUser = vi.mocked(findUserByAuthProvider)
 const mockFindSession = vi.mocked(findSessionByChannel)
@@ -426,6 +427,7 @@ describe('[COMP:api/public-turn] Shared public turn pipeline', () => {
           assistantId: 'a_1',
           identityNamespace: 'chatlink:l_1',
           externalUserId: 'visitor-1',
+          credential: publicChatLinkCredential('l_1', 'fixture-token'),
           limit: 100,
         },
         res as never,
@@ -452,6 +454,8 @@ describe('[COMP:api/public-turn] Shared public turn pipeline', () => {
           assistantId: 'a_1',
           identityNamespace: 'api:k_1',
           externalUserId: 'ext-1',
+          credential: publicApiKeyCredential({ id: 'k_1', keyHash: 'fixture-hash', scope: 'chat',
+            audience: 'external', anonymousContext: 'thin', toolPolicy: 'assistant', createdBy: null }),
           sessionId: 'sess-9',
           limit: 50,
         },

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { resolveRecordingForFile, isMediaMime } from '../recording-for-file.js'
-import type { WorkspaceFile } from '@use-brian/core'
+import type { WorkspaceFile } from '@use-brian/core/workspace-files/types.js'
 
 const WS = 'ws-1'
 

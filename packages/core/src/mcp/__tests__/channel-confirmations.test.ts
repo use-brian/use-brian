@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ChannelConfirmations, type ChannelInteractionScope } from '../channel-confirmations.js'
 import { CONFIRMATION_DECISIONS, type NormalizedConfirmationEvent } from '../confirmation-events.js'
-import { createConfirmationResolver, type ConfirmationResolver, type ToolConfirmationRequest } from '../types.js'
+import { createConfirmationResolver, type ConfirmationResolver, type ToolConfirmationRequest } from '@use-brian/agent-runtime/mcp/types.js'
 
 const scope: ChannelInteractionScope = {
   channelType: 'slack', integrationId: 'integration', conversationId: 'room', senderId: 'actor', sessionId: 'thread',

@@ -2,8 +2,18 @@
  * [COMP:api/crm-delivery-oversight]
  */
 import type { PoolClient, QueryResultRow } from 'pg'
-import { assessDelivery, type AccessContext, type DeliveryCommitment, type DeliveryDetail,
-  type DeliveryObservation, type DeliveryLinkedWork, type DeliveryReadPort, type DeliverySource, type DeliverySourceRef, type DeliveryViewer } from '@use-brian/core'
+import {
+  assessDelivery,
+  type DeliveryCommitment,
+  type DeliveryDetail,
+  type DeliveryObservation,
+  type DeliveryLinkedWork,
+  type DeliveryReadPort,
+  type DeliverySource,
+  type DeliverySourceRef,
+  type DeliveryViewer
+} from '@use-brian/core/crm/delivery-oversight.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import { getAppPool, applyRLSGucs } from './client.js'
 import { commercialVisibility } from './crm-commercial-context-store.js'
 import { queryCrmPage } from '../crm-operations/pagination.js'

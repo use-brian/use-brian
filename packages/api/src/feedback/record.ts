@@ -18,7 +18,7 @@
  * [COMP:brain/feedback-recorder]
  */
 
-import { deriveResourceScope, type ResourceScope, type ScopeSource } from '@use-brian/core'
+import { deriveResourceScope, type ResourceScope, type ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { getPool } from '../db/client.js'
 import { createMemory } from '../db/memories.js'
 import { recordDerivedResource } from '../db/derived-scope-store.js'

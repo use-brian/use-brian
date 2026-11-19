@@ -3,8 +3,8 @@
  */
 import { z } from 'zod'
 import { CrmOperationsError } from './operations-types.js'
-import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
-import { missingToolCapability } from '../tools/capability-gate.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { missingToolCapability } from '@use-brian/agent-runtime/tools/capability-gate.js'
 import { crmOperationsToolContext, crmOperationsToolFailure } from './operations-tools.js'
 import type { CrmOperationsServicePort } from './operations-types.js'
 import { AppendDeliveryObservationSchema, DeliveryProposalSchema, DeliveryListQuerySchema, RecordDeliveryRecognitionSchema,

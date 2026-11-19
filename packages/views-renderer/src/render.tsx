@@ -21,7 +21,7 @@ import {
   type A2UIRowValue,
   type A2UIWidget,
   type ViewPayload,
-} from '@use-brian/core/dist/views/a2ui.js'
+} from '@use-brian/core/views/a2ui.js'
 import type { OnActionHandler, RenderWidgetOpts, ViewRendererProps } from './types.js'
 import { Badge } from './widgets/Badge.js'
 import { Button } from './widgets/Button.js'

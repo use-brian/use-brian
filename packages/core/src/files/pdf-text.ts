@@ -11,10 +11,14 @@
  * [COMP:files/pdf-text]
  */
 
-import { extractText } from 'unpdf'
+import { lazyImplementation } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
+
+// The pdf.js text extractor loads on the first PDF, not at import (M4 step 5, D13).
+const loadUnpdf = lazyImplementation('The PDF text extractor (unpdf)', () => import('unpdf'))
 
 /** Extract the concatenated text layer of a PDF as a single string ('' if none). */
 export async function extractPdfText(buffer: Buffer): Promise<string> {
+  const { extractText } = await loadUnpdf()
   const { text } = await extractText(new Uint8Array(buffer), { mergePages: true })
   return text.trim()
 }

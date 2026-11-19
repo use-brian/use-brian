@@ -27,6 +27,8 @@ import { getWorkspaceMembershipWithReadScopeSystem } from '../db/workspace-store
 import { TURN_LEASE_STALE_AFTER_MS } from '../db/sessions.js'
 import { liveSessionTier } from '../session-read-access.js'
 import { anchorReadGate } from '../session-read-authority.js'
+import { conversationReadersActive, readConversationMemberTiers } from '../db/conversation-visibility.js'
+import { pinSessionTitleClaims, sessionTitleProjections } from './session-title-authority.js'
 import { classifySession, policyFor, sessionKindSql, sessionPolicy } from '../session-kind.js'
 
 /** How long a settled item stays on the roster — a read-time window, no stored state (§3.2). */
@@ -56,6 +58,8 @@ export type LiveSessionItem = {
   title?: string
   /** FULL tier only — true when this active lane owns a turn inbox. */
   canSteer?: boolean
+  turnId?:string|null
+  turnEndReason?:string|null
 }
 
 export type LiveWorkflowRunItem = {
@@ -151,6 +155,8 @@ type SessionRosterRow = {
   createdAt: Date
   lastActiveAt: Date
   turnHeartbeatAt: Date | null
+  turnId?:string|null
+  turnEndReason?:string|null
   waiting: boolean
 }
 
@@ -179,8 +185,9 @@ export function projectSessionRow(
   membershipCompartments: string[] | null = null,
   membershipProjectIds: string[] | null = null,
   departmentAccess?: NonNullable<Awaited<ReturnType<typeof getWorkspaceMembershipWithReadScopeSystem>>>['departmentAccess'],
+  currentTier?: 'full' | 'presence' | 'omitted',
 ): LiveSessionItem | null {
-  const tier = liveSessionTier({
+  const tier = currentTier ?? liveSessionTier({
     callerUserId,
     session: {
       userId: row.userId,
@@ -228,6 +235,8 @@ export function projectSessionRow(
   }
   if (tier === 'full') {
     base.visibility = row.visibility
+    base.turnId=row.turnId??null
+    base.turnEndReason=row.turnEndReason??null
     // Steering lands only through the per-session turn inbox, which exists
     // for personal-admission web conversations (D11): workspace sessions
     // answer a mid-turn message with a follow-up turn instead.
@@ -303,6 +312,7 @@ async function fetchSessionRows(workspaceId: string): Promise<SessionRosterRow[]
             s.created_at             AS "createdAt",
             s.last_active_at         AS "lastActiveAt",
             s.turn_heartbeat_at      AS "turnHeartbeatAt",
+            native_session_public_turn_id(s.workspace_id,s.id,s.last_turn_lease_token) AS "turnId",s.turn_end_reason AS "turnEndReason",
             EXISTS (
               SELECT 1 FROM pending_approvals pa
                WHERE pa.blocking_session_id = s.id
@@ -390,16 +400,22 @@ export function liveWorkRoutes(): Router {
         fetchRunRows(workspaceId, callerUserId),
       ])
       const now = new Date()
+      const currentTiers = conversationReadersActive()
+        ? await readConversationMemberTiers(callerUserId, sessionRows.map(row => row.id), true) : null
+      const recordTitles = currentTiers ? await sessionTitleProjections({ claims: pinSessionTitleClaims(req),
+        sessionIds: sessionRows.filter(row => currentTiers.get(row.id) === 'full').map(row => row.id) }) : null
+      const receivingTiers = currentTiers ? await readConversationMemberTiers(callerUserId, sessionRows.map(row => row.id), true) : null
       const projected = sessionRows.map((row) => ({
         row,
         item: projectSessionRow(
-          row,
+          recordTitles ? { ...row, title: recordTitles.get(row.id)?.title ?? null } : row,
           callerUserId,
           membership.clearance,
           now,
           membership.compartments,
           membership.projectIds,
           membership.departmentAccess,
+          receivingTiers ? receivingTiers.get(row.id) ?? 'omitted' : undefined,
         ),
       }))
       // The roster obeys the SAME read rule as the gate: a workspace row
@@ -407,7 +423,7 @@ export function liveWorkRoutes(): Router {
       // only when the anchor's audience includes the caller (L3). An
       // anchor refusal is invisible, never presence (D5).
       const sessionItems = await Promise.all(projected.map(async ({ row, item }) => {
-        if (!item) return null
+        if (!item || currentTiers) return item
         const read = policyFor(row).read
         if (read.rule !== 'workspace' || read.anchorGate === 'none') return item
         const verdict = await anchorReadGate(callerUserId, row)

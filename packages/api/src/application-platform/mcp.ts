@@ -1,7 +1,7 @@
 import type { Pool } from 'pg'
 /** Application MCP is an authenticated profile of the shared Brain transport. [COMP:api/application-auth] */
 import { z } from 'zod'
-import type { ExecutionContext } from '@use-brian/core'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { ApplicationPlatformError, applicationCommandSchema, applicationJsonSchema } from '@use-brian/shared'
 import { AuthorityChangedError } from '../context-scope/authority-lease.js'
 import type { BrainTool } from '../brain-mcp/tools.js'

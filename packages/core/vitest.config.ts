@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'node:url'
 import { configDefaults, defineConfig } from 'vitest/config'
+import { unitTestExclusions } from '../../scripts/testing/unit-partition.mjs'
 
 // Default `pnpm test` runs UNIT tests only (root CLAUDE.md test table).
 // Core's integration suites (`*.integration.test.ts`) hit live LLM
@@ -21,6 +22,6 @@ export default defineConfig({
     },
   },
   test: {
-    exclude: [...configDefaults.exclude, '**/*.integration.test.ts'],
+    exclude: [...configDefaults.exclude, '**/*.integration.test.ts', ...unitTestExclusions('packages/core')],
   },
 })

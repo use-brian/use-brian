@@ -31,7 +31,7 @@ vi.mock('../client.js', () => ({
 vi.mock('../../crm-operations/privacy-admission.js',()=>({acquireCrmPrivacyAdmission:vi.fn(async()=>{})}))
 
 import { createSoftDeleteStore } from '../soft-delete-store.js'
-import type { RowSnapshot } from '@use-brian/core'
+import type { RowSnapshot } from '@use-brian/core/corrections/soft-delete.js'
 
 const store = createSoftDeleteStore()
 const NOW = new Date('2026-05-18T12:00:00Z')

@@ -15,7 +15,9 @@
  * [COMP:api/mailbox-imap-client]
  */
 
-import { ImapFlow } from 'imapflow'
+import { createRequire } from 'node:module'
+import { ImplementationUnavailableError } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
+import type { ImapFlow as ImapFlowClient } from 'imapflow'
 import type { MailboxAccountSettings } from './types.js'
 
 /** The subset of imapflow this module consumes (structural, fake-able). */
@@ -249,7 +251,28 @@ export function attachSessionErrorSink(
   })
 }
 
+// The IMAP client library loads when the first client is constructed, not at
+// boot (M4 step 5). Construction is synchronous at every call site, so the
+// CommonJS package is required on first use; a failed load is the honest
+// `ImplementationUnavailableError` (no client, nothing sent), retried on the
+// next construction.
+const requirePackage = createRequire(import.meta.url)
+let imapFlowConstructor: typeof ImapFlowClient | null = null
+
+/** The `ImapFlow` class, loaded on first use. */
+export function imapFlowClass(): typeof ImapFlowClient {
+  if (imapFlowConstructor) return imapFlowConstructor
+  try {
+    imapFlowConstructor = (requirePackage('imapflow') as { ImapFlow: typeof ImapFlowClient }).ImapFlow
+  } catch (cause) {
+    console.error('[mailbox] IMAP client (imapflow) failed to load:', cause)
+    throw new ImplementationUnavailableError('The IMAP client (imapflow)', { cause })
+  }
+  return imapFlowConstructor
+}
+
 export function createImapClient(settings: MailboxAccountSettings): ImapClientLike {
+  const ImapFlow = imapFlowClass()
   const client = new ImapFlow({
     host: settings.imapHost,
     port: settings.imapPort,

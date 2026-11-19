@@ -24,10 +24,7 @@
 import { Router } from 'express'
 import { randomUUID } from 'node:crypto'
 import multer from 'multer'
-import type {
-  FilesApi,
-  FilesContext,
-} from '@use-brian/core'
+import type { FilesApi, FilesContext } from '@use-brian/core/workspace-files/api.js'
 import { isAllowedMime } from './files.js'
 import type { getWorkspaceFileReadProjection } from '../db/workspace-files.js'
 import { workspaceFileReadRevision } from '../files/files-api.js'

@@ -1,19 +1,22 @@
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { admitEntityLinkCreate } from '../workspace-access/entity-link-create-admission.js'
 import type {
-  AccessContext,
   EdgeType,
   EntityLinkCreateParams,
   EntityLinkRecord,
   EntityLinksStore,
   EntitySource,
   LinkKind,
-} from '@use-brian/core'
-import type { Sensitivity } from '@use-brian/core'
+} from '@use-brian/core/entities/types.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type pg from 'pg'
 import { buildAccessPredicate } from './access-predicate.js'
 import { queryWithRLS, getAppPool, applyRLSGucs } from './client.js'
-import { ContextScopeAccumulator, DerivedScopeError, bindScopeSources, boundScopeSources, deriveWriteScope, type ScopeSource, type SessionContextAuthority } from '@use-brian/core'
+import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { DerivedScopeError, deriveWriteScope, type ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { getMemoryById } from './memories.js'
 import { readRetainedContextFrame, writeRetainedContextFrame } from './session-context-revisions.js'
 import { readExternalSourceAncestors } from '../application-platform/external-source-ancestry.js'
@@ -138,6 +141,13 @@ function toLink(row: EntityLinkRow): EntityLinkRecord {
  * plainly — closed historical windows never collide, and a closed or
  * retracted edge can always be re-opened as a fresh active row.
  */
+/** ON CONFLICT DO UPDATE checks the existing row against the read/update
+ * policies and raises a USING-expression violation instead of skipping it. */
+function isConflictingRowPolicyRefusal(error: unknown): boolean {
+  const e = error as { code?: string; message?: string }
+  return e?.code === '42501' && /\(USING expression\) for table "entity_links"$/.test(e.message ?? '')
+}
+
 export async function createEntityLink(
   actorUserId: string,
   params: EntityLinkCreateParams,
@@ -169,7 +179,15 @@ export async function createEntityLink(
   // remove the active row between conflict arbitration and RETURNING.
   // A duplicate active edge is updated in place so its Team/Project
   // scope can only narrow by unioning the newly observed evidence.
+  // A ready-mode duplicate takes the guarded DO UPDATE. When the conflicting
+  // active edge is outside the caller's read policy (held, for one), Postgres
+  // refuses the ON CONFLICT update outright instead of skipping the row; that
+  // refusal is the same denial as the guard's no-op, so it is reported as
+  // context_not_available inside a savepoint that keeps the caller's
+  // transaction usable. Any other error is rethrown unchanged.
+  const guarded = admission.ready && !freshOnly
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (guarded) await run('SAVEPOINT entity_link_upsert', [])
     const result = await run<EntityLinkRow>(
       `INSERT INTO entity_links (
          source_kind, source_id, target_kind, target_id, edge_type,
@@ -225,7 +243,13 @@ export async function createEntityLink(
         params.validFrom ?? null,
         params.validTo ?? null,
       ],
-    )
+    ).catch(async (error: unknown) => {
+      if (!guarded) throw error
+      await run('ROLLBACK TO SAVEPOINT entity_link_upsert', [])
+      if (isConflictingRowPolicyRefusal(error)) throw new WorkspaceAccessError('context_not_available', 404)
+      throw error
+    })
+    if (guarded) await run('RELEASE SAVEPOINT entity_link_upsert', [])
     if (result.rows[0]) return toLink(result.rows[0])
     if (freshOnly || admission.ready) throw new WorkspaceAccessError('context_not_available', 404)
 

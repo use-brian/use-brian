@@ -1,5 +1,7 @@
 /** Canonical CRM event admission for parked goals. [COMP:api/goal-crm-scope] */
-import { crmDomainEventToDispatchEvent, matchesEvent, type CrmDomainEventEnvelope, type DispatchEvent, type GoalRecord } from '@use-brian/core'
+import type { GoalRecord } from '@use-brian/core/goals/types.js'
+import { crmDomainEventToDispatchEvent, type CrmDomainEventEnvelope } from '@use-brian/core/workflow/crm-event-trigger.js'
+import { matchesEvent, type DispatchEvent } from '@use-brian/core/workflow/event-trigger.js'
 import { getPool, query } from '../db/client.js'
 import { acquireCrmPrivacyWriterAdmission } from '../crm-operations/privacy-admission.js'
 import type { GoalAwaitingEvent } from './driver.js'

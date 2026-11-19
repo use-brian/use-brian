@@ -1,7 +1,7 @@
 /** Bounded transport aliases over the admitted native catalog. [COMP:api/workspace-mcp] */
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
-import { formatToolError } from '@use-brian/core'
+import { formatToolError } from '@use-brian/agent-runtime/engine/tool-executor.js'
 import type { BrainTool } from '../brain-mcp/tools.js'
 import { mcpToolInputSchema } from '../brain-mcp/stateless.js'
 

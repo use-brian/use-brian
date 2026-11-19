@@ -148,7 +148,7 @@ export function mergeHostConnectorIdentityHeaders(base: Record<string, string> |
  * Extract a connector's static **preflight headers** from its (non-secret,
  * client-writable) `config.preflightHeaders` into a name→value map. These are
  * operational headers (tenant, tracing, routing) a user configures per custom
- * MCP connector; `injectMcpTools` merges them over the connector's auth headers
+ * MCP connector; the `remote-mcp` provider merges them over the connector's auth headers
  * (`mergeValidatedHeaders`, preflight wins) so they travel on discovery and
  * every tool call. See `docs/architecture/engine/tool-hooks.md`.
  *
@@ -221,7 +221,7 @@ export type ActorIdentity = {
   org?: string | null
   /**
    * Opaque, short-lived media capability token (minted by the closed platform,
-   * HMAC-signed). When set, `injectMcpTools` emits it as `X-UseBrian-Media-Token` (+ legacy `X-Sidanclaw-Media-Token`)
+   * HMAC-signed). When set, the `remote-mcp` provider emits it as `X-UseBrian-Media-Token` (+ legacy `X-Sidanclaw-Media-Token`)
    * to connectors that opted in via `sendMediaToken`, letting them fetch this
    * user's latest recording server-to-server. Open core carries the string only;
    * it never signs or verifies it. Emitted separately from the actor headers.
@@ -231,7 +231,7 @@ export type ActorIdentity = {
 
 /**
  * Build the reserved-namespace identity headers from a resolved `ActorIdentity`.
- * These merge at the HIGHEST precedence in `injectMcpTools` (over auth + static
+ * These merge at the HIGHEST precedence in the `remote-mcp` provider (over auth + static
  * preflight headers) and the user-config path can't set the namespace, so the
  * model and the user are both unable to influence them — the value is a
  * sidanclaw-backend assertion. Trustworthy when the connector authenticates the

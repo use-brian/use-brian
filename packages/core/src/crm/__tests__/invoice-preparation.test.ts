@@ -1,20 +1,18 @@
 import { describe, expect, it, vi } from 'vitest'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { crmReferenceDefinitionIssues, CrmReferenceDefinitionInputSchema } from '../business-references.js'
 import {
   CrmDecimalError,
-  CrmInvoiceTemplateMapSchema,
-  CrmOperationsCommandSchema,
   computeCrmInvoiceTotals,
-  createCrmCommercialDocumentTools,
   crmCurrencyMinorUnits,
   crmDecimalAdd,
   crmDecimalMultiply,
   crmDecimalRound,
-  crmReferenceDefinitionIssues,
-  CrmReferenceDefinitionInputSchema,
-  type CrmCommercialDocumentReadPort,
-  type CrmOperationsServicePort,
-  type ToolContext,
-} from '../../index.js'
+} from '../commercial-decimal.js'
+import { createCrmCommercialDocumentTools } from '../commercial-document-tools.js'
+import type { CrmCommercialDocumentReadPort } from '../invoice-preparation.js'
+import { CrmInvoiceTemplateMapSchema } from '../invoice-template-map.js'
+import { CrmOperationsCommandSchema, type CrmOperationsServicePort } from '../operations-types.js'
 
 const UUID = '00000000-0000-4000-8000-000000000001'
 

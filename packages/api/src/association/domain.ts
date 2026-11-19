@@ -84,4 +84,4 @@ export {
   mayTransitionAssociationRegistration as mayTransitionRegistration,
   type AssociationErrorCode,
   AssociationError,
-} from '@use-brian/core'
+} from '@use-brian/core/association/domain.js'

@@ -7,7 +7,7 @@ import {
 } from '../chat.js'
 import type { SessionResumeStore, SessionResumePoint } from '../../db/session-resume-store.js'
 import type { PendingApprovalsStore, PendingApproval } from '../../db/pending-approvals-store.js'
-import type { AccessCeiling } from '@use-brian/core'
+import type { AccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
 
 // ─────────────────────────────────────────────────────────────────────
 // `runSessionResume` orchestrator (WU-6.4 — Path B durable chat resume).
@@ -101,6 +101,7 @@ function makeStubApprovalsStore(approval: PendingApproval | null) {
     recordAnswer: vi.fn(),
     listSkillApprovals: vi.fn(),
     listPendingForWorkspace: vi.fn(),
+    findBlockingQuestion: vi.fn(),
     countPendingForUser: vi.fn(),
     getById: vi.fn(),
     getByIdSystem: vi.fn().mockResolvedValue(approval),

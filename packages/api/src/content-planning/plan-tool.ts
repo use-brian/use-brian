@@ -11,7 +11,7 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '@use-brian/core'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 
 const planSlotSchema = z.object({
   index: z.number().int().min(1).max(99).describe(

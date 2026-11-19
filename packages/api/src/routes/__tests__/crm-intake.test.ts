@@ -1,10 +1,11 @@
-import { readFileSync } from 'node:fs'
 import type { Server } from 'node:http'
 import express from 'express'
 import request from 'supertest'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { CrmOperationsError, createRateLimiter } from '@use-brian/core'
+import { CrmOperationsError } from '@use-brian/core/crm/operations-types.js'
+import { createRateLimiter } from '@use-brian/core/security/rate-limiter.js'
 import { crmIntakeRoutes } from '../crm-intake.js'
+import { bootCompositionSource } from '../../boot/__tests__/composition-source.js'
 
 const CREDENTIAL_ID = '11111111-1111-4111-8111-111111111111'
 const WORKSPACE_ID = '22222222-2222-4222-8222-222222222222'
@@ -213,7 +214,7 @@ describe('[COMP:api/crm-intake-route] public atomic CRM intake', () => {
   })
 
   it('is mounted before the first bare JWT guard and skipped by the global parser', () => {
-    const source = readFileSync(new URL('../../boot.ts', import.meta.url), 'utf8')
+    const source = bootCompositionSource()
     const intakeIndex = source.indexOf("app.use('/api', crmIntakeRoutes({")
     const firstGuardIndex = source.search(/app\.use\('\/api', requireAuth\(env\.JWT_SECRET\)/)
     expect(intakeIndex).toBeGreaterThan(0)

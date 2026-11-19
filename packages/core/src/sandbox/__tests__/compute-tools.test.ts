@@ -2,8 +2,8 @@ import { describe, it, expect } from 'vitest'
 import { createComputeTools, type SandboxFilesPort } from '../compute-tools.js'
 import { createSandboxOrchestrator, createInMemorySandboxTaskStore } from '../orchestrator.js'
 import { StubSandboxProvider } from '../providers/stub.js'
-import type { Tool, ToolContext } from '../../tools/types.js'
-import { ContextScopeAccumulator } from '../../security/context-scope.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 
 function toolContext(overrides: Partial<ToolContext> = {}): ToolContext {
   return {

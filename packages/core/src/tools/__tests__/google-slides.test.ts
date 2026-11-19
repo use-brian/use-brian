@@ -4,7 +4,7 @@ import {
   type GoogleSlidesApi,
 } from '../base/google-slides.js'
 import type { AuthorizedFile } from '../base/google-drive.js'
-import type { ToolContext } from '../types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 // ── Helpers ──────────────────────────────────────────────────
 

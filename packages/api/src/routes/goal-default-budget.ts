@@ -6,7 +6,7 @@
  */
 import { Router } from 'express'
 import { z } from 'zod'
-import type { GoalDefaultBudgetStorePort } from '@use-brian/core'
+import type { GoalDefaultBudgetStorePort } from '@use-brian/core/goals/default-budget-tools.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 
 const updateBody = z

@@ -1,8 +1,11 @@
 import { createHash } from 'node:crypto'
-import { createExecutionContext, bindWorkspaceCredentialDelegation } from '@use-brian/core'
+import { createExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { bindWorkspaceCredentialDelegation } from '@use-brian/agent-runtime/security/workspace-delegation.js'
 import { Writable } from 'node:stream'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { AccessContext, FilesContext, WorkspaceFile, WorkspaceFilesStore } from '@use-brian/core'
+import type { FilesContext } from '@use-brian/core/workspace-files/api.js'
+import type { WorkspaceFile, WorkspaceFilesStore } from '@use-brian/core/workspace-files/types.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import type {
   CreateWorkspaceFileUpload,
   WorkspaceFileUpload,

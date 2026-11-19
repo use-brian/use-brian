@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import type { ToolContext } from '../../tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const mockClassify = vi.fn()
 vi.mock('../splitter.js', () => ({
@@ -140,6 +140,16 @@ describe('host-only preclassified reuse', () => {
   it('keeps default standard classification free of model/runtime overrides', async () => {
     mockClassify.mockResolvedValue({ tasks: null, usage: null, model: null })
     await runPreflight({ ...base, context: ctx })
-    expect(mockClassify).toHaveBeenCalledExactlyOnceWith({ provider: base.provider, message: base.message })
+    expect(mockClassify).toHaveBeenCalledExactlyOnceWith({ provider: base.provider, message: base.message, signal: ctx.abortSignal })
   })
+})
+
+
+it('[COMP:workers/preflight] forwards the original asynchronous worker accounting callback', async () => {
+  mockClassify.mockResolvedValue({ tasks: ['first', 'second'], usage: { inputTokens: 2, outputTokens: 1 }, model: 'classifier' })
+  const manager = makeManager()
+  mockCreate.mockReturnValue(manager)
+  const onUsage = vi.fn(async () => {})
+  await runPreflight({ ...base, context: ctx, onUsage })
+  expect(mockCreate).toHaveBeenLastCalledWith(expect.objectContaining({ onUsage }))
 })

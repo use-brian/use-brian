@@ -12,7 +12,7 @@
  * `@use-brian/channels` for the first-party Slack client.
  */
 
-import { formatToolError } from '../engine/tool-executor.js'
+import { formatToolError } from '@use-brian/agent-runtime/engine/tool-executor.js'
 
 const MAX_UPSTREAM_CHARS = 600
 

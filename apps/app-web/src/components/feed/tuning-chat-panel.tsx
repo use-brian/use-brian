@@ -1,21 +1,27 @@
 "use client";
 
-
-import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Feed chat panel — evolved from
  * `apps/feed-web/src/components/tuning-chat-panel.tsx`
  * (docs/plans/feed-web-consolidation.md §7.3): the chat surface where the
- * operator directs planning, ideation, writing, and voice work over `@use-brian/chat-ui` +
- * `POST /api/chat` SSE, with session resume (`channelId='tuning'`), the shared
- * dock recorder, copy/retry, and a model-tier picker gated by the workspace plan.
- * Research is assessed automatically for eligible assistants.
+ * operator directs planning, ideation, writing, and voice work, with session
+ * resume (`channelId='tuning'`), the shared dock recorder, copy/retry, and a
+ * model-tier picker gated by the workspace plan. Research is assessed
+ * automatically for eligible assistants.
+ *
+ * Since M5 WP-E the rail is a `page`-profile presentation of the shared
+ * conversation controller (`useConversation`): the controller owns the direct
+ * POST, follow/re-attach, Stop, approvals, pending questions, the mid-turn
+ * queue and history loading (`mapFeedTranscript`). The rail keeps the sticky
+ * channel lookup, its request fields (`feedTarget`, `replyTo`, `channelId`,
+ * `model`, research `mode`), Retry provenance, and the live bubble folded from
+ * the frame observer by `feed-chat-stream.ts`
+ * (docs/architecture/feed/draft-collaboration.md → "Feed chat streaming").
  *
  * Port deltas (disposition rules §6):
- *   - Session resume rides `fetchFeedSessionIdByChannel` (feed SDK) +
- *     `fetchSessionMessages`/`extractMessageText` (sessions SDK) instead of
- *     inline fetches; `extractMessageText` also collapses `<attached_file>`
- *     wrappers to a tidy name on resume (app-web's canonical extractor).
+ *   - Session resume rides `fetchFeedSessionIdByChannel` (feed SDK); history
+ *     goes through `extractMessageText` (sessions SDK), which also collapses
+ *     `<attached_file>` wrappers to a tidy name on resume.
  *   - Plan gating rides `getUsage()` (`@/lib/api/usage`).
  *   - No manual Research toggle; legacy explicit seeds retain quota handling.
  *   - All copy via `useT().feedPage.tuningChat`.
@@ -27,6 +33,7 @@ import {
   forwardRef,
   useCallback,
   useEffect,
+  useId,
   useImperativeHandle,
   useMemo,
   useRef,
@@ -34,18 +41,22 @@ import {
 } from "react";
 import {
   ChatMarkdown,
-  useChatSession,
-  useMessageStream,
+  initialChatState,
   type Message,
   type MessageAttachment,
   type ReplyTo,
 } from "@use-brian/chat-ui";
+import { useConversation } from "@/lib/chat/use-conversation";
+import { provisionalConversationKey } from "@/lib/chat/conversation-registry";
+import type {
+  ConversationBodyExtras,
+  ConversationController,
+  ConversationNotice,
+  ConversationState,
+  PresentationCapabilities,
+} from "@/lib/chat/conversation-controller";
+import type { ClassifiedTurnFrame } from "@/lib/chat/turn-frames";
 import { cn } from "@/lib/utils";
-import { authFetch } from "@/lib/auth-fetch";
-import {
-  useMidTurnQueue,
-  joinQueuedInputs,
-} from "@/lib/use-mid-turn-queue";
 import { QueuedInputs } from "@/components/ui/queued-inputs";
 import {
   SlashCommandIndicator,
@@ -58,10 +69,7 @@ import {
   type GoalAcceptedNotice,
 } from "@/components/chat-app/goal-acknowledgement";
 import { fetchFeedSessionIdByChannel } from "@/lib/api/feed";
-import {
-  fetchSessionMessages,
-  stopTurn,
-} from "@/lib/api/sessions";
+import { parsePresentedDocumentPayload } from "@/lib/api/sessions";
 import { getUsage } from "@/lib/api/usage";
 import { AssistantAvatar } from "@/components/assistant-avatar";
 import {
@@ -88,10 +96,7 @@ import {
   type NarrationDict,
 } from "@/lib/tool-narration";
 
-import { newFeedChatTurn, foldFeedChatEvent, feedEventPayload, feedTurnMessage, feedConfirmation, mapFeedTranscript } from "@/lib/feed-chat-stream";
-import { recoverFeedChat } from "@/lib/feed-chat-recovery";
-import { fetchPendingSessionInput, toRestoredConfirmation } from "@/lib/api/pending-questions";
-import { respondByKind } from "@/lib/api/approvals";
+import { newFeedChatTurn, foldFeedChatEvent, mapFeedTranscript, type FeedChatTurn } from "@/lib/feed-chat-stream";
 import { requestApprovalsRefresh } from "@/lib/approvals-events";
 import { ChatActivityFeed, ChatActivitySummary, ChatCitationList } from "@/components/chrome/chat-activity";
 import { ChatFileAttachments } from "@/components/chrome/chat-file-attachment";
@@ -109,7 +114,8 @@ import { Dialog } from "@base-ui/react/dialog";
 import { Button } from "@/components/ui/button";
 import type { DocumentAttachment } from "@use-brian/chat-ui";
 
-const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
+const ACTIVE_RUN_PHASES = new Set(["running", "suspended"]);
+const selectConversation = (state: ConversationState) => state;
 
 /**
  * The default sticky channel: one tuning conversation per (assistant,
@@ -204,6 +210,28 @@ export function reduceTuningToolActivity(
   }
 
   return null;
+}
+
+/**
+ * The only request fields the Feed rail adds to a turn (the controller's typed
+ * `bodyExtras`): the draft target, a quoted reply, the sticky channel when no
+ * fixed session is bound, the model tier and legacy research mode.
+ */
+export function feedRequestFields(input: {
+  feedTarget?: import('@use-brian/shared').FeedChatTarget;
+  reply?: ReplyTo | null;
+  fixedSessionId?: string;
+  channelId: string;
+  model: string;
+  researchMode: boolean;
+}): ConversationBodyExtras {
+  return {
+    ...(input.feedTarget ? { feedTarget: input.feedTarget } : {}),
+    ...(input.reply?.id ? { replyTo: { id: input.reply.id, text: input.reply.text } } : {}),
+    ...(input.fixedSessionId ? {} : { channelId: input.channelId }),
+    model: input.model,
+    ...(input.researchMode ? { mode: "research" as const } : {}),
+  };
 }
 
 export type TuningChatPanelHandle = {
@@ -306,10 +334,6 @@ export const TuningChatPanel = forwardRef<
   const tGoal = useT().chatApp;
   const tc = useT().feedCollaboration;
   const tQueue = useT().chat.queue;
-  const session = useChatSession();
-  const stream = useMessageStream();
-  const sessionStateRef = useRef(session.state);
-  sessionStateRef.current = session.state;
   // A docked rail's composer sits in the bottom-right corner at `lg`+, where
   // the floating record button rests (WorkspaceChrome's FloatingRecorderHost).
   // Registering it lifts that button above Send; the inline record control
@@ -317,31 +341,19 @@ export const TuningChatPanel = forwardRef<
   const composerFooterRef = useRef<HTMLDivElement>(null);
   useFloatingRecorderClearance(composerFooterRef, docked);
   const inlineRecorderClass = docked ? "lg:hidden" : undefined;
-  const appliedInputIdsRef = useRef(new Set<string>());
   // A retry must reproduce the original scope, never the current editor state.
   // Hydrated Feed messages do not carry that reference, so only locally known
   // requests can be replayed directly; Reply remains available for older rows.
   const sentTargetsRef = useRef(new Map<string, import('@use-brian/shared').FeedChatTarget | undefined>());
   const [input, setInput] = useState("");
+  const [replyTo, setReplyTo] = useState<ReplyTo | null>(null);
+  // Presentation-side fold of the live turn (feed-chat-stream.ts), fed by the
+  // controller's frame observer so the live bubble renders as before.
   const [turn, setTurn] = useState(newFeedChatTurn);
   const turnRef = useRef(turn);
-  const busyRef = useRef(false);
-  const epochRef = useRef(0);
-  const recoveryRef = useRef<AbortController | null>(null);
-  const recoverSessionRef = useRef<(sid: string, notice?: boolean) => void>(() => {});
-  const [initialized, setInitialized] = useState(false);
-  const [reconnecting, setReconnecting] = useState(false);
-  const [recoveryFailed, setRecoveryFailed] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [pendingQuestion, setPendingQuestion] = useState<{ sessionId: string; approvalId: string } | null>(null);
+  const updateTurn = useCallback((next: FeedChatTurn) => { turnRef.current = next; setTurn(next); }, []);
   const [openDocument, setOpenDocument] = useState<DocumentAttachment | null>(null);
   const followBottomRef = useRef(true);
-  const updateTurn = useCallback((next: ReturnType<typeof newFeedChatTurn>) => {
-    turnRef.current = next;
-    setTurn(next);
-    session.dispatch({ type: "stream/reset" });
-    if (next.visibleText) session.dispatch({ type: "stream/append", text: next.visibleText });
-  }, [session.dispatch]);
   const slashContainerRef = useRef<HTMLDivElement | null>(null);
   const slashCommands = useSlashCommands({
     enabled: true,
@@ -350,12 +362,10 @@ export const TuningChatPanel = forwardRef<
     onChange: setInput,
     containerRef: slashContainerRef,
   });
-  const [error, setError] = useState<string | null>(null);
+  /** Errors the rail owns (lookup, approval); turn errors are controller notices. */
+  const [localError, setLocalError] = useState<string | null>(null);
   const [acceptedGoal, setAcceptedGoal] =
     useState<GoalAcceptedNotice | null>(null);
-  // The server's machine code for the last error. `budget_exhausted` is a
-  // billing STATE, not a stream crash, so the host renders it (D18).
-  const [errorCode, setErrorCode] = useState<string | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   // Model tier. Persisted across sessions; gated by the workspace plan
   // (pro/max disabled on lower plans) once `/api/usage` resolves.
@@ -370,12 +380,70 @@ export const TuningChatPanel = forwardRef<
   const [workspacePlan, setWorkspacePlan] = useState<string | null>(null);
   // Legacy research seed compatibility. A seed can set `mode: 'research'`, which
   // the server turns into coordinator + max-tier model + a higher turn
-  // ceiling, gated by the workspace's free-research quota. The SSE handler
+  // ceiling, gated by the workspace's free-research quota. A quota frame
   // trips `researchExhausted` when the server denies a turn.
   const [researchMode, setResearchMode] = useState(false);
   const [researchExhausted, setResearchExhausted] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const sessionIdRef = useRef<string | null>(null);
+
+  // ── The conversation (M5: this rail is a presentation) ────────────────
+  // Sticky channel lookup: a fixed session, the channel's existing session,
+  // or none yet (the first send creates it through `channelId`).
+  const lookupKey = `${assistantId}\u0000${channelId}\u0000${fixedSessionId ?? ""}\u0000${workspaceId ?? ""}`;
+  const [lookup, setLookup] = useState<{ key: string; sessionId: string | null; done: boolean }>(() => ({
+    key: lookupKey, sessionId: fixedSessionId ?? null, done: false,
+  }));
+  const lookupCurrent = lookup.key === lookupKey;
+  const initialized = lookupCurrent && lookup.done;
+  // A provisional entry re-keys to its session on the `session` frame. Until
+  // the lookup state catches up, read the adopted id from the entry this rail
+  // already holds, so the same render keeps the same controller.
+  const boundRef = useRef<{ key: string; controller: ConversationController | null }>({ key: "", controller: null });
+  const knownSessionId = fixedSessionId ?? (lookupCurrent ? lookup.sessionId : null);
+  const adoptedSessionId = !knownSessionId && boundRef.current.key === lookupKey && boundRef.current.controller && !boundRef.current.controller.isDisposed()
+    ? boundRef.current.controller.getSessionId() : null;
+  const surfaceEffectRef = useRef<(frame: ClassifiedTurnFrame) => void>(() => {});
+  const frameObserverRef = useRef<(frame: ClassifiedTurnFrame) => void>(() => {});
+  const narrationRef = useRef(tChat.toolNarration);
+  narrationRef.current = tChat.toolNarration;
+  const capabilities = useMemo<PresentationCapabilities>(() => ({
+    profile: "page",
+    onSurfaceEffect: (frame) => surfaceEffectRef.current(frame),
+    onFrame: (frame) => frameObserverRef.current(frame),
+    describeTool: (name, toolInput) => describeToolFromInput(name, toolInput, narrationRef.current),
+    parseDocument: (payload) => parsePresentedDocumentPayload(payload),
+    mapHistoryRows: (rows) => mapFeedTranscript(rows, narrationRef.current),
+  }), []);
+  const presentationId = useId();
+  const { controller, value: conversation } = useConversation(
+    {
+      workspaceId: workspaceId ?? "",
+      sessionId: knownSessionId ?? adoptedSessionId,
+      provisionalKey: provisionalConversationKey("feed", `${assistantId}:${channelId}`),
+      presentationId,
+      capabilities,
+    },
+    selectConversation,
+  );
+  boundRef.current = { key: lookupKey, controller };
+  const transcript = conversation?.transcript ?? initialChatState;
+  const sessionId = fixedSessionId ?? transcript.sessionId ?? knownSessionId ?? adoptedSessionId;
+  const sessionIdRef = useRef<string | null>(sessionId);
+  sessionIdRef.current = sessionId;
+  const mirror = conversation?.mirror ?? null;
+  const directLive = transcript.isStreaming;
+  const isStreaming = directLive || !!mirror?.active;
+  const runActive = ACTIVE_RUN_PHASES.has(conversation?.run.phase ?? "idle");
+  const busy = isStreaming || runActive;
+  const notices = conversation?.notices ?? [];
+  const reconnecting = notices.some((notice) => notice.code === "reconnecting");
+  const recoveryFailed = notices.some((notice) => notice.code === "reconnectFailed");
+  // A pending question has its own snapshot field, so a restored approval card
+  // (in `pendingConfirmations`) shows beside it.
+  const pendingQuestion = conversation?.question ?? null;
+  // The opening probe is still asking whether a turn already runs: hold the
+  // composer (typed text stays) rather than racing that turn.
+  const hydrating = conversation?.hydrating ?? false;
   const att = useFileAttachments(
     () => fixedSessionId ?? sessionIdRef.current ?? undefined,
   );
@@ -394,10 +462,6 @@ export const TuningChatPanel = forwardRef<
       });
     },
   }), [researchExhausted]);
-
-  useEffect(() => {
-    sessionIdRef.current = session.state.sessionId;
-  }, [session.state.sessionId]);
 
   // Persist the model choice so it sticks across panel opens / reloads.
   useEffect(() => {
@@ -453,382 +517,188 @@ export const TuningChatPanel = forwardRef<
     setModel((m) => (m === "standard" ? "pro" : m));
   }, [workspacePlan]);
 
-  // Bind identity before sending; invalidate both hydration and live readers on navigation.
+  // Bind the conversation before sending. A changed channel, assistant or
+  // fixed session is another conversation: drop this rail's local state and
+  // look the new one up; a late lookup for the old key never lands.
   useEffect(() => {
-    const epoch = ++epochRef.current;
-    const current = () => epochRef.current === epoch;
-    setInitialized(false);
-    busyRef.current = false;
-    sessionIdRef.current = null;
-    session.setSession(null);
-    session.loadMessages([]);
-    session.setReplyTo(null);
+    let current = true;
+    setLookup({ key: lookupKey, sessionId: fixedSessionId ?? null, done: false });
+    setReplyTo(null);
     sentTargetsRef.current.clear();
-    session.clearConfirmations();
-    session.dispatch({ type: "stream/abort" });
-    setPendingQuestion(null);
     setOpenDocument(null);
     att.clear();
-    setReconnecting(false);
-    setRecoveryFailed(false);
-    setNotice(null);
-    setError(null);
+    setLocalError(null);
+    setAcceptedGoal(null);
+    setStatusMessage(null);
     updateTurn(newFeedChatTurn());
     void (async () => {
       try {
         const sid = fixedSessionId ?? (await fetchFeedSessionIdByChannel(assistantId, channelId));
-        if (!current()) return;
-        if (sid) {
-          sessionIdRef.current = sid;
-          session.setSession(sid);
-          const rows = await fetchSessionMessages(sid);
-          if (!current()) return;
-          session.loadMessages(mapFeedTranscript(rows, tChat.toolNarration));
-          recoverSessionRef.current(sid, false);
-        }
-        setInitialized(true);
+        if (current) setLookup({ key: lookupKey, sessionId: sid ?? null, done: true });
       } catch {
-        if (current()) { setError(t.streamFailed); setInitialized(true); }
+        if (current) { setLocalError(t.streamFailed); setLookup({ key: lookupKey, sessionId: fixedSessionId ?? null, done: true }); }
       }
     })();
-    return () => {
-      ++epochRef.current;
-      stream.abort();
-      recoveryRef.current?.abort();
-      busyRef.current = false;
-    };
-    // Session methods/transport are stable; dictionary changes do not restart a turn.
+    return () => { current = false; };
+    // Dictionary changes do not restart a conversation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [assistantId, channelId, fixedSessionId, workspaceId]);
+  }, [lookupKey]);
 
   useEffect(() => {
     const el = containerRef.current;
     if (el && followBottomRef.current) el.scrollTop = el.scrollHeight;
-  }, [session.state.messages, session.state.streamingText, turn.log.events, turn.documents, turn.fileAttachments]);
+  }, [transcript.messages, isStreaming, turn.visibleText, turn.log.events, turn.documents, turn.fileAttachments]);
 
-  /**
-   * Mid-turn input (queue + steer) — a message sent while a turn streams is
-   * handed to the RUNNING turn instead of being blocked.
-   * See docs/architecture/engine/mid-turn-input.md.
-   */
-  const midTurn = useMidTurnQueue({
-    stream,
-    getSessionId: () => fixedSessionId ?? sessionIdRef.current,
-    ...(workspaceId ? { workspaceId } : {}),
-    getAssistantId: () => assistantId,
-  });
-  const selectedSessionIdRef = useRef(fixedSessionId ?? sessionIdRef.current);
-  selectedSessionIdRef.current = fixedSessionId ?? sessionIdRef.current;
-  /** `sendMessage` is called from inside its own `onDone` (the flush). */
-  const sendMessageRef = useRef<
-    ((text: string, fileIds: string[], truncateFromMessageId?: string, localAttachments?: MessageAttachment[], reply?: ReplyTo | null, attachSelection?: boolean, retryTarget?: import('@use-brian/shared').FeedChatTarget) => Promise<boolean>) | null
-  >(null);
-
-  /**
-   * The running turn took a queued message: close the segment written before
-   * it arrived, drop the user bubble in, start a fresh segment. Without the
-   * split the text written earlier renders below the message and reads as its
-   * answer.
-   */
-  const applyQueuedInput = useCallback(
-    (inputId: string, messageId: string, owningSessionId: string) => {
-      if (appliedInputIdsRef.current.has(inputId)) return false;
-      const entry = midTurn.take(inputId, owningSessionId);
-      if (!entry) return false;
-      appliedInputIdsRef.current.add(inputId);
-      const previousReply = feedTurnMessage(turnRef.current);
-      if (previousReply) session.appendMessage(previousReply);
-      session.dispatch({ type: "stream/reset" });
-      session.appendMessage({
-        id: messageId,
-        role: "user",
-        text: entry.text,
-        timestamp: new Date(),
-      });
-      return true;
-    },
-    [midTurn, session],
-  );
-
-  /** Stream ended with messages still queued — send them as an ordinary turn. */
-  const flushQueuedInputs = useCallback((owningSessionId: string | null) => {
-    const epoch = epochRef.current;
-    setTimeout(() => {
-      if (!owningSessionId || epoch !== epochRef.current || selectedSessionIdRef.current !== owningSessionId) return;
-      const stillWaiting = midTurn.drain(owningSessionId).filter(entry => !appliedInputIdsRef.current.has(entry.inputId));
-      if (stillWaiting.length > 0) void sendMessageRef.current?.(joinQueuedInputs(stillWaiting), []);
-    }, 0);
-  }, [midTurn]);
-
-  const refreshPending = async (sid: string, epoch: number) => {
-    try {
-      const result = await fetchPendingSessionInput(sid);
-      if (epochRef.current !== epoch || sessionIdRef.current !== sid) return;
-      setPendingQuestion(result.pending ? { sessionId: sid, approvalId: result.pending.approvalId } : null);
-      if (result.toolConfirmation) {
-        const restored = toRestoredConfirmation(result.toolConfirmation, sid);
-        // The direct card has the live resolver id; retain it when it already represents this approval.
-        if (!sessionStateRef.current.pendingConfirmations.some(c => c.approvalId === restored.approvalId)) session.addConfirmation(restored);
+  // Frames of this rail's turns (direct) and of a followed turn (a reconnect,
+  // a reload mid-turn, a resumed question): fold them into the live bubble.
+  frameObserverRef.current = (frame) => {
+    const { event, payload } = frame;
+    if (frame.stream === "direct") {
+      if (event === "session" && typeof payload.sessionId === "string" && boundRef.current.key === lookupKey) {
+        const adopted = payload.sessionId;
+        setLookup((current) => current.key === lookupKey && !current.sessionId ? { ...current, sessionId: adopted } : current);
+        return;
       }
-    } catch { /* Pending recovery is retried at settlement/re-entry. */ }
-  };
-
-  const handleExtraEvent = (event: string, payload: Record<string, unknown>) => {
-    switch (event) {
-      case "goal_accepted":
-        setAcceptedGoal(goalAcceptedNoticeFromPayload(payload));
-        break;
-      case "status":
-        if (typeof payload.message === "string") setStatusMessage(payload.message);
-        break;
-      case "tool_confirmation_required": {
-        const confirmation = feedConfirmation(payload, sessionIdRef.current ?? "");
-        if (confirmation) session.addConfirmation(confirmation);
-        break;
-      }
-      case "tool_confirmation_resolved":
-        if (typeof payload.toolCallId === "string") session.updateConfirmation(payload.toolCallId, { status: payload.decision === "deny" ? "denied" : "approved" });
-        break;
-      case "notice": {
-        const known: Record<string, string> = {
-          custom_model_image_fallback: tChat.noticeCustomModelImageFallback,
-          custom_model_endpoint_fallback: tChat.noticeCustomModelEndpointFallback,
-          budget_downgraded: tChat.noticeBudgetDowngraded,
-        };
-        setNotice(known[String(payload.code)] ?? (typeof payload.message === "string" ? payload.message : null));
-        break;
-      }
-      case "queued":
-        setNotice(tGoal.queuedNotice);
-        break;
-      case "research_quota":
-      case "research_quota_exhausted":
-        if (event === "research_quota_exhausted") { setResearchExhausted(true); setResearchMode(false); }
-        break;
-      case "error":
-        if (payload.code === "pending_question_exists" && typeof payload.approvalId === "string" && sessionIdRef.current) {
-          setPendingQuestion({ sessionId: sessionIdRef.current, approvalId: payload.approvalId });
-        } else {
-          setError(typeof payload.message === "string" ? payload.message : typeof payload.error === "string" ? payload.error : t.streamError);
-          setErrorCode(typeof payload.code === "string" ? payload.code : null);
-        }
-        if (payload.code === "research_quota_exhausted") { setResearchExhausted(true); setResearchMode(false); }
-        break;
-    }
-  };
-  const extraEventRef = useRef(handleExtraEvent);
-  extraEventRef.current = handleExtraEvent;
-
-  const consumeEvent = (event: string, payload: Record<string, unknown>, owningSessionId: string | null) => {
-    if (event === "input_applied" && typeof payload.inputId === "string") {
-      if (owningSessionId && applyQueuedInput(payload.inputId, typeof payload.messageId === "string" ? payload.messageId : `queued-${payload.inputId}`, owningSessionId)) updateTurn(newFeedChatTurn());
+      if (event === "status" && typeof payload.message === "string") setStatusMessage(payload.message);
+      updateTurn(foldFeedChatEvent(turnRef.current, event, payload, narrationRef.current));
       return;
     }
-    updateTurn(foldFeedChatEvent(turnRef.current, event, payload, tChat.toolNarration));
-    extraEventRef.current(event, payload);
+    if (event === "turn_started") { updateTurn(newFeedChatTurn()); return; }
+    if (event === "snapshot") updateTurn(foldFeedChatEvent(turnRef.current, event, payload, narrationRef.current));
+    else if (event === "activity") updateTurn(foldFeedChatEvent(turnRef.current, String(payload.event), payload, narrationRef.current));
   };
-  const consumeEventRef = useRef(consumeEvent);
-  consumeEventRef.current = consumeEvent;
-
-  const clearActivity = () => {
-    busyRef.current = false;
-    setReconnecting(false);
-    setStatusMessage(null);
-    updateTurn(newFeedChatTurn());
-    session.dispatch({ type: "stream/abort" });
+  surfaceEffectRef.current = (frame) => {
+    if (frame.event === "goal_accepted") setAcceptedGoal(goalAcceptedNoticeFromPayload(frame.payload));
+    else if (frame.event === "research_quota_exhausted") { setResearchExhausted(true); setResearchMode(false); }
   };
 
-  const recoverSession = (sid: string, showNotice = true) => {
-    recoveryRef.current?.abort();
-    const controller = new AbortController();
-    recoveryRef.current = controller;
-    const epoch = epochRef.current;
-    const current = () => epochRef.current === epoch && !controller.signal.aborted && sessionIdRef.current === sid;
-    busyRef.current = true;
-    setReconnecting(showNotice);
-    setRecoveryFailed(false);
-    setError(null);
-    if (showNotice) session.dispatch({ type: "stream/start" });
-    void refreshPending(sid, epoch);
-    let sawRunning = showNotice;
-    void recoverFeedChat({
-      url: `${API_URL}/api/sessions/${encodeURIComponent(sid)}/stream`,
-      signal: controller.signal, fetch: authFetch,
-      onRetry: () => { if (current()) setReconnecting(true); },
-      onEvent: ({ event, data }) => {
-        if (!current()) return;
-        const payload = feedEventPayload(data);
-        if (event === "status" && payload.status === "running") {
-          sawRunning = true;
-          session.dispatch({ type: "stream/start" });
-          setReconnecting(false);
-        } else if (event === "snapshot") {
-          sawRunning = true;
-          setReconnecting(false);
-          consumeEventRef.current(event, payload, sid);
-        } else if (event === "activity") {
-          consumeEventRef.current(String(payload.event), payload, sid);
-        } else if (event === "error") {
-          extraEventRef.current(event, payload);
-        }
-      },
-    }).then(async () => {
-      if (!current()) return;
-      // Even an idle reconnect must reload: the POST may have died just before commit.
-      const rows = await fetchSessionMessages(sid);
-      if (!current()) return;
-      const messages = mapFeedTranscript(rows, tChat.toolNarration);
-      const live = feedTurnMessage(turnRef.current);
-      if (live) {
-        const index = messages.findIndex(message => message.id === live.id);
-        if (index >= 0) messages[index] = { ...messages[index], citations: live.citations, activityDurationMs: live.activityDurationMs };
-      }
-      session.loadMessages(messages);
-      session.clearConfirmations();
-      clearActivity();
-      await refreshPending(sid, epoch);
-      if (!current()) return;
-      if (sawRunning) { flushQueuedInputs(sid); onTurnComplete?.(); }
-    }).catch(() => {
-      if (!current()) return;
-      // Preserve queue and partial output. No retry POST after an unknown outcome.
-      busyRef.current = true;
-      setReconnecting(false);
-      setRecoveryFailed(true);
-      setError(tChat.turnReconnectFailed);
-    });
+  // Turn errors arrive as typed notices; copy stays here.
+  const errorNotice = notices.find((notice): notice is Extract<ConversationNotice, { code: "error" }> => notice.code === "error") ?? null;
+  useEffect(() => {
+    if (errorNotice?.errorCode === "research_quota_exhausted") { setResearchExhausted(true); setResearchMode(false); }
+  }, [errorNotice]);
+  const turnNotice = notices.find((notice): notice is Extract<ConversationNotice, { code: "turnNotice" }> => notice.code === "turnNotice") ?? null;
+  const knownNotices: Record<string, string> = {
+    custom_model_image_fallback: tChat.noticeCustomModelImageFallback,
+    custom_model_endpoint_fallback: tChat.noticeCustomModelEndpointFallback,
+    budget_downgraded: tChat.noticeBudgetDowngraded,
   };
-  recoverSessionRef.current = recoverSession;
+  const notice = notices.some((item) => item.code === "queued") ? tGoal.queuedNotice
+    : turnNotice ? knownNotices[turnNotice.notice] ?? turnNotice.message ?? null : null;
+  const errorCode = errorNotice?.errorCode ?? null;
+  const error = recoveryFailed ? tChat.turnReconnectFailed
+    : errorNotice ? errorNotice.message ?? (errorNotice.errorCode === "stream_interrupted" ? tChat.turnReconnectFailed : errorNotice.errorCode === "stream_failed" || errorNotice.errorCode === "not_accepted" ? t.streamFailed : t.streamError)
+    : notices.some((item) => item.code === "stopTurnFailed") ? t.streamFailed
+    : notices.some((item) => item.code === "confirmNotAllowed") ? tGoal.confirmNotAllowed
+    : localError;
 
+  // Text whose delivery is uncertain comes back to the composer; it is
+  // never resent automatically (offline contract point 7).
+  const unsentCount = conversation?.unsent.length ?? 0;
+  useEffect(() => {
+    if (!controller || unsentCount === 0) return;
+    const texts = controller.takeUnsent();
+    if (texts.length === 0) return;
+    const restored = texts.join("\n\n");
+    setInput((current) => (current.trim() ? `${current}\n\n${restored}` : restored));
+  }, [controller, unsentCount]);
+
+  // A turn that settled (its own, followed, or stopped) lets the host
+  // re-read what it produced.
+  const settledPhase = conversation?.run.phase ?? "idle";
+  const wasActiveRef = useRef(false);
+  const onTurnCompleteRef = useRef(onTurnComplete);
+  onTurnCompleteRef.current = onTurnComplete;
+  useEffect(() => {
+    const active = busy;
+    if (wasActiveRef.current && !active && (settledPhase === "completed" || settledPhase === "cancelled")) {
+      setStatusMessage(null);
+      onTurnCompleteRef.current?.();
+    }
+    wasActiveRef.current = active;
+  }, [busy, settledPhase]);
+
+  const detachRef = useRef(att.detach);
+  detachRef.current = att.detach;
   const sendMessage = useCallback(
-    async (text: string, fileIds: string[], truncateFromMessageId?: string, localAttachments?: MessageAttachment[], reply?: ReplyTo | null, attachSelection = false, retryTarget?: import('@use-brian/shared').FeedChatTarget) => {
-      if (!ready || !initialized || busyRef.current) return false;
+    async (text: string, fileIds: string[], localAttachments?: MessageAttachment[], reply?: ReplyTo | null, attachSelection = false) => {
+      if (!controller || !ready || !initialized) return false;
       const trimmed = text.trim();
       if (!trimmed && fileIds.length === 0) return false;
-      recoveryRef.current?.abort();
-      const epoch = ++epochRef.current;
-      let owningSessionId = fixedSessionId ?? sessionIdRef.current;
-      const current = () => epochRef.current === epoch && selectedSessionIdRef.current === owningSessionId;
-      busyRef.current = true;
-      appliedInputIdsRef.current.clear();
       followBottomRef.current = true;
       const attachments = localAttachments ?? fileIds.map(id => ({ id, fileName: t.voiceNote, mimeType: "audio/webm" }));
       const selectedPassage = attachSelection ? props.feedSelection : undefined;
-      const feedTarget = retryTarget ?? (props.feedTarget && { ...props.feedTarget, ...(selectedPassage ? { target: selectedPassage.target, revision: selectedPassage.sourceRevision } : {}) });
-      const userMessage: Message = { ...(reply ? { replyTo: reply } : {}), id: `local-${Date.now()}`, role: "user", text: trimmed, timestamp: new Date(), ...(attachments.length ? { attachments } : {}) };
-      sentTargetsRef.current.set(userMessage.id, feedTarget);
-      session.appendMessage(userMessage);
-      if (reply && attachSelection) session.setReplyTo(null);
+      const feedTarget = props.feedTarget && { ...props.feedTarget, ...(selectedPassage ? { target: selectedPassage.target, revision: selectedPassage.sourceRevision } : {}) };
+      if (reply && attachSelection) setReplyTo(null);
       if (selectedPassage) props.onClearFeedSelection?.();
-      setInput(""); if (localAttachments) att.detach(); setError(null); setErrorCode(null); setNotice(null); setAcceptedGoal(null);
-      setStatusMessage(null); setReconnecting(false);
+      setInput(""); setLocalError(null); setAcceptedGoal(null); setStatusMessage(null);
       updateTurn(newFeedChatTurn());
-      session.dispatch({ type: "stream/start" });
-      await stream.start({
-        url: `${API_URL}/api/chat`, authFetch: (input, init) => authFetch(input.toString(), init),
-        body: {
-          message: trimmed, ...(feedTarget ? { feedTarget } : {}), assistantId,
-          ...(reply?.id ? { replyTo: { id: reply.id, text: reply.text } } : {}),
-          sessionId: owningSessionId ?? undefined,
-          ...(fixedSessionId ? {} : { channelId }), model, ...(researchMode ? { mode: "research" } : {}),
-          ...(workspaceId ? { workspaceId } : {}), ...(fileIds.length ? { fileIds } : {}),
-          ...(truncateFromMessageId ? { truncateFromMessageId } : {}),
-        },
-        onEvent: ({ event, data }) => {
-          if (!current()) return;
-          const payload = feedEventPayload(data);
-          if (event === "session" && typeof payload.sessionId === "string") {
-            owningSessionId = payload.sessionId;
-            selectedSessionIdRef.current = payload.sessionId;
-            sessionIdRef.current = payload.sessionId;
-            session.setSession(payload.sessionId);
-          } else if (event === "user_message_saved" && typeof payload.id === "string") {
-            sentTargetsRef.current.set(payload.id, sentTargetsRef.current.get(userMessage.id));
-            sentTargetsRef.current.delete(userMessage.id);
-            session.dispatch({ type: "message/rekey", messageId: userMessage.id, id: payload.id });
-          } else consumeEventRef.current(event, payload, owningSessionId);
-        },
-        onDone: () => {
-          if (!current()) return;
-          const finalMessage = feedTurnMessage(turnRef.current);
-          if (finalMessage) session.dispatch({ type: "stream/finalize", finalMessage });
-          clearActivity();
-          session.clearConfirmations();
-          const sid = owningSessionId;
-          if (sid) void refreshPending(sid, epoch);
-          flushQueuedInputs(owningSessionId); onTurnComplete?.();
-        },
-        onDisconnect: () => {
-          if (!current()) return;
-          const sid = owningSessionId;
-          if (sid) recoverSessionRef.current(sid);
-          else { setError(tChat.turnReconnectFailed); setReconnecting(false); }
-        },
-        onError: (err) => {
-          if (!current()) return;
-          const sid = owningSessionId;
-          if (sid) recoverSessionRef.current(sid);
-          else { clearActivity(); setError(err instanceof Error ? err.message : t.streamFailed); }
-        },
+      const result = await controller.send({
+        presentationId,
+        text: trimmed,
+        fileIds,
+        assistantId,
+        bodyExtras: requestFields(feedTarget, reply),
+        userMessage: { ...(reply ? { replyTo: reply } : {}), ...(attachments.length ? { attachments } : {}) },
+        onAccepted: () => { if (localAttachments) detachRef.current(); },
+        onUserMessageSaved: (id) => sentTargetsRef.current.set(id, feedTarget),
+        // Failure before acceptance: the text returns to the composer.
+        onRejected: () => setInput((current) => current || trimmed),
       });
+      if (result === "invalid" || result === "busy") { setInput((current) => current || trimmed); setLocalError(t.streamFailed); return false; }
       return true;
     },
-    // Async events read fresh UI handlers through refs; transport ownership uses the epoch.
+    // Request fields read current props; the controller owns transport.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [assistantId, initialized, session, stream, model, researchMode, workspaceId, t, updateTurn, ready, props.feedTarget, props.feedSelection, props.onClearFeedSelection, fixedSessionId, channelId, att.detach],
+    [controller, assistantId, initialized, model, researchMode, t, updateTurn, ready, props.feedTarget, props.feedSelection, props.onClearFeedSelection, fixedSessionId, channelId, presentationId],
   );
 
-  const resolveConfirmation = async (toolCallId: string, decision: "allow" | "always_allow" | "deny", comment?: string) => {
-    const confirmation = session.state.pendingConfirmations.find(item => item.toolCallId === toolCallId);
-    if (!confirmation || confirmation.status !== "pending" || (decision === "always_allow" && !confirmation.allowPersistentApproval)) return;
-    const epoch = epochRef.current;
-    session.updateConfirmation(toolCallId, { status: "approving" });
-    try {
-      const result = confirmation.restored && confirmation.approvalId
-        ? await respondByKind({ id: confirmation.approvalId, kind: "tool_invocation" }, decision !== "deny" ? "approved" : "rejected", comment, decision === "always_allow" ? { grantAlways: true } : undefined)
-        : await authFetch(`${API_URL}/api/chat/confirm`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sessionId: confirmation.sessionId, toolCallId, decision, ...(comment ? { comment } : {}) }) });
-      if (epoch !== epochRef.current) return;
-      if (!result.ok) throw new Error(tGoal.confirmNotAllowed);
-      session.updateConfirmation(toolCallId, { status: decision !== "deny" ? "approved" : "denied" });
-      if (workspaceId) requestApprovalsRefresh(workspaceId);
-      if (!stream.inFlight()) recoverSessionRef.current(confirmation.sessionId);
-    } catch {
-      if (epoch !== epochRef.current) return;
-      session.updateConfirmation(toolCallId, { status: "pending" });
-      setError(tGoal.confirmNotAllowed);
-    }
+  const requestFields = (feedTarget: import('@use-brian/shared').FeedChatTarget | undefined, reply: ReplyTo | null | undefined) =>
+    feedRequestFields({ feedTarget, reply, fixedSessionId, channelId, model, researchMode });
+
+  const resolveConfirmation = async (toolCallId: string, decision: "approve" | "always_allow" | "deny", comment?: string) => {
+    const confirmation = transcript.pendingConfirmations.find(item => item.toolCallId === toolCallId);
+    if (!controller || !confirmation || confirmation.status !== "pending") return;
+    const outcome = await controller.respondConfirmation(toolCallId, decision, comment);
+    if (outcome === "resolved") { if (workspaceId) requestApprovalsRefresh(workspaceId); }
+    else if (outcome === "failed") setLocalError(tGoal.confirmNotAllowed);
   };
 
-  useEffect(() => {
-    sendMessageRef.current = sendMessage;
-  }, [sendMessage]);
+  const retryRecovery = () => {
+    if (!controller) return;
+    controller.dismissNotice("reconnectFailed");
+    void controller.reloadHistory();
+    void controller.refreshPendingInput();
+  };
 
   const onSend = useCallback(async (steer = false) => {
-    if (!ready || !initialized || recoveryFailed || (busyRef.current && !session.state.isStreaming)) return;
+    if (!controller || !ready || !initialized || recoveryFailed || hydrating) return;
     const fileIds = att.fileIds();
     if ((!input.trim() && fileIds.length === 0) || att.uploading) return;
     // A turn is already running: hand this to it rather than starting a
     // second one. Attachments remain staged for the next ordinary turn because
     // the mid-turn queue is deliberately text-only.
-    if (busyRef.current || stream.inFlight()) {
-      if (fileIds.length > 0 || session.state.replyTo || props.feedSelection) return;
-      if (midTurn.queue(input, steer)) setInput("");
+    if (busy) {
+      if (fileIds.length > 0 || replyTo || props.feedSelection) return;
+      if (controller.queue(input, steer, { bodyExtras: { model }, assistantId, presentationId })) setInput("");
       return;
     }
     const localAttachments = readyAttachments(att.attachments).map(a => ({
       id: a.fileId!, fileName: a.fileName, mimeType: a.mimeType,
       ...(a.previewUrl ? { localPreviewUrl: a.previewUrl } : {}),
     }));
-    await sendMessage(input, fileIds, undefined, localAttachments, session.state.replyTo, true);
-  }, [att.attachments, att.fileIds, att.uploading, initialized, input, midTurn, ready, recoveryFailed, sendMessage, session.state.isStreaming, session.state.replyTo, props.feedSelection, stream]);
+    await sendMessage(input, fileIds, localAttachments, replyTo, true);
+  }, [controller, att.attachments, att.fileIds, att.uploading, busy, hydrating, initialized, input, model, assistantId, presentationId, ready, recoveryFailed, sendMessage, replyTo, props.feedSelection]);
 
   // Feed hides the global chat chrome but keeps its recorder controller alive.
   // While this floating tuning panel owns the replacement dock, short captures
   // must land in this visible sticky session instead of the hidden global chat.
+  const replyToRef = useRef(replyTo);
+  replyToRef.current = replyTo;
   useEffect(() => {
     if (!ownsDockRecorderTarget) return;
     return registerDockRecorderChatTarget({
-      sendVoiceClip: (fileId) => sendMessage("", [fileId], undefined, undefined, sessionStateRef.current.replyTo, true),
+      sendVoiceClip: (fileId) => sendMessage("", [fileId], undefined, replyToRef.current, true),
       getSessionId: () => sessionIdRef.current ?? undefined,
     });
   }, [ownsDockRecorderTarget, sendMessage]);
@@ -854,7 +724,7 @@ export const TuningChatPanel = forwardRef<
   }, []);
 
   const retrySource = (messageId: string) => {
-    const msgs = session.state.messages;
+    const msgs = transcript.messages;
     const index = msgs.findIndex(message => message.id === messageId);
     const message = msgs[index];
     const source = message?.role === "user" ? message : msgs[index - 1];
@@ -864,24 +734,34 @@ export const TuningChatPanel = forwardRef<
     return source;
   };
   const handleRetry = (messageId: string) => {
-    if (busyRef.current || stream.inFlight()) return;
+    if (!controller || busy || !ready || !initialized) return;
     const source = retrySource(messageId);
     if (!source) return;
-    const messages = session.state.messages;
-    session.loadMessages(messages.slice(0, messages.findIndex(message => message.id === source.id)));
-    void sendMessage(source.text, [], source.id, undefined, source.replyTo, false, sentTargetsRef.current.get(source.id));
+    // The original target and quote, never the current editor state.
+    const target = sentTargetsRef.current.get(source.id);
+    setLocalError(null); setAcceptedGoal(null); setStatusMessage(null);
+    updateTurn(newFeedChatTurn());
+    followBottomRef.current = true;
+    void controller.edit({
+      presentationId,
+      messageId: source.id,
+      text: source.text,
+      assistantId,
+      bodyExtras: requestFields(target, source.replyTo),
+      ...(source.replyTo ? { userMessage: { replyTo: source.replyTo } } : {}),
+      onUserMessageSaved: (id) => sentTargetsRef.current.set(id, target),
+    });
   };
 
   const handleReply = (message: Message, container: HTMLElement | null) => {
     const target = buildReplyTarget({ message, selection: selectionTextWithin(container, window.getSelection()), authorName: message.role === "assistant" ? assistantName : tGoal.replyAuthorYou });
     if (!target) return;
-    session.setReplyTo(target);
+    setReplyTo(target);
     inputRef.current?.focus();
   };
   const quotedMessage = (reply: ReplyTo | undefined) => reply ? <blockquote className="mb-1 border-l-2 border-primary/50 pl-2 text-xs text-muted-foreground" data-feed-reply-quote>{condenseQuote(reply.text)}</blockquote> : null;
-  const messages = session.state.messages;
-  const isStreaming = session.state.isStreaming;
-  const streamingText = session.state.streamingText;
+  const messages = transcript.messages;
+  const streamingText = isStreaming ? turn.visibleText : "";
   const liveTool = turn.tools.find(tool => tool.status === "running") ?? turn.tools.at(-1);
   const activity = useMemo<TuningChatActivity>(
     () =>
@@ -1072,21 +952,21 @@ export const TuningChatPanel = forwardRef<
           )}
           {reconnecting ? <p role="status" className="text-xs text-muted-foreground">{tChat.turnReconnecting}</p> : null}
           {notice ? <p role="status" className="text-xs text-muted-foreground">{notice}</p> : null}
-          {session.state.pendingConfirmations.filter(c => c.status === "pending" || c.status === "approving").map(confirmation => (
+          {transcript.pendingConfirmations.filter(c => c.status === "pending" || c.status === "approving").map(confirmation => (
             <ChatConfirmationCard key={confirmation.toolCallId} confirmation={confirmation}
               approveLabel={tChat.confirmationApprove} denyLabel={tChat.confirmationDeny} approvingLabel={tChat.confirmationApproving}
               onAlwaysAllow={id => void resolveConfirmation(id, "always_allow")}
-              onApprove={id => void resolveConfirmation(id, "allow")} onDeny={(id, comment) => void resolveConfirmation(id, "deny", comment)} />
+              onApprove={id => void resolveConfirmation(id, "approve")} onDeny={(id, comment) => void resolveConfirmation(id, "deny", comment)} />
           ))}
           {pendingQuestion ? <PendingQuestionPanel sessionId={pendingQuestion.sessionId} approvalId={pendingQuestion.approvalId} dict={tChat.pendingQuestion}
-            onAnswered={() => { setPendingQuestion(null); recoverSessionRef.current(pendingQuestion.sessionId); }}
-            onCancelled={() => { setPendingQuestion(null); recoverSessionRef.current(pendingQuestion.sessionId, false); }} /> : null}
+            onAnswered={() => { controller?.questionSettled(pendingQuestion.approvalId); }}
+            onCancelled={() => { controller?.questionSettled(pendingQuestion.approvalId); }} /> : null}
           {/* Messages handed to the running turn, not yet taken by it.
               See docs/architecture/engine/mid-turn-input.md. */}
           <QueuedInputs
-            inputs={midTurn.queued}
+            inputs={conversation?.queued ? [...conversation.queued] : []}
             dict={tQueue}
-            onSteer={midTurn.steer}
+            onSteer={(inputId) => void controller?.steer(inputId)}
           />
 
           {error && errorCode === "budget_exhausted" && renderPlanGate ? (
@@ -1094,7 +974,7 @@ export const TuningChatPanel = forwardRef<
           ) : error ? (
             <div className="rounded-xl bg-destructive/10 p-3 text-xs text-destructive">
               {error}
-              {recoveryFailed && sessionIdRef.current ? <Button size="sm" variant="outline" className="mt-2" onClick={() => recoverSessionRef.current(sessionIdRef.current!)}>{t.retry}</Button> : null}
+              {recoveryFailed && sessionId ? <Button size="sm" variant="outline" className="mt-2" onClick={retryRecovery}>{t.retry}</Button> : null}
             </div>
           ) : null}
         </div>
@@ -1119,7 +999,7 @@ export const TuningChatPanel = forwardRef<
           />
           {workspaceId &&
           acceptedGoal?.sessionId ===
-            (fixedSessionId ?? session.state.sessionId) ? (
+            sessionId ? (
             <GoalAcknowledgement
               notice={acceptedGoal}
               workspaceId={workspaceId}
@@ -1140,9 +1020,9 @@ export const TuningChatPanel = forwardRef<
             commands={slashCommands}
             className="mx-2.5 mt-2.5"
           />
-          {session.state.replyTo ? <div className="mx-2.5 mt-2.5 flex items-start gap-2" data-feed-reply-context>
-            <div className="min-w-0 flex-1 border-l-2 border-primary/60 pl-2"><p className="text-xs font-medium text-muted-foreground">{tGoal.replyingToMessage}</p><p className="truncate text-xs text-muted-foreground">{condenseQuote(session.state.replyTo.text)}</p></div>
-            <Button type="button" variant="ghost" size="icon" className="size-11 md:size-8 shrink-0" aria-label={tGoal.replyCancel} onClick={() => session.setReplyTo(null)}><X className="size-3.5" aria-hidden /></Button>
+          {replyTo ? <div className="mx-2.5 mt-2.5 flex items-start gap-2" data-feed-reply-context>
+            <div className="min-w-0 flex-1 border-l-2 border-primary/60 pl-2"><p className="text-xs font-medium text-muted-foreground">{tGoal.replyingToMessage}</p><p className="truncate text-xs text-muted-foreground">{condenseQuote(replyTo.text)}</p></div>
+            <Button type="button" variant="ghost" size="icon" className="size-11 md:size-8 shrink-0" aria-label={tGoal.replyCancel} onClick={() => setReplyTo(null)}><X className="size-3.5" aria-hidden /></Button>
           </div> : null}
           {props.feedSelection ? <div className="mx-2.5 mt-2.5 flex items-start gap-2 rounded-md bg-muted/40 p-2" data-feed-selection-attachment>
             <div className="min-w-0 flex-1"><p className="text-xs font-medium">{tc.selection}</p><blockquote className="line-clamp-3 whitespace-pre-wrap break-words text-xs text-muted-foreground">{props.feedSelection.quote || tc.post}</blockquote></div>
@@ -1166,7 +1046,7 @@ export const TuningChatPanel = forwardRef<
                 void att.upload(images);
               }}
               // Typeable while the reply streams — `onSend` no-ops on
-              // `stream.inFlight()`, so Enter can't double-send; the message
+              // a running turn (it queues instead), so Enter can't double-send; the message
               // list carries the thinking indicator.
               placeholder={composerPlaceholder ?? t.composerPlaceholder}
               disabled={!ready}
@@ -1212,16 +1092,9 @@ export const TuningChatPanel = forwardRef<
               </Select>
               {isStreaming && (
                 <button
-                  onClick={() => {
-                    const sid = fixedSessionId ?? sessionIdRef.current;
-                    if (!sid) return;
-                    const epoch = epochRef.current;
-                    void stopTurn(sid).then(() => {
-                      if (epochRef.current !== epoch) return;
-                      stream.abort();
-                      recoverSessionRef.current(sid);
-                    }).catch(() => { if (epochRef.current === epoch) setError(t.streamFailed); });
-                  }}
+                  // One Stop: the controller's compare-and-set request for
+                  // the turn it started or follows; a failure is a notice.
+                  onClick={() => { void controller?.stop(); }}
                   className="inline-flex size-11 items-center justify-center rounded-xl text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors shrink-0 md:size-8"
                   title={t.stop}
                 >
@@ -1232,7 +1105,7 @@ export const TuningChatPanel = forwardRef<
                   (muted to mark the difference). See mid-turn-input.md. */}
               <button
                 onClick={() => void onSend()}
-                disabled={!ready || !initialized || recoveryFailed || att.uploading || (busyRef.current && !isStreaming) || (isStreaming && (att.hasReady || !!session.state.replyTo || !!props.feedSelection)) || (!input.trim() && !att.hasReady)}
+                disabled={!ready || !initialized || recoveryFailed || hydrating || att.uploading || (busy && !isStreaming) || (isStreaming && (att.hasReady || !!replyTo || !!props.feedSelection)) || (!input.trim() && !att.hasReady)}
                 className={cn(
                   "inline-flex size-11 items-center justify-center rounded-xl transition-colors shadow-sm shrink-0 md:size-8",
                   "disabled:opacity-30 disabled:cursor-not-allowed",

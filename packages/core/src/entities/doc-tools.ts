@@ -38,12 +38,12 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '../tools/types.js'
-import { resolveWriteScope, scopeEvidenceFromRows } from '../security/context-scope.js'
-import { isAttendedTurn } from '../tools/capability-gate.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
+import { resolveWriteScope, scopeEvidenceFromRows } from '@use-brian/agent-runtime/security/context-scope.js'
+import { isAttendedTurn } from '@use-brian/agent-runtime/tools/capability-gate.js'
 import { isBuiltInEntityTypeId } from './doc-built-ins.js'
-import { uuidId } from '../tools/schema-tolerance.js'
-import { toolFailure } from '../tools/tool-failure.js'
+import { uuidId } from '@use-brian/agent-runtime/tools/schema-tolerance.js'
+import { toolFailure } from '@use-brian/agent-runtime/tools/tool-failure.js'
 import {
   cellValueSchema,
   entityFilterSchema,

@@ -1,5 +1,6 @@
 /** Verified provider object and monetary identity. [COMP:crm/association-provider] */
-import { AssociationError, CrmOperationsError, type AssociationActor, type AssociationProviderBindingInput } from '@use-brian/core'
+import { CrmOperationsError } from '@use-brian/core/application-platform/operation-contract.js'
+import { AssociationError, type AssociationActor, type AssociationProviderBindingInput } from '@use-brian/core/association/domain.js'
 
 export function requireAssociationProviderActor(actor: AssociationActor): void {
   if (!['api_key', 'brain_key', 'oauth_token', 'integration_key', 'provider', 'system_job'].includes(actor.credentialKind)

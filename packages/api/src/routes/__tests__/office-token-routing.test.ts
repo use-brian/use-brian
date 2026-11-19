@@ -3,7 +3,7 @@ import request from 'supertest'
 import { describe, expect, it, vi } from 'vitest'
 import { officeTemplateRoutes, type OfficeTemplatesRouteDeps } from '../office-templates.js'
 import { documentFixture, spreadsheetFixture } from '../../../../office-model/src/__tests__/fixtures.js'
-import { inferOfficeTemplateRouting } from '@use-brian/core'
+import { inferOfficeTemplateRouting } from '@use-brian/core/office/templates/routing.js'
 
 // Transport fixtures only; real transaction/RLS proof lives in office-library-scope.integration.
 vi.mock('../../db/office-read-projection.js', async importOriginal => ({

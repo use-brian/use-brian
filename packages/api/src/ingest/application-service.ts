@@ -6,13 +6,15 @@
 import {
   applyFrozenExtractionPlan,
   ExtractionApplicationError,
-  type AccessContext,
   type ExtractionApplicationItem,
   type ExtractionApplicationMutation,
   type ExtractionApplicationRun,
-  type FrozenCandidate,
-  type FrozenExtractionPlan,
-} from '@use-brian/core'
+} from '@use-brian/core/ingest/application.js'
+import type {
+  FrozenCandidate,
+  FrozenExtractionPlan,
+} from '@use-brian/core/ingest/extraction-plan.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 
 import type { DbEpisodesStore } from '../db/episodes-store.js'
 import type {

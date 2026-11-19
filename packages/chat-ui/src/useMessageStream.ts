@@ -11,6 +11,8 @@ export type AuthFetch = (
   init?: RequestInit,
 ) => Promise<Response>
 
+export type StreamCompletion = { event: string | null; turnId: string | null }
+
 export type StreamOptions = {
   /** POST URL for the chat endpoint, e.g. `${API_URL}/api/chat`. */
   url: string
@@ -19,7 +21,7 @@ export type StreamOptions = {
   /** Caller-supplied fetch — typically `authFetch`. */
   authFetch: AuthFetch
   /** Per-event callback. Caller dispatches reducer actions from here. */
-  onEvent: (event: SSEEvent) => void
+  onEvent: (event: SSEEvent) => unknown
   /**
    * Called once at `reply_complete`, or when the stream ends AFTER the server said it was over — a
    * terminal event (`done` or `error`) was seen before the body closed.
@@ -27,7 +29,7 @@ export type StreamOptions = {
    * Compatibility: when `onDisconnect` is not supplied, a body that closes
    * WITHOUT a terminal event also lands here, exactly as it always did.
    */
-  onDone?: () => void
+  onDone?: (info: StreamCompletion) => unknown
   /**
    * Called when the transport closed with NO terminal event: a request or
    * proxy timeout, a deploy, a network blip. The turn is very likely still
@@ -37,7 +39,7 @@ export type StreamOptions = {
    * re-attach (the chat surface's session follow stream) does so here.
    * `lastEvent` is the last event name received, for diagnostics.
    */
-  onDisconnect?: (info: { lastEvent: string | null }) => void
+  onDisconnect?: (info: { lastEvent: string | null }) => unknown
   /** Called on transport errors. Aborted streams do not call this. */
   onError?: (err: unknown) => void
 }
@@ -108,21 +110,26 @@ export async function runStream(opts: StreamOptions, signal: AbortSignal): Promi
   let sawTerminal = false
   let replyComplete = false
   let completed = false
-  const complete = () => {
+  let terminal: StreamCompletion = { event: null, turnId: null }
+  const complete = async () => {
     if (completed) return
     completed = true
-    opts.onDone?.()
+    await opts.onDone?.(terminal)
   }
-  const deliver = (event: SSEEvent) => {
+  const deliver = async (event: SSEEvent) => {
     lastEvent = event.event
     if (TERMINAL_STREAM_EVENTS.has(event.event)) sawTerminal = true
-    opts.onEvent(event)
+    if (TERMINAL_STREAM_EVENTS.has(event.event) || event.event === 'reply_complete') {
+      const value = event.data && typeof event.data === 'object' ? (event.data as { turnId?: unknown }).turnId : null
+      terminal = { event: event.event, turnId: typeof value === 'string' && /^[a-f0-9]{64}$/.test(value) ? value : null }
+    }
+    await opts.onEvent(event)
     if (event.event === 'reply_complete') {
       // The server has persisted the reply and released its turn. Continue
       // reading authorized metadata, but do not keep the composer spinning
       // or let a later socket close finalize a successor turn a second time.
       replyComplete = true
-      complete()
+      await complete()
     }
   }
 
@@ -134,7 +141,7 @@ export async function runStream(opts: StreamOptions, signal: AbortSignal): Promi
       const chunk = decoder.decode(value, { stream: true })
       for (const event of parseSSEStream(chunk, buffer)) {
         if (signal.aborted) break
-        deliver(event)
+        await deliver(event)
       }
     }
     // Drain any trailing event captured but not yet flushed.
@@ -142,7 +149,7 @@ export async function runStream(opts: StreamOptions, signal: AbortSignal): Promi
     if (tail) {
       for (const event of parseSSEStream(tail, buffer)) {
         if (signal.aborted) break
-        deliver(event)
+        await deliver(event)
       }
     }
     if (signal.aborted) return
@@ -152,8 +159,8 @@ export async function runStream(opts: StreamOptions, signal: AbortSignal): Promi
     // network). Hand that to `onDisconnect` when the caller can re-attach;
     // otherwise keep the historical `onDone` so existing hosts behave as
     // before.
-    if (replyComplete || sawTerminal || !opts.onDisconnect) complete()
-    else opts.onDisconnect({ lastEvent })
+    if (replyComplete || sawTerminal || !opts.onDisconnect) await complete()
+    else await opts.onDisconnect({ lastEvent })
   } catch (err) {
     if (signal.aborted) return
     if (replyComplete) return
@@ -187,10 +194,18 @@ export function useMessageStream(): UseMessageStreamResult {
     replyInFlightRef.current = true
 
     try {
-      await runStream({ ...opts, onDone: () => {
-        if (abortRef.current === controller) replyInFlightRef.current = false
-        opts.onDone?.()
-      } }, controller.signal)
+      await runStream({ ...opts,
+        onEvent: event => { if (abortRef.current === controller) return opts.onEvent(event) },
+        onDone: async info => {
+          if (abortRef.current !== controller) return
+          replyInFlightRef.current = false
+          await opts.onDone?.(info)
+        },
+        onDisconnect: opts.onDisconnect ? info => {
+          if (abortRef.current === controller) return opts.onDisconnect?.(info)
+        } : undefined,
+        onError: err => { if (abortRef.current === controller) opts.onError?.(err) },
+      }, controller.signal)
     } finally {
       if (abortRef.current === controller) {
         abortRef.current = null

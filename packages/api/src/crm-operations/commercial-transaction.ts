@@ -14,7 +14,7 @@ import {
   type CrmOperationsCommandResult,
   type CrmOperationsContext,
   type CrmOperationsCommand,
-} from '@use-brian/core'
+} from '@use-brian/core/crm/operations-types.js'
 import type { CrmOperationsTransaction } from '../db/crm-operations-store.js'
 
 export type CommercialResult = CrmOperationsCommandResult

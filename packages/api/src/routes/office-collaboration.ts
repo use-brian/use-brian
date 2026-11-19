@@ -5,7 +5,7 @@ import { z } from 'zod'
 import { OfficeCommandSchema } from '@use-brian/office-model'
 import type { OfficeArtifactRow } from '../db/office-artifacts.js'
 import type { OfficeCommentAnchor } from '../db/office-comments.js'
-import type { OfficeToolPort } from '@use-brian/core'
+import type { OfficeToolPort } from '@use-brian/core/office/tools.js'
 import type { ResolvedOfficeAccess } from '../office/access.js'
 
 const AnchorSchema = z.object({

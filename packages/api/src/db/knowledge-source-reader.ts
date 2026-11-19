@@ -1,6 +1,10 @@
 /** Native source-card fields under original R1 authority. [COMP:api/application-persistence] */
 import {z} from 'zod'
-import {bindScopeSources,DerivedScopeError,intersectAccessCeilings,pinAccessCeiling,type AccessContext,type SessionContextAuthority} from '@use-brian/core'
+import type {SessionContextAuthority} from '@use-brian/core/memory/session-state-types.js'
+import {intersectAccessCeilings, pinAccessCeiling} from '@use-brian/agent-runtime/security/access-ceiling.js'
+import type {AccessContext} from '@use-brian/agent-runtime/security/access-context.js'
+import {DerivedScopeError} from '@use-brian/agent-runtime/security/derived-scope.js'
+import {bindScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {getPool,applyRLSGucs,runWithAgentAccess} from './client.js'
 import {readRetainedContextFrame} from './session-context-revisions.js'
 import {currentApplicationReadTransaction} from '../application-platform/execution-context.js'

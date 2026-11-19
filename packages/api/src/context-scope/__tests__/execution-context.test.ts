@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { executionToolContext } from '@use-brian/core'
-import { readFile } from 'node:fs/promises'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { readdir, readFile } from 'node:fs/promises'
 import { resolveExecutionContextSystem as resolveContext } from '../execution-context.js'
 import type { ResolvedTurnScope } from '../resolve-turn-scope.js'
 import type { AuthorityLease } from '../authority-lease.js'
@@ -8,7 +8,7 @@ import type { AuthorityLease } from '../authority-lease.js'
 // Unit scope/identity tests inject only metadata and assistant ports. The real
 // PostgreSQL matrix exercises production factories with no authority substitutes.
 const resolveExecutionContextSystem: typeof resolveContext = (input, deps) => resolveContext(input, {
-  pinPolicyEpoch: async () => async () => true, resolveAssistant: async () => input.assistant, ...deps,
+  pinPolicyEpoch: async () => ({isCurrent: async () => true, matches: () => true}), resolveAssistant: async () => input.assistant, ...deps,
 })
 
 const authority: AuthorityLease = {
@@ -68,7 +68,7 @@ describe('[COMP:api/execution-context] trusted execution resolution', () => {
     let current = true
     const createLease = vi.fn(() => authority)
     await expect(resolveExecutionContextSystem(base(), {
-      pinPolicyEpoch: async () => async () => current,
+      pinPolicyEpoch: async () => ({isCurrent: async () => current, matches: () => current}),
       resolveScope: async () => { current = false; return scope },
       createLease,
     })).rejects.toMatchObject({ reason: 'authority_changed' })
@@ -219,18 +219,56 @@ describe('[COMP:api/execution-context] trusted execution resolution', () => {
 
   it('keeps every production model, MCP, worker, and workflow path on validated construction', async () => {
     const root = new URL('../../../../../', import.meta.url)
-    const productionPaths: Record<string, readonly string[]> = {
+    const read = (path: string) => readFile(new URL(path, root), 'utf8')
+    // Kernel turns. The standalone `prepareAssistantRun` handoff is retired
+    // (turn-kernel.md "Private final run preparation"): each lane resolves its
+    // canonical ExecutionContext, binds it as the owner's one verified
+    // `kind: 'execution'` invocation and hands final assembly to that owner's
+    // `prepareRun`; the owner refuses any unprepared run. Web chat and the
+    // channel pipeline reach classification through `routeAttendedTurn`
+    // (attended-turn-routing.ts), which constructs no run (asserted below).
+    const kernelLanes: Record<string, readonly string[]> = {
       'packages/api/src/routes/chat.ts': [
-        'resolveExecutionContextSystem', 'prepareAssistantRun', 'executionToolContext',
+        'resolveExecutionContextSystem', 'openAssistantTurn(',
+        "ownedTurn.bindModelPreparation({ kind: 'execution', toolProfile: 'web', execution: executionContext,",
+        'ownedTurn.prepareRun({', 'executionToolContext', 'routeAttendedTurn({',
       ],
       'packages/api/src/routes/channel-pipeline.ts': [
-        'resolveExecutionContextSystem', 'prepareAssistantRun', 'executionToolContext',
+        'resolveExecutionContextSystem', 'openAssistantTurn(',
+        "turnOwner.bindModelPreparation({ kind: 'execution', toolProfile: 'channel', execution: executionContext,",
+        'turnOwner.prepareRun({', 'executionToolContext', 'routeAttendedTurn({',
       ],
       'packages/api/src/routes/public-turn.ts': [
-        'resolveExecutionContextSystem', 'prepareAssistantRun', 'executionToolContext',
+        'resolveExecutionContextSystem', 'openAssistantTurn(',
+        "turnOwner.bindModelPreparation({ kind: 'execution', toolProfile: 'public', execution: executionContext,",
+        'turnOwner.prepareRun({', 'executionToolContext',
       ],
       'packages/api/src/inter-assistant/executor.ts': [
-        'resolveExecutionContextSystem', 'prepareAssistantRun', 'executionToolContext',
+        'resolveExecutionContextSystem', 'openAssistantTurn(',
+        "owner.bindModelPreparation({ kind: 'execution', toolProfile: 'callee', execution: executionContext,",
+        'owner.prepareRun({', 'executionToolContext',
+      ],
+      // Durable resume binds its canonical system execution (createExecutionContext).
+      'packages/api/src/routes/session-resume-replay.ts': [
+        'createExecutionContext', 'openAssistantTurn(',
+        "owner.bindModelPreparation({ kind: 'execution', toolProfile: 'resume', execution,",
+        'owner.prepareRun({', 'executionToolContext',
+      ],
+    }
+    const productionPaths: Record<string, readonly string[]> = {
+      ...kernelLanes,
+      // The owner: one invocation shape, captured preparation, binding through
+      // the canonical access wrapper, Brief, and refusal of an unprepared run.
+      'packages/api/src/turn/kernel.ts': [
+        'captureTurnModelPreparation(invocation', 'prepareRun(input: TurnRunPreparationInput)',
+        'this.modelPreparation.captureRun(input, model)', "throw new Error('The original run has not been prepared.')",
+        "throw new Error('The original owner supplies the prepared run.')",
+        'this.modelPreparation.assertLoopContext(supplied.context)',
+      ],
+      'packages/api/src/turn/prepare.ts': [
+        "{ kind: 'execution'; toolProfile: 'web' | 'channel' | 'public' | 'callee' | 'resume'; execution: ExecutionContext;",
+        'bindToolsToAgentAccess(unbound, projection', 'captureBriefRunPreparation()',
+        'captureRun(input: TurnRunPreparationInput, model: PreparedTurnModel)',
       ],
       'packages/api/src/brain-mcp/tools.ts': [
         'resolveExecutionContextSystem', 'executionToolContext',
@@ -244,13 +282,40 @@ describe('[COMP:api/execution-context] trusted execution resolution', () => {
       'packages/api/src/context-scope/workflow-authority.ts': [
         'createExecutionContext', "purpose:'workflow'", 'authority:lease',
       ],
-      'packages/api/src/boot.ts': [
+      'packages/api/src/boot/workflow.register.ts': [
         'resolveWorkflowRunScope', 'resolveExecutionContextSystem', 'externalClientPrincipal',
       ],
     }
     for (const [path, anchors] of Object.entries(productionPaths)) {
-      const content = await readFile(new URL(path, root), 'utf8')
+      const content = await read(path)
       for (const anchor of anchors) expect(content, `${path} must retain ${anchor}`).toContain(anchor)
+    }
+
+    // Closure: nothing else opens or runs a kernel turn. Every production file
+    // that opens one is a listed lane, the loop runner is private to the
+    // owner, no lane drives the query loop itself, the retired handoff is
+    // gone, and the routing adapter constructs no run.
+    const apiSource = new URL('packages/api/src/', root)
+    const files = (await readdir(apiSource, { recursive: true }))
+      .filter(file => file.endsWith('.ts') && !file.split('/').includes('__tests__'))
+    const openers: string[] = []
+    for (const file of files) {
+      const content = await readFile(new URL(file, apiSource), 'utf8')
+      const path = `packages/api/src/${file}`
+      expect(content, `${path} must not use the retired handoff`).not.toContain('prepareAssistantRun')
+      if (path !== 'packages/api/src/turn/kernel.ts') {
+        expect(content, `${path} must not run the owner's private loop`).not.toContain('runAssistantTurnLoop')
+        if (/\bopenAssistantTurn\(/.test(content)) openers.push(path)
+      }
+    }
+    expect(openers.sort()).toEqual(Object.keys(kernelLanes).sort())
+    for (const path of Object.keys(kernelLanes)) {
+      expect(await read(path), `${path} must not drive the query loop outside its owner`).not.toMatch(/\bqueryLoop\(/)
+    }
+    const routing = await read('packages/api/src/routes/attended-turn-routing.ts')
+    expect(routing).toContain('export async function routeAttendedTurn(')
+    for (const construction of ['openAssistantTurn', 'prepareRun', 'bindModelPreparation', 'queryLoop(']) {
+      expect(routing, `attended-turn-routing.ts must not construct a run (${construction})`).not.toContain(construction)
     }
   })
 })

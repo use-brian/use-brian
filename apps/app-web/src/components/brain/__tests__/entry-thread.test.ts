@@ -2,40 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   buildEntryPreamble,
   partitionToolChips,
-  reduceToolEvent,
   TOOL_CHIP_COLLAPSE_THRESHOLD,
 } from "../entry-thread";
 import type { ToolUsed } from "@use-brian/chat-ui";
 
-describe("[COMP:app-web/brain-entry-thread] tool timeline reducer", () => {
-  const running: ToolUsed[] = [{ id: "t1", name: "searchKnowledge", status: "running" }];
-
-  it("adds a tool once on tool_start and dedups re-emits", () => {
-    const next = reduceToolEvent([], "tool_start", { id: "t1", name: "searchKnowledge" });
-    expect(next).toEqual(running);
-    expect(reduceToolEvent(running, "tool_start", { id: "t1", name: "searchKnowledge" })).toBeNull();
-  });
-
-  it("marks done or retried on tool_result", () => {
-    expect(reduceToolEvent(running, "tool_result", { id: "t1" })).toEqual([
-      { id: "t1", name: "searchKnowledge", status: "done" },
-    ]);
-    expect(reduceToolEvent(running, "tool_result", { id: "t1", isError: true })).toEqual([
-      { id: "t1", name: "searchKnowledge", status: "retried" },
-    ]);
-  });
-
-  it("removes a retracted tool on tool_dropped", () => {
-    expect(reduceToolEvent(running, "tool_dropped", { id: "t1" })).toEqual([]);
-  });
-
-  it("ignores unknown events, missing ids, and unknown tool ids", () => {
-    expect(reduceToolEvent(running, "text_delta", { id: "t1" })).toBeNull();
-    expect(reduceToolEvent(running, "tool_start", { name: "x" })).toBeNull();
-    expect(reduceToolEvent(running, "tool_result", { id: "nope" })).toBeNull();
-    expect(reduceToolEvent(running, "tool_dropped", { id: "nope" })).toBeNull();
-  });
-});
+// The tool timeline (dedup start, done/retried result, dropped removal) is the
+// shared turn transcript's since M5 WP-E: `reduceToolEvent` was deleted and its
+// cases run through the controller in entry-thread-presentation.test.tsx.
 
 describe("[COMP:app-web/brain-entry-thread] entry thread preamble", () => {
   it("carries the entry summary and ends ready for the user's question", () => {

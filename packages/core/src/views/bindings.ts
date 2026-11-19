@@ -12,8 +12,8 @@
  * [COMP:views/bindings]
  */
 
-import { bindScopeSources, boundScopeSources } from '../security/source-evidence.js'
-import type { ScopeSource } from '../security/derived-scope.js'
+import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import type {
   CompanyListRow,
   ContactListRow,
@@ -21,7 +21,7 @@ import type {
   DealListRow,
   DealStage,
 } from '../crm/types.js'
-import type { AccessContext } from '../security/access-context.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import type { TaskListRow, TaskStore } from '../tasks/types.js'
 import type {
   WorkflowRunRecord,
@@ -634,7 +634,7 @@ async function resolveDealLabels(
   }
   if (requests.length === 0) return new Map()
   const refs=requests.flatMap(request=>request.ids.map(id=>({entity:request.entity,id}))),labels=new Map<string,string>()
-  const sources:import('../security/derived-scope.js').ScopeSource[]=[]
+  const sources:import('@use-brian/agent-runtime/security/derived-scope.js').ScopeSource[]=[]
   for(let offset=0;offset<refs.length;offset+=100) {
     const batch=refs.slice(offset,offset+100),groups:typeof requests=[]
     for(const entity of ['company','contact'] as const){const ids=batch.filter(ref=>ref.entity===entity).map(ref=>ref.id);if(ids.length)groups.push({entity,ids})}

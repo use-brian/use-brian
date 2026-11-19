@@ -1,7 +1,9 @@
-import {
-  workspaceFilesCtxFor, minSensitivity, scopeEvidenceFromRows,
-  type FilesApi, type ToolContext, type Sensitivity, type CreateComputerToolsOptions,
-} from '@use-brian/core'
+import type { CreateComputerToolsOptions } from '@use-brian/core/sandbox/tools.js'
+import type { FilesApi } from '@use-brian/core/workspace-files/api.js'
+import { ctxFor as workspaceFilesCtxFor } from '@use-brian/core/workspace-files/tool-helpers.js'
+import { scopeEvidenceFromRows } from '@use-brian/agent-runtime/security/context-scope.js'
+import { minSensitivity, type Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 /** Browser transfers use the same file authority and provenance as durable file tools. */
 export function createBrowserFileBridge(api: FilesApi, clearanceFor: (assistantId: string) => Promise<Sensitivity>,

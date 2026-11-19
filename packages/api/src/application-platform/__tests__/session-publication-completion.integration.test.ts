@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
-import { boundScopeSources } from '@use-brian/core'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { getAppPool, getPool, rollbackAndRelease } from '../../db/client.js'
-import { readAdmittedSessionQuery } from '../../db/session-query-reader.js'
-import { publishNativeSessionMessageBatch } from '../../db/session-message-publication.js'
+import { readAdmittedSessionQuery } from '../../db/conversation-store.js'
+import { publishNativeSessionMessageBatch } from '../../db/conversation-store.js'
 import { withSessionMessagePublication } from '../../db/session-context-revisions.js'
 import { persistentContextFixture } from './fixtures/persistent-context.js'
 
@@ -50,4 +50,37 @@ describe.sequential('[COMP:api/session-publication-completion] real deferred tim
       await f.cleanup()
     }
   })
+  it.each(['committed','aborted'] as const)('reconciles a lost %s acknowledgement without replaying publication', async outcome => {
+    const f=await persistentContextFixture()
+    try {
+      await f.history()
+      const authority=await f.modelContext(f.firstId)
+      const input=await readAdmittedSessionQuery({sessionId:f.session.id,throughSequence:3,authority})
+      const sources=boundScopeSources(input)
+      let writes=0,commits=0
+      const measure=async<T>(counter:string,run:()=>Promise<T>):Promise<T>=>{
+        if(counter!=='publication_commit')return run()
+        commits++
+        if(outcome==='committed')await run()
+        throw new Error('fixture_commit_acknowledgement_lost')
+      }
+      const publication=withSessionMessagePublication(authority,sources,async db=>{
+        writes++
+        await publishNativeSessionMessageBatch({sessionId:f.session.id,messages:[{role:'assistant',content:'Synthetic durable reply'}],
+          derivation:{producer:'fixture:commit-outcome',sources},derivationTarget:f.envelope,authority},db)
+        return {completed:true}
+      },{measure})
+      if(outcome==='committed')await expect(publication).resolves.toEqual({completed:true})
+      else await expect(publication).rejects.toMatchObject({message:'fixture_commit_acknowledgement_lost',retrySafe:false,operationMayHaveExecuted:true})
+      expect(writes).toBe(1)
+      expect(commits).toBe(1)
+      expect((await f.pool.query('SELECT count(*)::integer AS n FROM session_messages WHERE session_id=$1',[f.session.id])).rows[0].n)
+        .toBe(outcome==='committed'?4:3)
+      if(outcome==='committed'){
+        const reopened=await readAdmittedSessionQuery({sessionId:f.session.id,throughSequence:4,authority})
+        expect(reopened.history.at(-1)?.content).toBe('Synthetic durable reply')
+      }
+    } finally { await f.cleanup() }
+  })
+
 })

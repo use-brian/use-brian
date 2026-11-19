@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest'
-import type { FilesApi } from '@use-brian/core'
+import type { FilesApi } from '@use-brian/core/workspace-files/api.js'
 import { isImageIcon } from '@use-brian/shared'
 import { createFetchSiteIconTool as createReal } from '../site-icon-tool.js'
 import type { FetchSiteIconDeps } from '../site-icon-tool.js'

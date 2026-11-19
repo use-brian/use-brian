@@ -9,7 +9,7 @@ import {
   buildAliasInternalLink,
   isValidInternalAlias,
 } from '@use-brian/shared/desktop-links'
-import type { SavedViewStore } from '@use-brian/core'
+import type { SavedViewStore } from '@use-brian/core/views/types.js'
 import type {
   AliasAvailability,
   InternalLinkAliases,

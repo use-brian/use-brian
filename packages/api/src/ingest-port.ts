@@ -9,7 +9,9 @@
  */
 
 import type { EpisodeSensitivity } from './db/episodes-store.js'
-import type { LLMProvider, PipelineBResult, SourceKind } from '@use-brian/core'
+import type { PipelineBResult } from '@use-brian/core/ingest/pipeline-b.js'
+import type { SourceKind } from '@use-brian/core/ingest/types.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
 
 export type WorkspaceLlmLane = {
   provider: LLMProvider

@@ -8,7 +8,8 @@
  * Spec: docs/architecture/context-engine/scoped-context.md -> "Reference predicate (v2)".
  */
 import {z} from 'zod'
-import type { DepartmentReadGrant, Sensitivity } from '@use-brian/core'
+import type { DepartmentReadGrant } from '@use-brian/agent-runtime/security/department-read.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { ANONYMOUS, eff, effBase, projectAdmission, type AccessSnapshot, type Edge, type Principal, type ProjectEdge, type Reader, type Tier } from './reference-predicate.js'
 
 type Query = <R>(sql: string, values: unknown[]) => Promise<{ rows: R[] }>
@@ -39,32 +40,18 @@ const departmentSnapshot = z.object({
   projectEdges: z.array(principalEdge.extend({ projectId: z.string().uuid() })),
 }).strict()
 
+/** Shared statement fragment: each consumer still executes a new snapshot. */
+export const departmentSnapshotSql = 'SELECT read_session_department_facts($1,$2,$3) AS snapshot'
+
 export async function loadDepartmentSnapshot(query: Query, input: DepartmentReadInput): Promise<{ snapshot: AccessSnapshot; principal: Principal }> {
-  // One statement is the fact owner. Membership and edges cannot come from
-  // different committed states; no fact or decision survives this operation.
-  const result = await query<{ snapshot: unknown }>(`WITH member AS MATERIALIZED (
-    SELECT role, clearance FROM workspace_members WHERE workspace_id=$1 AND user_id=$2
-  ), active_projects AS MATERIALIZED (
-    SELECT s.project_id FROM project_shared_scopes s JOIN workspaces w ON w.id=s.workspace_id
-    WHERE s.workspace_id=$1 AND s.status='active' AND w.project_shared_spaces
-  ) SELECT jsonb_build_object(
-    'member', (SELECT to_jsonb(m) FROM member m),
-    'assistant', (SELECT jsonb_build_object('clearance',a.clearance) FROM assistants a
-      WHERE a.id=$3 AND a.workspace_id=$1 AND public.assistant_placement_visible($2,a.id)),
-    'edges', coalesce((SELECT jsonb_agg(jsonb_build_object(
-      'kind',e.principal_kind,'id',coalesce(e.user_id,e.assistant_id),
-      'departmentId',e.department_id,'clearance',e.clearance,'expiresAt',e.expires_at))
-      FROM department_edges e WHERE e.workspace_id=$1
-        AND ((e.user_id=$2 AND EXISTS(SELECT 1 FROM member)) OR e.assistant_id=$3)), '[]'::jsonb),
-    'activeProjects', coalesce((SELECT jsonb_agg(project_id ORDER BY project_id) FROM active_projects), '[]'::jsonb),
-    'projectEdges', coalesce((SELECT jsonb_agg(jsonb_build_object(
-      'kind',e.principal_kind,'id',coalesce(e.user_id,e.assistant_id),
-      'projectId',e.project_id,'expiresAt',e.expires_at))
-      FROM project_shared_members e WHERE e.workspace_id=$1 AND EXISTS(SELECT 1 FROM active_projects)
-        AND ((e.user_id=$2 AND EXISTS(SELECT 1 FROM member)) OR e.assistant_id=$3)), '[]'::jsonb)
-    ) AS snapshot`, [input.workspaceId, input.userId, input.assistantId])
+  const result = await query<{ snapshot: unknown }>(departmentSnapshotSql, [input.workspaceId, input.userId, input.assistantId])
   if (result.rows.length !== 1) throw new Error('authority_unavailable')
-  const loaded = departmentSnapshot.parse(result.rows[0].snapshot)
+  return decodeDepartmentSnapshot(input, result.rows[0].snapshot)
+}
+
+/** Applies the same reference-predicate inputs to a freshly acquired fact tuple. */
+export function decodeDepartmentSnapshot(input: DepartmentReadInput, raw: unknown): { snapshot: AccessSnapshot; principal: Principal } {
+  const loaded = departmentSnapshot.parse(raw)
   const { member, assistant } = loaded
   const principal: Principal = member ? { kind: 'user', id: input.userId } : ANONYMOUS
   const base: Record<string, Tier> = {}

@@ -1,10 +1,24 @@
 /** Actual post-turn commitment consumer. [COMP:api/turn-session-state] */
 import {
-  bindScopeSources, boundScopeSources, DerivedScopeError, executionToolContext,
-  runSessionStateDiff, type ContentBlock, type LLMProvider, type Message,
-  type SessionContextAuthority, type SessionStateStore, type SessionStateDiffResult,
-} from '@use-brian/core'
-import { assertSourceModelInputAuthority } from '../application-platform/model-source-authority.js'
+  runSessionStateDiff,
+  type SessionStateDiffResult,
+} from '@use-brian/core/memory/session-state-diff.js'
+import type {
+  SessionContextAuthority,
+  SessionStateStore,
+} from '@use-brian/core/memory/session-state-types.js'
+import type {
+  ContentBlock,
+  LLMProvider,
+  Message,
+} from '@use-brian/agent-runtime/providers/types.js'
+import { DerivedScopeError } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import {
+  bindScopeSources,
+  boundScopeSources,
+} from '@use-brian/agent-runtime/security/source-evidence.js'
+import { admitModelInput } from '../context-scope/admission.js'
 import { AuthorityChangedError } from '../context-scope/authority-lease.js'
 
 // Closed grammar only: uncertain wording retains the normal diff. Inspect the
@@ -43,26 +57,24 @@ export async function runTurnSessionStateDiff(params: {
   const context = { ...executionToolContext(execution, { appId: 'Use Brian' }), scopeAccumulator: accumulator }
   const assertInputAuthority = async () => {
     if (execution.lifecycle.abortSignal.aborted) throw new AuthorityChangedError()
-    await execution.security.authority.assertCurrent()
-    await assertSourceModelInputAuthority(context)
+    await admitModelInput(context)
     if (execution.lifecycle.abortSignal.aborted) throw new AuthorityChangedError()
   }
+  // Admission precedes any response-content inspection, including shortcuts.
+  await assertInputAuthority()
   // Select only a completed substantive response; narration alongside tool_use
   // never becomes a durable commitment merely because it contained text.
   const final = [...params.assistantTurns].reverse().find(turn =>
     !turn.content.some(block => block.type === 'tool_use') &&
     turn.content.some(block => block.type === 'text' && block.text.trim().length > 0))
-  if (!final) { await assertInputAuthority(); return { upserts: 0, resolves: 0, usage: null, model: null } }
+  if (!final) return { upserts: 0, resolves: 0, usage: null, model: null }
   let open: Awaited<ReturnType<SessionStateStore['listOpenBySession']>> | undefined
   if (params.allowTrivialShortcut !== false && greetingOnly(params.userMessage, params.assistantTurns, final.content)) {
-    if (execution.lifecycle.abortSignal.aborted) throw new AuthorityChangedError()
-    await execution.security.authority.assertCurrent()
     open = await params.store.listOpenBySession(execution.lifecycle.sessionId, params.authority)
     await execution.security.authority.assertCurrent()
     if (execution.lifecycle.abortSignal.aborted) throw new AuthorityChangedError()
     if (open.length === 0) return { upserts: 0, resolves: 0, usage: null, model: null }
   }
-  await assertInputAuthority()
   const text = final.content.filter((block): block is { type: 'text'; text: string } => block.type === 'text')
     .map(block => block.text).join('\n')
   const assistant = bindScopeSources<Message>({ role: 'assistant', content: text }, accumulator.evidence.sources ?? [])

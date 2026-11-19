@@ -1,5 +1,7 @@
 import {beforeEach,describe,expect,it,vi} from 'vitest'
-import {ContextScopeAccumulator,DerivedScopeError,type SessionContextAuthority} from '@use-brian/core'
+import type {SessionContextAuthority} from '@use-brian/core/memory/session-state-types.js'
+import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
+import {DerivedScopeError} from '@use-brian/agent-runtime/security/derived-scope.js'
 
 const fixture=vi.hoisted(()=>({scope:null as unknown,query:vi.fn(),rollback:vi.fn()}))
 vi.mock('../client.js',async importOriginal=>({

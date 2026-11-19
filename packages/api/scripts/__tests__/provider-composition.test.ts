@@ -1,12 +1,13 @@
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { bootCompositionSource } from '../../src/boot/__tests__/composition-source.js'
 
 const root = resolve(import.meta.dirname, '../../../..')
 
 describe('[COMP:api/model-resolution] provider composition', () => {
   it('constructs provider-neutral synthesis instead of using a Gemini-key gate', async () => {
-    const source = await readFile(resolve(root, 'packages/api/src/boot.ts'), 'utf8')
+    const source = bootCompositionSource()
 
     expect(source).toContain('const researchSynthesize = createResearchSynthesizer')
     expect(source).toContain('const generateSynthesize: GenerateSynthesizeFn = createGenerateSynthesizer')
@@ -15,7 +16,7 @@ describe('[COMP:api/model-resolution] provider composition', () => {
   })
 
   it('keeps audio keyed while resolving image and PDF media dynamically', async () => {
-    const source = await readFile(resolve(root, 'packages/api/src/boot.ts'), 'utf8')
+    const source = bootCompositionSource()
 
     expect(source).toContain("preferred === 'openai-codex'")
     expect(source).toContain("mime === 'application/pdf' || mime.startsWith('image/')")
@@ -24,7 +25,7 @@ describe('[COMP:api/model-resolution] provider composition', () => {
   })
 
   it('wires DashScope into browser exploration and both recording transports', async () => {
-    const source = await readFile(resolve(root, 'packages/api/src/boot.ts'), 'utf8')
+    const source = bootCompositionSource()
     const entry = await readFile(resolve(root, 'apps/api/src/index.ts'), 'utf8')
 
     expect(source).toContain("apiKeyEnvName: 'OPENAI_API_KEY' as const")

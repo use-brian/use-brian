@@ -25,23 +25,24 @@ import {
   buildMaintenanceWorkflow,
   type KbMaintenanceStore,
 } from '../knowledge/maintenance.js'
+import type { JobStore } from '@use-brian/core/scheduling/types.js'
 import {
   syncWorkflowScheduleTrigger,
   clearWorkflowScheduleTriggers,
-  type JobStore,
-  type WorkflowStore,
-} from '@use-brian/core'
+} from '@use-brian/core/workflow/scheduled-trigger.js'
+import type { WorkflowStore } from '@use-brian/core/workflow/types.js'
 import type { ConnectorInstance, ConnectorInstanceStore } from '../db/connector-instance-store.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import { listUsableWorkspaceConnectors } from '../connectors/usable-connectors.js'
 import { effectiveReadClearance, effectiveReadCompartments } from '../db/workspace-store.js'
 import * as github from '../github/client.js'
-import type { AccessContext, Sensitivity } from '@use-brian/core'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { splitFrontmatterBlock, resolveRepoFilePath } from '../knowledge/repo-files.js'
 import { promises as fs } from 'node:fs'
 import * as nodePath from 'node:path'
 import { execFile } from 'node:child_process'
-import type { KnowledgeRepoWriter } from '@use-brian/core'
+import type { KnowledgeRepoWriter } from '@use-brian/core/knowledge/types.js'
 import {
   KnowledgeCaptureRuleInputSchema,
   type KnowledgeCaptureRuleInput,
@@ -136,7 +137,7 @@ type KnowledgeRouteOptions = {
   workflowStore?: WorkflowStore
   jobStore?: JobStore
   resolvePrimary?: (workspaceId: string) => Promise<string | null>
-  resolveAuthoringAuthority?: (params: { userId: string; workspaceId: string }) => Promise<import('@use-brian/core').AuthoringAuthority>
+  resolveAuthoringAuthority?: (params: { userId: string; workspaceId: string }) => Promise<import('@use-brian/agent-runtime/security/access-ceiling.js').AuthoringAuthority>
 }
 
 function isLoopbackAddress(address: string | undefined): boolean {

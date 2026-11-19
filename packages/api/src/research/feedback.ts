@@ -13,7 +13,7 @@ import {
   interpretResearchFollowup,
   resolveResearchFollowupTarget,
   type ResearchFeedbackKind,
-} from '@use-brian/core'
+} from '@use-brian/core/research/contracts.js'
 import type { ResearchActivity, ResearchArtifactLink, ResearchFeedback, ResearchSensitivity } from '../db/research-store.js'
 
 export type FollowupMessage = {

@@ -13,3 +13,24 @@ export type { PreflightResult } from './preflight.js'
 
 export { RESEARCH_EFFORT_BUDGETS, researchEffortInstruction } from './research-effort.js'
 export type { ResearchEffort } from './research-effort.js'
+
+export { routeTurn, planTurnRoute } from './turn-routing.js'
+export type {
+  CapabilityDescriptorRef,
+  ChannelRoutingFacts,
+  CombinedTurnDecision,
+  TurnRoute,
+  TurnRouteResearch,
+  TurnRoutePlan,
+  TurnRoutingAttribution,
+  TurnRoutingCapture,
+  TurnRoutingFacts,
+  TurnRoutingInput,
+  TurnRoutingLane,
+  TurnRoutingPortRequest,
+  TurnRoutingPorts,
+  TurnRoutingProfile,
+  TurnRoutingStrategy,
+  TurnRoutingUsageRecord,
+  WebRoutingFacts,
+} from './turn-routing.js'

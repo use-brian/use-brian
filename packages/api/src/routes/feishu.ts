@@ -24,20 +24,18 @@ import {
   type FeishuRestoreChannel,
   type IncomingMessage,
 } from '@use-brian/channels'
+import { sanitize as sanitizeAnalytics } from '@use-brian/core/analytics/logger.js'
+import { parseFileContent } from '@use-brian/core/files/parsers.js'
+import type { MediaBackend } from '@use-brian/core/media/backend.js'
 import {
-  buildTool,
   composeVoiceTurnText,
   describeTranscriptionFailure,
-  parseFileContent,
-  sanitize as sanitizeAnalytics,
   transcribeFirstAudio,
   TRANSCRIPTION_DISABLED_REASON,
-  type ContentBlock,
-  type MediaBackend,
-  type TokenUsage,
-  type Tool,
-  type WorkflowEventDispatcher,
-} from '@use-brian/core'
+} from '@use-brian/core/media/preflight.js'
+import type { WorkflowEventDispatcher } from '@use-brian/core/workflow/event-trigger.js'
+import type { ContentBlock, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import {
   describeToolInput,
   humanizeToolName,
@@ -94,11 +92,11 @@ export type FeishuWebhookIngestor = {
 }
 
 export type FeishuRouteOptions = Omit<DiscordRouteOptions, 'ingestChannelMediaRef'> & {
-  filesApi?: import('@use-brian/core').FilesApi
+  filesApi?: import('@use-brian/core/workspace-files/api.js').FilesApi
   readCachedFile?: (
     id: string,
-    ctx: import('@use-brian/core').AccessContext,
-  ) => Promise<import('@use-brian/core').CachedFile | null>
+    ctx: import('@use-brian/agent-runtime/security/access-context.js').AccessContext,
+  ) => Promise<import('@use-brian/core/files/types.js').CachedFile | null>
   workspaceToolPolicyStore?: import('../db/workspace-tool-policy-store.js').WorkspaceToolPolicyStore
   linkedAccountStore?: LinkedAccountStore
   linkCodeStore?: LinkCodeStore

@@ -1,19 +1,30 @@
+import type { CrmCredentialParent } from '@use-brian/core/crm/integration-authority.js'
 /** CRM-only credential lifecycle/authentication. [COMP:api/crm-integration-auth] */
 import { randomBytes, randomUUID } from 'node:crypto'
 import type { Pool, PoolClient } from 'pg'
 import { z } from 'zod'
 import {
-  CrmIntegrationGrantsSchema, CrmOperationsError, crmOperationsSha256,
-  type CrmIntegrationAuthority, type CrmIntegrationGrant, type AuthoringAuthority, parseAuthoringAuthority,
-  type CrmPage, type CrmPageQuery, type DepartmentReadGrant,
-} from '@use-brian/core'
+  type AuthoringAuthority,
+  parseAuthoringAuthority,
+} from '@use-brian/agent-runtime/security/access-ceiling.js'
+import type { DepartmentReadGrant } from '@use-brian/agent-runtime/security/department-read.js'
+import {
+  CrmOperationsError,
+  crmOperationsSha256,
+} from '@use-brian/core/application-platform/operation-contract.js'
+import {
+  CrmIntegrationGrantsSchema,
+  type CrmIntegrationAuthority,
+  type CrmIntegrationGrant,
+} from '@use-brian/core/crm/integration-authority.js'
+import type { CrmPage, CrmPageQuery } from '@use-brian/core/crm/pagination.js'
 import { applyRLSGucs, getAppPool, getPool } from './client.js'
 import { resolveWorkflowAuthoringScope } from '../context-scope/workflow-authority.js'
 import { runWithAgentAccess } from './agent-access-context.js'
 import { hashSecret, verifySecret } from './api-key-store.js'
 import { queryCrmPage } from '../crm-operations/pagination.js'
 import { admitCrmIntegrationBinding, renewCrmIntegrationBinding, CrmIntegrationDepartmentSelectionSchema, previewCrmIntegrationBindings, CrmIntegrationBindingOptionsSchema, crmIntegrationExecutionLimits,
-  assertCrmCredentialParent, type CrmCredentialParent,
+  assertCrmCredentialParent,
   type CrmIntegrationExecutionLimits,
   type CrmIntegrationDepartmentBinding } from '../crm-operations/integration-department-authority.js'
 

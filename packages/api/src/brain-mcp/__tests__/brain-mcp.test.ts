@@ -15,7 +15,7 @@ vi.mock('../../context-scope/execution-context.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../../context-scope/execution-context.js')>()
   return { ...actual,resolveExecutionContextSystem: (input: Parameters<typeof actual.resolveExecutionContextSystem>[0],
     deps: Parameters<typeof actual.resolveExecutionContextSystem>[1] = {}) => actual.resolveExecutionContextSystem(input,{
-      ...deps,pinPolicyEpoch: async () => async () => true,resolveAssistant: async () => input.assistant,
+      ...deps,pinPolicyEpoch: async () => ({isCurrent: async () => true, matches: () => true}),resolveAssistant: async () => input.assistant,
     }) }
 })
 import { randomUUID } from 'node:crypto'
@@ -23,7 +23,12 @@ import express from 'express'
 import request from 'supertest'
 import type { Request } from 'express'
 import { z } from 'zod'
-import { buildTool, createAssociationTools, createCrmCredentialTools, createTaskTools, type PipelineBResult, type TaskStore, type Tool, type ToolContext } from '@use-brian/core'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { createAssociationTools } from '@use-brian/core/association/tools.js'
+import { createCrmCredentialTools } from '@use-brian/core/crm/operations-tools.js'
+import type { PipelineBResult } from '@use-brian/core/ingest/pipeline-b.js'
+import { createTaskTools } from '@use-brian/core/tasks/tools.js'
+import type { TaskStore } from '@use-brian/core/tasks/types.js'
 import { hashSecret } from '../../db/api-key-store.js'
 import { mintBrainPlaintext, type BrainKeyStore } from '../../db/brain-keys-store.js'
 import { mintBridgeToken } from '../../home-apps/tokens.js'

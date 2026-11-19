@@ -4,7 +4,7 @@ import {
   MAX_PRESENTED_DOCUMENT_CHARS,
   parsePresentedDocumentInput,
 } from '../base/present-document.js'
-import type { ToolContext } from '../types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const ctx: ToolContext = {
   userId: 'user-1',

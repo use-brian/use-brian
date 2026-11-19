@@ -1,7 +1,9 @@
 import {randomUUID} from 'node:crypto'
 import {afterAll,describe,expect,it} from 'vitest'
-import {createTaskGuardrailTools,type AccessContext,type ToolContext} from '@use-brian/core'
-import {getAppPool,getPool,queryWithRLS} from '../client.js'
+import {createTaskGuardrailTools} from '@use-brian/core/tasks/guardrail-tools.js'
+import type {AccessContext} from '@use-brian/agent-runtime/security/access-context.js'
+import type {ToolContext} from '@use-brian/agent-runtime/tools/types.js'
+import {applyRLSGucs,getAppPool,getPool,queryWithRLS} from '../client.js'
 import {runWithAgentAccess} from '../agent-access-context.js'
 import {createDbWorkspaceGroupStore} from '../workspace-group-store.js'
 import {deleteBrainInboxRow,deleteBrainInboxTasks,primitiveToTable,verifyBrainInboxRow,type BrainInboxPrimitive} from '../brain-inbox-store.js'
@@ -24,10 +26,17 @@ async function fixture(){
   const key=team.compartmentKey!
   const access:AccessContext={userId,workspaceId,assistantId,assistantKind:'standard',clearance:'confidential',compartments:[key],mutationCompartments:[key],projectIds:[projectId],visibilityAssistantIds:[assistantId]}
   const execution=(mutationCompartments:string[]|null=[key])=>({...access,clearance:access.clearance,compartments:access.compartments,mutationCompartments})
-  async function create(primitive:BrainInboxPrimitive='task'){
+  // Canonical task scope fields are refused to the owner pool after creation
+  // (migration 8051 field guards), so a task fixture is inserted with its
+  // final scope and visibility instead of being relabelled afterwards.
+  async function create(primitive:BrainInboxPrimitive='task',task:{userId?:string;assistantId?:string;sensitivity?:string}={}){
     let id:string=randomUUID()
     const table=primitiveToTable(primitive)
-    if(table==='tasks')await pool.query("INSERT INTO tasks(id,workspace_id,title,created_by_user_id) VALUES($1,$2,'Fixture task',$3)",[id,workspaceId,userId])
+    if(table==='tasks'){
+      await pool.query("INSERT INTO tasks(id,workspace_id,title,created_by_user_id,compartments,project_ids,user_id,assistant_id,sensitivity) VALUES($1,$2,'Fixture task',$3,$4,$5,$6,$7,coalesce($8,'internal'))",
+        [id,workspaceId,userId,[key],[projectId],task.userId??null,task.assistantId??null,task.sensitivity??null])
+      return id
+    }
     else if(table==='entities')await pool.query("INSERT INTO entities(id,workspace_id,kind,display_name,source,created_by_user_id) VALUES($1,$2,'person','Fixture entity','user',$3)",[id,workspaceId,userId])
     else if(table==='memories')id=(await createMemory({workspaceId,userId:null,assistantId,createdByUserId:userId,scope:'workspace',summary:'Fixture memory',sensitivity:'internal',compartments:[key],projectIds:[projectId]})).id
     else if(table==='workspace_files')await pool.query("INSERT INTO workspace_files(id,workspace_id,path,name,storage_uri,created_by_user_id) VALUES($1,$2,$3,'fixture.txt','gs://fixture/file',$4)",[id,workspaceId,`/${id}.txt`,userId])
@@ -69,16 +78,13 @@ describe('[COMP:api/brain-mutation-scope] canonical verification, deletion and r
     expect(await f.evidence()).toEqual(primitive==='memory'?[0,2,2,0,0]:[2,0,2,0,0])
   })
   it.each(['held','retracted','retired','private','assistant','project','clearance'])('withholds a %s task from all mutation paths without evidence',async kind=>{
-    const f=await fixture(),id=await f.create()
-    const updates:Record<string,string>={held:'scope_held=true',retracted:'retracted_at=now()',retired:'valid_to=now()',private:`user_id='${f.member}'`,assistant:`assistant_id=NULL`,project:'project_ids=ARRAY[]::uuid[]',clearance:"sensitivity='confidential'"}
-    await pool.query(`UPDATE tasks SET ${updates[kind]} WHERE id=$1`,[id])
+    const f=await fixture()
+    const id=await f.create('task',kind==='private'?{userId:f.member}:kind==='assistant'?{assistantId:f.assistantId}:kind==='clearance'?{sensitivity:'confidential'}:{})
+    const updates:Record<string,string>={held:'scope_held=true',retracted:'retracted_at=now()',retired:'valid_to=now()'}
+    if(updates[kind])await pool.query(`UPDATE tasks SET ${updates[kind]} WHERE id=$1`,[id])
     let ctx=f.access
-    if(kind==='assistant'){
-      await pool.query('UPDATE tasks SET assistant_id=$2 WHERE id=$1',[id,f.assistantId]);ctx={...ctx,visibilityAssistantIds:[]}
-    }
-    if(kind==='project'){
-      await pool.query('UPDATE tasks SET project_ids=$2 WHERE id=$1',[id,[f.projectId]]);ctx={...ctx,projectIds:[]}
-    }
+    if(kind==='assistant')ctx={...ctx,visibilityAssistantIds:[]}
+    if(kind==='project')ctx={...ctx,projectIds:[]}
     if(kind==='clearance')ctx={...ctx,clearance:'internal'}
     expect(await f.verify('task',id,ctx)).toMatchObject({status:'not_found'})
     expect(await f.remove('task',id,ctx)).toEqual({status:'not_found'})
@@ -106,8 +112,7 @@ describe('[COMP:api/brain-mutation-scope] canonical verification, deletion and r
     expect(await f.evidence()).toEqual([0,0,0,0,0])
   })
   it('bulk-deletes only authorized tasks and retires only their hosted goals',async()=>{
-    const f=await fixture(),allowed=await f.create(),hidden=await f.create()
-    await pool.query('UPDATE tasks SET user_id=$2 WHERE id=$1',[hidden,f.member])
+    const f=await fixture(),allowed=await f.create(),hidden=await f.create('task',{userId:f.member})
     for(const id of [allowed,hidden])await pool.query("INSERT INTO goals(workspace_id,host_type,host_id,outcome,done_when,created_by_user_id) VALUES($1,'task',$2,'Fixture outcome','{}',$3)",[f.workspaceId,id,f.userId])
     expect(await deleteBrainInboxTasks({taskIds:[allowed,hidden,randomUUID()],workspaceId:f.workspaceId,deletedByUserId:f.userId,access:f.access})).toEqual([allowed])
     const goals=(await pool.query('SELECT host_id,status FROM goals WHERE workspace_id=$1',[f.workspaceId])).rows
@@ -182,12 +187,21 @@ describe('[COMP:api/brain-mutation-scope] canonical verification, deletion and r
     }
     expect(await runWithAgentAccess(f.execution(),read)).toEqual([1,1])
     expect(await runWithAgentAccess({...f.execution(),compartments:[],mutationCompartments:[]},read)).toEqual([0,0])
-    await pool.query(`UPDATE ${primitiveToTable(primitive)} SET compartments='{}',project_ids='{}' WHERE id=$1`,[id])
+    // Task scope fields are canonical (migration 8051 refuses owner-pool field
+    // writes), so the task is relabelled by its workspace owner through the app role.
+    const relabel=async(set:string,values:unknown[]=[])=>{
+      if(primitive!=='task'){await pool.query(`UPDATE ${primitiveToTable(primitive)} SET ${set} WHERE id=$1`,[id,...values]);return}
+      const client=await getAppPool().connect()
+      try{await client.query('BEGIN');await applyRLSGucs(client,f.userId);await client.query(`UPDATE tasks SET ${set} WHERE id=$1`,[id,...values]);await client.query('COMMIT')}
+      catch(error){await client.query('ROLLBACK');throw error}
+      finally{client.release()}
+    }
+    await relabel("compartments='{}',project_ids='{}'")
     expect(await runWithAgentAccess({...f.execution(),compartments:[],mutationCompartments:[]},read)).toEqual([0,0])
     const restricted=await f.groups.createTeam(f.userId,f.workspaceId,{name:'Research',key:'research'})
-    await pool.query(`UPDATE ${primitiveToTable(primitive)} SET compartments=$2 WHERE id=$1`,[id,[restricted.compartmentKey!]])
+    await relabel('compartments=$2',[[restricted.compartmentKey!]])
     expect(await runWithAgentAccess(f.execution(),read)).toEqual([0,0])
-    await pool.query(`UPDATE ${primitiveToTable(primitive)} SET compartments=$2 WHERE id=$1`,[id,[f.key]])
+    await relabel('compartments=$2',[[f.key]])
     await pool.query(`UPDATE ${primitiveToTable(primitive)} SET scope_held=true WHERE id=$1`,[id])
     expect(await runWithAgentAccess(f.execution(),read)).toEqual([0,0])
   })

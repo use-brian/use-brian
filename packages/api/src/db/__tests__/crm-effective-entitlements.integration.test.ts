@@ -4,15 +4,12 @@ import pg from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
 import { createDbCrmIntakeReadStore } from '../crm-intake-store.js'
 import { createDbCrmSegmentStore } from '../crm-segment-store.js'
-import { createAssociationStore } from '../association-store.js'
-import { EventInputSchema, OrderCreateSchema, TicketInputSchema } from '../../association/domain.js'
 import { getPool } from '../client.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL })
 const reads = createDbCrmIntakeReadStore()
-const commerce = createAssociationStore(pool)
 async function fixture() {
   const workspaceId = randomUUID(), userId = randomUUID(), planId = randomUUID(), contactId = randomUUID()
   await pool.query('INSERT INTO users (id,auth_provider_id) VALUES ($1::uuid,$1::text)', [userId])
@@ -53,10 +50,15 @@ describe('[COMP:crm/operations-pagination] Actual effective entitlement predicat
       cursor = page.nextCursor ?? undefined
     } while (cursor)
     expect(new Set(ids).size).toBe(105)
-    const raw = await commerce.listMemberships(f.workspaceId, f.contactId, { effectiveAt: at })
+    const raw = []
+    let rawCursor: string | undefined
+    do {
+      const page = await reads.listEntitlements(f.workspaceId, { contactId: f.contactId, effectiveAt: at, limit: 100, cursor: rawCursor })
+      raw.push(...page.entitlements)
+      rawCursor = page.nextCursor ?? undefined
+    } while (rawCursor)
     expect(raw).toHaveLength(107)
-    expect(raw.filter((row) => row.status === 'active' && row.isEffective === false)).toHaveLength(2)
-    expect(await commerce.listMemberships(f.workspaceId, f.contactId, { activeOnly: true, effectiveAt: at })).toHaveLength(105)
+    expect(raw.filter(row => row.status === 'active' && row.isEffective === false)).toHaveLength(2)
     const first = await reads.listEntitlements(f.workspaceId, { activeOnly: true, limit: 1 })
     const next = await reads.listEntitlements(f.workspaceId, { activeOnly: true, limit: 2, cursor: first.nextCursor! })
     expect(next.entitlements.every((row) => row.effectiveAt === first.entitlements[0].effectiveAt)).toBe(true)
@@ -68,7 +70,7 @@ describe('[COMP:crm/operations-pagination] Actual effective entitlement predicat
     await expect(reads.listEntitlements(f.workspaceId, { activeOnly: true, effectiveAt: '2026-01-01T19:00:00.123456-05:00', cursor: historical.nextCursor! })).resolves.toBeDefined()
   })
 
-  it('shares effective access between segment membership and current member pricing', async () => {
+  it('uses current effective access for segment membership', async () => {
     const f = await fixture(), future = randomUUID(), past = randomUUID()
     for (const id of [future, past]) await pool.query(`INSERT INTO entities (id,workspace_id,kind,display_name,created_by_user_id,source)
       VALUES ($1,$2,'person','Fixture person',$3,'manual')`, [id, f.workspaceId, f.userId])
@@ -86,65 +88,9 @@ describe('[COMP:crm/operations-pagination] Actual effective entitlement predicat
     const segment = await createDbCrmSegmentStore().previewSegment(f.workspaceId, segmentId)
     expect(segment.snapshotIds).toEqual([f.contactId])
     expect(segment.count).toBe(1)
-    await pool.query(`UPDATE workspace_modules SET state='enabled' WHERE workspace_id=$1 AND module_key='association'`, [f.workspaceId])
-    const event = await commerce.upsertEvent(f.workspaceId, EventInputSchema.parse({ slug: 'fixture-event', title: 'Fixture event', startsAt: '2099-01-01T12:00:00Z', endsAt: '2099-01-01T14:00:00Z', timezone: 'UTC', mode: 'venue', status: 'published', capacity: 20 }), f.actor)
-    const ticket = await commerce.upsertTicket(f.workspaceId, String(event.record.id), TicketInputSchema.parse({ key: 'member', name: 'Member ticket', currency: 'USD', priceMinor: 100, memberPriceMinor: 25, eligiblePlanKeys: ['member'], status: 'on_sale', capacity: 20 }), f.actor)
-    const input = (contactId: string) => OrderCreateSchema.parse({ contactId, idempotencyKey: randomUUID(), lines: [{ ticketId: ticket.record.id, quantity: 1, useMemberPrice: true, attendees: [{ name: 'Fixture attendee' }] }] })
-    expect((await commerce.createOrder(f.workspaceId, input(f.contactId), f.actor)).record.totalMinor).toBe('25')
-    // A successful historical read is not a present-day commerce authorization.
+    // Historical entitlement reads do not change current segment membership.
     expect((await reads.listEntitlements(f.workspaceId, { contactId: past, activeOnly: true, effectiveAt: '2001-01-01T00:00:00Z' })).entitlements).toHaveLength(1)
-    for (const id of [future, past]) await expect(commerce.createOrder(f.workspaceId, input(id), f.actor)).rejects.toMatchObject({ code: 'member_price_ineligible' })
     await pool.query(`UPDATE association_memberships SET status='cancelled' WHERE workspace_id=$1 AND contact_id=$2 AND idempotency_key='current'`, [f.workspaceId, f.contactId])
-    await expect(commerce.createOrder(f.workspaceId, input(f.contactId), f.actor)).rejects.toMatchObject({ code: 'member_price_ineligible' })
     expect((await createDbCrmSegmentStore().previewSegment(f.workspaceId, segmentId)).count).toBe(0)
-  })
-
-  it('enforces restricted admission for the buyer and each distinct attendee and retains its evidence', async () => {
-    const f = await fixture()
-    const attendeeOne = randomUUID(), attendeeTwo = randomUUID(), guest = randomUUID()
-    for (const [id, name] of [[attendeeOne, 'First member'], [attendeeTwo, 'Second member'], [guest, 'Guest']]) {
-      await pool.query(`INSERT INTO entities (id,workspace_id,kind,display_name,created_by_user_id,source)
-        VALUES ($1,$2,'person',$3,$4,'manual')`, [id, f.workspaceId, name, f.userId])
-    }
-    const memberships = await pool.query<{ id: string; contact_id: string }>(`INSERT INTO association_memberships
-      (workspace_id,contact_id,plan_id,idempotency_key,request_fingerprint,status,starts_at,ends_at)
-      VALUES ($1,$2,$5,'buyer',repeat('a',64),'active','2020-01-01T00:00:00Z',NULL),
-             ($1,$3,$5,'attendee-one',repeat('b',64),'active','2020-01-01T00:00:00Z',NULL),
-             ($1,$4,$5,'attendee-two',repeat('c',64),'active','2020-01-01T00:00:00Z',NULL)
-      RETURNING id,contact_id`, [f.workspaceId, f.contactId, attendeeOne, attendeeTwo, f.planId])
-    await pool.query(`UPDATE workspace_modules SET state='enabled' WHERE workspace_id=$1 AND module_key='association'`, [f.workspaceId])
-    const event = await commerce.upsertEvent(f.workspaceId, EventInputSchema.parse({ slug: 'restricted-event', title: 'Restricted event', startsAt: '2099-01-01T12:00:00Z', endsAt: '2099-01-01T14:00:00Z', timezone: 'UTC', mode: 'venue', status: 'published', capacity: 20 }), f.actor)
-    const ticket = await commerce.upsertTicket(f.workspaceId, String(event.record.id), TicketInputSchema.parse({
-      key: 'member', name: 'Member ticket', currency: 'USD', priceMinor: 100, memberPriceMinor: 25,
-      eligiblePlanKeys: ['member'], eligibilityRequired: true, eligibilityScope: 'buyer_and_attendees', status: 'on_sale', capacity: 20,
-    }), f.actor)
-    expect(ticket.record).toMatchObject({ eligibilityScope: 'buyer_and_attendees' })
-    const input = (contacts: Array<string | undefined>, useMemberPrice = true) => OrderCreateSchema.parse({
-      contactId: f.contactId, idempotencyKey: randomUUID(), lines: [{ ticketId: ticket.record.id,
-        quantity: contacts.length, useMemberPrice, attendees: contacts.map((contactId, index) => ({
-          ...(contactId ? { contactId } : {}), name: `Attendee ${index + 1}`,
-        })) }],
-    })
-    const created = await commerce.createOrder(f.workspaceId, input([attendeeOne, attendeeTwo]), f.actor)
-    expect(created.record).toMatchObject({
-      totalMinor: '50',
-      lines: [{ pricingBasis: 'member', eligibleMembershipId: memberships.rows.find(row => row.contact_id === f.contactId)?.id }],
-    })
-    const registrationEvidence = (created.record.registrations as Array<Record<string, unknown>>)
-      .map(row => [row.attendeeContactId, row.eligibleMembershipId])
-      .sort(([left], [right]) => String(left).localeCompare(String(right)))
-    expect(registrationEvidence).toEqual([
-      [attendeeOne, memberships.rows.find(row => row.contact_id === attendeeOne)?.id],
-      [attendeeTwo, memberships.rows.find(row => row.contact_id === attendeeTwo)?.id],
-    ].sort(([left], [right]) => String(left).localeCompare(String(right))))
-    await expect(commerce.createOrder(f.workspaceId, input([attendeeOne, guest]), f.actor))
-      .rejects.toMatchObject({ code: 'attendee_membership_ineligible', details: { attendeeIndex: 1 } })
-    await expect(commerce.createOrder(f.workspaceId, input([attendeeOne, attendeeOne]), f.actor))
-      .rejects.toMatchObject({ code: 'attendee_membership_ineligible', details: { attendeeIndex: 1 } })
-    await expect(commerce.createOrder(f.workspaceId, input([attendeeOne], false), f.actor))
-      .rejects.toMatchObject({ code: 'member_price_ineligible' })
-    await pool.query("UPDATE association_memberships SET status='cancelled' WHERE workspace_id=$1 AND contact_id=$2", [f.workspaceId, attendeeTwo])
-    await expect(commerce.createOrder(f.workspaceId, input([attendeeOne, attendeeTwo]), f.actor))
-      .rejects.toMatchObject({ code: 'attendee_membership_ineligible', details: { attendeeIndex: 1 } })
   })
 })

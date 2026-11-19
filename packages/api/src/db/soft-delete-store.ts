@@ -27,7 +27,7 @@
 
 import {captureCrmErasure} from '../crm-operations/erasure-journal.js'
 import {acquireCrmPrivacyAdmission} from '../crm-operations/privacy-admission.js'
-import { HardPurgeError, SoftDeleteError, type RowSnapshot, type SoftDeletePrimitive, type SoftDeleteRepository, type SoftDeleteApplyHardPurgeInput } from '@use-brian/core'
+import { HardPurgeError, SoftDeleteError, type RowSnapshot, type SoftDeletePrimitive, type SoftDeleteRepository, type ApplyHardPurgeInput as SoftDeleteApplyHardPurgeInput } from '@use-brian/core/corrections/soft-delete.js'
 import type {PoolClient} from 'pg'
 import { getPool, query } from './client.js'
 import { redactCrmOperationsForContact } from '../crm-operations/privacy.js'

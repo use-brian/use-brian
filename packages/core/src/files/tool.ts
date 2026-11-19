@@ -1,6 +1,6 @@
-import { scopeEvidenceFromRows } from '../security/context-scope.js'
+import { scopeEvidenceFromRows } from '@use-brian/agent-runtime/security/context-scope.js'
 import { z } from 'zod'
-import { buildTool, type Tool } from '../tools/types.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import type { FileStore } from './types.js'
 
 /**

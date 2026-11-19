@@ -3285,6 +3285,8 @@ export const ja: Dictionary = {
     pendingQuestion: {
       heading: "確認させてください",
       placeholder: "回答を入力…",
+      chooseAnswer: "回答を選択",
+      customAnswer: "別の回答を入力",
       submit: "回答を送信",
       submitting: "送信中…",
       cancel: "キャンセル",
@@ -9273,6 +9275,37 @@ export const ja: Dictionary = {
     "noProjects": "利用可能なプロジェクトがありません"
 },
   chatApp: {
+    offlineRetainedHistory: "オフライン履歴。最終同期: {time}",
+    visibility: {
+      membersUnavailable: "ワークスペースのメンバーを取得できません。参加者の変更を一時停止しています。",
+      projectsUnavailable: "プロジェクトを取得できません。プロジェクトの変更を一時停止しています。",
+      "raiseCap": "機密区分の上限を引き上げる",
+      "capNotice": "上限は引き上げのみ可能です。下げるには新しい会話を作成してください。",
+      "project": "プロジェクト",
+      "noProject": "プロジェクトなし",
+      "projectNotice": "非公開チャットは非公開のままです。ワークスペースの会話をプロジェクトに移すと閲覧範囲が狭まり、外すには管理者権限が必要です。",
+      "saveProject": "プロジェクトを保存",
+
+      "title": "会話の公開範囲",
+      "cap": "機密区分の上限: {cap}",
+      "boundaries": "部門とプロジェクトの範囲: {count}",
+      "caps": {
+            "public": "公開",
+            "internal": "社内",
+            "confidential": "機密"
+      },
+      "privateByKind": "この1対1のチャットは非公開です。所有者だけが引き継ぎを通じて内容を共有できます。",
+      "private": "非公開",
+      "workspace": "ワークスペース",
+      "participants": "参加者（開始者は常に含まれます）",
+      "unnamedParticipant": "参加者",
+      "narrowNotice": "以前の閲覧者がすでに内容を見た可能性があります。オフラインのコピーは24時間以内に期限切れになります。",
+      "widenNotice": "閲覧者を追加すると会話全体が共有されます。参加者に通知され、変更は監査に記録されます。",
+      "save": "公開範囲を保存",
+      "saving": "保存中",
+      "failed": "公開範囲を更新できませんでした。もう一度お試しください。",
+      "conflict": "公開範囲が別の場所で変更されました。会話を更新して再試行してください。"
+},
     displayHistory: {
       "label": "保存済みメッセージ",
       "notice": "これらの保存済みメッセージは参照専用です。アシスタントには送信されません。",
@@ -9410,6 +9443,7 @@ export const ja: Dictionary = {
     queuedNotice: "現在のターンが終わり次第、アシスタントが返信します。",
     postFailed: "メッセージを投稿できませんでした。もう一度お試しください。",
     stopTurnFailed: "ターンを停止できませんでした。もう一度お試しください。",
+    sendWhileTurnRunning: "アシスタントはまだこのチャットで作業中です。返信を待つか停止してから、もう一度送信してください。",
     mentionInsertAria: "{name} をメンション",
     slashMenuLabel: "コマンド",
     slashInsertAria: "/{slug} を実行",
@@ -9500,6 +9534,7 @@ export const ja: Dictionary = {
     liveWorkStopTitle: "このターンを停止します",
     liveWorkNoProgress: "{minutes} 分間、進捗がありません",
     turnStoppedBy: "{name} がこのターンを停止しました。",
+    turnStopped: "このターンは停止されました。",
     turnStoppedByYou: "このターンを停止しました。",
     turnFailed: "返信を完了できませんでした。もう一度試す前に、会話の内容をご確認ください。",
     turnReconnecting:
@@ -9508,6 +9543,10 @@ export const ja: Dictionary = {
       "前のターンが応答しなくなったためリセットし、チャットのブロックを解除しました。メッセージはすべて残っています。もう一度送信すると続けられます。",
     pinnedContext: "ピン",
     assistantClearanceBlocked: "このアシスタントの権限レベルはこのルームより高いため、ここでは回答できません。",
+    clearanceBelowRejectedRoom: "{name} はこのルームを読む権限がないため、ここでは回答できません。メンションを外すか、ワークスペース管理者に権限の引き上げを依頼してください。",
+    clearanceBelowRejectedMessage: "{name} はこのメッセージを読む権限がないため、ここでは回答できません。メンションを外すか、ワークスペース管理者に権限の引き上げを依頼してください。",
+    clearanceBelowSkippedRoom: "{name} はこのルームを読む権限がないため、スキップされました。ワークスペース管理者が権限を引き上げられます。",
+    clearanceBelowSkippedMessage: "{name} はこのメッセージを読む権限がないため、スキップされました。ワークスペース管理者が権限を引き上げられます。",
     deliveryAudienceBlocked: "この回答には、この共有チャットの全員が閲覧できるわけではない情報が含まれているため、ここには投稿されませんでした。個人チャットで改めて質問してください。",
     // The Chat side pane: Work + pinned + open tabs (chat-parity D4-D8).
     // [COMP:app-web/chat-side-pane]

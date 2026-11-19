@@ -3,15 +3,19 @@ import { withExternalKeyActor } from '../external-key-admission.js'
 import pg from 'pg'
 import { createProgrammaticEpisodeTerminal } from '../../ingest/programmatic-terminal.js'
 import { randomUUID } from 'node:crypto'
+import { writeFile } from 'node:fs/promises'
 import express from 'express'
 import request from 'supertest'
 import { afterAll, describe, expect, it, vi } from 'vitest'
-import { createBatchWorker, type BatchStore, type LLMProvider } from '@use-brian/core'
-import { getPool, getAppPool } from '../client.js'
+import { createBatchWorker } from '@use-brian/core/scheduling/poll-worker.js'
+import type { BatchStore } from '@use-brian/core/scheduling/types.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import { getPool, getAppPool, applyRLSGucs } from '../client.js'
 import { createProgrammaticCaptureStore } from '../programmatic-capture-store.js'
 import { createDbProgrammaticBatchStore } from '../pending-ingest-batches-store.js'
 import { createDbWorkspaceGroupStore } from '../workspace-group-store.js'
 import { createWorkspaceStore } from '../workspace-store.js'
+import { updateTask } from '../tasks.js'
 import { programmaticCaptureRoutes } from '../../routes/programmatic-capture.js'
 import { requireAuth } from '../../auth/middleware.js'
 import { createTokens } from '../../auth/jwt.js'
@@ -55,7 +59,7 @@ async function fixture(beforeExtract?:()=>Promise<void>, memories:object[]=[], e
   providerCall++
   const extraction={summary:'Verified configured intake summary',entities,edges:[],memories,tasks,ephemeral,tags:[]}
   const readiness={assessments:tasks.map((t,index)=>({index,classification:'ready',evidence_quote:'Ship the pricing page update by Friday',commitment:'explicit',
-   objective:'Ship the pricing page update',target:'Pricing page',description:'Update the pricing page by Friday. Start from the existing implementation. Done when live.',
+   objective:String((t as {text?:string}).text??'Ship the pricing page update'),target:String((t as {text?:string}).text??'Pricing page'),description:'Update the pricing page by Friday. Start from the existing implementation. Done when live.',
    starting_point_kind:'discoverable',starting_point:'Locate the existing pricing page implementation.',completion_signal:'The updated pricing page is live.',missing:[],explanation:'Explicit commitment.'}))}
   yield {type:'text_delta',text:JSON.stringify(tasks.length && providerCall%2===0?readiness:extraction)}
   yield {type:'done'}
@@ -63,8 +67,9 @@ async function fixture(beforeExtract?:()=>Promise<void>, memories:object[]=[], e
  const ingest=vi.fn(createProgrammaticEpisodeTerminal({provider,model:'fixture-extractor'}))
  const enqueue=createProgrammaticCaptureRouter({store,ingest,now:()=>new Date('2020-01-01')})
  const process=createProgrammaticBatchProcessor({store,ingest,configuredIngest:ingest})
- const consume=()=>createDbProgrammaticBatchStore().withClaimedBatches(100,async(batches,mark)=>{
-  for(const batch of batches){
+ const consume=(afterProcessed?:(client:pg.PoolClient)=>Promise<void>)=>createDbProgrammaticBatchStore().withClaimedBatches(100,async(batches,mark)=>{
+  const own=batches.filter(batch=>batch.workspaceId===w)
+  for(const batch of own){
    await process(batch)
    const {programmaticIntakeClient}=await import('../programmatic-intake-context.js')
    const execution=(await programmaticIntakeClient.getStore()!.query(`SELECT current_setting('app.current_user_id',true) AS actor,
@@ -73,8 +78,9 @@ async function fixture(beforeExtract?:()=>Promise<void>, memories:object[]=[], e
    expect(execution.actor).not.toBe(actor);expect(execution.bypass).not.toBe('true')
    expect(execution.proof??'').toBe('');expect(execution.receipt??'').toBe('')
    await mark(batch.id)
+   await afterProcessed?.(programmaticIntakeClient.getStore() as pg.PoolClient)
   }
-  return batches.length
+  return own.length
  })
  return {actor,w,a,key,session,team,p,post,enqueue,auth,ingest,consume,process,app,token}
 }
@@ -177,6 +183,142 @@ describe('ready configured intake: production HTTP configuration, real enqueue a
   expect((await pool.query("SELECT resource_kind FROM scope_derivations WHERE workspace_id=$1",[f.w])).rows).toEqual([{resource_kind:'task'}])
   await pool.query('UPDATE episodes SET scope_held=true WHERE workspace_id=$1',[f.w])
   expect((await pool.query('SELECT scope_held FROM tasks WHERE workspace_id=$1',[f.w])).rows).toEqual([{scope_held:true}])
+ })
+ it('[COMP:api/configured-capture-authority] seals distinct outputs through cleared per-call proof and real COMMIT',async()=>{
+  const f=await fixture(undefined,[{scope:'user',summary:'Fictional source fact',detail:'Source detail',tags:[],why_not_entity:'not an entity',why_not_task:'not a task'}],
+   [{kind:'project',display_name:'Fictional launch project',attributes:{}}],[{text:'Ship the pricing page update',due_iso:null,assignee_ref:null}])
+  await pool.query(`INSERT INTO task_rules(workspace_id,status,effect,predicate,origin,created_by_user_id)
+   VALUES($1,'active','allow','{"lanes":["extracted"]}','user',$2)`,[f.w,f.actor])
+  await f.enqueue(f.auth,{eventId:'sealed-multiple',sessionId:'source',content:'Ship the pricing page update by Friday. Fictional source fact.'})
+  let observed=false
+  expect(await f.consume(async client=>{
+   const identity=(await client.query(`SELECT current_user AS role,pg_backend_pid() AS pid,pg_current_xact_id()::text AS xid,
+    (SELECT usesuper FROM pg_user WHERE usename=current_user) AS super,
+    current_user=(SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid='episode_extraction_items'::regclass) AS owner,
+    current_setting('app.current_user_id',true) AS actor,current_setting('app.programmatic_candidate_source',true) AS proof`)).rows[0]
+   expect(identity.super).toBe(false);expect(identity.owner).toBe(true);expect(identity.actor).not.toBe(f.actor);expect(identity.proof??'').toBe('')
+   const items=(await client.query(`SELECT i.*,r.episode_id FROM episode_extraction_items i JOIN episode_extraction_runs r ON r.id=i.run_id WHERE r.workspace_id=$1`,[f.w])).rows
+   const task=items.find(item=>item.primitive_kind==='task')
+   expect(task.configured_txid).toBe(identity.xid);expect(task.configured_backend_pid).toBe(identity.pid)
+   expect(task.configured_task.id).toBe(task.target_record_id)
+   expect(task.configured_source.source).toMatchObject({resourceKind:'episode',resourceId:task.episode_id,held:false,validTo:null,retractedAt:null})
+   expect(items.filter(item=>item.primitive_kind!=='task').every(item=>item.configured_txid===null)).toBe(true)
+   for(const update of ["candidate_id='wrong-candidate'","target_record_id='00000000-0000-4000-8000-000000000000'","configured_backend_pid=configured_backend_pid+1"]){
+    await client.query('SAVEPOINT forged_seal')
+    const before=(await client.query('SELECT to_jsonb(i) AS image FROM episode_extraction_items i WHERE run_id=$1 AND candidate_id=$2',[task.run_id,task.candidate_id])).rows[0].image
+    await expect(client.query(`UPDATE episode_extraction_items SET ${update} WHERE run_id=$1 AND candidate_id=$2`,[task.run_id,task.candidate_id])).rejects.toThrow(/episode_extraction_item_immutable|capture_candidate_target_changed|capture_receipt_not_caller_mintable/)
+    await client.query('ROLLBACK TO SAVEPOINT forged_seal')
+    const after=(await client.query('SELECT to_jsonb(i) AS image FROM episode_extraction_items i WHERE run_id=$1 AND candidate_id=$2',[task.run_id,task.candidate_id])).rows[0].image
+    expect(after).toEqual(before)
+   }
+   const other=new pg.Client({connectionString:process.env.DATABASE_URL});await other.connect()
+   try{expect((await other.query('SELECT configured_task_source_commit_allowed($1,$2,$3,$4::jsonb) AS allowed',
+    [f.w,task.target_record_id,task.configured_task.scope_version,JSON.stringify(task.configured_task)])).rows[0].allowed).toBe(false)}finally{await other.end()}
+   observed=true
+  })).toBe(1)
+  expect(observed).toBe(true)
+  const task=(await pool.query('SELECT id,scope_version::text AS version FROM tasks WHERE workspace_id=$1',[f.w])).rows[0]
+  const stale=(await pool.query('SELECT configured_task_source_commit_allowed($1,$2,$3,to_jsonb(t)) AS allowed FROM tasks t WHERE t.id=$2',[f.w,task.id,task.version])).rows[0]
+  expect(stale.allowed).toBe(false) // a committed receipt is archival in a later transaction
+  const app=await getAppPool().connect()
+  try{
+   await app.query('BEGIN');await applyRLSGucs(app,f.actor)
+   const rows=(await app.query(`SELECT i.run_id,i.candidate_id FROM episode_extraction_items i JOIN episode_extraction_runs r ON r.id=i.run_id WHERE r.workspace_id=$1 AND i.primitive_kind='task'`,[f.w])).rows
+   expect(rows).toHaveLength(1)
+   const changed=await app.query('UPDATE episode_extraction_items SET configured_backend_pid=configured_backend_pid+1 WHERE run_id=$1 AND candidate_id=$2',[rows[0].run_id,rows[0].candidate_id])
+   expect(changed.rowCount).toBe(0)
+  }finally{await app.query('ROLLBACK');app.release()}
+  const revised=await updateTask(f.actor,task.id,{title:'Ship the revised pricing page'},undefined,{
+   access:{workspaceId:f.w,userId:f.actor,assistantId:f.a,assistantKind:'primary',clearance:'internal',
+    compartments:[f.team.compartmentKey!],mutationCompartments:[f.team.compartmentKey!],projectIds:[],visibilityAssistantIds:[f.a]},
+  })
+  expect(revised).toMatchObject({title:'Ship the revised pricing page'})
+  expect(revised?.id).not.toBe(task.id)
+  expect((await pool.query("SELECT count(*)::int AS n FROM episode_extraction_items WHERE target_record_id=$1 AND configured_txid IS NOT NULL",[revised?.id])).rows[0].n).toBe(0)
+  const portableProof=process.env.BRIAN_PORTABLE_CONFIGURED_TASK_PROOF
+  if(portableProof){
+   const evidence=(await pool.query(`SELECT run_id,candidate_id,target_record_id,payload_hash,receipt_id,configured_txid::text,
+    configured_backend_pid,configured_source,configured_task FROM episode_extraction_items WHERE target_record_id=$1`,[task.id])).rows[0]
+   await writeFile(portableProof,JSON.stringify({workspaceId:f.w,actorId:f.actor,assistantId:f.a,compartment:f.team.compartmentKey,
+    revisedId:revised?.id,evidence}),{flag:'wx',mode:0o600})
+  }
+ })
+ for(const refusal of ['source-content','key-revoke','config-expiry'] as const)it(`[COMP:api/configured-capture-authority] rolls back publication on ${refusal} after task write and per-call cleanup`,async()=>{
+  const f=await fixture(undefined,[],[],[{text:'Ship the pricing page update',due_iso:null,assignee_ref:null}])
+  await pool.query(`INSERT INTO task_rules(workspace_id,status,effect,predicate,origin,created_by_user_id)
+   VALUES($1,'active','allow','{"lanes":["extracted"]}','user',$2)`,[f.w,f.actor])
+  await f.enqueue(f.auth,{eventId:`seal-${refusal}`,sessionId:'source',content:'Ship the pricing page update by Friday'})
+  if(refusal==='config-expiry')await pool.query("UPDATE auth_sessions SET expires_at=clock_timestamp()+interval '1 second' WHERE id=$1",[f.session])
+  let reached=false,hookFinished=false
+  await expect(f.consume(async client=>{
+   expect((await client.query('SELECT count(*)::int AS n FROM tasks WHERE workspace_id=$1',[f.w])).rows[0].n).toBe(1)
+   expect((await client.query("SELECT current_setting('app.programmatic_candidate_source',true) AS proof")).rows[0].proof??'').toBe('')
+   reached=true
+   if(refusal==='source-content')await client.query(`UPDATE episodes SET content_ref=jsonb_set(content_ref,'{text}','"Substituted source"') WHERE workspace_id=$1`,[f.w])
+   if(refusal==='key-revoke')await client.query("UPDATE brain_keys SET status='revoked' WHERE id=$1",[f.key])
+   if(refusal==='config-expiry')await client.query('SELECT pg_sleep(1.1)')
+   hookFinished=true
+  })).rejects.toThrow()
+  expect(reached).toBe(true)
+  if(refusal==='key-revoke'||refusal==='config-expiry')expect(hookFinished).toBe(true)
+  for(const table of ['tasks','episodes','episode_extraction_runs'])expect((await pool.query(`SELECT count(*)::int AS n FROM ${table} WHERE workspace_id=$1`,[f.w])).rows[0].n).toBe(0)
+  expect((await pool.query('SELECT processed_at FROM pending_ingest_batches WHERE workspace_id=$1',[f.w])).rows[0].processed_at).toBeNull()
+  await pool.query('UPDATE pending_ingest_batches SET scope_held=true WHERE workspace_id=$1',[f.w])
+ })
+ for(const target of ['task','source'] as const)it(`[COMP:api/configured-capture-authority] rolls back ${target} mutation after per-call cleanup at COMMIT`,async()=>{
+  const f=await fixture(undefined,[],[],[{text:'Ship the pricing page update',due_iso:null,assignee_ref:null}])
+  await pool.query(`INSERT INTO task_rules(workspace_id,status,effect,predicate,origin,created_by_user_id)
+   VALUES($1,'active','allow','{"lanes":["extracted"]}','user',$2)`,[f.w,f.actor])
+  await f.enqueue(f.auth,{eventId:`refused-${target}`,sessionId:'source',content:'Ship the pricing page update by Friday'})
+  let hookFinished=false
+  await expect(f.consume(async client=>{
+   const before=(await client.query('SELECT to_jsonb(t) AS image FROM tasks t WHERE workspace_id=$1',[f.w])).rows[0].image
+   const source=(await client.query('SELECT to_jsonb(e) AS image FROM episodes e WHERE workspace_id=$1',[f.w])).rows[0].image
+   const currentProof=(await client.query('SELECT configured_task_source_commit_allowed($1,$2,$3,$4::jsonb) AS allowed',[f.w,before.id,String(before.scope_version),JSON.stringify(before)])).rows[0].allowed
+   expect(currentProof).toBe(true)
+   expect((await client.query('SELECT configured_task_source_commit_allowed($1,$2,$3,$4::jsonb) AS allowed',[f.w,before.id,String(before.scope_version),JSON.stringify({...before,title:'Substituted target'})])).rows[0].allowed).toBe(false)
+   // Updated-at and explicit version writes are normalized by existing triggers.
+   // These reachable changes must alter the stored row before deferred recheck.
+   const changed=target==='task'?await client.query('UPDATE tasks SET verified_at=clock_timestamp() WHERE id=$1',[before.id])
+    :await client.query("UPDATE episodes SET summary_text='Substituted source summary' WHERE id=$1",[source.id])
+   expect(changed.rowCount).toBe(1)
+   const current=(await client.query('SELECT to_jsonb(t) AS image FROM tasks t WHERE id=$1',[before.id])).rows[0].image
+   const currentSource=(await client.query('SELECT to_jsonb(e) AS image FROM episodes e WHERE id=$1',[source.id])).rows[0].image
+   if(target==='task')expect(current.verified_at).not.toBe(before.verified_at)
+   else expect(currentSource.summary_text).toBe('Substituted source summary')
+   hookFinished=true
+  })).rejects.toThrow(/task source authority changed|capture_publication_incomplete/)
+  expect(hookFinished).toBe(true)
+  for(const table of ['tasks','episodes','episode_extraction_runs'])expect((await pool.query(`SELECT count(*)::int AS n FROM ${table} WHERE workspace_id=$1`,[f.w])).rows[0].n).toBe(0)
+  expect((await pool.query('SELECT processed_at FROM pending_ingest_batches WHERE workspace_id=$1',[f.w])).rows[0].processed_at).toBeNull()
+  await pool.query('UPDATE pending_ingest_batches SET scope_held=true WHERE workspace_id=$1',[f.w])
+ })
+ it('[COMP:api/configured-capture-authority] maps two independent task candidates to separate protected targets',async()=>{
+  const f=await fixture(undefined,[],[],[{text:'Ship the pricing page update',due_iso:null,assignee_ref:null},
+   {text:'Send the quarterly roadmap note',due_iso:null,assignee_ref:null}])
+  await pool.query(`INSERT INTO task_rules(workspace_id,status,effect,predicate,origin,created_by_user_id)
+   VALUES($1,'active','allow','{"lanes":["extracted"]}','user',$2)`,[f.w,f.actor])
+  await f.enqueue(f.auth,{eventId:'two-task-seals',sessionId:'source',content:'Ship the pricing page update by Friday. Send the quarterly roadmap note on Monday.'})
+  expect(await f.consume()).toBe(1)
+  const items=(await pool.query(`SELECT i.candidate_id,i.target_record_id,i.configured_task FROM episode_extraction_items i
+   JOIN episode_extraction_runs r ON r.id=i.run_id WHERE r.workspace_id=$1 AND i.primitive_kind='task' ORDER BY i.candidate_id`,[f.w])).rows
+  expect(items).toHaveLength(2)
+  expect(new Set(items.map(item=>item.target_record_id)).size).toBe(2)
+  expect(items.every(item=>item.configured_task.id===item.target_record_id)).toBe(true)
+  expect(items.map(item=>item.configured_task.title).sort()).toEqual(['Send the quarterly roadmap note','Ship the pricing page update'].sort())
+ })
+ it('[COMP:api/configured-capture-authority] keeps internal seal ports unavailable to app_user',async()=>{
+  const app=await getAppPool().connect()
+  try{
+   const identity=(await app.query('SELECT current_user AS role,(SELECT usesuper FROM pg_user WHERE usename=current_user) AS super')).rows[0]
+   expect(identity.role).toBe('app_user');expect(identity.super).toBe(false)
+   for(const fn of ['protect_configured_task_receipt()','seal_configured_task_candidate()',
+    'assert_programmatic_publication_current(uuid,uuid)','configured_task_source_commit_allowed(uuid,uuid,text,jsonb)']){
+    expect((await app.query("SELECT has_function_privilege(current_user,$1,'EXECUTE') AS allowed",[`public.${fn}`])).rows[0].allowed).toBe(false)
+   }
+   await expect(app.query('SELECT public.configured_task_source_commit_allowed($1,$2,$3,$4)',[randomUUID(),randomUUID(),'1','{}'])).rejects.toMatchObject({code:'42501'})
+   await expect(app.query('CREATE TRIGGER forged_configured_seal AFTER INSERT ON public.tasks FOR EACH ROW EXECUTE FUNCTION public.seal_configured_task_candidate()')).rejects.toMatchObject({code:'42501'})
+  }finally{app.release()}
  })
  it('rolls back earlier canonical candidate writes when a task is not admitted',async()=>{
   const f=await fixture(undefined,[],[{kind:'project',display_name:'Must roll back',attributes:{}}],[{text:'Ship the pricing page update',due_iso:null,assignee_ref:null}])

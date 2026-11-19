@@ -12,8 +12,8 @@
  * Human projections and vault access must enforce the same current authority.
  */
 import { z } from 'zod'
-import { canRead, type Sensitivity } from '../security/sensitivity.js'
-import type { DepartmentReadGrant } from '../security/department-read.js'
+import { canRead, type Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import type { DepartmentReadGrant } from '@use-brian/agent-runtime/security/department-read.js'
 import type { SessionVault } from './types.js'
 
 export type BrowserBackendKind = 'local' | 'cloud'

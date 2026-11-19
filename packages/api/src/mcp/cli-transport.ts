@@ -19,7 +19,7 @@
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
-import type { McpServerConfig, McpToolInfo } from '@use-brian/core'
+import type { McpServerConfig, McpToolInfo } from '@use-brian/agent-runtime/mcp/types.js'
 
 const CONNECT_TIMEOUT = 10_000
 const CALL_TIMEOUT = 30_000

@@ -1,11 +1,13 @@
 import { describe,expect,it,vi } from 'vitest'
-import { createExecutionContext,executionToolContext,bindWorkspaceCredentialDelegation,ContextScopeAccumulator } from '@use-brian/core'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { createExecutionContext, executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { bindWorkspaceCredentialDelegation } from '@use-brian/agent-runtime/security/workspace-delegation.js'
 import { captureOfficeWorkspaceAuthority,withOfficeWorkspaceAuthority } from '../workspace-authority.js'
 const mocked=vi.hoisted(()=>({restore:vi.fn(),input:vi.fn(),output:vi.fn()}))
 vi.mock('../../workspace-mcp/delegation.js',()=>({restoreWorkspaceMcpDelegation:mocked.restore}))
 vi.mock('../../db/capability-store.js',()=>({createDbCapabilityStore:()=>({})}))
 vi.mock('../../db/session-context-revisions.js',()=>({bindWorkspaceMcpPublication:()=>{}}))
-vi.mock('../../application-platform/model-source-authority.js',()=>({assertSourceModelInputAuthority:mocked.input,assertSourceModelOutputAuthority:mocked.output}))
+vi.mock('../../context-scope/admission.js',()=>({admitModelInput:mocked.input,admitModelOutput:mocked.output}))
 const uid=(n:number)=>`77000000-0000-4000-8000-${String(n).padStart(12,'0')}`
 function fixture(){
  let active=true
@@ -16,6 +18,8 @@ function fixture(){
  lifecycle:{sessionId:parent.sessionId,channelType:'programmatic',channelId:parent.credentialId,abortSignal:new AbortController().signal}})
  bindWorkspaceCredentialDelegation(execution,parent)
  const context={...executionToolContext(execution,{appId:'fixture'}),scopeAccumulator:new ContextScopeAccumulator()}
+ mocked.input.mockImplementation(async context=>context.authority.assertCurrent())
+ mocked.output.mockImplementation(async context=>context.authority.assertCurrent())
  mocked.restore.mockImplementation(async()=>{await execution.security.authority.assertCurrent();return {context,consent:{}}})
  return {parent,context,revoke:()=>{active=false}}
 }

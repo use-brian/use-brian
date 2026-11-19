@@ -22,7 +22,7 @@ import {
   createSandboxOrchestrator,
 } from '../orchestrator.js'
 import { StubSandboxProvider, type StubSkillRunIo } from '../providers/stub.js'
-import type { ToolContext } from '../../tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { sendDecisionPath, sendRequestPath, RESULT_PATH } from '../runner-shim.js'
 import type { BlockSendDecision } from '../runner-shim.js'
 
@@ -614,8 +614,8 @@ describe('[COMP:sandbox/skill-runner] attended profile classification', () => {
   })
   it('renews authority after the executor receives the human decision',async()=>{
     const f=await fixture()
-    const {createToolExecutor}=await import('../../engine/tool-executor.js')
-    const {createLoopDetector}=await import('../../engine/loop-detector.js')
+    const {createToolExecutor}=await import('@use-brian/agent-runtime/engine/tool-executor.js')
+    const {createLoopDetector}=await import('@use-brian/agent-runtime/engine/loop-detector.js')
     const executor=createToolExecutor({
       tools:new Map([['classifyBrowserProfileDepartment',f.tool]]),
       context:{...f.context,approvedToolInvocation:undefined,activeCapabilities:new Set(['computer','home_app:browsers:write']),createToolInvocationApproval:async()=> 'persisted-approval'},

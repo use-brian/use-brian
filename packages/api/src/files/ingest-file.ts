@@ -10,14 +10,10 @@
  * [COMP:files/ingest]
  */
 
-import {
-  detectDocumentFormat,
-  documentMimeType,
-  parseFileContent,
-  type FilesApi,
-  type FilesContext,
-  type FileSensitivity,
-} from '@use-brian/core'
+import { detectDocumentFormat, documentMimeType } from '@use-brian/core/files/document-formats.js'
+import { parseFileContent } from '@use-brian/core/files/parsers.js'
+import type { FilesApi, FilesContext } from '@use-brian/core/workspace-files/api.js'
+import type { FileSensitivity } from '@use-brian/core/workspace-files/types.js'
 import { toEpisodeSensitivity } from '../episode-sensitivity.js'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'
 import { indexFileArtifact } from './artifact-index.js'

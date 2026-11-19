@@ -2,7 +2,7 @@
 import { claimFeedRun, failFeedRun, renewFeedLease, type FeedEditorialKind, type FeedEditorialRun } from '../db/feed-editorial-runs-store.js'
 import { FeedCollaborationError } from '../db/feed-collaboration-store.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
-import { GoogleRequestNotDispatchedError } from '@use-brian/core'
+import { GoogleRequestNotDispatchedError } from '@use-brian/agent-runtime/providers/google-auth.js'
 
 // Provider exceptions can contain request bodies, image bytes or credentials.
 // Emit only known runtime names/codes, including bounded nested fetch causes.
