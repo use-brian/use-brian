@@ -335,7 +335,7 @@ function Editor(props: PropertyEditorProps): JSX.Element {
         className={
           'flex w-full items-center justify-between gap-2 rounded-md border border-dashed px-3 py-2 text-xs transition-colors ' +
           (dragOver
-            ? 'border-primary bg-primary/10 text-foreground'
+            ? 'border-foreground/50 bg-foreground/10 text-foreground'
             : 'border-border bg-muted/20 text-muted-foreground')
         }
         onDragOver={(e) => {
@@ -359,7 +359,7 @@ function Editor(props: PropertyEditorProps): JSX.Element {
             }
             inp.click()
           }}
-          className="rounded-sm border border-border bg-background px-2 py-1 text-xs text-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+          className="focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground/50 rounded-sm border border-border bg-background px-2 py-1 text-xs text-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
         >
           Pick
         </button>
@@ -380,7 +380,7 @@ function Editor(props: PropertyEditorProps): JSX.Element {
               <button
                 type="button"
                 aria-label={`Remove ${r.name}`}
-                className="text-muted-foreground hover:text-foreground"
+                className="text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground/50"
                 onMouseDown={(e) => {
                   e.preventDefault()
                   removeAt(i)
@@ -403,7 +403,7 @@ function Editor(props: PropertyEditorProps): JSX.Element {
         <button
           type="button"
           onClick={() => props.onCancel()}
-          className="rounded-sm border border-border bg-background px-2 py-1 text-xs hover:bg-muted"
+          className="focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground/50 rounded-sm border border-border bg-background px-2 py-1 text-xs hover:bg-muted"
         >
           Cancel
         </button>
@@ -411,7 +411,7 @@ function Editor(props: PropertyEditorProps): JSX.Element {
           type="button"
           onClick={() => commit(files)}
           disabled={uploading}
-          className="rounded-sm border border-primary bg-primary px-2 py-1 text-xs text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
+          className="focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground/50 rounded-sm border border-action bg-action px-2 py-1 text-xs text-action-foreground hover:bg-action/90 disabled:cursor-not-allowed disabled:opacity-60"
         >
           Save
         </button>

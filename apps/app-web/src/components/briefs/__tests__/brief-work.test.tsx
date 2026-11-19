@@ -153,8 +153,11 @@ describe("[COMP:app-web/brief-work] direct work pickup", () => {
   it("keeps controls as real buttons and links with phone tap targets", async () => {
     api.fetchWork.mockResolvedValue(work({ needsAssignment: [queue] }));
     await render(<BriefWork workspaceId="w1" scope={{ kind: "personal" }} />); await flush();
-    expect(button(t.actions.take)?.tagName).toBe("BUTTON");
-    expect(button(t.actions.take)?.className).toContain("max-sm:min-h-11");
+    const take = button(t.actions.take)!;
+    expect(take.tagName).toBe("BUTTON");
+    for (const target of ["max-md:min-h-11", "max-md:min-w-11", "[@media(pointer:coarse)]:min-h-11", "[@media(pointer:coarse)]:min-w-11"]) {
+      expect(take.classList.contains(target), target).toBe(true);
+    }
     for (const link of Array.from(host.querySelectorAll("li a"))) expect(link.className).toContain("max-sm:min-h-11");
   });
 

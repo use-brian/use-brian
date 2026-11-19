@@ -1259,6 +1259,7 @@ describe('[COMP:providers/codex-app-server] Codex app-server provider bridge', (
       expect(start.params).toMatchObject({ dynamicTools: [{ type: 'function', name: 'brian_echo',
         description: ECHO_TOOL.description, inputSchema: ECHO_TOOL.parameters }] })
       expect(JSON.stringify(start.params)).not.toMatch(/deferLoading|deferred_only/)
+      expect(start.params).not.toMatchObject({ baseInstructions: expect.stringContaining('# Tool schema discovery') })
       respond(harness, start, { thread: { id: 'thread-1' }, model, modelProvider: 'openai' })
       respondToTurnStart(harness, await waitForMethod(harness, 'turn/start'))
       complete(harness, 'thread-1', 'turn-1')
@@ -1271,12 +1272,18 @@ describe('[COMP:providers/codex-app-server] Codex app-server provider bridge', (
     try {
       const model = 'gpt-5.6-luna'
       const provider = createCodexAppServerProvider({ transport: { rpc: harness.peer, cwd: '/tmp/brian-codex-test' }, models: [model], toolBatchQuietMs: 1 })
+      const connectorSearch = { ...ECHO_TOOL, name: 'mcp_search' }
       const options = { model, systemPrompt: 'Synthetic.', tools: [],
-        toolRegistration: { mode: 'deferred' as const, catalog: [ECHO_TOOL], active: [] } }
+        toolRegistration: { mode: 'deferred' as const, catalog: [ECHO_TOOL, connectorSearch], active: [connectorSearch] } }
       const messages: Message[] = [{ role: 'user', content: 'Synthetic' }]
       const stream = collect(stateless ? provider.stream({ ...options, messages }) : provider.createSession(options).send(messages))
       const started = await waitForMethod(harness, 'thread/start')
-      expect(started.params).toMatchObject({ dynamicTools: [{ type: 'namespace', name: 'brian', tools: [{ name: 'brian_echo', deferLoading: true }] }] })
+      expect(started.params).toMatchObject({ dynamicTools: [{ type: 'namespace', name: 'brian', tools: [
+        { name: 'brian_echo', deferLoading: true }, { name: 'mcp_search', deferLoading: false },
+      ] }] })
+      expect(started.params).toMatchObject({ baseInstructions: expect.stringContaining('native tool search') })
+      expect(started.params).toMatchObject({ baseInstructions: expect.stringContaining('separate connected-service catalog, not all Brian tools') })
+      expect(started.params).not.toMatchObject({ baseInstructions: expect.stringContaining('`discoverTools`') })
       respondToThreadStart(harness, started, 'thread-1', model)
       respondToTurnStart(harness, await waitForMethod(harness, 'turn/start'))
       notify(harness, 'turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: [

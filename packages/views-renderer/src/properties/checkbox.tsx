@@ -48,7 +48,7 @@ function Cell(props: { value: A2UIRowValue }): JSX.Element {
       disabled
       checked={checked}
       readOnly
-      className="h-3.5 w-3.5 cursor-default rounded-sm border border-border bg-background accent-primary disabled:opacity-100"
+      className="h-3.5 w-3.5 cursor-default rounded-sm border border-border bg-background accent-action disabled:opacity-100"
     />
   )
 }
@@ -74,23 +74,28 @@ function Editor(props: PropertyEditorProps): JSX.Element {
   }
 
   return (
-    <input
-      ref={ref}
-      type="checkbox"
-      checked={draft}
-      onChange={(e) => {
-        const next = e.target.checked
-        setDraft(next)
-        commit(next)
-      }}
-      onKeyDown={(e) => {
-        if (e.key === 'Escape') {
-          e.preventDefault()
-          props.onCancel()
-        }
-      }}
-      className="h-3.5 w-3.5 cursor-pointer rounded-sm border border-border bg-background accent-primary"
-    />
+    // Keep the compact glyph, but let the associated label provide a 44px
+    // phone/coarse-pointer target without enlarging decorative table cells.
+    <label className="inline-flex h-11 w-11 cursor-pointer items-center justify-center md:h-auto md:w-auto [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11">
+      <input
+        ref={ref}
+        aria-label="Checkbox"
+        type="checkbox"
+        checked={draft}
+        onChange={(e) => {
+          const next = e.target.checked
+          setDraft(next)
+          commit(next)
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') {
+            e.preventDefault()
+            props.onCancel()
+          }
+        }}
+        className="h-3.5 w-3.5 cursor-pointer rounded-sm border border-border bg-background accent-action focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground/50"
+      />
+    </label>
   )
 }
 

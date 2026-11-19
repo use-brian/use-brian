@@ -1,4 +1,5 @@
-import { registeredToolDefinitions } from './tool-registration.js'
+import { registeredToolDefinitions, toolDiscoveryInstructions } from './tool-registration.js'
+import { bufferProviderStream } from './stream-backpressure.js'
 import type { HttpRetryWindow } from './types.js'
 /**
  * Gemini provider using REST API directly (not the SDK).
@@ -683,6 +684,8 @@ function buildRequest(
   // for all of them. Drops reasoning / content-less parts that would 400.
   const safeContents = normalizeGeminiRequestContents(contents, modelId)
   const systemParts = systemContextParts(options)
+  const discoveryInstructions = toolDiscoveryInstructions(options, 'dynamic')
+  if (discoveryInstructions) systemParts.push(discoveryInstructions)
 
   const toolEntries: GeminiToolEntry[] = []
   const tools = registeredToolDefinitions(options, 'dynamic')
@@ -1137,5 +1140,14 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
       }
     },
   }
-  return registerInputAdmissionOwner(provider)
+  return registerInputAdmissionOwner({
+    ...provider,
+    stream: request => bufferProviderStream(signal => provider.stream({ ...request, signal }), request.signal),
+    createSession: options => {
+      const session = provider.createSession!(options)
+      return { send: (messages, opts) => bufferProviderStream(
+        signal => session.send(messages, { ...opts, signal }), opts?.signal ?? options.signal,
+      ) }
+    },
+  })
 }

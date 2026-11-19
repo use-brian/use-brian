@@ -9,7 +9,7 @@ import type { Sensitivity, SensitivityAccumulator } from '../security/sensitivit
 import type { CompartmentAccumulator } from '../security/compartments.js'
 import type { ContextScopeAccumulator, ScopeEvidence } from '../security/context-scope.js'
 import type { EvidenceAccumulator } from '../security/evidence.js'
-import type { LLMProvider } from '../providers/types.js'
+import type { LLMProvider, ToolDefinition, ToolSchemaRegistrationMode } from '../providers/types.js'
 import type { AccessContext } from '../security/access-context.js'
 import type { ExecutionContext } from '../security/execution-context.js'
 
@@ -362,6 +362,14 @@ export type ToolContext = {
   }) => void
   /** Full tool set for the current request (used by workers to inherit MCP tools). */
   requestTools?: Map<string, Tool>
+  /** Invocation-local metadata from the loop's FINAL admitted registry, not
+   * requestTools inherited from an earlier route or a parent worker. Supplied
+   * only to catalog-aware search; never model arguments or execution authority. */
+  admittedToolCatalog?: {
+    definitions: readonly ToolDefinition[]
+    mode: ToolSchemaRegistrationMode
+    loadSchemas(names: readonly string[]): void
+  }
   /** Worker manager for tracking background worker lifecycle. The loop reads
    * only the `WorkerCoordinator` port; core widens it to `WorkerManager`. */
   workerManager?: WorkerCoordinator
@@ -607,6 +615,16 @@ export type Tool<Input extends z.ZodType = z.ZodType> = {
   hiddenFromModel?: boolean
   /** Optional schema adapter; expose only when the loop selects deferred schemas. */
   deferredSchemaOnly?: boolean
+  /** Host-owned capability: the loop can bind its final schema catalog to
+   * this metadata-only search without replacing the tool's guarded dispatcher. */
+  acceptsToolCatalog?: boolean
+  /** Host-only proxy resolution. The executor validates this tool's envelope,
+   * then runs the resolved admitted tool through its ordinary guards, approval,
+   * scheduling and accounting. Never call the target's execute here. */
+  resolveToolCall?: (input: Record<string, unknown>, tools: ReadonlyMap<string, Tool>) => {
+    name: string
+    input: Record<string, unknown>
+  } | undefined
 
   /**
    * Dynamic confirmation check — called at execution time instead of

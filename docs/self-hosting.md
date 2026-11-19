@@ -99,6 +99,29 @@ Every channel is configured in the app under **Studio → Channels**.
 The My Browser extension pairs Chrome or Firefox. For Firefox on a headless
 server, see [`apps/firefox-companion/README.md`](../apps/firefox-companion/README.md).
 
+## Building the API from source
+
+`pnpm --filter @use-brian/api build` uses `packages/api/tsconfig.json` for
+production compilation. Files under `src/**/__tests__/` and files named
+`*.test.*` or `*.spec.*` are excluded from type-checking and emission, reducing
+the compiler's memory use and keeping test artifacts out of fresh builds.
+Production fixtures, such as the eval fixtures, remain included. Build the
+workspace dependencies first, as with other package-level build commands.
+
+`pnpm --filter @use-brian/api typecheck` uses `tsconfig.typecheck.json` to check
+both production and test sources without emitting JavaScript or declarations.
+This config repeats the production project references because TypeScript does
+not inherit `references` through `extends`. Vitest unit and integration commands continue
+running the original test sources; these exclusions do not disable tests.
+Full test-inclusive typechecking can still need more memory than a production
+build.
+
+When updating an existing checkout, remove `packages/api/dist` and
+`packages/api/tsconfig.tsbuildinfo` before rebuilding if test-free output is
+required: TypeScript does not delete artifacts emitted by an older config.
+Exclusions are not an import boundary, so production code must not import test
+files. CI checks the production import graph as well as the selected roots.
+
 ## Container images
 
 Prebuilt images for the independently deployable services are published to the

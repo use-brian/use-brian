@@ -71,8 +71,8 @@ describe('[COMP:api/route-helpers] Route helpers', () => {
   })
 
   describe('buildUnavailableCapabilitiesPrompt', () => {
-    // No search surface: the capability surface skips the mcp_search pair when no
-    // source exists, and these three pin the original strict behaviour.
+    // Connector availability must not make closed-world claims about deferred
+    // Brian tools, regardless of whether connector search exists.
     const noSearch = new Map()
     it.each([false,true])('keeps protected-source recovery truthful and bounded (search=%s)', searchable => {
       const result = buildUnavailableCapabilitiesPrompt([CONNECTOR_SOURCE_RESTRICTION], new Map(searchable ? [['mcp_search',{}]] : []), [])
@@ -105,7 +105,7 @@ describe('[COMP:api/route-helpers] Route helpers', () => {
       expect(result.match(/Studio → Connectors/g)).toHaveLength(1)
     })
 
-    it('scopes the Settings suggestion to the listed services (closed world)', () => {
+    it('scopes the Settings suggestion to listed services without denying other Brian tools', () => {
       const result = buildUnavailableCapabilitiesPrompt(['Gmail'], noSearch, [])
       // The template must be scoped to the list, not a general habit the
       // model extends to arbitrary services (the invented-Jira-connector
@@ -129,10 +129,14 @@ describe('[COMP:api/route-helpers] Route helpers', () => {
       expect(result).not.toContain('The list and visible tools are the complete integration surface')
     })
 
-    it('orders a search before any denial when mcp_search is present', () => {
+    it('uses the turn-bound unified catalog and paginated inventory before denying an unlisted capability', () => {
       const result = buildUnavailableCapabilitiesPrompt(['Gmail'], withSearch, [])
       expect(result).toContain('mcp_search')
       expect(result).toMatch(/before .{0,60}unavailable/i)
+      expect(result).toContain('unlisted capability')
+      expect(result).toContain('final admitted Brian tool catalog')
+      expect(result).toContain('empty query and follow nextOffset until null')
+      expect(result).toContain('indexed-source count alone is not the total tool count')
       // The listed services stay closed-world — searching for them is still banned.
       expect(result).toContain('Do not suggest a connector setting for an unlisted service')
     })
@@ -170,13 +174,15 @@ describe('[COMP:api/route-helpers] Route helpers', () => {
       expect(result).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/)
     })
 
-    it('keeps the strict closed world when there is no search surface', () => {
+    it('does not invent search tools or deny deferred Brian tools when connector search is absent', () => {
       // Tool-awareness rule: never name mcp_search when it is not in the map.
       // The capability surface skips the search pair entirely when no source exists.
       expect(buildUnavailableCapabilitiesPrompt([], new Map(), ['Google Calendar'])).toBe('')
       const result = buildUnavailableCapabilitiesPrompt(['Gmail'], new Map(), ['Google Calendar'])
       expect(result).not.toContain('mcp_search')
-      expect(result).toContain('The list and visible tools are the complete integration surface')
+      expect(result).not.toContain('The list and visible tools are the complete integration surface')
+      expect(result).not.toContain('say Use Brian has no integration')
+      expect(result).toContain('Missing parameter schemas do not establish')
     })
   })
 
