@@ -11,6 +11,7 @@ import {requireAuth} from '../../../auth/middleware.js'
 import {chatRoutes} from '../../../routes/chat.js'
 import {sessionRoutes} from '../../../routes/sessions.js'
 import {getAppPool,getPool} from '../../../db/client.js'
+import {conversationReadersActive,initializeConversationVisibility} from '../../../db/conversation-visibility.js'
 import {createOssUsageStore} from '../../../db/oss-usage-store.js'
 import {createStuckSessionSweeper} from '../../../scheduling/stuck-session-sweeper.js'
 import type {SessionEvent} from '../../../session-event-port.js'
@@ -20,6 +21,8 @@ import {createPendingApprovalsStore} from '../../../db/pending-approvals-store.j
 
 const {assertLocalFixture}=await import(new URL('../../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
+await initializeConversationVisibility()
+if (!conversationReadersActive()) throw new Error('Installed native conversation readers were not activated')
 const command=z.object({mode:z.enum(['publish','kill_after_commit','receive','recover_sweep','follow_up','stop','stop_before_publication','kill_stopped_after_commit','kill_wait_after_commit']),sessionId:z.string().uuid(),assistantId:z.string().uuid(),
  workspaceId:z.string().uuid(),token:z.string(),secret:z.string(),staleAfterMs:z.number().int().positive().optional(),turnId:z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(),counter:z.string().regex(/^publication_counter_[a-f0-9]+$/)}).strict().parse(JSON.parse(await readFile(process.argv[2],'utf8')))
 const emit=(value:unknown)=>new Promise<void>((resolve,reject)=>{

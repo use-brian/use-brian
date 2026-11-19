@@ -214,9 +214,14 @@ describe.sequential('[COMP:api/native-turn-frame] authenticated durable buffered
    expect(outcome.event).toBe('response')
    const refused=outcome as ResponseEvent
    expect(refused.status).toBe(200)
-   expect(refused.body).toContain('"code":"delivery_audience_unverified"')
+   expect(refused.body).toContain('"code":"authority_changed","error":"source_unavailable"')
+   expect(refused.body).not.toContain('event: assistant_message_saved')
+   expect(refused.body).not.toContain('event: reply_complete')
    expect(refused.body).not.toContain('event: done')
-   expect((await f.pool.query('SELECT count(*)::int AS count FROM native_conversation_publications WHERE session_id=$1',[f.session.id])).rows[0].count).toBe(0)
+   expect((await f.pool.query<{ publications: number; completions: number }>(`SELECT
+    (SELECT count(*)::int FROM native_conversation_publications WHERE session_id=$1) AS publications,
+    (SELECT count(*)::int FROM native_turn_completions WHERE session_id=$1) AS completions`,[f.session.id])).rows[0])
+    .toEqual({publications:0,completions:0})
   }finally{await f.pool.query(`DROP TABLE IF EXISTS ${counter}`);await f.cleanup();await rm(directory,{recursive:true,force:true})}
  },120000)
  it.each([false,true])('fences an explicit-null HTTP Stop against a legacy owner successor: %s',async successor=>{
