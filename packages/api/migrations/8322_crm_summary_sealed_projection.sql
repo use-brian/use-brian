@@ -1439,7 +1439,7 @@ CREATE TYPE public.crm_summary_member_facts AS (
 
 CREATE FUNCTION public.crm_summary_read_member_facts(w uuid,actor uuid) RETURNS public.crm_summary_member_facts
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp
-BEGIN ATOMIC
+RETURN (
   SELECT ROW(m.role,m.clearance,m.team_scope_mode,m.compartments,wk.department_read_v2,wk.project_shared_spaces)::public.crm_summary_member_facts
   FROM public.workspace_members m JOIN public.workspaces wk ON wk.id=m.workspace_id
   WHERE m.workspace_id=w AND m.user_id=actor
@@ -1452,8 +1452,8 @@ BEGIN ATOMIC
       AND r.rolcanlogin AND NOT r.rolsuper AND NOT r.rolbypassrls
       AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c
         WHERE c.oid IN('public.application_query_domains'::regclass,'public.crm_pipelines'::regclass)
-          AND pg_catalog.pg_has_role(r.oid,c.relowner,'USAGE')));
-END;
+          AND pg_catalog.pg_has_role(r.oid,c.relowner,'USAGE')))
+);
 REVOKE ALL ON FUNCTION public.crm_summary_read_member_facts(uuid,uuid) FROM PUBLIC,app_user;
 
 CREATE FUNCTION public.crm_summary_http_member_scope(w uuid,actor uuid,at_time timestamptz,reflector_tier integer)
@@ -1793,7 +1793,7 @@ GRANT EXECUTE ON FUNCTION public.retain_crm_summary_certificate(uuid,jsonb) TO a
 
 CREATE OR REPLACE FUNCTION public.crm_summary_read_member_facts(w uuid,actor uuid) RETURNS public.crm_summary_member_facts
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp
-BEGIN ATOMIC
+RETURN (
   SELECT ROW(m.role,m.clearance,m.team_scope_mode,m.compartments,wk.department_read_v2,wk.project_shared_spaces)::public.crm_summary_member_facts
   FROM public.workspace_members m JOIN public.workspaces wk ON wk.id=m.workspace_id
   WHERE m.workspace_id=w AND m.user_id=actor
@@ -1803,17 +1803,17 @@ BEGIN ATOMIC
       AND r.rolcanlogin AND NOT r.rolsuper AND NOT r.rolbypassrls
       AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c
         WHERE c.oid IN('public.application_query_domains'::regclass,'public.crm_pipelines'::regclass)
-          AND pg_catalog.pg_has_role(r.oid,c.relowner,'USAGE')));
-END;
+          AND pg_catalog.pg_has_role(r.oid,c.relowner,'USAGE')))
+);
 REVOKE ALL ON FUNCTION public.crm_summary_read_member_facts(uuid,uuid) FROM PUBLIC,app_user;
 
 CREATE FUNCTION public.crm_summary_sign_issued_receipt(payload jsonb) RETURNS jsonb
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp
-BEGIN ATOMIC
+RETURN (
   SELECT jsonb_build_array(1,k.id,'issued',payload,encode(sha256(k.pad_outer||sha256(k.pad_inner||convert_to(
     jsonb_build_array('crm_summary_scope_receipt',1,k.id,'issued',payload)::text,'UTF8'))),'hex'))
-  FROM public.crm_summary_receipt_keys k WHERE k.issue_enabled;
-END;
+  FROM public.crm_summary_receipt_keys k WHERE k.issue_enabled
+);
 REVOKE ALL ON FUNCTION public.crm_summary_sign_issued_receipt(jsonb) FROM PUBLIC,app_user;
 
 -- Isolated receiving proof for actual CRM rows, stage authority and the two
