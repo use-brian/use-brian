@@ -73,10 +73,10 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     expect(embedded.strategy.matrix.include).toEqual([
       { group: 'owner-legacy', timeoutMinutes: 15 },
       { group: 'owner-fresh', timeoutMinutes: 15 },
-      { group: 'owner-cutover', timeoutMinutes: 10 },
-      { group: 'owner-successor', timeoutMinutes: 10 },
+      { group: 'owner-cutover', timeoutMinutes: 15 },
+      { group: 'owner-successor', timeoutMinutes: 15 },
       { group: 'owner-prerequisites', timeoutMinutes: 10 },
-      { group: 'session', timeoutMinutes: 10 },
+      { group: 'session', timeoutMinutes: 15 },
       { group: 'remaining', timeoutMinutes: 10 },
     ]);
     expect(embedded['timeout-minutes']).toBe('${{ matrix.timeoutMinutes }}');
