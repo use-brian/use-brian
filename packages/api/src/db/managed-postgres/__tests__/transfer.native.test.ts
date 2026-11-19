@@ -326,16 +326,43 @@ describeNative('[COMP:platform/managed-postgres-transfer] existing embedded brai
       m8278: await fileSha(join(migrationsDir, '8278_page_closure_adapter.sql')),
       m8280: await fileSha(join(migrationsDir, '8280_query_domain_visibility.sql')),
     }
-    // Every roster table: durable and rebound facts equal the embedded source
-    // exactly (rows and record digest); installation-derived tables are the
-    // target's own; the 8276 witness and the 8277 completion header exist only on
-    // the target (the header is created empty by the forward migration).
+    // Shared durable and rebound facts retain their exact rows and digests.
+    // The forward CRM migrations introduce their reviewed roster and provision
+    // one receipt signer on the destination. The 8273 source predates these rows.
+    const crmTables = {
+      crm_summary_attention_rollups: 'derived',
+      crm_summary_company_references: 'derived',
+      crm_summary_configuration_publications: 'derived',
+      crm_summary_entity_domain_versions: 'durable',
+      crm_summary_entity_publications: 'derived',
+      crm_summary_partition_leaves: 'durable',
+      crm_summary_policy_adapters: 'durable',
+      crm_summary_policy_inputs: 'durable',
+      crm_summary_policy_requirements: 'durable',
+      crm_summary_principal_revisions: 'derived',
+      crm_summary_receipt_keys: 'derived',
+      crm_summary_record_policies: 'durable',
+      crm_summary_release_revisions: 'derived',
+      crm_summary_rollup_leaves: 'derived',
+      crm_summary_rollups: 'derived',
+      crm_summary_scope_classes: 'durable',
+      crm_summary_scope_partition_versions: 'durable',
+      crm_summary_scope_policy_usage: 'derived',
+      crm_summary_selected_cells: 'derived',
+      crm_summary_source_descriptors: 'durable',
+      crm_summary_source_groups: 'durable',
+    }
     const tables = Object.keys(targetDigests)
     expect(tables.filter((name) => !sourceDigests[name]).sort()).toEqual([
       'conversation_envelope_backfill_checkpoint', 'conversation_envelopes', 'conversation_legacy_history_enrollments',
       'conversation_message_quarantine', 'conversation_participants', 'conversation_settings_transitions',
-      'conversation_visibility_audit', 'conversation_visibility_notices', 'native_turn_completions', 'native_turn_contract_witness',
-    ])
+      'conversation_visibility_audit', 'conversation_visibility_notices', ...Object.keys(crmTables),
+      'native_turn_completions', 'native_turn_contract_witness',
+    ].sort())
+    for (const [name, classification] of Object.entries(crmTables)) {
+      expect(targetDigests[name].class, name).toBe(classification)
+    }
+    expect(targetDigests.crm_summary_receipt_keys.rows).toBe(1)
     expect(Object.keys(sourceDigests).filter((name) => !targetDigests[name])).toEqual([])
     expect(targetDigests.native_turn_completions).toMatchObject({ class: 'durable', rows: 0 })
     const facts = tables.filter((name) => sourceDigests[name] && ['durable', 'rebound'].includes(targetDigests[name].class))
