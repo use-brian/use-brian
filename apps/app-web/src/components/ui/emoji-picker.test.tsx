@@ -2,11 +2,10 @@
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { File } from "lucide-react";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import { ThemeProvider, useTheme } from "@/lib/theme";
-import { CaretEmojiPicker, EmojiPicker, PageIconButton } from "./emoji-picker";
+import { CaretEmojiPicker, EmojiPicker } from "./emoji-picker";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -94,7 +93,7 @@ describe("[COMP:app-web/emoji-picker] resolved theme bridge", () => {
     localStorage.setItem("doc:theme", mode);
     const pick = vi.fn();
     const change = vi.fn();
-    await render(<PageIconButton icon={null} fallback={File} onSetIcon={pick} open onOpenChange={change} />);
+    await render(<EmojiPicker trigger={<button>Page icon</button>} onPick={pick} open onOpenChange={change} />);
     expect(mart.instances).toHaveLength(1);
     const { options, element } = mart.instances[0];
     expect(options.theme).toBe(mode);
