@@ -12,6 +12,8 @@ import {createDbCommentThreadStore} from '../../db/comment-thread-store.js'
 import {readSessionById} from '../../db/sessions.js'
 import {publishSessionTitle} from '../../db/session-title-store.js'
 import {readRetainedContextFrame} from '../../db/session-context-revisions.js'
+import {addSessionPin} from '../../db/session-pins-store.js'
+import {resolvePinnedContext} from '../../resolve-session-pins.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 
@@ -116,6 +118,30 @@ describe.sequential('[COMP:api/page-closure-adapter] Page-derived closures are a
   for(const result of await equivalent(x,x.f.secondId))expect(result).toMatchObject({outcome:'admit',adapter:'admitted'})
   await x.f.pool.query('DELETE FROM teamspace_members WHERE teamspace_id=$1 AND user_id=$2',[x.teamspace,x.f.secondId])
   for(const result of await equivalent(x,x.f.secondId))expect(result.outcome).toBe('deny')
+ })
+
+ it('resolves native Page and derived-file pins in the room and withholds both after Page access is removed',async()=>{
+  const x=await setup(),{f}=x, file=x.evidence.sources[0]
+  await f.pool.query('INSERT INTO teamspace_members(teamspace_id,user_id) VALUES($1,$2)',[x.teamspace,f.secondId])
+  for(const [kind,refId] of [['page',x.page.id],['file',file.resourceId]] as const){
+   await addSessionPin({sessionId:f.session.id,kind,refId,addedByUserId:f.ownerId})
+  }
+  const resolve=async()=>{
+   const executionContext=await f.execution(f.secondId),scopeAccumulator=new ContextScopeAccumulator()
+   const result=await resolvePinnedContext({sessionId:f.session.id,workspaceId:f.workspaceId,clearance:f.session.effectiveClearance,
+    context:{executionContext,scopeAccumulator}})
+   return {result,evidence:scopeAccumulator.evidence}
+  }
+  const allowed=await resolve()
+  expect(allowed.result.block).toContain('Fictional source page')
+  expect(allowed.result.block).toContain('Fictional Page export')
+  expect(allowed.result.pageTargets).toEqual([{pageId:x.page.id,title:'Fictional source page'}])
+  expect(allowed.evidence.sources).toEqual(expect.arrayContaining([file,expect.objectContaining({resourceKind:'page_event_changed',resourceId:x.page.revision})]))
+  await f.pool.query('DELETE FROM teamspace_members WHERE teamspace_id=$1 AND user_id=$2',[x.teamspace,f.secondId])
+  const denied=await resolve()
+  expect(denied.result.block?.match(/pinned item is unavailable/g)).toHaveLength(2)
+  expect(denied.result.pageTargets).toEqual([])
+  expect(denied.evidence.sources??[]).toEqual([])
  })
 
  it('decides a Page made private to its creator exactly as the generic validator does',async()=>{

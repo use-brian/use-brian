@@ -98,10 +98,12 @@ import { findAssistantById, findUserById, resolveAssistantAccess } from '../db/u
 import { getConnectorUserId, getWorkspaceRoleSystem } from '../db/workspace-store.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import { recordExternalCostFromMeta } from '../billing-external.js'
-import { runWithAgentAccess } from '../db/client.js'
+import { runWithAgentAccess, withRLSTransaction } from '../db/client.js'
+import { isConversationEvidenceRoot } from '../application-platform/conversation-evidence.js'
 import { currentAgentAccess } from '../db/agent-access-context.js'
-import { validateCallerScopeEvidence } from '../context-scope/caller-evidence.js'
-import { assertCurrentAuthority, AuthorityChangedError, createAuthorityLease, createSessionAuthorityLease, executeWithCurrentAuthority, runWithAuthorityLease } from '../context-scope/authority-lease.js'
+import { assertScopeEvidenceFitsCeiling, validateCallerScopeEvidence } from '../context-scope/caller-evidence.js'
+import { resourceScopeKey } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { assertCurrentAuthority, AuthorityChangedError, createAuthorityLease, createSessionAuthorityLease, currentLockedSourceEvidence, executeWithCurrentAuthority, runWithAuthorityLease, withLockedSourceEvidence } from '../context-scope/authority-lease.js'
 import {
   formatActiveWorkspaceContext,
   noteAutomaticScopeEvidence,
@@ -595,15 +597,32 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       const receiverStarting = intersectAccessCeilings(starting, await resolveLiveAccessCeilingSystem({
         userId: starting.userId, assistant: receiver, workspaceId: receiver.workspaceId, key: receiverBinding,
       }))
+      const validateReceiverEvidence = (evidence: NonNullable<CalleeQueryParams['callerScopeEvidence']>, ceiling: typeof receiverStarting) => {
+        if (!receiver.workspaceId || !evidence.sources?.some(isConversationEvidenceRoot)) {
+          return validateCallerScopeEvidence(evidence, ceiling)
+        }
+        const locked = currentLockedSourceEvidence()
+        if (locked?.assistantId === receiver.id && locked.ceiling.userId === ceiling.userId
+          && locked.ceiling.workspaceId === ceiling.workspaceId && accessCeilingContains(ceiling, locked.ceiling)
+          && evidence.sources.every(source => locked.evidence.sources?.some(current => current.resourceKind === source.resourceKind
+            && current.resourceId === source.resourceId && current.version === source.version && resourceScopeKey(current) === resourceScopeKey(source)))) {
+          assertScopeEvidenceFitsCeiling(evidence, ceiling, 'caller')
+          return Promise.resolve(evidence)
+        }
+        // This transport boundary has verified the receiver, but does not own
+        // a callee execution or session yet. Use its actual narrowed app role.
+        return runWithAgentAccess(ceiling, () => withRLSTransaction(ceiling.userId,
+          client => validateCallerScopeEvidence(evidence, ceiling, client), receiver.id))
+      }
       const callerEvidence = params.callerScopeEvidence !== undefined
-        ? await validateCallerScopeEvidence(params.callerScopeEvidence,receiverStarting) : undefined
+        ? await validateReceiverEvidence(params.callerScopeEvidence, receiverStarting) : undefined
       const receiverLease = createAuthorityLease(receiverStarting, async () => {
         const liveReceiver = await findAssistantById(params.calleeAssistantId)
         if (!liveReceiver || (liveReceiver.workspaceId ?? '') !== starting.workspaceId) return null
         const currentReceiver = await resolveLiveAccessCeilingSystem({
           userId: starting.userId, assistant: liveReceiver, workspaceId: liveReceiver.workspaceId, key: receiverBinding,
         })
-        if (callerEvidence) await validateCallerScopeEvidence(callerEvidence,intersectAccessCeilings(receiverStarting,currentReceiver))
+        if (callerEvidence) await validateReceiverEvidence(callerEvidence, intersectAccessCeilings(receiverStarting, currentReceiver))
         return currentReceiver
       })
       return runWithAuthorityLease(lease, () => runWithAuthorityLease(receiverLease,
@@ -855,10 +874,13 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     const inOriginalCaller = AsyncLocalStorage.snapshot()
     let sessionAuthority: ReturnType<typeof createSessionAuthorityLease> | undefined
     const assertOriginalAuthority = async (): Promise<void> => {
-      await inOriginalCaller(assertCurrentAuthority)
+      const locked = currentLockedSourceEvidence()
+      const assertOriginalCaller = () => inOriginalCaller(() => locked
+        ? withLockedSourceEvidence(locked, assertCurrentAuthority) : assertCurrentAuthority())
+      await assertOriginalCaller()
       if (!sessionAuthority) throw new AuthorityChangedError()
       await sessionAuthority.assertCurrent()
-      await inOriginalCaller(assertCurrentAuthority)
+      await assertOriginalCaller()
     }
     const assertOperationCurrent = async (): Promise<void> => {
       abortController.signal.throwIfAborted()

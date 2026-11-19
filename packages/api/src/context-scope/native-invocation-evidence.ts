@@ -144,6 +144,20 @@ function bindVerifiedProviderEvidence(execution: ExecutionContext): void {
  verifiedProviderEvidence.set(execution, execution.security.authority)
 }
 
+/** Assistant identity for a native source acquisition, taken from the original host execution. */
+export function nativeSourceAssistant(execution: ExecutionContext): string | undefined {
+ const {identity,ownership,security,surface,assistant}=execution
+ const {userId,workspaceId}=security.access
+ if(ownership.kind!=='workspace'||ownership.workspaceId!==workspaceId||security.access.assistantId!==assistant.id
+  ||surface.systemRead||surface.clientSelfMemory||security.access.systemRead||getApplicationExecutionBinding(execution))return undefined
+ if(identity.kind==='attended'&&identity.principal.kind==='workspace_member'&&identity.principal.userId===userId
+  &&(identity.principal.authenticationKind==='native_session'||identity.principal.authenticationKind==='verified_channel'))return assistant.id
+ if(identity.kind==='delegated'&&identity.actorUserId===userId&&identity.parentCeiling.userId===userId
+  &&identity.parentCeiling.workspaceId===workspaceId&&!surface.readOnly)return assistant.id
+ if(hasWorkspaceMcpRetainedAuthority(execution))return assistant.id
+ return undefined
+}
+
 /** Null requires the full original validator; it never means admitted. Callers bracket this read with their original live lease.
  * An optional server-owned metadata guard only narrows a completed proof under its native locks. */
 export async function tryNativeInvocationEvidence(execution:ExecutionContext,evidence:ScopeEvidence,recipient:AccessCeiling,kind:'caller'|'audience',narrowingGuard?:()=>Promise<void>):Promise<ScopeEvidence|null>{

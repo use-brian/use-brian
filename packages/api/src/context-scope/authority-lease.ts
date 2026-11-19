@@ -7,6 +7,7 @@ import {
   type AccessCeiling,
 } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { AuthoritySourceSchema } from '@use-brian/agent-runtime/security/authority-source.js'
+import type { ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
 import type { CurrentAuthorityBoundary } from '@use-brian/agent-runtime/tools/types.js'
 import type { Session } from '../db/sessions.js'
 import { operationCeilingsFromMembership } from '../db/workspace-store.js'
@@ -31,6 +32,18 @@ export type AuthorityLease = CurrentAuthorityBoundary & {
   markOperationMayHaveExecuted(): void
 }
 const leases = new AsyncLocalStorage<readonly AuthorityLease[]>()
+
+type LockedSourceEvidence = { assistantId: string; ceiling: AccessCeiling; evidence: ScopeEvidence }
+const lockedSourceEvidence = new AsyncLocalStorage<LockedSourceEvidence>()
+
+/** Only the open publication transaction's final lease check consumes this proof. */
+export function withLockedSourceEvidence<T>(proof: LockedSourceEvidence, check: () => Promise<T>): Promise<T> {
+  return lockedSourceEvidence.run(proof, check)
+}
+
+export function currentLockedSourceEvidence(): LockedSourceEvidence | undefined {
+  return lockedSourceEvidence.getStore()
+}
 
 /** No TTL: each boundary observes live membership/grants, including timed expiry. */
 export function createAuthorityLease(

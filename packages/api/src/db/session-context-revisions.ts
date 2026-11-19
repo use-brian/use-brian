@@ -1,4 +1,4 @@
-import {markAuthorityOperationUncertain} from '../context-scope/authority-lease.js'
+import {markAuthorityOperationUncertain, withLockedSourceEvidence} from '../context-scope/authority-lease.js'
 import {isBoundBufferedTerminalCommand,type BoundBufferedTerminalCommand} from '../turn/terminal-publication.js'
 import {admitRetainedGoalWorkflowWrite} from '../workspace-access/goal-source-admission.js'
 import { nativeSessionQueryContextSources } from '../application-platform/session-query-context.js'
@@ -270,7 +270,8 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
         // same checks as a bounded statement, then recheck live authority and
         // cancellation before allowing the transaction to commit.
         if (writeSessionId) await time('publication_constraints',()=>client.query('SET CONSTRAINTS ALL IMMEDIATE'))
-        await execution.security.authority.assertCurrent()
+        await withLockedSourceEvidence({ assistantId: execution.assistant.id, ceiling: execution.security.ceiling, evidence: checked },
+          () => execution.security.authority.assertCurrent())
         if (execution.lifecycle.abortSignal.aborted&&!finalizing || JSON.stringify(accumulator.evidence) !== before
           || host !== retainedHosts.get(execution) || !host && wiring !== getSharedRetainedSourceAuthority()) changed()
         if(action==='retain'){publicationAttempted=true;publicationState.outcome='unknown'}
