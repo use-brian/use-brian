@@ -1,5 +1,5 @@
 import { routeAttendedTurn, type AttendedTurnRoute } from './attended-turn-routing.js'
-import {resumePrivateLegacySession,PRIVATE_TRANSCRIPT_INSTRUCTION} from '../db/private-transcript.js'
+import {bindPrivateResponderTranscript,resumePrivateLegacySession,PRIVATE_TRANSCRIPT_INSTRUCTION} from '../db/private-transcript.js'
 import { attachWorkspaceFiles } from '../files/workspace-attachments.js'
 import { bindWorkspaceCredentialDelegation, workspaceCredentialDelegation } from '@use-brian/agent-runtime/security/workspace-delegation.js'
 import { createWorkspaceTurnSink, type NativeChatRequest, type NativeChatSink, type WorkspaceTurnInput, type WorkspaceTurnResult, type WorkspaceTurnBinding } from '../workspace-mcp/native-turn.js'
@@ -3006,6 +3006,19 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       turnTimingIdentity = { userId: user.id, assistantId: assistant.id, sessionId: session.id }
 
       const turnPolicy = sessionPolicy(classifySession(session))
+      if (!programmatic && !requestedRoomResponseGroup && turnPolicy.read.rule === 'owner'
+        && classifySession(session).surface === 'chat' && session.channelType === 'web'
+        && session.workspaceId === assistant.workspaceId && session.workspaceId
+        && session.userId === user.id && session.assistantId !== assistant.id) {
+        // A single private responder keeps its own reader floor. The room record
+        // admission continues to govern every group and workspace response.
+        const envelope = (await query<{cap: Sensitivity}>(`SELECT cap FROM conversation_envelopes
+          WHERE workspace_id=$1 AND session_id=$2 AND starter_user_id=$3
+            AND visibility IN ('configured_private','private_by_kind')`, [session.workspaceId,session.id,user.id])).rows[0]
+        if (envelope && roomClearanceFit({assistantClearance:assistant.clearance,roomClearance:envelope.cap}) === 'below') {
+          bindPrivateResponderTranscript(executionContext)
+        }
+      }
       const pageBoundTurn = turnPolicy.read.rule === 'workspace' && turnPolicy.read.anchorGate === 'doc_page'
       const isRoomSession = turnPolicy.crossAssistantSend === 'room'
       sharedAudienceForError = turnPolicy.deliveryCeiling.ceiling === 'audience'
