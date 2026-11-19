@@ -13,7 +13,7 @@ vi.mock('../client.js', () => {
   const client = { query: (sql: string, values?: unknown[]) => {
     if (sql.includes('current_setting')) return Promise.resolve({ rows: [{ value: 'false' }] })
     if (/^(BEGIN|COMMIT|ROLLBACK|SELECT id FROM workspaces)/.test(sql)
-      || sql.includes('set_config') || sql.includes('FROM workspace_access_policies')) return Promise.resolve({ rows: [] })
+      || sql.includes('set_config') || sql.includes('FROM public.read_workspace_admission_policy(')) return Promise.resolve({ rows: [] })
     return queryWithRLS(actor, sql, values)
   } }
   return { query: vi.fn(), queryWithRLS, getAppPool: () => ({ connect: async () => client }),

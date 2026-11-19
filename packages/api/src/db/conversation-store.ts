@@ -1,3 +1,4 @@
+import { hasWorkspaceConversationAudience } from '../session-kind.js'
 import {readPrivateTranscript} from './private-transcript.js'
 /** Current native session query captures. [COMP:api/application-persistence] */
 import {z} from 'zod'
@@ -311,7 +312,7 @@ async function publishNativeMessageBatch(input:NativeSessionMessageBatchInput,cl
    if(row.message.sessionId!==sessionId||row.source.workspaceId!==execution.security.access.workspaceId||row.source.resourceId!==row.message.id
     ||row.message.role!==values[index].role||index>0&&row.message.sequenceNum!==stored[index-1].message.sequenceNum+1)throw new DerivedScopeError('scope_source_changed')
    if(channelFloor&&(!channelEvidenceFitsEnvelope(channelFloor,row.source)
-    ||channelFloor.visibility==='workspace'&&row.source.userId!==null))throw new DerivedScopeError('scope_source_changed')
+    ||hasWorkspaceConversationAudience(channelFloor.visibility)&&row.source.userId!==null))throw new DerivedScopeError('scope_source_changed')
    return bindScopeSource({...row.message,createdAt:new Date(row.message.createdAt)},row.source)
   })
   if(completion&&rows.length)verifyTurnCompletionReceipt(completionResult,completion,rows)

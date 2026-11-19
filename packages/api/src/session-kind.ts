@@ -269,6 +269,11 @@ export function classifySession(row: SessionKindRow, turn: SessionTurnFacts = {}
  * positive same-conversation room evidence, not an archived timestamp alone.
  * [COMP:api/conversation-visibility] */
 export type ConversationVisibility = 'private_by_kind' | 'configured_private' | 'workspace'
+
+/** Classify a stored envelope's explicit audience after the record has been resolved. */
+export function hasWorkspaceConversationAudience(visibility: ConversationVisibility | undefined): boolean {
+  return visibility === 'workspace'
+}
 export function classifyConversationVisibility(row: SessionKindRow & { guestSessionToken?: string | null }, facts: {
   historical: boolean; workspace: boolean; provenLegacyGroup?: boolean; currentMember?: boolean
 }): ConversationVisibility {
@@ -483,6 +488,19 @@ export function isPersonalChat(kind: SessionKind): boolean {
     && kind.lane === 'conversation' && kind.surface !== 'doc'
 }
 
+/** Stored Chat shape for private native startup and prompt reads. */
+type StoredPrivateChatShape = Partial<Pick<SessionKindRow, 'channelType' | 'appOrigin' | 'anchorKind' | 'visibility' | 'mode'>>
+export function usesStoredPrivateChat(row: StoredPrivateChatShape): boolean {
+  return row.channelType === 'web' && row.appOrigin === 'chat' && row.anchorKind === 'none'
+    && normalizeSessionVisibility(row.visibility) === 'personal' && row.mode !== 'draft'
+}
+
+/** Unanchored workspace Chat or a web turn with a verified Page binding. */
+export function usesWorkspacePromptIndexes(row: SessionKindRow, pageBoundTurn: boolean): boolean {
+  return row.channelType === 'web' && (row.appOrigin === 'chat' && row.anchorKind === 'none' || pageBoundTurn)
+    && row.visibility === 'workspace'
+}
+
 /** Closed native owner presentation purpose; SQL still authorizes the real row. */
 export function usesPrivateChatPresentation(row: SessionKindRow): boolean {
  return row.visibility==='personal' && row.channelType==='web' && row.anchorKind==='none'
@@ -641,6 +659,13 @@ export function transportPolicy(transport: Transport): TransportPolicy {
 const sqlList = (values: readonly string[]): string => values.map((v) => `'${v.replace(/'/g, "''")}'`).join(', ')
 
 export const sessionKindSql = {
+  /** Exact stored native prompt shape, including the legacy owner spelling. */
+  nativePrivatePromptChat: (alias: string): string =>
+    `${alias}.channel_type='web' AND ${alias}.app_origin='chat' AND ${alias}.anchor_kind='none' AND ${alias}.anchor_ref IS NULL
+        AND ${alias}.visibility IN('owner','personal') AND ${alias}.mode IS DISTINCT FROM 'draft'`,
+  /** Explicit envelope audience. SQL comparisons preserve NULL refusal. */
+  workspaceEnvelope: (alias: string): string => `${alias}.visibility='workspace'`,
+  privateEnvelope: (alias: string): string => `${alias}.visibility<>'workspace'`,
   /**
    * A human conversation (`lane='conversation'`): not one of the machine-lane
    * channel types and not transient. The ONE definition of human activity

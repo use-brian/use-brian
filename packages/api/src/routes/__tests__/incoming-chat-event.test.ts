@@ -160,8 +160,9 @@ describe('route persistence boundaries', () => {
     // findSessionById is likewise a wrapper (it touches last_active_at); its
     // projection lives in readSessionById.
     expect(body('export async function findSessionById')).toContain('readSessionById(')
-    for (const loader of ['async function insertSession', 'export async function findSessionByChannel', 'export async function readSessionById']) {
-      const implementation = body(loader)
+    expect(body('async function insertSession')).toContain('RETURNING ${SESSION_CREATE_PROJECTION}')
+    const createProjection = db.match(/const SESSION_CREATE_PROJECTION = `([^`]+)`/)?.[1] ?? ''
+    for (const implementation of [createProjection, body('export async function findSessionByChannel'), body('export async function readSessionById')]) {
       for (const field of ['effectiveClearance', 'contextGroupId', 'contextProjectId', 'contextCompartments']) {
         expect(implementation).toContain(`as "${field}"`)
       }

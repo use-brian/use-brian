@@ -29,6 +29,11 @@ const navigation = vi.hoisted(() => ({
 const projectsApi = vi.hoisted(() => ({ listContextProjects: vi.fn() }));
 vi.mock("@/lib/api/context-scopes", () => projectsApi);
 const viewer = vi.hoisted(() => ({ id: "viewer-1" }));
+const chatEntries = vi.hoisted(() => new Map<string, unknown>());
+vi.mock("@/lib/offline/idb", async importOriginal => {
+  const { chatIdbEntries } = await import("@/lib/offline/__tests__/fixtures/chat-idb");
+  return { ...await importOriginal<typeof import("@/lib/offline/idb")>(), ...chatIdbEntries(chatEntries) };
+});
 vi.mock("@/lib/user", () => ({ getUserInfo: () => ({ id: viewer.id }) }));
 
 vi.mock("next/navigation", () => ({
@@ -133,6 +138,7 @@ function buttonNamed(name: string): HTMLButtonElement {
 }
 
 beforeEach(() => {
+  chatEntries.clear();
   localStorage.clear();
   viewer.id = "viewer-1";
   resetSurfaceCache();

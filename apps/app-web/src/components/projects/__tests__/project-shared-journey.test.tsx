@@ -24,7 +24,10 @@ vi.mock('@/lib/api/context-scopes', () => ({
 }));
 vi.mock('@/lib/api/sessions', () => ({ createWorkspaceSession: ports.createRoom }));
 vi.mock('@/lib/chat-surface-data', () => ({ patchSharedChatSessions: ports.patchRooms }));
-vi.mock('@/lib/chat-session-events', () => ({ dispatchChatSessionsRefresh: ports.refresh }));
+vi.mock('@/lib/chat-session-events', async importOriginal => ({
+  ...await importOriginal<typeof import('@/lib/chat-session-events')>(),
+  dispatchChatSessionsRefresh: ports.refresh,
+}));
 vi.mock('@/components/ui/confirm-dialog', () => ({ confirmDialog: ports.confirm }));
 vi.mock('@/components/ui/prompt-dialog', () => ({ promptDialog: ports.prompt }));
 vi.mock('@/components/ui/checkbox', () => ({

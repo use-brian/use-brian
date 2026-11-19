@@ -15,6 +15,7 @@ import * as release8311 from './installation-authentication-8311.mjs'
 import * as release8312 from './installation-authentication-8312.mjs'
 import * as release8313 from './installation-authentication-8313.mjs'
 import * as release8314 from './installation-authentication-8314.mjs'
+import * as release8315 from './installation-authentication-8315.mjs'
 
 const profiles=new Map([
  ['8294_fused_admission_plan_size.sql',release8294],
@@ -31,6 +32,7 @@ const profiles=new Map([
  ['8312_conversation_verified_channel_publication.sql',release8312],
  ['8313_conversation_page_publication.sql',release8313],
  ['8314_conversation_settings_readiness.sql',release8314],
+ ['8315_conversation_retained_row_transitions.sql',release8315],
 ])
 export const hasInstallationRelease=head=>profiles.has(head)
 function profileForRelease(head){

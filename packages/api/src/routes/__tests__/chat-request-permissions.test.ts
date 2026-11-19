@@ -7,7 +7,7 @@ describe('chat request permission ownership', () => {
   it('binds delivery to the original resolved execution without a snapshot provider', () => {
     expect(source).toContain('const executionInput: ResolveExecutionContextInput = {')
     expect(source).toContain('resolveExecutionContextSystem(executionInput)')
-    expect(source).toContain('createTurnDeliveryAdmission(executionContext, scopeAccumulator, session)')
+    expect(source).toMatch(/createTurnDeliveryAdmission\(executionContext, scopeAccumulator, session,\s*pageBoundTurn && conversationWriteFloor \? readLegacyDeliveryAudience : undefined\)/)
     expect(source).not.toContain('createExecutionPermissionSnapshots')
   })
 

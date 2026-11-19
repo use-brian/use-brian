@@ -7,7 +7,19 @@
  * Spec: docs/architecture/engine/turn-kernel.md "Reply publication". */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const tx = vi.hoisted(() => ({ query: vi.fn(async (_sql: string) => ({ rows: [] })), release: vi.fn() }))
+const tx = vi.hoisted(() => {
+  let status: 'I' | 'T' = 'I'
+  return {
+    query: vi.fn(async (sql: string) => {
+      if (sql === 'BEGIN') status = 'T'
+      if (sql === 'COMMIT' || sql === 'ROLLBACK') status = 'I'
+      return { rows: [] }
+    }),
+    getTransactionStatus: () => status,
+    readyForQuery: true,
+    release: vi.fn(),
+  }
+})
 vi.mock('../../db/notify-listener.js', () => ({ registerNotifyChannel: vi.fn(), startNotifyListener: vi.fn() }))
 vi.mock('../../db/client.js', async importOriginal => ({ ...await importOriginal<object>(), getPool: () => ({ connect: async () => tx }) }))
 // The stored writer is the real store function over the mocked row writer and pool.

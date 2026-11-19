@@ -50,7 +50,7 @@ import { findOrCreateSession, addSessionMessage, setSessionMessageChannelId, typ
 import { findRoomDeliveryAddress, findRoomForDelivery } from '../channel-room/room.js'
 import { getPool, query } from '../db/client.js'
 import { conversationAnchorWriteAdmissionActive } from '../db/conversation-visibility.js'
-import { sessionKindSql } from '../session-kind.js'
+import { hasWorkspaceConversationAudience, sessionKindSql } from '../session-kind.js'
 import { whatsappCloudUserAllowed } from '../whatsapp/cloud-access.js'
 import { createFeishuApi } from '../feishu/client.js'
 import type { FeishuCredentials } from '../db/channel-integrations.js'
@@ -171,9 +171,9 @@ async function readDeliveryEnvelope(input: DeliveryAudienceInput, sessionId: str
     JOIN public.assistants sender ON sender.id=$3 AND sender.workspace_id=e.workspace_id
     ${write?.shared ? 'JOIN public.workspace_members actor ON actor.workspace_id=e.workspace_id AND actor.user_id=$4' : ''}
     WHERE e.session_id=$1 AND e.workspace_id=$2 AND s.channel_type=$5 AND s.channel_id=$6
-      AND (s.anchor_kind='channel' AND s.archived_at IS NULL AND e.visibility='workspace'
+      AND (s.anchor_kind='channel' AND s.archived_at IS NULL AND ${sessionKindSql.workspaceEnvelope('e')}
        AND (s.provider_context_identity IS NULL OR s.provider_context_identity->>'integrationId'=$7)
-       OR s.anchor_kind='none' AND s.assistant_id=$3 AND e.starter_user_id=$4 AND e.visibility<>'workspace'
+       OR s.anchor_kind='none' AND s.assistant_id=$3 AND e.starter_user_id=$4 AND ${sessionKindSql.privateEnvelope('e')}
        AND NOT EXISTS(SELECT 1 FROM public.sessions room WHERE room.workspace_id=e.workspace_id
         AND room.channel_type=$5 AND room.channel_id=$6 AND ${sessionKindSql.channelRoomDeliveryAddress('room')}))
       ${!client ? 'AND public.conversation_member_read_allowed(e.workspace_id,e.session_id,$4)'
@@ -221,7 +221,7 @@ async function persistDeliveryMessage(input: DeliveryAudienceInput, session: Pic
         await client.query('ROLLBACK'); return null
       }
     }
-    const scope = { workspaceId:input.workspaceId,userId:envelope.visibility==='workspace' ? null : input.userId,
+    const scope = { workspaceId:input.workspaceId,userId:hasWorkspaceConversationAudience(envelope.visibility) ? null : input.userId,
       assistantId:null,...floor }
     const saved = await addSessionMessage(derivation ? {...message,derivation,derivationTarget:scope} : {...message,scope},client)
     if ((await client.query('SELECT 1 FROM public.conversation_message_quarantine WHERE message_id=$1',[saved.id])).rows.length) {

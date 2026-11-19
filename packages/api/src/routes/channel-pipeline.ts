@@ -9,7 +9,7 @@ import { bindScopeSources } from '@use-brian/agent-runtime/security/source-evide
 import { runTurnSessionStateDiff } from '../turn/session-state.js'
 import { withTurnInference } from '../turn/runtime.js'
 import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
-import { policyFor } from '../session-kind.js'
+import { hasWorkspaceConversationAudience, policyFor } from '../session-kind.js'
 import { narrowConnectorTurnScope, resolveConnectorNativeTurnScopeSystem } from '../context-scope/connector-exposure.js'
 import { mayReadGroupContext, roomTurnShape } from '../channel-room/turn.js'
 import { appendChannelRoomMessage, claimChannelRoomTurn } from '../channel-room/messages.js'
@@ -1450,7 +1450,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
         scope: dataTurnScope,
         workspaceId: assistant.workspaceId,
         userId,
-        sharedAudience: recordEnvelope?.visibility==='workspace' || !turnPolicy.context.personalMemory,
+        sharedAudience: hasWorkspaceConversationAudience(recordEnvelope?.visibility) || !turnPolicy.context.personalMemory,
       })
   const inputMessageScope = recordAddress && !recordAddress.member && !room && authoredScope
     ? {...authoredScope,userId:null,sensitivity:'public' as const,compartments:[],projectIds:[]} : authoredScope
@@ -1735,7 +1735,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
       if (channelWrite && db) {
         const floor = await pinVerifiedChannelPublication(db,channelWrite,turnOwner.token)
         if (!input.scope || !channelEvidenceFitsEnvelope(floor,input.scope)
-          || floor.visibility==='workspace' && input.scope.userId!==null) throw new AuthorityChangedError(false)
+          || hasWorkspaceConversationAudience(floor.visibility) && input.scope.userId!==null) throw new AuthorityChangedError(false)
       }
       if (!room) return addSessionMessage(input,db)
       const result = await appendChannelRoomMessage(input,db)

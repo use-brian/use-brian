@@ -37,7 +37,7 @@ function adm(sql: string): { rows: unknown[]; rowCount: number } | undefined {
   if (/^(BEGIN|COMMIT|ROLLBACK)/.test(sql)) return { rows: [], rowCount: 0 }
   if (sql.includes("current_setting('app.system_bypass'")) return { rows: [{ value: null }], rowCount: 1 }
   if (sql.includes('set_config(') || sql.includes('FROM workspaces WHERE id=$1 FOR UPDATE')) return { rows: [], rowCount: 0 }
-  if (sql.includes('FROM workspace_access_policies')) return { rows: [], rowCount: 0 }
+  if (sql.includes('FROM public.read_workspace_admission_policy(')) return { rows: [], rowCount: 0 }
   return undefined
 }
 function forwardingClient() {

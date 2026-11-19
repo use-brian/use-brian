@@ -84,7 +84,8 @@ vi.mock("@/lib/offline/offline-writes", () => ({
   getOnline: () => true,
 }));
 const idb = vi.hoisted(() => new Map<string, unknown>());
-vi.mock("@/lib/offline/idb", () => ({
+vi.mock("@/lib/offline/idb", async importOriginal => ({
+  ...await importOriginal<typeof import("@/lib/offline/idb")>(),
   idbGet: async (key: string) => idb.get(key) ?? null,
   idbSet: async (key: string, value: unknown) => {
     idb.set(key, value);

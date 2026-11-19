@@ -184,7 +184,7 @@ describe("[COMP:app-web/office-iteration-panel] the rail as a controller present
       await settle();
     });
     await paint();
-    expect(fetchHistoryRows).toHaveBeenCalledWith("session-1", expect.anything());
+    expect(fetchHistoryRows).toHaveBeenCalledWith("session-1", expect.any(AbortSignal), expect.any(Function));
     expect(host.textContent).toContain("Saved reply");
     expect(host.querySelector('[data-office-edit-card]')).not.toBeNull();
   });

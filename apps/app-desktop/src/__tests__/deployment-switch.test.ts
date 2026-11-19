@@ -224,27 +224,25 @@ describe("[COMP:app-desktop/main] embedded browser IPC", () => {
 
   it("cancels pending native pairing when the main window closes", async () => {
     const { dialog } = await import("electron");
-    const consent = vi.spyOn(dialog, "showMessageBox");
-    const close = vi.fn();
-    const created = vi.fn();
-    vi.stubGlobal("WebSocket", class { constructor() { created(); } close = close; readyState = 0; });
+    let approve!: (answer: Electron.MessageBoxReturnValue) => void;
+    const consent = vi.spyOn(dialog, "showMessageBox").mockReturnValueOnce(
+      new Promise(resolve => { approve = resolve; }),
+    );
     const pending = invoke(sender(), pairInput());
-    await vi.waitFor(() => expect(created).toHaveBeenCalledOnce());
-    expect(consent).not.toHaveBeenCalled();
+    expect(consent).toHaveBeenCalledOnce();
     state.windows[0].close();
+    approve({ response: 1, checkboxChecked: false });
     expect(await pending).toEqual({ ok: false });
     expect(state.windows).toHaveLength(1);
     expect(state.windows[0].destroyed).toBe(true);
-    expect(close).toHaveBeenCalled();
-    vi.unstubAllGlobals();
   });
 
-  it.each(["status", "request-control", "pair", "show", "cancel", "disconnect", "set-enabled"])("validates the sender and main frame for %s", async (type) => {
+  it.each(["status", "request-control", "pair", "show", "cancel", "disconnect"])("validates the sender and main frame for %s", async (type) => {
     const { EmbeddedBrowser } = await import("../embedded-browser.js");
     const pair = vi.spyOn(EmbeddedBrowser.prototype, "pair").mockResolvedValue(true);
     const status = vi.spyOn(EmbeddedBrowser.prototype, "status");
-    const actions = ["show", "cancelPending", "dispose", "setEnabled"].map(method => vi.spyOn(EmbeddedBrowser.prototype, method as "show"));
-    const input = type === "pair" ? pairInput() : { type, enabled: false };
+    const actions = ["show", "cancelPending", "dispose"].map(method => vi.spyOn(EmbeddedBrowser.prototype, method as "show"));
+    const input = type === "pair" ? pairInput() : { type };
     const foreignContents = { id: 999, isDestroyed: () => false, mainFrame: {} };
     expect(await invoke({ sender: foreignContents, senderFrame: foreignContents.mainFrame }, input)).toEqual({ ok: false });
     expect(await invoke({ ...sender(), senderFrame: {} }, input)).toEqual({ ok: false });
@@ -259,25 +257,12 @@ describe("[COMP:app-desktop/main] embedded browser IPC", () => {
     const { EmbeddedBrowser } = await import("../embedded-browser.js");
     const pair = vi.spyOn(EmbeddedBrowser.prototype, "pair").mockResolvedValue(true);
     for (const type of ["status", "request-control"]) {
-      expect(await invoke(sender(), { type })).toEqual({ ok: true, hasControl: true, browserEnabled: true, connected: false, automaticBlocked: false, controlEpoch: 0 });
+      expect(await invoke(sender(), { type })).toEqual({ ok: true, hasControl: true, connected: false, automaticBlocked: false, controlEpoch: 0 });
     }
     expect(await invoke(sender(), pairInput("other-user"))).toEqual({ ok: false });
     expect(pair).not.toHaveBeenCalled();
     expect(await invoke(sender(), pairInput())).toEqual({ ok: true });
     expect(pair).toHaveBeenCalledExactlyOnceWith(pairInput(), JSON.stringify([local.appUrl, "same-user"]));
-  });
-
-  it("persists the trusted device setting and blocks explicit pairing without a prompt", async () => {
-    const { dialog } = await import("electron");
-    const consent = vi.spyOn(dialog, "showMessageBox");
-    expect(await invoke(sender(), { type: "set-enabled", enabled: false })).toMatchObject({ ok: true, browserEnabled: false });
-    expect(await invoke(sender(), { type: "request-control" })).toMatchObject({ ok: true, hasControl: false, browserEnabled: false });
-    expect(await invoke(sender(), pairInput())).toEqual({ ok: false });
-    const { BrowserPreferences } = await import("../browser-preferences.js");
-    expect(new BrowserPreferences(() => "/tmp/desktop-switch-test/browser-preferences.json").enabled()).toBe(false);
-    expect(await invoke(sender(), { type: "set-enabled", enabled: "true" })).toMatchObject({ ok: false, browserEnabled: false });
-    expect(await invoke(sender(), { type: "set-enabled", enabled: true })).toMatchObject({ ok: true, browserEnabled: true });
-    expect(consent).not.toHaveBeenCalled();
   });
 
   it.each([['show', 'show'], ['cancel', 'cancelPending'], ['disconnect', 'dispose']] as const)('delegates trusted %s requests', async (type, method) => {

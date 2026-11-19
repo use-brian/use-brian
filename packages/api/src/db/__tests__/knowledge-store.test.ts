@@ -6,7 +6,7 @@ vi.mock('../client.js', () => {
   const transactionQuery = async (sql: string, values?: unknown[]) => {
     if (sql.includes("current_setting('app.system_bypass'")) return { rows: [{ value: 'false' }] }
     if (/^(BEGIN|COMMIT|ROLLBACK)/.test(sql) || sql.includes('set_config') || sql.includes('FROM workspaces WHERE id=')) return { rows: [] }
-    if (sql.trimStart().startsWith('SELECT') && sql.includes('FROM workspace_access_policies')) return { rows: [] }
+    if (sql.trimStart().startsWith('SELECT') && sql.includes('FROM public.read_workspace_admission_policy(')) return { rows: [] }
     return resourceQuery(sql, values)
   }
   const pool = { connect: async () => ({ query: transactionQuery, release: vi.fn() }) }

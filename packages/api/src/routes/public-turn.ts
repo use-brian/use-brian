@@ -87,7 +87,7 @@ import {
   automaticContextAccess,
 } from '../context-scope/resolve-turn-scope.js'
 import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
-import { normalizeSessionVisibility, policyFor, sessionAuthorityDestinationMatches } from '../session-kind.js'
+import { hasWorkspaceConversationAudience, normalizeSessionVisibility, policyFor, sessionAuthorityDestinationMatches } from '../session-kind.js'
 import { openAssistantTurn, openTurnSqlScope, TurnRefusal, turnUsageIdentity, type TurnSqlScope } from '../turn/kernel.js'
 import { noopPublishSessionEvent, type PublishSessionEvent } from '../session-event-port.js'
 import { publishTurnCompleted } from '../session-live-publisher.js'
@@ -791,7 +791,7 @@ async function executePublicTurnInScope(
           }
         } : input.credentialCurrent,
         ...(publicRecord?.floor.workspaceId ? {
-          sharedAudience: publicRecord.floor.visibility === 'workspace',
+          sharedAudience: hasWorkspaceConversationAudience(publicRecord.floor.visibility),
           maximumAccess: { workspaceId: publicRecord.floor.workspaceId, userId: user.id, clearance: publicRecord.floor.cap,
             compartments: publicRecord.floor.compartments, mutationCompartments: publicRecord.floor.compartments,
             projectIds: publicRecord.floor.projectIds, visibilityAssistantIds: null },

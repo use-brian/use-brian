@@ -237,7 +237,7 @@ describe('[COMP:api/public-turn] complete public operation ownership',()=>{
     await vi.waitFor(()=>expect(mocks.wait).toHaveBeenCalled())
     expect(mocks.truncate).not.toHaveBeenCalled();expect(mocks.query).not.toHaveBeenCalled()
     await mocks.release(session.id,'completed','prior-owner');await run.promise
-    expect(mocks.truncate).toHaveBeenCalledWith('fictional-old-message')
+    expect(mocks.truncate).toHaveBeenCalledExactlyOnceWith('fictional-old-message', session.id)
     expect(run.res.body).toMatchObject({reply:'Fictional public answer'})
   })
   it('withholds output and settlement success after lease loss during the real provider stream',async()=>{

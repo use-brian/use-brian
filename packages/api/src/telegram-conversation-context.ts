@@ -31,7 +31,7 @@ export async function assertTelegramConversationCurrent(room: Session): Promise<
       AND a.workspace_id=s.workspace_id AND ci.bot_user_id=s.provider_context_identity->>'botId'
       AND ci.identity_generation=s.provider_context_generation
       ${conversationAnchorWriteAdmissionActive() ? `AND EXISTS(SELECT 1 FROM public.conversation_envelopes e WHERE e.session_id=s.id
-        AND e.workspace_id=s.workspace_id AND e.visibility='workspace' AND public.scope_review_state_held('session',s.id) IS NOT TRUE)` : ''}
+        AND e.workspace_id=s.workspace_id AND ${sessionKindSql.workspaceEnvelope('e')} AND public.scope_review_state_held('session',s.id) IS NOT TRUE)` : ''}
       AND NOT EXISTS(SELECT 1 FROM channel_recording_policies p WHERE p.workspace_id=s.workspace_id
         AND p.bot_id=ci.bot_user_id AND p.conversation_id=s.channel_id AND NOT p.enabled)`,
   [room.id,room.providerContextIdentity,room.providerContextGeneration])).rows.length)

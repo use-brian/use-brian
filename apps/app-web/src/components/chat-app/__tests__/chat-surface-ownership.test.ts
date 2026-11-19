@@ -233,7 +233,7 @@ describe("[COMP:app-web/chat-sessions-cache] surface async ownership", () => {
     if (switched) scope.switchTo("B");
     response.reject(new Error("forbidden"));
     await loading;
-    expect(scope.fetchChatTranscript).toHaveBeenCalledWith("A", { signal: expect.any(AbortSignal) });
+    expect(scope.fetchChatTranscript).toHaveBeenCalledWith("A", { signal: expect.any(AbortSignal), onCached: expect.any(Function) });
     expect(scope.writeTranscriptCache).not.toHaveBeenCalled();
     expect(scope.chat.loadMessages).not.toHaveBeenCalled();
     expect(scope.setError).toHaveBeenCalledTimes(switched ? 0 : 1);
