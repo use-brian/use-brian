@@ -20,6 +20,11 @@ import {parseArgs} from 'node:util'
 import {createHash} from 'node:crypto'
 import {portableLegacyConversionTables,portableOwnerPolicies,restoreStrippedFields} from './portable-restore-seals.mjs'
 
+import {
+ crmSummaryAuthorityEpochs,crmSummaryCredentialRule,crmSummaryDerivedRules,crmSummaryOriginStamps,
+ crmSummaryProjectionRule,crmSummaryStructuralValidators,crmSummaryWriterHelpers,
+} from './crm-summary-portable.mjs'
+
 const here=fileURLToPath(new URL('./',import.meta.url))
 const rosterPath=here+'portable-restore-roster.json'
 // Reviewed release-cohort rosters, each generated against a fresh chain stopped at
@@ -38,6 +43,8 @@ export const rosterRules=Object.freeze({
  'D5-display-fingerprints':'Historical display fingerprint owner. Target rows come from the shipped installer; archived rows are original proof only; signatures must match, fingerprints are never blanket repinned.',
  'D6-enrollment-maintenance':'Conversion enrollment queue. Maintenance state the shipped enrollment trigger re-derives while restored units are imported; archived keys must be a subset of the re-derived keys and the generation counter is installation-local. Re-enrolled units are reconverted idempotently.',
  'D9-envelope-scan':'Derived historical envelope scan cursor. The target restarts its bounded inventory scan after restoring durable envelopes.',
+ [crmSummaryProjectionRule]:'CRM summary projection. Rebuild atomically from exact restored facts and verify current leaves against archived history.',
+ [crmSummaryCredentialRule]:'CRM summary signing material. Sealed and restored through its bounded encrypted credential artifact.',
  'D8-transaction-scratch':'Transaction-local settings proof. A committed snapshot must be empty. The target never imports this table.',
  'D7-contract-witness':'Registry-guard catalog witness (8276). Installation-local catalog tuple identities for the guard fast path; never imported. The import ends with the owner-only native_turn_contract_witness_refresh(), which re-records it from the restored target catalog.',
  'F1-durable-fact':'User, workspace, conversation and operational fact. Imported exactly under canonical constraints; post-import row digests must equal the archived digests.',
@@ -194,7 +201,7 @@ const reviewedWriterHelpers=['department_edges_reconcile','crm_projection_append
  'retract_admitted_native_memory','resume_private_legacy_session','capture_page_event_observation']
 const recordWriterHelpers=['classify_conversation_envelope','withdraw_conversation_record_targets']
 const configuredStructuralValidators=['protect_configured_task_receipt']
-const authorityEpochTables=['application_policy_contract_epoch','application_policy_workspace_epochs','application_native_crm_configuration_epochs','ledger_epoch']
+const authorityEpochTables=['application_policy_contract_epoch','application_policy_workspace_epochs','application_native_crm_configuration_epochs','ledger_epoch',...crmSummaryAuthorityEpochs]
 const seedReplaceKeys={application_policy_contract_epoch:['singleton'],ledger_epoch:['id']}
 // Reviewed deviation from the inventory: enrollment is re-derived, not imported.
 const rederivedRule={native_conversation_conversion_pending:'D6-enrollment-maintenance'}
@@ -203,7 +210,7 @@ const contractRoots=['native_turn_helpers_current()','native_retained_helpers_cu
 // Polymorphic source references carry no foreign key; their contract-bound
 // validators read the current source row, so they import after every table.
 const polymorphicLate=['scope_resource_states','scope_derivations','scope_derivation_sources']
-const derivedRule={_migrations:'D1-ledger',crm_erasure_journal_targets:'D2-capture-targets',native_retained_contract_helpers:'D3-retained-fingerprints',
+const derivedRule={...crmSummaryDerivedRules,_migrations:'D1-ledger',crm_erasure_journal_targets:'D2-capture-targets',native_retained_contract_helpers:'D3-retained-fingerprints',
  native_turn_contract_helpers:'D4-canonical-registry',private_session_display_contract:'D5-display-fingerprints',native_turn_contract_witness:'D7-contract-witness',
  conversation_settings_transitions:'D8-transaction-scratch',conversation_envelope_backfill_checkpoint:'D9-envelope-scan'}
 // FORCE-RLS read/write access paths, with the schema facts that prove complete
@@ -305,7 +312,11 @@ export async function buildRoster(client,inventory){
   policyDigests[name]=sha(JSON.stringify(own.map(({policyname,cmd,qual,with_check})=>[policyname,cmd,qual,with_check])))
   entry.forceRls.policyDigest=policyDigests[name]
  }
- const writerHelpers=tables.conversation_envelopes?[...reviewedWriterHelpers,...recordWriterHelpers]:reviewedWriterHelpers
+ const crmSummary=Boolean(tables.crm_summary_receipt_keys)
+ const writerHelpers=[
+  ...reviewedWriterHelpers,...(tables.conversation_envelopes?recordWriterHelpers:[]),...(crmSummary?crmSummaryWriterHelpers:[]),
+ ]
+ const activeOriginStamps=crmSummary?[...originStamps,...crmSummaryOriginStamps]:originStamps
  const sequences=Object.fromEntries((await client.query(`SELECT s.relname,
    (SELECT c.relname||'.'||a.attname FROM pg_depend d JOIN pg_class c ON c.oid=d.refobjid JOIN pg_attribute a ON a.attrelid=d.refobjid AND a.attnum=d.refobjsubid
     WHERE d.classid='pg_class'::regclass AND d.objid=s.oid AND d.refclassid='pg_class'::regclass AND d.deptype IN('a','i')) owner
@@ -315,8 +326,8 @@ export async function buildRoster(client,inventory){
   FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_proc p ON p.oid=t.tgfoid JOIN pg_language l ON l.oid=p.prolang
   WHERE NOT t.tgisinternal AND c.relnamespace='public'::regnamespace AND (t.tgtype & 4<>0 OR t.tgtype & 16<>0)
   ORDER BY c.relname COLLATE "C",t.tgname COLLATE "C"`)).rows
- const triggers={},bodies=new Map(),stampAudit=new Set([...originStamps,...fixpointStamps])
- if(stampAudit.size!==originStamps.length+fixpointStamps.length)throw Error('portable_roster_stamp_review_overlap')
+ const triggers={},bodies=new Map(),stampAudit=new Set([...activeOriginStamps,...fixpointStamps])
+ if(stampAudit.size!==activeOriginStamps.length+fixpointStamps.length)throw Error('portable_roster_stamp_review_overlap')
  for(const row of triggerRows){
   const entry=tables[row.relname]
   if(!entry||entry.class==='derived'||entry.class==='rederived')continue
@@ -330,7 +341,7 @@ export async function buildRoster(client,inventory){
   const stamps=trigger.class==='fires'&&inserts&&(row.tgtype&2)!==0&&(row.lanname!=='plpgsql'||assignsInsertedRow(row.prosrc))
   if(stamps&&!stampAudit.has(key))throw Error('portable_roster_unreviewed_insert_stamp: '+key)
   if(stampAudit.has(key)&&!stamps)throw Error('portable_roster_stamp_review_stale: '+key)
-  if(originStamps.includes(key))trigger.class='suspended:origin-stamp'
+  if(activeOriginStamps.includes(key))trigger.class='suspended:origin-stamp'
   triggers[key]=trigger;bodies.set(key,row)
  }
  for(const key of stampAudit)if(!triggers[key])throw Error('portable_roster_stamp_review_stale: '+key)
@@ -360,7 +371,10 @@ export async function buildRoster(client,inventory){
  // on a table the import updates) has a reviewed verdict by function, with
  // reviewed per-trigger exceptions. Origin validators are suspended; structural
  // validators fire, and the tables their bodies read are imported first.
- const structural=tables.episode_extraction_items?.stripOnTransfer?[...structuralValidators,...configuredStructuralValidators]:structuralValidators
+ const structural=[
+  ...structuralValidators,...(tables.episode_extraction_items?.stripOnTransfer?configuredStructuralValidators:[]),
+  ...(crmSummary?crmSummaryStructuralValidators:[]),
+ ]
  const fired=Object.entries(triggers).filter(([key,trigger])=>trigger.class==='fires'&&(trigger.events.includes('insert')||restoredByUpdate.has(key.split('.')[0])))
  const verdict=key=>originValidatorTriggers.includes(key)?'origin':originValidators.includes(bodies.get(key).proname)?'origin'
   :structural.includes(bodies.get(key).proname)?'structural':null
@@ -412,7 +426,7 @@ export async function buildRoster(client,inventory){
   inventory:{sourceCompilationManifestSha256:inventory.sourceCompilationManifestSha256,trustedRuntimeArtifact:inventory.trustedRuntimeArtifact,ledgerCount:ledger.length,ledgerHead:ledger.at(-1)},
   // Only the rules this chain's tables use (a release cohort predates later rules).
   rules:Object.fromEntries(Object.entries(rosterRules).filter(([rule])=>Object.values(tables).some(entry=>entry.rule===rule))),
-  sequenceRule,triggerRules,reviewedWriterHelpers:writerHelpers,creationCurrencyGuards,originStamps:[...originStamps],fixpointStamps:[...fixpointStamps],
+  sequenceRule,triggerRules,reviewedWriterHelpers:writerHelpers,creationCurrencyGuards,originStamps:[...activeOriginStamps],fixpointStamps:[...fixpointStamps],
   originValidators:[...originValidators],originValidatorTriggers:[...originValidatorTriggers],structuralValidators:[...structural],contractRoots,inventoryOverrides:rederivedRule,
   counts:summarize(tables,sequences,triggers,deferredReferences),tables,sequences,triggers,deferredReferences,validatorOrder}
  return roster

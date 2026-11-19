@@ -88,6 +88,12 @@ export type WorkerCoordinator = {
  */
 export interface ToolContextExtensions {}
 
+/** Source identity and descriptor revision of an approved connector call. */
+export type ConnectorResumeTarget = {
+  serverName: string
+  version: string
+}
+
 export type ToolContext = {
   /** Validated production execution facts; flat fields below are its compatibility projection. */
   executionContext?: ExecutionContext
@@ -338,7 +344,8 @@ export type ToolContext = {
    * the parent executor can't write `session_resume_points` because it
    * sees the wrapper's name, not the underlying one. This hook lets the
    * gateway fire the same Path B checkpoint with the **canonical
-   * underlying tool name + frozen input**, so a Cloud Run restart mid-
+   * underlying tool name + frozen input**, including its connector source
+   * and descriptor version when indexed, so a Cloud Run restart mid-
    * confirmation replays the right tool.
    *
    * Absent in non-route contexts (smoke tests, scheduled-job execution).
@@ -349,6 +356,7 @@ export type ToolContext = {
     toolCallId: string
     toolName: string
     toolInput: Record<string, unknown>
+    connectorTarget?: ConnectorResumeTarget
     describeText: string
     expiresAt: Date
   }) => void

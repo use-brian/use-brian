@@ -844,16 +844,23 @@ const transition=z.discriminatedUnion('state',[
  z.object({state:z.literal('stopped_legacy'),turnId:z.null(),reason:z.literal('stopped_by_user')}).strict(),
 ]).nullable()
 async function turnTransition(sessionId:string,action:'claim'|'reclaim'|'cancel',assistantId:string|null,startedAt:Date|null,
- staleAfterMs:number,expectedToken:string|null|undefined,expectedTurnId:string|null=null){
+ staleAfterMs:number,expectedToken:string|null|undefined,expectedTurnId:string|null=null,idleOnly=false){
  if(!Number.isSafeInteger(staleAfterMs)||staleAfterMs<1||staleAfterMs>2147483647)throw new Error('Invalid turn lease duration')
- const raw=(await query<{value:unknown}>('SELECT native_session_turn_transition($1,$2,$3,$4,$5,$6,$7,$8) AS value',
+ const sql = 'SELECT native_session_turn_transition($1,$2,$3,$4,$5,$6,$7,$8) AS value'
+ const raw=(await query<{value:unknown}>(
+  idleOnly ? sql + " FROM sessions WHERE id=$1 AND status<>'running'" : sql,
   [sessionId,action,assistantId,startedAt,String(staleAfterMs),expectedToken??null,expectedTurnId,expectedToken!==undefined])).rows[0]?.value
- const result=transition.parse(raw)
+ const result=transition.parse(idleOnly && raw===undefined ? null : raw)
  return result
 }
 /** One SQL-owned locked claim, including exact original recovered outcome. */
-export async function claimTurnLeaseOutcome(sessionId:string,assistantId:string|null=null,startedAt:Date|null=null):Promise<TurnClaim|null>{
- const result=await turnTransition(sessionId,'claim',assistantId,startedAt,TURN_LEASE_STALE_AFTER_MS,undefined)
+export async function claimTurnLeaseOutcome(sessionId:string,assistantId:string|null=null,startedAt:Date|null=null,
+ options?: { idleOnly: true }):Promise<TurnClaim|null>{
+ // The WHERE also excludes a legacy running row with no token. The native
+ // transition checks the null token after locking to catch a concurrent owner.
+ const idleOnly = options?.idleOnly === true
+ const result=await turnTransition(sessionId,'claim',assistantId,startedAt,TURN_LEASE_STALE_AFTER_MS,
+  idleOnly ? null : undefined,null,idleOnly)
  if(result?.state!=='claimed')return null
  notifySessionChange(sessionId)
  return{token:result.token,turnId:result.turnId,...result.recovered?{recovered:result.recovered}:{}}

@@ -32,8 +32,7 @@ function assistantTurn(value: AssistantResponse): QueryEvent {
 
 describe('[COMP:engine/turn-output] final output selection', () => {
   it('drops whole tool-bearing turns and preserves the two formatting contracts', () => {
-    const compact = createTurnOutputCollector()
-    const channel = createTurnOutputCollector({ format: 'channel' })
+    const collector = createTurnOutputCollector()
     const events: QueryEvent[] = [
       assistantTurn(response([
         { type: 'text', text: 'private plan' },
@@ -45,13 +44,10 @@ describe('[COMP:engine/turn-output] final output selection', () => {
       ])),
       assistantTurn(response([{ type: 'text', text: 'Second response' }])),
     ]
-    for (const event of events) {
-      compact.observe(event)
-      channel.observe(event)
-    }
+    for (const event of events) collector.observe(event)
 
-    expect(compact.select()).toEqual({ kind: 'text', text: 'First answer\nSecond response' })
-    expect(channel.select()).toEqual({ kind: 'text', text: 'First\n answer\nSecond response' })
+    expect(collector.select('channel')).toEqual({ kind: 'text', text: 'First\n answer\nSecond response' })
+    expect(collector.select()).toEqual({ kind: 'text', text: 'First answer\nSecond response' })
   })
 
   it('reads response references at selection time and never appends turn_complete twice', () => {

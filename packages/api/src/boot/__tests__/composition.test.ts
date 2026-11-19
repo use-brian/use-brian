@@ -71,7 +71,7 @@ const LAZY: Readonly<Record<string, { routes?: readonly string[]; workers?: read
   'workflow-events': { workers: ['createCampaignConversionOutboxWorker', 'createCrmEntitlementWorker', 'createCrmImportFileCleanupWorker', 'createCrmRetentionWorker'] },
   'workers': { workers: ['createCleanupWorker', 'createOrganizationUpgradeWorker', 'createSessionStateWorker', 'createSessionTitleWorker'] },
   'learning-workers': { workers: ['createFeedEditorialWorker', 'createPlaybookReflectionWorker', 'createSkillReviewWorker'] },
-  'memory-workers': { workers: ['createGDriveCatalogWorker', 'createGDriveEnrichmentWorker', 'createLinkedInImportWorker'] },
+  'memory-workers': { workers: ['createFileIngestWorker', 'createGDriveCatalogWorker', 'createGDriveEnrichmentWorker', 'createLinkedInImportWorker'] },
   'recording-workers': { routes: ['chatArchiveExtractRoutes'], workers: ['createOpenRecordingProcessWorker', 'createRecordingAutoTitleWorker'] },
   'sync-workers': { routes: ['ingestRoutes'], workers: ['createExternalSinkRelay', 'createGoalStallReaper', 'createStuckSessionSweeper', 'createViewsPruneWorker'] },
   'channels': { routes: ['channelsRoutes', 'customChannelBridgeRoutes', 'discordRoutes', 'feishuNotificationRoutes', 'feishuRoutes', 'msteamsRoutes', 'slackLinkingRoutes', 'slackRoutes', 'telegramByoRoutes', 'telegramLinkingRoutes', 'wechatRoutes', 'whatsappByonRoutes', 'whatsappCloudRoutes', 'whatsappIngestAdminRoutes'] },

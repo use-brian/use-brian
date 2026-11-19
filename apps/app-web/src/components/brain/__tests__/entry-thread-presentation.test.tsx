@@ -145,11 +145,19 @@ describe("[COMP:app-web/brain-entry-thread] the Ask thread on the controller", (
     await settle();
     t.clock.runFrames();
     expect(controller.getSnapshot().transcript.streamingText).toBe("partial");
+    t.net.transport.loadHistory.mockResolvedValueOnce([
+      { id: "saved-user", role: "user", text: "Explain" },
+      { id: "saved-partial", role: "assistant", text: "partial" },
+    ]);
     pendingStop.resolve({ stopped: true });
     expect(await stopped).toBe("stopped");
     expect(sse.aborted()).toBe(true);
     expect(await send).toBe("stopped");
-    expect(entryTurnOutcome("stopped", controller.getSnapshot())).toMatchObject({ kind: "stopped" });
+    const settled = controller.getSnapshot();
+    expect(settled.transcript.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: "assistant", text: "partial" }),
+    ]));
+    expect(entryTurnOutcome("stopped", settled)).toBeNull();
   });
 
   it("leaves the turn running and says so when the stop request fails", async () => {

@@ -20,7 +20,7 @@ export async function assertChannelConversationCurrent(db: Client, sessionId: st
     AND s.provider_context_identity=$2::jsonb AND s.provider_context_generation=$3
     AND ${sessionKindSql.providerConversationContext('s')} AND ${sessionKindSql.activeChannelRoom('s')}
     ${conversationAnchorWriteAdmissionActive() ? `AND EXISTS(SELECT 1 FROM public.conversation_envelopes e WHERE e.session_id=s.id
-      AND e.workspace_id=s.workspace_id AND e.visibility='workspace'
+      AND e.workspace_id=s.workspace_id AND ${sessionKindSql.workspaceEnvelope('e')}
       AND public.scope_review_state_held('session',s.id) IS NOT TRUE FOR SHARE OF e)` : ''}
     RETURNING id`,
   [sessionId,expected.identity,expected.generation])

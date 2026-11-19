@@ -19,14 +19,15 @@ export const terminalPublicationResultSchema=z.object({operationId:uuid,commandD
 type Result=z.infer<typeof terminalPublicationResultSchema>
 type Message={role:string;content:unknown;senderAssistantId?:string|null}
 export type BoundBufferedTerminalCommand=Readonly<{readonly terminalCommand:unique symbol}>
-type Binding={root:BufferedWebPublication;execution:ExecutionContext;rowsDigest:string;candidate:TerminalDescriptor|null;owner:{closed:boolean}}
+type OwnerState = { closed: boolean; disposition: 'pending' | 'committed' | 'stopped' }
+type Binding={root:BufferedWebPublication;execution:ExecutionContext;rowsDigest:string;candidate:TerminalDescriptor|null;owner:OwnerState}
 const bindings=new WeakMap<BoundBufferedTerminalCommand,Binding>()
-const committed=new WeakSet<object>()
 function changed():never{throw new Error('Terminal publication binding changed')}
 
 /** Called by the real kernel owner; the route receives only its methods. */
 export function createTerminalPublicationOwner(token:string,signal:AbortSignal){
- const owner={closed:false},roots=new WeakMap<BufferedWebPublication,ExecutionContext>()
+ const owner: OwnerState = { closed: false, disposition: 'pending' }
+ const roots=new WeakMap<BufferedWebPublication,ExecutionContext>()
  let finalized:FinalizedOutputSelection|null=null
  return {
   bindRoot(root:BufferedWebPublication,execution:ExecutionContext){
@@ -53,7 +54,8 @@ export function createTerminalPublicationOwner(token:string,signal:AbortSignal){
    const handle=Object.freeze({}) as BoundBufferedTerminalCommand
    bindings.set(handle,{root,execution,rowsDigest:outputContentDigest(rows),candidate,owner});return handle
   },
-  isCommitted(){return committed.has(owner)&&!signal.aborted},
+  isCommitted(){return owner.disposition==='committed'&&!signal.aborted},
+  isStopped(){return owner.disposition==='stopped'},
   close(){owner.closed=true;finalized=null},
  }
 }
@@ -71,7 +73,11 @@ export function acceptCommittedTerminalPublication(handle:BoundBufferedTerminalC
  rows:readonly {id:string;sequenceNum:number}[],raw:unknown,requestedStopped:boolean):void{
  const b=bindings.get(handle),result:Result=terminalPublicationResultSchema.parse(raw)
  if(!b||b.owner.closed||b.root!==root||b.execution!==execution||result.operationId!==root.operationId||result.requestedStopped!==requestedStopped)changed()
- if(result.stopped){if(result.terminalDescriptor!==null||result.terminalOutputs!==null)changed();return}
+ if(result.stopped){
+  if(result.terminalDescriptor!==null||result.terminalOutputs!==null)changed()
+  b.owner.disposition='stopped'
+  return
+ }
  if(!b.candidate){if(result.terminalDescriptor!==null||result.terminalOutputs!==null)changed();return}
  if(outputContentDigest(result.terminalDescriptor)!==outputContentDigest(b.candidate)||result.terminalOutputs?.length!==b.candidate.members.length)changed()
  for(const [index,m]of b.candidate.members.entries()){
@@ -79,5 +85,5 @@ export function acceptCommittedTerminalPublication(handle:BoundBufferedTerminalC
   if(actual.origin!==m.origin||actual.revision!==m.revision||actual.commandOrdinal!==m.commandOrdinal
    ||actual.id!==row?.id||actual.sequence!==row.sequenceNum)changed()
  }
- committed.add(b.owner)
+ if(b.owner.disposition!=='stopped')b.owner.disposition='committed'
 }

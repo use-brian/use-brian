@@ -1420,6 +1420,7 @@ async function dispatchLocal(params: {
           toolCallId: confirmId,
           toolName: tool,
           toolInput: args,
+          ...(entry.lazy?.version ? { connectorTarget: { serverName: entry.server, version: entry.lazy.version } } : {}),
           describeText:
             displayLines && displayLines.length > 0
               ? displayLines.join('\n')

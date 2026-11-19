@@ -42,6 +42,8 @@ import {
 import { DEFAULT_STALL_IDLE_MS } from '@use-brian/agent-runtime/engine/stall-watchdog.js'
 import {
   createTurnOutputCollector,
+  type TurnOutputCollector,
+  type TurnOutputFormat,
   type TurnOutputSelection,
   type FinalizedOutputSelection,
 } from '@use-brian/agent-runtime/engine/turn-output.js'
@@ -49,7 +51,7 @@ import type { ContentBlock, Message } from '@use-brian/agent-runtime/providers/t
 import { inheritScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import type { ToolContext, Tool } from '@use-brian/agent-runtime/tools/types.js'
 import {createTerminalPublicationOwner} from './terminal-publication.js'
-import type {BufferedWebPublication} from '../db/conversation-publication-recovery.js'
+import { committedTurnCompletion, type BufferedWebPublication } from '../db/conversation-publication-recovery.js'
 import { sanitizeDeliveryText } from '@use-brian/shared'
 import type { ProviderAvailability } from '@use-brian/shared/model-registry'
 import type { ResolvedWorkspaceCustomLlm } from '../custom-llm-runtime.js'
@@ -61,7 +63,8 @@ import { openTurnAdmissionClosure, type AdmissionClosureStats, type TurnAdmissio
 import { registerTurnAbort, releaseTurn, startLeaseHeartbeat, takeTurnLease, unregisterTurnAbort,TurnLeaseLostError,TurnStoppedError,turnAbortKind } from './lease.js'
 import { captureTurnUsageBilling, type TurnBilling, type TurnUsageBilling, type TurnUsageSettlement } from './billing.js'
 import { bindSessionTurnAuthority,isAuthorityChangedError } from '../context-scope/authority-lease.js'
-import type { TurnEndReason,RecoveredTurn } from '../db/sessions.js'
+import { bindVerifiedResumeEvidence } from '../context-scope/native-invocation-evidence.js'
+import { findSessionTurnLeaseState, type TurnEndReason, type RecoveredTurn } from '../db/sessions.js'
 import { registerTurnInbox, type TurnInboxHandle } from '../turn-inbox.js'
 import { randomUUID } from 'node:crypto'
 import { currentTurnFrame, readTurnSqlLedger, turnSqlRecordingEnabled, withTurnFrame, type TurnSqlLedger } from '../db/turn-sql-accounting.js'
@@ -69,8 +72,10 @@ import type { SessionMessage } from '../db/sessions.js'
 import { writeTurnPublication, type TurnPublicationRequest } from './publication.js'
 import { captureCapabilityComposition, type TurnCapabilityProfile, type TurnCapabilityRequest, type TurnCapabilityResult } from './capabilities.js'
 import { captureTurnHistory, type CapturedTurnHistory, type TurnHistoryRequest } from './history.js'
+import { resumePredecessorSlotWait, type ResumeSlotWaitOptions } from './resume-recovery.js'
+import { composeRecoveryMessage, type ComposeRecoveryMessageResult, type RecoveryPendingTurn } from './recovery-message.js'
 import { captureTurnModelPreparation, type TurnModelInvocation, type TurnModelServices, type TurnMainModelRequest, type PreparedTurnModel,
-  type TurnRunPreparationInput, type PreparedTurnRun } from './prepare.js'
+  type TurnRunPreparationInput, type PreparedTurnRun, type PreparedBackgroundModel } from './prepare.js'
 
 export type TurnSinkKind = 'sse' | 'adapter' | 'json' | 'return' | 'none'
 
@@ -155,7 +160,7 @@ export type AssistantTurnLoopInput = {
   /** Throws `TurnRefusal('budget_blocked')` (or anything) to stop before the loop. */
   budget?: () => Promise<void>
   /** Output collector format for the final-only selection. */
-  outputFormat?: 'compact' | 'channel'
+  outputFormat?: TurnOutputFormat
   /** The stall window; defaults to `DEFAULT_STALL_IDLE_MS`. Derived, never an env knob. */
   stallIdleMs?: number
 }
@@ -168,6 +173,7 @@ export function servedTurnModel(model: TurnModel): string {
 
 type OpenAssistantTurnParams = Pick<AssistantTurnLoopInput, 'sessionId' | 'policy' | 'abortController'> & {
   waitForSlot?: (sessionId: string, opts?:{signal?:AbortSignal}) => Promise<boolean>
+  resumeRecovery?: { workspaceId: string; approvalId: string; options?: ResumeSlotWaitOptions }
   assistantId?: string
   startedAt?: Date
   /** Notification after an actual atomic stale takeover; never a claim decision. */
@@ -251,16 +257,35 @@ class AssistantTurnOwner {
   private completionRecorded = false
   private sinkKind: TurnSinkKind | undefined
   private lastResult: TurnLoopResult | undefined
+  private outputCollector: TurnOutputCollector | undefined
   private readonly results=new WeakSet<TurnLoopResult>()
   private modelPreparation: ReturnType<typeof captureTurnModelPreparation> | undefined
   private modelPreparations: Promise<unknown>[] = []
   private preparedMainModel: PreparedTurnModel | undefined
   private mainPreparationStarted = false
   private backgroundPreparationStarted = false
+  private preparedBackgroundModel: PreparedBackgroundModel | undefined
+  private recoveryContext: ToolContext | undefined
+  private recoveryMessage: Promise<ComposeRecoveryMessageResult | null> | undefined
   bindModelPreparation(invocation: TurnModelInvocation, services: TurnModelServices): void {
     if (this.modelPreparation || this.ran || this.closed) throw new Error('Model preparation must bind once before running.')
     this.disposeSessionTurnAuthority=bindSessionTurnAuthority(invocation.execution.security.authority,
       {sessionId:this.params.sessionId,assistantId:invocation.execution.assistant.id,token:this.token})
+    const recovery = this.params.resumeRecovery
+    const execution = invocation.execution
+    if (recovery && invocation.toolProfile === 'resume' && execution.identity.kind === 'system'
+      && execution.identity.purpose === 'session_resume' && execution.identity.jobId === recovery.approvalId
+      && execution.security.access.workspaceId === recovery.workspaceId
+      && execution.lifecycle.sessionId === this.params.sessionId && execution.assistant.id === this.params.assistantId) {
+      bindVerifiedResumeEvidence(execution, this.token, async () => {
+        const signal = this.params.abortController.signal
+        signal.throwIfAborted()
+        const lease = await findSessionTurnLeaseState(this.params.sessionId)
+        if (this.didRelease || lease?.status !== 'running' || lease.turnLeaseToken !== this.token) throw new TurnLeaseLostError()
+        signal.throwIfAborted()
+      })
+    }
+
     this.modelPreparation = captureTurnModelPreparation(invocation, services,
       { sessionId: this.params.sessionId, assistantId: this.params.assistantId, signal: this.params.abortController.signal,
         effect: operation => {
@@ -313,7 +338,10 @@ class AssistantTurnOwner {
     if (!this.modelPreparation || this.backgroundPreparationStarted || this.ran || this.closed) throw new Error('Background model preparation is unavailable or already started.')
     this.backgroundPreparationStarted = true
     const preparation = this.modelPreparation, original = { ...request }
-    const prepared = this.frame('preparation', () => Promise.resolve().then(() => preparation.background(original)))
+    const prepared = this.frame('preparation', () => Promise.resolve().then(() => preparation.background(original)).then(background => {
+      this.preparedBackgroundModel = background
+      return background
+    }))
     this.modelPreparations.push(prepared)
     return prepared
   }
@@ -412,7 +440,9 @@ class AssistantTurnOwner {
   sqlLedger(): TurnSqlLedger | undefined { return readTurnSqlLedger(this.sqlTurnId) }
   get released(): boolean { return this.didRelease }
   get completionReason():TurnEndReason|undefined{return this.endReason}
-  get abortKind():'stop'|'lease_lost'|'abort'|null{return turnAbortKind(this.params.abortController.signal)}
+  get abortKind():'stop'|'lease_lost'|'abort'|null{
+    return this.terminal.isStopped() ? 'stop' : turnAbortKind(this.params.abortController.signal)
+  }
   openInput(): Pick<TurnInboxHandle, 'port'> {
     if (this.closed) throw new Error('This turn has already closed.')
     this.input ??= registerTurnInbox(this.params.sessionId, { assistantId: this.params.assistantId })
@@ -443,14 +473,77 @@ class AssistantTurnOwner {
       ...(routine ? { routineCalendarRead: routine } : {}) }
     this.ran = true
     this.sinkKind = params.sink.kind
+    this.recoveryContext = { ...supplied.context }
+    const collector = createTurnOutputCollector({ format: params.outputFormat })
+    this.outputCollector = collector
     // Install the drain promise before a synchronous budget/host hook can finish.
-    this.running = Promise.resolve().then(() => runAssistantTurnLoop({ ...params,
+    this.running = Promise.resolve().then(() => runAssistantTurnLoop(collector, { ...params,
       model: { provider: model.provider, model: model.model, configuredProviders: model.configuredProviders, customLlm: model.customLlm },
       loop, sessionId: this.params.sessionId,
       policy: this.params.policy, abortController: this.params.abortController },
       result => { this.results.add(result); this.lastResult = result }, snapshot => { this.usageSnapshot = structuredClone(snapshot) },
       () => { this.producerTerminal = true }, this.frame)).finally(() => { this.runDrained = true })
     return this.running
+  }
+
+  /** Reconcile the original approval after claim and before replaying its outcome. */
+  async hasCommittedResumePublication(): Promise<boolean> {
+    const recovery = this.params.resumeRecovery
+    if (!recovery || this.closed || this.ran) throw new Error('Resume recovery requires its original turn owner before execution.')
+    const signal = this.params.abortController.signal
+    signal.throwIfAborted()
+    const completed = await this.frame('admission', () => committedTurnCompletion({
+      workspaceId: recovery.workspaceId,
+      sessionId: this.params.sessionId,
+      input: { kind: 'approval', ref: recovery.approvalId },
+    }))
+    signal.throwIfAborted()
+    return completed !== null
+  }
+
+  /** A presentation view of this owner's admitted events, never a delivery grant. */
+  selectedOutput(format?: TurnOutputFormat): TurnOutputSelection {
+    const selection = this.outputCollector?.select(format)
+    return selection ? structuredClone(selection) : { kind: 'empty', reason: 'no_model_output' }
+  }
+
+  /** One interactive synthesis, from this turn's already paired tool results. */
+  recoverInteractiveReply(request: {
+    reason: 'failed' | 'empty'
+    pendingAssistantTurns: readonly RecoveryPendingTurn[]
+    userText: string
+    channelType: string
+    authorizeDestination: () => Promise<void>
+    recordUsage: (result: ComposeRecoveryMessageResult) => Promise<void>
+  }): Promise<ComposeRecoveryMessageResult | null> {
+    const { reason, pendingAssistantTurns, userText, channelType, authorizeDestination, recordUsage } = request
+    const signal = this.params.abortController.signal
+    const model = this.preparedBackgroundModel, context = this.recoveryContext
+    if (this.closed || this.abortKind || this.recoveryMessage || !model || !context
+      || (this.sinkKind !== 'sse' && this.sinkKind !== 'adapter')) return Promise.resolve(null)
+    if (reason === 'empty') {
+      const selection = this.selectedOutput()
+      if (selection.kind !== 'empty' || selection.reason !== 'tools_only') return Promise.resolve(null)
+    }
+    const assertDestination = async () => {
+      signal.throwIfAborted()
+      await authorizeDestination()
+      signal.throwIfAborted()
+    }
+    this.recoveryMessage = this.frame('follow_up', () => composeRecoveryMessage({
+      provider: model.provider, pendingAssistantTurns, userText, channelType, signal,
+      beforeDispatch: () => this.frame('model_input', async () => {
+        signal.throwIfAborted()
+        await admitModelSourceEvidence(context, 'context')
+        await assertDestination()
+      }),
+    }).then(async recovered => {
+      if (!recovered) return null
+      await recordUsage(recovered)
+      await assertDestination()
+      return recovered
+    }))
+    return this.recoveryMessage
   }
 
   /** Presentation is distinct from durable publication. */
@@ -556,6 +649,7 @@ class AssistantTurnOwner {
         await Promise.allSettled(this.modelPreparations)
         // Failure of output/run cannot discard already observed spend.
         await this.running?.catch(() => {})
+        await this.recoveryMessage?.catch(() => {})
         this.terminal.close()
         this.input?.close()
         this.input = undefined
@@ -581,20 +675,26 @@ export type AssistantTurn = AssistantTurnOwner
 export async function openAssistantTurn(params: OpenAssistantTurnParams): Promise<AssistantTurn> {
   const scope = params.sqlScope && !consumedSqlScopes.has(params.sqlScope) ? params.sqlScope : undefined
   const sqlTurnId = scope?.sqlTurnId ?? randomUUID(), frame = turnSqlFrame(sqlTurnId)
-  const slot = await frame('admission', () => takeTurnLease({ sessionId: params.sessionId, admission: params.policy.admission,
-    waitForSlot: params.waitForSlot, assistantId: params.assistantId, startedAt: params.startedAt,signal:params.abortController.signal }))
-  if (!slot.taken) throw new TurnRefusal(slot.code)
-  const owner = new AssistantTurnOwner(params, slot.token,slot.turnId??null, sqlTurnId)
-  if (scope) consumedSqlScopes.add(scope)
-  if (slot.reclaimed) {
-    try { if(slot.recovered)frame('admission', () => params.onReclaimed?.(slot.recovered!)) }
+  const recovery = params.resumeRecovery
+  const resumeRecovery = recovery && { ...recovery, options: { ...recovery.options } }
+  const onReclaimed = (recovered: RecoveredTurn) => {
+    try { frame('admission', () => params.onReclaimed?.(recovered)) }
     catch (error) { console.error('[turn-owner] stale recovery notification failed:', error) }
   }
+  const waitForSlot = resumeRecovery
+    ? resumePredecessorSlotWait({ approvalId: resumeRecovery.approvalId, options: resumeRecovery.options, onReclaimed })
+    : params.waitForSlot
+  const slot = await frame('admission', () => takeTurnLease({ sessionId: params.sessionId, admission: params.policy.admission,
+    waitForSlot, idleOnly: !!resumeRecovery, assistantId: params.assistantId, startedAt: params.startedAt, signal: params.abortController.signal }))
+  if (!slot.taken) throw new TurnRefusal(slot.code)
+  const owner = new AssistantTurnOwner({ ...params, resumeRecovery }, slot.token, slot.turnId ?? null, sqlTurnId)
+  if (scope) consumedSqlScopes.add(scope)
+  if (slot.reclaimed && slot.recovered) onReclaimed(slot.recovered)
   if(params.abortController.signal.aborted){await owner.finish('failed');params.abortController.signal.throwIfAborted()}
   return owner
 }
 
-async function runAssistantTurnLoop(params: AssistantTurnLoopInput,onResult?:(result:TurnLoopResult)=>void,observeUsage?:(snapshot:QueryUsageSnapshot)=>void,onProducerTerminal?:()=>void,
+async function runAssistantTurnLoop(collector: TurnOutputCollector, params: AssistantTurnLoopInput,onResult?:(result:TurnLoopResult)=>void,observeUsage?:(snapshot:QueryUsageSnapshot)=>void,onProducerTerminal?:()=>void,
   frame: TurnSqlFrame = (_id, fn) => fn()): Promise<TurnLoopResult> {
   const original = {
     execution: params.loop.context.executionContext,
@@ -642,7 +742,6 @@ async function runAssistantTurnLoop(params: AssistantTurnLoopInput,onResult?:(re
     assertIdentity()
     assertPermissionContextBinding(context)
   }
-  const collector = createTurnOutputCollector({ format: params.outputFormat ?? 'compact' })
   // Text of the current model round that was admitted AND delivered to the
   // streaming sink. A Stop closes the producer mid-round, so the loop never
   // yields that round's `assistant_turn`; the owner records it at the Stop exit.

@@ -112,7 +112,14 @@ export async function executeActivationProbe(id, context) {
     requireStatus(queued, [200, 202], 'File ingest enqueue')
     const job = find(queued.body, value => typeof value.jobId === 'string')
     if (!job) throw new Error('File ingest did not return its durable job')
-    if (!workers) return { status: 'not-yet-run', jobId: job.jobId, queued: true, reason: 'Completion requires the workers-enabled runtime' }
+    if (!workers) {
+      const read = await request(`/api/files/ingest-jobs/${job.jobId}`)
+      requireStatus(read, [200], 'Workers-disabled file ingest reopen')
+      if (read.body?.jobId !== job.jobId || read.body.status !== 'pending') {
+        throw new Error('The file-ingest job did not reopen pending with workers disabled')
+      }
+      return { status: 'pass', jobId: job.jobId, queued: true, completed: false, durableReopen: true }
+    }
     const deadline = Date.now() + 90_000
     while (Date.now() < deadline) {
       const read = await request(`/api/files/ingest-jobs/${job.jobId}`)

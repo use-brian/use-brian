@@ -1,5 +1,5 @@
 import { routeAttendedTurn, type AttendedTurnRoute } from './attended-turn-routing.js'
-import {resumePrivateLegacySession,PRIVATE_TRANSCRIPT_INSTRUCTION} from '../db/private-transcript.js'
+import {bindPrivateResponderTranscript,resumePrivateLegacySession,PRIVATE_TRANSCRIPT_INSTRUCTION} from '../db/private-transcript.js'
 import { attachWorkspaceFiles } from '../files/workspace-attachments.js'
 import { bindWorkspaceCredentialDelegation, workspaceCredentialDelegation } from '@use-brian/agent-runtime/security/workspace-delegation.js'
 import { createWorkspaceTurnSink, type NativeChatRequest, type NativeChatSink, type WorkspaceTurnInput, type WorkspaceTurnResult, type WorkspaceTurnBinding } from '../workspace-mcp/native-turn.js'
@@ -100,7 +100,7 @@ import { EvidenceAccumulator } from '@use-brian/agent-runtime/security/evidence.
 import { isSensitivity, minSensitivity, SensitivityAccumulator } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { filterToolsByCapabilities } from '@use-brian/agent-runtime/tools/capability-gate.js'
 import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
-import { classifySession, isPersonalChat, policyFor, sessionPolicy } from '../session-kind.js'
+import { classifySession, isPersonalChat, policyFor, sessionPolicy, usesStoredPrivateChat, usesWorkspacePromptIndexes } from '../session-kind.js'
 import { abortLocalTurn, waitForTurnSlot, TURN_SLOT_WAIT_TIMEOUT_MS, TurnStoppedError } from '../turn/lease.js'
 import { finalizedTurnOutput, openAssistantTurn, openTurnSqlScope, TurnRefusal, turnUsageIdentity, type AssistantTurn, type TurnSqlScope } from '../turn/kernel.js'
 import { createBufferedTurnOutput } from './buffered-turn-output.js'
@@ -130,7 +130,6 @@ import { recordRoomMentionsForMessage, type RecordRoomMentionsResult } from '../
 import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { resolveMentionSpans } from '@use-brian/shared/mention-matching'
 import { recordOverheadUsage } from './_overhead-usage.js'
-import { composeRecoveryMessage } from './_recovery-message.js'
 import { composeEmptyTurnSynthesis } from './_empty-turn-synthesis.js'
 import { resolveReplyText } from './_reply-context.js'
 import { resolveBrandContext } from '../brand/prompt-context.js'
@@ -174,7 +173,7 @@ import type { CacheStore } from '@use-brian/agent-runtime/compaction/cache-tool.
 import type { EngineHooks } from '@use-brian/agent-runtime/engine/hooks.js'
 import type { McpSettingsStore, ConfirmationDecision, ConfirmationResolver } from '@use-brian/agent-runtime/mcp/types.js'
 import type { Message, LLMProvider, ContentBlock, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
-import type { Tool, WorkerResult } from '@use-brian/agent-runtime/tools/types.js'
+import type { ConnectorResumeTarget, Tool, WorkerResult } from '@use-brian/agent-runtime/tools/types.js'
 
 import { resolveModel, ensureServableModel, backgroundModelFor, isStandardTier, chatTierBudget, planNudgeCap, tierForModel, isExplicitMeteredModelSelection } from '../model-resolution.js'
 import { isRegistryModelAvailable, registryRow } from '@use-brian/shared/model-registry'
@@ -1819,6 +1818,7 @@ export type ResumeReplayParams = {
   suspendedToolName: string
   /** Model-proposed arguments at suspension. The approval gates THIS input. */
   suspendedToolInput: unknown
+  connectorTarget?: ConnectorResumeTarget
   /** Resume worker position marker — useful for analytics + assertions. */
   loopStepIndex: number
   selectedCustomModel?: string
@@ -1943,6 +1943,7 @@ export async function runSessionResume(
       approvalId,
       suspendedToolName: point.suspendedToolName,
       suspendedToolInput: point.suspendedToolInput,
+      ...(point.connectorTarget ? { connectorTarget: point.connectorTarget } : {}),
       loopStepIndex: point.loopStepIndex,
       ...(point.selectedCustomModel ? { selectedCustomModel: point.selectedCustomModel } : {}),
       ...(point.selectedTier ? { selectedTier: point.selectedTier } : {}),
@@ -3005,6 +3006,19 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       turnTimingIdentity = { userId: user.id, assistantId: assistant.id, sessionId: session.id }
 
       const turnPolicy = sessionPolicy(classifySession(session))
+      if (!programmatic && !requestedRoomResponseGroup && turnPolicy.read.rule === 'owner'
+        && classifySession(session).surface === 'chat' && session.channelType === 'web'
+        && session.workspaceId === assistant.workspaceId && session.workspaceId
+        && session.userId === user.id && session.assistantId !== assistant.id) {
+        // A single private responder keeps its own reader floor. The room record
+        // admission continues to govern every group and workspace response.
+        const envelope = (await query<{cap: Sensitivity}>(`SELECT cap FROM conversation_envelopes
+          WHERE workspace_id=$1 AND session_id=$2 AND starter_user_id=$3
+            AND visibility IN ('configured_private','private_by_kind')`, [session.workspaceId,session.id,user.id])).rows[0]
+        if (envelope && roomClearanceFit({assistantClearance:assistant.clearance,roomClearance:envelope.cap}) === 'below') {
+          bindPrivateResponderTranscript(executionContext)
+        }
+      }
       const pageBoundTurn = turnPolicy.read.rule === 'workspace' && turnPolicy.read.anchorGate === 'doc_page'
       const isRoomSession = turnPolicy.crossAssistantSend === 'room'
       sharedAudienceForError = turnPolicy.deliveryCeiling.ceiling === 'audience'
@@ -4695,9 +4709,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       const viewerCtx = { ...automaticContextAccess(turnScope.access, turnScope.activeProjectId), memoryContext: { ...(turnScope.activeProjectId ? {projectId:turnScope.activeProjectId} : {}), activity:memoryActivityFromText(typeof message === "string" ? message : undefined) } }
       let promptIndexes: ReturnType<NonNullable<typeof options.memoryStore.getPairedPromptIndexes>> | undefined
       let nativePromptMemory: ReturnType<NonNullable<typeof options.memoryStore.getPromptMemoryContext>> | undefined
-      const privatePromptShape = !executionContext.security.access.sharedAudience && session.channelType==='web'
-        && session.appOrigin==='chat' && session.anchorKind==='none' && session.workspaceId===assistant.workspaceId
-        && (session.visibility==='owner' || session.visibility==='personal') && session.mode!=='draft'
+      const privatePromptShape = !executionContext.security.access.sharedAudience && usesStoredPrivateChat(session)
+        && session.workspaceId===assistant.workspaceId
         && session.userId===user.id && session.assistantId===assistant.id
       const auxiliaryPrompt = nativeTranscriptAuthority && privatePromptShape
         ? options.memoryStore.getPromptAuxiliaryContext?.(viewerCtx,'Use Brian',nativeTranscriptAuthority) : undefined
@@ -4707,9 +4720,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           : undefined
       const readPromptIndexes = (candidate: typeof nativeTranscriptAuthority) =>
         candidate && assistant.workspaceId && (!executionContext.security.access.sharedAudience
-          || conversationReadersActive() && session.channelType==='web'
-          && (session.appOrigin==='chat' && session.anchorKind==='none' || pageBoundTurn)
-          && session.visibility==='workspace'
+          || conversationReadersActive() && usesWorkspacePromptIndexes(session, pageBoundTurn)
           && session.workspaceId===assistant.workspaceId && session.assistantId===assistant.id
           && turnScope.activeProjectId===null)
           ? (promptIndexes ??= options.memoryStore.getPairedPromptIndexes?.(viewerCtx,PER_TURN_INDEX_CAP,candidate))
@@ -7055,18 +7066,24 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         const replyRow=[...assembled.assistantRows].find(([,row])=>row.isLast)?.[0] ?? null
         await turnTiming.time('reply_publication', () => ownedTurn.publish({ disposition: 'reply', rows: assembled.rows, write: batchWrite,
           native: nativeTranscriptAuthority, execute: operation => authority.execute(operation), measure: turnTiming.time,
-          pendingAnnotation: nativeClassification?.pendingAnnotation, replyRowIndex: replyRow,
+          // Only the turn that authored the group input publishes its annotation.
+          // Later responders read that revision and must leave their evidence current.
+          pendingAnnotation: roomResponseGroupContext?.sourceMessageId ? undefined : nativeClassification?.pendingAnnotation,
+          replyRowIndex: replyRow,
           // The durable completion header (8277): this turn's answer to its authored input.
           completion: { lane: 'web', input: { kind: 'session_message', ref: storedUserMsg.id }, assistantId: assistant.id },
           ...(bufferedWebPublication ? { buffered: { root: bufferedWebPublication, selectedOrdinals } } : {}),
           afterCommit: async (rows) => {
           const savedTurns = [...assembled.assistantRows].flatMap(([index, row]) => rows[index]
             ? [{ stored: rows[index]!, isLast: row.isLast, attachments: row.isLast ? outboundAttachments : [] }] : [])
-          if (savedTurns.length > 0 && !stoppedNativeBuffer) await assertDeliveryAudience()
+          // The authenticated commit can observe Stop under its publication lock
+          // before the local heartbeat updates the request's signal.
+          const stopped = stoppedNativeBuffer || ownedTurn.abortKind === 'stop'
+          if (savedTurns.length > 0 && !stopped) await assertDeliveryAudience()
           for (const saved of savedTurns) {
             lastAssistantMessageId = saved.stored.id
             turnLedgerHandle.bindAssistantMessageId(saved.stored.id)
-            if (stoppedNativeBuffer) continue
+            if (stopped) continue
 
             // The UI uses `assistant_message_saved` to attach retry/edit/
             // feedback actions to the most recent bubble. Only emit for the
@@ -7103,6 +7120,12 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             }
           }
         } }))
+
+        if (ownedTurn.abortKind === 'stop') {
+          recallBuffer?.discard()
+          turnTiming.mark('flush')
+          return
+        }
 
         // Flush the per-turn memory recall buffer once the final assistant
         // message id is known. All buffered recalls (index_inject + tool_call)
@@ -7506,6 +7529,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
                   approvalId: event.approvalId,
                   suspendedToolName: event.toolName,
                   suspendedToolInput: event.toolInput,
+                  connectorTarget: event.connectorTarget,
                   selectedCustomModel: customLlmRuntime?.selector,
                   selectedTier: logicalTier,
                   selectedLegacyByo: usedLegacyByoKey,
@@ -8337,7 +8361,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         )
         await settleResearch(
           turnLoopResult.selection.kind === 'text' ? sanitizeDeliveryText(turnLoopResult.selection.text) : '',
-          abortController.signal.aborted || !!queryLoopError,
+          ownedTurn.abortKind !== null || !!queryLoopError,
           turnLoopResult.selection.kind === 'question',
         )
         if (ownedTurn.abortKind === 'stop') throw new TurnStoppedError()
@@ -8571,13 +8595,16 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         // mode after tool calls). Best-effort; if Flash hiccups we
         // fall through to the outer catch's generic `error` event.
         try {
-          const recovered = !queryLoopError && !abortController.signal.aborted && !recoveryDelivered
-            ? await authority.execute(() => composeRecoveryMessage({
-                provider: backgroundProvider,
-                pendingAssistantTurns,
-                userText: userMessageText,
-                channelType: 'web',
-              })) : null
+          const recovered = !queryLoopError && !recoveryDelivered
+            ? await ownedTurn.recoverInteractiveReply({
+                reason: 'failed', pendingAssistantTurns, userText: userMessageText, channelType: 'web',
+                authorizeDestination: assertDeliveryAudience,
+                recordUsage: ({ model, usage }) => recordOverheadUsage({
+                  usageStore: options.usageStore, userId: user.id, assistantId: assistant.id,
+                  sessionId: session.id, userMessageId: storedUserMsg.id, model, usage,
+                  source: 'overhead:recovery-message', ...backgroundUsageAttribution,
+                }),
+              }) : null
           if (recovered) {
             await assertDeliveryAudience()
             sendEvent('text_delta', { text: recovered.text })
@@ -8593,17 +8620,6 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
               // Same attribution contract as the empty-turn synthesis above.
               senderAssistantId: assistant.id,
             }] })
-            await recordOverheadUsage({
-              usageStore: options.usageStore,
-              userId: user.id,
-              assistantId: assistant.id,
-              sessionId: session.id,
-              userMessageId: storedUserMsg.id,
-              model: recovered.model,
-              usage: recovered.usage,
-              source: 'overhead:recovery-message',
-              ...backgroundUsageAttribution,
-            })
             recoveryDelivered = true
           }
         } catch (recoverErr) {

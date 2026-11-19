@@ -12,7 +12,7 @@ import { ensureOfficeArtifactSessionSystem } from '../office-artifact-sessions.j
 import { officeArtifactStore } from '../office-artifacts.js'
 import { addSessionMessage } from '../sessions.js'
 import { createTask, getTaskById, listTasks } from '../tasks.js'
-import { createWorkspaceFile, getWorkspaceFileById } from '../workspace-files.js'
+import { createWorkspaceFile, getWorkspaceFileById, supersedeWorkspaceFile } from '../workspace-files.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -105,8 +105,22 @@ it('withholds native Memory, Task and file derivatives without rewriting their f
     expect(await readMemory(previous.id)).toBeNull()
     expect(await readMemory(child.id)).toBeNull()
     expect((await readFileLineage()).rows).toEqual([{allowed:false}])
+    expect(await supersedeWorkspaceFile(f.ownerId,f.workspaceId,file.id,{
+      editorUserId:f.ownerId,storageUri:'gs://fixture/refused-successor',sizeBytes:1,
+    },access)).toBeNull()
     await expect(save('Fictional refused laundering write',memorySource)).rejects.toThrow()
     expect((await physical()).rows).toEqual(beforeHold)
+
+    // A physical successor with no direct derivation still inherits the
+    // withdrawn conversation origin through its workspace-local predecessor.
+    const successor = await createWorkspaceFile(f.ownerId,{
+      workspaceId:f.workspaceId,path:'/fictional-successor.txt',parentPath:'/',
+      name:'fictional-successor.txt',mime:'text/plain',sizeBytes:1,storageUri:'gs://fixture/fictional-successor',
+      sensitivity:'internal',createdByUserId:f.ownerId,userId:f.ownerId,
+    })
+    expect(await getWorkspaceFileById(access,successor.id)).toMatchObject({id:successor.id})
+    await f.pool.query('UPDATE workspace_files SET valid_to=now(),superseded_by=$2 WHERE id=$1',[file.id,successor.id])
+    expect(await getWorkspaceFileById(access,successor.id)).toBeNull()
     const reopened = JSON.stringify((await capture()).rows)
     expect(reopened).not.toContain('Fictional earlier request')
     expect(reopened).toContain('Fictional earlier response')

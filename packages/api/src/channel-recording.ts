@@ -2,6 +2,7 @@
  * An installation's recorder is distinct from the actor receiving a group reply.
  * Spec: channels/adapter-pattern.md, Personal recording destinations.
  */
+import { sessionKindSql } from './session-kind.js'
 import { randomUUID } from 'node:crypto'
 import type { PoolClient } from 'pg'
 import type { ResourceScope } from '@use-brian/agent-runtime/security/derived-scope.js'
@@ -162,7 +163,7 @@ async function appendTelegramRecording(input: RecordingMessage): Promise<Recordi
           AND s.recording_policy_id=$4 AND s.recording_revision=$5
           AND s.anchor_kind='channel' AND s.channel_type='telegram' AND s.channel_id=$6
           AND s.archived_at IS NULL AND s.visibility=$7
-          AND ($7='workspace')=(e.visibility='workspace')
+          AND ($7='workspace')=(${sessionKindSql.workspaceEnvelope('e')})
           AND public.conversation_member_read_allowed(e.workspace_id,s.id,e.starter_user_id)
         FOR SHARE OF e,s`, [policy.sessionId,owner.workspaceId,owner.ownerUserId,policy.id,
         policy.revision,input.conversationId,policy.destination])

@@ -266,11 +266,7 @@ async function collectShopifyTools(
 
 // ── Provider module ───────────────────────────────────────────
 
-/**
- * One Shopify lane. `withCachedFileReader` threads the upload-cache reader;
- * only the personal base lane receives it (grant and workspace-owned lanes
- * read workspace files only).
- */
+/** One Shopify lane. Attached bytes come from the executing surface and actor. */
 export type ShopifyLane = BuiltinLane<{ connectorId: string; connected: boolean; url?: string | null }> & {
   credsOverride?: () => Promise<string | null>
   persistOverride?: (encoded: string) => Promise<void>
@@ -278,7 +274,6 @@ export type ShopifyLane = BuiltinLane<{ connectorId: string; connected: boolean;
   resolveInstanceCreds?: (instanceId: string) => Promise<string | null>
   persistInstanceCreds?: (instanceId: string, clientId: string, secret: string) => Promise<void>
   healthProbe?: { report: HealthReporter; instanceId?: string | null }
-  withCachedFileReader?: boolean
 }
 
 export async function activateShopifyLane(ctx: ProviderActivationContext, lane: ShopifyLane): Promise<Tool[]> {
@@ -288,7 +283,7 @@ export async function activateShopifyLane(ctx: ProviderActivationContext, lane: 
     ctx.stores.assistantConnectorStore, tools, laneUnavailable(ctx, lane), lane.credsOverride,
     lane.persistOverride, lane.extraInstances, lane.resolveInstanceCreds, lane.persistInstanceCreds,
     lane.healthProbe, ctx.stores.assistantConnectorGrantsStore, ctx.attachments.filesApi,
-    lane.withCachedFileReader ? ctx.attachments.readCachedFile : undefined, ctx.stores.connectorInstanceStore,
+    ctx.attachments.readCachedFile, ctx.stores.connectorInstanceStore,
   )
   return [...tools.values()]
 }

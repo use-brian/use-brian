@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { classifySession, isTuningSession, normalizeSessionVisibility, type SessionKindRow } from '../session-kind.js'
+import { classifySession, hasWorkspaceConversationAudience, isTuningSession, normalizeSessionVisibility,
+  sessionKindSql, usesStoredPrivateChat, usesWorkspacePromptIndexes, type SessionKindRow } from '../session-kind.js'
 
 /**
  * Every session shape in the wild (docs/plans/unified-sessions.md section 2.1)
@@ -101,5 +102,40 @@ describe('[COMP:api/session-kind] classifySession', () => {
   it('recognizes the tuning sentinel', () => {
     expect(isTuningSession({ channelId: 'tuning' })).toBe(true)
     expect(isTuningSession({ channelId: 'abc' })).toBe(false)
+  })
+})
+
+describe('[COMP:api/session-kind] stored native prompt and envelope shape', () => {
+  const chat = { channelType: 'web', anchorKind: 'none', appOrigin: 'chat' }
+
+  it('preserves the admitted private Chat shape for both storage spellings', () => {
+    expect(usesStoredPrivateChat({ ...chat, visibility: 'owner' })).toBe(true)
+    expect(usesStoredPrivateChat({ ...chat, visibility: 'personal' })).toBe(true)
+    expect(usesStoredPrivateChat({ ...chat, visibility: 'personal', mode: 'draft' })).toBe(false)
+    expect(usesStoredPrivateChat({ ...chat, visibility: 'unknown' })).toBe(false)
+    expect(usesStoredPrivateChat({ ...chat, visibility: 'personal', anchorKind: null })).toBe(false)
+    expect(usesStoredPrivateChat({ ...chat, visibility: 'personal', channelType: undefined })).toBe(false)
+  })
+
+  it('admits only workspace Chat or an already verified Page on web', () => {
+    const page = { channelType: 'web', anchorKind: 'doc_thread', appOrigin: 'doc', visibility: 'workspace' }
+    expect(usesWorkspacePromptIndexes({ ...chat, visibility: 'workspace' }, false)).toBe(true)
+    expect(usesWorkspacePromptIndexes(page, false)).toBe(false)
+    expect(usesWorkspacePromptIndexes(page, true)).toBe(true)
+    expect(usesWorkspacePromptIndexes({ ...page, visibility: 'personal' }, true)).toBe(false)
+    expect(usesWorkspacePromptIndexes({ ...page, channelType: 'telegram' }, true)).toBe(false)
+  })
+
+  it('uses the explicit record audience and retains the existing SQL expressions', () => {
+    expect(hasWorkspaceConversationAudience('workspace')).toBe(true)
+    for (const unsupported of ['configured_private', 'private_by_kind', undefined] as const) {
+      expect(hasWorkspaceConversationAudience(unsupported)).toBe(false)
+    }
+    expect(sessionKindSql.workspaceEnvelope('e')).toBe("e.visibility='workspace'")
+    expect(sessionKindSql.privateEnvelope('e')).toBe("e.visibility<>'workspace'")
+    expect(sessionKindSql.nativePrivatePromptChat('s')).toBe(
+      "s.channel_type='web' AND s.app_origin='chat' AND s.anchor_kind='none' AND s.anchor_ref IS NULL\n"
+      + "        AND s.visibility IN('owner','personal') AND s.mode IS DISTINCT FROM 'draft'",
+    )
   })
 })

@@ -8,6 +8,7 @@ import type {ExecutionContext} from '@use-brian/agent-runtime/security/execution
 import {RANK} from '@use-brian/agent-runtime/security/sensitivity.js'
 import {getApplicationExecutionBinding} from '../application-platform/execution-context.js'
 import {getAppPool,rlsGucSettings,runWithAgentAccess} from '../db/client.js'
+import {usesPrivateResponderTranscript} from '../db/private-transcript.js'
 import {conversationRecordSourceSchema,parseTurnConversationRecord,type ConversationRecord} from '../db/conversation-record.js'
 import {captureSessionAuthority} from './authority-lease.js'
 import {assertScopeEvidenceFitsCeiling} from './caller-evidence.js'
@@ -25,6 +26,7 @@ const lockedPublicationSchema=z.object({value:z.unknown(),transactionId:z.string
 const historySignature='public.capture_native_turn_conversation_record(uuid,uuid,uuid,uuid,uuid,integer,uuid,boolean,boolean,uuid,integer,integer,integer)'
 
 function changed():never{throw new DerivedScopeError('scope_source_changed')}
+
 function eligible(execution:ExecutionContext):boolean{
  const {identity,ownership,security,surface}=execution
  return identity.kind==='attended'&&identity.principal.kind==='workspace_member'
@@ -47,7 +49,7 @@ const placeholders='$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13'
 // Failure of an activated capture always propagates.
 const enabledPools=new WeakSet<Pool>()
 export async function tryReadTurnConversationRecord(execution:ExecutionContext,from?:number|null,through?:number,topicThrough?:number):Promise<ConversationRecord|null>{
- if(!eligible(execution))return null
+ if(!eligible(execution)||usesPrivateResponderTranscript(execution))return null
  const pool=getAppPool()
  if(!enabledPools.has(pool)){
   const installed=(await pool.query<{installed:boolean}>(`SELECT coalesce(

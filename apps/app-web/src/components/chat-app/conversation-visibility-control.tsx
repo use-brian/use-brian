@@ -114,7 +114,7 @@ export function ConversationVisibilityControl({ session, workspaceId }: { sessio
       {caps.canMoveProject && <div className="mt-3 space-y-2">
         <label className="block text-xs font-medium" htmlFor={`conversation-project-${session.id}`}>{t.project}</label>
         <Select value={projectId} onValueChange={value => setProjectId(value ?? "none")} disabled={saving || offline || projectsUnavailable || projectReadOnly}>
-          <SelectTrigger id={`conversation-project-${session.id}`} className="min-h-11 md:min-h-8 w-full"><SelectValue /></SelectTrigger>
+          <SelectTrigger id={`conversation-project-${session.id}`} className="min-h-11 md:min-h-8 w-full"><SelectValue>{projectId === "none" ? t.noProject : projects.find(project => project.id === projectId)?.name ?? t.project}</SelectValue></SelectTrigger>
           <SelectContent><SelectItem value="none">{t.noProject}</SelectItem>{projects.map(project => <SelectItem key={project.id} value={project.id}>{project.name}</SelectItem>)}</SelectContent>
         </Select>
         <p className="text-xs text-muted-foreground">{t.projectNotice}</p>

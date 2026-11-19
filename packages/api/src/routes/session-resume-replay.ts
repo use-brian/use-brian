@@ -29,11 +29,9 @@ import { withTurnInference } from '../turn/runtime.js'
 import { renderCharterBlock, resolveCharter } from '@use-brian/shared'
 import { openAssistantTurn, openTurnSqlScope, turnUsageIdentity, type TurnSqlScope } from '../turn/kernel.js'
 import { resolveTurnBilling } from '../turn/billing.js'
-import { TURN_SLOT_WAIT_TIMEOUT_MS, waitForTurnSlot, type TurnSlotWait } from '../turn/lease.js'
-import { readResumePredecessorLease } from '../db/session-resume-store.js'
+import type { ResumeSlotWaitOptions } from '../turn/resume-recovery.js'
 import type { ResumeCapabilityParams } from '../turn/capabilities.js'
 import { createTurnLedger } from '../ledger/recorder.js'
-import { committedTurnCompletion } from '../db/conversation-publication-recovery.js'
 import { noopPublishSessionEvent, type PublishSessionEvent } from '../session-event-port.js'
 import { createTurnStreamPublisher, publishTurnCompleted } from '../session-live-publisher.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
@@ -63,20 +61,19 @@ import {
 import { SensitivityAccumulator } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { boundScopeSource } from '@use-brian/agent-runtime/security/source-evidence.js'
 import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
-import { classifySession, normalizeSessionVisibility, policyFor, sessionAuthorityDestinationMatches } from '../session-kind.js'
+import { classifySession, normalizeSessionVisibility, policyFor, sessionAuthorityDestinationMatches, usesStoredPrivateChat } from '../session-kind.js'
 import {
   findSessionById,
   addSessionMessage,
-  reclaimStaleTurnOutcome,
   toStampedMessages,
-  TURN_LEASE_STALE_AFTER_MS,
-  type RecoveredTurn,
   type Session,
 } from '../db/sessions.js'
 import {
   createDeliveryAudienceAuthorizer,
   DeliveryAudienceUnverifiedError,
 } from '../context-scope/delivery-authority.js'
+import { roomAudienceCeiling } from './_room-binding.js'
+import { admitVerifiedPersonalResumeAudience, admitVerifiedSharedRoomResumeEvidence } from '../context-scope/native-invocation-evidence.js'
 import { findAssistantById } from '../db/users.js'
 import type { SessionResumeReplay, ResumeReplayParams } from './chat.js'
 import { MODEL_MAP, chatTierBudget, tierForModel } from '../model-resolution.js'
@@ -115,7 +112,7 @@ export type SessionResumeReplayDeps = {
    * candidates are the boot registry only, still bound by the same owner.
    */
   capabilityStores?: Omit<ResumeCapabilityParams, 'userId' | 'assistantId' | 'tools' | 'executionContext' | 'scopeAccumulator'
-    | 'contextScope' | 'assistantTeamId' | 'suspendedToolName'>
+    | 'contextScope' | 'assistantTeamId' | 'suspendedToolName' | 'connectorTarget'>
   /** Base L1 system prompt. The assistant's L2 is appended per-session. */
   systemPrompt: string
   /** Model for the continuation turn. Defaults to `gemini-flash`. */
@@ -147,52 +144,6 @@ export type SessionResumeReplayDeps = {
    * window is `TURN_LEASE_STALE_AFTER_MS`, the bound `TURN_SLOT_WAIT_TIMEOUT_MS`.
    */
   resumeSlotWait?: ResumeSlotWaitOptions
-}
-
-export type ResumeSlotWaitOptions = { staleAfterMs?: number; pollMs?: number; timeoutMs?: number }
-
-/**
- * The resume's slot wait (askquestion-suspend-resume.md → "Resumed turn
- * execution (D9)", step 1). The suspended turn's own lease, named by this
- * session's resume point, is the resume's predecessor: while it is fresh the
- * resume waits (a live process may still hold it); once its heartbeat is stale
- * the resume reclaims it through the sweeper's fenced `reclaimStaleTurnOutcome`
- * (`stalled_reclaimed` / `publication_recovered`), announces it, and lets the
- * owner claim, without waiting for a sweep tick. A fresh lease or one the resume
- * point does not name is never reclaimed here: it keeps the ordinary
- * `waitForTurnSlot` wait and fails closed at the timeout.
- */
-export function resumePredecessorSlotWait(params: {
-  approvalId: string
-  onReclaimed: (recovered: RecoveredTurn) => void
-  options?: ResumeSlotWaitOptions
-}): TurnSlotWait {
-  return async (sessionId, opts) => {
-    // Resolved on use: a slot that is free on the first claim never waits.
-    const staleAfterMs = params.options?.staleAfterMs ?? TURN_LEASE_STALE_AFTER_MS
-    const pollMs = params.options?.pollMs ?? 2_000
-    const deadline = Date.now() + (params.options?.timeoutMs ?? TURN_SLOT_WAIT_TIMEOUT_MS)
-    for (;;) {
-      opts?.signal?.throwIfAborted()
-      const lease = await readResumePredecessorLease(sessionId, params.approvalId, staleAfterMs)
-      if (!lease || !lease.running) return true
-      if (lease.predecessorToken && lease.stale) {
-        const recovered = await reclaimStaleTurnOutcome(sessionId, staleAfterMs, lease.predecessorToken)
-        if (recovered) {
-          params.onReclaimed(recovered)
-          return true
-        }
-        continue // the lease changed under us: read it again
-      }
-      const remaining = deadline - Date.now()
-      if (remaining <= 0) return false
-      // The predecessor is re-checked every poll; any other lease waits as before.
-      const freed = await waitForTurnSlot(sessionId, { signal: opts?.signal, pollMs,
-        timeoutMs: lease.predecessorToken ? Math.min(pollMs, remaining) : remaining })
-      if (freed) return true
-      if (!lease.predecessorToken) return false
-    }
-  }
 }
 
 type AssistantRow = NonNullable<Awaited<ReturnType<typeof findAssistantById>>>
@@ -491,9 +442,7 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
       sessionId,
       policy: resumePolicy,
       abortController,
-      waitForSlot: resumePredecessorSlotWait({ approvalId: params.approvalId, options: deps.resumeSlotWait,
-        onReclaimed: recovered => publishTurnCompleted({ sessionId, senderUserId: null, publishSessionEvent,
-          turnId: recovered.turnId, reason: recovered.reason }) }),
+      resumeRecovery: { workspaceId: initialAssistant.workspaceId, approvalId: params.approvalId, options: deps.resumeSlotWait },
       assistantId: initialAssistant.id,
       // Same stale-takeover notice as web and channel: the reclaimed
       // predecessor's followers see its terminal outcome, never this turn's.
@@ -517,8 +466,7 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
       // acknowledgement or resume-point deletion was lost) is never replayed;
       // 'completed' lets the caller delete the resume point. Read after this
       // owner holds the lease, so no predecessor can still be publishing.
-      if (await committedTurnCompletion({ workspaceId: initialAssistant.workspaceId, sessionId,
-        input: { kind: 'approval', ref: params.approvalId } })) { completed = true; return 'completed' }
+      if (await owner.hasCommittedResumePublication()) { completed = true; return 'completed' }
       // A queued replay resumes the current stored destination and scope, after
       // obtaining its slot, rather than preparing against its pre-wait snapshot.
       const admittedSession = await findSessionById(sessionId)
@@ -603,17 +551,24 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
         userId: session.userId,
         sharedAudience: !policyFor(session).context.personalMemory,
       })
-      // A closing row carries no source content, only the session's input
-      // envelope, and is written only while the original lease is still current.
-      const failureScope = resumeEnvelope
-      if (failureScope) publishFailureOutcome = async () => {
-        await owner.publish({ disposition: 'closing', native: null, write: { scope: failureScope },
-          execute: operation => retryTransientWrite(abortController.signal, sessionId, () => lease.execute(operation)),
-          rows: [{ role: 'assistant', senderAssistantId: assistant.id, content: [{ type: 'text', text: RESUME_FAILED_TEXT }] }] })
-      }
       const execution = resumeExecution(session, { ...assistant, workspaceId: assistant.workspaceId! }, params.approvalId,
         turnScope, bounded, lease, abortController.signal)
       const context = buildContext(session, turnScope, execution)
+      const sessionKind = classifySession(session)
+      const roomRecipient = session.channelType === 'web' && sessionKind.audience === 'workspace'
+        && sessionKind.anchor.kind === 'none' && sessionKind.surface === 'chat'
+        ? roomAudienceCeiling(assistant.workspaceId, session) : undefined
+      const personalWebChat = usesStoredPrivateChat(session)
+      const bindFailureOutcome = (evidence?: import('@use-brian/agent-runtime/security/context-scope.js').ScopeEvidence) => {
+        if (!resumeEnvelope) return
+        publishFailureOutcome = async () => {
+          await owner.publish({ disposition: 'closing', native: null, write: { scope: resumeEnvelope },
+            ...(roomRecipient && evidence ? { sharedRoomResume: { execution, evidence, recipient: roomRecipient } } : {}),
+            execute: operation => retryTransientWrite(abortController.signal, sessionId, () => lease.execute(operation)),
+            rows: [{ role: 'assistant', senderAssistantId: assistant.id, content: [{ type: 'text', text: RESUME_FAILED_TEXT }] }] })
+        }
+      }
+      if (!roomRecipient) bindFailureOutcome()
       owner.bindModelPreparation({ kind: 'execution', toolProfile: 'resume', execution, assertCurrent: assertReplayCurrent }, {
         provider: deps.provider, configuredProviders: turnDeps.configuredProviders,
         resolveWorkspaceCustomLlm: turnDeps.resolveWorkspaceCustomLlm?.bind(turnDeps) ?? null,
@@ -681,42 +636,59 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
         // The roster comes from the owner's capability port (profile `resume`,
         // exactly the suspended tool), then binds through the same invocation.
         const candidates = new Map(deps.tools)
-        if (deps.capabilityStores) {
+        if (deps.capabilityStores && params.approvalStatus === 'approved' && params.approvalKind !== 'question') {
           await owner.prepareCapabilities({ profile: 'resume', composition: { kind: 'resume', params: {
             ...deps.capabilityStores, userId: session.userId, assistantId: assistant.id, tools: candidates,
             executionContext: execution, scopeAccumulator: context.scopeAccumulator as ContextScopeAccumulator,
-            assistantTeamId: assistant.workspaceId ?? null, contextScope: turnScope, suspendedToolName } } })
+            assistantTeamId: assistant.workspaceId ?? null, contextScope: turnScope, suspendedToolName,
+            connectorTarget: params.connectorTarget } } })
           await assertReplayCurrent()
+        } else if (params.connectorTarget) {
+          candidates.delete(suspendedToolName)
         }
         const scopedTools = owner.prepareTools(candidates)
         await assertReplayCurrent()
+        const scopeAccumulator = context.scopeAccumulator as ContextScopeAccumulator
+        // A shared room checks the original checkpoint and retained dialogue
+        // before the approved tool can produce an effect.
+        const readHistory = async () => {
+          const { messages } = await owner.prepareHistory({ native: null, evidence: scopeAccumulator })
+          await assertReplayCurrent()
+          return messages
+        }
+        const roomHistory = roomRecipient ? await readHistory() : undefined
+        if (roomRecipient) {
+          scopeAccumulator.note(await admitVerifiedSharedRoomResumeEvidence(execution, scopeAccumulator.evidence, bounded, 'caller'))
+          bindFailureOutcome(scopeAccumulator.evidence)
+        }
         const outcomeNote = await resolveResumeOutcomeNote(scopedTools, params, context)
         await assertReplayCurrent()
 
         // ── 2. Rebuild the conversation, append the outcome note ──
-        // The original owner performs the stored-history read and notes its evidence.
-        const scopeAccumulator = context.scopeAccumulator as ContextScopeAccumulator
-        const dbMessages = (await owner.prepareHistory({ native: null, evidence: scopeAccumulator })).messages
-        await assertReplayCurrent()
+        const dbMessages = roomHistory ?? await readHistory()
         const history = ensureToolResultPairing(toStampedMessages(dbMessages, 'UTC') as Message[])
         const messages: Message[] = [
           ...history,
           { role: 'user', content: [{ type: 'text', text: outcomeNote }] },
         ]
 
-        const outcomeWrite = turnOutputWrite({
-          producer: 'turn:resume-outcome',
-          accumulator: scopeAccumulator,
-          envelope: resumeEnvelope,
-        })
-        const storedOutcome = await retryTransientWrite(abortController.signal, sessionId, () => executeWithCurrentAuthority(() => addSessionMessage({
-          sessionId,
-          role: 'system',
-          content: [{ type: 'text', text: outcomeNote }],
-          ...outcomeWrite,
-        })))
-        const outcomeSource = boundScopeSource(storedOutcome)
-        if (outcomeSource) scopeAccumulator.noteSource(outcomeSource)
+        // A shared room records the answer note with its admitted reply. The
+        // publication transaction supplies its durable source edge.
+        if (!roomRecipient) {
+          const outcomeWrite = turnOutputWrite({
+            producer: 'turn:resume-outcome',
+            accumulator: scopeAccumulator,
+            envelope: resumeEnvelope,
+          })
+          const storedOutcome = await retryTransientWrite(abortController.signal, sessionId, () => executeWithCurrentAuthority(() => addSessionMessage({
+            sessionId,
+            role: 'system',
+            content: [{ type: 'text', text: outcomeNote }],
+            ...outcomeWrite,
+          })))
+          const outcomeSource = boundScopeSource(storedOutcome)
+          if (outcomeSource) scopeAccumulator.noteSource(outcomeSource)
+        }
 
         // ── 3. Drive the continuation turn ──
         // Layer 2 is the charter block every runner renders, not the legacy
@@ -730,7 +702,20 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
           ? `${baseSystemPrompt}\n\n${activeWorkspaceContext}`
           : baseSystemPrompt
 
-        const authorizeResumeAudience = createDeliveryAudienceAuthorizer()
+        const authorizeResumeAudience = createDeliveryAudienceAuthorizer(roomRecipient ? {
+          validateEvidence: (evidence, recipient) => admitVerifiedSharedRoomResumeEvidence(execution, evidence, recipient, 'audience'),
+        } : personalWebChat ? {
+          validateEvidence: (evidence, recipient) => admitVerifiedPersonalResumeAudience(execution, evidence, recipient),
+        } : {})
+        const admitResumeAudience = async () => {
+          const audience = await authorizeResumeAudience({
+            workspaceId: assistant.workspaceId!, assistantId: assistant.id,
+            userId: session.userId, channelType: session.channelType, channelId: session.channelId,
+            sessionId, scopeEvidence: scopeAccumulator.evidence,
+          })
+          if (!audience.allowed) throw new DeliveryAudienceUnverifiedError(audience.detail, audience.diagnostic)
+          return audience.evidence
+        }
         // D2: the continuation bills like the turn it resumes.
         const resumeBilling = await resolveTurnBilling({
           policy: resumePolicy,
@@ -772,7 +757,9 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
           },
           ...(policy.budget ?? {}),
           },
-          sink: { kind: 'none', onEvent: async (event) => {
+          sink: { kind: 'none', ...(personalWebChat ? { admitOutput: async () => {
+            scopeAccumulator.note(await admitResumeAudience())
+          } } : {}), onEvent: async (event) => {
           // The replay is not an interactive stream. No generated event may be
           // accepted or persisted after authority changes.
           await assertReplayCurrent()
@@ -784,16 +771,7 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
             turnStream.setReplyPhase('saving')
             // The continuation's output reaches the session's audience like any
             // turn's: judge its evidence against that audience first.
-            const audience = await authorizeResumeAudience({
-              workspaceId: assistant.workspaceId!,
-              assistantId: assistant.id,
-              userId: session.userId,
-              channelType: session.channelType,
-              channelId: session.channelId,
-              sessionId,
-              scopeEvidence: scopeAccumulator.evidence,
-            })
-            if (!audience.allowed) throw new DeliveryAudienceUnverifiedError(audience.detail, audience.diagnostic)
+            if (!personalWebChat) await admitResumeAudience()
             finalContent = event.response.content
           } else if (event.type === 'error') {
             throw event.error
@@ -803,7 +781,8 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
             // "Reply publication"). A system execution holds no native
             // transcript authority, so the owner uses its stored writer.
             if (!finalContent) return
-            await owner.publish({ disposition: 'reply', rows: [{ role: 'assistant', content: finalContent }],
+            await owner.publish({ disposition: 'reply', rows: [{ role: 'assistant', content: finalContent, senderAssistantId: assistant.id }],
+              ...(roomRecipient ? { sharedRoomResume: { execution, evidence: scopeAccumulator.evidence, recipient: roomRecipient, outcomeNote } } : {}),
               completion: { lane: 'resume', input: { kind: 'approval', ref: params.approvalId }, assistantId: assistant.id },
               write: turnOutputWrite({ producer: 'turn:resume-output', accumulator: scopeAccumulator, envelope: resumeEnvelope }),
               native: null,
@@ -829,7 +808,9 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
       // Lease loss, Stop and a refused or uncertain authority write nothing.
       // A committed or possibly committed reply is never followed by this note.
       const state = owner.completion.state
-      if (publishFailureOutcome && owner.abortKind === null && (state === 'unpublished' || state === 'refused')) {
+      const authorityRefused = error instanceof AuthorityChangedError || error instanceof DeliveryAudienceUnverifiedError
+        || (error as { reason?: unknown } | null)?.reason === 'authority_changed'
+      if (publishFailureOutcome && !authorityRefused && owner.abortKind === null && (state === 'unpublished' || state === 'refused')) {
         try { await publishFailureOutcome() }
         catch (noteError) { console.warn(`[session-resume] failure outcome not recorded for ${sessionId}: ${noteError instanceof Error ? noteError.message : String(noteError)}`) }
       }

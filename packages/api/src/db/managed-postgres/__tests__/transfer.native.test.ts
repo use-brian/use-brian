@@ -73,6 +73,93 @@ type Embedded = {
 }
 const conversationStore = (file: string) => pathToFileURL(join(repoRoot, 'packages/api/scripts/conversation-store', file)).href
 const fileSha = async (path: string) => createHash('sha256').update(await readFile(path)).digest('hex')
+const applicationFieldTables = ['application_field_resources', 'application_field_observations'] as const
+type ApplicationFieldTable = (typeof applicationFieldTables)[number]
+type ApplicationFieldRow = { key: string; digest: string; shape: Record<string, unknown>; created: number }
+type ApplicationFieldRows = Record<ApplicationFieldTable, ApplicationFieldRow[]>
+type ConfigurationRevision = { workspace_id: string; revision: string }
+
+async function snapshotApplicationFields(client: pg.Client): Promise<ApplicationFieldRows> {
+  await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
+  try {
+    await client.query("SET LOCAL TimeZone='UTC'")
+    const load = async (table: ApplicationFieldTable, key: string) => {
+      const { rows } = await client.query<{ key: string; canonical: string; shape: Record<string, unknown>; created: number }>(
+        `SELECT ${key} as key, to_jsonb(r)::text AS canonical, to_jsonb(r)-'created_at' AS shape,
+          extract(epoch from r.created_at)::double precision * 1000 AS created
+          FROM public.${table} r ORDER BY 1`,
+      )
+      return rows.map(({ key, canonical, shape, created }) => ({ key, digest: sha(canonical), shape, created }))
+    }
+    const result = {
+      application_field_resources: await load('application_field_resources', 'r.id::text'),
+      application_field_observations: await load('application_field_observations', "r.resource_id::text||':'||r.version"),
+    }
+    await client.query('COMMIT')
+    return result
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  }
+}
+
+async function expectedConfigurationFields(client: pg.Client, workspaces: ConfigurationRevision[]) {
+  const canonicalDigest = async (fact: Record<string, unknown>) => (await client.query<{ digest: string }>(
+    "SELECT encode(sha256(convert_to($1::jsonb::text,'UTF8')),'hex') AS digest", [JSON.stringify(fact)],
+  )).rows[0].digest
+  const origin = { kind: 'native', moduleKey: 'native' }
+  const fields = ['config']
+  const configurationKind = 'crm-configuration-v1'
+  const type = 'crm_configuration'
+  const fieldIdentity = await canonicalDigest({ kind: configurationKind, fields })
+  return Promise.all(workspaces.map(async ({ workspace_id: workspaceId, revision }) => {
+    const scope = { workspaceId, userId: null, assistantId: null, sensitivity: 'public', compartments: [], projectIds: [] }
+    const identity = await canonicalDigest({
+      workspaceId, origin, typeKey: type, id: workspaceId, selection: 'read', selectedVersion: null, fields, fieldIdentity,
+    })
+    const id = `${identity.slice(0, 8)}-${identity.slice(8, 12)}-8${identity.slice(13, 16)}-8${identity.slice(17, 20)}-${identity.slice(20, 32)}`
+    const policyVersion = await canonicalDigest({ kind: configurationKind, revision })
+    const version = await canonicalDigest({
+      resourceId: id, recordVersion: revision, sourceVersion: revision, policyVersion, scope, sources: [],
+    })
+    return {
+      resource: { id, workspace_id: workspaceId, origin, type_key: type, resource_id: workspaceId, selection: 'read',
+        selected_version: null, fields, field_identity: fieldIdentity, identity },
+      observation: { workspace_id: workspaceId, resource_id: id, version, record_version: revision,
+        policy_version: policyVersion, source_kind: type, source_id: workspaceId, source_version: revision, source_scope: scope, owner_id: null },
+      publication: { workspace_id: workspaceId, revision, field_id: id, field_version: version },
+    }
+  }))
+}
+
+function compareApplicationFieldAdditions(
+  cohort: ApplicationFieldRows, current: ApplicationFieldRows,
+  configuration: Awaited<ReturnType<typeof expectedConfigurationFields>>, started: number,
+) {
+  const required = {
+    application_field_resources: new Map(configuration.map(row => [row.resource.id, row.resource])),
+    application_field_observations: new Map(configuration.map(row => [
+      `${row.observation.resource_id}:${row.observation.version}`, row.observation,
+    ])),
+  }
+  const proof = {} as Record<ApplicationFieldTable, { historical: Record<string, string>; added: string[] }>
+  for (const table of applicationFieldTables) {
+    const old = new Map(cohort[table].map(row => [row.key, row.digest]))
+    const now = new Map(current[table].map(row => [row.key, row]))
+    const needed = required[table] as Map<string, Record<string, unknown>>
+    const extra = current[table].filter(row => !old.has(row.key))
+    const historical = Object.fromEntries(cohort[table].map(row => [row.key, row.digest]))
+    proof[table] = { historical, added: extra.map(row => row.key) }
+    expect(Object.fromEntries(cohort[table].map(row => [row.key, now.get(row.key)?.digest])), table).toEqual(historical)
+    expect(extra.map(row => row.key).sort(), table).toEqual([...needed.keys()].filter(key => !old.has(key)).sort())
+    for (const [key, shape] of needed) expect(now.get(key)?.shape, `${table} ${key}`).toEqual(shape)
+    for (const row of extra) {
+      expect(row.created, `${table} forward creation time`).toBeGreaterThanOrEqual(started)
+      expect(row.created, `${table} forward creation time`).toBeLessThanOrEqual(Date.now())
+    }
+  }
+  return proof
+}
 /** Spawn a fixture receiving phase on the managed DSNs and return its IPC state. */
 function fixturePhase(phase: string, urls: Urls, env: Record<string, string>, input: Record<string, unknown>, stdio: number): Promise<Record<string, unknown>> {
   return new Promise((accept, reject) => {
@@ -93,6 +180,8 @@ describeNative('[COMP:platform/managed-postgres-transfer] existing embedded brai
   let source: SourceState
   let original: Awaited<ReturnType<typeof treeDigest>>
   let sourceDigests: Digests
+  let sourceFields: ApplicationFieldRows
+  let sourceConfiguration: ConfigurationRevision[]
   const apis: ChildProcess[] = []
   const receipt: Record<string, unknown> = { test: 'transfer.native', started: new Date().toISOString(), matrix: [] as unknown[] }
   const env: Record<string, string | undefined> = {
@@ -173,7 +262,14 @@ describeNative('[COMP:platform/managed-postgres-transfer] existing embedded brai
       const served = await embedded.openEmbeddedSource({ directory: copy, socketDirectory: socket })
       try {
         const client = await served.connect()
-        try { sourceDigests = await restore.portableTableDigests({ ownerClient: client, roster: await embedded.loadCohortRoster(), sourceProfile: 'embedded-superuser' }) }
+        try {
+          sourceDigests = await restore.portableTableDigests({ ownerClient: client, roster: await embedded.loadCohortRoster(), sourceProfile: 'embedded-superuser' })
+          sourceFields = await snapshotApplicationFields(client)
+          sourceConfiguration = (await client.query<ConfigurationRevision>(
+            "SELECT w.id AS workspace_id, coalesce(e.revision::text,'0') AS revision FROM public.workspaces w " +
+            "LEFT JOIN public.application_native_crm_configuration_epochs e ON e.workspace_id=w.id ORDER BY w.id",
+          )).rows
+        }
         finally { await client.end() }
       } finally { await served.close() }
     } finally { await rm(copy, { recursive: true, force: true }); await rm(socket, { recursive: true, force: true }) }
@@ -293,6 +389,9 @@ describeNative('[COMP:platform/managed-postgres-transfer] existing embedded brai
     const owner = new pg.Client(managedClientConfig(handle.urls.ownerUrl))
     await owner.connect()
     let ledger: string[], role: Record<string, unknown>, witness: number, targetDigests: Digests, leaseToken: string | null
+    let targetFields: ApplicationFieldRows
+    let newConfiguration: Awaited<ReturnType<typeof expectedConfigurationFields>>
+    let currentPublications: Record<string, unknown>[]
     try {
       ledger = (await owner.query<{ name: string }>('SELECT name FROM _migrations ORDER BY name')).rows.map((row) => row.name)
       role = (await owner.query('SELECT rolsuper,rolbypassrls,rolcreaterole,rolcreatedb FROM pg_roles WHERE rolname=current_user')).rows[0]
@@ -301,6 +400,11 @@ describeNative('[COMP:platform/managed-postgres-transfer] existing embedded brai
       // Target side of the equality proof, before any request touches the brain.
       const restore = (await import(conversationStore('portable-restore.mjs'))) as Restore
       targetDigests = await restore.portableTableDigests({ ownerClient: owner, roster: await restore.loadPortableRoster() })
+      targetFields = await snapshotApplicationFields(owner)
+      newConfiguration = await expectedConfigurationFields(owner, sourceConfiguration)
+      currentPublications = (await owner.query(
+        "SELECT workspace_id, revision, field_id, field_version FROM public.crm_summary_configuration_publications ORDER BY workspace_id",
+      )).rows
     } finally { await owner.end() }
     expect(ledger).toEqual(files)
     // The forward step applied exactly the shipped files after the 8273 cohort.
@@ -326,21 +430,57 @@ describeNative('[COMP:platform/managed-postgres-transfer] existing embedded brai
       m8278: await fileSha(join(migrationsDir, '8278_page_closure_adapter.sql')),
       m8280: await fileSha(join(migrationsDir, '8280_query_domain_visibility.sql')),
     }
-    // Every roster table: durable and rebound facts equal the embedded source
-    // exactly (rows and record digest); installation-derived tables are the
-    // target's own; the 8276 witness and the 8277 completion header exist only on
-    // the target (the header is created empty by the forward migration).
+    // Shared durable and rebound facts retain their exact rows and digests.
+    // The forward CRM migrations introduce their reviewed roster and provision
+    // one receipt signer on the destination. The 8273 source predates these rows.
+    const crmTables = {
+      crm_summary_attention_rollups: 'derived',
+      crm_summary_company_references: 'derived',
+      crm_summary_configuration_publications: 'derived',
+      crm_summary_entity_domain_versions: 'durable',
+      crm_summary_entity_publications: 'derived',
+      crm_summary_partition_leaves: 'durable',
+      crm_summary_policy_adapters: 'durable',
+      crm_summary_policy_inputs: 'durable',
+      crm_summary_policy_requirements: 'durable',
+      crm_summary_principal_revisions: 'derived',
+      crm_summary_receipt_keys: 'derived',
+      crm_summary_record_policies: 'durable',
+      crm_summary_release_revisions: 'derived',
+      crm_summary_rollup_leaves: 'derived',
+      crm_summary_rollups: 'derived',
+      crm_summary_scope_classes: 'durable',
+      crm_summary_scope_partition_versions: 'durable',
+      crm_summary_scope_policy_usage: 'derived',
+      crm_summary_selected_cells: 'derived',
+      crm_summary_source_descriptors: 'durable',
+      crm_summary_source_groups: 'durable',
+    }
     const tables = Object.keys(targetDigests)
     expect(tables.filter((name) => !sourceDigests[name]).sort()).toEqual([
       'conversation_envelope_backfill_checkpoint', 'conversation_envelopes', 'conversation_legacy_history_enrollments',
       'conversation_message_quarantine', 'conversation_participants', 'conversation_settings_transitions',
-      'conversation_visibility_audit', 'conversation_visibility_notices', 'native_turn_completions', 'native_turn_contract_witness',
-    ])
+      'conversation_visibility_audit', 'conversation_visibility_notices', ...Object.keys(crmTables),
+      'native_turn_completions', 'native_turn_contract_witness',
+    ].sort())
+    for (const [name, classification] of Object.entries(crmTables)) {
+      expect(targetDigests[name].class, name).toBe(classification)
+    }
+    expect(targetDigests.crm_summary_receipt_keys.rows).toBe(1)
     expect(Object.keys(sourceDigests).filter((name) => !targetDigests[name])).toEqual([])
     expect(targetDigests.native_turn_completions).toMatchObject({ class: 'durable', rows: 0 })
     const facts = tables.filter((name) => sourceDigests[name] && ['durable', 'rebound'].includes(targetDigests[name].class))
-    const mismatched = facts.filter((name) => sourceDigests[name].rows !== targetDigests[name].rows || sourceDigests[name].sha256 !== targetDigests[name].sha256)
+    // 8322 adds one current configuration enclosure per historical workspace.
+    // Check the two affected tables row-by-row, with exact identities and shape
+    // derived from the 8273 workspace and revision facts. All other shared facts,
+    // including application_field_observation_sources, retain table equality.
+    const changedByEnclosures = new Set<string>(applicationFieldTables)
+    const mismatched = facts.filter((name) => !changedByEnclosures.has(name)
+      && (sourceDigests[name].rows !== targetDigests[name].rows || sourceDigests[name].sha256 !== targetDigests[name].sha256))
     expect(mismatched).toEqual([])
+    expect(sourceConfiguration.length).toBeGreaterThan(0)
+    expect(currentPublications).toEqual(newConfiguration.map(row => row.publication))
+    receipt.configurationFieldAdditions = compareApplicationFieldAdditions(sourceFields, targetFields, newConfiguration, started)
     const populatedFacts = facts.filter((name) => targetDigests[name].rows > 0)
     for (const name of ['users', 'auth_sessions', 'workspaces', 'workspace_members', 'sessions', 'session_messages', 'memories', 'brain_keys']) expect(populatedFacts).toContain(name)
     // 8285 retired FORCE RLS on these: the cohort source and import use the system policy path,
@@ -353,7 +493,8 @@ describeNative('[COMP:platform/managed-postgres-transfer] existing embedded brai
     receipt.retiredForceRls = { writers: (source as unknown as { forcedTables?: unknown }).forcedTables ?? null,
       tables: Object.fromEntries(retiredForce.map((name) => [name, { source: sourceDigests[name], target: targetDigests[name] }])) }
     const equality = {
-      tables: tables.length, compared: facts.length, equal: facts.length - mismatched.length, populated: populatedFacts.length,
+      tables: tables.length, compared: facts.length, equal: facts.length - changedByEnclosures.size - mismatched.length,
+      historicalRowEqualityWithCanonicalAdditions: [...changedByEnclosures], populated: populatedFacts.length,
       rows: populatedFacts.reduce((n, name) => n + targetDigests[name].rows, 0),
       populatedTables: Object.fromEntries(populatedFacts.map((name) => [name, { rows: targetDigests[name].rows, sha256: targetDigests[name].sha256 }])),
       derived: Object.fromEntries(tables.filter((name) => !facts.includes(name)).map((name) => [name, { class: targetDigests[name].class, sourceRows: sourceDigests[name]?.rows ?? null, targetRows: targetDigests[name].rows }])),

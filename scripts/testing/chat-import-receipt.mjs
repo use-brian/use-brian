@@ -43,11 +43,11 @@ export const DETERMINISTIC_REPLY = 'Deterministic receipt reply.'
 
 /** Receiving probes and their runtime implementation inventory (plan 5.2). */
 export const ACTIVATION_PROBES = [
-  { id: 'office-docx-pdf-export', loads: ['packages/core/dist/office/**', 'packages/core/dist/files/libreoffice.js'] },
-  { id: 'crm-contact-create', loads: ['packages/core/dist/crm/**', 'packages/api/dist/crm-operations/**'] },
-  { id: 'campaign-draft', loads: ['packages/core/dist/campaigns/**'] },
-  { id: 'file-ingest-job', loads: ['packages/core/dist/ingest/**', 'packages/api/dist/ingest/**'] },
-  { id: 'mailbox-tool-call', loads: ['packages/api/dist/mailbox/archive-search-tool.js', 'packages/api/dist/db/email-archive-store.js'] },
+  { id: 'office-docx-pdf-export', loads: [], npmLoads: ['docx', '@cantoo/pdf-lib'] },
+  { id: 'crm-contact-create', loads: ['packages/api/dist/routes/crm.js'] },
+  { id: 'campaign-draft', loads: ['packages/api/dist/routes/campaigns.js'] },
+  { id: 'file-ingest-job', loads: ['packages/api/dist/files/ingest-file.js'] },
+  { id: 'mailbox-tool-call', loads: ['packages/api/dist/db/email-archive-search.js'] },
 ]
 
 // ── Deterministic OpenAI-compatible provider ────────────────────────────
@@ -299,10 +299,11 @@ export function ordinaryTurnImportDelta(before, after, root = OSS_ROOT) {
 }
 
 async function runProbe(probe, context) {
+  const expected = { id: probe.id, expectedLoads: probe.loads, expectedNpmLoads: probe.npmLoads ?? [] }
   try {
     const { executeActivationProbe } = await import('./m4/activation-probes.mjs')
-    return { id: probe.id, expectedLoads: probe.loads, ...await executeActivationProbe(probe.id, context) }
-  } catch (error) { return { id: probe.id, status: 'fail', expectedLoads: probe.loads, reason: error.message } }
+    return { ...expected, ...await executeActivationProbe(probe.id, context) }
+  } catch (error) { return { ...expected, status: 'fail', reason: error.message } }
 }
 
 function git(dir, args) { const r = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8' }); return r.status === 0 ? r.stdout.trim() : null }
@@ -388,11 +389,24 @@ export async function receipt(opts) {
         workers: Boolean(opts.workers), accessToken: fixtureTokens?.owner, provider: opts.provider ? null : provider })
       const after = await snapshot(child, traceDir, `probe-${probe.id}`)
       snapshots.push(after)
-      const matching = after.urls.filter(url => probe.loads.some(glob => globToRegExp(glob).test(url.replace(`file://${root}/`, ''))))
-      const loadedImplementation = probe.loads.every(glob => after.urls.some(url => globToRegExp(glob).test(url.replace(`file://${root}/`, ''))))
-      probes.push({ ...action, loadedImplementation, matchingModules: matching.map(url => url.replace(`file://${root}/`, '')),
-        newlyLoadedMatchingModules: matching.filter(url => !before.urls.includes(url)).map(url => url.replace(`file://${root}/`, '')),
-        ...(action.status === 'pass' && !loadedImplementation ? { status: 'fail', reason: 'Action succeeded but required implementation modules were not observed' } : {}) })
+      const oldUrls = new Set(before.urls)
+      const oldNpm = new Set(before.npmPackages)
+      const newWorkspace = new Set(after.urls.filter(url => !oldUrls.has(url)).map(url => url.replace(`file://${root}/`, '')))
+      const newlyLoadedMatchingModules = probe.loads.filter(path => newWorkspace.has(path))
+      const newlyLoadedNpmPackages = (probe.npmLoads ?? []).filter(name => after.npmPackages.includes(name) && !oldNpm.has(name))
+      const loadedImplementation = newlyLoadedMatchingModules.length === probe.loads.length &&
+        newlyLoadedNpmPackages.length === (probe.npmLoads?.length ?? 0)
+      const ingestWorkerLoaded = after.urls.includes(`file://${root}/packages/api/dist/files/file-ingest-worker.js`)
+      const expectedWorkerMode = probe.id !== 'file-ingest-job' || ingestWorkerLoaded === Boolean(opts.workers)
+      let reason
+      if (action.status === 'pass' && !loadedImplementation) {
+        reason = 'The action did not first-load its required implementation'
+      } else if (action.status === 'pass' && !expectedWorkerMode) {
+        reason = 'File-ingest worker module did not honor the selected worker mode'
+      }
+      probes.push({ ...action, loadedImplementation, newlyLoadedMatchingModules, newlyLoadedNpmPackages,
+        ...(probe.id === 'file-ingest-job' ? { ingestWorkerLoaded } : {}),
+        ...(reason ? { status: 'fail', reason } : {}) })
     }
     const complete = turn.status === 'pass' && probes.every((p) => p.status === 'pass')
     return {

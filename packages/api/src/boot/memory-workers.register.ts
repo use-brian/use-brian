@@ -22,7 +22,6 @@ import {
 import { createCompositeCommitmentResolver } from '@use-brian/core/memory/commitment-resolvers.js'
 import { createSprintVarianceResolver } from '@use-brian/core/memory/sprint-variance-resolver.js'
 import { getTaskByIdSystem } from '../db/tasks.js'
-import { createFileIngestWorker } from '../files/file-ingest-worker.js'
 import {
   claimNextFileIngestJob, markFileIngestJobDone, markFileIngestJobFailed,
 } from '../db/file-ingest-jobs-store.js'
@@ -32,6 +31,7 @@ import type { MemoryWorkersScope } from './scope.js'
 
 // Worker modules that load when the worker starts (deployment.md -> "Boot
 // composition" -> "Lazy routers and workers"); `--no-workers` never loads them.
+const createFileIngestWorker = lazyWorker(() => import('../files/file-ingest-worker.js'), 'createFileIngestWorker', '[file-ingest-worker]')
 const createGDriveEnrichmentWorker = lazyWorker(() => import('../google/enrichment-worker.js'), 'createGDriveEnrichmentWorker', '[gdrive-enrichment-worker]')
 const createGDriveCatalogWorker = lazyWorker(() => import('../google/catalog-worker.js'), 'createGDriveCatalogWorker', '[gdrive-catalog-worker]')
 const createLinkedInImportWorker = lazyWorker(() => import('../linkedin-import/worker.js'), 'createLinkedInImportWorker', '[linkedin-import]')

@@ -56,6 +56,7 @@ function deferred<T>(){let resolve!:(value:T)=>void;const promise=new Promise<T>
 let held:string|null=null,nextToken=0,waiters:Array<()=>void>=[],current=true,effects=0,toolRequested=false
 let requests:Array<string|null>=[],providerFailure:Error|undefined,providerGate:Promise<void>|null=null,afterSpend:(()=>void)|undefined
 let childAuthority:CurrentAuthorityBoundary|undefined,childSnapshot:unknown
+let finalProviderText: string
 const tool=buildTool({name:'fixtureRead',description:'Fictional read',inputSchema:z.object({}),isReadOnly:true,isConcurrencySafe:true,
   async execute(_input,context){expect(held).not.toBeNull();expect(context.abortSignal?.aborted).toBe(false)
     childAuthority=context.authority;childSnapshot=context.authority?.snapshotSource?.();effects++;return {data:'Fictional verified fact'}}})
@@ -65,7 +66,7 @@ const provider:LLMProvider={name:'fixture-callee',models:['fixture'],stream(){th
     if(toolRequested&&first){first=false;yield{type:'tool_use_start' as const,id:'callee-read',name:'fixtureRead'}
       yield{type:'tool_use_delta' as const,id:'callee-read',input:'{}'};yield{type:'tool_use_end' as const,id:'callee-read'}
       yield{type:'message_end' as const,stopReason:'tool_use' as const,usage:{inputTokens:2,outputTokens:3}}
-    }else{yield{type:'text_delta' as const,text:'Fictional delegated answer'}
+    }else{yield{type:'text_delta' as const,text:finalProviderText}
       yield{type:'message_end' as const,stopReason:'end_turn' as const,usage:{inputTokens:2,outputTokens:3}}}
     afterSpend?.()
   })()
@@ -79,6 +80,7 @@ function executor(options:Partial<CalleeExecutorOptions>={}){return createCallee
   resolveWorkspaceCustomLlm:mocks.custom,usageStore:{recordUsage:mocks.usage} as never,publishSessionEvent:mocks.publish,...options})}
 beforeEach(()=>{
   vi.clearAllMocks();held=null;nextToken=0;waiters=[];current=true;effects=0;toolRequested=false;requests=[];providerFailure=undefined;providerGate=null;afterSpend=undefined;childAuthority=undefined;childSnapshot=undefined
+  finalProviderText = 'Fictional delegated answer'
   mocks.assistant.mockImplementation(async id=>id===assistant.id?assistant:id===caller.id?caller:null)
   mocks.session.mockResolvedValue(session);mocks.readSession.mockResolvedValue(session)
   mocks.scope.mockResolvedValue(scope);mocks.live.mockImplementation(async()=>current?access:{...access,clearance:'public'})
@@ -126,6 +128,13 @@ describe('[COMP:api/inter-assistant-executor] original callee operation ownershi
     expect(mocks.usage).toHaveBeenCalledTimes(2);expect(mocks.usage).toHaveBeenCalledWith(expect.objectContaining({userId:'callee-owner',triggerKey:'workflow_assistant_call',inputTokens:4,outputTokens:6}))
     expect(mocks.publish).toHaveBeenCalledWith(expect.objectContaining({kind:'turn_completed',payload:expect.objectContaining({turnId:'callee-turn-2'})}))
     expect(held).toBeNull()
+  })
+  it.each(['workflow', 'web'] as const)('returns only sanitized owner-selected text to the %s caller', async callerChannelType => {
+    finalProviderText = 'Message body:\nFictional clean answer. (Word count: ~3)'
+    toolRequested = true
+    await expect(executor()(params({ callerChannelType }))).resolves.toBe('Fictional clean answer.')
+    expect(effects).toBe(1)
+    expect(mocks.release).toHaveBeenLastCalledWith(session.id, 'completed', 'callee-token-1')
   })
   it.each([{userId:'successor-actor'},{assistantId:'successor-assistant'},{channelId:'different-destination'},{visibility:'personal'}])('refuses queued original session drift %j before preparation',async change=>{
     held='prior-owner';const run=executor()(params());const refusal=expect(run).rejects.toBeInstanceOf(AuthorityChangedError)

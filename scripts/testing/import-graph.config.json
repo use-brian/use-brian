@@ -20,7 +20,8 @@
       { "glob": "packages/core/src/{office,crm,campaigns,ingest,sandbox}/**" },
       { "glob": "packages/core/src/files/{pdf-*,xlsx,parsers,html,libreoffice}.ts" },
       { "glob": "packages/{office-renderer,views-renderer}/**" },
-      { "glob": "packages/api/src/{office,crm-operations,campaigns,intake,ingest,mailbox,recordings}/**" }
+      { "glob": "packages/api/src/{office,crm-operations,campaigns,intake,ingest,mailbox,recordings}/**" },
+      { "glob": "packages/api/src/{db/email-archive-search,files/file-ingest-worker}.ts" }
     ],
     "npm": [
       "pdfjs-dist", "unpdf", "@cantoo/pdf-lib", "@napi-rs/canvas", "sharp", "exceljs", "docx", "pptxgenjs",

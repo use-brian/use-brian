@@ -436,10 +436,14 @@ describe("[COMP:app-web/conversation-controller] second browser pass (M5Q-12, M5
     const second = t.net.lastFollow();
     expect(second).not.toBe(first);
     t.net.status.current = { status: "idle", turnId: TURN_OLD };
+    const idleLoads = t.net.transport.loadHistory.mock.calls.length;
     second.sse!.send("status", { status: "idle", turnId: TURN_OLD, turnEndReason: "completed", startedAt: null });
+    await settle();
+    expect(t.net.transport.loadHistory.mock.calls.length).toBeGreaterThan(idleLoads);
     second.sse!.send("done", { turnId: TURN_OLD });
     second.sse!.close(); // recorded `__close`
     await settle();
+    expect(t.clock.timerDelays()).toContain(6_000);
     await t.clock.advance(6_000);
     // The scheduler starts the resume job: the reopened stream follows it.
     const third = t.net.lastFollow();
@@ -460,6 +464,36 @@ describe("[COMP:app-web/conversation-controller] second browser pass (M5Q-12, M5
     expect(t.state().notices.filter((notice) => notice.code === "turnEnd")).toEqual([]);
     await t.clock.advance(130_000);
     expect(t.net.lastFollow()).toBe(third);
+  });
+
+  it("M5Q-21: a definitive withdrawal ends a resume follow after an ambiguous idle receipt", async () => {
+    const t = setup("s-1");
+    const withdraw = vi.fn(async () => {});
+    t.net.transport.withdrawRetainedHistory = withdraw;
+    t.net.status.current = { status: "running", turnId: TURN_DEAD };
+    await settle();
+    t.net.lastFollow().sse!.send("status", { status: "running", turnId: TURN_DEAD });
+    await settle();
+    t.controller.presentConfirmation(restoredCard);
+    expect(await t.controller.respondConfirmation("approval:ap-1", "approve")).toBe("resolved");
+    await settle();
+    const resume = t.net.lastFollow();
+    const permitted = { id: "older", role: "assistant" as const, text: "Previously admitted reply", timestamp: new Date() };
+    t.net.transport.loadHistory.mockResolvedValueOnce([permitted]);
+    t.net.status.current = { status: "idle", turnId: TURN_OLD };
+    resume.sse!.send("status", { status: "idle", turnId: TURN_OLD, turnEndReason: "completed" });
+    await settle();
+    expect(t.state().transcript.messages).toEqual([permitted]);
+    expect(resume.sse!.aborted()).toBe(false);
+    const follows = t.net.follows.length;
+    resume.sse!.send("access_denied", { code: "conversation_access_denied" });
+    await settle();
+    expect(t.state().transcript.messages).toEqual([]);
+    expect(withdraw).toHaveBeenCalledExactlyOnceWith(SCOPE, "s-1");
+    expect(resume.sse!.aborted()).toBe(true);
+    await t.clock.advance(121_000);
+    expect(t.net.follows).toHaveLength(follows);
+    t.controller.dispose();
   });
 
   it("M5Q-21: past the window a resume follow that never sees the turn ends with one reload", async () => {

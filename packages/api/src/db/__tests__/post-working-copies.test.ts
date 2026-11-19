@@ -13,6 +13,7 @@ beforeEach(() => {
     if (sql.includes('FROM assistants WHERE id=$1 FOR SHARE')) return { rows: [{ workspaceId: 'ws-1', clearance: 'internal' }] }
     if (sql.includes("current_setting('app.system_bypass'")) return { rows: [{ value: null }] }
     if (sql.includes('SELECT feed_draft_audience_allowed')) return { rows: [{ allowed: true }] }
+    if (sql.startsWith('INSERT INTO public.session_messages')) return { rows: [], rowCount: 1 }
     if (sql.startsWith('INSERT INTO sessions')) return { rows: created ? [{ id: 'session-1' }] : [] }
     if (sql.includes('FOR UPDATE')) return { rows: [{ userId: 'user-1', title: '[threads] Launch notes' }] }
     if (sql.includes('SELECT revision')) return { rows: previous ? [previous] : [] }
@@ -25,7 +26,7 @@ describe('[COMP:feed/post-working-copies] transactional persistence', () => {
     expect(copy.revision).toBe(1)
     expect(db.query.mock.calls[0][0]).toBe('BEGIN')
     expect(db.query).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO sessions'), expect.arrayContaining(['session-1', 'draft:session-1']))
-    expect(db.query).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO session_messages'), expect.arrayContaining([expect.stringContaining('A private thought')]))
+    expect(db.query).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO public.session_messages'), expect.arrayContaining([expect.stringContaining('A private thought')]))
     expect(db.query.mock.calls.at(-1)?.[0]).toBe('COMMIT')
     expect(db.release).toHaveBeenCalledOnce()
   })
@@ -33,7 +34,7 @@ describe('[COMP:feed/post-working-copies] transactional persistence', () => {
     created = false; previous = { ...input, revision: 1 }
     const copy = await postWorkingCopiesStore.put('assistant-1', 'session-1', 'user-1', input)
     expect(copy.revision).toBe(1)
-    expect(db.query.mock.calls.some(([sql]) => sql.includes('INSERT INTO session_messages'))).toBe(false)
+    expect(db.query.mock.calls.some(([sql]) => sql.includes('INSERT INTO public.session_messages'))).toBe(false)
     expect(db.query.mock.calls.some(([sql]) => sql.includes('INSERT INTO feed_post_working_copies'))).toBe(false)
   })
   it('rejects a stale revision under the row lock and rolls back', async () => {
@@ -58,7 +59,7 @@ describe('[COMP:feed/post-working-copies] transactional persistence', () => {
       if (sql.includes("current_setting('app.system_bypass'")) return { rows: [{ value: null }] }
       if (sql.includes('INSERT INTO sessions')) return { rows: [{ id: 'session-1' }] }
       if (sql.includes('FOR UPDATE')) return { rows: [{ userId: 'user-1', title: '[threads] Launch notes' }] }
-      if (sql.includes('INSERT INTO session_messages')) throw new Error('disk full')
+      if (sql.includes('INSERT INTO public.session_messages')) throw new Error('disk full')
       return { rows: [] }
     })
     await expect(postWorkingCopiesStore.put('assistant-1', 'session-1', 'user-1', input)).rejects.toThrow('disk full')

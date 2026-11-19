@@ -31,9 +31,11 @@ import type { Page } from '@use-brian/core/views/blocks.js'
 import type { NameOrigin } from '@use-brian/core/views/types.js'
 import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
-import { validateCallerScopeEvidence, validateAudienceScopeEvidence } from '../context-scope/caller-evidence.js'
+import { readCurrentPageReceipt } from '../application-platform/conversation-evidence.js'
+import { assertScopeEvidenceFitsCeiling, validateCallerScopeEvidence, validateAudienceScopeEvidence } from '../context-scope/caller-evidence.js'
+import { nativeSourceAssistant } from '../context-scope/native-invocation-evidence.js'
 import { runWithAgentAccess } from './agent-access-context.js'
-import { queryWithRLS } from './client.js'
+import { queryWithRLS, withRLSTransaction } from './client.js'
 import { readPageThreadAudienceAuthority } from '../context-scope/page-thread-audience.js'
 
 // ── Row projections ────────────────────────────────────────────────────
@@ -71,8 +73,8 @@ export function createDbDocPageStore(): DocPageStore {
         if (execution.security.ceiling.userId !== userId || !context?.scopeAccumulator) throw new Error('page_source_authority_required')
         await execution.security.authority.assertCurrent()
       }
-      const read = () => queryWithRLS<VersionedPageRow>(
-        userId,
+      const nativeAssistantId = execution && nativeSourceAssistant(execution)
+      const readSql =
         // `name_origin` + `icon` live only on `saved_views` (not the Yjs
         // snapshot), so they're read straight from `sv` — no COALESCE.
         // `name_origin` drives auto-title; `icon` seeds the `setIcon` op's
@@ -86,16 +88,42 @@ export function createDbDocPageStore(): DocPageStore {
                 COALESCE(cd.snapshot_title, sv.name)  AS name,
                 sv.name_origin                        AS "nameOrigin",
                 sv.icon                               AS icon
-                ${execution ? ",sv.page_event_revision AS \"pageRevision\",read_entity_derivation_source(sv.workspace_id,'page_event_changed',sv.page_event_revision) AS source" : ''}
+                ${execution ? ',sv.page_event_revision AS "pageRevision"' : ''}
+                ${execution && !nativeAssistantId ? ",read_entity_derivation_source(sv.workspace_id,'page_event_changed',sv.page_event_revision) AS source" : ''}
            FROM saved_views sv
            LEFT JOIN documents cd ON cd.page_id = sv.id
-          WHERE sv.id = $1`,
-        [pageId],
-      )
-      const result = execution ? await runWithAgentAccess(execution.security.access, read) : await read()
-      const row = result.rows[0]
+          WHERE sv.id = $1${nativeAssistantId ? ' AND sv.workspace_id = $2' : ''}`
+      const read = () => queryWithRLS<VersionedPageRow>(userId, readSql, [pageId])
+      let row: VersionedPageRow | undefined
+      if (execution && nativeAssistantId) {
+        const { access, ceiling, authority } = execution.security
+        const outcome = await runWithAgentAccess(access, () => withRLSTransaction(userId, async client => {
+          const selected = (await client.query<VersionedPageRow>(readSql, [pageId, access.workspaceId])).rows[0]
+          if (!selected) return null
+          if (!selected.pageRevision) throw new Error('page_source_unavailable')
+          const evidence = await readCurrentPageReceipt(client, access.workspaceId, selected.pageRevision, userId)
+          return { row: selected, revision: selected.pageRevision, evidence }
+        }, nativeAssistantId))
+        if (!outcome) return null
+        let evidence = outcome.evidence
+        if (access.sharedAudience && (!evidence || evidence.sources?.some(source => source.userId !== null))) {
+          // The private Page's own discussion has its distinct principal.
+          // Its owner runs after the app transaction releases Page locks.
+          const proof = await readPageThreadAudienceAuthority(access.workspaceId,
+            { resourceKind: 'page_event_changed', resourceId: outcome.revision },
+            { sessionId: execution.lifecycle.sessionId, actorUserId: userId })
+          evidence = proof?.source ? { sources: [proof.source, ...proof.requiredSources] } : null
+        }
+        if (!evidence) throw new Error('page_source_unavailable')
+        assertScopeEvidenceFitsCeiling(evidence, ceiling, 'caller')
+        await authority.assertCurrent()
+        context!.scopeAccumulator!.note(evidence)
+        row = outcome.row
+      } else {
+        row = (execution ? await runWithAgentAccess(execution.security.access, read) : await read()).rows[0]
+      }
       if (!row) return null
-      if (execution) {
+      if (execution && !nativeAssistantId) {
         // A private Page can have its own Page-gated discussion. Prove that
         // exact destination with the original actor before admitting its receipt;
         // the generic shared entity reader intentionally refuses private roots.

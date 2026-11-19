@@ -1,5 +1,6 @@
 /** Text-only M7 history for an authenticated public route.
  * [COMP:api/conversation-visibility] */
+import { hasWorkspaceConversationAudience } from '../session-kind.js'
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { ClientBase } from 'pg'
@@ -118,7 +119,7 @@ export async function pinPublicMemberConversationPublication(
 
 export function publicConversationScope(floor: PublicConversationFloor): ResourceScope | undefined {
   if (!floor.workspaceId) return undefined
-  return { workspaceId: floor.workspaceId, userId: floor.visibility === 'workspace' ? null : floor.starterUserId,
+  return { workspaceId: floor.workspaceId, userId: hasWorkspaceConversationAudience(floor.visibility) ? null : floor.starterUserId,
     assistantId: null, sensitivity: floor.cap, compartments: floor.compartments, projectIds: floor.projectIds }
 }
 

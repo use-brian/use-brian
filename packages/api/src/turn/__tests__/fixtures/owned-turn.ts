@@ -6,7 +6,7 @@ import type { CurrentAuthorityBoundary } from '@use-brian/agent-runtime/tools/ty
 import { openAssistantTurn as openProductionTurn, type AssistantTurn, type AssistantTurnLoopInput } from '../../kernel.js'
 import { tierForModel } from '../../../model-resolution.js'
 
-export type FixtureTurnInput = AssistantTurnLoopInput
+export type FixtureTurnInput = AssistantTurnLoopInput & { prepareBackground?: boolean }
 export type FixtureTurnOwner = Omit<AssistantTurn, 'run'> & { run(input: FixtureTurnInput): ReturnType<AssistantTurn['run']> }
 
 /** A unit fixture with no domain execution gets a test-owned system execution
@@ -45,6 +45,7 @@ async function prepare(owner: AssistantTurn, input: FixtureTurnInput) {
       resolveWorkspaceCustomLlm: input.model.customLlm ? async () => input.model.customLlm : null,
       resolveLegacyByoKey: null, buildLegacyByoProvider: null,
     })
+  if (input.prepareBackground) await owner.prepareBackgroundModel({ configuredDefault: true })
   await owner.prepareMainModel({ kind: 'web', requestedModel: input.model.customLlm?.selector ?? tierForModel(input.model.model),
     plan: 'max_5x', budgetStatus: 'ok', researchMode: false, metered: null, hasImage: false })
 }
@@ -56,7 +57,7 @@ export async function openAssistantTurn(input: Parameters<typeof openProductionT
   const fixture = owner as unknown as FixtureTurnOwner
   fixture.run = async options => {
     if (!prepared) { await prepare(owner, options); prepared = true }
-    const { model: _model, sessionId: _session, policy: _policy, abortController: _abort, loop, ...rest } = options
+    const { model: _model, sessionId: _session, policy: _policy, abortController: _abort, prepareBackground: _background, loop, ...rest } = options
     // The fixture submits its assembled values once through the production
     // owner's prepareRun; run then consumes only the owner's private copy.
     const { systemPrompt, runtimeSystemContext, messages, tools, maxTokens: _maxTokens, inputTokenLimit: _inputTokenLimit, ...owned } = loop

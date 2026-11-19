@@ -16,7 +16,7 @@ export type TurnOutputCollector = {
   /** Observe one engine event. Events unrelated to final delivery are ignored. */
   observe(event: QueryEvent, provenance?: QueryOutputProvenance): void
   /** Read the current delivery window without consuming it. */
-  select(): TurnOutputSelection
+  select(format?: TurnOutputFormat): TurnOutputSelection
   /** Advance only after the selected output has been delivered successfully. */
   advanceDelivery(): void
   /** Internal provenance only, never a durable terminal intent or delivery grant. */
@@ -112,10 +112,10 @@ export function createTurnOutputCollector(
         retracted = true
       }
     },
-    select() {
+    select(selectedFormat = format) {
       if (question) return { kind: 'question', question }
       const current = responses()
-      const text = formatResponses(current, format)
+      const text = formatResponses(current, selectedFormat)
       if (text.length > 0) return { kind: 'text', text }
       if (current.length === 0) return { kind: 'empty', reason: retracted ? 'text_withheld' : 'no_model_output' }
       if (current.some(hasToolUse)) return { kind: 'empty', reason: 'tools_only' }

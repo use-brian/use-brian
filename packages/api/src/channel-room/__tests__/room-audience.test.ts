@@ -19,7 +19,7 @@ describe('[COMP:api/channel-room] authoritative group classification (PostgreSQL
   it('uses approved group labels and valid room bindings independently of the first bot', async () => {
     const db=new PGlite()
     try {
-      await db.exec(`CREATE TABLE workspaces(id uuid PRIMARY KEY);
+      await db.exec(`CREATE TABLE workspaces(id uuid PRIMARY KEY,department_read_v2 boolean NOT NULL DEFAULT false);
         CREATE TABLE workspace_groups(id uuid,workspace_id uuid,compartment_key text,kind text,status text);
         CREATE TABLE workspace_projects(id uuid,workspace_id uuid);
         CREATE TABLE assistants(id uuid,workspace_id uuid,clearance text,placement_department_id uuid);
@@ -27,7 +27,14 @@ describe('[COMP:api/channel-room] authoritative group classification (PostgreSQL
         CREATE TABLE channel_integrations(id text,channel_id text,channel_type text,status text,config jsonb);
         CREATE TABLE workspace_members(user_id uuid,workspace_id uuid,role text);
         CREATE TABLE workspace_access_policies(workspace_id uuid,access_mode text,setup_state text,revision integer,default_department_id uuid);`)
-      await db.query('INSERT INTO workspaces VALUES($1)',[W])
+      await db.exec('CREATE ROLE app_user')
+      const migration = await readFile(new URL('../../../migrations/8298_legacy_bypass_retirement.sql', import.meta.url), 'utf8')
+      const start = migration.indexOf('CREATE FUNCTION public.read_workspace_admission_policy(')
+      const end = migration.indexOf('CREATE OR REPLACE FUNCTION public.admit_knowledge_repo_write(', start)
+      expect(start).toBeGreaterThanOrEqual(0)
+      expect(end).toBeGreaterThan(start)
+      await db.exec(migration.slice(start, end))
+      await db.query('INSERT INTO workspaces(id) VALUES($1)',[W])
       await db.query("INSERT INTO workspace_groups VALUES($1,$2,'team:finance','team','active')",[G,W])
       await db.query('INSERT INTO workspace_projects VALUES($1,$2)',[P,W])
       await db.query("INSERT INTO assistants VALUES($1,$3,'confidential',NULL),($2,$3,'public',NULL)",[A,B,W])

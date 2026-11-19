@@ -40,7 +40,6 @@ import {
   stripUnsignedToolUses,
   modelRequiresToolSignatures,
 } from '@use-brian/agent-runtime/engine/tool-pairing.js'
-import { createTurnOutputCollector } from '@use-brian/agent-runtime/engine/turn-output.js'
 import { unionCompartments } from '@use-brian/agent-runtime/security/compartments.js'
 import { canRead } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
@@ -55,7 +54,6 @@ import type { SessionStateStore } from '@use-brian/core/memory/session-state-typ
 import type { MemoryStore } from '@use-brian/core/memory/types.js'
 import type { GDriveFilesStore } from '@use-brian/core/tools/base/gdrive-files.js'
 import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
-import type { TurnOutputSelection } from '@use-brian/agent-runtime/engine/turn-output.js'
 import type { McpSettingsStore } from '@use-brian/agent-runtime/mcp/types.js'
 import type { LLMProvider, Message, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
 import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
@@ -87,8 +85,8 @@ import {
   automaticContextAccess,
 } from '../context-scope/resolve-turn-scope.js'
 import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
-import { normalizeSessionVisibility, policyFor, sessionAuthorityDestinationMatches } from '../session-kind.js'
-import { openAssistantTurn, openTurnSqlScope, TurnRefusal, turnUsageIdentity, type TurnSqlScope } from '../turn/kernel.js'
+import { hasWorkspaceConversationAudience, normalizeSessionVisibility, policyFor, sessionAuthorityDestinationMatches } from '../session-kind.js'
+import { openAssistantTurn, openTurnSqlScope, TurnRefusal, turnUsageIdentity, type TurnLoopResult, type TurnSqlScope } from '../turn/kernel.js'
 import { noopPublishSessionEvent, type PublishSessionEvent } from '../session-event-port.js'
 import { publishTurnCompleted } from '../session-live-publisher.js'
 import { waitForTurnSlot } from '../turn/lease.js'
@@ -140,14 +138,11 @@ export { applyPublicResearchToolCeiling, resolveClientSelfMemory } from './clien
 const PUBLIC_EMPTY_REPLY = "I couldn't generate a reply — please rephrase or try again."
 
 /** Final-only public JSON rendering; SSE remains an immediate event stream. */
-export function formatPublicTurnReply(selection: TurnOutputSelection): string {
-  const selectedText = selection.kind === 'question'
-    ? formatAssistantQuestion(selection.question)
-    : selection.kind === 'text'
-      ? selection.text
-      : ''
-  const trimmed = sanitizeDeliveryText(selectedText)
-  return trimmed.length > 0 ? trimmed : PUBLIC_EMPTY_REPLY
+export function formatPublicTurnReply(result: Pick<TurnLoopResult, 'selection' | 'finalText'>): string {
+  const reply = result.selection.kind === 'question'
+    ? sanitizeDeliveryText(formatAssistantQuestion(result.selection.question))
+    : result.finalText
+  return reply || PUBLIC_EMPTY_REPLY
 }
 
 export function shouldExposeSaveMemoryTool(params: {
@@ -791,7 +786,7 @@ async function executePublicTurnInScope(
           }
         } : input.credentialCurrent,
         ...(publicRecord?.floor.workspaceId ? {
-          sharedAudience: publicRecord.floor.visibility === 'workspace',
+          sharedAudience: hasWorkspaceConversationAudience(publicRecord.floor.visibility),
           maximumAccess: { workspaceId: publicRecord.floor.workspaceId, userId: user.id, clearance: publicRecord.floor.cap,
             compartments: publicRecord.floor.compartments, mutationCompartments: publicRecord.floor.compartments,
             projectIds: publicRecord.floor.projectIds, visibilityAssistantIds: null },
@@ -1561,7 +1556,6 @@ async function executePublicTurnInScope(
     let loopError: Error | null = null
     let finalContent: ContentBlock[] | null = null
 
-    const turnOutput = createTurnOutputCollector({ format: 'compact' })
     // Written from the kernel's sink callback; held in one object so the
     // reads after the turn are not narrowed to their initial `null`.
     const turnFacts: { totalUsage: TokenUsage | null; responseModel: string | null; assistantMessageId: string | null } = {
@@ -1579,7 +1573,7 @@ async function executePublicTurnInScope(
         userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
       })
       await assertTurnCurrent()
-      await turnOwner.run({
+      const turnLoopResult = await turnOwner.run({
 
         loop: {
         ledger: createTurnLedger({
@@ -1643,7 +1637,6 @@ async function executePublicTurnInScope(
         maxTurns,
         },
         sink: { kind: 'json', onEvent: async (event) => {
-        turnOutput.observe(event)
         if (event.type === 'text_delta') {
           await assertDeliveryAudience()
           sendEvent?.('text_delta', { text: event.text })
@@ -1748,14 +1741,12 @@ async function executePublicTurnInScope(
 
     // JSON is a final-only delivery lane. Select from finalised turn references
     // before lexical sanitization; live SSE above remains delta-based.
-    const selected = turnOutput.select()
     res.json({
       sessionId: channelId,
       messageId: finalMessageId,
-      reply: formatPublicTurnReply(selected),
+      reply: formatPublicTurnReply(turnLoopResult),
       model: finalModel,
     })
-    turnOutput.advanceDelivery()
     completed = true
   } catch (err) {
     if (err instanceof TurnRefusal) {

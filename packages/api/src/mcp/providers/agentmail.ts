@@ -33,7 +33,8 @@ import { runLanes } from './lanes.js'
 async function collectAgentmailTools(params: {
   provider: EmailInboxProvider
   /** Handled inboxes, oldest first — the first is the default sender. */
-  inboxes: Array<{ address: string; governanceId: string }>
+  inboxes: Array<{ address: string; governanceId: string; instanceId: string }>
+  currentInboxIds: () => Promise<string[]>
   settingsStore: McpSettingsStore
   userId: string
   workspaceId?: string
@@ -96,10 +97,17 @@ async function collectAgentmailTools(params: {
   const governanceByAddress = new Map(
     inboxes.map((inbox) => [inbox.address.toLowerCase(), inbox.governanceId]),
   )
+  const assertInboxCurrent = async (address: string) => {
+    const inbox = inboxes.find(candidate => candidate.address === address)
+    if (!inbox || !(await params.currentInboxIds()).includes(inbox.instanceId)) {
+      throw new Error('The assistant no longer handles this inbox.')
+    }
+  }
   const assertInboxAction = async (
     inboxAddress: string,
     action: 'agentmailSendMessage' | 'agentmailCreateDraft',
   ): Promise<void> => {
+    await assertInboxCurrent(inboxAddress)
     if (!assistantConnectorGrantsStore) return
     const governanceId = governanceByAddress.get(inboxAddress.toLowerCase())
     if (!governanceId) {
@@ -123,7 +131,12 @@ async function collectAgentmailTools(params: {
 
   const api: AgentmailToolApi = {
     async listInboxes() {
-      return inboxes.map((inbox, i) => ({ address: inbox.address, isDefault: i === 0 }))
+      const current = new Set(await params.currentInboxIds())
+      // The default is pinned when the family activates. A reassignment
+      // cannot silently use another sender for the same invocation.
+      if (!current.has(inboxes[0]!.instanceId)) throw new Error('The assistant inbox assignment changed.')
+      return inboxes.flatMap((inbox, i) => current.has(inbox.instanceId)
+        ? [{ address: inbox.address, isDefault: i === 0 }] : [])
     },
     async send(p) {
       await assertInboxAction(p.inboxAddress, 'agentmailSendMessage')
@@ -159,6 +172,7 @@ async function collectAgentmailTools(params: {
       )
     },
     async searchThreads(p) {
+      await assertInboxCurrent(p.inboxAddress)
       const result = await provider.listThreads(p.inboxAddress, {
         limit: p.limit,
         senders: p.senders,
@@ -252,7 +266,8 @@ async function collectAgentmailTools(params: {
 /** The Assistant Email lane: the handled inboxes, oldest first, under the workspace policy. */
 export type AgentmailLane = {
   provider: EmailInboxProvider
-  inboxes: Array<{ address: string; governanceId: string }>
+  inboxes: Array<{ address: string; governanceId: string; instanceId: string }>
+  currentInboxIds: () => Promise<string[]>
   settingsStore: McpSettingsStore
   userId: string
   reportUnavailable?: boolean
@@ -265,6 +280,7 @@ export async function activateAgentmailLane(ctx: ProviderActivationContext, lane
     workspaceId: ctx.assistantTeamId ?? undefined,
     provider: lane.provider,
     inboxes: lane.inboxes,
+    currentInboxIds: lane.currentInboxIds,
     settingsStore: lane.settingsStore,
     userId: lane.userId,
     assistantId: ctx.assistantId,

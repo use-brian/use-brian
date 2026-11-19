@@ -2,8 +2,8 @@
   "format": 1,
   "status": "reviewed contract; fail closed on any unknown table, sequence, trigger, policy or reference",
   "inventory": {
-    "ledgerCount": 789,
-    "ledgerHead": "8314_conversation_settings_readiness.sql"
+    "ledgerCount": 801,
+    "ledgerHead": "8325_conversation_office_observation.sql"
   },
   "rules": {
     "D1-ledger": "Migration ledger. The target ledger is produced by the shipped installer; the archived source ledger is retained as original proof and must name the same shipped release.",
@@ -13,6 +13,8 @@
     "D5-display-fingerprints": "Historical display fingerprint owner. Target rows come from the shipped installer; archived rows are original proof only; signatures must match, fingerprints are never blanket repinned.",
     "D6-enrollment-maintenance": "Conversion enrollment queue. Maintenance state the shipped enrollment trigger re-derives while restored units are imported; archived keys must be a subset of the re-derived keys and the generation counter is installation-local. Re-enrolled units are reconverted idempotently.",
     "D9-envelope-scan": "Derived historical envelope scan cursor. The target restarts its bounded inventory scan after restoring durable envelopes.",
+    "D10-crm-summary-projection": "CRM summary projection. Rebuild atomically from exact restored facts and verify current leaves against archived history.",
+    "D11-crm-summary-credential": "CRM summary signing material. Sealed and restored through its bounded encrypted credential artifact.",
     "D8-transaction-scratch": "Transaction-local settings proof. A committed snapshot must be empty. The target never imports this table.",
     "D7-contract-witness": "Registry-guard catalog witness (8276). Installation-local catalog tuple identities for the guard fast path; never imported. The import ends with the owner-only native_turn_contract_witness_refresh(), which re-records it from the restored target catalog.",
     "F1-durable-fact": "User, workspace, conversation and operational fact. Imported exactly under canonical constraints; post-import row digests must equal the archived digests.",
@@ -42,7 +44,13 @@
     "resume_private_legacy_session",
     "capture_page_event_observation",
     "classify_conversation_envelope",
-    "withdraw_conversation_record_targets"
+    "withdraw_conversation_record_targets",
+    "crm_summary_publish_partition_delta",
+    "crm_summary_preserve_partition_leaf",
+    "crm_summary_publish_rollup_leaf",
+    "crm_summary_shift_scope_policy",
+    "crm_summary_publish_configuration",
+    "crm_summary_refresh_workspace_inputs"
   ],
   "creationCurrencyGuards": [
     "validate_scope_resource_reference",
@@ -112,7 +120,10 @@
     "workspace_audit_log.crm_file_copy_parent_valid",
     "workspace_audit_log.crm_scope_audit_guard",
     "workspace_audit_log.workflow_copy_parent_valid",
-    "workspace_files.zzz_department_home_stamp"
+    "workspace_files.zzz_department_home_stamp",
+    "crm_summary_policy_adapters.crm_summary_guard_adapter",
+    "crm_summary_policy_inputs.crm_summary_guard_policy_input",
+    "crm_summary_policy_requirements.crm_summary_guard_policy_requirement"
   ],
   "fixpointStamps": [
     "application_access_grants.application_grant_guard",
@@ -263,7 +274,10 @@
     "validate_teamspace_context_group",
     "validate_workspace_project_entity",
     "wf_search_vector_update",
-    "protect_configured_task_receipt"
+    "protect_configured_task_receipt",
+    "crm_summary_guard_record_policy",
+    "crm_summary_scope_policy_lock_record",
+    "crm_summary_source_descriptor_guard"
   ],
   "contractRoots": [
     "native_turn_helpers_current()",
@@ -275,22 +289,22 @@
     "native_conversation_conversion_pending": "D6-enrollment-maintenance"
   },
   "counts": {
-    "tables": 574,
-    "durable": 563,
-    "derived": 8,
+    "tables": 595,
+    "durable": 573,
+    "derived": 19,
     "rebound": 2,
     "rederived": 1,
-    "durableOrRebound": 565,
+    "durableOrRebound": 575,
     "regprocedureSlots": 4,
     "forceRls": 11,
     "seededTables": 4,
     "generatedTables": 4,
     "identityTables": 4,
-    "authorityEpochTables": 4,
+    "authorityEpochTables": 6,
     "transactionBoundTables": 12,
     "sequences": 6,
-    "triggers": 1395,
-    "suspendedTriggers": 357,
+    "triggers": 1435,
+    "suspendedTriggers": 393,
     "deferredReferences": 23
   },
   "tables": {
@@ -1347,6 +1361,90 @@
       "rule": "F1-durable-fact"
     },
     "crm_seller_profiles": {
+      "class": "durable",
+      "rule": "F1-durable-fact"
+    },
+    "crm_summary_attention_rollups": {
+      "class": "derived",
+      "rule": "D10-crm-summary-projection"
+    },
+    "crm_summary_company_references": {
+      "class": "derived",
+      "rule": "D10-crm-summary-projection"
+    },
+    "crm_summary_configuration_publications": {
+      "class": "derived",
+      "rule": "D10-crm-summary-projection"
+    },
+    "crm_summary_entity_domain_versions": {
+      "class": "durable",
+      "rule": "F2-authority-epoch"
+    },
+    "crm_summary_entity_publications": {
+      "class": "derived",
+      "rule": "D10-crm-summary-projection"
+    },
+    "crm_summary_partition_leaves": {
+      "class": "durable",
+      "rule": "F1-durable-fact"
+    },
+    "crm_summary_policy_adapters": {
+      "class": "durable",
+      "rule": "F1-durable-fact"
+    },
+    "crm_summary_policy_inputs": {
+      "class": "durable",
+      "rule": "F1-durable-fact"
+    },
+    "crm_summary_policy_requirements": {
+      "class": "durable",
+      "rule": "F1-durable-fact"
+    },
+    "crm_summary_principal_revisions": {
+      "class": "derived",
+      "rule": "D10-crm-summary-projection"
+    },
+    "crm_summary_receipt_keys": {
+      "class": "derived",
+      "rule": "D11-crm-summary-credential"
+    },
+    "crm_summary_record_policies": {
+      "class": "durable",
+      "rule": "F1-durable-fact"
+    },
+    "crm_summary_release_revisions": {
+      "class": "derived",
+      "rule": "D10-crm-summary-projection"
+    },
+    "crm_summary_rollup_leaves": {
+      "class": "derived",
+      "rule": "D10-crm-summary-projection"
+    },
+    "crm_summary_rollups": {
+      "class": "derived",
+      "rule": "D10-crm-summary-projection"
+    },
+    "crm_summary_scope_classes": {
+      "class": "durable",
+      "rule": "F1-durable-fact"
+    },
+    "crm_summary_scope_partition_versions": {
+      "class": "durable",
+      "rule": "F2-authority-epoch"
+    },
+    "crm_summary_scope_policy_usage": {
+      "class": "derived",
+      "rule": "D10-crm-summary-projection"
+    },
+    "crm_summary_selected_cells": {
+      "class": "derived",
+      "rule": "D10-crm-summary-projection"
+    },
+    "crm_summary_source_descriptors": {
+      "class": "durable",
+      "rule": "F1-durable-fact"
+    },
+    "crm_summary_source_groups": {
       "class": "durable",
       "rule": "F1-durable-fact"
     },
@@ -3218,6 +3316,15 @@
         "update"
       ]
     },
+    "application_native_crm_configuration_epochs.crm_summary_configuration_publish_after_owner_revision": {
+      "function": "crm_summary_configuration_publish()",
+      "tgtype": 21,
+      "class": "suspended:derived-effect",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
     "application_native_field_contracts.application_native_catalog_guard": {
       "function": "application_native_catalog_guard()",
       "tgtype": 23,
@@ -3334,6 +3441,15 @@
         "update"
       ]
     },
+    "application_native_resource_owners.zzz_crm_summary_policy_inputs": {
+      "function": "crm_summary_workspace_inputs_changed()",
+      "tgtype": 29,
+      "class": "suspended:derived-effect",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
     "application_native_role_assignments.application_native_role_guard": {
       "function": "application_native_role_guard()",
       "tgtype": 23,
@@ -3444,6 +3560,15 @@
       "function": "crm_capture_erasure_effect()",
       "tgtype": 29,
       "class": "fires:recovery-capture",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "application_policy_workspace_epochs.crm_summary_release_policy": {
+      "function": "crm_summary_release_input_changed()",
+      "tgtype": 29,
+      "class": "suspended:derived-effect",
       "events": [
         "insert",
         "update"
@@ -3803,6 +3928,15 @@
         "update"
       ]
     },
+    "assistants.crm_summary_principal_assistant": {
+      "function": "crm_summary_principal_revision_write()",
+      "tgtype": 29,
+      "class": "suspended:derived-effect",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
     "assistants.set_updated_at": {
       "function": "trigger_set_updated_at()",
       "tgtype": 19,
@@ -3831,6 +3965,15 @@
     "assistants.zz_department_edges_sync": {
       "function": "sync_department_edges()",
       "tgtype": 21,
+      "class": "suspended:derived-effect",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "assistants.zzz_crm_summary_reflector_inputs": {
+      "function": "crm_summary_workspace_inputs_changed()",
+      "tgtype": 29,
       "class": "suspended:derived-effect",
       "events": [
         "insert",
@@ -7824,6 +7967,123 @@
         "update"
       ]
     },
+    "crm_summary_entity_domain_versions.crm_summary_release_domain": {
+      "function": "crm_summary_release_input_changed()",
+      "tgtype": 29,
+      "class": "suspended:derived-effect",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "crm_summary_entity_domain_versions.zzz_crm_summary_domain_inputs": {
+      "function": "crm_summary_workspace_inputs_changed()",
+      "tgtype": 29,
+      "class": "suspended:derived-effect",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "crm_summary_policy_adapters.crm_summary_guard_adapter": {
+      "function": "crm_summary_guard_adapter()",
+      "tgtype": 23,
+      "class": "suspended:origin-stamp",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "crm_summary_policy_adapters.crm_summary_provider_adapter_change": {
+      "function": "application_policy_epoch_changed()",
+      "tgtype": 29,
+      "class": "suspended:derived-effect",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "crm_summary_policy_inputs.crm_summary_guard_policy_input": {
+      "function": "crm_summary_guard_policy_input()",
+      "tgtype": 23,
+      "class": "suspended:origin-stamp",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "crm_summary_policy_inputs.crm_summary_provider_input_change": {
+      "function": "application_policy_epoch_changed()",
+      "tgtype": 29,
+      "class": "suspended:derived-effect",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "crm_summary_policy_requirements.crm_summary_guard_policy_requirement": {
+      "function": "crm_summary_guard_policy_requirement()",
+      "tgtype": 23,
+      "class": "suspended:origin-stamp",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "crm_summary_policy_requirements.crm_summary_provider_requirement_change": {
+      "function": "application_policy_epoch_changed()",
+      "tgtype": 29,
+      "class": "suspended:derived-effect",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "crm_summary_record_policies.crm_summary_guard_record_policy": {
+      "function": "crm_summary_guard_record_policy()",
+      "tgtype": 23,
+      "class": "fires",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "crm_summary_record_policies.crm_summary_provider_record_change": {
+      "function": "application_policy_epoch_changed()",
+      "tgtype": 29,
+      "class": "suspended:derived-effect",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "crm_summary_record_policies.crm_summary_scope_policy_enrollment_change": {
+      "function": "crm_summary_scope_policy_change()",
+      "tgtype": 29,
+      "class": "suspended:derived-effect",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "crm_summary_record_policies.crm_summary_scope_policy_lock_enrollment": {
+      "function": "crm_summary_scope_policy_lock_record()",
+      "tgtype": 31,
+      "class": "fires",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "crm_summary_source_descriptors.crm_summary_source_descriptor_guard": {
+      "function": "crm_summary_source_descriptor_guard()",
+      "tgtype": 31,
+      "class": "fires",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
     "crm_suppression_events.crm_privacy_write_admission": {
       "function": "crm_privacy_guard_write()",
       "tgtype": 31,
@@ -7986,6 +8246,15 @@
       "function": "crm_capture_erasure_effect()",
       "tgtype": 29,
       "class": "fires:recovery-capture",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "department_edges.crm_summary_principal_department": {
+      "function": "crm_summary_principal_revision_write()",
+      "tgtype": 29,
+      "class": "suspended:derived-effect",
       "events": [
         "insert",
         "update"
@@ -8337,6 +8606,42 @@
       "function": "crm_capture_erasure_effect()",
       "tgtype": 29,
       "class": "fires:recovery-capture",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "entities.crm_summary_entity_publication_changed": {
+      "function": "crm_summary_entity_publication_changed()",
+      "tgtype": 29,
+      "class": "suspended:derived-effect",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "entities.crm_summary_selected_cells_changed": {
+      "function": "crm_summary_selected_cells_changed()",
+      "tgtype": 21,
+      "class": "suspended:derived-effect",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "entities.crm_summary_z_preserve_partition_leaf_after_entity": {
+      "function": "crm_summary_preserve_partition_leaf_after_entity()",
+      "tgtype": 29,
+      "class": "suspended:derived-effect",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "entities.crm_summary_zz_rollup_after_entity": {
+      "function": "crm_summary_rollup_after_entity()",
+      "tgtype": 29,
+      "class": "suspended:derived-effect",
       "events": [
         "insert",
         "update"
@@ -11143,6 +11448,15 @@
         "update"
       ]
     },
+    "project_shared_members.crm_summary_principal_project_member": {
+      "function": "crm_summary_principal_revision_write()",
+      "tgtype": 29,
+      "class": "suspended:derived-effect",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
     "project_shared_members.project_shared_members_owner_guard": {
       "function": "guard_project_shared_owner_edge()",
       "tgtype": 27,
@@ -11198,6 +11512,15 @@
       "function": "crm_capture_erasure_effect()",
       "tgtype": 29,
       "class": "fires:recovery-capture",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "project_shared_scopes.crm_summary_principal_project": {
+      "function": "crm_summary_principal_revision_write()",
+      "tgtype": 29,
+      "class": "suspended:derived-effect",
       "events": [
         "insert",
         "update"
@@ -11778,10 +12101,64 @@
         "update"
       ]
     },
+    "scope_resource_states.crm_summary_entity_scope_state_changed": {
+      "function": "crm_summary_entity_scope_state_changed()",
+      "tgtype": 29,
+      "class": "suspended:derived-effect",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "scope_resource_states.crm_summary_release_configuration_hold": {
+      "function": "crm_summary_release_input_changed()",
+      "tgtype": 29,
+      "class": "suspended:derived-effect",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "scope_resource_states.crm_summary_scope_policy_lock_review": {
+      "function": "crm_summary_scope_policy_lock_record()",
+      "tgtype": 31,
+      "class": "fires",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "scope_resource_states.crm_summary_z_preserve_partition_leaf_after_review": {
+      "function": "crm_summary_preserve_partition_leaf_after_review()",
+      "tgtype": 29,
+      "class": "suspended:derived-effect",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "scope_resource_states.crm_summary_zz_rollup_after_review": {
+      "function": "crm_summary_rollup_after_review()",
+      "tgtype": 29,
+      "class": "suspended:derived-effect",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
     "scope_resource_states.scope_resource_states_reference": {
       "function": "validate_scope_resource_reference()",
       "tgtype": 23,
       "class": "suspended:creation-currency",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "scope_resource_states.zzz_crm_summary_review_inputs": {
+      "function": "crm_summary_workspace_inputs_changed()",
+      "tgtype": 29,
+      "class": "suspended:derived-effect",
       "events": [
         "insert",
         "update"
@@ -13563,6 +13940,15 @@
         "update"
       ]
     },
+    "workspace_access_grants.crm_summary_principal_access_grant": {
+      "function": "crm_summary_principal_revision_write()",
+      "tgtype": 29,
+      "class": "suspended:derived-effect",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
     "workspace_access_grants.workspace_access_grants_validate": {
       "function": "validate_department_read_record()",
       "tgtype": 23,
@@ -14121,6 +14507,15 @@
         "update"
       ]
     },
+    "workspace_group_compartment_grants.crm_summary_principal_group_grant": {
+      "function": "crm_summary_principal_revision_write()",
+      "tgtype": 29,
+      "class": "suspended:derived-effect",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
     "workspace_group_compartment_grants.workspace_access_revision": {
       "function": "advance_workspace_access_policy()",
       "tgtype": 31,
@@ -14166,6 +14561,15 @@
         "update"
       ]
     },
+    "workspace_group_members.crm_summary_principal_group_member": {
+      "function": "crm_summary_principal_revision_write()",
+      "tgtype": 29,
+      "class": "suspended:derived-effect",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
     "workspace_group_members.workspace_access_revision": {
       "function": "advance_workspace_access_policy()",
       "tgtype": 31,
@@ -14197,6 +14601,15 @@
       "function": "crm_capture_erasure_effect()",
       "tgtype": 29,
       "class": "fires:recovery-capture",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "workspace_groups.crm_summary_principal_group": {
+      "function": "crm_summary_principal_revision_write()",
+      "tgtype": 29,
+      "class": "suspended:derived-effect",
       "events": [
         "insert",
         "update"
@@ -14406,6 +14819,15 @@
       "function": "crm_capture_erasure_effect()",
       "tgtype": 29,
       "class": "fires:recovery-capture",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "workspace_members.crm_summary_principal_member": {
+      "function": "crm_summary_principal_revision_write()",
+      "tgtype": 29,
+      "class": "suspended:derived-effect",
       "events": [
         "insert",
         "update"
@@ -14931,6 +15353,30 @@
         "update"
       ]
     },
+    "workspaces.crm_summary_configuration_publish_after_workspace_create": {
+      "function": "crm_summary_configuration_publish()",
+      "tgtype": 5,
+      "class": "suspended:derived-effect",
+      "events": [
+        "insert"
+      ]
+    },
+    "workspaces.crm_summary_principal_workspace": {
+      "function": "crm_summary_principal_revision_write()",
+      "tgtype": 17,
+      "class": "suspended:derived-effect",
+      "events": [
+        "update"
+      ]
+    },
+    "workspaces.crm_summary_release_workspace": {
+      "function": "crm_summary_release_input_changed()",
+      "tgtype": 5,
+      "class": "suspended:derived-effect",
+      "events": [
+        "insert"
+      ]
+    },
     "workspaces.set_teams_updated_at": {
       "function": "trigger_set_updated_at()",
       "tgtype": 19,
@@ -14945,6 +15391,14 @@
       "class": "suspended:derived-effect",
       "events": [
         "update"
+      ]
+    },
+    "workspaces.zzz_crm_summary_workspace_inputs": {
+      "function": "crm_summary_workspace_inputs_changed()",
+      "tgtype": 5,
+      "class": "suspended:derived-effect",
+      "events": [
+        "insert"
       ]
     }
   },
@@ -15230,6 +15684,18 @@
       "reads": [
         "workspace_compartments",
         "workspace_projects"
+      ]
+    },
+    {
+      "table": "crm_summary_record_policies",
+      "reads": [
+        "entities"
+      ]
+    },
+    {
+      "table": "crm_summary_source_descriptors",
+      "reads": [
+        "workspaces"
       ]
     },
     {
@@ -15524,6 +15990,12 @@
         "workspace_compartments",
         "workspace_groups",
         "workspace_projects"
+      ]
+    },
+    {
+      "table": "scope_resource_states",
+      "reads": [
+        "entities"
       ]
     },
     {

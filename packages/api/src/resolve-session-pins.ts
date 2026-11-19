@@ -2,10 +2,13 @@ import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scop
 import { canRead } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import type { QueryResultRow } from 'pg'
-import { validateCallerScopeEvidence, validateAudienceScopeEvidence } from './context-scope/caller-evidence.js'
-import { query, queryWithRLS, runWithAgentAccess } from './db/client.js'
-type PinAuthority = Pick<ToolContext, 'executionContext' | 'scopeAccumulator'>
+import { readCurrentPageReceipt } from './application-platform/conversation-evidence.js'
+import { assertScopeEvidenceFitsCeiling, validateCallerScopeEvidence, validateAudienceScopeEvidence } from './context-scope/caller-evidence.js'
+import { nativeSourceAssistant } from './context-scope/native-invocation-evidence.js'
+import { query, queryWithRLS, runWithAgentAccess, withRLSTransaction } from './db/client.js'
 import { listSessionPins, PIN_INSTRUCTION_MAX_CHARS, type SessionPin } from './db/session-pins-store.js'
+
+type PinAuthority = Pick<ToolContext, 'executionContext' | 'scopeAccumulator'>
 
 /**
  * Assembly-time resolution of a room's pinned context (multiplayer chat P1b,
@@ -86,8 +89,33 @@ async function resolvePinLine(
   const execution = context?.executionContext
   const read = async <T extends QueryResultRow>(sql: string, args: unknown[]) => {
     if (!execution) return query<T>(sql, args)
-    if (!context?.scopeAccumulator) throw new Error('pin_source_authority_required')
+    const accumulator = context?.scopeAccumulator
+    if (!accumulator) throw new Error('pin_source_authority_required')
     await execution.security.authority.assertCurrent()
+    const { access, ceiling } = execution.security
+    const nativeAssistantId = nativeSourceAssistant(execution)
+    if (nativeAssistantId && (pin.kind === 'file' || pin.kind === 'page')) {
+      const page = pin.kind === 'page'
+      const projection = page ? 'page_event_revision AS "pageRevision"'
+        : `jsonb_build_object('workspaceId',workspace_id,'userId',user_id,'assistantId',assistant_id,
+             'resourceKind','workspace_file','resourceId',id,'version',scope_version::text,
+             'sensitivity',sensitivity,'compartments',compartments,'projectIds',project_ids) AS "pinSource"`
+      const outcome = await runWithAgentAccess(access, () => withRLSTransaction(ceiling.userId, async client => {
+        const result = await client.query<T & { pageRevision?: string; pinSource?: ScopeSource }>(sql.replace('SELECT ', `SELECT ${projection}, `), args)
+        const row = result.rows[0]
+        if (!row) return { result }
+        const evidence = page
+          ? row.pageRevision && await readCurrentPageReceipt(client, workspaceId, row.pageRevision, ceiling.userId)
+          : row.pinSource && await validateCallerScopeEvidence({ sources: [row.pinSource] }, ceiling, client)
+        if (!evidence || access.sharedAudience && evidence.sources?.some(source => source.userId !== null))
+          return { result: { ...result, rows: [] } }
+        if (page) assertScopeEvidenceFitsCeiling(evidence, ceiling, 'caller')
+        return { result, evidence }
+      }, nativeAssistantId))
+      await execution.security.authority.assertCurrent()
+      if (outcome.evidence) accumulator.note(outcome.evidence)
+      return outcome.result
+    }
     const kind = pin.kind === 'file' ? 'workspace_file' : pin.kind === 'page' ? 'page_event_changed' : pin.kind === 'task' ? 'task' : 'entity'
     const id = pin.kind === 'page' ? 'page_event_revision' : 'id'
     const scoped = sql.replace('SELECT ', `SELECT read_entity_derivation_source(workspace_id,'${kind}',${id}) AS "pinSource", `)
@@ -101,7 +129,7 @@ async function resolvePinLine(
     const checked = await validateCallerScopeEvidence(evidence, execution.security.ceiling)
     await validateAudienceScopeEvidence(checked, execution.security.ceiling)
     await execution.security.authority.assertCurrent()
-    context.scopeAccumulator.note(checked)
+    accumulator.note(checked)
     return result
   }
   try {
