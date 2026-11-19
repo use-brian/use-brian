@@ -212,7 +212,8 @@ const contractRoots=['native_turn_helpers_current()','native_retained_helpers_cu
 const polymorphicLate=['scope_resource_states','scope_derivations','scope_derivation_sources']
 const derivedRule={...crmSummaryDerivedRules,_migrations:'D1-ledger',crm_erasure_journal_targets:'D2-capture-targets',native_retained_contract_helpers:'D3-retained-fingerprints',
  native_turn_contract_helpers:'D4-canonical-registry',private_session_display_contract:'D5-display-fingerprints',native_turn_contract_witness:'D7-contract-witness',
- conversation_settings_transitions:'D8-transaction-scratch',conversation_envelope_backfill_checkpoint:'D9-envelope-scan'}
+ conversation_settings_transitions:'D8-transaction-scratch',native_memory_query_write_intents:'D8-transaction-scratch',
+ conversation_envelope_backfill_checkpoint:'D9-envelope-scan'}
 // FORCE-RLS read/write access paths, with the schema facts that prove complete
 // coverage of actor partitions. Changes to these policies refuse at import.
 const forceAccess={
