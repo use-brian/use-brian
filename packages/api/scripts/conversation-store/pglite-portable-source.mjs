@@ -14,7 +14,7 @@ import {createRequire} from 'node:module'
 import {join} from 'node:path'
 import {fileURLToPath,pathToFileURL} from 'node:url'
 import {currentInstallationAuthenticationSource as cohortAuthenticationSource} from './installation-authentication-8273.mjs'
-import {loadPortableRoster,shippedMigrationSet,PortableRestoreRefusal,exportPortableBrain,exportErasureCheckpoint} from './portable-restore.mjs'
+import {loadPortableRoster,shippedMigrationSet,migrationLedgerAliases,PortableRestoreRefusal,exportPortableBrain,exportErasureCheckpoint} from './portable-restore.mjs'
 
 const here=fileURLToPath(new URL('./',import.meta.url))
 const sha=value=>createHash('sha256').update(value).digest('hex')
@@ -97,9 +97,11 @@ export async function openEmbeddedSource({directory,socketDirectory,sourceRoot})
   const cohort=await cohortMigrationSet(sourceRoot?{sourceRoot}:{})
   const ledgerTable=(await db.query("SELECT to_regclass('public._migrations') IS NOT NULL present")).rows[0].present
   const ledger=ledgerTable?(await db.query('SELECT name FROM public._migrations ORDER BY name COLLATE "C"')).rows.map(row=>row.name):[]
-  const shipped=new Set(cohort)
-  if(!ledger.length||ledger.some(name=>!shipped.has(name)))throw refusal('portable_restore_source_not_at_shipped_head','embedded ledger is not a prefix of the shipped 8273 cohort')
-  if(ledger.length!==cohort.length){
+  const shipped=new Set(cohort),applied=new Set(ledger)
+  const aliases=await migrationLedgerAliases(sourceRoot)
+  if(!ledger.length||ledger.some(name=>!shipped.has(name)&&!shipped.has(aliases.get(name))))
+   throw refusal('portable_restore_source_not_at_shipped_head','embedded ledger is not a prefix of the shipped 8273 cohort')
+  if(cohort.some(name=>!applied.has(name))){
    // Same runner and file set the embedded product boot applies, on the copy only.
    const {migratePglite}=await import(new URL('../../../../apps/api/src/migrate-pglite.ts',import.meta.url).href)
    migrated=await migratePglite(db,join(sourceRoot??fileURLToPath(new URL('../../',import.meta.url)),'migrations'),{through:embeddedTransferCohort.through})

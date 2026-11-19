@@ -77,11 +77,14 @@ export async function shippedMigrationSet({sourceRoot=defaultSourceRoot,migratio
 // release. That receipt never stands in for the successor or an archive target.
 const legacyMemoryReceipt='8268_native_memory_query_write_lineage.sql'
 const memorySuccessor='8326_native_memory_query_write_contract.sql'
+export async function migrationLedgerAliases(sourceRoot=defaultSourceRoot){
+ const source=await readFile(join(sourceRoot,'src/migrations/renames.ts'),'utf8')
+ return new Map([...source.matchAll(/\['([\w.-]+\.sql)',\s*'([\w.-]+\.sql)'\]/g)].map(match=>[match[1],match[2]]))
+}
 async function compatibleLedger(ledger,shipped,sourceRoot){
  const set=new Set(shipped)
  if(!shipped.every(name=>ledger.includes(name)))return false
- const source=await readFile(join(sourceRoot,'src/migrations/renames.ts'),'utf8')
- const aliases=new Map([...source.matchAll(/\['([\w.-]+\.sql)',\s*'([\w.-]+\.sql)'\]/g)].map(match=>[match[1],match[2]]))
+ const aliases=await migrationLedgerAliases(sourceRoot)
  if(ledger.includes(legacyMemoryReceipt)){
   if(!set.has(memorySuccessor))return false
   const archive=await readFile(join(sourceRoot,'scripts/conversation-store/historical',legacyMemoryReceipt),'utf8')
