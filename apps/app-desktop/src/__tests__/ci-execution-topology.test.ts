@@ -70,8 +70,16 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     // the root unit command's limit so sibling builds cannot starve them.
     expect(remainingCommand).toContain('--concurrency=1');
     const embedded = workflow.jobs['embedded-database-tests'];
-    expect(embedded.strategy.matrix.group).toEqual(['owner-legacy', 'owner-fresh', 'owner-cutover', 'owner-successor', 'owner-prerequisites', 'session', 'remaining']);
-    expect(embedded['timeout-minutes']).toBe(10);
+    expect(embedded.strategy.matrix.include).toEqual([
+      { group: 'owner-legacy', timeoutMinutes: 15 },
+      { group: 'owner-fresh', timeoutMinutes: 15 },
+      { group: 'owner-cutover', timeoutMinutes: 10 },
+      { group: 'owner-successor', timeoutMinutes: 10 },
+      { group: 'owner-prerequisites', timeoutMinutes: 10 },
+      { group: 'session', timeoutMinutes: 10 },
+      { group: 'remaining', timeoutMinutes: 10 },
+    ]);
+    expect(embedded['timeout-minutes']).toBe('${{ matrix.timeoutMinutes }}');
     expect(embedded.strategy['fail-fast']).toBe(false);
     const nodeTests = embedded.steps.find((step: { name?: string }) => step.name === 'Embedded database tests');
     expect(nodeTests.run).toContain('scripts/testing/embedded-database-tests.mjs ${{ matrix.group }}');
@@ -80,6 +88,7 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     expect(acceptance.strategy.matrix).toContain('fromJSON(needs.ci-scope.outputs.matrix)');
     expect(workflow.jobs['ci-scope'].outputs.matrix).toBe('${{ steps.scope.outputs.matrix }}');
     expect(workflow.jobs['embedded-current-tests'].if).toBe("needs.ci-scope.outputs.historical == 'false'");
+    expect(workflow.jobs['embedded-current-tests']['timeout-minutes']).toBe(20);
     expect(embedded.if).toBe("needs.ci-scope.outputs.historical == 'true'");
     expect(workflow.on.schedule).toHaveLength(1);
     expect(workflow.on).toHaveProperty('workflow_dispatch');
