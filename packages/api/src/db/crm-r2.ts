@@ -23,6 +23,9 @@ import {
 } from '@use-brian/core/application-platform/record-values.js'
 import type { EntityRecord } from '@use-brian/core/entities/types.js'
 import { stitchMailboxThreads, type MailboxSearchHit } from '@use-brian/core/tools/base/mailbox.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { currentApplicationReadTransaction } from '../application-platform/execution-context.js'
+import { runWithAgentAccess } from './agent-access-context.js'
 import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import {
   bindScopeSources,
@@ -33,7 +36,7 @@ import type { PoolClient } from 'pg'
 import { applicationDecimalText,ApplicationPlatformError } from '@use-brian/shared'
 import { runLegacyCanonicalCrmRead,readLegacyCanonicalCrmConfiguration,mapCanonicalCrmRows,queryLegacyCanonicalCrmSql,queryLegacyCanonicalCrmPrivateSql } from './crm-reader.js'
 import { buildAccessPredicate, buildCurrentMemberSourcePredicate, mutationActorAccess } from './access-predicate.js'
-import { applyRLSGucs, getAppPool, getPool, query, queryGated, queryWithRLS } from './client.js'
+import { applyRLSGucs, commitTransaction, getAppPool, getPool, query, queryGated, queryWithRLS, rollbackAndRelease } from './client.js'
 import { crmReferenceScope, prepareCrmParticipantMutation, readCrmMutationSource, readCrmReference, runCrmWriteTransaction, updateDeal } from './crm.js'
 import { assertNativeEntityFieldWrites, getEntityById, updateEntity } from './entities-store.js'
 
@@ -1302,81 +1305,108 @@ export type CrmSummary = {
   stages: Array<{ stageId: string; count: number; values: Record<string, number|string> }>
 }
 
+
+type CrmRollupProjection = {
+  rollups: Array<[kind: CrmEntityKind, stage: string | null, currency: string, count: number,
+    valued: number, amount: string, orphaned: number, open: boolean | null]>
+  overdue: number
+  stale: number
+}
+
+/** Convert admitted rollups to the existing public response without losing decimal precision. */
+function projectCrmSummary(input: CrmSummary | CrmRollupProjection): CrmSummary {
+  if (!('rollups' in input)) return input
+  const totals = { deals: 0, contacts: 0, companies: 0 }
+  const attention = { overdue: input.overdue, stale: input.stale, noAmount: 0, orphaned: 0 }
+  const stages = new Map<string, CrmSummary['stages'][number]>()
+  for (const [kind, stageId, currency, count, valued, amount, orphaned, open] of input.rollups) {
+    if (kind === 'company') {
+      totals.companies += count
+    } else if (kind === 'person') {
+      totals.contacts += count
+      attention.orphaned += orphaned
+    } else {
+      totals.deals += count
+      if (open) attention.noAmount += count - valued
+      if (stageId && count > 0) {
+        const stage = stages.get(stageId) ?? { stageId, count: 0, values: {} }
+        stage.count += count
+        if (valued > 0) addCurrency(stage.values, currency, amount)
+        stages.set(stageId, stage)
+      }
+    }
+  }
+  return { totals, attention, stages: [...stages.values()].sort((a, b) => a.stageId.localeCompare(b.stageId)) }
+}
+
 export async function getCrmSummary(
   ctx: AccessContext,
   pipelineId?: string | null,
 ): Promise<CrmSummary> {
-  return runLegacyCanonicalCrmRead(ctx,async()=>{
-  const ap = buildAccessPredicate(ctx, { alias: 'e', startIdx: 1 })
-  const aggregateValues: unknown[] = [...ap.params, ['person', 'company', 'deal']]
-  const pipelinePredicate = pipelineId
-    ? `AND e.attributes->>'pipeline_id' = $${aggregateValues.push(pipelineId)}`
-    : ''
-  const openDeal = `(CASE
-    WHEN NULLIF(e.attributes->>'pipeline_stage_id','') IS NOT NULL THEN EXISTS (
-      SELECT 1 FROM crm_pipeline_stages summary_stage
-       WHERE summary_stage.id::text = e.attributes->>'pipeline_stage_id'
-         AND summary_stage.workspace_id = e.workspace_id
-         AND summary_stage.archived_at IS NULL AND summary_stage.category = 'open'
-    )
-    ELSE COALESCE(e.attributes->>'stage','lead') NOT IN ('won','lost')
-  END)`
-  // Both projections consume the same fully admitted snapshots in one operation.
-  const aggregate = await queryLegacyCanonicalCrmSql<{
-    deals: string; contacts: string; companies: string
-    overdue: string; stale: string; noAmount: string; orphaned: string
-    stages: Array<{ stageId: string; currency: string; stageCount: string; value: string | null }>
-  }>(ctx,[{type:'person',fields:['archivedAt','companyId']},{type:'company',fields:['archivedAt']},{type:'deal',fields:['archivedAt','pipelineId','pipelineStageId','stage','amount','closeDate','updatedAt','currencyCode']}],
-    `SELECT summary_totals.*,
-            COALESCE((SELECT jsonb_agg(summary_stages) FROM (
-       SELECT e.attributes->>'pipeline_stage_id' AS "stageId",
-              COALESCE(NULLIF(upper(e.attributes->>'currency_code'),''),'USD') AS currency,
-              SUM(COUNT(*)) OVER (
-                PARTITION BY e.attributes->>'pipeline_stage_id'
-              )::text AS "stageCount",
-              SUM(NULLIF(e.attributes->>'amount','')::numeric)::text AS value
-         FROM entities e
-        WHERE ${ap.sql} AND e.kind = 'deal' AND e.valid_to IS NULL
-          AND e.retracted_at IS NULL AND NOT (e.attributes ? 'crm_archived_at')
-          AND NULLIF(e.attributes->>'pipeline_stage_id','') IS NOT NULL
-          ${pipelinePredicate}
-        GROUP BY e.attributes->>'pipeline_stage_id', currency
-            ) summary_stages), '[]'::jsonb) AS stages
-       FROM (SELECT
-       COUNT(*) FILTER (WHERE e.kind = 'deal' ${pipelinePredicate})::text AS deals,
-       COUNT(*) FILTER (WHERE e.kind = 'person')::text AS contacts,
-       COUNT(*) FILTER (WHERE e.kind = 'company')::text AS companies,
-       COUNT(*) FILTER (WHERE e.kind = 'deal' ${pipelinePredicate}
-         AND ${openDeal}
-         AND NULLIF(e.attributes->>'close_date','')::date < CURRENT_DATE)::text AS overdue,
-       COUNT(*) FILTER (WHERE e.kind = 'deal' ${pipelinePredicate}
-         AND ${openDeal}
-         AND e.updated_at < now() - interval '30 days')::text AS stale,
-       COUNT(*) FILTER (WHERE e.kind = 'deal' ${pipelinePredicate}
-         AND ${openDeal}
-         AND NULLIF(e.attributes->>'amount','') IS NULL)::text AS "noAmount",
-       COUNT(*) FILTER (WHERE e.kind = 'person'
-         AND NULLIF(e.attributes->>'company_id','') IS NULL)::text AS orphaned
-     FROM entities e
-     WHERE ${ap.sql} AND e.kind = ANY($${ap.nextIdx}::text[])
-       AND e.valid_to IS NULL AND e.retracted_at IS NULL
-       AND NOT (e.attributes ? 'crm_archived_at')) summary_totals`,
-    aggregateValues,
-  )
-  const stageMap = new Map<string, { stageId: string; count: number; values: Record<string, number|string> }>()
-  for (const row of aggregate.rows[0]?.stages ?? []) {
-    const summary = stageMap.get(row.stageId) ?? { stageId: row.stageId, count: 0, values: {} }
-    summary.count = Number(row.stageCount)
-    if (row.value !== null) summary.values[row.currency] = decimalResult(decimalParts(row.value).units,decimalParts(row.value).scale)
-    stageMap.set(row.stageId, summary)
-  }
-  const row = aggregate.rows[0]
-  return inheritScopeSources({
-    totals: { deals: Number(row?.deals ?? 0), contacts: Number(row?.contacts ?? 0), companies: Number(row?.companies ?? 0) },
-    attention: { overdue: Number(row?.overdue ?? 0), stale: Number(row?.stale ?? 0), noAmount: Number(row?.noAmount ?? 0), orphaned: Number(row?.orphaned ?? 0) },
-    stages: [...stageMap.values()],
-  },aggregate)
-  })
+  // Diagnostic snapshot for actual member-route measurements. The workspace,
+  // policy and source attestations still need complete production integration.
+  if (ctx.systemRead || currentApplicationReadTransaction(ctx)) throw new ApplicationPlatformError('access_unavailable','The summary is unavailable.')
+  const admitted = await runWithAgentAccess({ ...ctx, clearance: ctx.clearance ?? 'confidential', compartments: ctx.compartments,
+    visibilityAssistantIds: ctx.visibilityAssistantIds ?? (ctx.assistantKind === 'primary' ? null : [ctx.assistantId]) }, () => readCrmSummary(ctx.userId, ctx.workspaceId, pipelineId, false))
+  if (!admitted) throw new ApplicationPlatformError('access_unavailable', 'The summary is unavailable.')
+  return admitted
+}
+
+export async function getWorkspaceCrmSummary(
+  actor: string, workspaceId: string, pipelineId?: string | null,
+): Promise<CrmSummary | null> {
+  return readCrmSummary(actor, workspaceId, pipelineId, true)
+}
+
+async function readCrmSummary(
+  actor: string, workspaceId: string, pipelineId: string | null | undefined, reflector: boolean,
+): Promise<CrmSummary | null> {
+  const client = await getAppPool().connect()
+  try {
+    await client.query('BEGIN')
+    await applyRLSGucs(client, actor)
+    const capture = (await client.query<{
+      membership: boolean
+      summary: CrmSummary | CrmRollupProjection | null
+      sources: ScopeSource[] | null
+      revision: string
+      deadline: string | null
+      field_epoch: string | null
+      transaction_at: string
+      requires_lineage: boolean
+      packet: string
+      configuration_id: string
+      configuration_version: string
+      source_id: string
+      source_identity: string
+      source_user_id: string | null
+    }>('SELECT * FROM read_crm_summary_sealed($1,$2,$3)', [workspaceId, pipelineId || null, reflector])).rows[0]
+    if (!capture?.membership) return null
+    if (!capture.summary) throw new ApplicationPlatformError('access_unavailable', 'The summary is unavailable.')
+    const release = async () => {
+      const result = (await client.query<{ current: boolean }>({
+        name: 'crm-summary-current',
+        text: 'SELECT check_crm_summary_witness($1,$2,$3,$4,$5,$6,$7,$8) AS current',
+        values: [workspaceId, actor, capture.revision, capture.deadline, capture.field_epoch,
+          capture.transaction_at, capture.requires_lineage, capture.packet],
+      })).rows[0]
+      if (result?.current !== true) throw new ApplicationPlatformError('access_unavailable', 'The summary source changed.')
+    }
+    await release()
+    const projected = projectCrmSummary(capture.summary)
+    await release()
+    const base = { workspaceId, userId: null, assistantId: null, sensitivity: 'public' as const, compartments: [], projectIds: [] }
+    const domain = {
+      ...base, userId: capture.source_user_id, resourceKind: 'crm_summary_domain',
+      resourceId: capture.source_id, version: capture.source_identity, sourceProof: capture.packet,
+    }
+    const configuration = {
+      ...base, resourceKind: 'application_field', resourceId: capture.configuration_id, version: capture.configuration_version,
+    }
+    const summary = bindScopeSources(projected, [configuration, ...(capture.sources ?? [domain])])
+    await commitTransaction(client)
+    return summary
+  } finally { await rollbackAndRelease(client) }
 }
 
 export async function lookupCrmRecords(input: {
