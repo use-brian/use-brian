@@ -10542,6 +10542,7 @@ DO $memory_write_install_intents$ BEGIN
   REVOKE ALL ON public.native_memory_query_write_intents FROM PUBLIC,app_user;
  END IF;
 END $memory_write_install_intents$;
+LOCK TABLE public.native_memory_query_write_intents IN ACCESS EXCLUSIVE MODE;
 DO $memory_write_intents$
 DECLARE installed pg_class;
  owner_oid oid:=(SELECT relowner FROM pg_class WHERE oid='public.memories'::regclass);
@@ -10570,13 +10571,82 @@ BEGIN
   OR (SELECT count(*) FROM pg_constraint WHERE conrelid=installed.oid AND contype<>'n')<>4
   OR (SELECT count(*) FROM pg_index WHERE indrelid=installed.oid)<>1
   OR NOT EXISTS(SELECT 1 FROM pg_index WHERE indrelid=installed.oid AND indisprimary AND indisvalid AND indisready AND indislive)
-  OR EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=installed.oid AND (NOT tgisinternal OR tgenabled<>'O'))
+  OR EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=installed.oid
+   AND (NOT tgisinternal OR tgenabled<>'O') AND tgname<>'crm_recovery_capture')
   OR EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_constraint k ON k.oid=t.tgconstraint
    WHERE k.conrelid=installed.oid AND (NOT t.tgisinternal OR t.tgenabled<>'O'))
   OR (SELECT count(*) FROM pg_trigger t JOIN pg_constraint k ON k.oid=t.tgconstraint WHERE k.conrelid=installed.oid)<>12
  THEN RAISE EXCEPTION 'memory_query_write_intents_contract_changed';END IF;
  IF EXISTS(SELECT 1 FROM public.native_memory_query_write_intents)
  THEN RAISE EXCEPTION 'memory_query_write_intents_not_empty';END IF;
+
+END $memory_write_intents$;
+DO $memory_write_recovery_capture$
+DECLARE capture pg_trigger;
+ target public.crm_erasure_journal_targets;
+BEGIN
+ SELECT * INTO capture FROM pg_trigger
+  WHERE tgrelid='public.native_memory_query_write_intents'::regclass AND tgname='crm_recovery_capture';
+ SELECT * INTO target FROM public.crm_erasure_journal_targets
+  WHERE table_name='native_memory_query_write_intents';
+ IF capture.oid IS NULL AND target.table_name IS NULL THEN RETURN;END IF;
+ IF NOT EXISTS(SELECT 1 FROM public._migrations WHERE name='8268_native_memory_query_write_lineage.sql')
+  OR NOT EXISTS(SELECT 1 FROM public._migrations WHERE name='8271_refresh_recovery_capture.sql')
+  OR capture.oid IS NULL OR target.table_name IS NULL
+  OR capture.tgfoid IS DISTINCT FROM 'public.crm_capture_erasure_effect()'::regprocedure::oid
+  OR capture.tgtype<>29 OR capture.tgenabled<>'O' OR capture.tgisinternal
+  OR capture.tgconstraint<>0 OR capture.tgparentid<>0 OR capture.tgconstrrelid<>0 OR capture.tgconstrindid<>0
+  OR capture.tgdeferrable OR capture.tginitdeferred
+  OR capture.tgnargs<>0 OR capture.tgargs<>''::bytea OR capture.tgattr<>''::int2vector
+  OR capture.tgqual IS NOT NULL OR capture.tgoldtable IS NOT NULL OR capture.tgnewtable IS NOT NULL
+  OR target.key_columns IS DISTINCT FROM ARRAY['derivation_id','field_id','field_version']
+  OR target.capture_inserts IS DISTINCT FROM false
+ THEN RAISE EXCEPTION 'memory_query_write_recovery_capture_changed';END IF;
+ IF EXISTS(SELECT 1 FROM public.crm_erasure_journal WHERE table_name='native_memory_query_write_intents')
+ THEN RAISE EXCEPTION 'memory_query_write_recovery_receipts_present';END IF;
+ DROP TRIGGER crm_recovery_capture ON public.native_memory_query_write_intents;
+ DELETE FROM public.crm_erasure_journal_targets WHERE table_name='native_memory_query_write_intents';
+END $memory_write_recovery_capture$;
+DO $memory_write_intents$
+DECLARE installed pg_class;
+ owner_oid oid:=(SELECT relowner FROM pg_class WHERE oid='public.memories'::regclass);
+BEGIN
+ SELECT * INTO STRICT installed FROM pg_class WHERE oid='public.native_memory_query_write_intents'::regclass;
+ IF installed.relowner IS DISTINCT FROM owner_oid OR installed.relkind<>'r'
+  OR installed.relpersistence<>'p' OR NOT installed.relrowsecurity OR installed.relforcerowsecurity
+  OR installed.relispartition
+  OR coalesce(installed.relacl,acldefault('r',owner_oid)) IS DISTINCT FROM acldefault('r',owner_oid)
+  OR EXISTS(SELECT 1 FROM pg_policy WHERE polrelid=installed.oid)
+  OR EXISTS(SELECT 1 FROM pg_rewrite WHERE ev_class=installed.oid)
+  OR EXISTS(SELECT 1 FROM pg_inherits WHERE inhrelid=installed.oid OR inhparent=installed.oid)
+  OR (SELECT array_agg(attname||':'||format_type(atttypid,atttypmod) ORDER BY attnum)
+      FROM pg_attribute WHERE attrelid=installed.oid AND attnum>0)
+   IS DISTINCT FROM ARRAY['derivation_id:uuid','workspace_id:uuid','field_id:uuid','field_version:text','transaction_id:xid8']
+  OR EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=installed.oid AND attnum>0
+   AND (NOT attnotnull OR attisdropped OR atthasdef OR attgenerated<>'' OR attidentity<>'' OR attacl IS NOT NULL))
+  OR (SELECT array_agg(pg_get_constraintdef(oid) ORDER BY pg_get_constraintdef(oid) COLLATE "C")
+   FROM pg_constraint WHERE conrelid=installed.oid AND contype IN('p','f')
+    AND convalidated AND NOT condeferrable AND NOT condeferred)
+   IS DISTINCT FROM ARRAY[
+    'FOREIGN KEY (derivation_id) REFERENCES scope_derivations(id) ON DELETE CASCADE',
+    'FOREIGN KEY (field_id, field_version) REFERENCES application_field_observations(resource_id, version)',
+    'FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE',
+    'PRIMARY KEY (derivation_id, field_id, field_version)']
+  OR (SELECT count(*) FROM pg_constraint WHERE conrelid=installed.oid AND contype<>'n')<>4
+  OR (SELECT count(*) FROM pg_index WHERE indrelid=installed.oid)<>1
+  OR NOT EXISTS(SELECT 1 FROM pg_index WHERE indrelid=installed.oid AND indisprimary AND indisvalid AND indisready AND indislive)
+  OR EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=installed.oid
+   AND (NOT tgisinternal OR tgenabled<>'O'))
+  OR EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_constraint k ON k.oid=t.tgconstraint
+   WHERE k.conrelid=installed.oid AND (NOT t.tgisinternal OR t.tgenabled<>'O'))
+  OR (SELECT count(*) FROM pg_trigger t JOIN pg_constraint k ON k.oid=t.tgconstraint WHERE k.conrelid=installed.oid)<>12
+ THEN RAISE EXCEPTION 'memory_query_write_intents_contract_changed';END IF;
+ IF EXISTS(SELECT 1 FROM public.native_memory_query_write_intents)
+ THEN RAISE EXCEPTION 'memory_query_write_intents_not_empty';END IF;
+ IF EXISTS(SELECT 1 FROM public.crm_erasure_journal_targets
+  WHERE table_name='native_memory_query_write_intents')
+ THEN RAISE EXCEPTION 'memory_query_write_recovery_target_unexpected';END IF;
+
 END $memory_write_intents$;
 DO $memory_write_compose$
 DECLARE member record; actual pg_proc; after_row pg_proc; definition text; body text; marker text;
