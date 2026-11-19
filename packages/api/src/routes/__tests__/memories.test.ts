@@ -3,7 +3,7 @@ import request from 'supertest'
 import { createTestApp } from './helpers.js'
 
 vi.mock('../../application-platform/native-module-runtime.js',()=>({resolveNativeApplicationModuleExecution:vi.fn()}))
-vi.mock('../../application-platform/model-source-authority.js',()=>({assertSourceModelOutputAuthority:vi.fn()}))
+vi.mock('../../context-scope/admission.js',()=>({admitModelOutput:vi.fn()}))
 
 vi.mock('../../db/scoped-summary-store.js', () => ({ getSoulContext: vi.fn() }))
 
@@ -89,7 +89,7 @@ import {
 import { notifyBrainInboxChange } from '../../brain-stream/notify.js'
 import { memoryRoutes } from '../memories.js'
 import {resolveNativeApplicationModuleExecution} from '../../application-platform/native-module-runtime.js'
-import {assertSourceModelOutputAuthority} from '../../application-platform/model-source-authority.js'
+import {admitModelOutput} from '../../context-scope/admission.js'
 
 const mockListMemories = vi.mocked(listMemories)
 const mockGetMemoryById = vi.mocked(getMemoryById)
@@ -144,7 +144,7 @@ describe('[COMP:api/memories-route] Memory routes', () => {
       ownership:{kind:'workspace',workspaceId},surface:{},lifecycle:{sessionId:'fixture',channelType:'web',abortSignal:new AbortController().signal},
       security:{access:{userId:req.userId,workspaceId,assistantId,clearance:'confidential'},provenance:{},writeDefaults:{compartments:[],projectIds:[]},authority:{assertCurrent:async()=>{}}},
     } as never))
-    vi.mocked(assertSourceModelOutputAuthority).mockResolvedValue(undefined)
+    vi.mocked(admitModelOutput).mockResolvedValue(undefined)
     vi.mocked(resolveOperationCeilingsSystem).mockImplementation(async (_user, _workspace, clearance, compartments) => ({
       clearance, compartments: compartments ?? null, mutationCompartments: compartments ?? null,
     }))

@@ -19,7 +19,7 @@ import type {
   GoalHostType,
   HostAdapter,
   HostStore,
-} from '@use-brian/core'
+} from '@use-brian/core/goals/types.js'
 import { query } from '../db/client.js'
 import { updateTask } from '../db/tasks.js'
 

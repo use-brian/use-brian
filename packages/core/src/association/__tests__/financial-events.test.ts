@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { AssociationCommandSchema, AssociationOrderFinancialSummarySchema, AssociationProviderFinancialEventInputSchema, ProviderInboxEnvelopeSchema } from '../../index.js'
+import { AssociationCommandSchema } from '../operations.js'
+import { AssociationOrderFinancialSummarySchema, AssociationProviderFinancialEventInputSchema } from '../domain.js'
+import { ProviderInboxEnvelopeSchema } from '../provider-inbox.js'
 
 const event = {
   provider: 'stripe', providerReference: 'cs_fixture', adjustmentReference: 're_fixture',

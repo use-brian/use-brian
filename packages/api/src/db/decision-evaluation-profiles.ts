@@ -5,10 +5,8 @@
  * [COMP:decisions/promotion-registry]
  */
 import { createHash } from 'node:crypto'
-import type {
-  DecisionEvaluationProfile,
-  DecisionOperationRef,
-} from '@use-brian/core'
+import type { DecisionEvaluationProfile } from '@use-brian/core/decisions/hydra.js'
+import type { DecisionOperationRef } from '@use-brian/core/decisions/types.js'
 import type { DecisionEvaluationReport } from '../decision-evaluation.js'
 import {
   parseDecisionPromotionBundle,

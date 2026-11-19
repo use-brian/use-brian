@@ -1,4 +1,5 @@
-import type { MemoryStore, ScopeSource } from '@use-brian/core'
+import type { MemoryStore } from '@use-brian/core/memory/types.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { getPool } from './client.js'
 import { excludeExternalPrincipalsSql } from './external-principal.js'
 

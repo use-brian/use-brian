@@ -12,7 +12,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { createBrainHealingTools, type HealingToolsDeps } from '../healing-tools.js'
-import type { Tool, ToolContext } from '../../tools/types.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import type {
   CrossKindClusterRow,
   DuplicateClusterRow,

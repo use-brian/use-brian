@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
-import { ProgrammeCatalogueDocumentSchema } from '@use-brian/core'
+import { ProgrammeCatalogueDocumentSchema } from '@use-brian/core/association/programme-catalogue.js'
 import { createProgrammeCatalogueStore } from '../programme-catalogue-store.js'
 import { createAssociationWorkspaceModulesStore } from '../../association/workspace-module.js'
 const url=process.env.MEMBERSHIP_TEST_DATABASE_URL

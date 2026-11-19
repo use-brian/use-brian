@@ -1,6 +1,7 @@
 /** Atomic proposal-only Office persistence with current evidence and destination authority. */
 import { createHash } from 'node:crypto'
-import type { AccessContext, ScopeEvidence } from '@use-brian/core'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import type { ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
 import { buildAccessPredicate, buildCurrentMemberSourcePredicate, mutationActorAccess } from './access-predicate.js'
 import { defaultOfficeDbQuery, type OfficeDbQuery } from './office-artifacts.js'
 

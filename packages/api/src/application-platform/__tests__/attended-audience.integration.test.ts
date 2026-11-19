@@ -1,6 +1,6 @@
 import {randomBytes,randomUUID} from 'node:crypto'
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
-import {scopeEvidenceFromRows} from '@use-brian/core'
+import {scopeEvidenceFromRows} from '@use-brian/agent-runtime/security/context-scope.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {createDbChannelIntegrationStore} from '../../db/channel-integrations.js'
 import {findOrCreateChannelForConnect} from '../../db/channels-store.js'

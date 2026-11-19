@@ -15,7 +15,8 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { ConnectorApiError, connectorError, describeConnectorError, createWordPressTools, type WordPressApi } from '@use-brian/core'
+import { ConnectorApiError, connectorError, describeConnectorError } from '@use-brian/core/tools/base/_connector-result.js'
+import { createWordPressTools, type WordPressApi } from '@use-brian/core/tools/base/wordpress.js'
 import { classifyConnectorAuthError } from '../connector-health.js'
 import { githubApiError } from '../../github/client.js'
 import { notionApiError } from '../../notion/client.js'

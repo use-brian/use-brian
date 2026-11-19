@@ -182,8 +182,14 @@ describe('[COMP:api/account-teardown] account teardown against a real schema', (
     )).id
     const sharedEntity = (await one<{ id: string }>(
       `INSERT INTO entities (kind, display_name, workspace_id, created_by_user_id, source, verified_by_user_id, source_episode_id)
-       VALUES ('company', 'Example Co', $1, $2, 'manual', $2, $3) RETURNING id`,
+       VALUES ('product', 'Example product', $1, $2, 'manual', $2, $3) RETURNING id`,
       [shared, member, privateEpisode],
+    )).id
+    // A canonical CRM record: its author is immutable (migration 8040), kept.
+    const crmCompany = (await one<{ id: string }>(
+      `INSERT INTO entities (kind, display_name, workspace_id, created_by_user_id, source)
+       VALUES ('company', 'Example Co', $1, $2, 'manual') RETURNING id`,
+      [shared, member],
     )).id
     const privateEntity = (await one<{ id: string }>(
       `INSERT INTO entities (kind, display_name, workspace_id, created_by_user_id, source, user_id)
@@ -232,18 +238,12 @@ describe('[COMP:api/account-teardown] account teardown against a real schema', (
       [shared, owner, memberAssistant],
     )).id
 
-    // Approvals and an assigned task.
+    // Approvals. Assigned tasks move before this transaction, through the
+    // canonical non-owner writer: account-departure.integration.test.ts.
     const pending = (await one<{ id: string }>(
       `INSERT INTO pending_approvals (workspace_id, approver_user_id, status, tool_name) VALUES ($1, $2, 'pending', 'sendEmail') RETURNING id`,
       [shared, member],
     )).id
-    const membership = async (user: string) =>
-      (await one<{ id: string }>(`SELECT id FROM workspace_members WHERE workspace_id = $1 AND user_id = $2`, [shared, user])).id
-    const task = (await one<{ id: string }>(
-      `INSERT INTO tasks (workspace_id, title, created_by_user_id, assignee_id) VALUES ($1, 'Follow up', $2, $3) RETURNING id`,
-      [shared, owner, await membership(member)],
-    )).id
-    const ownerMembership = await membership(owner)
 
     const removed = await deleteAccountFootprint(client!, member)
 
@@ -265,6 +265,7 @@ describe('[COMP:api/account-teardown] account teardown against a real schema', (
       `SELECT created_by_user_id, verified_by_user_id, source_episode_id FROM entities WHERE id = $1`,
       [sharedEntity],
     )).toEqual({ created_by_user_id: owner, verified_by_user_id: member, source_episode_id: null })
+    expect(await one(`SELECT created_by_user_id FROM entities WHERE id = $1`, [crmCompany])).toEqual({ created_by_user_id: member })
 
     // The workflow moved and paused; its run-as identity is the deleted user.
     expect(await one(
@@ -279,7 +280,6 @@ describe('[COMP:api/account-teardown] account teardown against a real schema', (
 
     expect(await one(`SELECT status, approver_user_id FROM pending_approvals WHERE id = $1`, [pending]))
       .toEqual({ status: 'expired', approver_user_id: member })
-    expect(await one(`SELECT assignee_id FROM tasks WHERE id = $1`, [task])).toEqual({ assignee_id: ownerMembership })
     expect(await one(`SELECT owner_user_id FROM assistants WHERE id = $1`, [memberAssistant])).toEqual({ owner_user_id: owner })
     expect(await count(`SELECT count(*) AS n FROM assistant_members WHERE assistant_id = $1 AND user_id = $2`, [memberAssistant, owner])).toBe(1)
     expect(await one(`SELECT assistant_id FROM episodes WHERE id = $1`, [capturedEpisode])).toEqual({ assistant_id: memberAssistant })

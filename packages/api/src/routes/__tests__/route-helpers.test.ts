@@ -9,10 +9,6 @@ vi.mock('../../db/client.js', () => ({
   query: vi.fn(),
 }))
 
-vi.mock('../../mcp/inject.js', () => ({
-  injectMcpTools: vi.fn(),
-}))
-
 import {
   computePercent,
   isValidDateString,
@@ -20,10 +16,8 @@ import {
   buildUnavailableCapabilitiesPrompt,
   requireAssistantMember,
   requireAssistantOwner,
-  applyMcpInjection,
 } from '../route-helpers.js'
 import { query } from '../../db/client.js'
-import { injectMcpTools } from '../../mcp/inject.js'
 import { CONNECTOR_SCOPE_RESTRICTION, CONNECTOR_SOURCE_RESTRICTION } from '../../mcp/discovery-diagnostics.js'
 
 const mockQuery = vi.mocked(query)
@@ -77,7 +71,7 @@ describe('[COMP:api/route-helpers] Route helpers', () => {
   })
 
   describe('buildUnavailableCapabilitiesPrompt', () => {
-    // No search surface: `injectMcpTools` skips the mcp_search pair when no
+    // No search surface: the capability surface skips the mcp_search pair when no
     // source exists, and these three pin the original strict behaviour.
     const noSearch = new Map()
     it.each([false,true])('keeps protected-source recovery truthful and bounded (search=%s)', searchable => {
@@ -122,7 +116,7 @@ describe('[COMP:api/route-helpers] Route helpers', () => {
     })
 
     // ── Deferred-surface carve-out (prod incident 2026-07-23) ──────
-    // `injectMcpTools` DELETES every built-in connector tool from the map and
+    // The capability surface folds every built-in connector tool out of the map and
     // folds it behind `mcp_search`. A granted+connected connector is therefore
     // in NEITHER `capabilities` (it is connected) NOR the tool map (plucked),
     // so the bare closed-world sentence told the model to deny it. TaskMaster
@@ -178,7 +172,7 @@ describe('[COMP:api/route-helpers] Route helpers', () => {
 
     it('keeps the strict closed world when there is no search surface', () => {
       // Tool-awareness rule: never name mcp_search when it is not in the map.
-      // `injectMcpTools` skips the search pair entirely when no source exists.
+      // The capability surface skips the search pair entirely when no source exists.
       expect(buildUnavailableCapabilitiesPrompt([], new Map(), ['Google Calendar'])).toBe('')
       const result = buildUnavailableCapabilitiesPrompt(['Gmail'], new Map(), ['Google Calendar'])
       expect(result).not.toContain('mcp_search')
@@ -295,89 +289,6 @@ describe('[COMP:api/route-helpers] Route helpers', () => {
       const sql = mockQuery.mock.calls[0][0]
       expect(sql).toMatch(/assistant_members[\s\S]*role = 'owner'/)
       expect(sql).toMatch(/workspace_members[\s\S]*role = 'owner'/)
-    })
-  })
-
-  describe('applyMcpInjection', () => {
-    const mockInject = vi.mocked(injectMcpTools)
-    const baseParams = {
-      scope: 'public-api',
-      connectorUserId: 'team-owner-id',
-      assistant: { id: 'asst_1', workspaceId: 'team_1' as string | null },
-      tools: new Map(),
-    }
-
-    it('returns identity-enricher no-op when MCP stores are absent', async () => {
-      // Routes pass `stores: options` where options can omit connectorStore
-      // entirely (legacy/test setups). Helper must NOT call injectMcpTools
-      // and must NOT throw — it should degrade silently to base tools.
-      const result = await applyMcpInjection({ ...baseParams, stores: {} })
-
-      expect(mockInject).not.toHaveBeenCalled()
-      expect(result.unavailable).toEqual([])
-      expect(result.searchableSources).toEqual([])
-      // Identity enricher returns input unchanged
-      const enriched = await result.enrichConfirmation('toolName', { foo: 'bar' })
-      expect(enriched).toEqual({ foo: 'bar' })
-    })
-
-    it('passes through to injectMcpTools and returns its result', async () => {
-      mockInject.mockResolvedValueOnce({
-        enrichConfirmation: async (_t, input) => ({ ...input, enriched: true }),
-        unavailable: ['Gmail'],
-        searchableSources: ['Google Calendar'],
-      })
-
-      const stores = {
-        connectorStore: {} as never,
-        mcpSettingsStore: {} as never,
-      }
-      const result = await applyMcpInjection({ ...baseParams, userTimezone: 'Asia/Hong_Kong', stores })
-
-      expect(mockInject).toHaveBeenCalledTimes(1)
-      const call = mockInject.mock.calls[0][0]
-      expect(call.userId).toBe('team-owner-id')
-      expect(call.assistantId).toBe('asst_1')
-      expect(call.assistantTeamId).toBe('team_1')
-      expect(call.userTimezone).toBe('Asia/Hong_Kong')
-      expect(result.unavailable).toEqual(['Gmail'])
-      expect(result.searchableSources).toEqual(['Google Calendar'])
-    })
-
-    it('coerces undefined workspaceId to null so injectMcpTools sees a stable shape', async () => {
-      // Personal-only assistants pass workspaceId: undefined. The MCP injection
-      // function expects null | string, so the helper must normalise — a
-      // raw undefined would silently skip the team-overlay branches inside
-      // injectMcpTools without warning.
-      mockInject.mockResolvedValueOnce({
-        enrichConfirmation: async (_t, input) => input,
-        unavailable: [],
-        searchableSources: [],
-      })
-
-      const stores = { connectorStore: {} as never, mcpSettingsStore: {} as never }
-      await applyMcpInjection({
-        ...baseParams,
-        assistant: { id: 'asst_personal', workspaceId: undefined },
-        stores,
-      })
-
-      expect(mockInject.mock.calls[0][0].assistantTeamId).toBeNull()
-    })
-
-    it('returns no-op when injectMcpTools throws (never crashes the route)', async () => {
-      mockInject.mockRejectedValueOnce(new Error('discovery timeout'))
-      const stores = { connectorStore: {} as never, mcpSettingsStore: {} as never }
-      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-
-      const result = await applyMcpInjection({ ...baseParams, stores })
-
-      expect(result.unavailable).toEqual([])
-      expect(errSpy).toHaveBeenCalledWith(
-        expect.stringContaining('[public-api]'),
-        expect.any(Error),
-      )
-      errSpy.mockRestore()
     })
   })
 })

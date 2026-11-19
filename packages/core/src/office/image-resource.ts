@@ -1,6 +1,10 @@
 /** Deterministic Office image admission. [COMP:office/image-resource] */
 import { createHash } from 'node:crypto'
-import sharp from 'sharp'
+import type sharpModule from 'sharp'
+import { lazyImplementation } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
+
+// The image codec loads on the first admitted image, not with the Office module (M4 step 5).
+const loadSharp = lazyImplementation('The Office image codec (sharp)', () => import('sharp').then((m) => m.default))
 
 export const MAX_OFFICE_IMAGE_BYTES = 20 * 1024 * 1024
 export const MAX_OFFICE_IMAGE_DIMENSION_PX = 8_192
@@ -15,8 +19,9 @@ export type NormalizedOfficeImage = {
 
 export async function normalizeOfficeImageResource(input: Uint8Array): Promise<NormalizedOfficeImage> {
   if (input.byteLength > MAX_OFFICE_IMAGE_BYTES) throw new Error('office_image_too_large')
-  let source: sharp.Sharp
-  let metadata: sharp.Metadata
+  const sharp = await loadSharp()
+  let source: sharpModule.Sharp
+  let metadata: sharpModule.Metadata
   try {
     source = sharp(input, { failOn: 'error' })
     metadata = await source.metadata()

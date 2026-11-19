@@ -1,8 +1,16 @@
 /** Canonical delivery commands bound to the existing CRM transaction.
  * [COMP:api/crm-delivery-oversight]
  */
-import { CrmOperationsError, classifyDeliveryRecognition, deliveryQuoteMatches, deliveryObservationSupported,
-  type DeliveryCommand, type DeliveryCommitment, type DeliverySource, type DeliveryViewer } from '@use-brian/core'
+import {
+  classifyDeliveryRecognition,
+  deliveryQuoteMatches,
+  deliveryObservationSupported,
+  type DeliveryCommand,
+  type DeliveryCommitment,
+  type DeliverySource,
+  type DeliveryViewer
+} from '@use-brian/core/crm/delivery-oversight.js'
+import { CrmOperationsError } from '@use-brian/core/crm/operations-types.js'
 import type { CrmOperationsTransaction } from '../db/crm-operations-store.js'
 import { currentAgentAccess } from '../db/agent-access-context.js'
 import { mutationActorAccess } from '../db/access-predicate.js'
@@ -86,7 +94,7 @@ export async function executeDeliveryCommand(tx: CrmOperationsTransaction, comma
       const prior = (await client.query(`SELECT ${DELIVERY_COMMITMENT_COLUMNS},c.request_hash AS "requestHash" FROM crm_delivery_commitments c
         WHERE c.workspace_id=$1 AND c.source_kind=$2 AND c.source_id=$3 AND c.source_revision=$4 AND c.candidate_key=$5 FOR UPDATE`,
         [context.workspaceId, source.kind, source.id, source.revision, proposal.candidateKey])).rows[0]
-      const { crmOperationsSha256 } = await import('@use-brian/core')
+      const { crmOperationsSha256 } = await import('@use-brian/core/crm/operations-types.js')
       const requestHash = crmOperationsSha256(proposal)
       if (prior) {
         if (prior.requestHash !== requestHash) throw new CrmOperationsError('idempotency_conflict', 'The frozen source candidate already has a different payload.')

@@ -9,8 +9,7 @@
  * tracking policy".
  */
 
-export { SEARCH_PROVIDER_COST_PER_1K } from '@use-brian/core'
-import { SEARCH_PROVIDER_COST_PER_1K } from '@use-brian/core'
+import { SEARCH_PROVIDER_COST_PER_1K } from '@use-brian/core/billing/search-provider-rates.js'
 
 /** Cost in USD for `calls` successful searches against `provider`. */
 export function estimateSearchCostUsd(provider: string, calls: number): number {

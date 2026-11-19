@@ -1,3 +1,4 @@
+import { createExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
@@ -5,12 +6,16 @@ const mocks = vi.hoisted(() => ({
   current: vi.fn(),
   audience: vi.fn(),
   budget: vi.fn(),
+  claim: vi.fn(), release: vi.fn(),
 }))
 
 vi.mock('../../db/sessions.js', async original => ({
   ...(await original<typeof import('../../db/sessions.js')>()),
   findOrCreateSession: vi.fn(async () => ({ id: 'session', visibility: 'personal', channelType: 'feishu' })),
   getSessionMessages: mocks.history,
+  claimTurnLeaseOutcome: mocks.claim,
+  releaseTurnOutcome: mocks.release,
+  touchTurnLease: vi.fn(async () => ({ held: true, cancelRequested: false })),
 }))
 vi.mock('../../db/workspace-store.js', async original => ({
   ...(await original<typeof import('../../db/workspace-store.js')>()),
@@ -24,16 +29,20 @@ vi.mock('../../channel-room/room.js', async original => ({
 }))
 vi.mock('../../context-scope/execution-context.js', async original => ({
   ...(await original<typeof import('../../context-scope/execution-context.js')>()),
-  resolveExecutionContextSystem: vi.fn(async (input: { workspaceId?: string | null }) => ({
+  resolveExecutionContextSystem: vi.fn(async (input: { workspaceId?: string | null; sessionId?: string }) => ({
     turnScope: {
       access: { userId: 'user', workspaceId: input.workspaceId, clearance: 'internal', compartments: [], projectIds: [] },
       effectiveCompartments: [], writeCompartments: [], effectiveProjectIds: [], writeProjectIds: [],
     },
-    executionContext: {
-      security: { authority: { assertCurrent: mocks.current } },
-      ownership: input.workspaceId ? { kind: 'workspace', workspaceId: input.workspaceId } : { kind: 'personal', ownerUserId: 'owner' },
-      identity: { kind: 'attended', principal: { kind: 'workspace_member', userId: 'user' } },
-    },
+    executionContext: createExecutionContext({
+      identity: { kind: 'attended', principal: { kind: 'workspace_member', userId: 'user', authenticationKind: 'native_session' } },
+      ownership: input.workspaceId ? { kind: 'workspace', workspaceId: input.workspaceId } : { kind: 'personal', ownerUserId: 'user' },
+      access: { userId: 'user', workspaceId: input.workspaceId ?? '', assistantId: 'assistant', assistantKind: 'standard',
+        clearance: 'internal', compartments: [], mutationCompartments: [], projectIds: [], visibilityAssistantIds: ['assistant'] },
+      writeDefaults: { compartments: [], projectIds: [] },
+      authority: { assertCurrent: mocks.current, async execute(operation) { await mocks.current(); return operation() } },
+      lifecycle: { sessionId: input.sessionId ?? 'session', channelType: 'feishu', channelId: 'conversation', abortSignal: new AbortController().signal },
+    }),
   })),
 }))
 vi.mock('../../context-scope/delivery-authority.js', async original => ({
@@ -74,6 +83,8 @@ function turn() {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  mocks.claim.mockResolvedValue({ token: "processing-token", turnId: "a".repeat(64) })
+  mocks.release.mockImplementation(async (_id, reason) => ({ turnId: "a".repeat(64), reason }))
   mocks.current.mockResolvedValue(undefined)
   mocks.audience.mockResolvedValue({ allowed: true, evidence: { sensitivity: 'public', compartments: [], projectIds: [] } })
   mocks.budget.mockResolvedValue({ status: 'ok' })
@@ -154,7 +165,7 @@ describe('[COMP:api/channel-pipeline-audience-refusal] processing feedback lifet
     const outcome = running.then(() => null, error => error)
     await vi.waitFor(() => expect(mocks.history).toHaveBeenCalledOnce())
     expect(hooks.onProcessingStart).toHaveBeenCalledOnce()
-    expect(mocks.audience).toHaveBeenCalledOnce()
+    expect(mocks.audience).toHaveBeenCalledTimes(3) // initial, post-claim, and owner model preparation admissions
     expect(hooks.onCleanup).not.toHaveBeenCalled()
     rejectHistory(failure)
     expect(await outcome).toBe(failure)

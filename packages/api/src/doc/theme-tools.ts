@@ -21,7 +21,9 @@
  */
 
 import { z } from 'zod'
-import { buildTool, toolFailure, type Tool, type LLMProvider } from '@use-brian/core'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import { toolFailure } from '@use-brian/agent-runtime/tools/tool-failure.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { seedAppearance, type CustomThemePayload } from '@use-brian/shared'
 
 import type { DocThemeStore } from '../db/doc-themes-store.js'

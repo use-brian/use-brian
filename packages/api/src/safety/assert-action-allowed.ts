@@ -27,7 +27,7 @@
  */
 
 import { OFFICIAL_CONNECTOR_TOOLS } from '@use-brian/shared'
-import type { Tool } from '@use-brian/core'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 import type {
   AssistantConnectorGrant,
   AssistantConnectorGrantsStore,

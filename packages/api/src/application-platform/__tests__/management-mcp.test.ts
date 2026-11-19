@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createExecutionContext } from '@use-brian/core'
+import { createExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { ApplicationPlatformError } from '@use-brian/shared'
 import { AuthorityChangedError } from '../../context-scope/authority-lease.js'
 import { buildNativeApplicationGovernanceMcpTools, buildNativeApplicationSchemaMcpTools, buildNativeApplicationManagementMcpTools } from '../mcp.js'

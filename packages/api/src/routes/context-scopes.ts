@@ -10,7 +10,7 @@ import { departmentRouteReview, executeReviewedDepartmentRoute } from '../worksp
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { Router, type Request, type Response } from 'express'
 import { z } from 'zod'
-import { scopeGrantContains, type ScopeGrant } from '@use-brian/core'
+import { scopeGrantContains, type ScopeGrant } from '@use-brian/agent-runtime/security/context-scope.js'
 import { projectAggregates, projectContent } from '../db/project-aggregates.js'
 import { createProjectSharedStore, type ProjectSharedStore } from '../db/project-shared-store.js'
 import {

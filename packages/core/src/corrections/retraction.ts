@@ -36,7 +36,7 @@
  */
 
 import type { SessionContextAuthority } from '../memory/session-state-types.js'
-import { DerivedScopeError } from '../security/derived-scope.js'
+import { DerivedScopeError } from '@use-brian/agent-runtime/security/derived-scope.js'
 
 // ── Snapshots & args ────────────────────────────────────────────────
 

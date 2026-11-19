@@ -9,9 +9,9 @@ import type {
   BrowserProfileStore,
   CreateBrowserProfileParams,
   UpdateBrowserProfileParams,
-} from '@use-brian/core'
+} from '@use-brian/core/sandbox/profiles.js'
 import type { PoolClient } from 'pg'
-import { canRead } from '@use-brian/core'
+import { canRead } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { query, getPool } from './client.js'
 import { loadDepartmentSnapshot } from '../context-scope/department-resolver.js'
 import { read, write, updatePreservesFloor } from '../context-scope/reference-predicate.js'

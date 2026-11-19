@@ -3,8 +3,16 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "exports": {
+    "./package.json": "./package.json",
+    "./*.js": {
+      "types": "./dist/*.d.ts",
+      "default": "./dist/*.js"
+    }
+  },
+  "//": {
+    "exports": "Import file-level subpaths only: @use-brian/core/<path>.js (runtime names from @use-brian/agent-runtime/<path>.js). There is no root entry: the aggregate barrel, its transitional named-export successor, the \".\" export, main/types and ./dist/* were deleted in the M4 final cut (D13), docs/plans/oss-chat-m4-runtime-separation-plan.md step 7."
+  },
   "scripts": {
     "build": "tsc && rm -rf dist/skills/builtin && (test -d src/skills/builtin && cp -r src/skills/builtin dist/skills/builtin || true)",
     "typecheck": "tsc --noEmit && tsc --noEmit -p scripts/tsconfig.json",
@@ -13,7 +21,6 @@
     "smoke": "tsx scripts/smoke.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.98.0",
     "@cantoo/fontkit": "2.0.12",
     "@cantoo/pdf-lib": "2.11.1",
     "@firecrawl/anydoc": "0.1.3",
@@ -22,14 +29,11 @@
     "@fontsource/noto-sans-sc": "5.3.0",
     "@mozilla/readability": "^0.5.0",
     "@napi-rs/canvas": "^0.1.100",
-    "@openai/codex": "0.165.0",
-    "@openai/codex-catalog": "npm:@openai/codex@0.165.0",
+    "@use-brian/agent-runtime": "workspace:*",
     "@use-brian/brian-kb": "workspace:*",
     "@use-brian/office-model": "workspace:*",
     "@use-brian/office-renderer": "workspace:*",
     "@use-brian/shared": "workspace:*",
-    "ajv": "^8.20.0",
-    "ajv-formats": "^3.0.1",
     "crc-32": "^1.2.2",
     "decimal.js": "^10.6.0",
     "docx": "^9.7.1",
@@ -45,14 +49,12 @@
     "sharp": "^0.34.3",
     "tldts": "7.4.3",
     "unpdf": "^1.6.2",
-    "undici": "7.28.0",
     "yjs": "13.6.31",
     "zod": "^3.24"
   },
   "devDependencies": {
     "@types/node": "^20.19.39",
     "@types/turndown": "^5.0.6",
-    "dotenv": "^16",
     "typescript": "^5.7",
     "vitest": "^3"
   }

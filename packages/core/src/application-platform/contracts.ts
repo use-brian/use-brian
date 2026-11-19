@@ -2,7 +2,7 @@
 import { z } from 'zod'
 import { ApplicationPlatformError, applicationResourceSchema, defineWorkspaceModuleRegistry, WORKSPACE_MODULE_OPERATION_CLASSES,
   type ApplicationModuleCatalog, type ApplicationResourceDefinition, type ApplicationResourceRef, type WorkspaceModuleDefinition, type WorkspaceModuleOperationClass, type WorkspaceModuleRegistry } from '@use-brian/shared'
-import type { ExecutionContext } from '../security/execution-context.js'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 
 export interface ApplicationOperationContext<Transaction> {
   execution: ExecutionContext

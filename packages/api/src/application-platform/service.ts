@@ -1,8 +1,17 @@
 /** Canonical module dispatcher and atomic command receipts. [COMP:api/application-records] */
 import { createHash, randomUUID } from 'node:crypto'
 import type { Pool, PoolClient } from 'pg'
-import { applicationAuthorityAllowsOperation, applicationAuthorityFieldCatalog, defineApplicationModules, validateApplicationResourceCatalog, type ApplicationModuleDefinition, type ApplicationOperationContext,
-  type ExecutionContext } from '@use-brian/core'
+import {
+  applicationAuthorityAllowsOperation,
+  applicationAuthorityFieldCatalog
+} from '@use-brian/core/application-platform/access.js'
+import {
+  defineApplicationModules,
+  validateApplicationResourceCatalog,
+  type ApplicationModuleDefinition,
+  type ApplicationOperationContext
+} from '@use-brian/core/application-platform/contracts.js'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { ApplicationPlatformError, WORKSPACE_MODULES, applicationCommandSchema, applicationResourceRefSchema,
   type ApplicationCommand, type ApplicationOperationReceipt, type ApplicationResourceRef,
   type WorkspaceModuleRegistry } from '@use-brian/shared'

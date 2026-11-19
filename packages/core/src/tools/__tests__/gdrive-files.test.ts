@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { createGDriveFilesTools, type GDriveFilesStore, type GDriveFile } from '../base/gdrive-files.js'
-import type { ToolContext } from '../types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const ctx: ToolContext = {
   userId: 'u1',

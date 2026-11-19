@@ -2,8 +2,13 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { Pool, PoolClient } from 'pg'
 import { z } from 'zod'
-import { propertyDefSchema, validateDocApplicationSchema, validateDocApplicationValues,
-  type CellValue, type ExecutionContext, type PropertyDef } from '@use-brian/core'
+import {
+  validateDocApplicationSchema,
+  validateDocApplicationValues
+} from '@use-brian/core/application-platform/values.js'
+import { propertyDefSchema } from '@use-brian/core/entities/doc-schemas.js'
+import type { CellValue, PropertyDef } from '@use-brian/core/entities/doc-types.js'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { ApplicationPlatformError } from '@use-brian/shared'
 import { createDbDocEntityStore } from '../db/doc-entity-store.js'
 import { runApplicationTransaction } from './execution-context.js'

@@ -3,10 +3,15 @@
  * [COMP:api/routine-intake-execution]
  */
 import { AsyncLocalStorage } from 'node:async_hooks'
+import type { ExecutionPlanDraft, ExecutionProvenance } from '@use-brian/core/goals/execution.js'
+import { WORKFLOW_SCOPE_EVIDENCE_VAR } from '@use-brian/core/workflow/executor.js'
 import {
-  accessCeilingContains, parseAuthoringAuthority, pinAccessCeiling, pinAuthoringAuthority, WORKFLOW_SCOPE_EVIDENCE_VAR,
-  type AuthoringAuthority, type ExecutionPlanDraft, type ExecutionProvenance,
-} from '@use-brian/core'
+  accessCeilingContains,
+  parseAuthoringAuthority,
+  pinAccessCeiling,
+  pinAuthoringAuthority,
+  type AuthoringAuthority,
+} from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { applyRLSGucs, getPool, queryWithRLS, rollbackAndRelease } from '../db/client.js'
 import { runWithAgentAccess } from '../db/agent-access-context.js'
 import { getTaskByIdSystem } from '../db/tasks.js'

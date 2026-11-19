@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { blockSchema, pageSchema, type Block } from '@use-brian/core/dist/views/blocks.js'
-import { applyOps } from '@use-brian/core/dist/doc/ops.js'
-import { opsSchema } from '@use-brian/core/dist/doc/page-schemas.js'
+import { blockSchema, pageSchema, type Block } from '@use-brian/core/views/blocks.js'
+import { applyOps } from '@use-brian/core/doc/ops.js'
+import { opsSchema } from '@use-brian/core/doc/page-schemas.js'
 import { pageToYDocUpdate, snapshotFromUpdate, pageToYDoc, yDocToSnapshot } from '../encode.js'
 import { applyOpsToYDoc } from '../apply-ops.js'
 

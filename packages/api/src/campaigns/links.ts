@@ -1,5 +1,5 @@
 /** Stable campaign-link construction and redirect policy. [COMP:campaigns/links] */
-import { CampaignError } from '@use-brian/core'
+import { CampaignError } from '@use-brian/core/campaigns/types.js'
 import {
   campaignHttpUrlSchema,
   type CampaignUtm,

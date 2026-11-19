@@ -13,10 +13,10 @@
  * in `usage_tracking`.
  */
 
-import type { TokenUsage } from '../providers/types.js'
+import type { TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
 import type { MediaBackend } from './backend.js'
 import { runMediaUnderstanding } from './backend.js'
-import { aiStudioTransport } from '../providers/google-transport.js'
+import { aiStudioTransport } from '@use-brian/agent-runtime/providers/google-transport.js'
 
 export type TranscribeOptions = {
   /** AI Studio key. Equivalent to a `google` backend over `aiStudioTransport`. */

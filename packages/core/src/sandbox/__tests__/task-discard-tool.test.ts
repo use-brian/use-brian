@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { createComputerTools } from '../tools.js'
 import { createLocalBrowserProvider } from '../local-browser-provider.js'
-import type { ToolContext } from '../../tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const ctx: ToolContext = { userId: 'user-1', assistantId: 'assistant-1', sessionId: 'session-1', appId: 'app-1',
   workspaceId: 'workspace-1', channelType: 'web', attended: true, channelId: 'channel-1', abortSignal: new AbortController().signal }

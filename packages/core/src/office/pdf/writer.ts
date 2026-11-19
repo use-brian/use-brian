@@ -1,12 +1,6 @@
 import { createHash } from 'node:crypto'
-import {
-  PDFDocument,
-  PDFSignature,
-  degrees,
-  rgb,
-  type PDFImage,
-  type PDFPage,
-} from '@cantoo/pdf-lib'
+import type { PDFDocument, PDFImage, PDFPage } from '@cantoo/pdf-lib'
+import { lazyImplementation } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
 import type {
   PdfField,
   PdfOverlay,
@@ -15,6 +9,10 @@ import type {
 } from '@use-brian/office-model'
 import { PdfEngineError } from './errors.js'
 import { resolvePdfFontRuns } from './fonts.js'
+
+type PdfLib = typeof import('@cantoo/pdf-lib')
+// The PDF engine loads on the first render, not with the Office modules (M4 step 5).
+const loadPdfLib = lazyImplementation('The PDF writer (pdf-lib)', (): Promise<PdfLib> => import('@cantoo/pdf-lib'))
 
 export type PdfWriterResource = {
   bytes: Uint8Array
@@ -56,9 +54,9 @@ function contentSha256(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex')
 }
 
-function color(value: string) {
+function color(lib: PdfLib, value: string) {
   const hex = value.slice(1, 7)
-  return rgb(
+  return lib.rgb(
     Number.parseInt(hex.slice(0, 2), 16) / 255,
     Number.parseInt(hex.slice(2, 4), 16) / 255,
     Number.parseInt(hex.slice(4, 6), 16) / 255,
@@ -74,6 +72,7 @@ function fieldText(field: PdfField, widgetExportValue?: string): string | null {
 }
 
 async function drawTextInRect(
+  lib: PdfLib,
   document: PDFDocument,
   page: PDFPage,
   text: string,
@@ -100,8 +99,8 @@ async function drawTextInRect(
       y,
       size,
       font: run.font,
-      color: color(textColor),
-      rotate: degrees(rotation),
+      color: color(lib, textColor),
+      rotate: lib.degrees(rotation),
     })
     x += run.font.widthOfTextAtSize(run.text, size)
   }
@@ -115,10 +114,10 @@ function snapshotFields(snapshot: PdfSnapshot): PdfField[] {
   return snapshot.pages.flatMap((page) => page.fields)
 }
 
-async function flattenSource(document: PDFDocument): Promise<void> {
+async function flattenSource(lib: PdfLib, document: PDFDocument): Promise<void> {
   const form = document.getForm()
   for (const field of form.getFields()) {
-    if (field instanceof PDFSignature) form.removeField(field)
+    if (field instanceof lib.PDFSignature) form.removeField(field)
   }
   if (form.getFields().length > 0) form.flatten({ updateFieldAppearances: false })
 }
@@ -130,20 +129,21 @@ export function createPdfWriterPort(options: { resolveResource?: PdfWriterResour
       if (sourceHash !== snapshot.source.sha256) {
         throw new PdfEngineError('pdf_malformed', 'The immutable PDF source no longer matches the canonical snapshot')
       }
+      const lib = await loadPdfLib()
 
       let source: PDFDocument
       try {
-        source = await PDFDocument.load(sourceBytes, {
+        source = await lib.PDFDocument.load(sourceBytes, {
           ignoreEncryption: false,
           throwOnInvalidObject: true,
           updateMetadata: false,
         })
-        await flattenSource(source)
+        await flattenSource(lib, source)
       } catch (error) {
         throw new PdfEngineError('pdf_malformed', 'The PDF source could not be prepared for output', { cause: error })
       }
 
-      const output = await PDFDocument.create()
+      const output = await lib.PDFDocument.create()
       output.setTitle(snapshot.title)
       output.setLanguage(snapshot.defaultLanguage)
       output.setCreator('Use Brian PDF editor')
@@ -153,7 +153,7 @@ export function createPdfWriterPort(options: { resolveResource?: PdfWriterResour
       const pages = new Map(snapshot.pages.map((page, index) => [page.id, { model: page, pdf: output.getPage(index), index }]))
       const receipts: PdfRenderReceipt[] = []
       for (const { model, pdf } of pages.values()) {
-        pdf.setRotation(degrees(model.rotation))
+        pdf.setRotation(lib.degrees(model.rotation))
       }
 
       for (const field of snapshotFields(snapshot)) {
@@ -167,12 +167,12 @@ export function createPdfWriterPort(options: { resolveResource?: PdfWriterResour
               y: widget.rect.y,
               width: widget.rect.width,
               height: widget.rect.height,
-              color: rgb(1, 1, 1),
-              borderColor: rgb(0.45, 0.45, 0.45),
+              color: lib.rgb(1, 1, 1),
+              borderColor: lib.rgb(0.45, 0.45, 0.45),
               borderWidth: 0.5,
             })
             if (visibleText) {
-              await drawTextInRect(output, page.pdf, visibleText, widget.rect, snapshot.locale, 10, '#111111')
+              await drawTextInRect(lib, output, page.pdf, visibleText, widget.rect, snapshot.locale, 10, '#111111')
             }
             receipts.push({
               objectId: `${field.id}:${widget.id}`,
@@ -199,10 +199,11 @@ export function createPdfWriterPort(options: { resolveResource?: PdfWriterResour
                 y: overlay.rect.y,
                 width: overlay.rect.width,
                 height: overlay.rect.height,
-                color: color(overlay.appearance.backgroundColor),
+                color: color(lib, overlay.appearance.backgroundColor),
               })
             }
             await drawTextInRect(
+              lib,
               output,
               page.pdf,
               visibleText,
@@ -215,7 +216,7 @@ export function createPdfWriterPort(options: { resolveResource?: PdfWriterResour
             )
           } else if (overlay.kind === 'checkmark') {
             const inset = Math.max(1, overlay.strokeWidthPt)
-            const stroke = color(overlay.color)
+            const stroke = color(lib, overlay.color)
             if (overlay.mark === 'x') {
               page.pdf.drawLine({ start: { x: overlay.rect.x + inset, y: overlay.rect.y + inset }, end: { x: overlay.rect.x + overlay.rect.width - inset, y: overlay.rect.y + overlay.rect.height - inset }, thickness: overlay.strokeWidthPt, color: stroke })
               page.pdf.drawLine({ start: { x: overlay.rect.x + inset, y: overlay.rect.y + overlay.rect.height - inset }, end: { x: overlay.rect.x + overlay.rect.width - inset, y: overlay.rect.y + inset }, thickness: overlay.strokeWidthPt, color: stroke })
@@ -243,7 +244,7 @@ export function createPdfWriterPort(options: { resolveResource?: PdfWriterResour
               y: overlay.rect.y,
               width: overlay.rect.width,
               height: overlay.rect.height,
-              rotate: degrees(overlay.rotation),
+              rotate: lib.degrees(overlay.rotation),
             })
           }
           receipts.push({ objectId: overlay.id, kind: 'overlay', pageId: overlay.pageId, rect: overlay.rect, visibleText })

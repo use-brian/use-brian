@@ -7,10 +7,10 @@ import { tavilyProvider } from '../base/search-tavily.js'
 import { baiduProvider } from '../base/search-baidu.js'
 import { duckDuckGoProvider } from '../base/search-ddg.js'
 import { webSearchTool } from '../base/web-search.js'
-import type { ToolContext } from '../types.js'
-import { createToolExecutor, NO_TOOL_TIMEOUT } from '../../engine/tool-executor.js'
-import { createLoopDetector } from '../../engine/loop-detector.js'
-import type { ContentBlock } from '../../providers/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { createToolExecutor, NO_TOOL_TIMEOUT } from '@use-brian/agent-runtime/engine/tool-executor.js'
+import { createLoopDetector } from '@use-brian/agent-runtime/engine/loop-detector.js'
+import type { ContentBlock } from '@use-brian/agent-runtime/providers/types.js'
 
 // ── Helpers ─────────────────────────────────────────────────────
 

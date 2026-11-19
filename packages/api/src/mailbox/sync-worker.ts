@@ -41,36 +41,36 @@
  * [COMP:api/mailbox-sync-worker]
  */
 
-import { simpleParser } from 'mailparser'
+import type { AnalyticsLogger } from '@use-brian/core/analytics/logger.js'
+import type { CrmStore } from '@use-brian/core/crm/types.js'
+import type { EntityLinksStore, EntityStore } from '@use-brian/core/entities/types.js'
+import { emailFilterImplementations } from '@use-brian/core/ingest/adapters/email/filters.js'
 import {
-  composeFilters,
-  computeNextRun,
-  createIngestEngine,
-  mailboxEpisodeText,
   mailboxFilterImplementations,
-  normalizeMailboxMessage,
-  processEpisode,
-  universalFilters,
-  emailFilterImplementations,
   isMachineSenderAddress,
-  type AnalyticsLogger,
-  type CrmStore,
-  type EntityLinksStore,
-  type EntityStore,
+} from '@use-brian/core/ingest/adapters/mailbox/filters.js'
+import {
+  mailboxEpisodeText,
+  normalizeMailboxMessage,
+  type MailboxIngestMessage,
+} from '@use-brian/core/ingest/adapters/mailbox/normalize.js'
+import {
+  createIngestEngine,
   type IngestEngine,
   type IngestEngineDeps,
   type IngestRule,
-  type LLMProvider,
-  type MailboxIngestMessage,
-  type MemoryStore,
-  type PipelineBEpisode,
-  type PipelineBApplicationPort,
   type PlaceholderResolver,
-  type SourceKind,
-  type TaskAdmissionPort,
-  type TaskStore,
-  type UsageStore,
-} from '@use-brian/core'
+} from '@use-brian/core/ingest/engine.js'
+import { composeFilters, universalFilters } from '@use-brian/core/ingest/filters.js'
+import type { PipelineBApplicationPort } from '@use-brian/core/ingest/pipeline-b-application.js'
+import { processEpisode, type PipelineBEpisode } from '@use-brian/core/ingest/pipeline-b.js'
+import type { SourceKind } from '@use-brian/core/ingest/types.js'
+import type { MemoryStore } from '@use-brian/core/memory/types.js'
+import { computeNextRun } from '@use-brian/core/scheduling/schedule.js'
+import type { TaskAdmissionPort } from '@use-brian/core/tasks/admission.js'
+import type { TaskStore } from '@use-brian/core/tasks/types.js'
+import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
 import type { ConnectorInstance, ConnectorInstanceStore } from '../db/connector-instance-store.js'
 import type { DbEpisodesStore } from '../db/episodes-store.js'
 import type { IngestRuleRow, IngestRulesStore } from '../db/ingest-rules-store.js'
@@ -91,7 +91,7 @@ import {
   type MailboxSessionCache,
   type SocketKeepWarm,
 } from './imap-session.js'
-import { htmlToText, messageRef, parseReferencesHeader } from './mailbox-api.js'
+import { htmlToText, loadSimpleParser, messageRef, parseReferencesHeader } from './mailbox-api.js'
 import { bareEmailAddress, readSendAsAliases } from './send-as.js'
 import type { MailboxAccountSettings } from './types.js'
 
@@ -271,6 +271,9 @@ export async function parseSyncedMessage(params: {
 }): Promise<ParsedSyncMessage | null> {
   const { accountEmail, folder, msg } = params
   if (!msg.source) return null
+  // Loaded outside the per-message catch: a parser that cannot load fails the
+  // pass honestly instead of skipping every message as unparseable.
+  const simpleParser = await loadSimpleParser()
   let parsed
   try {
     parsed = await simpleParser(msg.source)

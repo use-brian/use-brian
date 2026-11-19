@@ -214,6 +214,56 @@ test('[COMP:crm/assurance-fixture] Group interruption disposes only the owned Po
   }
 })
 
+test('[COMP:crm/assurance-fixture] Owned restart empties shared buffers and keeps the cluster, port and data', { timeout: 300_000 }, async () => {
+  await assertLocalFixture()
+  const env = cleanRuntimeEnvironment(process.env)
+  const pgBin = (await runCommand('pg_config', ['--bindir'], { env })).trim()
+  const fixture = await createLocalFixture({ pgBin, env, statementStatistics: true })
+  try {
+    const owner = async (run) => { const client = new pg.Client({ connectionString: fixture.adminUrl }); await client.connect(); try { return await run(client) } finally { await client.end() } }
+    const state = () => owner(async client => (await client.query(`SELECT pg_postmaster_start_time()::text AS started, inet_server_port() AS port,
+      (SELECT count(*)::int FROM _migrations) AS migrations,
+      -- Fails unless pg_stat_statements is still preloaded after the restart.
+      (SELECT count(*) FROM pg_stat_statements) >= 0 AS statements`)).rows[0])
+    // Blocks of _migrations read from outside shared buffers by one scan.
+    const reads = () => owner(async client => (await client.query('EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT count(*) FROM _migrations')).rows[0]['QUERY PLAN'][0].Plan['Shared Read Blocks'])
+    await reads()
+    assert.equal(await reads(), 0)
+    const held = new pg.Client({ connectionString: fixture.appUrl })
+    held.on('error', () => {})
+    await held.connect()
+    const before = await state()
+    await fixture.restart()
+    // First scan after the restart, before anything else touches _migrations.
+    assert.ok(await reads() > 0, 'a restarted cluster serves the first scan from outside shared buffers')
+    const after = await state()
+    assert.notEqual(after.started, before.started)
+    assert.equal(after.port, before.port)
+    assert.equal(after.migrations, before.migrations)
+    assert.equal(after.statements, true)
+    // Existing connections end; callers reconnect with a fresh pool.
+    await assert.rejects(held.query('SELECT 1'))
+    await held.end().catch(() => {})
+    assert.equal(JSON.parse(await readFile(fixture.env.BRIAN_ASSURANCE_FIXTURE, 'utf8')).port, before.port)
+  } finally { await fixture.dispose() }
+  await assert.rejects(fixture.restart(), /not running/)
+})
+
+test('[COMP:crm/assurance-fixture] CLI forwards harness controls without database selectors and enables statement statistics', { timeout: 300_000 }, async () => {
+  await assertLocalFixture()
+  const env = { ...cleanRuntimeEnvironment(process.env), BRIAN_CHAT_COST_OUTPUT: '/nonexistent/fictional-cost.json',
+    TEST_DATABASE_URL: 'postgres://127.0.0.1:1/never', PGHOSTADDR: '192.0.2.1' }
+  const pgBin = (await runCommand('pg_config', ['--bindir'], { env })).trim()
+  const report = "const e=process.env;console.log('fixture-env '+JSON.stringify({output:e.BRIAN_CHAT_COST_OUTPUT,test:e.TEST_DATABASE_URL??null,hostaddr:e.PGHOSTADDR??null,stats:e.BRIAN_ASSURANCE_STATEMENT_STATS??null,port:new URL(e.DATABASE_URL).port,pgport:e.PGPORT}))"
+  const output = await runCommand(process.execPath, ['scripts/crm/local-fixture.mjs', '--statement-statistics', '--pg-bin', pgBin, '--', process.execPath, '-e', report], { env })
+  const seen = JSON.parse(output.split('\n').find(text => text.startsWith('fixture-env ')).slice('fixture-env '.length))
+  assert.equal(seen.output, '/nonexistent/fictional-cost.json')
+  assert.equal(seen.test, null)
+  assert.equal(seen.hostaddr, null)
+  assert.equal(seen.stats, 'true')
+  assert.equal(seen.port, seen.pgport)
+})
+
 test('[COMP:crm/assurance-fixture] Fixed stopped alias transition restores exact pins and suffix ACLs atomically', async () => {
   await assertLocalFixture()
   const owner = new pg.Client({ connectionString: process.env.DATABASE_URL })

@@ -1,7 +1,13 @@
 /** Transactional draft/publication authority. [COMP:crm/membership-catalogue] */
 import type { Pool, PoolClient } from 'pg'
-import { AssociationError, MembershipCatalogueDocumentSchema, membershipPublicationIssues, resolveMembershipCatalogue,
-  type MembershipCatalogueDocument, type MembershipSite, type AssociationActor } from '@use-brian/core'
+import { AssociationError, type AssociationActor } from '@use-brian/core/association/domain.js'
+import {
+  MembershipCatalogueDocumentSchema,
+  membershipPublicationIssues,
+  resolveMembershipCatalogue,
+  type MembershipCatalogueDocument,
+  type MembershipSite
+} from '@use-brian/core/association/membership-catalogue.js'
 import { getPool } from './client.js'
 import { saveCrmEntitlementPlanRecord } from './crm-catalog-records.js'
 import { lockAssociationModule, requireAssociationAdmission } from '../association/workspace-module.js'

@@ -1,8 +1,7 @@
 /** Shared accepted-content, readiness and manual delivery boundary. [COMP:feed/draft-projection] */
-import JSZip from 'jszip'
 import { FEED_MEDIA_CAPS, FEED_TEXT_CAPS, type FeedComposition, type FeedTarget, type FeedLinkedInIssue } from '@use-brian/shared'
-import { projectFeedLinkedIn, projectFeed, walkFeed, feedCompositionHtml, feedText, canonicalFeedValue } from '@use-brian/doc-model'
-import type { FilesApi } from '@use-brian/core'
+import { projectFeedLinkedIn, projectFeed, walkFeed, feedCompositionHtml, feedText, canonicalFeedValue } from '@use-brian/doc-model/feed.js'
+import type { FilesApi } from '@use-brian/core/workspace-files/api.js'
 import { withFeedTransaction, readFeedCopy, requireFeedComposition, assertFeedFiles, FeedCollaborationError, type FeedActor, type StructuredFeedContent } from '../db/feed-collaboration-store.js'
 import { query } from '../db/client.js'
 export type FeedReadinessIssue = { code: FeedLinkedInIssue['code'] | 'unfinished_slot' | 'empty_post' | 'text_limit' | 'media_limit' | 'duplicate_media' | 'unsupported_format' | 'invalid_thread' | 'article_fields'; target: FeedTarget }
@@ -79,6 +78,8 @@ export async function exportFeedArticle(actor: FeedActor, expectedRevision: numb
     if (projection.missingSlots.length && !acknowledgeOmissions) throw new FeedCollaborationError(409, 'acknowledge_omitted_slots')
     return { content, projection, scope }
   }, false)
+  // jszip loads at export time, never at module evaluation (M4 step 5).
+  const { default: JSZip } = await import('jszip')
   const zip = new JSZip(); const date = new Date('1980-01-01T00:00:00Z'); const assetPath = (id: string, mime: string) => `assets/${id}.${extension(mime)}`
   let total = 0
   const manifest: Array<{fileId:string;path:string;alt:string;blockId?:string;placement:string}> = []

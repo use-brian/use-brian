@@ -1,7 +1,7 @@
 import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/attended-audience.js'
 import { withTurnInference } from '../turn/runtime.js'
 import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
-import { renderSystemContext } from '@use-brian/core'
+import { renderSystemContext } from '@use-brian/agent-runtime/providers/system-context.js'
 /**
  * Shared public turn pipeline — the body of the public API's message
  * handler, extracted so two front doors can drive it:
@@ -26,53 +26,52 @@ import { renderSystemContext } from '@use-brian/core'
 import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { randomUUID } from 'node:crypto'
+import { sanitize as sanitizeAnalytics } from '@use-brian/core/analytics/logger.js'
 import {
   buildAssistantNameSection,
   buildMemoryContext,
-  createMemoryTools,
-  calculateCost,
-  filterToolsByCapabilities,
-  sanitize as sanitizeAnalytics,
-  stripUnsignedToolUses, modelRequiresToolSignatures,
-  modelToCompactionTier,
-  unionCompartments,
-  buildWorkspaceFilesContext,
-  buildSessionStateBlock,
-  ContextScopeAccumulator,
-  createTurnOutputCollector,
-  formatAssistantQuestion,
-  executionToolContext,
-} from '@use-brian/core'
-import type {
-  LLMProvider,
-  Tool,
-  MemoryStore,
-  UsageStore,
-  Message,
-  CapabilityStore,
-  KnowledgeStoreInterface,
-  AnalyticsLogger,
-  TokenUsage,
-  EpisodicStore,
-  SessionStateStore,
-  McpSettingsStore,
-  GDriveFilesStore,
-  TurnOutputSelection,
-} from '@use-brian/core'
-import type { ContentBlock, EngineHooks } from '@use-brian/core'
+} from '@use-brian/core/memory/context-builder.js'
+import { buildSessionStateBlock } from '@use-brian/core/memory/session-state-context.js'
+import { createMemoryTools } from '@use-brian/core/memory/tools.js'
+import { buildWorkspaceFilesContext } from '@use-brian/core/workspace-files/context-builder.js'
+import { calculateCost } from '@use-brian/agent-runtime/billing/cost-tracker.js'
+import { modelToCompactionTier } from '@use-brian/agent-runtime/compaction/compact.js'
+import {
+  stripUnsignedToolUses,
+  modelRequiresToolSignatures,
+} from '@use-brian/agent-runtime/engine/tool-pairing.js'
+import { createTurnOutputCollector } from '@use-brian/agent-runtime/engine/turn-output.js'
+import { unionCompartments } from '@use-brian/agent-runtime/security/compartments.js'
+import { canRead } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { formatAssistantQuestion } from '@use-brian/agent-runtime/tools/base/ask-question.js'
+import { filterToolsByCapabilities } from '@use-brian/agent-runtime/tools/capability-gate.js'
+import type { AnalyticsLogger } from '@use-brian/core/analytics/logger.js'
+import type { CapabilityStore } from '@use-brian/core/authorization/types.js'
+import type { KnowledgeStoreInterface } from '@use-brian/core/knowledge/types.js'
+import type { EpisodicStore } from '@use-brian/core/memory/episodic-types.js'
+import type { SessionStateStore } from '@use-brian/core/memory/session-state-types.js'
+import type { MemoryStore } from '@use-brian/core/memory/types.js'
+import type { GDriveFilesStore } from '@use-brian/core/tools/base/gdrive-files.js'
+import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
+import type { TurnOutputSelection } from '@use-brian/agent-runtime/engine/turn-output.js'
+import type { McpSettingsStore } from '@use-brian/agent-runtime/mcp/types.js'
+import type { LLMProvider, Message, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
+import type { EngineHooks } from '@use-brian/agent-runtime/engine/hooks.js'
+import type { ContentBlock } from '@use-brian/agent-runtime/providers/types.js'
 import { sanitizeDeliveryText, resolveCharter, renderCharterBlock } from '@use-brian/shared'
 import { loadDecisionPlaybookContext } from '../decision-learning/playbook-context.js'
 import { runProactiveCompaction } from './proactive-compaction.js'
 import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
-import { applyMcpInjection, buildUnavailableCapabilitiesPrompt, injectSkills } from './route-helpers.js'
+import { buildUnavailableCapabilitiesPrompt, injectSkills } from './route-helpers.js'
 import { createDbWorkspaceSkillStore } from '../db/skill-store.js'
 import { createDbWorkspaceSkillEnablementStore } from '../db/workspace-skill-enablement-store.js'
 import {
-  attachUserVisibleContext,
   buildSplitSystemPrompt,
   formatPrivateRuntimeContext,
-  formatUserVisibleContext,
-} from './_prompt-builder.js'
+  } from './_prompt-builder.js'
 import { resolveBrandContext } from '../brand/prompt-context.js'
 import {
   getConnectorUserId,
@@ -88,17 +87,17 @@ import {
   automaticContextAccess,
 } from '../context-scope/resolve-turn-scope.js'
 import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
-import { prepareAssistantRun } from '../turn/prepare.js'
-import { policyFor } from '../session-kind.js'
-import { runAssistantTurn, TurnRefusal, turnUsageIdentity } from '../turn/kernel.js'
+import { normalizeSessionVisibility, policyFor, sessionAuthorityDestinationMatches } from '../session-kind.js'
+import { openAssistantTurn, openTurnSqlScope, TurnRefusal, turnUsageIdentity, type TurnSqlScope } from '../turn/kernel.js'
+import { noopPublishSessionEvent, type PublishSessionEvent } from '../session-event-port.js'
+import { publishTurnCompleted } from '../session-live-publisher.js'
 import { waitForTurnSlot } from '../turn/lease.js'
-import { isAuthorityChangedError } from '../context-scope/authority-lease.js'
+import { AuthorityChangedError, isAuthorityChangedError } from '../context-scope/authority-lease.js'
 import {
   createDeliveryAudienceAuthorizer,
   DeliveryAudienceUnverifiedError,
   isDeliveryAudienceUnverifiedError,
 } from '../context-scope/delivery-authority.js'
-import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
 import { isExternalPrincipal } from '../db/external-principal.js'
 import { accrueClientPrincipal } from './client-accrual.js'
 import type { ConnectorStore } from '../db/connector-store.js'
@@ -123,6 +122,10 @@ import { billingPartyForAssistant } from '../billing-party.js'
 import { resolveChatModelSelection } from '../model-resolution.js'
 import { checkUsageBudget, type CreditBudgetGate } from './route-helpers.js'
 import { query } from '../db/client.js'
+import { publicConversationScope, readPublicConversationFloor, readPublicConversationHistory,
+  type PublicConversationCredential, type PublicTurnConversationAddress } from '../db/public-conversation.js'
+import { withPublicConversationWrite } from '../db/conversation-store.js'
+import { ConversationVisibilityError, publicConversationHistoryActive } from '../db/conversation-visibility.js'
 import type { ProviderAvailability } from '@use-brian/shared/model-registry'
 import {
   applyPublicResearchToolCeiling,
@@ -181,7 +184,7 @@ export type PublicTurnDeps = {
   connectorGrantStore?: ConnectorGrantStore
   connectorInstanceStore?: ConnectorInstanceStore
   gdriveFilesStore?: GDriveFilesStore
-  filesApi?: import('@use-brian/core').FilesApi
+  filesApi?: import('@use-brian/core/workspace-files/api.js').FilesApi
   assistantConnectorGrantsStore?: import('../db/assistant-connector-grants-store.js').AssistantConnectorGrantsStore
   engineHooks?: EngineHooks
   maxTurns?: number
@@ -191,7 +194,7 @@ export type PublicTurnDeps = {
    * turn (see `PublicTurnContextScope`); the keyed API never builds the
    * block, so leaving this unset keeps that path byte-identical.
    */
-  workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
+  workspaceFilesStore?: import('@use-brian/core/workspace-files/types.js').WorkspaceFilesStore
   /**
    * Skills catalogue. Same gating as `workspaceFilesStore` — an
    * `external-client` turn never injects skills.
@@ -200,6 +203,12 @@ export type PublicTurnDeps = {
   /** Workspace-skill surface for `injectSkills` — see the call site (mig 492). */
   workspaceSkillStore?: import('../db/skill-store.js').WorkspaceSkillStore
   workspaceSkillEnablementStore?: import('../db/workspace-skill-enablement-store.js').WorkspaceSkillEnablementStore
+  /**
+   * Session live-event bus. The public lane announces a reclaimed stale
+   * predecessor's terminal outcome (`onReclaimed`) as web, channel and resume
+   * do. Default no-op; the composition root passes the real bus.
+   */
+  publishSessionEvent?: PublishSessionEvent
 }
 
 /**
@@ -314,6 +323,9 @@ export type PublicTurnInput = {
    */
   identityNamespace: string
   body: PublicTurnBody
+  /** Exact validated credential from the HTTP owner. Older fixtures that do
+   * not mount the conversation reader continue to use credentialCurrent. */
+  credential?: PublicConversationCredential
   /**
    * How much assistant context to reconstruct. Defaults to
    * `'external-client'` so the keyed API keeps its existing behavior
@@ -515,6 +527,7 @@ export async function upsertClientMemory(params: {
     clientSelfMemory: { compartment: string }
   }
   sessionId: string
+  assertCurrent?: () => Promise<void>
   value: NonNullable<PublicTurnBody['clientMemory']>
 }): Promise<void> {
   const keyTag = `client-memory:${params.value.key}`
@@ -529,6 +542,7 @@ export async function upsertClientMemory(params: {
   const existing = (await params.store.getIndex(params.access, true))
     .find((memory) => memory.tags.includes(keyTag))
   if (existing) {
+    await params.assertCurrent?.()
     const updated = await params.store.update(existing.id, {
       summary: params.value.summary,
       detail: params.value.detail,
@@ -536,6 +550,7 @@ export async function upsertClientMemory(params: {
     }, params.access)
     if (updated) return
   }
+  await params.assertCurrent?.()
   await params.store.create({
     assistantId: params.access.assistantId,
     userId: params.access.userId,
@@ -575,9 +590,24 @@ export async function executePublicTurn(
   req: import('express').Request,
   res: import('express').Response,
 ): Promise<void> {
+  // One request SQL ledger before the owner exists (turn-kernel.md "Per-turn
+  // SQL accounting phases"): adapter work lands in the `adapter` frame and the
+  // owner adopts the same identity, as on web and channel.
+  const sqlScope = openTurnSqlScope()
+  return sqlScope.run(() => executePublicTurnInScope(deps, input, req, res, sqlScope))
+}
+
+async function executePublicTurnInScope(
+  deps: PublicTurnDeps,
+  input: PublicTurnInput,
+  req: import('express').Request,
+  res: import('express').Response,
+  sqlScope: TurnSqlScope,
+): Promise<void> {
   // Inference wiring through the turn kernel's boot registration.
   deps = withTurnInference(deps)
   const maxTurns = deps.maxTurns ?? 8
+  input = { ...input, body: structuredClone(input.body), internalActor: input.internalActor ? { ...input.internalActor } : undefined }
   const body = input.body
 
   // ── 3. Assistant + billing party ─────────────────────────
@@ -682,914 +712,1051 @@ export async function executePublicTurn(
     )
   }
 
-  // Ensure the user appears in the assistant's member list — same
-  // pattern as resolveChannelUser. Lets the owner see who's been
-  // talking to the bot.
-  await query(
-    `INSERT INTO assistant_members (assistant_id, user_id, role)
-     VALUES ($1, $2, 'member')
-     ON CONFLICT (assistant_id, user_id) DO NOTHING`,
-    [assistant.id, user.id],
-  )
-
-  // ── 4b. Client accrual ───────────────────────────────────
-  // What this turn leaves behind about the external client it serves: the
-  // `client:<externalUserId>` compartment stamp (the client-vs-client wall,
-  // D12) and, on an identified turn, a team-visible contact record (D11).
-  // Returns an empty stamp for a resolved teammate, so a public-API turn on
-  // behalf of a real member behaves exactly as before. See client-accrual.ts.
-  //
-  // The internal lane skips the call outright rather than relying on the
-  // teammate no-op inside it: an attributed member is a principal, not a
-  // client, and the skip should be legible at the seam.
-  const accrual = internalScope
-    ? { compartments: [], contactEntityId: null }
-    : await accrueClientPrincipal({
-        user,
-        workspaceId: assistant.workspaceId ?? null,
-        assistantId: assistant.id,
-        identityNamespace: input.identityNamespace,
-        externalUserId: body.externalUserId,
-        externalUserName: body.externalUserName,
-        email: claimedEmail ?? null,
-        orgId: body.claims?.orgId ?? null,
-        identified: isIdentified,
-        clientLead: body.clientLead,
-        analytics: deps.analytics,
-        ownerId,
-      })
-
   // ── 5. Session ───────────────────────────────────────────
   const channelId = body.sessionId ?? body.externalUserId
-  const session = await findOrCreateSession({
+  let session = await findOrCreateSession({
     assistantId: assistant.id,
     userId: user.id,
     channelType: 'api',
     channelId,
   })
+  // Track consumer interruption through queueing and preparation as well as
+  // execution. A fully read request is not a disconnected response.
   const abortController = new AbortController()
-  const fullScope = input.contextScope === 'assistant-full'
-  let turnScope
-  let executionContext
+  const onClose = () => { if (!res.writableEnded) abortController.abort() }
+  req.on('aborted', onClose)
+  res.on('close', onClose)
+  let turnOwner: Awaited<ReturnType<typeof openAssistantTurn>> | undefined
+  let completed = false
+  let sendEvent: PublicTurnSseSender | null = null
   try {
-    const resolved = await resolveExecutionContextSystem({
-      userId: user.id,
-      assistant,
-      workspaceId: assistant.workspaceId,
-      session,
-      memberMode: fullScope ? 'assistant' : 'enforce',
-      systemRead: laneReadsSystemSide(input.contextScope) || undefined,
-      identity: internalScope
-        ? { kind: 'attended', principal: { kind: 'workspace_member', userId: user.id, authenticationKind: 'credential_attribution' } }
-        : {
-            kind: 'programmatic',
-            principal: {
-              kind: input.identityNamespace.startsWith('chatlink:') ? 'public_share' : 'brain_key',
-              credentialId: input.identityNamespace,
-              actorUserId: user.id,
+    if (session.userId !== user.id || session.assistantId !== assistant.id
+      || !sessionAuthorityDestinationMatches({ channelType: 'api', channelId }, session)) throw new AuthorityChangedError()
+    const publicRecord = publicConversationHistoryActive() ? await (async () => {
+      if (!input.credential) throw new AuthorityChangedError()
+      const address: PublicTurnConversationAddress = { assistantId: assistant.id, credential: input.credential, externalUserId: body.externalUserId,
+        channelId, sessionId: session.id, userId: user.id,
+        ...(internalScope ? { memberUserId: user.id } : claimedEmail ? { claimedEmail } : {}) }
+      const floor = await readPublicConversationFloor(address)
+      if (floor.sessionId !== session.id || floor.workspaceId !== (assistant.workspaceId ?? null)) throw new AuthorityChangedError()
+      return { address, floor }
+    })() : undefined
+    abortController.signal.throwIfAborted()
+    // Pin the original read-only authority before any queue wait. Admission
+    // never replaces this lease with the successor's current permissions.
+    const fullScope = input.contextScope === 'assistant-full'
+    let turnScope
+    let executionContext
+    try {
+      const resolved = await resolveExecutionContextSystem({
+        userId: user.id,
+        assistant,
+        workspaceId: assistant.workspaceId,
+        session,
+        memberMode: fullScope ? 'assistant' : externalPrincipal ? 'external' : 'enforce',
+        systemRead: laneReadsSystemSide(input.contextScope) || undefined,
+        identity: internalScope
+          ? { kind: 'attended', principal: { kind: 'workspace_member', userId: user.id, authenticationKind: 'credential_attribution' } }
+          : {
+              kind: 'programmatic',
+              principal: {
+                kind: input.identityNamespace.startsWith('chatlink:') ? 'public_share' : 'brain_key',
+                credentialId: input.identityNamespace,
+                actorUserId: user.id,
+              },
+              credentialOwnerUserId: ownerId,
             },
-            credentialOwnerUserId: ownerId,
-          },
-      ownership: assistant.workspaceId
-        ? { kind: 'workspace', workspaceId: assistant.workspaceId }
-        : { kind: 'personal', ownerUserId: ownerId },
-      lifecycle: {
-        abortSignal: abortController.signal,
-        sessionId: session.id,
+        ownership: assistant.workspaceId
+          ? { kind: 'workspace', workspaceId: assistant.workspaceId }
+          : { kind: 'personal', ownerUserId: ownerId },
+        lifecycle: {
+          abortSignal: abortController.signal,
+          sessionId: session.id,
+          channelType: 'api',
+          channelId,
+        },
+        surface: {
+          ...(laneReadsSystemSide(input.contextScope) ? { systemRead: true as const } : {}),
+          ...(clientSelfMemory ? { clientSelfMemory } : {}),
+        },
+        attribution: { credentialOwnerUserId: ownerId, billingUserId: ownerId },
+        sessionAuthority: session,
+        credentialCurrent: publicRecord ? async () => {
+          try {
+            await readPublicConversationFloor(publicRecord.address, { version: publicRecord.floor.version, probe: true })
+            return (await input.credentialCurrent?.()) !== false
+          } catch (error) {
+            if (error instanceof ConversationVisibilityError) return false
+            throw error
+          }
+        } : input.credentialCurrent,
+        ...(publicRecord?.floor.workspaceId ? {
+          sharedAudience: publicRecord.floor.visibility === 'workspace',
+          maximumAccess: { workspaceId: publicRecord.floor.workspaceId, userId: user.id, clearance: publicRecord.floor.cap,
+            compartments: publicRecord.floor.compartments, mutationCompartments: publicRecord.floor.compartments,
+            projectIds: publicRecord.floor.projectIds, visibilityAssistantIds: null },
+          pinnedWriteDefaults: { compartments: publicRecord.floor.compartments, projectIds: publicRecord.floor.projectIds },
+        } : {}),
+      })
+      turnScope = resolved.turnScope
+      executionContext = resolved.executionContext
+    } catch (err) {
+      if (err instanceof ContextNotAvailableError) {
+        return fail(res, 409, err.code, err.message)
+      }
+      throw err
+    }
+    const originalSession = session
+    const publishSessionEvent = deps.publishSessionEvent ?? noopPublishSessionEvent
+    turnOwner = await openAssistantTurn({
+      sessionId: session.id,
+      policy: policyFor(originalSession),
+      abortController,
+      waitForSlot: waitForTurnSlot,
+      assistantId: assistant.id,
+      // Same stale-takeover notice as web, channel and resume: the reclaimed
+      // predecessor's followers see its terminal outcome, never this turn's.
+      onReclaimed: recovered => publishTurnCompleted({ sessionId: originalSession.id, senderUserId: null, publishSessionEvent,
+        turnId: recovered.turnId, reason: recovered.reason }),
+      sqlScope,
+    })
+    abortController.signal.throwIfAborted()
+    const [freshSession, freshAssistant] = await Promise.all([
+      findSessionByChannel({ assistantId: assistant.id, userId: user.id, channelType: 'api', channelId }),
+      findAssistantById(assistant.id),
+    ])
+    if (!freshSession || !freshAssistant || freshSession.id !== originalSession.id
+      || freshSession.userId !== user.id || freshSession.assistantId !== assistant.id
+      || freshAssistant.workspaceId !== assistant.workspaceId || freshAssistant.ownerUserId !== assistant.ownerUserId
+      || !sessionAuthorityDestinationMatches(originalSession, freshSession)
+      || normalizeSessionVisibility(originalSession.visibility) !== normalizeSessionVisibility(freshSession.visibility)
+      || originalSession.mode !== freshSession.mode) throw new AuthorityChangedError()
+    session = freshSession
+    const authority = executionContext.security.authority
+    const assertTurnCurrent = async (): Promise<void> => {
+      abortController.signal.throwIfAborted()
+      await authority.assertCurrent()
+      abortController.signal.throwIfAborted()
+    }
+    const withCurrentTurn = async <T>(operation: () => Promise<T>): Promise<T> => {
+      await assertTurnCurrent()
+      return authority.execute(async () => {
+        abortController.signal.throwIfAborted()
+        const result = await operation()
+        abortController.signal.throwIfAborted()
+        return result
+      })
+    }
+    await assertTurnCurrent()
+    const readClearance = turnScope.access.clearance ?? assistant.clearance
+    const readCompartments = turnScope.effectiveCompartments
+    const scopeAccumulator = new ContextScopeAccumulator({
+      compartments: turnScope.writeCompartments,
+      projectIds: turnScope.writeProjectIds,
+    })
+    const inputMessageScope = publicRecord ? publicConversationScope(publicRecord.floor) : sessionMessageInputScope({
+      scope: turnScope,
+      workspaceId: assistant.workspaceId,
+      userId: user.id,
+    })
+    const nativeTranscriptAuthority = executionContext.ownership.kind === 'workspace'
+      && executionContext.identity.kind === 'attended' && executionContext.identity.principal.kind === 'workspace_member'
+      ? { execution: executionContext, accumulator: scopeAccumulator } : undefined
+    // The owner's publication takes the native authority separately from the write.
+    const publicationWrite = () => turnOutputWrite({ producer: 'turn:public-api', accumulator: scopeAccumulator, envelope: inputMessageScope })
+    const authorizeDeliveryAudience = nativeTranscriptAuthority
+      ? createAttendedDeliveryAudienceAuthorizer(executionContext)
+      : createDeliveryAudienceAuthorizer()
+    const assertDeliveryAudience = async (): Promise<void> => {
+      await assertTurnCurrent()
+      const decision = await authorizeDeliveryAudience({
+        workspaceId: assistant.workspaceId ?? '',
+        assistantId: assistant.id,
+        userId: user.id,
         channelType: 'api',
         channelId,
-      },
-      surface: {
-        ...(laneReadsSystemSide(input.contextScope) ? { systemRead: true as const } : {}),
-        ...(clientSelfMemory ? { clientSelfMemory } : {}),
-      },
-      attribution: { credentialOwnerUserId: ownerId, billingUserId: ownerId },
-      sessionAuthority: session,
-      credentialCurrent: input.credentialCurrent,
-    })
-    turnScope = resolved.turnScope
-    executionContext = resolved.executionContext
-  } catch (err) {
-    if (err instanceof ContextNotAvailableError) {
-      return fail(res, 409, err.code, err.message)
-    }
-    throw err
-  }
-  const readClearance = turnScope.access.clearance ?? assistant.clearance
-  const readCompartments = turnScope.effectiveCompartments
-  const scopeAccumulator = new ContextScopeAccumulator({
-    compartments: turnScope.writeCompartments,
-    projectIds: turnScope.writeProjectIds,
-  })
-  const inputMessageScope = sessionMessageInputScope({
-    scope: turnScope,
-    workspaceId: assistant.workspaceId,
-    userId: user.id,
-  })
-  const nativeTranscriptAuthority = executionContext.ownership.kind === 'workspace'
-    && executionContext.identity.kind === 'attended' && executionContext.identity.principal.kind === 'workspace_member'
-    ? { execution: executionContext, accumulator: scopeAccumulator } : undefined
-  const currentTurnWrite = () => ({
-    ...turnOutputWrite({ producer: 'turn:public-api', accumulator: scopeAccumulator, envelope: inputMessageScope }),
-    ...(nativeTranscriptAuthority ? { authority: nativeTranscriptAuthority } : {}),
-  })
-  const authority = executionContext.security.authority
-  const authorizeDeliveryAudience = nativeTranscriptAuthority
-    ? createAttendedDeliveryAudienceAuthorizer(executionContext)
-    : createDeliveryAudienceAuthorizer()
-  const assertDeliveryAudience = async (): Promise<void> => {
-    await authority.assertCurrent()
-    const decision = await authorizeDeliveryAudience({
-      workspaceId: assistant.workspaceId ?? '',
-      assistantId: assistant.id,
-      userId: user.id,
-      channelType: 'api',
-      channelId,
-      sessionId: session.id,
-      recipientType: 'individual',
-      // The recipient is the principal this turn resolved: the published
-      // assistant scope on a full-scope link, an external guest when the
-      // principal is one, otherwise the real member it resolved to (an
-      // external lane can resolve a claimed identity to a member).
-      recipientMode: fullScope ? 'assistant' : externalPrincipal ? 'external' : 'member',
-      scopeEvidence: scopeAccumulator.evidence,
-    })
-    if (!decision.allowed) throw new DeliveryAudienceUnverifiedError(decision.detail, decision.diagnostic)
-    // Current labels of a source that changed since it was read join the floor.
-    scopeAccumulator.note({
-      sensitivity: decision.evidence.sensitivity,
-      compartments: decision.evidence.compartments,
-      projectIds: decision.evidence.projectIds,
-    })
-  }
-
-  // ── 5b. Retry/edit — destroy-and-regenerate ─────────────
-  // Look up the target message FIRST and verify it lives in this
-  // session before truncating. Without this, a leaked message id
-  // from session A could be used to delete history from session B
-  // by aiming it at the wrong (assistantId, externalUserId, sessionId).
-  let retryHint = ''
-  if (body.truncateFromMessageId) {
-    const target = await query<{ sessionId: string; role: string; content: unknown }>(
-      `SELECT session_id as "sessionId", role, content
-         FROM session_messages WHERE id = $1`,
-      [body.truncateFromMessageId],
-    )
-    if (target.rows.length === 0 || target.rows[0].sessionId !== session.id) {
-      return fail(res, 404, 'message_not_found')
-    }
-
-    const { deletedMessages } = await truncateMessagesFrom(body.truncateFromMessageId)
-    const oldUser = deletedMessages.find((m) => m.role === 'user')
-    const oldAssistant = deletedMessages.find((m) => m.role === 'assistant')
-    const oldUserText = oldUser ? extractText(oldUser.content) : ''
-    const isEdit = !!oldUser && oldUserText !== body.message
-
-    // Only inject a hint when there was a prior assistant turn to
-    // react to — otherwise "do something different" has no referent.
-    if (oldAssistant) {
-      retryHint = isEdit ? EDIT_HINT : RETRY_HINT
-    }
-
-    deps.analytics?.logEvent({
-      userId: ownerId,
-      actorUserId: user.id,
-      assistantId: assistant.id,
-      sessionId: session.id,
-      eventName: isEdit ? 'message_edited' : 'message_retried',
-      channelType: 'api',
-      metadata: {
-        truncatedFromMessageId: sanitizeAnalytics(body.truncateFromMessageId),
-        deletedCount: deletedMessages.length,
-        oldPromptPreview: oldUser ? sanitizeAnalytics(oldUserText.slice(0, 200)) : undefined,
-        oldResponsePreview: oldAssistant
-          ? sanitizeAnalytics(extractText(oldAssistant.content).slice(0, 300))
-          : undefined,
-        newPromptPreview: sanitizeAnalytics(body.message.slice(0, 200)),
-      },
-    })
-  }
-
-  // ── 6. Budget gate ───────────────────────────────────────
-  let budgetStatus: 'ok' | 'downgraded' | 'blocked' = 'ok'
-  if (deps.usageStore && assistant.workspaceId) {
-    const gate = await checkUsageBudget(
-      assistant.workspaceId,
-      workspacePlan,
-      deps.checkCreditBudget,
-    )
-    budgetStatus = gate.status
-    if (gate.status === 'blocked') {
-      return fail(
-        res,
-        429,
-        'budget_exhausted',
-        "This workspace has no active Use Brian plan. The workspace owner can pick a plan at usebrian.ai/plans, or self-host the open-source version.",
-      )
-    }
-  }
-  // Both public front doors bill the assistant's owner, so their tier is
-  // settable independently of the owner's own bot: `api_model_alias`
-  // (migration 416). Before that these turns rode `telegram_model_alias`,
-  // which meant capping a public chat link also downgraded Telegram.
-  const { logicalModel, logicalTier, servingModel: model } = resolveChatModelSelection(
-    assistant.apiModelAlias,
-    workspacePlan,
-    budgetStatus,
-    deps.configuredProviders,
-  )
-  const customLlmRuntime = assistant.workspaceId && deps.resolveWorkspaceCustomLlm
-    ? await deps.resolveWorkspaceCustomLlm({
-        workspaceId: assistant.workspaceId,
-        requestedTier: logicalTier,
-        allowDefault: true,
+        sessionId: session.id,
+        recipientType: 'individual',
+        // The recipient is the principal this turn resolved: the published
+        // assistant scope on a full-scope link, an external guest when the
+        // principal is one, otherwise the real member it resolved to (an
+        // external lane can resolve a claimed identity to a member).
+        recipientMode: fullScope ? 'assistant' : externalPrincipal ? 'external' : 'member',
+        scopeEvidence: scopeAccumulator.evidence,
       })
-    : null
-  const backgroundLlmRuntime = assistant.workspaceId && deps.resolveWorkspaceCustomLlm
-    ? await deps.resolveWorkspaceCustomLlm({
-        workspaceId: assistant.workspaceId,
-        requestedTier: 'standard',
-        allowDefault: true,
-        allowAnyDefault: true,
+      await assertTurnCurrent()
+      if (!decision.allowed) throw new DeliveryAudienceUnverifiedError(decision.detail, decision.diagnostic)
+      // Current labels of a source that changed since it was read join the floor.
+      scopeAccumulator.note({
+        sensitivity: decision.evidence.sensitivity,
+        compartments: decision.evidence.compartments,
+        projectIds: decision.evidence.projectIds,
       })
-    : null
-  const turnProvider = customLlmRuntime?.provider ?? deps.provider
-
-  // Deliberately do NOT publish to the workspace incoming-message dispatcher.
-  // Its workflow/goal subscribers do not carry this turn's authority, public
-  // floor, client compartments, or tool policy. Publishing even after saving
-  // would let a public visitor trigger workspace-authority automation and
-  // expose client-isolated text. This applies to all public pipeline lanes,
-  // including internal-member keys, until dispatch supports scoped authority.
-  // Any future opt-in must use session.id, never the external sessionId or
-  // externalUserId, for source integration/channel identity.
-  // ── 7. Persist user message ──────────────────────────────
-  const userContent: ContentBlock[] = [{ type: 'text', text: body.message }]
-  const storedUserMsg = await addSessionMessage({
-    sessionId: session.id,
-    role: 'user',
-    content: userContent,
-    scope: inputMessageScope,
-  })
-  const storedUserSource = await readSessionMessageScopeSource(
-    assistant.workspaceId,
-    storedUserMsg.id,
-  )
-  if (storedUserSource) scopeAccumulator.noteSource(storedUserSource)
-
-  // ── 8. Tools — mirror web chat ───────────────────────────
-  // Same shape as `chat.ts`: capability filter → MCP injection (which
-  // pulls in the team owner's connectors, mcp_search/mcp_call, and KB
-  // tools) → strip requiresConfirmation tools (no human-in-the-loop on
-  // the API channel) → memory tools for Tier 1.
-  //
-  // Without MCP injection here, an assistant whose system prompt
-  // references specific MCP tools (e.g. cgov chat referencing
-  // `search_dreps` from cgov-mcp) would silently fail on this channel —
-  // the model would see the tool name in the prompt, find no such tool,
-  // hallucinate or thought-burn into empty responses. See
-  // docs/architecture/features/public-api.md → "Tools available".
-  const activeCapabilities = new Set(
-    await deps.capabilityStore.listActive(assistant.id),
-  )
-  const baseTools = filterToolsByCapabilities(new Map(deps.tools), activeCapabilities)
-  const limitedPublicResearch = applyPublicResearchToolCeiling({
-    tools: baseTools,
-    toolPolicy: input.toolPolicy,
-    internalScope,
-    allowPublicResearch: body.allowPublicResearch === true,
-  })
-
-  const connectorUserId = await getConnectorUserId(user.id, assistant.workspaceId ?? null)
-  // Read-side clearance (incident 2026-06-01): read ceiling =
-  // min(member, assistant). The API key's principal is typically the
-  // workspace owner (resolves to the assistant's clearance), but a
-  // lower-clearance principal is correctly bounded. Writes keep the
-  // assistant's clearance via `assistantClearance` on the context.
-  //
-  // `assistant-full` deliberately skips the membership floor. A chat-link
-  // visitor is a non-member, so the floor resolved every read to `public` —
-  // and every brain table defaults to `sensitivity='internal'`, so the link
-  // matched almost nothing and shipped as a persona with an empty brain. The
-  // owner is publishing THEIR assistant, so the assistant's own clearance is
-  // the ceiling, exactly as it is on any channel the owner speaks through.
-  //
-  // This makes `assistants.clearance` the security control for the link: point
-  // one at a `confidential` assistant and that content is readable by anyone
-  // holding the URL. The Studio create-link flow states the inherited
-  // clearance for that reason — see docs/architecture/features/public-chat-link.md.
-  const mcpInjection = limitedPublicResearch
-    ? {
-        enrichConfirmation: async (_toolName: string, toolInput: Record<string, unknown>) => toolInput,
-        unavailable: [] as string[],
-        searchableSources: [] as string[],
-      }
-    : await applyMcpInjection({
-        scope: 'public-api',
-        executionContext,
-        scopeAccumulator,
-        connectorUserId,
-        assistant: { id: assistant.id, workspaceId: assistant.workspaceId ?? null },
-        userTimezone: owner.timezone ?? undefined,
-        tools: baseTools,
-        stores: deps,
-        engineHooks: deps.engineHooks,
-        contextScope: turnScope,
-        // End-user identity on the wire. A consumer serving its own clients
-        // points this assistant at a bridge MCP server; the bridge maps
-        // `X-UseBrian-Actor-Id` back to its own user record and scopes every
-        // fetch to that person. Without it the bridge cannot tell one client
-        // from another and the scoping has to be attempted in the prompt,
-        // which is not a guarantee.
-        //
-        // `id` is the consumer's own opaque `externalUserId` — the value the
-        // bridge already indexes on — while `userId` is the stable Use Brian
-        // UUID that survives the same human arriving on another channel.
-        // Server-resolved from the authenticated key, never from model output;
-        // the `X-UseBrian-*` namespace is unsettable from user connector config
-        // (`preflightHeadersToRecord`) and merges at highest precedence, so
-        // neither the model nor the end user can forge it. Still opt-in per
-        // connector via `config.sendActorIdentity`.
-        //
-        // `roles` is deliberately absent: identity is forwarded, authorization
-        // is derived. See `ActorIdentity.org`.
-        actorIdentity: {
-          channel: 'api',
-          id: body.externalUserId,
-          // Internal lane: the actor is the resolved member, so the wire carries
-          // their real email (the tier fields that feed claimedEmail are rejected
-          // at the route for internal keys).
-          email: internalScope ? (user.email ?? null) : (claimedEmail ?? null),
-          userId: user.id,
-          org: body.claims?.orgId ?? null,
-        },
-        // KB write tools are chat-only (D2): the API consumer has no
-        // Approve/Deny loop, so this surface never exposes them. The
-        // confirmation-strip below would drop them anyway — this keeps
-        // them out of the injector's `mcp_search` index too.
-        allowKnowledgeWrites: false,
-      })
-
-  // Strip confirmation-required tools AFTER injection — MCP injectors
-  // tag write-tools as `requiresConfirmation` and the API consumer has
-  // no way to approve them. Drops them silently (matches the spec's
-  // "API path is safe-by-default" posture).
-  for (const [, tool] of baseTools) {
-    if (tool.requiresConfirmation) {
-      baseTools.delete(tool.name)
-    }
-  }
-
-  // Memory tools. `saveMemory` is Tier 1 only — an anonymous stranger must
-  // never write into the workspace brain, and on `assistant-full` that is the
-  // one capability deliberately withheld from an otherwise complete surface.
-  //
-  // The write bar is structural, not just this branch: `listMemoryUsers`
-  // applies `excludeExternalPrincipalsSql` and `chatlink:` is an
-  // external-principal namespace, so background consolidation cannot turn a
-  // visitor's session into memories either. Withholding the tool is therefore
-  // sufficient; there is no second write path to close.
-  const memoryViewerCtx = {
-    ...automaticContextAccess(turnScope.access, turnScope.activeProjectId),
-    clientSelfMemory: clientSelfMemory ?? undefined,
-  }
-  if (body.clientMemory && clientSelfMemory) {
-    await upsertClientMemory({
-      store: deps.memoryStore,
-      access: {
-        ...memoryViewerCtx,
-        workspaceId: assistant.workspaceId!,
-        clearance: turnScope.access.clearance ?? assistant.clearance,
-        compartments: readCompartments ?? [],
-        clientSelfMemory,
-      },
-      sessionId: session.id,
-      value: body.clientMemory,
-    })
-  }
-
-  const { saveMemory, getMemory } = createMemoryTools(deps.memoryStore)
-  if (shouldExposeSaveMemoryTool({
-    isIdentified,
-    externalPrincipal,
-    hasClientSelfMemory: !!clientSelfMemory,
-    hasDeterministicClientMemory: !!body.clientMemory,
-  })) {
-    baseTools.set('saveMemory', saveMemory)
-  }
-  if (isIdentified || fullScope) {
-    baseTools.set('getMemory', getMemory)
-  }
-
-  // ── 9. Memory context ────────────────────────────────────
-  // Built for an identified caller, and for every `assistant-full` turn
-  // regardless of tier: the visitor's own shadow soul is empty, but the
-  // workspace/team memory is the assistant's knowledge of its own company and
-  // is the substance of what the link is meant to expose.
-  let memoryContext = ''
-  if (isIdentified || fullScope) {
-    const [soulContext, identityMemories, rankedIndex, workspaceIdentityMemories, teamMemoryIndex] =
-      await Promise.all([
-        (deps.memoryStore.getSoulContext?.(memoryViewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
-        deps.memoryStore.getIdentity(memoryViewerCtx,nativeTranscriptAuthority),
-        deps.memoryStore.getIndexRanked(memoryViewerCtx, PER_TURN_INDEX_CAP,executionContext.ownership.kind==='workspace'&&executionContext.identity.kind==='attended'&&executionContext.identity.principal.kind==='workspace_member'?{execution:executionContext,accumulator:scopeAccumulator}:undefined),
-        // Team memory is what makes a full-scope link useful, and what makes
-        // the internal lane a colleague rather than a stranger; the external
-        // keyed lanes stay on their per-user projection.
-        (fullScope || internalScope) && assistant.workspaceId
-          ? deps.memoryStore.getWorkspaceIdentity(memoryViewerCtx)
-          : Promise.resolve([]),
-        (fullScope || internalScope) && assistant.workspaceId
-          ? deps.memoryStore.getWorkspaceIndex(memoryViewerCtx,undefined,executionContext.ownership.kind==='workspace'&&executionContext.identity.kind==='attended'&&executionContext.identity.principal.kind==='workspace_member'?{execution:executionContext,accumulator:scopeAccumulator}:undefined)
-          : Promise.resolve([]),
-      ])
-    const soul = soulContext.content
-    scopeAccumulator.note(soulContext.evidence)
-    noteAutomaticScopeEvidence(scopeAccumulator, [
-      identityMemories,rankedIndex.rows,teamMemoryIndex,
-      ...identityMemories,
-      ...rankedIndex.rows,
-      ...workspaceIdentityMemories,
-      ...teamMemoryIndex,
-    ])
-    memoryContext = buildMemoryContext({
-      soul,
-      identityMemories: identityMemories.map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
-      memoryIndex: rankedIndex.rows.map((m) => ({ ...m, appId: null })),
-      totalNonIdentityCount: rankedIndex.totalCount,
-      workspaceIdentityMemories: workspaceIdentityMemories.map((m) => ({
-        id: m.id,
-        summary: m.summary,
-        detail: m.detail,
-      })),
-      teamMemoryIndex: teamMemoryIndex.map((m) => ({ ...m, appId: null })),
-      assistantName: assistant.name,
-    })
-  }
-
-  // ── 9b. Ambient workspace context (assistant-full + internal-member) ──
-  // The blocks web chat carries and the thin public turn never had. Each is
-  // independently optional and failure-tolerant: a store that is not wired in
-  // (OSS, or a caller that never passes it) simply omits its block. The
-  // internal lane gets them member-bounded: the files index reads through
-  // `readClearance`/`readCompartments`, which for a member is min(member,
-  // assistant) rather than the assistant override full scope uses.
-  let workspaceFilesContext: string | null = null
-  let brandContext: string | null = null
-  let sessionStateBlock: string | null = null
-  let skillsFragment = ''
-  if (fullScope || internalScope) {
-    if (deps.workspaceFilesStore && assistant.workspaceId && activeCapabilities.has('files')) {
-      try {
-        const rows = await deps.workspaceFilesStore.listIndexRanked(
-          {
-            workspaceId: assistant.workspaceId,
-            userId: user.id,
-            assistantId: assistant.id,
-            assistantKind: assistant.kind,
-            clearance: readClearance,
-            compartments: readCompartments,
-            mutationCompartments: turnScope.access.mutationCompartments,
-            projectIds: turnScope.effectiveProjectIds,
-            systemRead: laneReadsSystemSide(input.contextScope) || undefined,
-          },
-          PER_TURN_FILES_INDEX_CAP,
-        )
-        noteAutomaticScopeEvidence(scopeAccumulator, rows)
-        workspaceFilesContext = buildWorkspaceFilesContext(rows)
-      } catch (err) {
-        console.error('[public-turn] workspace-files index fetch failed:', err)
+      if (publicRecord && (!canRead(publicRecord.floor.cap, scopeAccumulator.sensitivity)
+        || scopeAccumulator.compartments.some(label => !publicRecord.floor.compartments.includes(label))
+        || scopeAccumulator.projectIds.some(id => !publicRecord.floor.projectIds.includes(id)))) {
+        throw new DeliveryAudienceUnverifiedError(undefined, 'source_unverifiable')
       }
     }
 
-    brandContext = await resolveBrandContext({
-      userId: ownerId,
-      workspaceId: assistant.workspaceId,
-      hasCapability: activeCapabilities.has('brand'),
-      logLabel: 'public-turn',
-    })
+    // Ensure the user appears in the assistant's member list — same
+    // pattern as resolveChannelUser. Lets the owner see who's been
+    // talking to the bot.
+    await withCurrentTurn(() => query(
+      `INSERT INTO assistant_members (assistant_id, user_id, role)
+       VALUES ($1, $2, 'member')
+       ON CONFLICT (assistant_id, user_id) DO NOTHING`,
+      [assistant.id, user.id],
+    ))
 
-    if (deps.sessionStateStore) {
-      try {
-        sessionStateBlock = await buildSessionStateBlock({
-          authority: { execution: executionContext, accumulator: scopeAccumulator },
-          store: deps.sessionStateStore,
-          sessionId: session.id,
-        })
-      } catch (err) {
-        console.error('[public-turn] session-state block fetch failed:', err)
-      }
-    }
-
-    if (deps.skillStore) {
-      try {
-        const skillResult = await injectSkills({
-          skillStore: deps.skillStore,
-          connectorUserId,
+    // ── 4b. Client accrual ───────────────────────────────────
+    // What this turn leaves behind about the external client it serves: the
+    // `client:<externalUserId>` compartment stamp (the client-vs-client wall,
+    // D12) and, on an identified turn, a team-visible contact record (D11).
+    // Returns an empty stamp for a resolved teammate, so a public-API turn on
+    // behalf of a real member behaves exactly as before. See client-accrual.ts.
+    //
+    // The internal lane skips the call outright rather than relying on the
+    // teammate no-op inside it: an attributed member is a principal, not a
+    // client, and the skip should be legible at the seam.
+    const accrual = internalScope
+      ? { compartments: [], contactEntityId: null }
+      : await withCurrentTurn(() => accrueClientPrincipal({
+          user,
+          workspaceId: assistant.workspaceId ?? null,
           assistantId: assistant.id,
-          // §5.5 governance gate — the assistant's clearance bounds which
-          // workspace skills are offered, same as every other channel.
-          assistantClearance: assistant.clearance,
-          tools: baseTools,
-          connectorStore: deps.connectorStore,
-          unavailableCapabilities: mcpInjection.unavailable,
-          channel: 'api',
-          assistantKind: assistant.kind,
-          workspaceId: assistant.workspaceId ?? undefined,
-          // Same gap the messaging channels had until mig 492: without these
-          // two stores the public API and the `/c/<token>` chat link saw only
-          // the legacy slug-keyed toggles, so a workspace skill enabled
-          // through the allowlist (or flagged `all_assistants`) was never
-          // offered here. Defaulted from the stateless factories to match
-          // `channel-pipeline.ts`; an injected store still wins.
-          workspaceSkillStore: deps.workspaceSkillStore ?? createDbWorkspaceSkillStore(),
-          workspaceSkillEnablementStore:
-            deps.workspaceSkillEnablementStore ?? createDbWorkspaceSkillEnablementStore(),
-        })
-        skillsFragment = skillResult.promptFragment
-      } catch (err) {
-        console.error('[public-turn] skill injection failed:', err)
+          identityNamespace: input.identityNamespace,
+          externalUserId: body.externalUserId,
+          externalUserName: body.externalUserName,
+          email: claimedEmail ?? null,
+          orgId: body.claims?.orgId ?? null,
+          identified: isIdentified,
+          clientLead: body.clientLead,
+          analytics: deps.analytics,
+          ownerId,
+        }))
+
+    // ── 5b. Retry/edit — destroy-and-regenerate ─────────────
+    // Look up the target message FIRST and verify it lives in this
+    // session before truncating. Without this, a leaked message id
+    // from session A could be used to delete history from session B
+    // by aiming it at the wrong (assistantId, externalUserId, sessionId).
+    let retryHint = ''
+    if (body.truncateFromMessageId) {
+      const target = await query<{ sessionId: string }>(
+        `SELECT session_id as "sessionId"
+           FROM session_messages WHERE id = $1`,
+        [body.truncateFromMessageId],
+      )
+      if (target.rows.length === 0 || target.rows[0].sessionId !== session.id) {
+        return fail(res, 404, 'message_not_found')
       }
+
+      const { deletedMessages } = await withCurrentTurn(async () => {
+        if (!publicRecord) return truncateMessagesFrom(body.truncateFromMessageId!, session.id)
+        const binding = { ...publicRecord.address, version: publicRecord.floor.version }
+        const truncated = await withPublicConversationWrite(binding, turnOwner!.token, async client => {
+          const result = await truncateMessagesFrom(body.truncateFromMessageId!, session.id, client)
+          const target = await client.query<{version:string}>('SELECT version::text FROM public.conversation_envelopes WHERE session_id=$1', [session.id])
+          if (!target.rows[0]) throw new AuthorityChangedError()
+          return { result, version: target.rows[0].version }
+        })
+        // Only the exact committed retry may replace this turn's generation.
+        publicRecord.floor.version = truncated.version
+        return truncated.result
+      })
+      const oldUser = deletedMessages.find((m) => m.role === 'user')
+      const oldAssistant = deletedMessages.find((m) => m.role === 'assistant')
+      const oldUserText = oldUser ? extractText(oldUser.content) : ''
+      const isEdit = !!oldUser && oldUserText !== body.message
+
+      // Only inject a hint when there was a prior assistant turn to
+      // react to — otherwise "do something different" has no referent.
+      if (oldAssistant) {
+        retryHint = isEdit ? EDIT_HINT : RETRY_HINT
+      }
+
+      deps.analytics?.logEvent({
+        userId: ownerId,
+        actorUserId: user.id,
+        assistantId: assistant.id,
+        sessionId: session.id,
+        eventName: isEdit ? 'message_edited' : 'message_retried',
+        channelType: 'api',
+        metadata: {
+          truncatedFromMessageId: sanitizeAnalytics(body.truncateFromMessageId),
+          deletedCount: deletedMessages.length,
+          oldPromptPreview: oldUser ? sanitizeAnalytics(oldUserText.slice(0, 200)) : undefined,
+          oldResponsePreview: oldAssistant
+            ? sanitizeAnalytics(extractText(oldAssistant.content).slice(0, 300))
+            : undefined,
+          newPromptPreview: sanitizeAnalytics(body.message.slice(0, 200)),
+        },
+      })
     }
 
-    // Skills inject their own tools, so re-run the confirmation strip: this
-    // surface still has no approval loop. Ordering matters — the earlier strip
-    // ran before injectSkills existed on this path.
+    // ── 6. Budget gate ───────────────────────────────────────
+    let budgetStatus: 'ok' | 'downgraded' | 'blocked' = 'ok'
+    if (deps.usageStore && assistant.workspaceId) {
+      const gate = await checkUsageBudget(
+        assistant.workspaceId,
+        workspacePlan,
+        deps.checkCreditBudget,
+      )
+      budgetStatus = gate.status
+      if (gate.status === 'blocked') {
+        return fail(
+          res,
+          429,
+          'budget_exhausted',
+          "This workspace has no active Use Brian plan. The workspace owner can pick a plan at usebrian.ai/plans, or self-host the open-source version.",
+        )
+      }
+    }
+    // Both public front doors bill the assistant's owner, so their tier is
+    // settable independently of the owner's own bot: `api_model_alias`
+    // (migration 416). Before that these turns rode `telegram_model_alias`,
+    // which meant capping a public chat link also downgraded Telegram.
+    turnOwner.bindModelPreparation({ kind: 'execution', toolProfile: 'public', execution: executionContext, assertCurrent: assertTurnCurrent },
+      { provider: deps.provider, configuredProviders: deps.configuredProviders,
+          resolveWorkspaceCustomLlm: deps.resolveWorkspaceCustomLlm?.bind(deps) ?? null,
+          resolveLegacyByoKey: null,
+          buildLegacyByoProvider: null })
+    const preparedModel = await turnOwner.prepareMainModel({ kind: 'public', requestedAlias: assistant.apiModelAlias,
+      plan: workspacePlan, budgetStatus })
+    const { logicalModel, logicalTier, model } = preparedModel
+    const customLlmRuntime = preparedModel.customLlm
+    const background = await turnOwner.prepareBackgroundModel({})
+    const backgroundLlmRuntime = background.customLlm
+    const turnProvider = preparedModel.provider
+
+    // Deliberately do NOT publish to the workspace incoming-message dispatcher.
+    // Its workflow/goal subscribers do not carry this turn's authority, public
+    // floor, client compartments, or tool policy. Publishing even after saving
+    // would let a public visitor trigger workspace-authority automation and
+    // expose client-isolated text. This applies to all public pipeline lanes,
+    // including internal-member keys, until dispatch supports scoped authority.
+    // Any future opt-in must use session.id, never the external sessionId or
+    // externalUserId, for source integration/channel identity.
+    // ── 7. Persist user message ──────────────────────────────
+    const userContent: ContentBlock[] = [{ type: 'text', text: body.message }]
+    const publicConversation = publicRecord ? { ...publicRecord.address, version: publicRecord.floor.version } : undefined
+    const storedUserMsg = await withCurrentTurn(() => publicConversation
+      ? withPublicConversationWrite(publicConversation, turnOwner!.token, (client, scope) => addSessionMessage({
+          sessionId: session.id, role: 'user', content: userContent, scope,
+        }, client))
+      : addSessionMessage({ sessionId: session.id, role: 'user', content: userContent, scope: inputMessageScope }))
+    const reportUsageError = deps.analytics?.logEvent.bind(deps.analytics)
+    const usageErrorIdentity = { userId: ownerId, actorUserId: user.id, assistantId: assistant.id, sessionId: session.id }
+    if (deps.usageStore) turnOwner.registerUsageBilling({
+      metadata: {
+        ...turnUsageIdentity({ payerUserId: ownerId, actorUserId: user.id }),
+        assistantId: assistant.id, sessionId: session.id, modelTier: logicalTier,
+        source: 'api', userMessageId: storedUserMsg.id, triggerKey: 'main_response',
+        providerKeySource: customLlmRuntime?.providerKeySource ?? 'platform',
+      },
+      costPolicy: 'reported_or_calculated', recordUsage: deps.usageStore.recordUsage.bind(deps.usageStore),
+      onError: error => {
+        console.error('[public-turn] usage tracking failed:', error)
+        reportUsageError?.({ ...usageErrorIdentity, eventName: 'usage_tracking_error', channelType: 'api',
+          metadata: { error_type: sanitizeAnalytics((error as Error)?.name ?? 'unknown') } })
+      },
+    })
+
+    const storedUserSource = await readSessionMessageScopeSource(
+      assistant.workspaceId,
+      storedUserMsg.id,
+    )
+    if (storedUserSource) scopeAccumulator.noteSource(storedUserSource)
+
+    // ── 8. Tools — mirror web chat ───────────────────────────
+    // Same shape as `chat.ts`: capability filter → the `public` capability
+    // surface (the team owner's connectors behind mcp_search/mcp_call, and KB
+    // reads; it never indexes a confirmation-required capability) → strip
+    // requiresConfirmation tools from the boot roster (no human-in-the-loop on
+    // the API channel) → memory tools for Tier 1.
+    //
+    // Without connector preparation here, an assistant whose system prompt
+    // references specific MCP tools (e.g. cgov chat referencing
+    // `search_dreps` from cgov-mcp) would silently fail on this channel —
+    // the model would see the tool name in the prompt, find no such tool,
+    // hallucinate or thought-burn into empty responses. See
+    // docs/architecture/features/public-api.md → "Tools available".
+    await assertTurnCurrent()
+    const activeCapabilities = new Set(
+      await deps.capabilityStore.listActive(assistant.id),
+    )
+    const baseTools = filterToolsByCapabilities(new Map(deps.tools), activeCapabilities)
+    const limitedPublicResearch = applyPublicResearchToolCeiling({
+      tools: baseTools,
+      toolPolicy: input.toolPolicy,
+      internalScope,
+      allowPublicResearch: body.allowPublicResearch === true,
+    })
+
+    const connectorUserId = await getConnectorUserId(user.id, assistant.workspaceId ?? null)
+    // Read-side clearance (incident 2026-06-01): read ceiling =
+    // min(member, assistant). The API key's principal is typically the
+    // workspace owner (resolves to the assistant's clearance), but a
+    // lower-clearance principal is correctly bounded. Writes keep the
+    // assistant's clearance via `assistantClearance` on the context.
+    //
+    // `assistant-full` deliberately skips the membership floor. A chat-link
+    // visitor is a non-member, so the floor resolved every read to `public` —
+    // and every brain table defaults to `sensitivity='internal'`, so the link
+    // matched almost nothing and shipped as a persona with an empty brain. The
+    // owner is publishing THEIR assistant, so the assistant's own clearance is
+    // the ceiling, exactly as it is on any channel the owner speaks through.
+    //
+    // This makes `assistants.clearance` the security control for the link: point
+    // one at a `confidential` assistant and that content is readable by anyone
+    // holding the URL. The Studio create-link flow states the inherited
+    // clearance for that reason — see docs/architecture/features/public-chat-link.md.
+    const capabilityOwner = turnOwner
+    const mcpInjection = limitedPublicResearch
+      ? {
+          enrichConfirmation: async (_toolName: string, toolInput: Record<string, unknown>) => toolInput,
+          unavailable: [] as string[],
+          searchableSources: [] as string[],
+        }
+      // Prepared by the original turn owner through the M3 capability surface
+      // (`public` profile, catalog-only until a call), from the route parameter block.
+      : await withCurrentTurn(() => capabilityOwner.prepareCapabilities({ profile: 'public', composition: { kind: 'route-params', params: {
+          scope: 'public-api',
+          executionContext,
+          scopeAccumulator,
+          connectorUserId,
+          assistant: { id: assistant.id, workspaceId: assistant.workspaceId ?? null },
+          userTimezone: owner.timezone ?? undefined,
+          tools: baseTools,
+          stores: deps,
+          engineHooks: deps.engineHooks,
+          contextScope: turnScope,
+          // End-user identity on the wire. A consumer serving its own clients
+          // points this assistant at a bridge MCP server; the bridge maps
+          // `X-UseBrian-Actor-Id` back to its own user record and scopes every
+          // fetch to that person. Without it the bridge cannot tell one client
+          // from another and the scoping has to be attempted in the prompt,
+          // which is not a guarantee.
+          //
+          // `id` is the consumer's own opaque `externalUserId` — the value the
+          // bridge already indexes on — while `userId` is the stable Use Brian
+          // UUID that survives the same human arriving on another channel.
+          // Server-resolved from the authenticated key, never from model output;
+          // the `X-UseBrian-*` namespace is unsettable from user connector config
+          // (`preflightHeadersToRecord`) and merges at highest precedence, so
+          // neither the model nor the end user can forge it. Still opt-in per
+          // connector via `config.sendActorIdentity`.
+          //
+          // `roles` is deliberately absent: identity is forwarded, authorization
+          // is derived. See `ActorIdentity.org`.
+          actorIdentity: {
+            channel: 'api',
+            id: body.externalUserId,
+            // Internal lane: the actor is the resolved member, so the wire carries
+            // their real email (the tier fields that feed claimedEmail are rejected
+            // at the route for internal keys).
+            email: internalScope ? (user.email ?? null) : (claimedEmail ?? null),
+            userId: user.id,
+            org: body.claims?.orgId ?? null,
+          },
+          // KB write tools are chat-only (D2): the API consumer has no
+          // Approve/Deny loop, so this surface never exposes them, neither
+          // directly nor in the `mcp_search` index.
+          allowKnowledgeWrites: false,
+        } } }))
+
+    // Strip confirmation-required tools AFTER preparation (D11-10 decision:
+    // kept). The `public` surface already never indexes a confirmation-required
+    // connector capability, so for connectors this is a second fence; it is the
+    // only fence for the boot roster (`deps.tools`), whose write tools also carry
+    // `requiresConfirmation` and which the capability catalog does not own. The
+    // API consumer has no way to approve them; they are dropped silently
+    // (the spec's "API path is safe-by-default" posture).
     for (const [, tool] of baseTools) {
       if (tool.requiresConfirmation) {
         baseTools.delete(tool.name)
       }
     }
-  }
 
-  // The assistant-name override rides the memory context when one was built,
-  // and is injected alone otherwise - see `resolvePublicContextBlock`.
-  const contextBlock = resolvePublicContextBlock({
-    assistantName: assistant.name,
-    memoryContext,
-  })
-  // End-user identity is private runtime context on the external lanes — the
-  // trusted system channel, never the user turn. See
-  // `buildEndUserIdentityContext`. The internal lane replaces it with the
-  // member speaker line: an attributed member is a teammate speaking, not "an
-  // external client of this workspace", and the wrong framing would make the
-  // model treat its own colleague as an unauthenticated stranger.
-  const endUserContext = internalScope ? '' : buildEndUserIdentityContext(body, { isIdentified })
-
-  const decisionPlaybookContext = await loadDecisionPlaybookContext({
-    workspaceId: assistant.workspaceId ?? null,
-    assistantId: assistant.id,
-    actorUserId: user.id,
-    externalPrincipal,
-    operationKind: 'public_turn',
-    operationId: storedUserMsg.id,
-    sourceKind: 'session_message',
-    sourceId: storedUserMsg.id,
-    channelType: 'api',
-    analytics: deps.analytics,
-    logLabel: 'public-turn',
-  })
-  const playbookRules = decisionPlaybookContext.playbookRules
-
-  let fullSystemPrompt: string
-  let runtimeSystemContext = ''
-  // Representations of content the visitor can actually see. Empty on this
-  // surface today (no reply quotes, no open page), but the three-way split
-  // contract is wired rather than assumed: an authority collapse is not
-  // repairable by reordering, so the seam exists before it has a payload.
-  // See `invariants/prompt-cache-alignment`.
-  let userVisibleContext = ''
-  if (fullScope || internalScope) {
-    // Route through the shared builder so the chat link inherits the same
-    // block order and the same provenance split as every other channel,
-    // rather than growing a second hand-rolled assembly that drifts.
+    // Memory tools. `saveMemory` is Tier 1 only — an anonymous stranger must
+    // never write into the workspace brain, and on `assistant-full` that is the
+    // one capability deliberately withheld from an otherwise complete surface.
     //
-    // Timezone: the internal lane has a real member with a real timezone;
-    // the anonymous full-scope link falls back to the workspace owner's (the
-    // visitor's is unknown and the browser sends none on this surface).
-    // Naming the assistant's own zone is the honest answer, and it is
-    // strictly better than the previous state, where no date reached the
-    // model at all and it guessed.
-    const timezone =
-      (internalScope ? user.timezone : null) ?? owner.timezone ?? 'UTC'
-    const split = buildSplitSystemPrompt({
-      basePrompt: deps.systemPrompt,
-      charter: resolveCharter(assistant),
-      playbookRules,
-      memoryContext: contextBlock,
-      workspaceFilesContext,
-      brandContext,
-      skillsFragment,
-      sessionStateBlock,
-      currentDateTime: new Date().toLocaleString('en-US', {
-        timeZone: timezone,
-        dateStyle: 'full',
-        timeStyle: 'short',
-      }),
-      timezone,
-      unavailableCapabilitiesPrompt: buildUnavailableCapabilitiesPrompt(
+    // The write bar is structural, not just this branch: `listMemoryUsers`
+    // applies `excludeExternalPrincipalsSql` and `chatlink:` is an
+    // external-principal namespace, so background consolidation cannot turn a
+    // visitor's session into memories either. Withholding the tool is therefore
+    // sufficient; there is no second write path to close.
+    const memoryViewerCtx = {
+      ...automaticContextAccess(turnScope.access, turnScope.activeProjectId),
+      clientSelfMemory: clientSelfMemory ?? undefined,
+    }
+    if (body.clientMemory && clientSelfMemory) {
+      await withCurrentTurn(() => upsertClientMemory({
+        store: deps.memoryStore,
+        access: {
+          ...memoryViewerCtx,
+          workspaceId: assistant.workspaceId!,
+          clearance: turnScope.access.clearance ?? assistant.clearance,
+          compartments: readCompartments ?? [],
+          clientSelfMemory,
+        },
+        sessionId: session.id,
+        value: body.clientMemory!,
+        assertCurrent: assertTurnCurrent,
+      }))
+    }
+
+    const { saveMemory, getMemory } = createMemoryTools(deps.memoryStore)
+    if (shouldExposeSaveMemoryTool({
+      isIdentified,
+      externalPrincipal,
+      hasClientSelfMemory: !!clientSelfMemory,
+      hasDeterministicClientMemory: !!body.clientMemory,
+    })) {
+      baseTools.set('saveMemory', saveMemory)
+    }
+    if (isIdentified || fullScope) {
+      baseTools.set('getMemory', getMemory)
+    }
+
+    // ── 9. Memory context ────────────────────────────────────
+    // Built for an identified caller, and for every `assistant-full` turn
+    // regardless of tier: the visitor's own shadow soul is empty, but the
+    // workspace/team memory is the assistant's knowledge of its own company and
+    // is the substance of what the link is meant to expose.
+    let memoryContext = ''
+    if (isIdentified || fullScope) {
+      const [soulContext, identityMemories, rankedIndex, workspaceIdentityMemories, teamMemoryIndex] =
+        await Promise.all([
+          (deps.memoryStore.getSoulContext?.(memoryViewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
+          deps.memoryStore.getIdentity(memoryViewerCtx,nativeTranscriptAuthority),
+          deps.memoryStore.getIndexRanked(memoryViewerCtx, PER_TURN_INDEX_CAP,executionContext.ownership.kind==='workspace'&&executionContext.identity.kind==='attended'&&executionContext.identity.principal.kind==='workspace_member'?{execution:executionContext,accumulator:scopeAccumulator}:undefined),
+          // Team memory is what makes a full-scope link useful, and what makes
+          // the internal lane a colleague rather than a stranger; the external
+          // keyed lanes stay on their per-user projection.
+          (fullScope || internalScope) && assistant.workspaceId
+            ? deps.memoryStore.getWorkspaceIdentity(memoryViewerCtx)
+            : Promise.resolve([]),
+          (fullScope || internalScope) && assistant.workspaceId
+            ? deps.memoryStore.getWorkspaceIndex(memoryViewerCtx,undefined,executionContext.ownership.kind==='workspace'&&executionContext.identity.kind==='attended'&&executionContext.identity.principal.kind==='workspace_member'?{execution:executionContext,accumulator:scopeAccumulator}:undefined)
+            : Promise.resolve([]),
+        ])
+      const soul = soulContext.content
+      scopeAccumulator.note(soulContext.evidence)
+      noteAutomaticScopeEvidence(scopeAccumulator, [
+        identityMemories,rankedIndex.rows,teamMemoryIndex,
+        ...identityMemories,
+        ...rankedIndex.rows,
+        ...workspaceIdentityMemories,
+        ...teamMemoryIndex,
+      ])
+      memoryContext = buildMemoryContext({
+        soul,
+        identityMemories: identityMemories.map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
+        memoryIndex: rankedIndex.rows.map((m) => ({ ...m, appId: null })),
+        totalNonIdentityCount: rankedIndex.totalCount,
+        workspaceIdentityMemories: workspaceIdentityMemories.map((m) => ({
+          id: m.id,
+          summary: m.summary,
+          detail: m.detail,
+        })),
+        teamMemoryIndex: teamMemoryIndex.map((m) => ({ ...m, appId: null })),
+        assistantName: assistant.name,
+      })
+    }
+
+    // ── 9b. Ambient workspace context (assistant-full + internal-member) ──
+    // The blocks web chat carries and the thin public turn never had. Each is
+    // independently optional and failure-tolerant: a store that is not wired in
+    // (OSS, or a caller that never passes it) simply omits its block. The
+    // internal lane gets them member-bounded: the files index reads through
+    // `readClearance`/`readCompartments`, which for a member is min(member,
+    // assistant) rather than the assistant override full scope uses.
+    let workspaceFilesContext: string | null = null
+    let brandContext: string | null = null
+    let sessionStateBlock: string | null = null
+    let skillsFragment = ''
+    if (fullScope || internalScope) {
+      if (deps.workspaceFilesStore && assistant.workspaceId && activeCapabilities.has('files')) {
+        try {
+          const rows = await deps.workspaceFilesStore.listIndexRanked(
+            {
+              workspaceId: assistant.workspaceId,
+              userId: user.id,
+              assistantId: assistant.id,
+              assistantKind: assistant.kind,
+              clearance: readClearance,
+              compartments: readCompartments,
+              mutationCompartments: turnScope.access.mutationCompartments,
+              projectIds: turnScope.effectiveProjectIds,
+              systemRead: laneReadsSystemSide(input.contextScope) || undefined,
+            },
+            PER_TURN_FILES_INDEX_CAP,
+          )
+          noteAutomaticScopeEvidence(scopeAccumulator, rows)
+          workspaceFilesContext = buildWorkspaceFilesContext(rows)
+        } catch (err) {
+          console.error('[public-turn] workspace-files index fetch failed:', err)
+        }
+      }
+
+      brandContext = await resolveBrandContext({
+        userId: ownerId,
+        workspaceId: assistant.workspaceId,
+        hasCapability: activeCapabilities.has('brand'),
+        logLabel: 'public-turn',
+      })
+
+      if (deps.sessionStateStore) {
+        try {
+          sessionStateBlock = await buildSessionStateBlock({
+            authority: { execution: executionContext, accumulator: scopeAccumulator },
+            store: deps.sessionStateStore,
+            sessionId: session.id,
+          })
+        } catch (err) {
+          console.error('[public-turn] session-state block fetch failed:', err)
+        }
+      }
+
+      if (deps.skillStore) {
+        try {
+          const skillResult = await withCurrentTurn(() => injectSkills({
+            skillStore: deps.skillStore!,
+            connectorUserId,
+            assistantId: assistant.id,
+            // §5.5 governance gate — the assistant's clearance bounds which
+            // workspace skills are offered, same as every other channel.
+            assistantClearance: assistant.clearance,
+            tools: baseTools,
+            connectorStore: deps.connectorStore,
+            unavailableCapabilities: mcpInjection.unavailable,
+            channel: 'api',
+            assistantKind: assistant.kind,
+            workspaceId: assistant.workspaceId ?? undefined,
+            // Same gap the messaging channels had until mig 492: without these
+            // two stores the public API and the `/c/<token>` chat link saw only
+            // the legacy slug-keyed toggles, so a workspace skill enabled
+            // through the allowlist (or flagged `all_assistants`) was never
+            // offered here. Defaulted from the stateless factories to match
+            // `channel-pipeline.ts`; an injected store still wins.
+            workspaceSkillStore: deps.workspaceSkillStore ?? createDbWorkspaceSkillStore(),
+            workspaceSkillEnablementStore:
+              deps.workspaceSkillEnablementStore ?? createDbWorkspaceSkillEnablementStore(),
+          }))
+          skillsFragment = skillResult.promptFragment
+        } catch (err) {
+          console.error('[public-turn] skill injection failed:', err)
+        }
+      }
+
+      // Skills inject their own tools, so re-run the confirmation strip: this
+      // surface still has no approval loop. Ordering matters — the earlier strip
+      // ran before injectSkills existed on this path.
+      for (const [, tool] of baseTools) {
+        if (tool.requiresConfirmation) {
+          baseTools.delete(tool.name)
+        }
+      }
+    }
+
+    // The assistant-name override rides the memory context when one was built,
+    // and is injected alone otherwise - see `resolvePublicContextBlock`.
+    const contextBlock = resolvePublicContextBlock({
+      assistantName: assistant.name,
+      memoryContext,
+    })
+    // End-user identity is private runtime context on the external lanes — the
+    // trusted system channel, never the user turn. See
+    // `buildEndUserIdentityContext`. The internal lane replaces it with the
+    // member speaker line: an attributed member is a teammate speaking, not "an
+    // external client of this workspace", and the wrong framing would make the
+    // model treat its own colleague as an unauthenticated stranger.
+    const endUserContext = internalScope ? '' : buildEndUserIdentityContext(body, { isIdentified })
+
+    const decisionPlaybookContext = await withCurrentTurn(() => loadDecisionPlaybookContext({
+      workspaceId: assistant.workspaceId ?? null,
+      assistantId: assistant.id,
+      actorUserId: user.id,
+      externalPrincipal,
+      operationKind: 'public_turn',
+      operationId: storedUserMsg.id,
+      sourceKind: 'session_message',
+      sourceId: storedUserMsg.id,
+      channelType: 'api',
+      analytics: deps.analytics,
+      logLabel: 'public-turn',
+    }))
+    const playbookRules = decisionPlaybookContext.playbookRules
+
+    let fullSystemPrompt: string
+    let runtimeSystemContext = ''
+    // Representations of content the visitor can actually see. Empty on this
+    // surface today (no reply quotes, no open page), but the three-way split
+    // contract is wired rather than assumed: an authority collapse is not
+    // repairable by reordering, so the seam exists before it has a payload.
+    // See `invariants/prompt-cache-alignment`.
+    let userVisibleContext = ''
+    if (fullScope || internalScope) {
+      // Route through the shared builder so the chat link inherits the same
+      // block order and the same provenance split as every other channel,
+      // rather than growing a second hand-rolled assembly that drifts.
+      //
+      // Timezone: the internal lane has a real member with a real timezone;
+      // the anonymous full-scope link falls back to the workspace owner's (the
+      // visitor's is unknown and the browser sends none on this surface).
+      // Naming the assistant's own zone is the honest answer, and it is
+      // strictly better than the previous state, where no date reached the
+      // model at all and it guessed.
+      const timezone =
+        (internalScope ? user.timezone : null) ?? owner.timezone ?? 'UTC'
+      const split = buildSplitSystemPrompt({
+        basePrompt: deps.systemPrompt,
+        charter: resolveCharter(assistant),
+        playbookRules,
+        memoryContext: contextBlock,
+        workspaceFilesContext,
+        brandContext,
+        skillsFragment,
+        sessionStateBlock,
+        currentDateTime: new Date().toLocaleString('en-US', {
+          timeZone: timezone,
+          dateStyle: 'full',
+          timeStyle: 'short',
+        }),
+        timezone,
+        unavailableCapabilitiesPrompt: buildUnavailableCapabilitiesPrompt(
+          mcpInjection.unavailable,
+          baseTools,
+          mcpInjection.searchableSources,
+        ),
+        // Internal lane: the same "You are talking with:" lead line web chat
+        // ships (web-chat speaker identity, 08-06) — the actor is a member.
+        speakerIdentity: internalScope
+          ? { name: user.name ?? user.email ?? 'Workspace member', email: user.email }
+          : undefined,
+        // Ordered last among the builder's private-runtime sections, so the
+        // end-user identity block stays at the end of the envelope as before.
+        // Empty (and omitted by the builder) on the internal lane.
+        preflightContext: endUserContext,
+      })
+      const privateBlock = formatPrivateRuntimeContext([
+        split.privateRuntimeContext,
+        formatActiveWorkspaceContext(turnScope),
+      ].filter(Boolean).join('\n\n'))
+      fullSystemPrompt = split.stablePrompt
+      runtimeSystemContext = privateBlock
+      userVisibleContext = split.userVisibleContext
+    } else {
+      // Same Layer 2 the shared builder renders: the charter block (with
+      // admitted playbook rules), not the raw legacy column (which a
+      // post-418 write no longer updates).
+      const charterBlock = renderCharterBlock(resolveCharter(assistant), { playbookRules })
+      const assistantSystemPrompt = charterBlock
+        ? `${deps.systemPrompt}\n\n${charterBlock}`
+        : deps.systemPrompt
+      const promptWithMemory = contextBlock
+        ? `${assistantSystemPrompt}\n\n${contextBlock}`
+        : assistantSystemPrompt
+      // Append the unavailable-capabilities block so the model doesn't
+      // burn turns hunting for tools that aren't connected. Same pattern
+      // as chat.ts (line 1124).
+      const capabilityAddendum = buildUnavailableCapabilitiesPrompt(
         mcpInjection.unavailable,
         baseTools,
         mcpInjection.searchableSources,
-      ),
-      // Internal lane: the same "You are talking with:" lead line web chat
-      // ships (web-chat speaker identity, 08-06) — the actor is a member.
-      speakerIdentity: internalScope
-        ? { name: user.name ?? user.email ?? 'Workspace member', email: user.email }
-        : undefined,
-      // Ordered last among the builder's private-runtime sections, so the
-      // end-user identity block stays at the end of the envelope as before.
-      // Empty (and omitted by the builder) on the internal lane.
-      preflightContext: endUserContext,
-    })
-    const privateBlock = formatPrivateRuntimeContext([
-      split.privateRuntimeContext,
-      formatActiveWorkspaceContext(turnScope),
-    ].filter(Boolean).join('\n\n'))
-    fullSystemPrompt = split.stablePrompt
-    runtimeSystemContext = privateBlock
-    userVisibleContext = split.userVisibleContext
-  } else {
-    // Same Layer 2 the shared builder renders: the charter block (with
-    // admitted playbook rules), not the raw legacy column (which a
-    // post-418 write no longer updates).
-    const charterBlock = renderCharterBlock(resolveCharter(assistant), { playbookRules })
-    const assistantSystemPrompt = charterBlock
-      ? `${deps.systemPrompt}\n\n${charterBlock}`
-      : deps.systemPrompt
-    const promptWithMemory = contextBlock
-      ? `${assistantSystemPrompt}\n\n${contextBlock}`
-      : assistantSystemPrompt
-    // Append the unavailable-capabilities block so the model doesn't
-    // burn turns hunting for tools that aren't connected. Same pattern
-    // as chat.ts (line 1124).
-    const capabilityAddendum = buildUnavailableCapabilitiesPrompt(
-      mcpInjection.unavailable,
-      baseTools,
-      mcpInjection.searchableSources,
-    )
-    const identityBlock = formatPrivateRuntimeContext([
-      endUserContext,
-      formatActiveWorkspaceContext(turnScope),
-    ].filter(Boolean).join('\n\n'))
-    fullSystemPrompt = promptWithMemory
-    runtimeSystemContext = [capabilityAddendum, identityBlock]
-      .filter(Boolean).join('\n\n')
-  }
-
-  // ── 10. Load history + proactive compaction ──────────────
-  // Mirrors web chat (chat.ts:797–816). `runProactiveCompaction`
-  // owns stamping + tool-result pairing + summary-prepend + the
-  // compaction LLM call when the tier+channel threshold is hit,
-  // updating `compact_boundary_sequence` / `compact_summary`
-  // in place.
-  //
-  // `channelClass: 'web'` — the API channel is Q&A-shaped with
-  // longer turns, much closer to web chat than rapid messaging
-  // (Telegram/Slack run at 0.5×). Without compaction long-lived
-  // API sessions grow until Gemini 3 Pro hits its empty-response
-  // failure mode on large inputs; see query-loop.ts:372 and the
-  // EMPTY_RETRY_PLAN comments.
-  const dbMessages = await getSessionMessages(session.id, {
-    fromSequence: session.compactBoundarySequence,
-    excludeHeld: true,
-  })
-  noteAutomaticScopeEvidence(scopeAccumulator, dbMessages)
-  await assertDeliveryAudience()
-  const compactionResult = await runProactiveCompaction({
-    modelContext: { execution: executionContext, accumulator: scopeAccumulator },
-    sessionMessages: dbMessages,
-    timezone: owner.timezone ?? 'UTC',
-    session,
-    tier: modelToCompactionTier(logicalModel),
-    channelClass: 'web',
-    profile: 'linear',
-    provider: backgroundLlmRuntime?.provider ?? deps.provider,
-    model: backgroundLlmRuntime?.selector,
-    inputTokenLimit: backgroundLlmRuntime?.inputTokenLimit,
-    modelTier: 'standard',
-    providerKeySource: backgroundLlmRuntime?.providerKeySource ?? 'platform',
-    systemPrompt: renderSystemContext({ systemPrompt: fullSystemPrompt, runtimeSystemContext }),
-    assistantId: assistant.id,
-    userId: user.id,
-    ownerId,
-    channelType: 'api',
-    memoryStore: deps.memoryStore,
-    episodicStore: deps.episodicStore,
-    sessionStateStore: deps.sessionStateStore,
-    analytics: deps.analytics,
-    usageStore: deps.usageStore,
-    userMessageId: storedUserMsg.id,
-    compartments: turnScope.writeCompartments,
-    projectIds: turnScope.writeProjectIds,
-    authority,
-  })
-  // Gate on the serving provider (the `model` resolved above) — the strip
-  // is Gemini-only and would erase a Qwen turn's tool calls. See tool-pairing.ts.
-  let messages: Message[] = stripUnsignedToolUses(
-    compactionResult.messages,
-    modelRequiresToolSignatures(model),
-  )
-
-  // Inject the retry/edit hint into the last user turn for the
-  // model only — the persisted row stays clean. Mirrors
-  // chat.ts:808–826.
-  if (retryHint && messages.length > 0) {
-    const lastIdx = messages.length - 1
-    const last = messages[lastIdx]
-    if (last.role === 'user') {
-      const cloned: Message = {
-        role: 'user',
-        content:
-          typeof last.content === 'string'
-            ? retryHint + last.content
-            : [{ type: 'text', text: retryHint }, ...last.content],
-      }
-      messages = [...messages.slice(0, lastIdx), cloned]
+      )
+      const identityBlock = formatPrivateRuntimeContext([
+        endUserContext,
+        formatActiveWorkspaceContext(turnScope),
+      ].filter(Boolean).join('\n\n'))
+      fullSystemPrompt = promptWithMemory
+      runtimeSystemContext = [capabilityAddendum, identityBlock]
+        .filter(Boolean).join('\n\n')
     }
-  }
 
-  // User-visible context rides the newest USER turn, never the system channel
-  // — the third leg of the provenance split. `attachUserVisibleContext`
-  // returns null when no plain trailing user message can carry it (a
-  // tool_result carrier, an assistant-final resume shape); the documented
-  // fallback is in-prompt placement for that turn only.
-  if (userVisibleContext) {
-    const enveloped = attachUserVisibleContext(messages, userVisibleContext)
-    if (enveloped) {
-      messages = enveloped
-    } else {
-      runtimeSystemContext = `${runtimeSystemContext}\n\n${formatUserVisibleContext(userVisibleContext)}`
-    }
-  }
-
-  // ── 11. Run the turn through the kernel ───────────────────
-  // Abort on consumer disconnect. Liveness is the kernel's stall watchdog
-  // (no provider chunk, no tool activity, no loop event for the derived
-  // window), never a wall clock: the 180 s ceiling this lane carried clipped
-  // slow-but-alive turns and caught nothing the watchdog does not.
-  req.on('close', () => abortController.abort())
-  let sendEvent: PublicTurnSseSender | null = null
-  let loopError: Error | null = null
-
-  const turnOutput = createTurnOutputCollector({ format: 'compact' })
-  // Written from the kernel's sink callback; held in one object so the
-  // reads after the turn are not narrowed to their initial `null`.
-  const turnFacts: { totalUsage: TokenUsage | null; responseModel: string | null; assistantMessageId: string | null } = {
-    totalUsage: null, responseModel: null, assistantMessageId: null,
-  }
-
-  try {
+    // ── 10. Load history + proactive compaction ──────────────
+    // Mirrors web chat (chat.ts:797–816). `runProactiveCompaction`
+    // owns stamping + tool-result pairing + summary-prepend + the
+    // compaction LLM call when the tier+channel threshold is hit,
+    // updating `compact_boundary_sequence` / `compact_summary`
+    // in place.
+    //
+    // `channelClass: 'web'` — the API channel is Q&A-shaped with
+    // longer turns, much closer to web chat than rapid messaging
+    // (Telegram/Slack run at 0.5×). Without compaction long-lived
+    // API sessions grow until Gemini 3 Pro hits its empty-response
+    // failure mode on large inputs; see query-loop.ts:372 and the
+    // EMPTY_RETRY_PLAN comments.
+    // The original turn owner performs the stored-history read and notes its evidence.
+    const dbMessages = (await turnOwner.prepareHistory({ native: null,
+      fromSequence: session.compactBoundarySequence, evidence: scopeAccumulator, publicConversation })).messages
     await assertDeliveryAudience()
-    sendEvent = input.delivery === 'sse' ? openPublicTurnSse(res) : null
-    sendEvent?.('session', { sessionId: channelId })
-    const preparedRun = await prepareAssistantRun({
-      executionContext,
-      model: {
-        provider: turnProvider,
-        model,
-        maxTokens: customLlmRuntime?.maxTokens,
-        inputTokenLimit: customLlmRuntime?.inputTokenLimit,
-      },
-      candidateTools: baseTools,
-      bindTools: (candidateTools, execution) => bindToolsToAgentAccess(candidateTools, {
-        clearance: execution.security.access.clearance,
-        compartments: execution.security.access.compartments,
-        mutationCompartments: execution.security.access.mutationCompartments,
-        projectIds: execution.security.access.projectIds,
-      }),
-      trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
-      userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
-    })
-    await runAssistantTurn({
-      sessionId: session.id,
-      policy: policyFor(session),
-      abortController,
-      // A second request on the same conversation waits for the first.
-      lease: { mode: 'kernel', waitForSlot: waitForTurnSlot },
-      model: {
-        provider: preparedRun.model.provider,
-        model: preparedRun.model.model,
-        configuredProviders: deps.configuredProviders,
-        customLlm: customLlmRuntime,
-      },
-      loop: {
-      ledger: createTurnLedger({
-        workspaceId: assistant.workspaceId ?? null,
-        assistantId: assistant.id,
-        sessionId: session.id,
-        payloads: getLedgerPayloadStore(),
-      }).ledger,
-      maxTokens: preparedRun.model.maxTokens,
-      inputTokenLimit: preparedRun.model.inputTokenLimit,
-      systemPrompt: fullSystemPrompt,
-      runtimeSystemContext: preparedRun.trustedContext,
-      messages,
-      tools: preparedRun.tools,
-      context: {
-        ...executionToolContext(executionContext, { appId: 'Use Brian' }),
-        // Read ceiling = min(member, assistant); write ceiling stays the
-        // assistant's own clearance (incident 2026-06-01).
-        activeGroupId: turnScope.activeGroupId,
-        activeProjectId: turnScope.activeProjectId,
-        // Memory-only authenticated-client carve-out. Other tools ignore this
-        // field and continue to receive the public/empty general projection.
-        memoryWriteSensitivityFloor: clientSelfMemory ? 'internal' : undefined,
-        memoryWriteCompartments: clientSelfMemory
-          ? [clientSelfMemory.compartment]
-          : undefined,
-        // Every CRM / memory / task / knowledge write on this turn unions this
-        // in (`unionCompartments(accumulator, assistantDefaultCompartments)`),
-        // so adding the client's compartment here stamps the whole turn from
-        // one seam. Empty for a teammate — see client-accrual.ts.
-        assistantDefaultCompartments: unionCompartments(
-          turnScope.writeCompartments,
-          accrual.compartments,
-        ),
-        scopeAccumulator,
-        workerRuntime: customLlmRuntime
-          ? {
-              provider: customLlmRuntime.provider,
-              model: customLlmRuntime.selector,
-              modelTier: customLlmRuntime.modelTier,
-              providerKeySource: customLlmRuntime.providerKeySource,
-              inputTokenLimit: customLlmRuntime.inputTokenLimit,
-              maxTokens: customLlmRuntime.maxTokens,
-            }
-          : undefined,
-        // `assistant-full` runs as a synthetic non-member principal, so member
-        // RLS hid every brain row before `clearance` was ever consulted — the
-        // lane raised the application ceiling and left the database gate shut,
-        // which is why a chat link read an empty brain (2026-08-07). Reads go
-        // system-side with `buildAccessPredicate` as the whole gate; the pinned
-        // `readClearance` above is the containment.
-        //
-        // Reads ONLY. Writes stay on `queryWithRLS` under this same synthetic
-        // principal and the database still refuses them, which is what keeps
-        // "external chat has no write access" enforced below the tool layer.
-        // Never set this for `external-client`: that lane's `public` floor and
-        // `client:*` compartment wall are the cross-client isolation contract.
-        userTimezone:
-          (internalScope ? user.timezone : null) ?? owner.timezone ?? undefined,
-        sessionStateStore: deps.sessionStateStore,
-        activeCapabilities,
-      },
+    const compactionResult = await withCurrentTurn(() => runProactiveCompaction({
+      modelContext: { execution: executionContext, accumulator: scopeAccumulator },
+      sessionMessages: dbMessages,
+      timezone: owner.timezone ?? 'UTC',
+      session,
+      tier: modelToCompactionTier(logicalModel),
+      channelClass: 'web',
+      profile: 'linear',
+      provider: background.provider,
+      model: backgroundLlmRuntime?.selector,
+      inputTokenLimit: backgroundLlmRuntime?.inputTokenLimit,
+      modelTier: 'standard',
+      providerKeySource: backgroundLlmRuntime?.providerKeySource ?? 'platform',
+      systemPrompt: renderSystemContext({ systemPrompt: fullSystemPrompt, runtimeSystemContext }),
+      assistantId: assistant.id,
+      userId: user.id,
+      ownerId,
       channelType: 'api',
-      // Reactive compaction on context-overflow errors —
-      // matches web chat (chat.ts:1541).
-      compactModel: 'gemini-3.6-flash-pro',
-      maxTurns,
-      },
-      sink: { kind: 'json', onEvent: async (event) => {
-      turnOutput.observe(event)
-      if (event.type === 'text_delta') {
-        await assertDeliveryAudience()
-        sendEvent?.('text_delta', { text: event.text })
-      } else if (event.type === 'tool_result') {
-        // Realtime parity with the web chat lane (realtime-sync): a
-        // brain write from a public-API turn repaints open brain pages.
-        for (const block of event.results) {
-          if (block.type !== 'tool_result') continue
-          notifyBrainWriteIfMatch(
-            assistant.workspaceId,
-            block.name,
-            block.isError ?? false,
-          )
+      memoryStore: deps.memoryStore,
+      episodicStore: deps.episodicStore,
+      sessionStateStore: deps.sessionStateStore,
+      analytics: deps.analytics,
+      usageStore: deps.usageStore,
+      userMessageId: storedUserMsg.id,
+      compartments: turnScope.writeCompartments,
+      projectIds: turnScope.writeProjectIds,
+      authority,
+    }))
+    // Gate on the serving provider (the `model` resolved above) — the strip
+    // is Gemini-only and would erase a Qwen turn's tool calls. See tool-pairing.ts.
+    let messages: Message[] = stripUnsignedToolUses(
+      compactionResult.messages,
+      modelRequiresToolSignatures(model),
+    )
+
+    // Inject the retry/edit hint into the last user turn for the
+    // model only — the persisted row stays clean. Mirrors
+    // chat.ts:808–826.
+    if (retryHint && messages.length > 0) {
+      const lastIdx = messages.length - 1
+      const last = messages[lastIdx]
+      if (last.role === 'user') {
+        const cloned: Message = {
+          role: 'user',
+          content:
+            typeof last.content === 'string'
+              ? retryHint + last.content
+              : [{ type: 'text', text: retryHint }, ...last.content],
         }
-      } else if (event.type === 'turn_complete') {
-        await assertDeliveryAudience()
-        turnFacts.totalUsage = event.totalUsage ?? null
-        turnFacts.responseModel = event.response.model
-        // Skip persisting fully empty assistant turns — same posture
-        // as chat.ts (1462). queryLoop's empty-response recovery may
-        // still exit empty when EMPTY_RETRY_PLAN or EMPTY_RETRY_WALL_MS
-        // is exhausted; persisting `[]` would poison the next turn's
-        // history and break tool-result pairing on reload.
-        if (event.response.content.length > 0) {
-          const stored = await addSessionMessage({
-            sessionId: session.id,
-            role: 'assistant',
-            content: event.response.content,
-            ...currentTurnWrite(),
-          })
-          turnFacts.assistantMessageId = stored.id
-        }
-      } else if (event.type === 'error') {
-        console.error('[public-turn] query loop error:', event.error)
-        loopError = event.error ?? new Error('upstream_failed')
+        messages = [...messages.slice(0, lastIdx), cloned]
       }
-    } },
+    }
+
+    // User-visible context rides the newest USER turn, never the system channel
+    // — the third leg of the provenance split. The original turn owner's
+    // `prepareRun` places it exactly once below; with no plain trailing user
+    // message (a tool_result carrier, an assistant-final resume shape) it keeps
+    // the documented tagged in-prompt fallback for that turn only.
+
+    // ── 11. Run the turn through the kernel ───────────────────
+    // Abort on consumer disconnect. Liveness is the kernel's stall watchdog
+    // (no provider chunk, no tool activity, no loop event for the derived
+    // window), never a wall clock: the 180 s ceiling this lane carried clipped
+    // slow-but-alive turns and caught nothing the watchdog does not.
+    let loopError: Error | null = null
+    let finalContent: ContentBlock[] | null = null
+
+    const turnOutput = createTurnOutputCollector({ format: 'compact' })
+    // Written from the kernel's sink callback; held in one object so the
+    // reads after the turn are not narrowed to their initial `null`.
+    const turnFacts: { totalUsage: TokenUsage | null; responseModel: string | null; assistantMessageId: string | null } = {
+      totalUsage: null, responseModel: null, assistantMessageId: null,
+    }
+
+      await assertDeliveryAudience()
+      sendEvent = input.delivery === 'sse' ? openPublicTurnSse(res) : null
+      sendEvent?.('session', { sessionId: channelId })
+      await turnOwner.prepareRun({
+        systemPrompt: fullSystemPrompt,
+        messages,
+        candidateTools: baseTools,
+        trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
+        userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
+      })
+      await assertTurnCurrent()
+      await turnOwner.run({
+
+        loop: {
+        ledger: createTurnLedger({
+          workspaceId: assistant.workspaceId ?? null,
+          assistantId: assistant.id,
+          sessionId: session.id,
+          payloads: getLedgerPayloadStore(),
+        }).ledger,
+        context: {
+          ...executionToolContext(executionContext, { appId: 'Use Brian' }),
+          // Read ceiling = min(member, assistant); write ceiling stays the
+          // assistant's own clearance (incident 2026-06-01).
+          activeGroupId: turnScope.activeGroupId,
+          activeProjectId: turnScope.activeProjectId,
+          // Memory-only authenticated-client carve-out. Other tools ignore this
+          // field and continue to receive the public/empty general projection.
+          memoryWriteSensitivityFloor: clientSelfMemory ? 'internal' : undefined,
+          memoryWriteCompartments: clientSelfMemory
+            ? [clientSelfMemory.compartment]
+            : undefined,
+          // Every CRM / memory / task / knowledge write on this turn unions this
+          // in (`unionCompartments(accumulator, assistantDefaultCompartments)`),
+          // so adding the client's compartment here stamps the whole turn from
+          // one seam. Empty for a teammate — see client-accrual.ts.
+          assistantDefaultCompartments: unionCompartments(
+            turnScope.writeCompartments,
+            accrual.compartments,
+          ),
+          scopeAccumulator,
+          workerRuntime: customLlmRuntime
+            ? {
+                provider: customLlmRuntime.provider,
+                model: customLlmRuntime.selector,
+                modelTier: customLlmRuntime.modelTier,
+                providerKeySource: customLlmRuntime.providerKeySource,
+                inputTokenLimit: customLlmRuntime.inputTokenLimit,
+                maxTokens: customLlmRuntime.maxTokens,
+              }
+            : undefined,
+          // `assistant-full` runs as a synthetic non-member principal, so member
+          // RLS hid every brain row before `clearance` was ever consulted — the
+          // lane raised the application ceiling and left the database gate shut,
+          // which is why a chat link read an empty brain (2026-08-07). Reads go
+          // system-side with `buildAccessPredicate` as the whole gate; the pinned
+          // `readClearance` above is the containment.
+          //
+          // Reads ONLY. Writes stay on `queryWithRLS` under this same synthetic
+          // principal and the database still refuses them, which is what keeps
+          // "external chat has no write access" enforced below the tool layer.
+          // Never set this for `external-client`: that lane's `public` floor and
+          // `client:*` compartment wall are the cross-client isolation contract.
+          userTimezone:
+            (internalScope ? user.timezone : null) ?? owner.timezone ?? undefined,
+          sessionStateStore: deps.sessionStateStore,
+          activeCapabilities,
+        },
+        channelType: 'api',
+        // Reactive compaction on context-overflow errors —
+        // matches web chat (chat.ts:1541).
+        compactModel: 'gemini-3.6-flash-pro',
+        maxTurns,
+        },
+        sink: { kind: 'json', onEvent: async (event) => {
+        turnOutput.observe(event)
+        if (event.type === 'text_delta') {
+          await assertDeliveryAudience()
+          sendEvent?.('text_delta', { text: event.text })
+        } else if (event.type === 'tool_result') {
+          await assertTurnCurrent()
+          // Realtime parity with the web chat lane (realtime-sync): a
+          // brain write from a public-API turn repaints open brain pages.
+          for (const block of event.results) {
+            if (block.type !== 'tool_result') continue
+            notifyBrainWriteIfMatch(
+              assistant.workspaceId,
+              block.name,
+              block.isError ?? false,
+            )
+          }
+        } else if (event.type === 'turn_complete') {
+          await assertDeliveryAudience()
+          turnFacts.totalUsage = event.totalUsage ?? null
+          turnFacts.responseModel = event.response.model
+          // Skip persisting fully empty assistant turns — same posture
+          // as chat.ts (1462). queryLoop's empty-response recovery may
+          // still exit empty when EMPTY_RETRY_PLAN or EMPTY_RETRY_WALL_MS
+          // is exhausted; persisting `[]` would poison the next turn's
+          // history and break tool-result pairing on reload.
+          if (event.response.content.length > 0) finalContent = event.response.content
+        } else if (event.type === 'error') {
+          console.error('[public-turn] query loop error:', event.error)
+          loopError = event.error ?? new Error('upstream_failed')
+        }
+      }, afterLoop: async () => {
+        // The owner's one reply publication (turn-kernel.md "Reply publication").
+        if (!finalContent) return
+        const [stored] = await turnOwner!.publish({ disposition: 'reply', write: publicationWrite(), native: nativeTranscriptAuthority,
+          publicConversation,
+          execute: withCurrentTurn, rows: [{ role: 'assistant', content: finalContent }],
+          // The durable completion header (8277): this turn's answer to its stored input.
+          completion: { lane: 'public', input: { kind: 'session_message', ref: storedUserMsg.id }, assistantId: assistant.id } })
+        turnFacts.assistantMessageId = stored?.id ?? null
+      } },
+      })
+      if (loopError) {
+        const detail = (loopError as Error).message
+        if (sendEvent) {
+          sendEvent('error', { error: 'upstream_failed', detail })
+          sendEvent('done', {})
+          res.end()
+          return
+        }
+        return fail(res, 502, 'upstream_failed', detail)
+      }
+
+    // Await factual original spend before successful delivery; errors settle it
+    // through the same one-shot promise in finally.
+    await turnOwner.settleUsage()
+    const { totalUsage, responseModel, assistantMessageId } = turnFacts
+
+    await assertTurnCurrent()
+    deps.analytics?.logEvent({
+      userId: ownerId,
+      actorUserId: user.id,
+      assistantId: assistant.id,
+      sessionId: session.id,
+      eventName: 'api_request',
+      channelType: 'api',
+      metadata: {
+        ...input.analyticsMeta,
+        identified: isIdentified,
+        tokens_in: totalUsage?.inputTokens ?? 0,
+        tokens_out: totalUsage?.outputTokens ?? 0,
+      },
     })
-    if (loopError) {
-      const detail = (loopError as Error).message
+
+    const finalMessageId = assistantMessageId ?? randomUUID()
+    const finalModel = responseModel ?? model
+    try {
+      await assertDeliveryAudience()
+    } catch (err) {
+      if (!isAuthorityChangedError(err) && !isDeliveryAudienceUnverifiedError(err)) throw err
+      const error = isAuthorityChangedError(err)
+        ? 'authority_changed'
+        : 'delivery_audience_unverified'
       if (sendEvent) {
-        sendEvent('error', { error: 'upstream_failed', detail })
+        sendEvent('error', { error })
         sendEvent('done', {})
         res.end()
         return
       }
-      return fail(res, 502, 'upstream_failed', detail)
+      return fail(res, 409, error)
     }
+    await assertTurnCurrent()
+    if (sendEvent) {
+      sendEvent('turn_complete', {
+        sessionId: channelId,
+        messageId: finalMessageId,
+        model: finalModel,
+      })
+      sendEvent('done', {})
+      res.end()
+      completed = true
+      return
+    }
+
+    // JSON is a final-only delivery lane. Select from finalised turn references
+    // before lexical sanitization; live SSE above remains delta-based.
+    const selected = turnOutput.select()
+    res.json({
+      sessionId: channelId,
+      messageId: finalMessageId,
+      reply: formatPublicTurnReply(selected),
+      model: finalModel,
+    })
+    turnOutput.advanceDelivery()
+    completed = true
   } catch (err) {
     if (err instanceof TurnRefusal) {
       if (sendEvent) {
@@ -1601,8 +1768,17 @@ export async function executePublicTurn(
       return fail(res, 409, 'conversation_busy', 'Another turn on this conversation is still running. Retry once it finishes.')
     }
     console.error('[public-turn] query loop threw:', err)
-    if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) {
-      const error = isAuthorityChangedError(err)
+    if (turnOwner?.abortKind === 'lease_lost') {
+      if (sendEvent) {
+        sendEvent('error', { error: 'authority_changed' })
+        sendEvent('done', {})
+        res.end()
+        return
+      }
+      return fail(res, 409, 'authority_changed')
+    }
+    if (isAuthorityChangedError(err) || err instanceof ConversationVisibilityError || isDeliveryAudienceUnverifiedError(err)) {
+      const error = isAuthorityChangedError(err) || err instanceof ConversationVisibilityError
         ? 'authority_changed'
         : 'delivery_audience_unverified'
       if (sendEvent) {
@@ -1620,114 +1796,19 @@ export async function executePublicTurn(
       return
     }
     return fail(res, 502, 'upstream_failed', (err as Error).message)
+  } finally {
+    req.off('aborted', onClose)
+    res.off('close', onClose)
+    await turnOwner?.finish(turnOwner.abortKind === 'stop' ? 'stopped_by_user'
+      : completed && !abortController.signal.aborted ? 'completed' : 'failed')
   }
-
-  // ── 12. Record usage (fire-and-forget) ───────────────────
-  // The credential's owner pays (`userId`), but the shadow user actually
-  // drove the turn — pass `actorUserId` so admin per-user views can
-  // pivot to the shadow. See migration 100 and
-  // docs/architecture/platform/analytics.md → "Actor vs billing party".
-  const { totalUsage, responseModel, assistantMessageId } = turnFacts
-  if (deps.usageStore && totalUsage && responseModel) {
-    const cost = customLlmRuntime?.providerKeySource === 'user'
-      ? 0
-      : calculateCost(responseModel, totalUsage)
-    deps.usageStore.recordUsage({
-      // The credential's owner pays; the actor drove the turn.
-      ...turnUsageIdentity({ payerUserId: ownerId, actorUserId: user.id }),
-      assistantId: assistant.id,
-      sessionId: session.id,
-      model: responseModel,
-      modelTier: logicalTier,
-      inputTokens: totalUsage.inputTokens,
-      outputTokens: totalUsage.outputTokens,
-      cacheReadTokens: totalUsage.cacheReadTokens,
-      cacheWriteTokens: totalUsage.cacheWriteTokens,
-      actualCostUsd: cost,
-      source: 'api',
-      userMessageId: storedUserMsg.id,
-      triggerKey: 'main_response',
-      providerKeySource: customLlmRuntime?.providerKeySource ?? 'platform',
-    }).catch((err) => {
-      // Mirror chat.ts: log AND surface to analytics so the
-      // failure isn't silent. The previous version only console
-      // logged, which masked the valid_source CHECK constraint
-      // breakage that hid every public-API turn from the
-      // dashboard until migration 102.
-      console.error('[public-turn] usage tracking failed:', err)
-      deps.analytics?.logEvent({
-        userId: ownerId,
-        actorUserId: user.id,
-        assistantId: assistant.id,
-        sessionId: session.id,
-        eventName: 'usage_tracking_error',
-        channelType: 'api',
-        metadata: {
-          error_type: sanitizeAnalytics((err as Error)?.name ?? 'unknown'),
-        },
-      })
-    })
-  }
-
-  deps.analytics?.logEvent({
-    userId: ownerId,
-    actorUserId: user.id,
-    assistantId: assistant.id,
-    sessionId: session.id,
-    eventName: 'api_request',
-    channelType: 'api',
-    metadata: {
-      ...input.analyticsMeta,
-      identified: isIdentified,
-      tokens_in: totalUsage?.inputTokens ?? 0,
-      tokens_out: totalUsage?.outputTokens ?? 0,
-    },
-  })
-
-  const finalMessageId = assistantMessageId ?? randomUUID()
-  const finalModel = responseModel ?? model
-  try {
-    await assertDeliveryAudience()
-  } catch (err) {
-    if (!isAuthorityChangedError(err) && !isDeliveryAudienceUnverifiedError(err)) throw err
-    const error = isAuthorityChangedError(err)
-      ? 'authority_changed'
-      : 'delivery_audience_unverified'
-    if (sendEvent) {
-      sendEvent('error', { error })
-      sendEvent('done', {})
-      res.end()
-      return
-    }
-    return fail(res, 409, error)
-  }
-  if (sendEvent) {
-    sendEvent('turn_complete', {
-      sessionId: channelId,
-      messageId: finalMessageId,
-      model: finalModel,
-    })
-    sendEvent('done', {})
-    res.end()
-    return
-  }
-
-  // JSON is a final-only delivery lane. Select from finalised turn references
-  // before lexical sanitization; live SSE above remains delta-based.
-  const selected = turnOutput.select()
-  res.json({
-    sessionId: channelId,
-    messageId: finalMessageId,
-    reply: formatPublicTurnReply(selected),
-    model: finalModel,
-  })
-  turnOutput.advanceDelivery()
 }
 
 export type PublicHistoryInput = {
   assistantId: string
   identityNamespace: string
   externalUserId: string
+  credential: PublicConversationCredential
   sessionId?: string
   limit: number
   /**
@@ -1747,6 +1828,17 @@ export async function handlePublicHistory(
   input: PublicHistoryInput,
   res: import('express').Response,
 ): Promise<void> {
+  const channelId = input.sessionId ?? input.externalUserId
+  if (publicConversationHistoryActive()) {
+    try {
+      const messages = await readPublicConversationHistory({ ...input, channelId })
+      res.json({ sessionId: channelId, messages })
+    } catch (error) {
+      if (!(error instanceof ConversationVisibilityError)) throw error
+      fail(res, 409, 'authority_changed')
+    }
+    return
+  }
   const authProviderId = `${input.identityNamespace}:${input.externalUserId}`
   const user = input.resolvedUserId
     ? { id: input.resolvedUserId }
@@ -1758,7 +1850,6 @@ export async function handlePublicHistory(
     return
   }
 
-  const channelId = input.sessionId ?? input.externalUserId
   const session = await findSessionByChannel({
     assistantId: input.assistantId,
     userId: user.id,

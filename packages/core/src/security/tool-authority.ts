@@ -1,6 +1,6 @@
-import { workspaceCredentialDelegation } from './workspace-delegation.js'
-import type { ToolContext } from '../tools/types.js'
-import { intersectAccessCeilings, parseAuthoringAuthority, pinAuthoringAuthority, type AuthoringAuthority } from './access-ceiling.js'
+import { workspaceCredentialDelegation } from '@use-brian/agent-runtime/security/workspace-delegation.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { intersectAccessCeilings, parseAuthoringAuthority, pinAuthoringAuthority, type AuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
 
 /** Freeze the trusted access fields already resolved onto an attended tool turn. */
 export function pinToolAuthoringAuthority(context: ToolContext): AuthoringAuthority {

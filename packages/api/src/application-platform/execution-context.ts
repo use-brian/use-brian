@@ -2,8 +2,19 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { Pool, PoolClient } from 'pg'
-import { createExecutionContext, intersectAccessCeilings, maxSensitivity, minSensitivity,
-  type AccessCeiling, type ExecutionContext, type Sensitivity } from '@use-brian/core'
+import {
+  intersectAccessCeilings,
+  type AccessCeiling
+} from '@use-brian/agent-runtime/security/access-ceiling.js'
+import {
+  createExecutionContext,
+  type ExecutionContext
+} from '@use-brian/agent-runtime/security/execution-context.js'
+import {
+  maxSensitivity,
+  minSensitivity,
+  type Sensitivity
+} from '@use-brian/agent-runtime/security/sensitivity.js'
 import { ApplicationPlatformError, WorkspaceModuleError } from '@use-brian/shared'
 import { findAssistantById } from '../db/users.js'
 import { applyRLSGucs, rollbackAndRelease } from '../db/client.js'
@@ -120,11 +131,11 @@ export async function resolveApplicationExecutionContext(authentication: Applica
   }
   const initial = await resolve()
   if (initial.state.workspaceId !== identity.workspaceId || initial.state.principal.userId !== identity.principal.userId
-    || initial.state.assistantId !== identity.assistantId || !(await policyCurrent())) throw new AuthorityChangedError()
+    || initial.state.assistantId !== identity.assistantId || !(await policyCurrent.isCurrent())) throw new AuthorityChangedError()
   const authority = createAuthorityLease(initial.ceiling, async () => {
     const current = await resolve()
     return current.signature === initial.signature ? current.ceiling : null
-  }, policyCurrent)
+  }, () => policyCurrent.isCurrent())
   const accessToken = Object.freeze({})
   const applicationAccess = { ...initial.ceiling, assistantId: initial.assistant.id,
     assistantKind: initial.assistant.kind, applicationBound: true as const, [applicationAccessToken]: accessToken }

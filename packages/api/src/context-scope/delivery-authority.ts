@@ -1,15 +1,16 @@
 import type { PoolClient } from 'pg'
 import type { query } from '../db/client.js'
 /** Current destination-audience authorization for restricted output. [COMP:api/delivery-authority] */
+import type { DeliveryAudienceDenialDetail } from '@use-brian/core/workflow/executor.js'
 import {
   intersectAccessCeilings,
   type AccessCeiling,
-  type DeliveryAudienceDenialDetail,
-  type ScopeEvidence,
-} from '@use-brian/core'
+} from '@use-brian/agent-runtime/security/access-ceiling.js'
+import type { ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
 import { parseTopicChannelId } from '@use-brian/channels'
 import { getGroupAudienceBindingsSystem, type ChannelIntegrationStore, type DeliveryAudienceBinding } from '../db/channel-integrations.js'
 import { findSessionByChannel, readSessionById, type Session } from '../db/sessions.js'
+import { providerChannelIdFromSession } from '../db/session-channel-id.js'
 import { policyFor } from '../session-kind.js'
 import { findAssistantById } from '../db/users.js'
 import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
@@ -64,7 +65,6 @@ export type DeliveryAudienceInput = {
  * Deliberately coarse: it never names the Team, Project or clearance that
  * failed, so a refusal cannot become an existence oracle.
  */
-export type { DeliveryAudienceDenialDetail } from '@use-brian/core'
 
 /**
  * The exact rule that refused, for logs and analytics only. Unlike `detail`
@@ -339,13 +339,16 @@ async function resolveEnvelope(
   }
 
   const integration = await integrationForTarget(input, deps.integrationStore)
-  const parsed = parseTopicChannelId(input.channelId)
+  const addressedGroup = inferredType==='group' && input.sessionChannelId
+    && providerChannelIdFromSession(input.channelType,input.sessionChannelId)===input.channelId
+    ? input.sessionChannelId : input.channelId
+  const parent = parseTopicChannelId(providerChannelIdFromSession(input.channelType,addressedGroup)).chatId
   const candidates = integration && inferredType === 'group' && deps.integrationStore?.getGroupAudienceBindingsSystem
-    ? await deps.integrationStore.getGroupAudienceBindingsSystem(input.workspaceId, input.channelType, input.channelId)
+    ? await deps.integrationStore.getGroupAudienceBindingsSystem(input.workspaceId, input.channelType, addressedGroup)
     : integration?.config?.deliveryAudienceBindings
   const bindings = candidates?.filter((candidate) =>
     candidate.version === 1
-    && (candidate.channelId === input.channelId || candidate.channelId === parsed.chatId),
+    && (candidate.channelId === addressedGroup || candidate.channelId === parent),
   ) ?? []
   return resolveApprovedBindings(input, deps, bindings)
 }

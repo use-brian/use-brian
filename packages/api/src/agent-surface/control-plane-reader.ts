@@ -15,14 +15,14 @@
  * Component tag: [COMP:control-plane/read-tools] (adapter half).
  */
 
+import type { CapabilityStore } from '@use-brian/core/authorization/types.js'
 import type {
-  CapabilityStore,
   ControlPlaneAssistant,
   ControlPlaneChannel,
   ControlPlaneConnector,
   ControlPlaneReader,
   ControlPlaneSkill,
-} from '@use-brian/core'
+} from '@use-brian/core/control-plane/types.js'
 import { OFFICIAL_CONNECTORS } from '@use-brian/shared'
 import {
   availableOfficialConnectorRows,

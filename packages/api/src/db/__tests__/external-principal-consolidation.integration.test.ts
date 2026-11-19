@@ -229,13 +229,13 @@ describeIf('[COMP:consolidation/external-principal-isolation] team passes skip e
   let seed: Seed
   let memories: typeof import('../memories.js')
   let memoryStore: typeof import('../memory-store.js')
-  let phases: typeof import('@use-brian/core')
+  let phases: typeof import('@use-brian/core/consolidation/phases.js')
 
   beforeAll(async () => {
     process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
     memories = await import('../memories.js')
     memoryStore = await import('../memory-store.js')
-    phases = await import('@use-brian/core')
+    phases = await import('@use-brian/core/consolidation/phases.js')
   })
 
   beforeEach(async () => {

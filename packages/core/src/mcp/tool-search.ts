@@ -1,5 +1,5 @@
 import {inheritRoutineCalendarRead,assertRoutineCalendarAdapterCurrent} from '../engine/routine-read-ownership.js'
-import { missingToolCapability } from '../tools/capability-gate.js'
+import { missingToolCapability } from '@use-brian/agent-runtime/tools/capability-gate.js'
 /**
  * MCP tool search — Pattern E adapted for Gemini.
  *
@@ -29,15 +29,15 @@ import { missingToolCapability } from '../tools/capability-gate.js'
 
 import { randomBytes } from 'node:crypto'
 import { z } from 'zod'
-import { buildTool, type Tool } from '../tools/types.js'
-import { classifyTool, defaultPolicy } from './classifier.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
+import { classifyTool, defaultPolicy } from '@use-brian/agent-runtime/mcp/classifier.js'
 import { mcpResultToToolResult } from './tool-result.js'
-import { jsonSchemaFromZod } from '../engine/query-loop.js'
-import { createMcpInputSchema, getMcpInputJsonSchema, mcpArgumentError } from './input-schema.js'
-import { declinedToolResult, timedOutToolResult, blockedThisTurnToolResult, policyBlockedToolResult, alwaysDeniedToolResult } from '../engine/decline-copy.js'
+import { jsonSchemaFromZod } from '@use-brian/agent-runtime/engine/query-loop.js'
+import { createMcpInputSchema, getMcpInputJsonSchema, mcpArgumentError } from '@use-brian/agent-runtime/mcp/input-schema.js'
+import { declinedToolResult, timedOutToolResult, blockedThisTurnToolResult, policyBlockedToolResult, alwaysDeniedToolResult } from '@use-brian/agent-runtime/engine/decline-copy.js'
 import { describeMcpToolError } from './errors.js'
-import type { EngineHooks, PreToolUseDirective } from '../engine/hooks.js'
-import type { McpSettingsStore, McpServerConfig, McpToolInfo } from './types.js'
+import type { EngineHooks, PreToolUseDirective } from '@use-brian/agent-runtime/engine/hooks.js'
+import type { McpSettingsStore, McpServerConfig, McpToolInfo } from '@use-brian/agent-runtime/mcp/types.js'
 
 // Host-only identity survives the shallow wrappers used by injection/workers.
 // A same-named first-party tool is not an adapter for this indexed source.
@@ -83,7 +83,54 @@ export type LocalSource = {
   kind: 'local'
   serverName: string
   tools: Tool[]
+  /**
+   * Lazy entries: descriptor-only tools whose `Tool` is built on demand by
+   * `resolve`. A descriptor whose name matches an eager `tools` entry is
+   * ignored. See docs/architecture/integrations/mcp.md -> "Capability catalog".
+   */
+  descriptors?: LocalToolDescriptor[]
+  /**
+   * Build (activate) one tool by canonical name. Awaited before local
+   * dispatch, before a direct adapter's confirmation hook and before an
+   * interactive read adapter runs. A plain `Tool` is a ready resolution; a
+   * resolution whose `version` differs from the indexed descriptor is stale.
+   */
+  resolve?: (toolName: string) => Promise<Tool | LocalToolResolution | null | undefined>
+  /**
+   * Undiscovered dynamic source: advertised by name only and discovered when
+   * an `mcp_search` query names it. Returns the discovered descriptors.
+   */
+  discover?: () => Promise<LocalToolDescriptor[]>
+  /** Human label shown beside a stable `serverName` identity. */
+  label?: string
+  /** Source summary for the search description; derived from names when absent. */
+  summary?: string
 }
+
+/** Catalog-time description of one lazily built local tool. Never an execution grant. */
+export type LocalToolDescriptor = {
+  name: string
+  description: string
+  /** JSON Schema for search display and lazy adapters. Absent: shown once resolved. */
+  inputSchema?: Record<string, unknown>
+  /** Show the full discovered JSON Schema line in search results (dynamic sources). */
+  externalInputSchema?: boolean
+  isReadOnly?: boolean
+  /** Static confirmation flag before activation. Defaults to true unless read-only. */
+  requiresConfirmation?: boolean
+  allowPersistentApproval?: boolean
+  requiresCapability?: string
+  hiddenFromModel?: boolean
+  /** Content-hash descriptor version; a resolution with another version is stale. */
+  version?: string
+}
+
+export type LocalToolResolution =
+  /** `descriptor` (optional) supplies clean search metadata if the version changed. */
+  | { status: 'ready'; tool: Tool; version?: string; descriptor?: LocalToolDescriptor }
+  /** The descriptor changed. `tool`/`descriptor` (when known) replace the indexed schema. */
+  | { status: 'stale'; tool?: Tool; descriptor?: LocalToolDescriptor; version?: string }
+  | { status: 'unavailable'; reason?: string }
 
 export type ToolSource = RemoteSource | LocalSource
 
@@ -123,8 +170,38 @@ type RemoteIndexedTool = IndexedToolBase & {
 
 type LocalIndexedTool = IndexedToolBase & {
   kind: 'local'
-  /** The actual `Tool` object — execute, hooks, capability wrappers all intact. */
+  /**
+   * The actual `Tool` object — execute, hooks, capability wrappers all intact.
+   * For a lazy entry this is a descriptor placeholder used only for search
+   * metadata and adapter flags; dispatch always runs the resolved tool.
+   */
   tool: Tool
+  label?: string
+  lazy?: LazyLocalState
+}
+
+type LocalResolutionOutcome =
+  | { status: 'ready'; tool: Tool }
+  | { status: 'stale' }
+  | { status: 'unavailable'; reason?: string }
+
+type LazyLocalState = {
+  resolve: NonNullable<LocalSource['resolve']>
+  version?: string
+  externalSchema: boolean
+  /** False until a descriptor or resolved tool supplied a parameter schema. */
+  schemaKnown: boolean
+  pending?: Promise<LocalToolResolution>
+  resolved?: Tool
+}
+
+type UndiscoveredSource = {
+  server: string
+  label?: string
+  discover: NonNullable<LocalSource['discover']>
+  resolve?: LocalSource['resolve']
+  terms: string[]
+  pending?: Promise<LocalToolDescriptor[] | null>
 }
 
 type IndexedTool = RemoteIndexedTool | LocalIndexedTool
@@ -133,6 +210,8 @@ export type McpToolIndex = {
   entries: IndexedTool[]
   /** Server name → connector summary (for the search tool description) */
   serverSummaries: Map<string, string>
+  /** Dynamic sources advertised by name and discovered when a search names them. */
+  undiscovered?: UndiscoveredSource[]
 }
 
 /** Tokenize a tool name + description for the keyword search index. */
@@ -159,6 +238,7 @@ export function buildToolIndex(sources: ToolSource[]): McpToolIndex {
   const entries: IndexedTool[] = []
   const serverSummaries = new Map<string, string>()
   const sourceIds = new Set<string>()
+  let undiscovered: UndiscoveredSource[] | undefined
 
   for (const source of sources) {
     if (source.kind === 'remote') {
@@ -189,7 +269,29 @@ export function buildToolIndex(sources: ToolSource[]): McpToolIndex {
     }
 
     // Local source
-    serverSummaries.set(source.serverName, summarizeCapabilities(source.tools.map((t) => t.name)))
+    const eagerNames = new Set(source.tools.map((t) => t.name))
+    const descriptors = source.resolve
+      ? (source.descriptors ?? []).filter((descriptor) => !eagerNames.has(descriptor.name))
+      : []
+    if (source.discover && source.resolve && source.tools.length === 0 && descriptors.length === 0) {
+      const label = source.label ?? source.serverName
+      serverSummaries.set(source.serverName, source.summary
+        ?? `${label}: tools not loaded yet; search for "${label}" to load them`)
+      ;(undiscovered ??= []).push({
+        server: source.serverName,
+        label: source.label,
+        discover: source.discover,
+        resolve: source.resolve,
+        terms: [...new Set([source.serverName, label].map((name) => name.toLowerCase().trim()).filter((name) => name.length > 2))],
+      })
+      continue
+    }
+    serverSummaries.set(source.serverName, source.summary
+      ?? summarizeCapabilities([...source.tools.map((t) => t.name), ...descriptors.map((d) => d.name)]))
+
+    for (const descriptor of descriptors) {
+      entries.push(lazyLocalEntry(source.serverName, source.label, descriptor, source.resolve!))
+    }
 
     for (const tool of source.tools) {
       // Derive JSON-Schema shape for the search result preview. Zod inputs
@@ -203,6 +305,7 @@ export function buildToolIndex(sources: ToolSource[]): McpToolIndex {
       entries.push({
         kind: 'local',
         server: source.serverName,
+        ...(source.label ? { label: source.label } : {}),
         toolName: tool.name,
         description: tool.description,
         inputSchema,
@@ -212,7 +315,131 @@ export function buildToolIndex(sources: ToolSource[]): McpToolIndex {
     }
   }
 
-  return { entries, serverSummaries }
+  return { entries, serverSummaries, ...(undiscovered ? { undiscovered } : {}) }
+}
+
+/** Metadata-only stand-in for a lazy entry. Its execute never runs a capability. */
+function descriptorPlaceholder(descriptor: LocalToolDescriptor): Tool {
+  const readOnly = descriptor.isReadOnly === true
+  return buildTool({
+    name: descriptor.name,
+    description: descriptor.description,
+    inputSchema: createMcpInputSchema(descriptor.inputSchema ?? { type: 'object' }),
+    isReadOnly: readOnly,
+    isConcurrencySafe: readOnly,
+    requiresConfirmation: descriptor.requiresConfirmation ?? !readOnly,
+    ...(descriptor.allowPersistentApproval !== undefined ? { allowPersistentApproval: descriptor.allowPersistentApproval } : {}),
+    ...(descriptor.requiresCapability ? { requiresCapability: descriptor.requiresCapability } : {}),
+    ...(descriptor.hiddenFromModel ? { hiddenFromModel: true } : {}),
+    async execute() {
+      return { data: `ERROR: "${descriptor.name}" has not been activated. Call it through mcp_call.`, isError: true }
+    },
+  })
+}
+
+function lazyLocalEntry(
+  server: string,
+  label: string | undefined,
+  descriptor: LocalToolDescriptor,
+  resolve: NonNullable<LocalSource['resolve']>,
+): LocalIndexedTool {
+  return {
+    kind: 'local',
+    server,
+    ...(label ? { label } : {}),
+    toolName: descriptor.name,
+    description: descriptor.description,
+    inputSchema: descriptor.inputSchema ?? {},
+    tool: descriptorPlaceholder(descriptor),
+    tokens: tokenize(descriptor.name, descriptor.description),
+    lazy: {
+      resolve,
+      ...(descriptor.version !== undefined ? { version: descriptor.version } : {}),
+      externalSchema: descriptor.externalInputSchema === true,
+      schemaKnown: descriptor.inputSchema !== undefined,
+    },
+  }
+}
+
+function toolJsonSchema(tool: Tool): Record<string, unknown> {
+  return tool.inputSchema?._def
+    ? (jsonSchemaFromZod(tool.inputSchema) as unknown as Record<string, unknown>)
+    : {}
+}
+
+/** Replace a lazy entry's indexed metadata with the current tool or descriptor. */
+function refreshLazyMetadata(entry: LocalIndexedTool, current: Tool | LocalToolDescriptor): void {
+  const lazy = entry.lazy!
+  const isTool = typeof (current as Tool).execute === 'function'
+  const schema = isTool ? toolJsonSchema(current as Tool) : (current as LocalToolDescriptor).inputSchema
+  entry.description = current.description
+  entry.tokens = tokenize(entry.toolName, current.description)
+  if (schema !== undefined) {
+    entry.inputSchema = schema
+    lazy.schemaKnown = true
+  }
+  const tool = current as Tool
+  entry.tool = descriptorPlaceholder(isTool
+    ? {
+        name: entry.toolName, description: tool.description, inputSchema: schema,
+        isReadOnly: tool.isReadOnly, requiresConfirmation: tool.requiresConfirmation,
+        allowPersistentApproval: tool.allowPersistentApproval, requiresCapability: tool.requiresCapability,
+        hiddenFromModel: tool.hiddenFromModel,
+      }
+    : { ...(current as LocalToolDescriptor), name: entry.toolName })
+}
+
+function normalizeResolution(value: Tool | LocalToolResolution | null | undefined): LocalToolResolution {
+  if (!value) return { status: 'unavailable' }
+  if (typeof (value as { execute?: unknown }).execute === 'function') return { status: 'ready', tool: value as Tool }
+  return value as LocalToolResolution
+}
+
+/**
+ * Resolve a lazy entry once per index. `expectedVersion` is the version an
+ * adapter was built against; a newer indexed version refuses that adapter.
+ * Resolver failures propagate (authority changes must stay typed).
+ */
+async function resolveLocalEntry(entry: LocalIndexedTool, expectedVersion?: string): Promise<LocalResolutionOutcome> {
+  const lazy = entry.lazy
+  if (!lazy) return { status: 'ready', tool: entry.tool }
+  const current = (): LocalResolutionOutcome => expectedVersion !== undefined && expectedVersion !== lazy.version
+    ? { status: 'stale' }
+    : { status: 'ready', tool: lazy.resolved! }
+  if (lazy.resolved) return current()
+  const pending = lazy.pending ??= lazy.resolve(entry.toolName).then(normalizeResolution)
+  let resolution: LocalToolResolution
+  try {
+    resolution = await pending
+  } catch (error) {
+    if (lazy.pending === pending) lazy.pending = undefined
+    throw error
+  }
+  if (lazy.resolved) return current()
+  if (resolution.status === 'unavailable') {
+    return { status: 'unavailable', ...(resolution.reason ? { reason: resolution.reason } : {}) }
+  }
+  if (resolution.status === 'ready') {
+    const changed = resolution.version !== undefined && lazy.version !== undefined && resolution.version !== lazy.version
+    if (resolution.version !== undefined) lazy.version = resolution.version
+    lazy.resolved = resolution.tool
+    if (changed || !lazy.schemaKnown) refreshLazyMetadata(entry, resolution.descriptor ?? resolution.tool)
+    return changed ? { status: 'stale' } : current()
+  }
+  // Explicit stale: adopt the current metadata and resolve again on the next call.
+  if (resolution.version !== undefined) lazy.version = resolution.version
+  const replacement = resolution.tool ?? resolution.descriptor
+  if (replacement) refreshLazyMetadata(entry, replacement)
+  if (lazy.pending === pending) lazy.pending = undefined
+  return { status: 'stale' }
+}
+
+function staleToolResult(server: string, tool: string): string {
+  return `ERROR: "${tool}" on "${server}" changed since it was found, so it was NOT executed. Search again with mcp_search to get its current parameters, then retry.`
+}
+
+function unavailableToolResult(tool: string, reason?: string): string {
+  return `ERROR: "${tool}" could not be prepared for this turn${reason ? ` (${reason})` : ''}, so it was NOT executed. Search again with mcp_search; if it is no longer listed, it is not available to this assistant right now.`
 }
 
 /**
@@ -345,9 +572,11 @@ function formatToolResult(entry: IndexedTool): string {
     }
   }
 
-  const label = entry.kind === 'remote' && entry.displayName ? ` (${entry.displayName})` : ''
-  const externalSchema = entry.kind === 'remote' || getMcpInputJsonSchema(entry.tool.inputSchema)
-    ? `\n  Input JSON Schema: ${JSON.stringify(schema)}` : ''
+  const labelText = entry.kind === 'remote' ? entry.displayName : entry.label
+  const label = labelText ? ` (${labelText})` : ''
+  const external = entry.kind === 'remote'
+    || (entry.lazy ? entry.lazy.externalSchema : getMcpInputJsonSchema(entry.tool.inputSchema))
+  const externalSchema = external ? `\n  Input JSON Schema: ${JSON.stringify(schema)}` : ''
   return `[${entry.server}]${label} ${entry.toolName}: ${entry.description}${schemaStr}${externalSchema}`
 }
 
@@ -393,7 +622,7 @@ export function createMcpSearchTools(params: {
   // ── Lookup: server:toolName → IndexedTool ─────────────────────
   const entryByKey = new Map<string, IndexedTool>()
   const ambiguousEntryKeys = new Set<string>()
-  for (const entry of index.entries) {
+  const registerEntry = (entry: IndexedTool) => {
     const key = `${entry.server}:${entry.toolName}`
     if (entryByKey.has(key)) {
       entryByKey.delete(key)
@@ -402,13 +631,50 @@ export function createMcpSearchTools(params: {
       entryByKey.set(key, entry)
     }
   }
+  for (const entry of index.entries) registerEntry(entry)
+
+  // Undiscovered dynamic sources load only when a search names them. Each
+  // source is discovered at most once per index; a failure stays honest.
+  const discoveryNotes = new Map<string, string>()
+  async function discoverNamedSources(query: string): Promise<void> {
+    const normalized = query.toLowerCase()
+    const targeted = (index.undiscovered ?? []).filter((source) =>
+      source.terms.some((term) => normalized.includes(term)))
+    await Promise.all(targeted.map(async (source) => {
+      const pending = source.pending ??= source.discover().catch((error) => {
+        console.warn(`[mcp_search] discovery failed for ${source.label ?? source.server}:`, error)
+        return null
+      })
+      const descriptors = await pending
+      if (!index.undiscovered?.includes(source)) return
+      index.undiscovered.splice(index.undiscovered.indexOf(source), 1)
+      const label = source.label ?? source.server
+      if (!descriptors || !source.resolve) {
+        index.serverSummaries.set(source.server, `${label}: tools could not be loaded right now`)
+        discoveryNotes.set(source.server, `Could not load the tools from ${label} right now.`)
+        return
+      }
+      for (const descriptor of descriptors) {
+        const entry = lazyLocalEntry(source.server, source.label, descriptor, source.resolve)
+        index.entries.push(entry)
+        registerEntry(entry)
+        const legacyKey = `${label}:${entry.toolName}`
+        if (source.label && source.label !== source.server && !legacyEntryByKey.has(legacyKey) && !ambiguousLegacyKeys.has(legacyKey)) {
+          legacyEntryByKey.set(legacyKey, entry)
+        }
+      }
+      index.serverSummaries.set(source.server, `${source.label ? `${source.label}: ` : ''}${summarizeCapabilities(descriptors.map((d) => d.name))}`)
+    }))
+  }
   // Older saved calls may name a label, but an ambiguous label never picks an instance.
   const legacyEntryByKey = new Map<string, IndexedTool>()
   const ambiguousLegacyKeys = new Set<string>()
+  const entryLabel = (entry: IndexedTool) => entry.kind === 'remote' ? entry.displayName : entry.label
   for (const entry of index.entries) {
-    if (entry.kind !== 'remote' || !entry.displayName || entry.displayName === entry.server
+    const label = entryLabel(entry)
+    if (!label || label === entry.server
       || ambiguousEntryKeys.has(`${entry.server}:${entry.toolName}`)) continue
-    const key = `${entry.displayName}:${entry.toolName}`
+    const key = `${label}:${entry.toolName}`
     if (legacyEntryByKey.has(key)) { legacyEntryByKey.delete(key); ambiguousLegacyKeys.add(key) }
     else if (!ambiguousLegacyKeys.has(key)) legacyEntryByKey.set(key, entry)
   }
@@ -450,6 +716,7 @@ export function createMcpSearchTools(params: {
     async execute(input, context) {
       const { query, limit } = input as { query: string; limit?: number }
       const directOnly = context.requestTools != null && !context.requestTools.has('mcp_call')
+      if (!directOnly && index.undiscovered?.length) await discoverNamedSources(query)
       const results = searchIndex(
         index,
         query,
@@ -464,17 +731,29 @@ export function createMcpSearchTools(params: {
         },
       )
 
+      const notes = [...discoveryNotes.values()]
+      discoveryNotes.clear()
+      const noteText = notes.length > 0 ? `\n\n${notes.join(' ')}` : ''
       if (results.length === 0) {
         return {
-          data: `No tools found matching "${query}". Try broader terms or different keywords.\n\nAvailable connectors: ${Array.from(index.serverSummaries.keys()).join(', ')}`,
+          data: `No tools found matching "${query}". Try broader terms or different keywords.\n\nAvailable connectors: ${Array.from(index.serverSummaries.keys()).join(', ')}${noteText}`,
         }
       }
+
+      // A lazy hit with no catalog schema resolves once so its real
+      // parameters are shown. A failure leaves the descriptor as indexed.
+      await Promise.all(results.map(async (entry) => {
+        if (entry.kind !== 'local' || !entry.lazy || entry.lazy.schemaKnown) return
+        try { await resolveLocalEntry(entry) } catch (error) {
+          console.debug(`[mcp_search] schema resolution failed for ${entry.toolName}:`, error)
+        }
+      }))
 
       const formatted = results.map(formatToolResult).join('\n\n')
       return {
         data: `Found ${results.length} matching tools:\n\n${formatted}\n\n${directOnly
           ? 'Call the matching tool directly by its name with the listed parameters.'
-          : 'Use mcp_call with server, tool, and args to execute.'}`,
+          : 'Use mcp_call with server, tool, and args to execute.'}${noteText}`,
       }
     },
   })
@@ -608,13 +887,13 @@ export function createMcpSearchTools(params: {
   const claimedNames = new Set(['mcp_search', 'mcp_call'])
   const aliasCounts = new Map<string, number>()
   for (const entry of index.entries) {
-    const legacyName = legacyMcpToolName(entry.kind === 'remote' ? entry.displayName ?? entry.server : entry.server, entry.toolName)
+    const legacyName = legacyMcpToolName(entryLabel(entry) ?? entry.server, entry.toolName)
     for (const alias of new Set([entry.toolName, legacyName])) {
       aliasCounts.set(alias, (aliasCounts.get(alias) ?? 0) + 1)
     }
   }
   for (const entry of index.entries) {
-    const legacyName = legacyMcpToolName(entry.kind === 'remote' ? entry.displayName ?? entry.server : entry.server, entry.toolName)
+    const legacyName = legacyMcpToolName(entryLabel(entry) ?? entry.server, entry.toolName)
     const aliases = [...new Set([entry.toolName, legacyName])]
       .filter((alias) => aliasCounts.get(alias) === 1)
     for (const name of aliases) {
@@ -623,8 +902,28 @@ export function createMcpSearchTools(params: {
       const toolKey = `${entry.server}:${entry.toolName}`
 
       if (entry.kind === 'local') {
+        // A lazy adapter is built against the indexed descriptor version. Its
+        // confirmation hooks await the resolved tool; a newer version refuses.
+        const adapterVersion = entry.lazy?.version
+        const lazyHooks: Partial<Tool> = entry.lazy ? {
+          async resolveConfirmation(context, input) {
+            const outcome = await resolveLocalEntry(entry, adapterVersion)
+            // Not ready: execute refuses on the same memoized outcome.
+            if (outcome.status !== 'ready') return false
+            return outcome.tool.resolveConfirmation
+              ? outcome.tool.resolveConfirmation(context, input)
+              : outcome.tool.requiresConfirmation
+          },
+          async describeConfirmation(input, context) {
+            const outcome = await resolveLocalEntry(entry, adapterVersion)
+            return outcome.status === 'ready' && outcome.tool.describeConfirmation
+              ? outcome.tool.describeConfirmation(input, context)
+              : undefined
+          },
+        } : {}
         directTools.push(Object.assign({
           ...entry.tool,
+          ...lazyHooks,
           name,
           async execute(input, context) {
             return dispatchLocal({
@@ -637,6 +936,7 @@ export function createMcpSearchTools(params: {
               blockedTools,
               allowedTools,
               skipConfirmation: true,
+              ...(adapterVersion !== undefined ? { expectedVersion: adapterVersion } : {}),
             })
           },
         } satisfies Tool, { [DIRECT_MCP_ENTRY]: entry }))
@@ -752,7 +1052,7 @@ async function dispatchRemote(params: {
   tool: string
   toolKey: string
   args: Record<string, unknown>
-  context: import('../tools/types.js').ToolContext
+  context: import('@use-brian/agent-runtime/tools/types.js').ToolContext
   blockedTools: Set<string>
   allowedTools: Set<string>
   settingsStore: McpSettingsStore
@@ -997,13 +1297,27 @@ async function dispatchLocal(params: {
   tool: string
   toolKey: string
   args: Record<string, unknown>
-  context: import('../tools/types.js').ToolContext
+  context: import('@use-brian/agent-runtime/tools/types.js').ToolContext
   blockedTools: Set<string>
   allowedTools: Set<string>
   skipConfirmation?: boolean
+  /** Descriptor version a direct adapter was built against. */
+  expectedVersion?: string
 }) {
   const { entry, server, tool, toolKey, context, blockedTools, allowedTools } = params
-  const targetTool = entry.tool
+  // A lazy entry builds its tool before anything else, including the
+  // confirmation path, so the resolved tool's own hooks govern the call.
+  let targetTool = entry.tool
+  if (entry.lazy) {
+    const outcome = await resolveLocalEntry(entry, params.expectedVersion)
+    if (outcome.status === 'stale') {
+      // A changed capability needs a fresh approval.
+      allowedTools.delete(toolKey)
+      return { data: staleToolResult(server, tool), isError: true }
+    }
+    if (outcome.status === 'unavailable') return { data: unavailableToolResult(tool, outcome.reason), isError: true }
+    targetTool = outcome.tool
+  }
   const missing = missingToolCapability(targetTool, context.activeCapabilities)
   if (missing) return { data: { error: `This assistant does not have the '${missing}' tool capability.` }, isError: true }
 

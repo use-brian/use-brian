@@ -19,7 +19,7 @@
  * MUST NOT block memory retrieval.
  */
 
-import type { AccessContext } from '../security/access-context.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import type { EntityLinksStore, EntityStore } from '../entities/types.js'
 import type { BrainCandidateStore } from './candidates-types.js'
 

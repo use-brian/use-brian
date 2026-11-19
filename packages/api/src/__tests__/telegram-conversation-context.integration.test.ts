@@ -3,9 +3,9 @@ import * as dbClient from '../db/client.js'
  * actual provider requests/delivery, privacy holds and executed stop guards. */
 import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { configureTelegramTextDeliveryObserver, createTelegramAdapter } from '@use-brian/channels'
-import type { LLMProvider } from '@use-brian/core'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
 import { applyRLSGucs, getAppPool, getPool } from '../db/client.js'
 import { getSessionMessages } from '../db/sessions.js'
 import { findAssistantById } from '../db/users.js'
@@ -19,6 +19,7 @@ import { sessionKindSql } from '../session-kind.js'
 import { processChannelMessage } from '../routes/channel-pipeline.js'
 import { confirmChannelRecordingOwner, admitTelegramRecording, changeChannelRecording } from '../channel-recording.js'
 import { persistentContextFixture } from '../application-platform/__tests__/fixtures/persistent-context.js'
+import { conversationAnchorWriteAdmissionActive,initializeConversationVisibility } from '../db/conversation-visibility.js'
 
 const enabled = Boolean(process.env.TELEGRAM_CONTEXT_TEST_DATABASE_URL)
 const { assertLocalFixture } = await import(new URL('../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
@@ -26,6 +27,7 @@ if (enabled) await assertLocalFixture()
 const run = enabled ? describe.sequential : describe.skip
 run('[COMP:api/telegram-conversation-context] normal topic continuity', () => {
   let fixture: Awaited<ReturnType<typeof persistentContextFixture>> | undefined
+  beforeAll(async()=>{await initializeConversationVisibility();expect(conversationAnchorWriteAdmissionActive()).toBe(true)})
   afterEach(async () => { configureTelegramTextDeliveryObserver(); vi.restoreAllMocks(); await fixture?.cleanup(); fixture=undefined })
   afterAll(async () => { await getAppPool().end(); await getPool().end() })
   async function setup() {
@@ -46,8 +48,7 @@ run('[COMP:api/telegram-conversation-context] normal topic continuity', () => {
   it('executes ordinary-owner migration and retains all canonical guards',async()=>{
     const role=(await getPool().query('SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')).rows[0]
     expect(role).toEqual({rolsuper:false,rolbypassrls:false})
-    for(const name of ['native_turn_helpers_current','native_turn_publication_contract','application_native_worklist_helpers_current',
-      'application_native_dependency_batch_helpers_current','application_native_field_reference_helpers_current','application_memory_statement_helpers_current']) {
+    for(const name of ['native_turn_helpers_current','native_turn_publication_contract','application_native_worklist_helpers_current']) {
       expect((await getPool().query(`SELECT public.${name}() ok`)).rows[0].ok).toBe(true)
     }
   })

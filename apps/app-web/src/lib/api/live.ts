@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * SDK for the Live all-activity roster (docs/architecture/features/live-work.md §3).
@@ -23,6 +24,8 @@ export type LiveSessionItem = {
   /** Local read start for transient completion reconciliation, never authority. */
   statusReadStartedAt?: number;
   kind: "session";
+  turnId?: string | null;
+  turnEndReason?: string | null;
   tier: "full" | "presence";
   id: string;
   assistantId: string;
@@ -80,7 +83,11 @@ export async function fetchLiveRoster(
     throw error;
   }
   const body = (await res.json()) as { items?: LiveWorkItem[] };
-  const items = (body.items ?? []).map(item => item.kind === "session" ? { ...item, statusReadStartedAt } : item);
+  const items = (body.items ?? []).map(item => item.kind === "session" ? {
+    ...item, statusReadStartedAt,
+    turnId: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional().parse(item.turnId) ?? null,
+    turnEndReason: z.string().nullable().optional().parse(item.turnEndReason) ?? null,
+  } : item);
   deadlines.set(items, started + MAX_AGE_MS);
   if (liveRosterRemaining(items) <= 0) throw new SurfaceCacheEvictionError(new Error('live_roster_expired'));
   return items;

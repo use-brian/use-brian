@@ -1,8 +1,18 @@
 /** Canonical external metadata and short transaction receipts, never provider payloads. [COMP:api/external-source-access] */
 import { createHash, randomUUID } from 'node:crypto'
 import type { PoolClient } from 'pg'
-import { bindScopeSource, ContextScopeAccumulator, intersectAccessCeilings, maxSensitivity, pinAccessCeiling, resourceScopeKey,
-  type ExecutionContext, type ScopeSource } from '@use-brian/core'
+import {
+  intersectAccessCeilings,
+  pinAccessCeiling
+} from '@use-brian/agent-runtime/security/access-ceiling.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import {
+  resourceScopeKey,
+  type ScopeSource
+} from '@use-brian/agent-runtime/security/derived-scope.js'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { maxSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { bindScopeSource } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { SourceProtocolError, sourceResourceKey, sourceSubjectKey, type SourceAction, type SourceObservation, type SourceSubject } from '@use-brian/brian-app/connector'
 import { getPool } from '../db/client.js'
 import { getApplicationTransactionBinding } from './execution-context.js'

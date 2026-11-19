@@ -34,7 +34,7 @@ import { createHash } from 'node:crypto'
 import { lookup as dnsLookup } from 'node:dns'
 import { isIP, isIPv4, isIPv6 } from 'node:net'
 import { promisify } from 'node:util'
-import { createRateLimiter } from '@use-brian/core'
+import { createRateLimiter } from '@use-brian/core/security/rate-limiter.js'
 import { decideFrameEmbedding } from '../url-embeddable.js'
 
 const dnsLookupAsync = promisify(dnsLookup)

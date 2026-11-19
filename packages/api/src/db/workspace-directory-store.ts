@@ -14,7 +14,7 @@
  * Spec: docs/architecture/platform/workspaces.md → "Member directory tool".
  * `[COMP:workspace/tools]`.
  */
-import type { WorkspaceDirectoryStore, WorkspaceMemberInfo } from '@use-brian/core'
+import type { WorkspaceDirectoryStore, WorkspaceMemberInfo } from '@use-brian/core/workspace/types.js'
 import type { WorkspaceMember, WorkspaceStore } from './workspace-store.js'
 
 type DirectoryWorkspaceStore = Pick<WorkspaceStore, 'getMembership' | 'listMembers'>

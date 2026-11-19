@@ -10,38 +10,37 @@
 import type { Pool, PoolClient, QueryResultRow } from 'pg'
 import {
   CrmOperationsError,
-  deriveResourceScope,
   CrmLocaleWordingsSchema,
   crmOperationsSha256,
   mayTransitionCrmEntitlement,
   mayTransitionCrmParticipation,
   type CrmIntakeDefinitionVersionInput,
   type CrmIntakeAttachmentPolicy,
-  type PreparedCrmSubmissionAttachment,
   type ImportHistoricalCrmSubmission,
   type CrmOperationsActor,
   type CrmOperationsContext,
-  type CrmSegmentCatalog,
-  type CrmSegmentPredicate,
-  type AccessContext,
-} from '@use-brian/core'
+} from '@use-brian/core/crm/operations-types.js'
+import type { CrmSegmentCatalog, CrmSegmentPredicate } from '@use-brian/core/crm/segments.js'
+import type { PreparedCrmSubmissionAttachment } from '@use-brian/core/crm/submission-attachments.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import { deriveResourceScope } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { applyRLSGucs,getAppPool,getPool,rollbackAndRelease } from './client.js'
 import { associationProviderInheritance, associationCheckoutInheritance, assertAssociationCheckoutParent, admitAssociationSourceScope, beginAssociationCreation, assertAssociationOrderAuthority, loadAssociationOrderScope } from '../association/source-scope.js'
-import type { AssociationActor } from '@use-brian/core'
+import type { AssociationActor } from '@use-brian/core/association/domain.js'
 import { readCrmPrivacyPolicy, saveCrmPrivacyPolicy } from '../crm-operations/privacy-policy.js'
 import { releaseCrmAddressSuppression } from '../crm-operations/suppression-tombstones.js'
 import { saveCrmManagedMailboxPolicy, saveCrmMailboxIntegrationGrant } from '../crm-operations/delivery-policy.js'
 import { saveCrmEntitlementPlanRecord, saveCrmEventRecord } from './crm-catalog-records.js'
 import { prepareProviderEntitlementPeriod, requireProviderEntitlementActor } from '../crm-operations/entitlement-periods.js'
-import { actorAuditIdentity, isUnverifiedIdentityPolicy } from '@use-brian/core'
+import { actorAuditIdentity, isUnverifiedIdentityPolicy } from '@use-brian/core/crm/operations-types.js'
 import { lockAssociationInventory, refreshAssociationInventory } from '../association/inventory.js'
 import type { PlanInput, EventInput } from '../association/domain.js'
 import { authorizeCrmIntegrationCommand } from '../crm-operations/integration-authority.js'
-import type { CrmOperationsCommand } from '@use-brian/core'
+import type { CrmOperationsCommand } from '@use-brian/core/crm/operations-types.js'
 import { loadCrmSegmentCatalog } from './crm-segment-store.js'
 import { crmEvidenceRequestHash, resolveCrmEvidenceReplay, type CrmEvidenceRequest } from '../crm-operations/evidence-replay.js'
 import { executeCrmConfigCommand } from './crm-config-commands.js'
-import type { CrmConfigCommand } from '@use-brian/core'
+import type { CrmConfigCommand } from '@use-brian/core/crm/config-commands.js'
 import { readCrmMutationSource } from './crm.js'
 import { assertNativeEntityFieldWrites,updateEntity } from './entities-store.js'
 import { currentAgentAccess, runWithAgentAccess } from './agent-access-context.js'
@@ -1778,7 +1777,14 @@ export function createDbCrmOperationsStore(pool: Pool = getPool(), transactionCl
       try {
         if (!transactionClient) {
           await client.query('BEGIN')
-          await client.query(`SELECT set_config('app.system_bypass', 'true', true)`)
+          // The factory accepts an injected pool. System writes require its owner role.
+          const owner = await client.query(`SELECT 1
+            FROM pg_roles r JOIN pg_class c ON c.oid = 'public.crm_activities'::regclass
+           WHERE r.rolname = current_user
+             AND (r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid, c.relowner, 'USAGE'))`)
+          if (owner.rowCount !== 1) {
+            throw new CrmOperationsError('not_authorized', 'The CRM system transaction requires the owner connection.')
+          }
         }
         await beginAssociationCreation(client, context.workspaceId)
         const actor = context.actor

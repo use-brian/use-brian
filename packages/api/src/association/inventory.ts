@@ -1,6 +1,6 @@
 /** Shared event-first inventory authority and committed boundaries. [COMP:crm/association-inventory] */
 import type { PoolClient } from 'pg'
-import { CrmOperationsError } from '@use-brian/core'
+import { CrmOperationsError } from '@use-brian/core/crm/operations-types.js'
 
 type InventoryReferences = { eventIds?: string[]; ticketIds?: string[]; orderId?: string; registrationId?: string }
 

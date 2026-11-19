@@ -14,8 +14,8 @@ import { buildStorageKey, buildStorageUri } from '../files/gcs-client.js'
 import { validateDepartmentOfficeGeneration } from './generation-evidence.js'
 import { assertOfficeGenerationOrigin } from './generation-origin.js'
 import { promptOnlyBrief, constructPromptOnlyDocument } from './prompt-only.js'
-import { OfficeGenerationBriefSchema } from '@use-brian/core'
-import type { LLMProvider } from '@use-brian/core'
+import { OfficeGenerationBriefSchema } from '@use-brian/core/office/generation/contracts.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
 import { validateOfficeInternalCandidateRendering, type OfficeRenderValidationPort } from './render-validation.js'
 
 const denied=()=>new Error('office_generation_publication_denied')

@@ -1,7 +1,9 @@
 /** Adapter behavior over already-admitted revision fixtures. Real authority/SQL
  * enforcement is exercised by persistent-consumers.integration.test.ts. */
 import { beforeEach,describe,it,expect,vi } from 'vitest'
-import { bindScopeSource,boundScopeSources,createExecutionContext,ContextScopeAccumulator } from '@use-brian/core'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { createExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { bindScopeSource, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import type { SessionContextRevision } from '../session-context-revisions.js'
 vi.mock('../session-context-revisions.js',async importOriginal=>({...await importOriginal<typeof import('../session-context-revisions.js')>(),readSessionContextRevisions:vi.fn(),writeSessionContextRevision:vi.fn(),mutateSessionContextParents:vi.fn()}))
 import { readSessionContextRevisions,writeSessionContextRevision,mutateSessionContextParents } from '../session-context-revisions.js'

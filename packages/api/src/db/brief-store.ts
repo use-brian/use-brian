@@ -10,7 +10,9 @@
  * [COMP:api/brief-publication]
  */
 import type { PoolClient } from 'pg'
-import type { BriefLayout, BriefOwnerKind, Ops, Page } from '@use-brian/core'
+import type { BriefLayout, BriefOwnerKind } from '@use-brian/core/doc/brief-types.js'
+import type { Ops } from '@use-brian/core/doc/page-types.js'
+import type { Page } from '@use-brian/core/views/blocks.js'
 import { applyRLSGucs, getAppPool, query, rollbackAndRelease } from './client.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 

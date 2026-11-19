@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { CrmStore, ToolContext } from '@use-brian/core'
+import type { CrmStore } from '@use-brian/core/crm/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { createMailboxContactImportTools } from '../contact-import-tools.js'
 import type { MailboxContactCandidate } from '../../db/mailbox-contact-store.js'
 

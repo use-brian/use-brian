@@ -18,7 +18,11 @@ import pg from 'pg'
  *
  * The backfill half runs the migration file's INSERT inside a rolled-back
  * transaction so the suite never mutates other local workspaces (applying
- * the real migration is `pnpm --filter @use-brian/api migrate`'s job).
+ * the real migration is `pnpm --filter @use-brian/api migrate`'s job). The
+ * backfill is database-wide, and since migration 634 a receipt-free shared
+ * room insert is refused for every ready-mode workspace, which other suites
+ * in a shared database leave behind. So the replay runs where migration 388
+ * actually ran: a disposable fixture stopped at the 389 boundary.
  *
  * Requires the local `Use Brian` PostgreSQL database; skips silently when
  * unavailable. Probes through client.js's `query` — the pool the store under
@@ -27,6 +31,8 @@ import pg from 'pg'
 
 import { query } from '../client.js'
 import { createWorkspaceStore } from '../workspace-store.js'
+
+const fixtureModule = new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href
 
 let pool: pg.Pool | undefined
 
@@ -63,7 +69,7 @@ function backfillSql(): string {
     .replace(/^COMMIT;$/m, '')
 }
 
-async function makeUser(client: pg.PoolClient): Promise<string> {
+async function makeUser(client: pg.ClientBase): Promise<string> {
   const r = await client.query(
     `INSERT INTO users (auth_provider, auth_provider_id)
      VALUES ('test', 'general-room-' || gen_random_uuid())
@@ -115,7 +121,35 @@ describeIf('[COMP:api/room-mechanics] General room provisioning (T6/D4)', () => 
   })
 
   it('the 388 backfill inserts exactly one General per room-less workspace and is idempotent', async () => {
-    const client = await pool!.connect()
+    const { createLocalFixture, cleanRuntimeEnvironment } = await import(fixtureModule)
+    let verified = false
+    const completed = new Error('general_room_backfill_verified')
+    try {
+      await createLocalFixture({
+        pgBin: process.env.PG_BIN,
+        env: cleanRuntimeEnvironment(process.env),
+        ordinaryOwner: true,
+        beforeApplyFile: '389_session_pins.sql',
+        beforeApply: async ({ adminUrl }: { adminUrl: string }) => {
+          const client = new pg.Client({ connectionString: adminUrl })
+          await client.connect()
+          try {
+            await backfillAtBoundary(client)
+            verified = true
+          } finally { await client.end() }
+          // The fixture owns cleanup; stop instead of migrating to head.
+          throw completed
+        },
+      })
+    } catch (error) {
+      if (!verified) throw error
+      expect((error as Error & { cause?: Error }).cause).toBe(completed)
+    }
+    expect(verified).toBe(true)
+  }, 600_000)
+})
+
+async function backfillAtBoundary(client: pg.Client) {
     try {
       await client.query('BEGIN')
       const userId = await makeUser(client)
@@ -158,7 +192,5 @@ describeIf('[COMP:api/room-mechanics] General room provisioning (T6/D4)', () => 
       expect(room.rows[0].title_manually_set).toBe(true)
     } finally {
       await client.query('ROLLBACK').catch(() => {})
-      client.release()
     }
-  })
-})
+}

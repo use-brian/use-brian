@@ -1,4 +1,4 @@
-import { executionToolContext } from '@use-brian/core'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { runWithAgentAccess } from '../db/client.js'
 import type { IncomingMessage } from '@use-brian/channels'
 import type { ChannelPipelineParams } from './channel-pipeline.js'

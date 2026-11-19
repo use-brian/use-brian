@@ -1,21 +1,24 @@
 import { createPublicKey, randomBytes, randomUUID } from 'node:crypto'
 import pg from 'pg'
-import { ContextScopeAccumulator,type ExecutionContext,type Sensitivity } from '@use-brian/core'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { createConnectorActorVerifier } from '@use-brian/brian-app/connector'
 import { createConnectorInstanceStore } from '../../../db/connector-instance-store.js'
 import { createConnectorActorKeyStore } from '../../connector-actor-keys.js'
 import { createConnectorSourceRuntimeFactory } from '../../source-runtime.js'
 import { createRetainedSourceAuthorityCoordinator } from '../../retained-source-authority.js'
+import { withBootstrap } from '../../../__tests__/fixtures/bootstrap-role.js'
 import { persistentContextFixture } from './persistent-context.js'
 import { independentSourceSchema, independentSourceReplayConsumer, startIndependentSource } from './independent-source.js'
 export async function sourceModeFixture(clearance:Sensitivity='confidential') {
  const f=await persistentContextFixture(clearance), role='modes_'+randomBytes(7).toString('hex'), password=randomBytes(24).toString('hex')
- await f.pool.query(`CREATE ROLE ${role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD '${password}'`)
- await f.pool.query(`CREATE SCHEMA ${role} AUTHORIZATION ${role}`)
+ // The ordinary owner has no CREATEROLE: the disposable source role and its schema are fixture-only bootstrap setup.
+ await withBootstrap(async client=>{await client.query(`CREATE ROLE ${role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD '${password}'`);await client.query(`CREATE SCHEMA ${role} AUTHORIZATION ${role}`)})
  const url=new URL(process.env.DATABASE_URL!);url.username=role;url.password=password
  const sourcePool=new pg.Pool({connectionString:url.href,options:`-c search_path=${role},pg_catalog`,max:3})
  let source:Awaited<ReturnType<typeof startIndependentSource>>|undefined
- const cleanup=async()=>{await source?.close();await sourcePool.end();await f.pool.query(`DROP SCHEMA ${role} CASCADE`);await f.pool.query(`DROP ROLE ${role}`);await f.cleanup()}
+ const cleanup=async()=>{await source?.close();await sourcePool.end();await withBootstrap(async client=>{await client.query(`DROP SCHEMA ${role} CASCADE`);await client.query(`DROP ROLE ${role}`)});await f.cleanup()}
  try {
   await sourcePool.query(independentSourceSchema)
   await sourcePool.query("INSERT INTO accounts(kind,id) VALUES('human',$1),('human',$2)",[f.ownerId,f.secondId])

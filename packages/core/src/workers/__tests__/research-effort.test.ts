@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { queryLoop } from '../../engine/query-loop.js'
-import type { LLMProvider } from '../../providers/types.js'
-import type { ToolContext } from '../../tools/types.js'
+import { queryLoop } from '@use-brian/agent-runtime/engine/query-loop.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { createWorkerManager, type WorkerRunsStore } from '../worker.js'
 import { RESEARCH_EFFORT_BUDGETS, researchEffortInstruction } from '../research-effort.js'
 
-vi.mock('../../engine/query-loop.js', () => ({
+vi.mock('@use-brian/agent-runtime/engine/query-loop.js', () => ({
   queryLoop: vi.fn(async function* () {
     yield { type: 'tool_start', name: 'urlReader', input: {} }
     yield { type: 'text_delta', text: '<worker-findings>Source-backed result</worker-findings>' }

@@ -21,8 +21,9 @@
  *
  * [COMP:api/brief-context]
  */
-import type { ExecutionContext, Tool } from '@use-brian/core'
-import { directionSections, extractDirectionRegion, renderBriefContext, renderBriefDirection, contextSections, isDirectionEmpty } from '@use-brian/core'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
+import { directionSections, extractDirectionRegion, renderBriefContext, renderBriefDirection, contextSections, isDirectionEmpty } from '@use-brian/core/doc/brief-types.js'
 import { runWithAgentAccess } from '../db/agent-access-context.js'
 import {
   departmentFitsAudienceSystem,

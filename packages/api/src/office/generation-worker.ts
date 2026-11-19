@@ -4,7 +4,8 @@ import { withOfficeWorkspaceAuthority } from './workspace-authority.js'
 import { withDepartmentOfficeGeneration } from './generation-evidence.js'
 import { validateOfficeInternalCandidateRendering } from './render-validation.js'
 import { randomUUID } from 'node:crypto'
-import { runOfficeGenerationPipeline, type OfficeGenerationEvent, type OfficeGenerationPipelineDeps } from '@use-brian/core'
+import type { OfficeGenerationEvent } from '@use-brian/core/office/generation/contracts.js'
+import { runOfficeGenerationPipeline, type OfficeGenerationPipelineDeps } from '@use-brian/core/office/generation/pipeline.js'
 import type { OfficeGenerationJobRow } from '../db/office-generation.js'
 
 export type OfficeGenerationWorkerStore = {

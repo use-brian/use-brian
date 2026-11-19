@@ -4,19 +4,49 @@
 import { sendCrmPrivacyExport } from '../crm-operations/privacy-export.js'
 import { Router, raw, type Request, type Response } from 'express'
 import { z } from 'zod'
+import { CrmOperationsError } from '@use-brian/core/application-platform/operation-contract.js'
+import type { AssociationServicePort } from '@use-brian/core/association/operations.js'
 import {
-  CRM_INTEGRATION_OPERATIONS, CRM_INTEGRATION_RESOURCE_CATALOG,
-  CrmOperationsCommandSchema, CrmOperationsError, assertCrmOperationsAuthority,
-  CrmPageQuerySchema, requireCrmIntegrationOperation, crmIntegrationResourceSelection,
-  CrmReferenceLookupQuerySchema, CrmReferencePreviewQuerySchema, type CrmReferenceReadPort,
-  CrmAccountListQuerySchema, CrmCommercialProfileQuerySchema, CrmResolutionQuerySchema, type CrmCommercialContextReadPort,
-  CrmInvoiceListQuerySchema, type CrmCommercialDocumentReadPort,
-  CrmChangeRequestQuerySchema, CrmEngagementQuerySchema, CrmBillingRequestQuerySchema, CrmBillingBalanceQuerySchema,
-  CrmRecurringPreviewQuerySchema, type CrmGovernedReadPort,
-  CrmLegacyMappingQuerySchema, CrmProjectionEventQuerySchema,
+  CrmReferenceLookupQuerySchema,
+  CrmReferencePreviewQuerySchema,
+  type CrmReferenceReadPort,
+} from '@use-brian/core/crm/business-references.js'
+import {
+  CrmAccountListQuerySchema,
+  CrmCommercialProfileQuerySchema,
+  CrmResolutionQuerySchema,
+  type CrmCommercialContextReadPort,
+} from '@use-brian/core/crm/commercial-context.js'
+import {
+  CrmLegacyMappingQuerySchema,
+  CrmProjectionEventQuerySchema,
+} from '@use-brian/core/crm/erp-bridge.js'
+import {
+  CrmChangeRequestQuerySchema,
+  CrmEngagementQuerySchema,
+  CrmBillingRequestQuerySchema,
+  CrmBillingBalanceQuerySchema,
+  CrmRecurringPreviewQuerySchema,
+  type CrmGovernedReadPort,
+} from '@use-brian/core/crm/governed-records.js'
+import {
+  CRM_INTEGRATION_OPERATIONS,
+  CRM_INTEGRATION_RESOURCE_CATALOG,
+  requireCrmIntegrationOperation,
+  crmIntegrationResourceSelection,
+} from '@use-brian/core/crm/integration-authority.js'
+import {
+  CrmInvoiceListQuerySchema,
+  type CrmCommercialDocumentReadPort,
+} from '@use-brian/core/crm/invoice-preparation.js'
+import {
+  CrmOperationsCommandSchema,
+  assertCrmOperationsAuthority,
   type CrmDeliveryServicePort,
-  type CrmOperationsContext, type CrmOperationsServicePort, type AssociationServicePort,
-} from '@use-brian/core'
+  type CrmOperationsContext,
+  type CrmOperationsServicePort,
+} from '@use-brian/core/crm/operations-types.js'
+import { CrmPageQuerySchema } from '@use-brian/core/crm/pagination.js'
 import type { CrmIntegrationPrincipal, CrmIntegrationStore } from '../db/crm-integration-store.js'
 import { CreateCrmIntegrationCredentialSchema } from '../db/crm-integration-store.js'
 import { createDbCrmIntakeReadStore, type DbCrmOperationsReadStore } from '../db/crm-intake-store.js'

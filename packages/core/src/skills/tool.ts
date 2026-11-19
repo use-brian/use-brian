@@ -22,7 +22,7 @@
  */
 
 import { z } from 'zod'
-import { buildTool } from '../tools/types.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
 import { formatSkillInstructions } from './bundle.js'
 import type { SkillContent } from './types.js'
 

@@ -7,14 +7,12 @@
 import { describe, it, expect, vi } from 'vitest'
 import { z } from 'zod'
 import {
-  buildTool,
   CONFIGURE_CAPABILITY,
-  filterToolsByCapabilities,
   OPERATOR_AUTOMATION_CAPABILITY,
-  type ControlPlaneReader,
-  type Tool,
-  type ToolContext,
-} from '@use-brian/core'
+} from '@use-brian/core/authorization/types.js'
+import type { ControlPlaneReader } from '@use-brian/core/control-plane/types.js'
+import { filterToolsByCapabilities } from '@use-brian/agent-runtime/tools/capability-gate.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 vi.mock('../../db/client.js', () => ({
   query: vi.fn().mockResolvedValue({

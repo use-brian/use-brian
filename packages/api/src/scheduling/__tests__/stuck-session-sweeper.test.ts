@@ -25,27 +25,21 @@ describe('[COMP:scheduling/stuck-session-sweeper] createStuckSessionSweeper', ()
     expect(sweep).toHaveBeenCalledWith(90_000)
   })
 
-  it('publishes turn_completed for sessions with live watchers (drafts AND rooms), not private web sessions', async () => {
+  it('publishes each recovered public identity and outcome to every live-follow surface', async () => {
     const sweep = vi.fn().mockResolvedValue([
-      { id: 'draft-1', mode: 'draft', userId: 'user-a', visibility: 'owner' },
-      { id: 'web-1', mode: null, userId: 'user-b', visibility: 'owner' },
-      { id: 'room-1', mode: null, userId: 'user-c', visibility: 'workspace' },
+      { id: 'draft-1', mode: 'draft', userId: 'user-a', visibility: 'workspace', channelType: 'web', anchorKind: 'feed_draft', turnId: 'a'.repeat(64), reason: 'stalled_reclaimed' },
+      { id: 'web-1', mode: null, userId: 'user-b', visibility: 'personal', channelType: 'web', anchorKind: 'none', turnId: 'b'.repeat(64), reason: 'stopped_by_user' },
+      { id: 'room-1', mode: null, userId: 'user-c', visibility: 'workspace', channelType: 'web', anchorKind: 'none', turnId: 'c'.repeat(64), reason: 'publication_recovered' },
+      { id: 'machine-1', mode: null, userId: 'user-d', visibility: 'personal', channelType: 'api', anchorKind: 'none', turnId: null, reason: 'stalled_reclaimed' },
     ])
     const publish = vi.fn()
-    const sweeper = createStuckSessionSweeper({
-      sweep,
-      publishDraftTurnCompleted: publish,
-      onError: () => {},
-    })
-
+    const sweeper = createStuckSessionSweeper({ sweep, publishDraftTurnCompleted: publish, onError: () => {} })
     await sweeper.tick()
-
-    // Rooms were the 2026-08-08 omission: the sweep healed the row but every
-    // open Live card kept showing "Working" because nothing told them.
-    expect(publish).toHaveBeenCalledTimes(2)
-    expect(publish).toHaveBeenCalledWith('draft-1')
-    expect(publish).toHaveBeenCalledWith('room-1')
-    expect(publish).not.toHaveBeenCalledWith('web-1')
+    expect(publish.mock.calls).toEqual([
+      ['draft-1', { turnId: 'a'.repeat(64), reason: 'stalled_reclaimed' }],
+      ['web-1', { turnId: 'b'.repeat(64), reason: 'stopped_by_user' }],
+      ['room-1', { turnId: 'c'.repeat(64), reason: 'publication_recovered' }],
+    ])
   })
 
   it('survives a SQL error without crashing — the next tick still runs', async () => {
@@ -71,8 +65,8 @@ describe('[COMP:scheduling/stuck-session-sweeper] createStuckSessionSweeper', ()
 
   it('survives a publish error per row without aborting the rest of the batch', async () => {
     const sweep = vi.fn().mockResolvedValue([
-      { id: 'draft-bad', mode: 'draft', userId: 'user-a' },
-      { id: 'draft-good', mode: 'draft', userId: 'user-b' },
+      { id: 'draft-bad', mode: 'draft', userId: 'user-a', visibility: 'workspace', channelType: 'web', anchorKind: 'feed_draft' },
+      { id: 'draft-good', mode: 'draft', userId: 'user-b', visibility: 'workspace', channelType: 'web', anchorKind: 'feed_draft' },
     ])
     const publish = vi.fn()
       .mockImplementationOnce(() => { throw new Error('subscriber crashed') })

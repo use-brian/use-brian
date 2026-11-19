@@ -129,8 +129,3 @@ export function pageLinksForRow(
   }
   return uniqueIds(ids);
 }
-
-/** Append ids to a live turn's list, keeping order and dropping repeats. */
-export function addPageLinks(current: readonly string[], ids: readonly string[]): string[] {
-  return uniqueIds([...current, ...ids]);
-}

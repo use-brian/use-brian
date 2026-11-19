@@ -4,7 +4,7 @@ import { readApplicationGovernanceCatalog,previewApplicationGovernance,applyAppl
 import { randomUUID } from 'node:crypto'
 import { afterAll,afterEach,beforeAll,beforeEach,describe,expect,it } from 'vitest'
 import { z } from 'zod'
-import { CrmOperationsCommandSchema,type CrmOperationsContext } from '@use-brian/core'
+import { CrmOperationsCommandSchema, type CrmOperationsContext } from '@use-brian/core/crm/operations-types.js'
 import {createWorkspaceModulesStore} from '../../db/workspace-modules-store.js'
 import {createDbCrmOperationsStore} from '../../db/crm-operations-store.js'
 import {createCrmOperationsService} from '../../crm-operations/service.js'

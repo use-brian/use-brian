@@ -9,7 +9,7 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '../types.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { type Json, str, idStr, asRows, projectList, connectorError, type ConnectorApiError } from './_connector-result.js'
 
 // Fathom meeting objects carry host / share-settings / per-participant user

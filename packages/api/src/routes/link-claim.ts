@@ -1,4 +1,4 @@
-import { sanitize as sanitizeAnalytics, type AnalyticsLogger } from '@use-brian/core'
+import { sanitize as sanitizeAnalytics, type AnalyticsLogger } from '@use-brian/core/analytics/logger.js'
 import { mergeShadowUser } from '../db/linked-accounts.js'
 
 /**

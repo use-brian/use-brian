@@ -17,7 +17,8 @@
  */
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
-import type { ExecutionPlanDraft, GoalRecord } from '@use-brian/core'
+import type { ExecutionPlanDraft } from '@use-brian/core/goals/execution.js'
+import type { GoalRecord } from '@use-brian/core/goals/types.js'
 import { getAppPool, getPool } from '../../db/client.js'
 import { createDbGoalStore } from '../../db/goals-store.js'
 import {

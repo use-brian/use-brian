@@ -117,9 +117,16 @@ describe('[COMP:recordings/auto-title] current-source topic publication', () => 
     const f = await fixture()
     for (let attempt=1;attempt<=3;attempt++) {
       expect(await claimRecordingAutoTitle()).toMatchObject({recordingId:f.recording.id,attempt})
-      await pool.query('UPDATE recordings SET auto_title_retry_at=now() WHERE id=$1',[f.recording.id])
+      // Make the retry due at the head of the shared queue. The claim orders
+      // never-scheduled rows first (newest first), and other suites on the same
+      // database leave such rows behind, so a retry merely due "now" would queue
+      // behind them. The attempt counter, not the retry time, is under test.
+      await pool.query('UPDATE recordings SET auto_title_retry_at=NULL WHERE id=$1',[f.recording.id])
     }
-    expect(await claimRecordingAutoTitle()).toBeNull()
+    // The exhausted row is no longer claimable, even when due at the queue head
+    // (a claim may return another suite's row, never this one).
+    expect((await claimRecordingAutoTitle())?.recordingId).not.toBe(f.recording.id)
+    expect((await pool.query('SELECT auto_title_attempts FROM recordings WHERE id=$1',[f.recording.id])).rows[0].auto_title_attempts).toBe(3)
     await pool.query("UPDATE workspace_files SET generated_title='Automatic display' WHERE id=$1",[f.file.id])
     await pool.query("UPDATE workspace_files SET title='Chosen display' WHERE id=$1",[f.file.id])
     expect((await pool.query('SELECT generated_title FROM workspace_files WHERE id=$1',[f.file.id])).rows[0].generated_title).toBeNull()

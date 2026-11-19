@@ -1,11 +1,11 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import type { Tool } from '@use-brian/core'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 const mocks = vi.hoisted(() => ({ generic: vi.fn(), shop: vi.fn() }))
 vi.mock('../../shopify/client.js', async original => ({
   ...await original<typeof import('../../shopify/client.js')>(),
   createShopifyTokenManager: mocks.generic, getShop: mocks.shop,
 }))
-import { injectMcpTools } from '../inject.js'
+import { composeForTest } from './surface-harness.js'
 import { packShopifyTokens } from '../../shopify/client.js'
 
 beforeEach(() => { vi.clearAllMocks(); mocks.shop.mockResolvedValue({}); mocks.generic.mockReturnValue({ getAuth: async () => ({ accessToken: 'legacy', shopDomain: 'fixture.myshopify.com' }) }) })
@@ -20,7 +20,7 @@ async function inject(path: string, result: 'short' | 'valid' | 'static' | 'miss
   const refresh = vi.fn(async () => { if (result === 'error') throw new Error('connector_rotation_uncertain'); return result === 'missing' ? null : credentials })
   const persist = vi.fn(), load = vi.fn(async () => credentials)
   const tools = new Map<string, Tool>()
-  await injectMcpTools({ userId: 'user', assistantId: 'assistant', tools, keepBuiltinsDirect: true,
+  await composeForTest({ userId: 'user', assistantId: 'assistant', tools, keepBuiltinsDirect: true,
     ...(overlay === 'grant' || overlay === 'workspace' ? { assistantTeamId: 'workspace' } : {}),
     connectorStore: { list: vi.fn(async () => instances), getCredentials: load, upsert: persist } as never,
     settingsStore: new Proxy({}, { get: () => vi.fn().mockResolvedValue(undefined) }) as never,

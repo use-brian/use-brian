@@ -1,15 +1,15 @@
 import {beforeEach,describe,expect,it,vi} from 'vitest'
-import {bindScopeSources} from '@use-brian/core'
+import {bindScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 const mocks=vi.hoisted(()=>({query:vi.fn(),resolve:vi.fn(),group:vi.fn(),output:vi.fn(),head:vi.fn(),read:vi.fn()}))
 vi.mock('../../db/client.js',()=>({getPool:()=>({query:mocks.query})}))
 vi.mock('../../db/auth-session-store.js',()=>({authSessionStore:{validateAccess:vi.fn(async()=>true)}}))
 vi.mock('../../db/sessions.js',()=>({readSessionById:vi.fn(async(id:string)=>({id,assistantId:'assistant',workspaceId:'workspace',userId:'actor',channelType:'web',channelId:id,visibility:'personal',anchorKind:'none'}))}))
 vi.mock('../../db/users.js',()=>({getUserAssistant:vi.fn(async()=>({id:'assistant',workspaceId:'workspace'}))}))
-vi.mock('../../db/session-query-reader.js',()=>({readAdmittedSessionQuery:vi.fn()}))
+vi.mock('../../db/conversation-store.js',()=>({readAdmittedSessionQuery:vi.fn()}))
 vi.mock('../../db/session-title-store.js',()=>({publishSessionTitle:vi.fn(),readSessionTitle:mocks.read,readSessionTitlesGrouped:mocks.group,sessionTitleHead:mocks.head}))
 vi.mock('../../context-scope/execution-context.js',()=>({resolveExecutionContextSystem:mocks.resolve}))
 vi.mock('../../session-read-authority.js',()=>({gateSessionRead:vi.fn(async()=>null)}))
-vi.mock('../../application-platform/model-source-authority.js',()=>({assertSourceModelOutputAuthority:mocks.output}))
+vi.mock('../../context-scope/admission.js',()=>({admitModelOutput:mocks.output}))
 import {sessionTitleProjections} from '../session-title-authority.js'
 const claims={userId:'actor'},ids=['first','second','third','fourth']
 function title(id:string){return bindScopeSources({title:'Fictional '+id,manual:false,revisionId:id+'-revision'},[])}

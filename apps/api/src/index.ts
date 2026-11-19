@@ -75,7 +75,6 @@ const env: OpenApiEnv = {
   VERTEX_LOCATION: process.env.VERTEX_LOCATION,
   VERTEX_SERVICE_ACCOUNT_JSON: process.env.VERTEX_SERVICE_ACCOUNT_JSON,
   JWT_SECRET,
-  ASSOCIATION_PROMOTION_HMAC_KEY: process.env.ASSOCIATION_PROMOTION_HMAC_KEY,
   NODE_ENV: process.env.NODE_ENV || 'development',
   API_URL: process.env.API_URL || 'http://localhost:4000',
   APP_URL: process.env.APP_URL || 'http://localhost:3003',

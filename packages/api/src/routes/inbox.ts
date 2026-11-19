@@ -32,8 +32,9 @@
 
 import { Router } from 'express'
 import { z } from 'zod'
-import type { DocNotificationsStore, CommentThreadStore, InboxPayload } from '@use-brian/core'
-import { resolveInboxCutoff } from '@use-brian/core'
+import type { CommentThreadStore } from '@use-brian/core/doc/comment-types.js'
+import type { DocNotificationsStore, InboxPayload } from '@use-brian/core/doc/inbox-types.js'
+import { resolveInboxCutoff } from '@use-brian/core/doc/inbox-types.js'
 
 export type InboxRouteOptions = {
   commentThreadStore: CommentThreadStore

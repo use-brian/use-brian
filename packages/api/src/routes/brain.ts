@@ -24,21 +24,18 @@
  */
 
 import { Router } from 'express'
-import type {
-  AccessContext,
-  EntityKind,
-  EntityLinksStore,
-  EntityStore,
-  RetrievalStore,
-  SearchResultRow,
-  Sensitivity,
-} from '@use-brian/core'
+import type { EntityKind, EntityLinksStore, EntityStore } from '@use-brian/core/entities/types.js'
+import type { RetrievalStore, SearchResultRow } from '@use-brian/core/retrieval/types.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 
-import { TASK_STATUSES as TASK_RECORD_STATUSES } from '@use-brian/core'
-import {boundScopeSources,executionToolContext,DerivedScopeError} from '@use-brian/core'
+import { TASK_STATUSES as TASK_RECORD_STATUSES } from '@use-brian/core/tasks/types.js'
+import {DerivedScopeError} from '@use-brian/agent-runtime/security/derived-scope.js'
+import {executionToolContext} from '@use-brian/agent-runtime/security/execution-context.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {pinSessionTitleClaims} from './session-title-authority.js'
 import {resolveNativeWorkspaceReadAuthority} from './native-workspace-read-authority.js'
-import {assertSourceModelOutputAuthority} from '../application-platform/model-source-authority.js'
+import {admitModelOutput} from '../context-scope/admission.js'
 import {isAuthorityChangedError} from '../context-scope/authority-lease.js'
 import {SourceProtocolError} from '@use-brian/brian-app/connector'
 import { query } from '../db/client.js'
@@ -1502,7 +1499,7 @@ export function brainRoutes(deps: {
       ])
       if(entry.sourceId&&!source)throw new DerivedScopeError('scope_evidence_missing')
       authority.accumulator.note({sources:[...boundScopeSources(entry),...boundScopeSources(related),...(source?boundScopeSources(source):[])]})
-      await assertSourceModelOutputAuthority({...executionToolContext(authority.execution,{appId:'native-brain-knowledge-read'}),scopeAccumulator:authority.accumulator})
+      await admitModelOutput({...executionToolContext(authority.execution,{appId:'native-brain-knowledge-read'}),scopeAccumulator:authority.accumulator})
       res.status(200).json({
         id: entry.id,
         path: entry.path,

@@ -4,7 +4,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Tool } from '@use-brian/core'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 import type { ConnectorActionAudit, ConnectorActionPreflight } from '../../connector-action-port.js'
 
 vi.mock('../../connector-config.js', () => ({
@@ -17,7 +17,7 @@ vi.mock('../../db/channels-store.js', () => ({
     listHandledInstances(...args),
 }))
 
-import { injectMcpTools } from '../inject.js'
+import { composeForTest } from './surface-harness.js'
 
 function settingsStoreStub() {
   return new Proxy({}, { get: () => vi.fn().mockResolvedValue(undefined) })
@@ -70,7 +70,7 @@ async function injectAgentmail(over: {
     getAuthCredentialsSystem: vi.fn(async () => null),
   }
 
-  const result = await injectMcpTools({
+  const result = await composeForTest({
     userId: 'user-1',
     assistantId: 'assistant-1',
     assistantTeamId: 'workspace-1',
@@ -79,6 +79,8 @@ async function injectAgentmail(over: {
     settingsStore: settingsStoreStub() as never,
     connectorInstanceStore: connectorInstanceStore as never,
     assistantConnectorGrantsStore: { getForAssistantSystem } as never,
+    // Assistant Email is not catalogued; its grants are checked at build and execute time only.
+    actionGrantReader: null,
     emailInboxProvider: provider as never,
     ...(over.audit ? { connectorActionAudit: over.audit } : {}),
     keepBuiltinsDirect: true,

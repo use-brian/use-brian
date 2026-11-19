@@ -1,4 +1,6 @@
-import { bindScopeSource, type AccessContext, type FileStore } from '@use-brian/core'
+import type { FileStore } from '@use-brian/core/files/types.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import { bindScopeSource } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { query, queryWithRLS } from './client.js'
 import { buildAccessPredicate } from './access-predicate.js'
 

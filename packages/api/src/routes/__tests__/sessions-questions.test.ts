@@ -3,7 +3,8 @@
  * Component tag: [COMP:api/pending-questions-resume].
  *
  * Covers:
- *   - GET  /api/sessions/:sessionId/pending — returns row or null
+ *   - GET  /api/sessions/:sessionId/pending — returns row or null, the full
+ *     question payload, and a reclaimed turn's card from its resume point
  *   - POST /api/sessions/:sessionId/answer/:approvalId — submit answer,
  *     records to DB, enqueues resume
  *   - POST /api/sessions/:sessionId/cancel/:approvalId — cancels, sets
@@ -19,8 +20,13 @@ import express from 'express'
 import request from 'supertest'
 
 // The session read gate now loads workspace authority for private sessions too.
+const dbMocks = vi.hoisted(() => ({ reclaimedToken: null as string | null }))
 vi.mock('../../db/client.js', () => ({
-  query: vi.fn(async () => ({ rows: [{ workspaceId: 'ws-1', allowed: true }] })),
+  // The reclaimed-turn correlation read answers from `dbMocks`; every other
+  // statement keeps the session-read-gate stand-in.
+  query: vi.fn(async (sql: string) => (sql.includes('last_turn_lease_token')
+    ? { rows: dbMocks.reclaimedToken ? [{ token: dbMocks.reclaimedToken }] : [] }
+    : { rows: [{ workspaceId: 'ws-1', allowed: true }] })),
 }))
 vi.mock('../../db/workspace-store.js', () => ({
   getWorkspaceMembershipWithReadScopeSystem: vi.fn(async () => ({
@@ -122,6 +128,7 @@ type StoreStubs = {
   respond: ReturnType<typeof vi.fn>
   listPendingForWorkspace: ReturnType<typeof vi.fn>
   loadForSession: ReturnType<typeof vi.fn>
+  getBySessionId: ReturnType<typeof vi.fn>
 }
 
 function makeApp(stubs: Partial<StoreStubs> = {}) {
@@ -130,6 +137,7 @@ function makeApp(stubs: Partial<StoreStubs> = {}) {
   const respond = stubs.respond ?? vi.fn(async () => null)
   const listPendingForWorkspace = stubs.listPendingForWorkspace ?? vi.fn(async () => [])
   const loadForSession = stubs.loadForSession ?? vi.fn(async () => [])
+  const getBySessionId = stubs.getBySessionId ?? vi.fn(async () => null)
 
   const app = express()
   app.use(express.json())
@@ -141,7 +149,7 @@ function makeApp(stubs: Partial<StoreStubs> = {}) {
     '/api/sessions',
     sessionQuestionRoutes({
       approvalsStore: { getById, recordAnswer, respond, listPendingForWorkspace } as never,
-      resumeDeps: {} as never,
+      resumeDeps: { sessionResumeStore: { getBySessionId } } as never,
       workerRunsStore: {
         loadForSession,
         recordSpawn: vi.fn(),
@@ -150,7 +158,7 @@ function makeApp(stubs: Partial<StoreStubs> = {}) {
       } as never,
     }),
   )
-  return { app, getById, recordAnswer, respond, listPendingForWorkspace, loadForSession }
+  return { app, getById, recordAnswer, respond, listPendingForWorkspace, loadForSession, getBySessionId }
 }
 
 beforeEach(() => {
@@ -160,6 +168,7 @@ beforeEach(() => {
   mockFindTurnLeaseState.mockReset()
   mockFindTurnLeaseState.mockResolvedValue(null)
   mockFindAssistant.mockReset()
+  dbMocks.reclaimedToken = null
 })
 
 // ── GET /:sessionId/pending ──────────────────────────────────────
@@ -181,6 +190,27 @@ describe('[COMP:api/pending-questions-resume] GET /:sessionId/pending', () => {
       approvalId: 'ap-q-1',
       question: 'Which MeshJS?',
     })
+    expect(res.body.pending).not.toHaveProperty('options')
+    expect(JSON.stringify(res.body)).not.toContain('call_42')
+  })
+
+  it('serves the stored question options and schema fields, omitting malformed ones', async () => {
+    mockFindSession.mockResolvedValue({ id: 'sess-1', assistantId: 'asst-1', userId: 'u-1' } as never)
+    mockFindAssistant.mockResolvedValue({ workspaceId: 'ws-1' } as never)
+    const stored = { question: 'Which colour?', toolUseId: 'call_42', options: ['Blue', 'Green'], allowCustom: false,
+      context: 'Fictional palette', version: 2 }
+    let { app } = makeApp({ listPendingForWorkspace: vi.fn(async () => [makeQuestionRow({ approvalPayload: stored })]) })
+    let res = await request(app).get('/api/sessions/sess-1/pending').expect(200)
+    expect(res.body.pending).toMatchObject({ approvalId: 'ap-q-1', question: 'Which colour?', options: ['Blue', 'Green'],
+      allowCustom: false, context: 'Fictional palette', version: 2, action: null })
+    expect(JSON.stringify(res.body)).not.toContain('call_42')
+    ;({ app } = makeApp({ listPendingForWorkspace: vi.fn(async () => [makeQuestionRow({
+      approvalPayload: { question: 'Which colour?', options: ['Blue', 'Blue'], allowCustom: 'no' },
+    })]) }))
+    res = await request(app).get('/api/sessions/sess-1/pending').expect(200)
+    expect(res.body.pending.question).toBe('Which colour?')
+    expect(res.body.pending).not.toHaveProperty('options')
+    expect(res.body.pending).not.toHaveProperty('allowCustom')
   })
 
   it('returns null when no question is pending', async () => {
@@ -329,6 +359,64 @@ describe('[COMP:api/pending-questions-resume] GET /:sessionId/pending', () => {
     })
     res = await request(app).get('/api/sessions/sess-1/pending').expect(200)
     expect(res.body.toolConfirmation).toBeNull()
+  })
+
+  it('restores a reclaimed last turn\'s card from the session resume point when no turn runs', async () => {
+    mockFindSession.mockResolvedValue({ id: 'sess-1', assistantId: 'asst-1', userId: 'u-1' } as never)
+    mockFindAssistant.mockResolvedValue({ workspaceId: 'ws-1' } as never)
+    mockFindTurnLeaseState.mockResolvedValue({ status: 'timeout', turnLeaseToken: null })
+    dbMocks.reclaimedToken = 'lease-current'
+    const getBySessionId = vi.fn(async () => ({ sessionId: 'sess-1', approvalId: 'ap-tool-1' }))
+    const { app } = makeApp({ getBySessionId, listPendingForWorkspace: vi.fn(async () => [makeToolConfirmationRow()]) })
+    const res = await request(app).get('/api/sessions/sess-1/pending').expect(200)
+    expect(getBySessionId).toHaveBeenCalledWith('sess-1')
+    expect(res.body.toolConfirmation).toMatchObject({ approvalId: 'ap-tool-1', toolName: 'fileWrite',
+      input: { path: '/workspace/plan.md', content: '# Plan' }, description: 'Write plan.md' })
+    expect(JSON.stringify(res.body)).not.toContain('lease-current')
+  })
+
+  it.each([
+    ['no resume point', null, 'lease-current', {}],
+    ['the resume point names another approval', { sessionId: 'sess-1', approvalId: 'ap-other' }, 'lease-current', {}],
+    ['the resume point belongs to another session', { sessionId: 'sess-2', approvalId: 'ap-tool-1' }, 'lease-current', {}],
+    ['a later claimant superseded the turn', { sessionId: 'sess-1', approvalId: 'ap-tool-1' }, 'lease-new', {}],
+    ['the last turn was stopped, completed or failed', { sessionId: 'sess-1', approvalId: 'ap-tool-1' }, null, {}],
+    ['the row expired', { sessionId: 'sess-1', approvalId: 'ap-tool-1' }, 'lease-current', { expiresAt: new Date('2000-01-01') }],
+    ['the row carries no turn token', { sessionId: 'sess-1', approvalId: 'ap-tool-1' }, 'lease-current',
+      { approvalPayload: { description: 'Write plan.md' } }],
+    ['the row is not a tool confirmation', { sessionId: 'sess-1', approvalId: 'ap-tool-1' }, 'lease-current', { kind: 'question' }],
+  ] as const)('does not restore a card when %s', async (_case, point, lastToken, over) => {
+    mockFindSession.mockResolvedValue({ id: 'sess-1', assistantId: 'asst-1', userId: 'u-1' } as never)
+    mockFindAssistant.mockResolvedValue({ workspaceId: 'ws-1' } as never)
+    mockFindTurnLeaseState.mockResolvedValue({ status: 'timeout', turnLeaseToken: null })
+    dbMocks.reclaimedToken = lastToken
+    const { app } = makeApp({ getBySessionId: vi.fn(async () => point),
+      listPendingForWorkspace: vi.fn(async () => [makeToolConfirmationRow(over as Partial<PendingApproval>)]) })
+    const res = await request(app).get('/api/sessions/sess-1/pending').expect(200)
+    expect(res.body.toolConfirmation).toBeNull()
+  })
+
+  it('keeps the running-token rule while a turn is live, even with a resume point', async () => {
+    mockFindSession.mockResolvedValue({ id: 'sess-1', assistantId: 'asst-1', userId: 'u-1' } as never)
+    mockFindAssistant.mockResolvedValue({ workspaceId: 'ws-1' } as never)
+    mockFindTurnLeaseState.mockResolvedValue({ status: 'running', turnLeaseToken: 'lease-new' })
+    dbMocks.reclaimedToken = 'lease-current'
+    const getBySessionId = vi.fn(async () => ({ sessionId: 'sess-1', approvalId: 'ap-tool-1' }))
+    const { app } = makeApp({ getBySessionId, listPendingForWorkspace: vi.fn(async () => [makeToolConfirmationRow()]) })
+    const res = await request(app).get('/api/sessions/sess-1/pending').expect(200)
+    expect(res.body.toolConfirmation).toBeNull()
+    expect(getBySessionId).not.toHaveBeenCalled()
+  })
+
+  it('does not consult the resume point for a caller who cannot read the session', async () => {
+    mockFindSession.mockResolvedValue({ id: 'sess-1', assistantId: 'asst-1', userId: 'someone-else' } as never)
+    mockFindAssistant.mockResolvedValue({ workspaceId: 'ws-1' } as never)
+    mockFindTurnLeaseState.mockResolvedValue({ status: 'timeout', turnLeaseToken: null })
+    dbMocks.reclaimedToken = 'lease-current'
+    const getBySessionId = vi.fn(async () => ({ sessionId: 'sess-1', approvalId: 'ap-tool-1' }))
+    const { app } = makeApp({ getBySessionId, listPendingForWorkspace: vi.fn(async () => [makeToolConfirmationRow()]) })
+    await request(app).get('/api/sessions/sess-1/pending').expect(404)
+    expect(getBySessionId).not.toHaveBeenCalled()
   })
 
   it('404s when session is not found or owned by another user', async () => {

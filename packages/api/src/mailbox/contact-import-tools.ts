@@ -6,7 +6,9 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type AccessContext, type CrmStore, type Tool, type ToolContext } from '@use-brian/core'
+import type { CrmStore } from '@use-brian/core/crm/types.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import {
   listMailboxContactImportCandidates,
   type MailboxContactCandidate,

@@ -6,7 +6,7 @@ import { documentFixture } from '../../../../office-model/src/__tests__/fixtures
 import { createPublishedOfficeTemplateReader } from '../../office/published-template.js';
 import type { OfficeOutputScope } from '../../office/file-binding.js';
 import type { OfficeTemplateBundle } from '@use-brian/office-model';
-import { inferOfficeTemplateRouting } from '@use-brian/core';
+import { inferOfficeTemplateRouting } from '@use-brian/core/office/templates/routing.js';
 vi.mock('../../db/office-read-projection.js', async original => ({ ...await original<typeof import('../../db/office-read-projection.js')>(), readOfficeProjection: async (_user: string, read: () => Promise<unknown>) => ({ ...await read() as object, validForMs: 30_000 }) }));
 
 function setup() {

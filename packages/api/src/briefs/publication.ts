@@ -17,7 +17,8 @@
  */
 import * as Y from 'yjs'
 import { applyOpsToYDoc, FRAGMENT_FIELD, healBlockIds, yDocToSnapshot, type DocOp } from '@use-brian/doc-model'
-import { extractDirectionRegion, validateDirectionOps, type Ops } from '@use-brian/core'
+import { extractDirectionRegion, validateDirectionOps } from '@use-brian/core/doc/brief-types.js'
+import type { Ops } from '@use-brian/core/doc/page-types.js'
 import { hashCommandReviewIntent } from '../workspace-access/command-review.js'
 import { createBriefSyncClient } from '../doc/doc-gateway.js'
 import {

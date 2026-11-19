@@ -24,6 +24,13 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
  * The hook owns NO send logic — the host wires `fileIds()` into its own
  * `/api/chat` call and calls `clear()` afterwards.
  *
+ * Where the chips live: a chat presentation passes the conversation's
+ * `AttachmentTray` (`lib/chat/conversation-attachments.ts`), so ready chips
+ * survive the presentation unmounting and every mounted presentation of one
+ * composer shares them; an upload in flight then completes into its tray
+ * after unmount. Without a tray the chips are local to the mounted component
+ * and an unmount drops in-flight results, as before.
+ *
  * [COMP:app-web/file-attachments]
  */
 
@@ -31,6 +38,7 @@ import * as React from "react";
 import { authFetch } from "@/lib/auth-fetch";
 import { useT } from "@/lib/i18n/client";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
+import { createAttachmentTray, type AttachmentTray } from "@/lib/chat/conversation-attachments";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
@@ -86,8 +94,11 @@ export type FileAttachmentsApi = {
    * `clear()` (revokes everything) is still the right call for an abandoned tray.
    */
   detach: () => void;
-  /** Restore already-uploaded draft chips without re-uploading or reprocessing. */
-  restore: (saved: Attachment[]) => void;
+  /**
+   * Restore already-uploaded draft chips without re-uploading or reprocessing,
+   * into this hook's tray or into `into` (a recovery draft's own conversation).
+   */
+  restore: (saved: Attachment[], into?: AttachmentTray | null) => void;
 };
 
 type UploadResponse = {
@@ -361,13 +372,29 @@ export function useFileAttachments(
       fields: Record<string, string>;
       onSessionReady: (sessionId: string) => void;
     } | undefined;
+    /**
+     * The conversation tray to read and write (null or absent: a tray local
+     * to this component). Session adoption (`onSessionReady`) only runs while
+     * this hook is mounted, so a late upload never routes the user.
+     */
+    tray?: AttachmentTray | null;
   },
 ): FileAttachmentsApi {
   const t = useT();
-  const [attachments, setAttachments] = React.useState<Attachment[]>([]);
-  const generation = React.useRef(0);
-  const pendingChips = React.useRef(new Set<string>());
-  React.useEffect(() => () => { generation.current += 1; }, []);
+  const localTray = React.useRef<AttachmentTray | null>(null);
+  const tray = opts?.tray ?? (localTray.current ??= createAttachmentTray());
+  const attachments = React.useSyncExternalStore(tray.subscribe, tray.getSnapshot, tray.getSnapshot);
+  const trayRef = React.useRef(tray);
+  trayRef.current = tray;
+  const mounted = React.useRef(false);
+  React.useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      // A component-local tray dies with the component: drop late results.
+      if (localTray.current) localTray.current.generation += 1;
+    };
+  }, []);
 
   // Keep accessors/config in refs so `upload` stays referentially stable.
   const sessionIdRef = React.useRef(getSessionId);
@@ -380,7 +407,9 @@ export function useFileAttachments(
   const upload = React.useCallback(async (fileList: FileList | File[]) => {
     const all = Array.from(fileList);
     if (all.length === 0) return;
-    const startedGeneration = generation.current;
+    // The tray this upload belongs to, even if the host binds another later.
+    const target = trayRef.current;
+    const startedGeneration = target.generation;
 
     const { attach, media, rejected } = await partitionUpload(all, {
       maxBytes: optsRef.current?.maxBytes ?? MAX_ATTACHMENT_BYTES,
@@ -392,7 +421,7 @@ export function useFileAttachments(
     // recording ids.
     if (media.length > 0) await optsRef.current?.onRouteMedia?.(media);
 
-    if (startedGeneration !== generation.current) return;
+    if (startedGeneration !== target.generation) return;
 
     // Guard: rejected files never POST; they surface as clear error chips so the
     // user gets a message instead of an opaque 413 / silent failure.
@@ -406,7 +435,7 @@ export function useFileAttachments(
         status: "error" as const,
         error: reason === "too_large" ? copy.tooLarge : copy.videoUnsupported,
       }));
-      setAttachments((prev) => [...prev, ...rejectedChips]);
+      target.update((prev) => [...prev, ...rejectedChips]);
     }
 
     if (attach.length === 0) return;
@@ -423,8 +452,8 @@ export function useFileAttachments(
           : undefined,
       status: "uploading" as const,
     }));
-    for (const chip of staged) pendingChips.current.add(chip.localId);
-    setAttachments((prev) => [...prev, ...staged]);
+    for (const chip of staged) target.pending.add(chip.localId);
+    target.update((prev) => [...prev, ...staged]);
 
     const formData = new FormData();
     for (const f of files) formData.append("files", f);
@@ -444,11 +473,11 @@ export function useFileAttachments(
       if (!res.ok) throw new Error("upload failed");
       const data = (await res.json()) as UploadResponse;
       // An old upload must not adopt its session into a different pane.
-      if (startedGeneration !== generation.current ||
-          !staged.some((chip) => pendingChips.current.has(chip.localId))) return;
-      if (data.sessionId) context?.onSessionReady(data.sessionId);
+      if (startedGeneration !== target.generation ||
+          !staged.some((chip) => target.pending.has(chip.localId))) return;
+      if (data.sessionId && mounted.current) context?.onSessionReady(data.sessionId);
       const stagedIds = new Set(staged.map((s) => s.localId));
-      setAttachments((prev) => applyUploadResult(prev, stagedIds, data.files));
+      target.update((prev) => applyUploadResult(prev, stagedIds, data.files));
 
       // Pre-flight confirm for a big PDF. Reading one is credit-incurring and
       // long-running, so the user is asked BEFORE the turn spends anything —
@@ -468,60 +497,63 @@ export function useFileAttachments(
           cancelLabel: copy.readPdfCancel,
         });
         if (!ok && chip) {
-          setAttachments((prev) => prev.filter((a) => a.localId !== chip.localId));
+          target.update((prev) => prev.filter((a) => a.localId !== chip.localId));
         }
       }
     } catch (err) {
-      if (startedGeneration !== generation.current) return;
+      if (startedGeneration !== target.generation) return;
       const stagedIds = new Set(staged.map((s) => s.localId));
-      setAttachments((prev) => markStagedError(prev, stagedIds, (err as Error).message));
+      target.update((prev) => markStagedError(prev, stagedIds, (err as Error).message));
     } finally {
-      for (const chip of staged) pendingChips.current.delete(chip.localId);
+      for (const chip of staged) target.pending.delete(chip.localId);
     }
   }, []);
 
+  // Bound to this render's tray, so a callback captured by a send (detach on
+  // acceptance) empties the tray the send came from.
   const remove = React.useCallback((localId: string) => {
-    pendingChips.current.delete(localId);
-    setAttachments((prev) => {
+    tray.pending.delete(localId);
+    tray.update((prev) => {
       const removed = prev.find((a) => a.localId === localId);
       if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
       return prev.filter((a) => a.localId !== localId);
     });
-  }, []);
+  }, [tray]);
 
   const clear = React.useCallback(() => {
-    generation.current += 1;
-    pendingChips.current.clear();
-    setAttachments((prev) => {
+    tray.generation += 1;
+    tray.pending.clear();
+    tray.update((prev) => {
       for (const a of prev) if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
-      return [];
+      return prev.length === 0 ? prev : [];
     });
-  }, []);
+  }, [tray]);
 
   const detach = React.useCallback(() => {
-    generation.current += 1;
-    pendingChips.current.clear();
-    setAttachments((prev) => {
+    tray.generation += 1;
+    tray.pending.clear();
+    tray.update((prev) => {
       // Keep the handed-off (ready) chips' object URLs alive — the sent message
       // now owns them. Revoke only the chips being dropped (uploading/errored).
       for (const url of previewUrlsToRevokeOnDetach(prev)) {
         URL.revokeObjectURL(url);
       }
-      return [];
+      return prev.length === 0 ? prev : [];
     });
-  }, []);
+  }, [tray]);
 
   const fileIds = React.useCallback(() => readyFileIds(attachments), [attachments]);
 
   const uploading = attachments.some((a) => a.status === "uploading");
   const hasReady = attachments.some((a) => a.status === "done" && !!a.fileId);
 
-  const restore = React.useCallback((saved: Attachment[]) => {
-    generation.current += 1;
-    pendingChips.current.clear();
-    setAttachments(saved.filter(chip => chip.status === "done" && !!chip.fileId)
+  const restore = React.useCallback((saved: Attachment[], into?: AttachmentTray | null) => {
+    const destination = into ?? tray;
+    destination.generation += 1;
+    destination.pending.clear();
+    destination.update(() => saved.filter(chip => chip.status === "done" && !!chip.fileId)
       .map(({ previewUrl: _preview, ...chip }) => chip));
-  }, []);
+  }, [tray]);
 
   return { attachments, uploading, hasReady, fileIds, upload, remove, clear, detach, restore };
 }

@@ -1,8 +1,9 @@
 /** Exact selected-resource projection for a workspace draft. [COMP:feed/source-authority] */
-import { maxSensitivity, type Sensitivity } from '@use-brian/core'
-import { walkFeed } from '@use-brian/doc-model'
+import { maxSensitivity, type Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { walkFeed } from '@use-brian/doc-model/feed.js'
 import { feedLinkedInFileIds, type FeedLinkedInContext, type FeedComposition } from '@use-brian/shared'
 import type { FeedActor, FeedReader, FeedScope } from '../db/feed-collaboration-store.js'
+import { conversationAnchorWriteAdmissionActive } from '../db/conversation-visibility.js'
 
 export function feedSelectedFiles(composition: FeedComposition, linkedin?: FeedLinkedInContext): Map<string, string | null> {
   const ids = new Map<string, string | null>()
@@ -50,8 +51,11 @@ export function guardFeedStream<T>(reader: FeedReader, sessionId: string, userId
   return event => {
     tail = tail.then(async () => {
       if (closed) return
+      const gate = conversationAnchorWriteAdmissionActive()
+        ? 'public.conversation_member_read_allowed(s.workspace_id,s.id,$2)'
+        : 'public.feed_draft_audience_allowed(s.id)'
       const allowed = (await reader.query(`SELECT 1 FROM sessions s JOIN workspace_members m ON m.workspace_id=s.workspace_id
-        WHERE s.id=$1 AND m.user_id=$2 AND feed_draft_audience_allowed(s.id)`, [sessionId, userId])).rows.length > 0
+        WHERE s.id=$1 AND m.user_id=$2 AND ${gate}`, [sessionId, userId])).rows.length > 0
       if (!allowed) { closed = true; close(); return }
       send(event)
     }).catch(() => { if (!closed) { closed = true; close() } })

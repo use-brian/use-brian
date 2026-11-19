@@ -22,9 +22,8 @@ import type {
   EntityRecord,
   EntityRollup,
   EntityStore,
-  RetrievalStore,
-  SearchResultRow,
-} from '@use-brian/core'
+} from '@use-brian/core/entities/types.js'
+import type { RetrievalStore, SearchResultRow } from '@use-brian/core/retrieval/types.js'
 
 const mockQuery = vi.mocked(query)
 

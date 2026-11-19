@@ -6,6 +6,7 @@
 // secrets); `@use-brian/shared-server` stays in the platform, not the submodule.
 // See packages/shared/CLAUDE.md → "Subpath exports".
 export * from './transcript-format.js'
+export * from './conversation-visibility.js'
 export * from './transcript-citations.js'
 export * from './recording-anchor.js'
 export * from './live-recording.js'

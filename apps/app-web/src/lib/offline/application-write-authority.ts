@@ -16,6 +16,13 @@ export type OfflineWriteAuthority = {
   apiOrigin: string;
 };
 
+const offlineApiOrigin = () => (publicRuntimeConfig().apiUrl ?? "http://localhost:4000").replace(/\/$/, "");
+
+/** The viewer and deployment can remain current after workspace navigation. */
+export function offlineWriteIdentityIsCurrent(authority: OfflineWriteAuthority): boolean {
+  return authority.viewerId === getUserInfo()?.id && authority.apiOrigin === offlineApiOrigin();
+}
+
 export function offlineWriteUnavailable(): Error {
   const locale = typeof document === "undefined" ? undefined
     : document.cookie.match(/(?:^|;\s*)locale=([^;]+)/)?.[1];
@@ -33,7 +40,7 @@ export function currentOfflineWriteAuthority(workspaceId?: string): OfflineWrite
   const workspace = workspaceId ?? activeWorkspace;
   if (!viewerId || !workspace || activeWorkspace && activeWorkspace !== workspace) return null;
   return { viewerId, workspaceId: workspace, applicationId: "native",
-    apiOrigin: (publicRuntimeConfig().apiUrl ?? "http://localhost:4000").replace(/\/$/, "") };
+    apiOrigin: offlineApiOrigin() };
 }
 
 export function sameOfflineWriteAuthority(a: OfflineWriteAuthority | undefined | null,

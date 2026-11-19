@@ -1,15 +1,33 @@
 /** Canonical Association command authority. [COMP:crm/association-service] */
+import { CrmOperationsError } from '@use-brian/core/application-platform/operation-contract.js'
 import {
-  ASSOCIATION_READ_COMMANDS, AssociationCommandSchema, AssociationContextSchema,
-  AssociationError, CrmOperationsError, CrmIntegrationScopeError,
-  actorAuditIdentity, crmIntegrationResourceSelection,
-  requireCrmIntegrationOperation, requireCrmIntegrationResources,
-  type AssociationActor, type AssociationContext, type AssociationServicePort,
-  AssociationPromotionImportSchema, type AssociationPromotionImportPort,
-  AssociationSourceMembershipImportSchema, type AssociationSourceMembershipImportPort,
-  AssociationSourceOrderImportSchema, type AssociationSourceOrderImportPort,
-  type CrmIntegrationOperation, type CrmOperationsServicePort,
-} from '@use-brian/core'
+  AssociationError,
+  type AssociationActor,
+  AssociationPromotionImportSchema,
+  AssociationSourceMembershipImportSchema,
+  AssociationSourceOrderImportSchema,
+} from '@use-brian/core/association/domain.js'
+import {
+  ASSOCIATION_READ_COMMANDS,
+  AssociationCommandSchema,
+  AssociationContextSchema,
+  type AssociationContext,
+  type AssociationServicePort,
+  type AssociationPromotionImportPort,
+  type AssociationSourceMembershipImportPort,
+  type AssociationSourceOrderImportPort,
+} from '@use-brian/core/association/operations.js'
+import {
+  CrmIntegrationScopeError,
+  crmIntegrationResourceSelection,
+  requireCrmIntegrationOperation,
+  requireCrmIntegrationResources,
+  type CrmIntegrationOperation,
+} from '@use-brian/core/crm/integration-authority.js'
+import {
+  actorAuditIdentity,
+  type CrmOperationsServicePort,
+} from '@use-brian/core/crm/operations-types.js'
 import { createMembershipCatalogueStore } from '../db/membership-catalogue-store.js'
 import { createProgrammeCatalogueStore } from '../db/programme-catalogue-store.js'
 import { createSiteContentStore } from '../db/site-content-store.js'

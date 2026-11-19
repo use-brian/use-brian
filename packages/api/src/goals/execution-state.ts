@@ -23,9 +23,9 @@ import {
   type ExecutionArtifact,
   type ExecutionCheckpoint,
   type ExecutionEffect,
-  type GoalRecord,
   type ReadinessReason,
-} from '@use-brian/core'
+} from '@use-brian/core/goals/execution.js'
+import type { GoalRecord } from '@use-brian/core/goals/types.js'
 import {
   bindAttemptRunSystem,
   findActiveNativeExecutionSystem,

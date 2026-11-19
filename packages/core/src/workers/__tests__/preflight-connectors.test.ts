@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { buildToolIndex, createMcpSearchTools } from '../../mcp/tool-search.js'
-import type { McpSettingsStore } from '../../mcp/types.js'
-import { buildTool, type ToolContext } from '../../tools/types.js'
-import type { ContentBlock, LLMProvider, StreamChunk } from '../../providers/types.js'
-import type { QueryEvent } from '../../engine/query-loop.js'
-import type { TurnLedger } from '../../engine/turn-ledger.js'
+import type { McpSettingsStore } from '@use-brian/agent-runtime/mcp/types.js'
+import { buildTool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import type { ContentBlock, LLMProvider, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
+import type { QueryEvent } from '@use-brian/agent-runtime/engine/query-loop.js'
+import type { TurnLedger } from '@use-brian/agent-runtime/engine/turn-ledger.js'
 
 vi.mock('../splitter.js', () => ({
   classifySplit: async () => ({ tasks: ['calendar lookup', 'email lookup'], usage: null, model: null }),
@@ -86,16 +86,27 @@ describe('[COMP:workers/preflight] connector read execution', () => {
       }),
     }
     const events: QueryEvent[] = []
-    const result = await runPreflight({
+    const usage: Array<{ model: string; usage: { inputTokens: number; outputTokens: number } }> = []
+    let releaseBilling!: () => void
+    const billing = new Promise<void>(resolve => { releaseBilling = resolve })
+    let complete = false
+    const running = runPreflight({
       provider, model: 'fixture', message: 'Check next month travel in calendar and email',
       tools, maxWorkerTurns: 4,
+      onUsage: async event => { usage.push(event); await billing },
       context: {
         userId: 'user-example', assistantId: 'assistant-example', workspaceId: 'workspace-example',
         sessionId: 'session-example', appId: 'test', channelType: 'telegram', channelId: 'chat-example',
         abortSignal: new AbortController().signal, requestTools: tools, turnLedger: ledger,
       },
       onEvent: event => events.push(event),
-    })
+    }).then(result => { complete = true; return result })
+    await vi.waitFor(() => expect(usage).toHaveLength(2))
+    expect(complete).toBe(false)
+    releaseBilling()
+    const result = await running
+    expect(usage.every(event => event.model === 'fixture' && event.usage.inputTokens > 0)).toBe(true)
+
     expect(result.type).toBe('researched')
     if (result.type !== 'researched') throw new Error('Missing research')
     expect(result.context).toContain('calendar booking: 2030-11-12')
@@ -110,4 +121,30 @@ describe('[COMP:workers/preflight] connector read execution', () => {
     // Worker schema promotion must not mutate the parent's deferred adapters.
     expect(tools.get('imapSearchMessages')?.deferredSchemaOnly).toBe(true)
   })
+})
+
+it('[COMP:workers/preflight] retains the original accounting callback across deferred classification', async () => {
+  const original = vi.fn(async () => {}), successor = vi.fn(async () => {})
+  let classify!: (value: { tasks: string[]; usage: null; model: null }) => void
+  const classified = new Promise<{ tasks: string[]; usage: null; model: null }>(resolve => { classify = resolve })
+  const provider: LLMProvider = {
+    name: 'fixture', models: ['fixture'], createSession() { throw new Error('Expected stateless worker') },
+    async *stream(): AsyncIterable<StreamChunk> {
+      yield { type: 'message_start', model: 'fixture' }
+      yield { type: 'text_delta', text: 'Original finding' }
+      yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 4, outputTokens: 2 } }
+    },
+  }
+  const options: Parameters<typeof runPreflight>[0] = {
+    provider, model: 'fixture', message: 'Look up one source', tools: new Map(), classify: () => classified,
+    context: { userId: 'original-user', assistantId: 'original-assistant', workspaceId: 'original-workspace', sessionId: 'original-session',
+      appId: 'fixture', channelType: 'web', channelId: 'original-channel', abortSignal: new AbortController().signal },
+    onUsage: original,
+  }
+  const running = runPreflight(options)
+  options.onUsage = successor
+  classify({ tasks: ['one source'], usage: null, model: null })
+  expect((await running).type).toBe('researched')
+  expect(original).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ userId: 'original-user', assistantId: 'original-assistant', sessionId: 'original-session', usage: expect.objectContaining({ inputTokens: 4, outputTokens: 2 }) }))
+  expect(successor).not.toHaveBeenCalled()
 })

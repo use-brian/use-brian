@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { DecisionEvaluationProfile, DecisionProvider } from '@use-brian/core'
+import type { DecisionEvaluationProfile } from '@use-brian/core/decisions/hydra.js'
+import type { DecisionProvider } from '@use-brian/core/decisions/types.js'
 import {
   DECISION_EVAL_FIXTURES,
   SYNTHETIC_EVALUATION_PROFILES,

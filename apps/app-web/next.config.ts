@@ -119,6 +119,16 @@ const nextConfig: NextConfig = {
     // id and tenant, which are public and ride in the authorize URL.
     // See docs/architecture/integrations/msgraph.md -> "Auth".
   },
+  experimental: {
+    // The development `/api` rewrite runs through Next's proxy, whose socket
+    // idle timeout defaults to 30 s. It cut `POST /api/chat` SSE during a
+    // silent turn preparation; built app-web has no rewrite and so no such
+    // cut. 30 minutes matches the hosted API request cap
+    // (deployment.md, Cloud Run `--timeout=1800`) and stays far below
+    // Node's 2^31-1 ms timer limit. See deployment.md -> "Development /api
+    // proxy". Regression: scripts/dev-proxy-silent-stream.mjs.
+    proxyTimeout: 30 * 60 * 1000,
+  },
   async rewrites() {
     if (process.env.NODE_ENV !== "development") return [];
     return [{ source: "/api/:path*", destination: `${API_URL}/api/:path*` }];

@@ -1,5 +1,5 @@
 import {describe,it,expect,vi} from 'vitest'
-import type {ToolContext} from '@use-brian/core'
+import type {ToolContext} from '@use-brian/agent-runtime/tools/types.js'
 import {withOfficeClassificationActor} from '../classification.js'
 import {currentAgentAccess,runWithAgentAccess} from '../../db/agent-access-context.js'
 const department={workspaceId:'workspace',userId:'viewer',assistantId:'assistant',base:'internal' as const,departments:{planning:'internal' as const},contextDepartment:null,binding:null,cap:null}

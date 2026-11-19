@@ -1,7 +1,7 @@
 import {randomUUID} from 'node:crypto'
 import {setImmediate} from 'node:timers/promises'
 import {afterAll,describe,expect,it} from 'vitest'
-import type {CrmOperationsContext} from '@use-brian/core'
+import type {CrmOperationsContext} from '@use-brian/core/crm/operations-types.js'
 import {getPool} from '../client.js'
 import {createWorkspaceModulesStore} from '../workspace-modules-store.js'
 import {createDbCrmOperationsStore} from '../crm-operations-store.js'

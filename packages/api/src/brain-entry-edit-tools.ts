@@ -1,4 +1,4 @@
-import { memoryLearningEditSchema } from '@use-brian/core'
+import { memoryLearningEditSchema } from '@use-brian/core/memory/learning.js'
 /**
  * Confirmed assistant tools for existing Brain Review entries.
  *
@@ -11,7 +11,8 @@ import { memoryLearningEditSchema } from '@use-brian/core'
  */
 
 import { z } from 'zod'
-import { buildTool, type AccessContext, type Tool, type ToolContext } from '@use-brian/core'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import {
   EDITABLE_FIELDS_BY_PRIMITIVE,
   type BrainEntryMutator,

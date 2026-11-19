@@ -10,6 +10,7 @@ WORKDIR /app
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json turbo.json tsconfig.base.json ./
 COPY patches ./patches
 COPY packages/shared/package.json packages/shared/tsconfig.json ./packages/shared/
+COPY packages/agent-runtime/package.json packages/agent-runtime/tsconfig.json ./packages/agent-runtime/
 COPY packages/channels/package.json packages/channels/tsconfig.json ./packages/channels/
 COPY packages/doc-model/package.json packages/doc-model/tsconfig.json ./packages/doc-model/
 COPY packages/office-model/package.json packages/office-model/tsconfig.json ./packages/office-model/
@@ -31,6 +32,7 @@ FROM deps AS build
 ENV NODE_OPTIONS=--max-old-space-size=6144
 
 COPY packages/shared/src ./packages/shared/src
+COPY packages/agent-runtime/src ./packages/agent-runtime/src
 COPY packages/channels/src ./packages/channels/src
 COPY packages/doc-model/src ./packages/doc-model/src
 COPY packages/office-model/src ./packages/office-model/src
@@ -59,6 +61,7 @@ WORKDIR /app
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
 COPY patches ./patches
 COPY packages/shared/package.json ./packages/shared/
+COPY packages/agent-runtime/package.json ./packages/agent-runtime/
 COPY packages/channels/package.json ./packages/channels/
 COPY packages/doc-model/package.json ./packages/doc-model/
 COPY packages/office-model/package.json ./packages/office-model/
@@ -73,6 +76,7 @@ COPY apps/browser-relay/package.json ./apps/browser-relay/
 RUN pnpm install --frozen-lockfile --prod
 
 COPY --from=build /app/packages/shared/dist ./packages/shared/dist
+COPY --from=build /app/packages/agent-runtime/dist ./packages/agent-runtime/dist
 COPY --from=build /app/packages/channels/dist ./packages/channels/dist
 COPY --from=build /app/packages/doc-model/dist ./packages/doc-model/dist
 COPY --from=build /app/packages/office-model/dist ./packages/office-model/dist

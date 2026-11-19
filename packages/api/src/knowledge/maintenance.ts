@@ -28,7 +28,8 @@
  */
 
 import { z } from 'zod'
-import type { Sensitivity, WorkflowDefinition, WorkflowTrigger } from '@use-brian/core'
+import type { WorkflowDefinition, WorkflowTrigger } from '@use-brian/core/workflow/types.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { query } from '../db/client.js'
 
 // ── Step-id constants ──────────────────────────────────────────

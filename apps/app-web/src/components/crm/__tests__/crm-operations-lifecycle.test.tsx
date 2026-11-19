@@ -64,7 +64,7 @@ describe("[COMP:app-web/crm-operations] entitlement and participation lifecycle"
     expect(api.listCrmEntitlements).toHaveBeenCalledWith("workspace-1", { contactId: CONTACT_ID, limit: 100 });
     expect(api.listCrmParticipation).toHaveBeenCalledWith("workspace-1", { contactId: CONTACT_ID, limit: 100 });
     expect(container.textContent).toContain("Member");
-    expect(container.textContent).toContain("Commerce-managed participation");
+    expect(container.textContent).toContain("This participation record uses managed registration and cannot be changed manually.");
     const selects = [...container.querySelectorAll<HTMLButtonElement>("button[role=combobox]")];
     expect(selects.some((button) => button.disabled)).toBe(true);
   });

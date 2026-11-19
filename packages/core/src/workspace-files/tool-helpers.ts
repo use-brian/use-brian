@@ -6,7 +6,7 @@
 
 import { z } from 'zod'
 import type { FilesContext, FilesError } from './api.js'
-import { resolveWriteScope, type ContextScopeAccumulator } from '../security/context-scope.js'
+import { resolveWriteScope, type ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 
 export const idOrPathShape = z.string().min(1).max(1024)
 

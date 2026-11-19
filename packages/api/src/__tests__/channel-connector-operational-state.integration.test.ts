@@ -4,7 +4,9 @@
  * and archive HTTP transports are synthetic; no production database is used. */
 import {randomBytes,randomUUID} from 'node:crypto'
 import {afterAll,beforeAll,describe,expect,it,onTestFinished,vi} from 'vitest'
-import {createGeminiProvider,createRoutingProvider,wrapProvider} from '@use-brian/core'
+import {createGeminiProvider} from '@use-brian/agent-runtime/providers/gemini.js'
+import {createRoutingProvider} from '@use-brian/agent-runtime/providers/routing.js'
+import {wrapProvider} from '@use-brian/agent-runtime/providers/wrappers.js'
 import {getAppPool,getPool,query} from '../db/client.js'
 import {admitTelegramRecording,changeChannelRecording,confirmChannelRecordingOwner,recordDeliveredTelegramMessage} from '../channel-recording.js'
 import {createDbChannelIntegrationStore,encryptCredentials} from '../db/channel-integrations.js'
@@ -18,6 +20,7 @@ import {createDbCapabilityStore} from '../db/capability-store.js'
 import {createDbLinkedAccountStore} from '../db/linked-accounts.js'
 import {channelLinkBindsHere} from '../db/channel-user-store.js'
 import {findAssistantById} from '../db/users.js'
+import {readSessionById} from '../db/sessions.js'
 import {createDecisionRuntime} from '../decision-runtime.js'
 import {createChatArchiveTools} from '../chat-archive/chat-tools.js'
 import {MessageStoreClient} from '../chat-archive/message-store-client.js'
@@ -100,8 +103,10 @@ describe.sequential('[COMP:api/channel-recording] connector operational progress
   await getAppPool().end();await getPool().end()
  })
 
- async function runTurn(id:string,authorityChange:boolean){
+ async function runTurn(id:string,authorityChange:boolean,credentialCurrent?:()=>Promise<boolean>,holdBeforeRelease=false){
   const mainRequests:ModelRequest[]=[],archiveOwners:string[]=[],sent:string[]=[],errors:Error[]=[],notices:string[]=[]
+  const dispatchOrder:Array<{phase:string;at:string;round?:number}>=[]
+  const mark=(phase:string,round?:number)=>dispatchOrder.push({phase,at:new Date().toISOString(),...(round===undefined?{}:{round})})
   const abortController=new AbortController();let pending:Promise<void>|undefined
   onTestFinished(async()=>{abortController.abort();await pending?.catch(()=>undefined);vi.unstubAllGlobals()})
   const provider=createRoutingProvider({gemini:wrapProvider(createGeminiProvider({kind:'ai-studio',
@@ -118,6 +123,7 @@ describe.sequential('[COMP:api/channel-recording] connector operational progress
    const main=url.pathname.endsWith('/gemini-3.6-flash')&&request.generationConfig?.responseMimeType!=='application/json'
    if(main){
     mainRequests.push(request)
+    mark('provider-dispatch',mainRequests.length)
     expect(JSON.stringify(request.contents)).toContain(retainedMarker)
     const round=mainRequests.length
     if(round<=3)return modelResponse([{functionCall:{id:`archive-${id}-${round}`,name:'searchChatHistory',args:{query:`fictional observatory ${round}`}},thoughtSignature:`fictional-${round}`}])
@@ -126,12 +132,17 @@ describe.sequential('[COMP:api/channel-recording] connector operational progress
      expect(JSON.stringify(request.contents)).toContain(resultMarker)
      await instances.setConfigSystem(mailbox.id,authorityChange?{authorityBoundary:'changed'}:
       {mailboxIdle:{status:'reconnecting',since:'2030-01-01T00:05:00Z',lastEventAt:null,lastError:'Fictional connection closed'}})
+     mark(authorityChange?'configuration-withdrawal-committed':'operational-status-committed')
      return modelResponse([{functionCall:{id:`discovery-${id}`,name:'mcp_search',args:{query:'search mailbox emails',limit:1}},thoughtSignature:'fictional-discovery'}])
     }
     expect(round).toBe(5)
     expect(JSON.stringify(request.contents)).toContain('mcp_search')
     expect(JSON.stringify(request.contents)).toContain('functionResponse')
     expect(JSON.stringify(request.contents)).toContain('imapSearchMessages')
+    if(holdBeforeRelease){
+     await query("UPDATE session_messages SET scope_held=true WHERE session_id=$1 AND channel_message_id='retained-question'",[sessionId])
+     mark('retained-message-hold-committed')
+    }
     return modelResponse([{text:finalText}])
    }
    const properties=request.generationConfig?.responseJsonSchema?.properties?.answers?.properties
@@ -149,18 +160,26 @@ describe.sequential('[COMP:api/channel-recording] connector operational progress
   const publishSessionEvent=vi.fn(),onCleanup=vi.fn(async()=>{})
   pending=processChannelMessage({recording,admittedAnswerContext:{kind:'continue'},assistant:selected!,userId:owner,ownerId:owner,
    isIdentified:true,senderLinkedIdentity,externalGuest:false,channelType:'telegram',channelId:conversation,isGroupChat:true,
-   channelIntegrationId:integration,channelIntegrationStore:integrationStore,incomingChannelMessageId:id,messageText,
+   channelIntegrationId:integration,channelIntegrationStore:integrationStore,incomingChannelMessageId:id,messageText,credentialCurrent,
    userContentBlocks:[{type:'text',text:messageText}],abortController,modelAlias:'standard',adaptiveResearchEnabled:false,
    decisionRuntime:createDecisionRuntime({llmProvider:provider,defaultLlmModel:'gemini-3.6-flash-standard'}),
    configuredProviders:new Set(['gemini']),provider,systemPrompt:'Use the supplied archive tools and then discover mailbox search.',
    tools:new Map(createChatArchiveTools({client:archive}).map(tool=>[tool.name,tool])),memoryStore:createDbMemoryStore(),capabilityStore,
    connectorStore,mcpSettingsStore:settings,assistantConnectorStore:assistantConnectors,connectorInstanceStore:instances,connectorGrantStore:grants,
    publishSessionEvent,hooks:{onCleanup,onConfirmationRequired:async()=>{throw new Error('Read-only discovery unexpectedly requested confirmation')},
-    sendError:async(error:Error)=>{errors.push(error);notices.push(channelUserErrorText(error))},
-    sendResponse:async(text:string)=>{sent.push(text);await delivered(`reply-${id}`,text);return{channelMessageId:`reply-${id}`}}}
+    sendError:async(error:Error)=>{errors.push(error);notices.push(channelUserErrorText(error));mark('safe-terminal-error')},
+    sendResponse:async(text:string)=>{sent.push(text);mark('reply-received');await delivered(`reply-${id}`,text);mark('reply-persisted');return{channelMessageId:`reply-${id}`}}}
   } as unknown as ChannelPipelineParams)
-  await pending
-  return{mainRequests,archiveOwners,sent,errors,notices,publishSessionEvent,onCleanup}
+  let failure:unknown
+  try{await pending}catch(error){if(!credentialCurrent)throw error;failure=error}
+  mark('pipeline-finished')
+  console.info('[connector operational acceptance boundary]',JSON.stringify({id,authorityChange,dispatchOrder,
+   mainRequests:mainRequests.length,archiveCalls:archiveOwners.length,replyCount:sent.length,notices,
+   errors:errors.map(error=>({name:error.name,reason:(error as Error&{reason?:string}).reason})),
+   persistedReplies:(await query('SELECT count(*)::int count FROM session_messages WHERE session_id=$1 AND channel_message_id=$2',[sessionId,`reply-${id}`])).rows[0].count,
+   session:(await query('SELECT status,turn_end_reason,turn_lease_token IS NULL AS lease_released FROM sessions WHERE id=$1',[sessionId])).rows[0],
+   retainedHistoryUnchanged:JSON.stringify(await historySnapshot())===JSON.stringify(history),bindingsUnchanged:JSON.stringify(await bindingSnapshot())===JSON.stringify(bindings)}))
+  return{mainRequests,archiveOwners,sent,errors,notices,publishSessionEvent,onCleanup,failure}
  }
 
  it('delivers after three archive searches and MCP discovery despite ordinary mailbox status progress',async()=>{
@@ -170,7 +189,9 @@ describe.sequential('[COMP:api/channel-recording] connector operational progress
   expect(result.sent).toEqual([finalText]);expect(result.onCleanup).toHaveBeenCalledOnce()
   const reply=(await query('SELECT role,content FROM session_messages WHERE session_id=$1 AND channel_message_id=$2',[sessionId,'reply-operational-positive'])).rows
   expect(reply).toEqual([{role:'assistant',content:[{type:'text',text:finalText}]}])
-  expect(result.publishSessionEvent).toHaveBeenCalledWith({kind:'turn_completed',sessionId,payload:{senderUserId:owner}})
+  const turnId=(await readSessionById(sessionId))?.turnId
+  expect(turnId).toMatch(/^[a-f0-9]{64}$/)
+  expect(result.publishSessionEvent).toHaveBeenCalledWith({kind:'turn_completed',sessionId,payload:{senderUserId:owner,turnId}})
   expect(await historySnapshot()).toEqual(history);expect(await bindingSnapshot()).toEqual(bindings)
   expect((await query('SELECT status,turn_lease_token FROM sessions WHERE id=$1',[sessionId])).rows[0]).toEqual({status:'idle',turn_lease_token:null})
  },90_000)
@@ -182,5 +203,39 @@ describe.sequential('[COMP:api/channel-recording] connector operational progress
   expect((await query('SELECT id FROM session_messages WHERE session_id=$1 AND channel_message_id=$2',[sessionId,'reply-authority-negative'])).rows).toEqual([])
   expect(await historySnapshot()).toEqual(history);expect(await bindingSnapshot()).toEqual(bindings)
   expect((await query('SELECT status,turn_lease_token,turn_end_reason FROM sessions WHERE id=$1',[sessionId])).rows[0]).toEqual({status:'failed',turn_lease_token:null,turn_end_reason:'failed'})
+ },90_000)
+ it('rechecks the original channel credential after native evidence and withholds the provider request',async()=>{
+  const app=getAppPool(),original=app.query.bind(app)
+  let current=true,nativeCaptures=0
+  const checks:boolean[]=[]
+  const observed=vi.spyOn(app,'query').mockImplementation((async(sql:string,values?:unknown[])=>{
+   const result=await original(sql,values)
+   if(typeof sql==='string'&&sql.includes('SELECT capture_conversation_evidence($1,$2) AS value FROM context')&&result.rows[0]?.value?.admitted===true){
+    nativeCaptures++;current=false
+   }
+   return result
+  }) as typeof app.query)
+  try{
+   const result=await runTurn('channel-credential-withdrawn',false,async()=>{checks.push(current);return current})
+   expect(nativeCaptures).toBe(1)
+   expect(checks[0]).toBe(true);expect(checks.at(-1)).toBe(false)
+   expect(result.mainRequests).toEqual([]);expect(result.archiveOwners).toEqual([]);expect(result.sent).toEqual([])
+   expect(result.errors).toEqual([])
+   expect(result.failure).toMatchObject({code:'source_unavailable',reason:'authority_changed',retrySafe:false,
+    cause:{name:'AuthorityChangedError',operationMayHaveExecuted:false}})
+   expect((await query('SELECT id FROM session_messages WHERE session_id=$1 AND channel_message_id=$2',[sessionId,'reply-channel-credential-withdrawn'])).rows).toEqual([])
+   expect(await historySnapshot()).toEqual(history);expect(await bindingSnapshot()).toEqual(bindings)
+  }finally{observed.mockRestore()}
+ },90_000)
+ it('withholds and stores no final recorder reply when a source is held after the last model request',async()=>{
+  try{
+   const result=await runTurn('held-before-final-release',false,undefined,true)
+   expect(result.mainRequests).toHaveLength(5)
+   expect(result.archiveOwners).toEqual([owner,owner,owner])
+   expect(result.sent).toEqual([]);expect(result.notices).toEqual([safeNotice])
+   expect(result.errors[0]).toMatchObject({name:'DeliveryAudienceUnverifiedError',reason:'delivery_audience_unverified',retrySafe:false})
+   expect((await query('SELECT id FROM session_messages WHERE session_id=$1 AND channel_message_id=$2',[sessionId,'reply-held-before-final-release'])).rows).toEqual([])
+   expect((await query('SELECT scope_held FROM session_messages WHERE session_id=$1 AND channel_message_id=$2',[sessionId,'retained-question'])).rows).toEqual([{scope_held:true}])
+  }finally{await query("UPDATE session_messages SET scope_held=false WHERE session_id=$1 AND channel_message_id='retained-question'",[sessionId])}
  },90_000)
 })

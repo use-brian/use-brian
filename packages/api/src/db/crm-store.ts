@@ -1,4 +1,6 @@
-import { bindScopeSources,boundScopeSources,type CrmStore,type EntityLinksStore } from '@use-brian/core'
+import type { CrmStore } from '@use-brian/core/crm/types.js'
+import type { EntityLinksStore } from '@use-brian/core/entities/types.js'
+import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import {
   createCompany, getCompanyById, listCompanies, updateCompany,
   createContact, getContactById, listContacts, updateContact,

@@ -2,11 +2,20 @@
  * [COMP:crm/production-import]
  */
 import {
-  CrmIntegrationGrantsSchema, CrmIntegrationScopeError, CrmOperationsError,
-  crmIntegrationResourceSelection, requireCrmIntegrationOperation, requireCrmIntegrationResources,
-  type CrmIntegrationAuthority, type CrmIntegrationGrant, type CrmIntegrationOperation,
-  type CrmIntegrationSelector, type CrmOperationsContext,
-} from '@use-brian/core'
+  CrmIntegrationGrantsSchema,
+  CrmIntegrationScopeError,
+  crmIntegrationResourceSelection,
+  requireCrmIntegrationOperation,
+  requireCrmIntegrationResources,
+  type CrmIntegrationAuthority,
+  type CrmIntegrationGrant,
+  type CrmIntegrationOperation,
+  type CrmIntegrationSelector,
+} from '@use-brian/core/crm/integration-authority.js'
+import {
+  CrmOperationsError,
+  type CrmOperationsContext,
+} from '@use-brian/core/crm/operations-types.js'
 
 const IMPORT_WRITES = [
   'crm.imports.write', 'crm.records.write', 'crm.submissions.write',

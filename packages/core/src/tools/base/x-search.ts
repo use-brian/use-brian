@@ -1,6 +1,6 @@
 import { z } from 'zod'
-import { buildTool } from '../types.js'
-import { sanitizeDeep } from '../../security/sanitize.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
+import { sanitizeDeep } from '@use-brian/agent-runtime/security/sanitize.js'
 import { encodeExternalCostMeta } from '../../billing/external-cost.js'
 import {
   extractXaiResponseText,
@@ -8,10 +8,10 @@ import {
   postXaiResponses,
   XAI_X_SEARCH_MODEL,
   XAI_X_URL_QUOTE_MODEL,
-} from '../../providers/xai.js'
+} from '@use-brian/agent-runtime/providers/xai.js'
 import { isXHost, parseStatusUrl } from './fetch-xai.js'
-import type { ExternalCredentialPool } from '../../providers/credential-pool.js'
-import { calculateCost } from '../../billing/cost-tracker.js'
+import type { ExternalCredentialPool } from '@use-brian/agent-runtime/providers/credential-pool.js'
+import { calculateCost } from '@use-brian/agent-runtime/billing/cost-tracker.js'
 import { recordToolSpend, resolveToolCredential } from './provider-credential.js'
 
 /**

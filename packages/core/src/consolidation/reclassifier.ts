@@ -38,11 +38,11 @@ import type {
   EntityRecord,
 } from '../entities/types.js'
 import type { MemoryRecord, MemoryStore } from '../memory/types.js'
-import type { LLMProvider } from '../providers/types.js'
-import type { TokenUsage } from '../providers/types.js'
-import type { Sensitivity } from '../security/sensitivity.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import type { TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type { TaskStore } from '../tasks/types.js'
-import { collectStream } from '../providers/accumulator.js'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
 import type { DecisionExecutionPort } from '../decisions/index.js'
 import { z } from 'zod'
 

@@ -7,7 +7,7 @@ import {createDbWorkspaceGroupStore} from '../../db/workspace-group-store.js'
 import {workspaceAccessRoutes} from '../../routes/workspace-access.js'
 import {getWorkspaceAccess,getWorkspaceAccessHistory,getWorkspaceAccessRequest,executeDepartmentAccessCommand} from '../service.js'
 import {createWorkspaceAccessTools} from '../tools.js'
-import type {ToolContext} from '@use-brian/core'
+import type {ToolContext} from '@use-brian/agent-runtime/tools/types.js'
 
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()

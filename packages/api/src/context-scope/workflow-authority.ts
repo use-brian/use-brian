@@ -1,22 +1,30 @@
 import { isDeepStrictEqual } from 'node:util'
-import { intersectWorkspaceCredentialDelegations, bindWorkspaceCredentialDelegation } from '@use-brian/core'
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { intersectWorkspaceCredentialDelegations, bindWorkspaceCredentialDelegation } from '@use-brian/agent-runtime/security/workspace-delegation.js'
 import { bindWorkspaceMcpPublication, bindWorkspaceMcpWorkflowPublication } from '../db/session-context-revisions.js'
-import { assertSourceModelInputAuthority } from '../application-platform/model-source-authority.js'
+import { admitModelInput } from './admission.js'
 import { restoreWorkspaceMcpDelegation } from '../workspace-mcp/delegation.js'
 import { createDbCapabilityStore } from '../db/capability-store.js'
 import { unboundNativeTaskGoalHost,resolveRetainedGoalWorkflowRuntime,resolveRetainedTaskGoalAuthority } from '../workspace-access/goal-source-admission.js'
 import type { PoolClient } from 'pg'
 import { createDbContextScopeStore } from '../db/context-scope-store.js'
-import { AuthoritySourceSchema, crmOperationsSha256, type AuthoritySource, accessCeilingContains, ContextScopeAccumulator, createExecutionContext, intersectAccessCeilings, parseAuthoringAuthority, pinAccessCeiling, pinAuthoringAuthority, scopeGrantContains, unionScopeRequirements, WORKFLOW_SCOPE_EVIDENCE_VAR, type AccessCeiling, type AuthoringAuthority, type GoalRecord, type ResolvedExecutionAccess, type WorkflowRunRecord } from '@use-brian/core'
+import { crmOperationsSha256 } from '@use-brian/core/application-platform/operation-contract.js'
+import type { GoalRecord } from '@use-brian/core/goals/types.js'
+import { WORKFLOW_SCOPE_EVIDENCE_VAR } from '@use-brian/core/workflow/executor.js'
+import type { WorkflowRunRecord } from '@use-brian/core/workflow/types.js'
+import { accessCeilingContains, intersectAccessCeilings, parseAuthoringAuthority, pinAccessCeiling, pinAuthoringAuthority, type AccessCeiling, type AuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import { AuthoritySourceSchema, type AuthoritySource } from '@use-brian/agent-runtime/security/authority-source.js'
+import { ContextScopeAccumulator, scopeGrantContains, unionScopeRequirements } from '@use-brian/agent-runtime/security/context-scope.js'
+import { createExecutionContext, type ResolvedExecutionAccess } from '@use-brian/agent-runtime/security/execution-context.js'
 import { query, queryWithRLS, runWithAgentAccess } from '../db/client.js'
 import { findAssistantById } from '../db/users.js'
 import { resolveOperationCeilingsSystem } from '../db/workspace-store.js'
-import { resolveLiveAccessCeilingSystem, resolveTurnScopeSystem, type ResolvedTurnScope } from './resolve-turn-scope.js'
+import { resolveLiveAccessCeilingSystem, resolveTurnScopeMetadataSystem, resolveTurnScopeSystem, type ResolvedTurnScope } from './resolve-turn-scope.js'
 import { AuthorityChangedError, createAuthorityLease, executeWithCurrentAuthority, runWithAuthorityLease } from './authority-lease.js'
 import { createDbWorkflowRunStore, readWorkflowRunInTransaction } from '../db/workflow-store.js'
 import { parseWorkflowCopyEvidence, readWorkflowInputEvidence } from './workflow-input-evidence.js'
 import { validateCallerScopeEvidence } from './caller-evidence.js'
-import { pinPolicyEpoch } from './policy-epoch.js'
+import { pinPolicyEpoch, type PolicyEpoch } from './policy-epoch.js'
 import { resolveSourceServiceWorkflowScope } from '../workflow/source-service.js'
 
 type GoalBinding = { id: string; contextGroupId: string | null; contextProjectId: string | null; authoringAuthority: AuthoringAuthority }
@@ -117,20 +125,36 @@ export async function captureAuthoringAuthoritySystem(params: {
   }
 }
 
-/** Preview deterministic tool exposure using run-equivalent scope, without a run row. */
-export async function resolveWorkflowAuthoringScope(params: {
+type WorkflowAuthoringScopeParams = {
   userId: string
   workspaceId: string
   assistantId: string
   authoringAuthority: AuthoringAuthority
   contextGroupId: string | null
   contextProjectId: string | null
-}, client?: PoolClient): Promise<ResolvedTurnScope> {
+}
+
+/** Preview deterministic tool exposure using run-equivalent scope, without a run row. */
+export async function resolveWorkflowAuthoringScope(params: WorkflowAuthoringScopeParams, client?: PoolClient): Promise<ResolvedTurnScope> {
+  return resolveAuthoringScope(params, resolveTurnScopeSystem, client)
+}
+
+/**
+ * The same run-equivalent scope without the executing caller's projection, for
+ * lease renewal only: a validator that pinned this ceiling must renew it under
+ * the same scope, so a nested callee's narrower projection is not revocation.
+ */
+export async function resolveWorkflowAuthoringMetadataSystem(params: WorkflowAuthoringScopeParams, client?: PoolClient): Promise<ResolvedTurnScope> {
+  return resolveAuthoringScope(params, resolveTurnScopeMetadataSystem, client)
+}
+
+async function resolveAuthoringScope(params: WorkflowAuthoringScopeParams,
+  resolveScope: typeof resolveTurnScopeSystem, client?: PoolClient): Promise<ResolvedTurnScope> {
   const saved = await resolveSavedAuthoringCeiling(params.authoringAuthority, params, params, client)
   const assistant = await authoringAssistant(params.assistantId, client)
   if (!assistant || assistant.workspaceId !== params.workspaceId) throw unavailable()
   try {
-    const scope = await resolveTurnScopeSystem({
+    const scope = await resolveScope({
       userId: params.userId, workspaceId: params.workspaceId, assistant,
       key: { contextGroupId: params.contextGroupId, contextProjectId: params.contextProjectId },
     }, authoringDeps(client))
@@ -181,7 +205,7 @@ function sameGoalBinding(a: GoalBinding | null | undefined, b: GoalBinding | nul
 /** Server-owned run snapshot; never accepted from workflow input or run vars. */
 async function resolveWorkflowRunSnapshot(params: {
   userId: string; assistantId: string; workspaceId: string; run: WorkflowRunRecord
-}, client?: PoolClient): Promise<{ turnScope: ResolvedTurnScope; assistantClearance: import('@use-brian/core').Sensitivity; sourceGoal: GoalBinding | null; storedAuthority: StoredAuthority }> {
+}, client?: PoolClient): Promise<{ turnScope: ResolvedTurnScope; assistantClearance: import('@use-brian/agent-runtime/security/sensitivity.js').Sensitivity; sourceGoal: GoalBinding | null; storedAuthority: StoredAuthority }> {
   const { userId, assistantId, workspaceId, run } = params
   const authorityQuery: typeof query = client ? (sql, values) => client.query(sql, values) : query
   const readStored = async () => (await authorityQuery<{
@@ -297,7 +321,7 @@ export async function resolveWorkflowRunScope(params: Parameters<typeof resolveW
   }
   if(!client){const service=await resolveSourceServiceWorkflowScope(params);if(service)return service}
   else if((await client.query("SELECT 1 FROM source_service_bindings WHERE workflow_id=$1 AND status<>'revoked'",[params.run.workflowId])).rowCount)throw unavailable()
-  let policyCurrent: () => Promise<boolean>
+  let policyCurrent: PolicyEpoch
   try {
     // A supplied owner transaction already has the private metadata privilege.
     // Keep its reads on that client; an app-client denial never falls back.
@@ -318,14 +342,14 @@ export async function resolveWorkflowRunScope(params: Parameters<typeof resolveW
     resolved.storedAuthority.invocationAuthority?.workspaceDelegation,
     resolved.storedAuthority.workflowAuthoringAuthority.workspaceDelegation,
     resolved.storedAuthority.sourceGoal?.authoringAuthority.workspaceDelegation)
-  let parentEvidence: import('@use-brian/core').ScopeEvidence = {}
+  let parentEvidence: import('@use-brian/agent-runtime/security/context-scope.js').ScopeEvidence = {}
   if (workspaceParent) {
     const restored = await restoreWorkspaceMcpDelegation(workspaceParent,createDbCapabilityStore())
     // Outside publication, use the parent's native source admission. Inside a
     // writer, qualify the same evidence on its existing transaction instead.
     if (!client) {
       bindWorkspaceMcpPublication(restored.context.executionContext!)
-      await assertSourceModelInputAuthority(restored.context)
+      await admitModelInput(restored.context)
       parentEvidence = restored.context.scopeAccumulator!.evidence
     } else {
       parentEvidence = await validateCallerScopeEvidence(restored.context.scopeAccumulator!.evidence,
@@ -347,14 +371,14 @@ export async function resolveWorkflowRunScope(params: Parameters<typeof resolveW
     return result.rows[0]?.allowed === true
   }
   if (!await runWithAgentAccess(pinAccessCeiling(resolved.turnScope.access), sourceAvailable)) throw unavailable()
-  let inputScopeEvidence: import('@use-brian/core').ScopeEvidence
-  let runtimeInputEvidence: import('@use-brian/core').ScopeEvidence
-  let persistedScopeEvidence: import('@use-brian/core').ScopeEvidence
-  let initialScopeEvidence: import('@use-brian/core').ScopeEvidence
+  let inputScopeEvidence: import('@use-brian/agent-runtime/security/context-scope.js').ScopeEvidence
+  let runtimeInputEvidence: import('@use-brian/agent-runtime/security/context-scope.js').ScopeEvidence
+  let persistedScopeEvidence: import('@use-brian/agent-runtime/security/context-scope.js').ScopeEvidence
+  let initialScopeEvidence: import('@use-brian/agent-runtime/security/context-scope.js').ScopeEvidence
   try {
     inputScopeEvidence = await validateCallerScopeEvidence(
       await readWorkflowInputEvidence(params.run.id,params.workspaceId,client),pinAccessCeiling(resolved.turnScope.access),client,client ? params.run.id : undefined)
-    const stored = (await authorityQuery<{ evidence: import('@use-brian/core').ScopeEvidence | null }>(
+    const stored = (await authorityQuery<{ evidence: import('@use-brian/agent-runtime/security/context-scope.js').ScopeEvidence | null }>(
       'SELECT vars->$3 AS evidence FROM workflow_runs WHERE id=$1 AND workspace_id=$2',
       [params.run.id,params.workspaceId,WORKFLOW_SCOPE_EVIDENCE_VAR])).rows[0]?.evidence
     persistedScopeEvidence = await validateCallerScopeEvidence(stored ?? {},pinAccessCeiling(resolved.turnScope.access),client,client ? params.run.id : undefined)
@@ -368,7 +392,7 @@ export async function resolveWorkflowRunScope(params: Parameters<typeof resolveW
     combined.note(persistedScopeEvidence)
     initialScopeEvidence = combined.evidence
   } catch { throw unavailable() }
-  if (!await policyCurrent()) throw new AuthorityChangedError()
+  if (!await policyCurrent.isCurrent()) throw new AuthorityChangedError()
   const lease = createAuthorityLease(pinAccessCeiling(resolved.turnScope.access), async () => {
     const actor = (await authorityQuery<{ actor: string | null }>(
       `SELECT COALESCE(r.triggered_by,w.created_by) AS actor FROM workflow_runs r
@@ -421,7 +445,7 @@ export async function resolveWorkflowRunScope(params: Parameters<typeof resolveW
     } catch {
       return null
     }
-  }, policyCurrent)
+  }, () => policyCurrent.isCurrent())
   const invocation = lease.snapshotSource!()
   const durableSource = AuthoritySourceSchema.parse({ version:1,kind:'workflow',invocationId:invocation.invocationId,
     runId:params.run.id,workspaceId:params.workspaceId,authorityUserId:params.userId,executingAssistantId:params.assistantId,
@@ -487,7 +511,7 @@ export async function resolveGoalAuthoritySystem(goal: GoalRecord) {
   if (!goal.createdByUserId) throw goalUnavailable()
   const authoring = parseAuthoringAuthority(goal.authoringAuthority)
   if (!authoring) throw goalUnavailable()
-  let policyCurrent: () => Promise<boolean>
+  let policyCurrent: PolicyEpoch
   try {
     policyCurrent = await pinPolicyEpoch({
       workspaceId: goal.workspaceId, principalId: goal.createdByUserId, assistantId: authoring.assistantId,
@@ -515,10 +539,16 @@ export async function resolveGoalAuthoritySystem(goal: GoalRecord) {
     const current=await unboundNativeTaskGoalHost(goal)
     return !!current&&await visible(current.id)
   }
-  if (!await runWithAgentAccess(saved.ceiling, taskSourcesCurrent)) throw goalUnavailable()
-  if (!await policyCurrent()) throw new AuthorityChangedError()
+  // The host Task read is RLS-gated by the ambient agent access, which a nested
+  // callee may narrow (a consult, a workflow step, a shared audience). Renewal
+  // re-reads it in the admission context, under exactly the saved ceiling, so a
+  // narrower call site is not mistaken for a lost source; real loss still fails.
+  const inAdmission = AsyncLocalStorage.snapshot()
+  const sourcesCurrent = () => inAdmission(() => runWithAgentAccess(saved.ceiling, taskSourcesCurrent))
+  if (!await sourcesCurrent()) throw goalUnavailable()
+  if (!await policyCurrent.isCurrent()) throw new AuthorityChangedError()
   const lease = createAuthorityLease(saved.ceiling, async () => {
-    if (!await runWithAgentAccess(saved.ceiling, taskSourcesCurrent)) return null
+    if (!await sourcesCurrent()) return null
     const row = (await query<{
       actor: string | null
       contextGroupId: string | null
@@ -540,7 +570,7 @@ export async function resolveGoalAuthoritySystem(goal: GoalRecord) {
     } catch {
       return null
     }
-  }, policyCurrent)
+  }, () => policyCurrent.isCurrent())
   return {
     ceiling:saved.ceiling,
     executeWithAuthority:<T>(operation:()=>Promise<T>):Promise<T> =>

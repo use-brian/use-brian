@@ -1,12 +1,12 @@
 import { createComputerTools } from '../tools.js'
-import { createExecutionContext, executionToolContext } from '../../security/execution-context.js'
+import { createExecutionContext, executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { describe, expect, it, vi } from 'vitest'
 import { createLocalBrowserProvider } from '../local-browser-provider.js'
 import { createCloudBrowserProvider } from '../cloud-browser-provider.js'
 import { createSandboxOrchestrator, createInMemorySandboxTaskStore } from '../orchestrator.js'
 import { createInMemorySessionVault, type BrowserProfile } from '../profiles.js'
 import { StubSandboxProvider } from '../providers/stub.js'
-import type { CurrentAuthorityBoundary } from '../../tools/types.js'
+import type { CurrentAuthorityBoundary } from '@use-brian/agent-runtime/tools/types.js'
 
 function lease() {
   let allowed = true

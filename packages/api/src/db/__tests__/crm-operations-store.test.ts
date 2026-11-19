@@ -16,6 +16,7 @@ const context = {
 
 function fakePool() {
   const query = vi.fn().mockImplementation(async (sql: string) => {
+    if (sql.includes("set_config('app.system_bypass'")) return { rows: [{ set_config: 'true' }], rowCount: 1 }
     if (sql.includes('SELECT id FROM entities')) return { rows: [{ id: 'contact-1' }], rowCount: 1 }
     return { rows: [], rowCount: 0 }
   })
@@ -40,6 +41,21 @@ describe('[COMP:crm/operations-store] CRM operations PostgreSQL transaction stor
     expect(release).toHaveBeenCalledOnce()
   })
 
+  it('refuses before any statement when the pool connection does not bypass RLS by role', async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+    const release = vi.fn()
+    const store = createDbCrmOperationsStore({ connect: vi.fn().mockResolvedValue({ query, release }) } as never)
+    const fn = vi.fn()
+    await expect(store.transaction(context, fn)).rejects.toMatchObject({ code: 'not_authorized' })
+    expect(fn).not.toHaveBeenCalled()
+    expect(query.mock.calls.map((call) => call[0])).toEqual([
+      'BEGIN',
+      expect.stringMatching(/set_config\('app\.system_bypass', 'true', true\)[\s\S]*FROM pg_roles r JOIN pg_class c[\s\S]*rolbypassrls[\s\S]*pg_has_role/),
+      'ROLLBACK',
+    ])
+    expect(release).toHaveBeenCalledOnce()
+  })
+
   it('rolls back and never commits when any transaction step fails', async () => {
     const { pool, query, release } = fakePool()
     const store = createDbCrmOperationsStore(pool)
@@ -50,8 +66,6 @@ describe('[COMP:crm/operations-store] CRM operations PostgreSQL transaction stor
     expect(query.mock.calls.map((call) => call[0])).toEqual([
       'BEGIN',
       expect.stringContaining("set_config('app.system_bypass', 'true', true)"),
-      // Lock order: the module share lock precedes the workspace lock.
-      'SELECT 1 FROM workspace_modules WHERE workspace_id=$1 AND module_key=$2 FOR SHARE',
       'SELECT id FROM workspaces WHERE id=$1 AND department_read_v2 FOR UPDATE',
       'ROLLBACK',
     ])
@@ -61,6 +75,7 @@ describe('[COMP:crm/operations-store] CRM operations PostgreSQL transaction stor
 
   it('refuses generic lifecycle updates for commerce-managed participation in legacy workspaces', async () => {
     const query = vi.fn().mockImplementation(async (sql: string) => {
+      if (sql.includes("set_config('app.system_bypass'")) return { rows: [{ set_config: 'true' }], rowCount: 1 }
       if (sql.includes('SELECT department_read_v2')) return { rows: [{ v2: false }], rowCount: 1 }
       if (sql.includes('SELECT status, source_kind')) {
         return { rows: [{ status: 'confirmed', sourceKind: 'commerce' }], rowCount: 1 }
@@ -81,6 +96,7 @@ describe('[COMP:crm/operations-store] CRM operations PostgreSQL transaction stor
 
   it('rejects invalid entitlement lifecycle reversal inside a legacy transaction', async () => {
     const query = vi.fn().mockImplementation(async (sql: string) => {
+      if (sql.includes("set_config('app.system_bypass'")) return { rows: [{ set_config: 'true' }], rowCount: 1 }
       if (sql.includes('SELECT department_read_v2')) return { rows: [{ v2: false }], rowCount: 1 }
       if (sql.includes('SELECT status, starts_at')) {
         return { rows: [{ status: 'cancelled', startsAt: new Date('2026-08-30T00:00:00Z') }], rowCount: 1 }
@@ -104,6 +120,7 @@ describe('[COMP:crm/pipeline-tools] catalog-backed deal stages', () => {
   beforeEach(() => { canonical.read.mockReset(); canonical.update.mockReset() })
   function stageStore() {
     const query = vi.fn().mockImplementation(async (sql: string) => {
+      if (sql.includes("set_config('app.system_bypass'")) return { rows: [{ set_config: 'true' }], rowCount: 1 }
       if (sql.includes('FROM workspace_members')) return { rows: [{ user_id: USER_ID }], rowCount: 1 }
       if (sql.includes('FROM crm_pipelines p')) return { rows: [{
         pipelineId: 'pipeline-custom', stageId: 'stage-review', stageName: 'Review',

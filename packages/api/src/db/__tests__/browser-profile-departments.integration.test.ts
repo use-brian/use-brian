@@ -3,7 +3,11 @@ import {resolveBrowserTaskExecutionAuthority} from '../../sandbox/task-execution
 import {resolveExecutionContextSystem} from '../../context-scope/execution-context.js'
 import {findAssistantById} from '../users.js'
 import {createLocalTaskAdmission} from '../../sandbox/local-task-authority.js'
-import {createLocalBrowserProvider,BrowserProfileAuthoritySchema,createSandboxOrchestrator,createCloudBrowserProvider,StubSandboxProvider} from '@use-brian/core'
+import {createCloudBrowserProvider} from '@use-brian/core/sandbox/cloud-browser-provider.js'
+import {createLocalBrowserProvider} from '@use-brian/core/sandbox/local-browser-provider.js'
+import {createSandboxOrchestrator} from '@use-brian/core/sandbox/orchestrator.js'
+import {BrowserProfileAuthoritySchema} from '@use-brian/core/sandbox/profiles.js'
+import {StubSandboxProvider} from '@use-brian/core/sandbox/providers/stub.js'
 import {createSandboxTaskStore} from '../sandbox-task-store.js'
 import {resolveHumanBrowserProfileDepartmentRead} from '../../sandbox/profile-authority.js'
 import request from 'supertest'
@@ -18,6 +22,17 @@ import {createBrowserProfileStore} from '../browser-profile-store.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 afterAll(async()=>{await getAppPool().end();await getPool().end()})
+// The owner's own tasks whose authority no longer holds stay listed as
+// metadata-only Discard stubs (ee0f9eef7): exactly these lifecycle fields, no
+// profile and no site. Returns `backend:sessionId` for each stub.
+const STUB_FIELDS=['backend','createdAt','injectedSite','lastActivityAt','profileId','sessionId','status','taskId','unavailable']
+function discardStubs(tasks:Array<Record<string,unknown>>):string[] {
+  return tasks.filter(task=>task.unavailable).map(task=>{
+    expect(Object.keys(task).sort()).toEqual(STUB_FIELDS)
+    expect(task).toMatchObject({profileId:null,injectedSite:null,unavailable:true})
+    return `${task.backend}:${task.sessionId}`
+  }).sort()
+}
 describe('[COMP:sandbox/profiles] persisted single-department identity',()=>{
  it('round-trips one department and refuses a foreign-workspace binding or silent deletion',async()=>{
   const custodian=randomUUID(),owner=randomUUID(),workspace=randomUUID(),foreign=randomUUID(),department=randomUUID()
@@ -117,7 +132,9 @@ describe('[COMP:sandbox/profiles] persisted single-department identity',()=>{
   expect((await list()).body.profiles).toEqual([])
   expect((await request(app).patch(`/api/computer/profiles/${profile.id}`).send({name:'Changed'})).status).toBe(404)
   expect((await store.get(profile.id))?.name).toBe('Department browser')
-  expect((await request(app).get(`/api/computer/tasks?workspaceId=${workspace}`)).body.tasks).toEqual([])
+  const expiredTasks=(await request(app).get(`/api/computer/tasks?workspaceId=${workspace}`)).body.tasks
+  expect(expiredTasks).toHaveLength(1)
+  expect(discardStubs(expiredTasks)).toEqual(['local:fixture-session'])
   expect((await request(app).get('/api/computer/tasks/fixture-session')).status).toBe(404)
   expect((await request(app).get('/api/computer/tasks/fixture-session/frame')).status).toBe(404)
   expect((await request(app).post('/api/computer/tasks/fixture-session/complete')).status).toBe(404)
@@ -187,7 +204,9 @@ describe('[COMP:sandbox/profiles] persisted single-department identity',()=>{
   expect((await request(app).get(`/api/computer/profiles?workspaceId=${workspace}`)).body.profiles.map((row:{id:string})=>row.id)).toContain(profile.id)
   const task=await orchestrator.getActiveTask(sessionId)
   const actionCount=provider.sandboxes.get(task!.sandboxId)!.actions.length
-  expect((await request(app).get(`/api/computer/tasks?workspaceId=${workspace}`)).body.tasks).toEqual([])
+  const transferredTasks=(await request(app).get(`/api/computer/tasks?workspaceId=${workspace}`)).body.tasks
+  expect(transferredTasks).toHaveLength(2)
+  expect(discardStubs(transferredTasks)).toEqual([`cloud:${sessionId}`,`local:${localSession}`].sort())
   for(const suffix of ['', '/frame'])expect((await request(app).get(`/api/computer/tasks/${sessionId}${suffix}`)).status).toBe(404)
   for(const suffix of ['/input','/stream-session','/resume'])expect((await request(app).post(`/api/computer/tasks/${sessionId}${suffix}`).send({kind:'key',text:'fictional'})).status).toBe(404)
   expect(provider.sandboxes.get(task!.sandboxId)!.actions).toHaveLength(actionCount)
@@ -195,7 +214,9 @@ describe('[COMP:sandbox/profiles] persisted single-department identity',()=>{
   const freshSession=randomUUID()
   await createCloudBrowserProvider({provider,binding:orchestrator.binding}).navigate({...ctx,sessionId:freshSession},'https://portal.example/account')
   expect((await request(app).get(`/api/computer/tasks/${freshSession}/frame`)).status).toBe(200)
-  expect((await request(app).get(`/api/computer/tasks?workspaceId=${workspace}`)).body.tasks.map((row:{sessionId:string})=>row.sessionId)).toEqual([freshSession])
+  const recoveredTasks=(await request(app).get(`/api/computer/tasks?workspaceId=${workspace}`)).body.tasks
+  expect(recoveredTasks.filter((row:{unavailable?:boolean})=>!row.unavailable).map((row:{sessionId:string})=>row.sessionId)).toEqual([freshSession])
+  expect(discardStubs(recoveredTasks)).toEqual([`cloud:${sessionId}`,`local:${localSession}`].sort())
   // A readable human profile must not replace a revoked acting assistant's ceiling.
   const actingAssistant=randomUUID(),agentSession=randomUUID()
   await query("INSERT INTO assistants(id,name,owner_user_id,workspace_id,kind,clearance,compartments) VALUES($1,'Fictional browser assistant',$2,$3,'standard','internal',NULL)",[actingAssistant,owner,workspace])

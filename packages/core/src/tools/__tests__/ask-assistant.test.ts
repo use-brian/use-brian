@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from 'vitest'
 import { createInterAssistantTools, type InterAssistantDeps } from '../base/ask-assistant.js'
-import type { ToolContext } from '../types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import type { ConsultResponse, Task } from '../../a2a/types.js'
-import { ContextScopeAccumulator } from '../../security/context-scope.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 
 const ctx: ToolContext = {
   userId: 'u_caller',

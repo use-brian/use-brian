@@ -1,15 +1,15 @@
 import { describe, expect, it, vi } from 'vitest'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { createCrmCommercialContextTools } from '../commercial-context-tools.js'
 import {
   CrmCommercialFieldsSchema,
   CrmOperationVersionInputSchema,
   CrmOverrideNotPermittedError,
-  createCrmCommercialContextTools,
   resolveCrmCommercialFields,
   type CrmCommercialContextReadPort,
   type CrmCommercialProfileSnapshot,
-  type CrmOperationsServicePort,
-  type ToolContext,
-} from '../../index.js'
+} from '../commercial-context.js'
+import type { CrmOperationsServicePort } from '../operations-types.js'
 
 const WORKSPACE_ID = '00000000-0000-4000-8000-000000000001'
 const USER_ID = '00000000-0000-4000-8000-000000000002'

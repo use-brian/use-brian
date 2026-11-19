@@ -1,8 +1,9 @@
 import { createOfficeService } from '../service.js'
 import { describe, expect, it, vi } from 'vitest'
-import type { Message, OfficeToolPort } from '@use-brian/core'
+import type { OfficeToolPort } from '@use-brian/core/office/tools.js'
+import type { Message } from '@use-brian/agent-runtime/providers/types.js'
 import { applyOfficeCommand, applyOfficeSnapshotCommand, documentRangePreimageHash, PdfSnapshotSchema, type DocumentSnapshot, type PdfSnapshot, type PresentationSnapshot, type SpreadsheetSnapshot } from '@use-brian/office-model'
-import { createApplyOfficeCommandsTool } from '@use-brian/core'
+import { createApplyOfficeCommandsTool } from '@use-brian/core/office/tools.js'
 import { generateAssistantOfficeCommands, officeRevisionFitRepairScope } from '../command-revision.js'
 
 const uid = (n: number) => `38000000-0000-4000-8000-${String(n).padStart(12, '0')}`

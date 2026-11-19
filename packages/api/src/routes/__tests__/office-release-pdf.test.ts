@@ -1,5 +1,5 @@
 import { createOfficeService } from '../../office/service.js'
-import type { ToolContext } from '@use-brian/core'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import express from 'express'
 import request from 'supertest'
 import { describe, expect, it, vi } from 'vitest'

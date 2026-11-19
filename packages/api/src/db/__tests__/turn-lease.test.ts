@@ -1,242 +1,79 @@
-/**
- * [COMP:api/turn-lease] — the turn lease over `sessions.status='running'`.
- *
- * `status='running'` is a lock. Migration 424 gave it an owner
- * (`turn_lease_token`) and a lease (`turn_heartbeat_at`) because it had
- * neither, and the 2026-08-08 incident is what that cost: a workspace room sat
- * `running` for ~31 minutes with no turn in flight anywhere, every member's
- * Live card spinning, every addressed message queueing behind a lock nobody
- * held.
- *
- * Two invariants here are regression guards, not preferences:
- *
- *   1. Staleness is measured on the LEASE, never on `last_active_at` alone.
- *      `findSessionById` writes `last_active_at = now()` on every read, so a
- *      client watching a stuck session refreshed the old sweep predicate
- *      faster than its 6-minute threshold could ever expire. A liveness clock
- *      that reads can refresh is not a liveness clock.
- *   2. Every lease operation is token-guarded. Once a stale lease can be
- *      reclaimed, an orphaned turn can wake up holding a token for a session
- *      somebody else now owns — and without the guard it would heartbeat,
- *      cancel or unlock the SUCCESSOR's turn. The recovery path would corrupt
- *      the state it exists to repair.
- *
- * Spec: docs/architecture/context-engine/session-messages.md
- *       → "Turn lease and recovery".
- */
-
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-
-vi.mock('../client.js', () => ({
-  query: vi.fn(),
-}))
-
-import {
-  startTurnLease,
-  touchTurnLease,
-  releaseTurnLease,
-  requestTurnCancel,
-  reclaimStaleTurn,
-  isTurnLeaseLive,
-  sweepStuckSessions,
-  TURN_HEARTBEAT_INTERVAL_MS,
-  TURN_LEASE_STALE_AFTER_MS,
-} from '../sessions.js'
-import { query } from '../client.js'
-
-const mockQuery = vi.mocked(query)
-
-/** Collapse whitespace so assertions read as SQL, not as formatting. */
-const sqlOf = (callIndex = 0): string =>
-  String(mockQuery.mock.calls[callIndex]?.[0] ?? '').replace(/\s+/g, ' ')
-
-beforeEach(() => {
-  mockQuery.mockReset()
-})
-
-describe('[COMP:api/turn-lease] staleness never reads last_active_at alone', () => {
-  it('sweepStuckSessions measures the heartbeat, coalescing only for pre-424 rows', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
-    await sweepStuckSessions(90_000)
-
-    const sql = sqlOf()
-    expect(sql).toContain('COALESCE(turn_heartbeat_at, last_active_at)')
-    // The 2026-08-08 predicate. If this ever comes back, a watched session
-    // becomes unsweepable again.
-    expect(sql).not.toMatch(/WHERE status = 'running' AND last_active_at </)
-  })
-
-  it('reclaimStaleTurn measures the heartbeat too', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
-    await reclaimStaleTurn('s-1')
-
-    expect(sqlOf()).toContain('COALESCE(turn_heartbeat_at, last_active_at)')
-  })
-
-  it('reclaims only a RUNNING session, so an idle one is never disturbed', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
-    await reclaimStaleTurn('s-1')
-
-    expect(sqlOf()).toContain("status = 'running'")
-  })
-
-  it('defaults the reclaim window to the lease threshold, several heartbeats wide', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
-    await reclaimStaleTurn('s-1')
-
-    expect(mockQuery.mock.calls[0]?.[1]).toEqual(['s-1', String(TURN_LEASE_STALE_AFTER_MS)])
-    // A live turn under GC pressure or DB latency must never be stolen.
-    expect(TURN_LEASE_STALE_AFTER_MS).toBeGreaterThanOrEqual(TURN_HEARTBEAT_INTERVAL_MS * 3)
-  })
-
-  it('returns swept rows with visibility so rooms can be told their turn ended', async () => {
-    mockQuery.mockResolvedValueOnce({
-      rows: [{ id: 's-1', mode: null, user_id: 'u-1', visibility: 'workspace' }],
-      rowCount: 1,
-    } as never)
-
-    await expect(sweepStuckSessions(90_000)).resolves.toEqual([
-      { id: 's-1', mode: null, userId: 'u-1', visibility: 'workspace' },
-    ])
-  })
-})
-
-describe('[COMP:api/turn-lease] ownership guards', () => {
-  it('startTurnLease mints a token and clears the previous turn s cancel + reason', async () => {
-    mockQuery.mockResolvedValueOnce({
-      rows: [{ turn_lease_token: 'tok-1' }],
-      rowCount: 1,
-    } as never)
-
-    await expect(startTurnLease('s-1')).resolves.toBe('tok-1')
-    const sql = sqlOf()
-    expect(sql).toContain('gen_random_uuid()')
-    expect(sql).toContain('turn_started_at = COALESCE($3::timestamptz, now())')
-    expect(sql).toContain('cancel_requested_at = NULL')
-    expect(sql).toContain('turn_end_reason = NULL')
-    // No answering assistant given = the binding answers.
-    expect(sql).toContain('turn_assistant_id = $2')
-    expect(mockQuery.mock.calls[0][1]).toEqual(['s-1', null, null])
-  })
-
-  it('startTurnLease stamps the answering assistant of a re-addressed turn', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [{ turn_lease_token: 'tok-2' }], rowCount: 1 } as never)
-    await startTurnLease('s-1', 'a-taskmaster')
-    expect(mockQuery.mock.calls[0][1]).toEqual(['s-1', 'a-taskmaster', null])
-  })
-
-  it('keeps the attended request start instead of dropping preparation time', async () => {
-    const startedAt = new Date('2026-01-01T00:00:00Z')
-    mockQuery.mockResolvedValueOnce({ rows: [{ turn_lease_token: 'tok-3' }], rowCount: 1 } as never)
-    await startTurnLease('s-1', 'assistant-fixture', startedAt)
-    expect(mockQuery.mock.calls[0][1]).toEqual(['s-1', 'assistant-fixture', startedAt])
-  })
-
-  it('touchTurnLease refreshes and reads the cancel flag in ONE statement', async () => {
-    mockQuery.mockResolvedValueOnce({
-      rows: [{ cancel_requested_at: null }],
-      rowCount: 1,
-    } as never)
-
-    await expect(touchTurnLease('s-1', 'tok-1')).resolves.toEqual({
-      held: true,
-      cancelRequested: false,
-    })
-    // One round trip is what makes a cross-process stop cheap enough to sit on
-    // a 20s timer.
-    expect(mockQuery).toHaveBeenCalledTimes(1)
-    expect(sqlOf()).toContain('RETURNING cancel_requested_at')
-    expect(sqlOf()).not.toContain('turn_started_at')
-    expect(sqlOf()).toContain('turn_lease_token = $2')
-  })
-
-  it('reports a requested cancel to the holder', async () => {
-    mockQuery.mockResolvedValueOnce({
-      rows: [{ cancel_requested_at: new Date() }],
-      rowCount: 1,
-    } as never)
-
-    await expect(touchTurnLease('s-1', 'tok-1')).resolves.toEqual({
-      held: true,
-      cancelRequested: true,
-    })
-  })
-
-  it('reports held:false when the lease was reclaimed under us', async () => {
-    // No row matched: our token is no longer the session's. The caller must
-    // abort rather than write a reply into a turn it does not own.
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
-
-    await expect(touchTurnLease('s-1', 'stale-tok')).resolves.toEqual({
-      held: false,
-      cancelRequested: false,
-    })
-  })
-
-  it('releaseTurnLease is token-guarded so an orphan cannot unlock its successor', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
-    await releaseTurnLease('s-1', 'completed', 'tok-1')
-
-    const sql = sqlOf()
-    expect(sql).toContain('turn_lease_token = $4')
-    expect(mockQuery.mock.calls[0]?.[1]).toEqual(['idle', 'completed', 's-1', 'tok-1'])
-  })
-
-  it('releases without a token only for an administrative stop', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
-    await releaseTurnLease('s-1', 'stopped_by_user', null)
-
-    expect(sqlOf()).not.toContain('turn_lease_token = $4')
-    expect(mockQuery.mock.calls[0]?.[1]).toEqual(['idle', 'stopped_by_user', 's-1'])
-  })
-
-  it('retains a terminal failure for reconnect and reopening without blocking a later send', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
-    await releaseTurnLease('s-1', 'failed', 'tok-1')
-    expect(mockQuery.mock.calls[0]?.[1]).toEqual(['failed', 'failed', 's-1', 'tok-1'])
-    expect(sqlOf()).toContain('turn_lease_token = $4')
-  })
-
-  it('rests an abnormal ending at timeout, keeping the debugging signal', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
-    await releaseTurnLease('s-1', 'stalled_reclaimed', null)
-
-    // 'timeout' blocks nothing (only 'running' does) but records that this
-    // turn did not end the way it was supposed to.
-    expect(mockQuery.mock.calls[0]?.[1]?.[0]).toBe('timeout')
-  })
-
-  it('a user-chosen stop rests at idle, because nothing went wrong', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
-    await releaseTurnLease('s-1', 'stopped_by_user', null)
-
-    expect(mockQuery.mock.calls[0]?.[1]?.[0]).toBe('idle')
-  })
-
-  it('requestTurnCancel only marks a session that is actually running', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
-
-    await expect(requestTurnCancel('s-1')).resolves.toBe(false)
-    expect(sqlOf()).toContain("status = 'running'")
-  })
-})
-
-describe('[COMP:api/turn-lease] admission-time proof of life', () => {
-  it('isTurnLeaseLive is true only for running + token + FRESH heartbeat (never last_active_at)', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }], rowCount: 1 } as never)
-    expect(await isTurnLeaseLive('s1')).toBe(true)
-    const sql = sqlOf()
-    expect(sql).toContain("status = 'running'")
-    expect(sql).toContain('turn_lease_token IS NOT NULL')
-    expect(sql).toContain('turn_heartbeat_at >= now()')
-    // A pre-424 row (NULL heartbeat) must NOT read as live - no COALESCE onto
-    // last_active_at here, unlike the reclaim predicates.
-    expect(sql).not.toContain('last_active_at')
-    expect(mockQuery.mock.calls[0]?.[1]).toEqual(['s1', String(TURN_LEASE_STALE_AFTER_MS)])
-  })
-
-  it('a stale or absent lease is not live, so the caller reclaims and proceeds', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
-    expect(await isTurnLeaseLive('s1')).toBe(false)
-  })
+/** Owner-result decoding and token fencing; real locks/staleness use the native suite. [COMP:api/turn-lease] */
+import {beforeEach,describe,expect,it,vi} from 'vitest'
+vi.mock('../client.js',()=>({query:vi.fn()}))
+import {query} from '../client.js'
+import {claimTurnLease,claimTurnLeaseOutcome,captureTurnCancellation,touchTurnLease,releaseTurnLease,releaseTurnOutcome,
+ reclaimStaleTurnOutcome,sweepStuckSessions,TURN_LEASE_STALE_AFTER_MS,TURN_HEARTBEAT_INTERVAL_MS} from '../sessions.js'
+const token='10000000-0000-4000-8000-000000000001',turnId='a'.repeat(64),oldId='b'.repeat(64)
+const mock=vi.mocked(query)
+let answers:unknown[],candidates:unknown[]
+beforeEach(()=>{answers=[];candidates=[];mock.mockReset();mock.mockImplementation(async(sql)=>{
+ if(String(sql).includes('native_session_turn_transition(')||String(sql).includes('native_session_release_turn('))return{rows:[{value:answers.shift()??null}]} as never
+ if(String(sql).includes('LIMIT 100'))return{rows:candidates} as never
+ return{rows:[]} as never
+})})
+describe('[COMP:api/turn-lease] canonical owner protocol',()=>{
+ it('retains private token compatibility while reporting the original recovered owner',async()=>{
+  const recovered={turnId:oldId,reason:'publication_recovered'},observer=vi.fn()
+  answers.push({state:'claimed',token,turnId,recovered})
+  expect(await claimTurnLease('session','assistant',null,observer)).toBe(token)
+  expect(observer).toHaveBeenCalledWith(recovered)
+  expect(TURN_LEASE_STALE_AFTER_MS).toBeGreaterThanOrEqual(3*TURN_HEARTBEAT_INTERVAL_MS)
+ })
+ it('passes answering assistant and original request start to the single owner',async()=>{
+  const started=new Date('2026-01-01T00:00:00Z');answers.push({state:'claimed',token,turnId,recovered:null})
+  expect(await claimTurnLeaseOutcome('session','assistant',started)).toEqual({token,turnId})
+  expect(mock.mock.calls[0][1]).toEqual(['session','claim','assistant',started,String(TURN_LEASE_STALE_AFTER_MS),null,null,false])
+ })
+ it('distinguishes busy/absent from malformed or unavailable owner results',async()=>{
+  answers.push({state:'busy'},null,{state:'claimed',token,turnId:'invalid',recovered:null})
+  expect(await claimTurnLeaseOutcome('session')).toBeNull();expect(await claimTurnLeaseOutcome('session')).toBeNull()
+  await expect(claimTurnLeaseOutcome('session')).rejects.toThrow()
+ })
+ it('captures expected public identity as CAS while keeping the token private to the host',async()=>{
+  answers.push({state:'cancel_requested',token,turnId,stale:false})
+  expect(await captureTurnCancellation('session',turnId)).toEqual({state:'cancel_requested',token,turnId,stale:false})
+  expect(mock.mock.calls[0][1]).toEqual(['session','cancel',null,null,String(TURN_LEASE_STALE_AFTER_MS),null,turnId,false])
+ })
+ it('distinguishes generic omission from an explicit tokenless owner expectation',async()=>{
+  answers.push({state:'superseded'},{state:'cancel_requested',token,turnId,stale:false})
+  expect(await captureTurnCancellation('session',null)).toEqual({state:'superseded'})
+  expect(await captureTurnCancellation('session')).toMatchObject({state:'cancel_requested',token})
+  expect(mock.mock.calls.filter(call=>String(call[0]).includes('native_session_turn_transition(')).map(call=>(call[1] as unknown[]).slice(5))).toEqual([[null,null,true],[null,null,false]])
+ })
+ it('uses the actual Stop result when a live holder requested completed',async()=>{
+  answers.push({turnId,reason:'stopped_by_user'})
+  expect(await releaseTurnOutcome('session','completed',token)).toEqual({turnId,reason:'stopped_by_user'})
+  expect(mock.mock.calls[0][1]).toEqual(['session',token,'completed'])
+ })
+ it('rejects unfenced administrative release without executing SQL',async()=>{
+  await expect(releaseTurnLease('session','stopped_by_user',null as unknown as string)).rejects.toThrow()
+  expect(mock).not.toHaveBeenCalled()
+ })
+ it('does not allow the host to request a manufactured recovered outcome',async()=>{
+  await expect(releaseTurnLease('session','publication_recovered',token)).rejects.toThrow()
+  expect(mock).not.toHaveBeenCalled()
+ })
+ it('preserves a classifier unavailable failure instead of returning not-running',async()=>{
+  mock.mockRejectedValueOnce(Object.assign(new Error('terminal_control_unavailable'),{code:'55000'}))
+  await expect(reclaimStaleTurnOutcome('session')).rejects.toThrow('terminal_control_unavailable')
+ })
+ it('bounds sweep candidates and fences each original token, including NULL legacy identity',async()=>{
+  candidates=[{id:'first',token,mode:null,userId:'user',visibility:'workspace',channelType:'web',anchorKind:'none'},
+   {id:'legacy',token:null,mode:null,userId:'user',visibility:'workspace',channelType:'web',anchorKind:'none'}]
+  answers.push({state:'recovered',recovered:{turnId,reason:'publication_recovered'}},{state:'busy'})
+  const rows=await sweepStuckSessions(90000)
+  expect(rows).toEqual([{id:'first',mode:null,userId:'user',visibility:'workspace',channelType:'web',anchorKind:'none',turnId,reason:'publication_recovered'}])
+  const transitions=mock.mock.calls.filter(call=>String(call[0]).includes('native_session_turn_transition('))
+  expect(transitions.map(call=>(call[1] as unknown[]).slice(5))).toEqual([[token,null,true],[null,null,true]])
+  expect(JSON.stringify(rows)).not.toContain(token)
+ })
+ it.each([null,new Date()])('heartbeats report cancellation without changing request start: %s',async cancel=>{
+  mock.mockResolvedValueOnce({rows:[{cancel_requested_at:cancel}]} as never)
+  expect(await touchTurnLease('session',token)).toEqual({held:true,cancelRequested:cancel!==null})
+  expect(String(mock.mock.calls[0][0])).not.toContain('turn_started_at')
+ })
+ it('a missing heartbeat row reports ownership loss',async()=>{
+  expect(await touchTurnLease('session',token)).toEqual({held:false,cancelRequested:false})
+ })
 })

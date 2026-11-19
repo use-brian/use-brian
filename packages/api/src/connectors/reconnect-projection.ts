@@ -2,7 +2,7 @@ import type { Pool } from 'pg'
 import { admitWorkspaceResource } from '../workspace-access/resource-admission.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { readAdmissionPolicy } from '../workspace-access/admission-policy-read.js'
-import { ConnectorSetupError } from './setup-service.js'
+import { ConnectorSetupError, requireConnectorSetupOwner } from './setup-service.js'
 import { ConnectorSetupLockRetry, lockConnectorSetupWorkspaces } from './setup-locks.js'
 
 type Tier = 'public' | 'internal' | 'confidential'
@@ -22,7 +22,8 @@ export async function connectorReconnectProjection(options: { pool: Pool; suppor
     const c = await options.pool.connect()
     try {
       await c.query('BEGIN')
-      await c.query("SELECT set_config('app.system_bypass','true',true),set_config('app.current_user_id',$1,true)", [actorId])
+      await requireConnectorSetupOwner(c)
+      await c.query("SELECT set_config('app.current_user_id',$1,true)", [actorId])
       await lockConnectorSetupWorkspaces(c, workspaceId, instanceId)
       const session = (await c.query<{ expires_at: Date }>(`SELECT s.expires_at FROM auth_sessions s JOIN users u ON u.id=s.user_id
         WHERE s.id=$1 AND s.user_id=$2 AND s.auth_version=u.auth_version

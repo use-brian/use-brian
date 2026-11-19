@@ -3,8 +3,8 @@ import { WorkspaceModuleError } from '@use-brian/shared'
 import { createAssociationTools } from '../tools.js'
 import { SiteContentCollectionSchema } from '../site-content.js'
 import type { AssociationServicePort } from '../operations.js'
-import type { Tool, ToolContext } from '../../tools/types.js'
-import { filterToolsByCapabilities } from '../../tools/capability-gate.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { filterToolsByCapabilities } from '@use-brian/agent-runtime/tools/capability-gate.js'
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
 const capabilities = ['association', 'home_app:association:read', 'home_app:association:write', 'crm', 'home_app:crm:read', 'home_app:crm:write']

@@ -9,11 +9,11 @@
  */
 import type {
   BrowserSkill,
-  BrowserSkillContract,
   BrowserSkillRecordingStep,
   BrowserSkillStore,
   CreateBrowserSkillParams,
-} from '@use-brian/core'
+} from '@use-brian/core/sandbox/browser-skills.js'
+import type { BrowserSkillContract } from '@use-brian/core/sandbox/effect-contract.js'
 import { query } from './client.js'
 
 type Row = {

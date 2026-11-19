@@ -29,7 +29,7 @@ export function newFeedChatTurn(now = Date.now()): FeedChatTurn {
     tools: [], workers: {}, toolStarts: {}, startedAt: now, sequence: 0,
     researchPhase: null, citations: [], fileAttachments: [], documents: [] };
 }
-export function feedEventPayload(data: unknown): Record<string, unknown> {
+function feedEventPayload(data: unknown): Record<string, unknown> {
   return data && typeof data === "object" ? data as Record<string, unknown> : {};
 }
 const str = (value: unknown): string => typeof value === "string" ? value : "";

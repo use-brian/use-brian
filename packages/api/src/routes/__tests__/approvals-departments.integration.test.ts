@@ -2,10 +2,14 @@ import { randomUUID } from 'node:crypto'
 import express from 'express'
 import request from 'supertest'
 import { afterAll, describe, expect, it } from 'vitest'
-import { getAppPool, getPool, query } from '../../db/client.js'
+import { getAppPool, getPool, query, runWithAgentClearance } from '../../db/client.js'
 import { approvalsRoutes } from '../approvals.js'
 import { createPendingApprovalsStore, readBrowserSendApprovalStatus } from '../../db/pending-approvals-store.js'
+import { authSessionStore } from '../../db/auth-session-store.js'
+import { initializeConversationVisibility } from '../../db/conversation-visibility.js'
+import { createPersonalWebSession } from '../../db/sessions.js'
 import { createWorkspaceStore } from '../../db/workspace-store.js'
+import { persistentContextFixture } from '../../application-platform/__tests__/fixtures/persistent-context.js'
 import type { ApprovalBridgeDeps } from '../../workflow/approval.js'
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -94,5 +98,45 @@ describe('[COMP:api/pending-approvals-store] real departmental approval reads', 
     expect(await readBrowserSendApprovalStatus(store,browserApproval.id)).toBe('unavailable')
     const independent=await store.createBrowserSkillSend({workspaceId:workspace,approverUserId:viewer,payload:{description:'Independent browser action'}})
     expect(await store.getById(viewer,independent.id)).not.toBeNull()
+  })
+
+  it('finds only the current readable blocking question and restores the borrowed actor on success and failure', async () => {
+    await initializeConversationVisibility()
+    const f = await persistentContextFixture('internal')
+    try {
+      const device = (await authSessionStore.create(f.ownerId, { deviceLabel: 'Fictional question device', userAgent: null, ipAddress: null }))!
+      const makeSession = () => createPersonalWebSession({ assistantId: f.assistantId, userId: f.ownerId,
+        workspaceId: f.workspaceId, channelType: 'web', channelId: randomUUID(), appOrigin: 'chat' },
+      { actorUserId: f.ownerId, authSessionId: device.id, authVersion: device.authVersion })
+      const target = await makeSession()
+      const neighbor = await makeSession()
+      const store = createPendingApprovalsStore()
+      const parent = { workspaceId: f.workspaceId, originatingAssistantId: f.assistantId,
+        approverUserId: f.ownerId, deliveryChannelType: 'web' } as const
+      const question = await store.createQuestion({ ...parent, blockingSessionId: target.id,
+        question: 'Choose the fictional destination?', options: ['First', 'Second'], toolUseId: 'test-question', allowCustom: false })
+      await store.createQuestion({ ...parent, blockingSessionId: neighbor.id,
+        question: 'This belongs to another session.', toolUseId: 'test-neighbor' })
+      await store.createToolInvocation({ ...parent, blockingSessionId: target.id, toolName: 'fictionalRead',
+        arguments: {}, approvalPayload: {} })
+      const state = async () => (await getAppPool().query(`SELECT pg_backend_pid() AS pid,
+        current_setting('app.current_user_id',true) AS actor,
+        nullif(current_setting('app.agent_clearance',true),'') AS clearance`)).rows[0]
+      const before = await state()
+      expect(before.actor).not.toBe(f.ownerId)
+      const readTarget = (userId: string) => runWithAgentClearance('internal', () =>
+        store.findBlockingQuestion(userId, f.workspaceId, target.id))
+      expect(await readTarget(f.ownerId)).toMatchObject({
+        id: question.id, blockingSessionId: target.id, kind: 'question',
+        approvalPayload: { question: question.approvalPayload.question, options: ['First', 'Second'], allowCustom: false },
+      })
+      expect(await state()).toEqual(before)
+      expect(await store.findBlockingQuestion(f.secondId, f.workspaceId, target.id)).toBeNull()
+      expect(await store.findBlockingQuestion(f.ownerId, randomUUID(), target.id)).toBeNull()
+      await expect(readTarget('malformed-fixture-actor')).rejects.toMatchObject({ code: '22P02' })
+      expect(await state()).toEqual(before)
+      await store.recordAnswer(question.id, 'First', f.ownerId)
+      expect(await store.findBlockingQuestion(f.ownerId, f.workspaceId, target.id)).toBeNull()
+    } finally { await f.cleanup() }
   })
 })

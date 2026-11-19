@@ -18,7 +18,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
-import { bindScopeSource } from '../../security/source-evidence.js'
+import { bindScopeSource } from '@use-brian/agent-runtime/security/source-evidence.js'
 import {
   runSkillDecay,
   evaluateDemoteRule,

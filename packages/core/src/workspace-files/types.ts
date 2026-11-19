@@ -32,7 +32,7 @@
  * `packages/api/src/db/workspace-files-store.ts`.
  */
 
-import type { AccessContext } from '../security/access-context.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 
 export const FILE_SENSITIVITIES = ['public', 'internal', 'confidential'] as const
 export type FileSensitivity = (typeof FILE_SENSITIVITIES)[number]

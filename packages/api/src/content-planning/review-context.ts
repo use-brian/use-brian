@@ -1,8 +1,9 @@
 import { readFeedSelectedSources } from './source-authority.js'
 /** Frozen, authorized source manifests for all five Feed Review checks. [COMP:feed/draft-review] */
-import { maxSensitivity, type AccessContext } from '@use-brian/core'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import { maxSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { FEED_REVIEW_DIMENSIONS, FEED_EDITORIAL_LIMITS, FEED_LEARNING_LIMITS, type FeedReviewContext, type FeedReviewSource, type FeedReviewCoverage, type FeedReviewDimension, type FeedLearningScope } from '@use-brian/shared'
-import { projectFeed, walkFeed } from '@use-brian/doc-model'
+import { projectFeed, walkFeed } from '@use-brian/doc-model/feed.js'
 import { type FeedActor, type FeedScope, type FeedReader, type StructuredFeedContent, readFeedCopy, requireFeedComposition, FeedCollaborationError, withFeedTransaction } from '../db/feed-collaboration-store.js'
 import { query } from '../db/client.js'
 import { feedEditorialHash } from '../db/feed-editorial-runs-store.js'

@@ -1,6 +1,9 @@
 /** Atomic creation from a native personal web chat. [COMP:api/office-chat-generation] */
 import { createHash } from 'node:crypto'
-import { AuthoritySourceSchema, pinAuthoringAuthority, type ToolContext, type OfficeToolPort } from '@use-brian/core'
+import type { OfficeToolPort } from '@use-brian/core/office/tools.js'
+import { pinAuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import { AuthoritySourceSchema } from '@use-brian/agent-runtime/security/authority-source.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { getAppPool, applyRLSGucs, rollbackAndRelease } from '../db/client.js'
 import { runWithAgentAccess } from '../db/agent-access-context.js'
 import { createOfficeArtifactStore, type OfficeDbQuery } from '../db/office-artifacts.js'

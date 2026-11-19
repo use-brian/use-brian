@@ -14,9 +14,9 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '../tools/types.js'
-import { toolTransport } from '../tools/capability-gate.js'
-import { toolFailure } from '../tools/tool-failure.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
+import { toolTransport } from '@use-brian/agent-runtime/tools/capability-gate.js'
+import { toolFailure } from '@use-brian/agent-runtime/tools/tool-failure.js'
 import type { CrmStore } from '../crm/types.js'
 import type { TaskStore } from '../tasks/types.js'
 import type { WorkflowRunStore } from '../workflow/types.js'

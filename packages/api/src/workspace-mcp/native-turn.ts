@@ -1,6 +1,6 @@
 /** Internal native chat transport; never an authenticated human request. [COMP:api/workspace-mcp] */
 import { z } from 'zod'
-import type { ToolContext } from '@use-brian/core'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import type { WorkspaceMcpConsent } from './consent.js'
 
 export type WorkspaceTurnInput = {

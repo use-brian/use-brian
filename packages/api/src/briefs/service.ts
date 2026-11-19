@@ -27,9 +27,9 @@ import {
   type BriefDirectionSection,
   type BriefLayout,
   type BriefOwnerKind,
-  type Ops,
-  type Page,
-} from '@use-brian/core'
+} from '@use-brian/core/doc/brief-types.js'
+import type { Ops } from '@use-brian/core/doc/page-types.js'
+import type { Page } from '@use-brian/core/views/blocks.js'
 import { query } from '../db/client.js'
 import { classifySession } from '../session-kind.js'
 import { withPagePlacement } from '../db/page-placement-admission.js'
@@ -59,7 +59,7 @@ import {
   type BriefRole,
 } from '../db/brief-store.js'
 import { hashCommandReviewIntent } from '../workspace-access/command-review.js'
-import { BRIEF_CONTEXT_SECTIONS, BRIEF_SECTION_LABELS, type BriefLocale } from '@use-brian/core'
+import { BRIEF_CONTEXT_SECTIONS, BRIEF_SECTION_LABELS, type BriefLocale } from '@use-brian/core/doc/brief-types.js'
 
 export type BriefActor = { userId: string; workspaceId: string; assistantId: string | null }
 export type BriefOwner = { kind: BriefOwnerKind; id: string }

@@ -86,6 +86,7 @@ export interface DesktopLinkNavigationState {
  * show focuses the existing host without opening a consent dialog. */
 export type DesktopBrowserControlMessage =
   | { type: "status" | "request-control" | "show" | "disconnect" | "cancel" }
+  | { type: "set-enabled"; enabled: boolean }
   | { type: "pair"; relayUrl: string; pairingToken: string; automatic?: boolean; expectedControlEpoch?: number }
   /** The Chat side pane's browser slot, CSS px in the app frame (chat-parity T7). */
   | { type: "pane-slot"; chatKey: string | null; rect: { x: number; y: number; width: number; height: number } | null }
@@ -114,7 +115,7 @@ export interface DesktopBridge {
   /** Show the main app account controls after session rejection, without starting OAuth. */
   showAccounts?: () => void;
   /** Pair resolves successfully only once the embedded browser relay is ready. */
-  browserControl?: (message: DesktopBrowserControlMessage) => Promise<{ ok: boolean; controlEpoch?: number; hasControl?: boolean; connected?: boolean; automaticBlocked?: boolean; browserProfileId?: string; workspaceId?: string }>;
+  browserControl?: (message: DesktopBrowserControlMessage) => Promise<{ ok: boolean; browserEnabled?: boolean; controlEpoch?: number; hasControl?: boolean; connected?: boolean; automaticBlocked?: boolean; browserProfileId?: string; workspaceId?: string }>;
   /** Host OS reported by Electron (`darwin`, `win32`, or `linux`). */
   platform?: string;
   /**

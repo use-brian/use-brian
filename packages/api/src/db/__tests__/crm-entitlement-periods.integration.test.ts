@@ -1,19 +1,18 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
-import { type CrmOperationsContext, type CrmOperationsCommand, CrmOperationsCommandSchema } from '@use-brian/core'
+import { type CrmOperationsContext, type CrmOperationsCommand, CrmOperationsCommandSchema } from '@use-brian/core/crm/operations-types.js'
 import { getPool, getAppPool } from '../client.js'
 import { runWithAgentAccess } from '../agent-access-context.js'
 import { loadDepartmentSnapshot, resolveDepartmentReadGrant } from '../../context-scope/department-resolver.js'
 import { createCrmOperationsService } from '../../crm-operations/service.js'
 import { createDbCrmOperationsStore } from '../crm-operations-store.js'
+import { createDbCrmIntakeReadStore } from '../crm-intake-store.js'
 import { createCrmIntegrationStore } from '../crm-integration-store.js'
 import { crmIntegrationContext } from '../../routes/crm-integration.js'
-import { createAssociationStore } from '../association-store.js'
-import { MembershipInputSchema } from '../../association/domain.js'
 import { _resetCoalescerForTests } from '../../brain-stream/notify.js'
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
-const pool = getPool(), appPool = getAppPool(), service = createCrmOperationsService(createDbCrmOperationsStore()), legacy = createAssociationStore()
+const pool = getPool(), appPool = getAppPool(), service = createCrmOperationsService(createDbCrmOperationsStore())
 type Grant = Extract<CrmOperationsCommand, { kind: 'grant_entitlement' }>
 async function fixture() {
   const workspaceId = randomUUID(), userId = randomUUID(), contactId = randomUUID(), planId = randomUUID()
@@ -49,10 +48,10 @@ describe('[COMP:crm/entitlement-periods] Actual provider renewal lineage', () =>
   it('extends active grants in place and preserves cancel-at-period-end access separately from immediate cancellation', async () => {
     const f = await fixture(), id = String((await f.grant()).record.id)
     await f.execute(f.context, { kind: 'update_entitlement', entitlementId: id, endsAt: '2100-01-01T00:00:00Z', renewalMode: 'none' })
-    expect((await legacy.listMemberships(f.workspaceId, f.input.contactId, { activeOnly: true }))).toMatchObject([{ id, renewalMode: 'none', isEffective: true }])
+    expect((await createDbCrmIntakeReadStore().listEntitlements(f.workspaceId, { contactId: f.input.contactId, activeOnly: true }, { kind: 'user', userId: f.userId })).entitlements).toMatchObject([{ id, renewalMode: 'none', isEffective: true }])
     await expect(f.grant({ providerPeriodId: 'period-2', predecessorId: id, startsAt: '2001-01-01T00:00:00Z', idempotencyKey: randomUUID() })).rejects.toMatchObject({ code: 'conflict', details: { reason: 'provider_period_predecessor_invalid' } })
     await f.execute(f.context, { kind: 'update_entitlement', entitlementId: id, status: 'cancelled' })
-    expect(await legacy.listMemberships(f.workspaceId, f.input.contactId, { activeOnly: true })).toEqual([])
+    expect((await createDbCrmIntakeReadStore().listEntitlements(f.workspaceId, { contactId: f.input.contactId, activeOnly: true }, { kind: 'user', userId: f.userId })).entitlements).toEqual([])
     await expect(f.execute(f.context, { kind: 'update_entitlement', entitlementId: id, status: 'active' })).rejects.toMatchObject({ code: 'conflict' })
   })
   it('renews a terminal period into one successor under concurrent delivery without reviving the predecessor', async () => {
@@ -77,24 +76,8 @@ describe('[COMP:crm/entitlement-periods] Actual provider renewal lineage', () =>
     await expect(f.grant({}, { ...f.context, actor: { kind: 'provider', provider: 'foreign', eventId: 'fixture-event' } })).rejects.toMatchObject({ code: 'not_authorized' })
     const id = String((await f.grant()).record.id)
     await expect(f.execute(human, { kind: 'update_entitlement', entitlementId: id, status: 'cancelled' })).rejects.toMatchObject({ code: 'not_authorized' })
-    await expect(legacy.updateMembership(f.workspaceId, id, { status: 'cancelled' }, { credentialKind: 'user', credentialId: f.userId })).rejects.toMatchObject({ code: 'not_authorized' })
     const manual = await f.grant({ provider: undefined, providerEntitlementId: undefined, providerPeriodId: undefined, idempotencyKey: randomUUID() }, human)
     expect(manual.record.provider).toBe(null)
-  })
-  it('shares replay and lineage with the direct compatibility membership store and keeps legacy rows valid', async () => {
-    const f = await fixture(), actor = f.actor
-    const input = MembershipInputSchema.parse({ ...f.input, providerMembershipId: f.input.providerEntitlementId })
-    const first = await f.withAuthority(() => legacy.createMembership(f.workspaceId, input, actor))
-    const replay = await f.grant({ idempotencyKey: randomUUID() })
-    expect(replay).toMatchObject({ duplicate: true, record: { id: first.record.id } })
-    await f.withAuthority(() => legacy.updateMembership(f.workspaceId, String(first.record.id), { status: 'expired' }, actor))
-    await expect(f.withAuthority(() => legacy.updateMembership(f.workspaceId, String(first.record.id), { status: 'active' }, actor))).rejects.toMatchObject({ code: 'invalid_transition' })
-    const next = await f.withAuthority(() => legacy.createMembership(f.workspaceId, { ...input, idempotencyKey: randomUUID(), providerPeriodId: 'period-2', predecessorId: String(first.record.id), startsAt: '2001-01-01T00:00:00Z' }, actor))
-    expect(next.record).toMatchObject({ predecessorId: first.record.id, providerPeriodId: 'period-2' })
-    const g = await fixture(), old = MembershipInputSchema.parse({ ...g.input, providerPeriodId: undefined, providerMembershipId: 'legacy-subscription' })
-    const legacyGrant = await g.withAuthority(() => legacy.createMembership(g.workspaceId, old, g.actor))
-    expect((await g.withAuthority(() => legacy.createMembership(g.workspaceId, old, g.actor))).created).toBe(false)
-    expect(legacyGrant.record.providerPeriodId).toBe(null)
   })
   it('rolls back a successor and its evidence if audit fails, and retries the same period safely', async () => {
     const f = await fixture()
@@ -105,21 +88,18 @@ describe('[COMP:crm/entitlement-periods] Actual provider renewal lineage', () =>
     } finally { await pool.query('ALTER TABLE association_audit_log DROP CONSTRAINT fixture_refuse_period_audit') }
     expect((await f.grant()).created).toBe(true)
   })
-  it('requires both current plan and provider scopes and rejects a revoked integration on replay', async () => {
+  it('keeps current plan authority and revoked-key checks for manual entitlement grants', async () => {
     const f = await fixture(), keys = createCrmIntegrationStore()
-    const narrow = await keys.create(f.workspaceId, f.userId, { label: 'Period fixture', expiresAt: '2099-01-01T00:00:00Z',
+    const key = await keys.create(f.workspaceId, f.userId, { label: 'Period fixture', expiresAt: '2099-01-01T00:00:00Z',
       grants: [{ operation: 'crm.entitlements.write', selectors: { planIds: [f.input.planId] } }] })
-    const narrowContext = crmIntegrationContext((await keys.authenticate(narrow.oneTimeSecret))!)
-    await expect(f.grant({}, narrowContext)).rejects.toMatchObject({ code: 'integration_scope_denied' })
-    const granted = await keys.create(f.workspaceId, f.userId, { label: 'Period backend', expiresAt: '2099-01-01T00:00:00Z',
-      grants: [{ operation: 'crm.entitlements.write', selectors: { planIds: [f.input.planId] } },
-        { operation: 'association.provider_events.write', selectors: { providerKeys: ['fixture'] } }] })
-    const principal = (await keys.authenticate(granted.oneTimeSecret))!, context = crmIntegrationContext(principal)
-    const first = await f.grant({}, context)
-    await expect(f.grant({ provider: 'foreign', providerEntitlementId: 'other', idempotencyKey: randomUUID() }, context)).rejects.toMatchObject({ code: 'integration_scope_denied' })
+    const principal = (await keys.authenticate(key.oneTimeSecret))!, context = crmIntegrationContext(principal)
+    // Retired Association provider authority cannot be inferred from a CRM grant.
+    await expect(f.grant({}, context)).rejects.toMatchObject({ code: 'integration_scope_denied' })
+    const manual = { provider: undefined, providerEntitlementId: undefined, providerPeriodId: undefined }
+    expect((await f.grant(manual, context)).created).toBe(true)
+    await expect(f.grant({ ...manual, planId: randomUUID(), idempotencyKey: randomUUID() }, context)).rejects.toMatchObject({ code: 'integration_scope_denied' })
     await keys.revoke(f.workspaceId, f.userId, principal.credentialId)
-    await expect(f.grant({}, context)).rejects.toMatchObject({ code: 'credential_revoked' })
-    expect(first.created).toBe(true)
+    await expect(f.grant(manual, context)).rejects.toMatchObject({ code: 'credential_revoked' })
   })
   it('keeps microsecond predecessor ordering and allows atomic erasure of a complete same-subject chain', async () => {
     const f = await fixture(), first = await f.grant({ status: 'cancelled', startsAt: '2000-01-01T00:00:00.000001Z' })

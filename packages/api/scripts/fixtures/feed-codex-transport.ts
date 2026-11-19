@@ -4,7 +4,8 @@ import { once } from 'node:events'
 import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createCodexImageProvider, resolvePinnedCodexCommand, startCodexAppServer } from '@use-brian/core'
+import { createCodexImageProvider } from '@use-brian/agent-runtime/providers/codex-app-server/image.js'
+import { resolvePinnedCodexCommand, startCodexAppServer } from '@use-brian/agent-runtime/providers/codex-app-server/process.js'
 export async function createFeedCodexFixture(onImage: () => void) {
   if (process.env.NODE_ENV !== 'test' || new URL(process.env.DATABASE_URL!).pathname !== '/feed_draft_collaboration_acceptance') throw new Error('Isolated fixture required')
   const home = await mkdtemp(join(tmpdir(), 'feed-codex-fixture-'))

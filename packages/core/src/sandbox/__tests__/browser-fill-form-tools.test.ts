@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createComputerTools } from '../tools.js'
 import type { BrowserFormField, BrowserProvider } from '../types.js'
-import type { Tool, ToolContext } from '../../tools/types.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const context: ToolContext = {
   userId: 'user', assistantId: 'assistant', sessionId: 'session', appId: 'app',

@@ -13,7 +13,8 @@
 
 import { readFileSync } from 'node:fs'
 import { describe, it, expect } from 'vitest'
-import { createTurnOutputCollector, type ContentBlock } from '@use-brian/core'
+import { createTurnOutputCollector } from '@use-brian/agent-runtime/engine/turn-output.js'
+import type { ContentBlock } from '@use-brian/agent-runtime/providers/types.js'
 import { EMPTY_DELIVERY_NOTICE } from '../channel-pipeline.js'
 
 const pipelineSource = readFileSync(new URL('../channel-pipeline.ts', import.meta.url), 'utf8')

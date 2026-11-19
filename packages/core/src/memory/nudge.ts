@@ -9,7 +9,7 @@
  */
 
 import { decisionUsageModelId } from '../decisions/usage.js'
-import type { ContentBlock, TokenUsage } from '../providers/types.js'
+import type { ContentBlock, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
 import type { MemoryStore } from './types.js'
 import type {
   DecisionCompletionRoute,
@@ -45,11 +45,7 @@ type RecalledMemory = {
   summary: string
 }
 
-/**
- * Extract getMemory results from buffered turns, judge utility via Standard-tier,
- * and track outcomes. Fire-and-forget from the caller.
- */
-export async function runMemoryNudge(params: {
+type MemoryNudgeParams = {
   turns: NudgeTurn[]
   callModel: (
     prompt: string,
@@ -60,13 +56,22 @@ export async function runMemoryNudge(params: {
   llm?: DecisionCompletionRoute
   workspaceId?: string
   runId?: string
-}): Promise<NudgeResult> {
+  /** The original execution supplies its authority for model and recall effects. */
+  execute?: (operation: () => Promise<NudgeResult>) => Promise<NudgeResult>
+}
+
+/** Extract eligible recalled Memories before acquiring authority for effects. */
+export async function runMemoryNudge(params: MemoryNudgeParams): Promise<NudgeResult> {
   const recalled = extractRecalledMemories(params.turns)
   if (recalled.length === 0) return { judged: 0, useful: 0, usage: null, model: null }
 
   const responseText = extractResponseText(params.turns)
   if (!responseText.trim()) return { judged: 0, useful: 0, usage: null, model: null }
+  const judge = () => judgeMemoryNudge(params,recalled,responseText)
+  return params.execute ? params.execute(judge) : judge()
+}
 
+async function judgeMemoryNudge(params: MemoryNudgeParams, recalled: RecalledMemory[], responseText: string): Promise<NudgeResult> {
   const decision = params.decisionRuntime
       ? (await params.decisionRuntime.run<MemoryDecision>({
         ...(params.workspaceId ? { workspaceId: params.workspaceId } : {}),

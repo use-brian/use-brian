@@ -10,7 +10,7 @@
 import { z } from 'zod'
 import { IMAGE_ICON_RE } from '@use-brian/shared'
 import { TASK_STATUSES } from '../tasks/types.js'
-import { DEAL_STAGES } from '../crm/types.js'
+import { DEAL_STAGES } from '../application-platform/record-values.js'
 import { WORKFLOW_RUN_STATUSES } from '../workflow/types.js'
 import {
   COMPANY_COLUMN_IDS,

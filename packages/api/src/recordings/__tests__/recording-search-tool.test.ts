@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import type { RetrievalActor, ToolContext } from '@use-brian/core'
+import type { RetrievalActor } from '@use-brian/core/retrieval/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 // Mock the retrieval store so the tool's routing + closure-binding can be
 // asserted with no DB. vi.hoisted keeps the mock fns referenceable from the

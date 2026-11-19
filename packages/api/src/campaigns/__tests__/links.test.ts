@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { CampaignError } from '@use-brian/core'
+import { CampaignError } from '@use-brian/core/campaigns/types.js'
 import {
   attributionQueryKeys,
   buildCampaignDestination,

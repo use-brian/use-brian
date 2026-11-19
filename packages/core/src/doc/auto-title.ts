@@ -23,7 +23,7 @@
  * [COMP:doc/auto-title]
  */
 
-import type { LLMProvider, Message, TokenUsage } from '../providers/types.js'
+import type { LLMProvider, Message, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
 
 /**
  * Minimum body plaintext length (chars) before the **human** edit trigger

@@ -32,5 +32,16 @@
     "@types/node": "^20.19.39",
     "typescript": "^5.7",
     "vitest": "^3"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./feed.js": {
+      "types": "./dist/feed/index.d.ts",
+      "default": "./dist/feed/index.js"
+    },
+    "./package.json": "./package.json"
   }
 }

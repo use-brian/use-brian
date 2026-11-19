@@ -33,7 +33,7 @@ import {
   validateRulePredicate,
   type TaskRuleEffect,
   type TaskRulePredicate,
-} from '@use-brian/core'
+} from '@use-brian/core/tasks/admission.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import { createTask } from '../db/tasks.js'
 import {

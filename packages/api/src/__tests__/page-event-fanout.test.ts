@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import type { DispatchEvent, PageLifecycleEvent, WorkflowEventDispatcher } from '@use-brian/core'
+import type { DispatchEvent, WorkflowEventDispatcher } from '@use-brian/core/workflow/event-trigger.js'
+import type { PageLifecycleEvent } from '@use-brian/core/workflow/page-event-trigger.js'
 import { setPageEventDispatcher, publishPageLifecycle } from '../page-event-fanout.js'
 
 const EVENT: PageLifecycleEvent = {

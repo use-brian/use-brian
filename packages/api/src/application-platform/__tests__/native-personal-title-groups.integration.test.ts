@@ -2,7 +2,9 @@ import {randomUUID} from 'node:crypto'
 import {afterAll,afterEach,beforeAll,describe,expect,it,vi} from 'vitest'
 import type {PoolClient} from 'pg'
 import pg from 'pg'
-import {ContextScopeAccumulator,boundScopeSources,type ScopeSource} from '@use-brian/core'
+import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
+import type {ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {applyRLSGucs,getAppPool,getPool,rollbackAndRelease,runWithAgentAccess} from '../../db/client.js'
 import {findAssistantById} from '../../db/users.js'
 import {authSessionStore} from '../../db/auth-session-store.js'
@@ -13,7 +15,7 @@ import * as titles from '../../db/session-title-store.js'
 import {resolveSessionTitleAuthority,sessionTitleProjections} from '../../routes/session-title-authority.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
 import * as executionContexts from '../../context-scope/execution-context.js'
-import * as queries from '../../db/session-query-reader.js'
+import * as queries from '../../db/conversation-store.js'
 import {readValidatedNativeTitleGroup} from '../../context-scope/caller-evidence.js'
 import {readNativeTitleGroupFrame,readRetainedContextFrame} from '../../db/session-context-revisions.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
@@ -90,7 +92,7 @@ describe.sequential('[COMP:api/application-persistence] current personal title g
    const value=await group(client);expect(value).toHaveLength(heads.length)
    for(const [index,row]of value.entries()){
     expect(row).toMatchObject({sessionId:heads[index].sessionId,revisionId:heads[index].revisionId,content:{title:heads[index].title,manual:false}})
-    const original=(await client.query('SELECT read_native_empty_query_session_title_revision($1,$2,$3) AS value',[f.workspaceId,heads[index].sessionId,heads[index].revisionId])).rows[0].value
+    const original=(await client.query('SELECT read_session_title_revision($1,$2,$3) AS value',[f.workspaceId,heads[index].sessionId,heads[index].revisionId])).rows[0].value
     expect(row.content).toEqual(original)
    }
   })
@@ -111,7 +113,7 @@ describe.sequential('[COMP:api/application-persistence] current personal title g
   expect(actual.value).toEqual(expected)
   expect(actual.sql.filter(sql=>sql.includes('SELECT read_native_personal_title_group_evidence('))).toHaveLength(1)
   expect(actual.sql.filter(sql=>sql.includes('SELECT read_native_personal_title_group('))).toHaveLength(0)
-  expect(actual.sql.filter(sql=>sql.includes('SELECT read_native_file_session_evidence('))).toHaveLength(1)
+  expect(actual.sql.filter(sql=>sql.includes('SELECT capture_conversation_evidence('))).toHaveLength(1)
   for(const id of ids)expect(boundScopeSources(actual.value.get(id)!)).toEqual(boundScopeSources(expected.get(id)!))
  },90_000)
  it('retains the original caller scalar floor before invoking identity-only acquisition',async()=>{

@@ -121,21 +121,28 @@ describe.sequential('[COMP:api/application-legacy-review] retained pending recov
  beforeAll(async()=>{
   fixture=await createLocalFixture({env:cleanRuntimeEnvironment(process.env),runtimeRole:'app_user',beforeApplyFile:boundary,beforeApply:async({adminUrl,appUrl,env}:{adminUrl:string;appUrl:string;env:Record<string,string>})=>{
    callbackCount++;owner=pool(adminUrl,4);app=pool(appUrl,4)
-   await owner.query(`CREATE ROLE ${administrator} LOGIN PASSWORD '${password}' SUPERUSER NOINHERIT;
+   // Fixture-only roles are provisioned by the fixture's bootstrap role; the
+   // primary's ordinary owner has no CREATEROLE and is never elevated.
+   const {bootstrapRole}=await assertLocalFixture(env)
+   const bootstrapUrl=new URL(adminUrl);if(bootstrapRole)bootstrapUrl.username=bootstrapRole
+   const bootstrap=new pg.Client({connectionString:bootstrapUrl.href});await bootstrap.connect()
+   try{await bootstrap.query(`CREATE ROLE ${administrator} LOGIN PASSWORD '${password}' SUPERUSER NOINHERIT;
     CREATE ROLE ${observer} NOLOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT;
-    CREATE ROLE ${installer} LOGIN PASSWORD '${installerPassword}' NOSUPERUSER NOBYPASSRLS NOINHERIT NOCREATEROLE NOCREATEDB NOREPLICATION`)
+    CREATE ROLE ${installer} LOGIN PASSWORD '${installerPassword}' NOSUPERUSER NOBYPASSRLS NOINHERIT NOCREATEROLE NOCREATEDB NOREPLICATION`)}
+   finally{await bootstrap.end()}
    const setupUrl=new URL(adminUrl);setupUrl.username=administrator;setupUrl.password=password;setup=pool(setupUrl.href,2)
    try{
     await preparePending();beforeCatalog=await catalog();beforeData=await data()
     dumpFile=join(dirname(env.BRIAN_ASSURANCE_FIXTURE),'pending-upgrade.dump')
-    await runCommand('pg_dump',['--format=custom','--no-owner','--file',dumpFile],{env})
+    // The bootstrap role reads the fixture-only snapshot, so forced RLS on the owner cannot filter it.
+    await runCommand('pg_dump',['--format=custom','--no-owner','--file',dumpFile],{env:{...env,...(bootstrapRole?{PGUSER:bootstrapRole}:{})}})
    }catch(error){await close(app);appClosed=true;await close(owner);await close(setup);throw error}
   }})
   await assertLocalFixture(fixture.env)
-  // The maintained primary's immutable bootstrap role completes its normal run.
+  // The maintained primary's ordinary owner completes its normal run.
   // The real ordinary-owner proof uses its genuine pre8121 snapshot, never a
   // regrant or a forged pending review. Business IDs/hashes/data remain exact.
-  primaryIdentity=await roleIdentity(owner);expect(primaryIdentity.current_user).toBe('assurance_owner');expect(primaryIdentity.rolsuper).toBe(true)
+  primaryIdentity=await roleIdentity(owner);expect(primaryIdentity.current_user).toBe('assurance_owner');expect(primaryIdentity.rolsuper).toBe(false);expect(primaryIdentity.rolbypassrls).toBe(false)
   expect(await data()).toEqual(beforeData)
   const primaryCatalog=await catalog()
   for(let i=0;i<primaryCatalog.length;i++){

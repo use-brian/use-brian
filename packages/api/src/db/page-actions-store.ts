@@ -16,7 +16,7 @@
  * [COMP:api/page-actions-store]
  */
 
-import type { PageAction, PageActionSpec } from '@use-brian/core'
+import type { PageAction, PageActionSpec } from '@use-brian/core/doc/page-action-types.js'
 
 import { queryWithRLS } from './client.js'
 

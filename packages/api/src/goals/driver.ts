@@ -38,18 +38,17 @@
  *
  * [COMP:workflow/goal-seeker]
  */
+import type { ReadinessReason } from '@use-brian/core/goals/execution.js'
+import { processGoalIteration, type ActingLoopDeps } from '@use-brian/core/goals/loop.js'
 import {
   BUILTIN_GOAL_DEFAULT_BUDGET,
-  processGoalIteration,
-  type ActingLoopDeps,
-  type EventSubscription,
-  type DispatchEvent,
   type GoalDefaultBudget,
   type GoalRecord,
   type GoalStatus,
   type GoalStore,
-  type ReadinessReason,
-} from '@use-brian/core'
+} from '@use-brian/core/goals/types.js'
+import type { DispatchEvent } from '@use-brian/core/workflow/event-trigger.js'
+import type { EventSubscription } from '@use-brian/core/workflow/types.js'
 import { buildGoalResolvers, finishGoal, type GoalDeliver,type GoalTerminalCommit } from './writeback.js'
 import type { ExecutionLedger, IterationEvidence } from './execution-state.js'
 

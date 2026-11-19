@@ -106,7 +106,7 @@ export class ApplicationManagementService {
       links:{miniApps:`${base}/studio/mini-apps`,connectors:`${base}/studio/connectors`,programmaticAccess:`${base}/studio/programmatic-access`,access:`${base}/organization?section=access`}}
   }
 
-  async executeCommand(actorId:string,workspaceId:string,raw:unknown,delivery:{audience:'human'|'brian';assistantId?:string;execution?:import('@use-brian/core').ExecutionContext}={audience:'human'}):Promise<unknown> {
+  async executeCommand(actorId:string,workspaceId:string,raw:unknown,delivery:{audience:'human'|'brian';assistantId?:string;execution?:import('@use-brian/agent-runtime/security/execution-context.js').ExecutionContext}={audience:'human'}):Promise<unknown> {
     const parsed=applicationManagementCommandSchema.safeParse(raw)
     if(!parsed.success)throw new ApplicationPlatformError('invalid_value','The management command is invalid.')
     const command=parsed.data
@@ -182,7 +182,7 @@ export class ApplicationManagementService {
     return result
   }
 
-  private async attendedSetupExecution(actorId:string,workspaceId:string,delivery:{audience:'human'|'brian';assistantId?:string;execution?:import('@use-brian/core').ExecutionContext},assistantId?:string) {
+  private async attendedSetupExecution(actorId:string,workspaceId:string,delivery:{audience:'human'|'brian';assistantId?:string;execution?:import('@use-brian/agent-runtime/security/execution-context.js').ExecutionContext},assistantId?:string) {
     const execution=delivery.execution
     if(execution){
       if(execution.security.access.userId!==actorId||execution.security.access.workspaceId!==workspaceId

@@ -1,7 +1,11 @@
 /**
  * PostgreSQL adapter for temporary realtime thread targets.
  *
- * Tool writes/listing use queryWithRLS. The inbound lookup is a trusted
+ * Tool writes/listing use queryWithRLS. Each of set, list and remove also
+ * carries an explicit `workspace_members` predicate on the acting user, so a
+ * principal that is not a current member is refused on every pooled
+ * connection, whatever `app.system_bypass` holds there (8293 retired the
+ * default-true leg of this table's policy). The inbound lookup is a trusted
  * system read performed only after a channel route resolves the workspace and
  * assistant from its authenticated integration.
  *
@@ -11,7 +15,7 @@
 import type {
   RealtimeThreadTarget,
   RealtimeThreadTargetStore,
-} from '@use-brian/core'
+} from '@use-brian/core/ingest/realtime-thread-targets.js'
 import { query, queryWithRLS } from './client.js'
 
 type TargetRow = {
@@ -44,6 +48,10 @@ const TARGET_COLUMNS = `
   updated_at AS "updatedAt"
 `
 
+/** The acting user must be a current member of the target workspace (`$1`). */
+const actingMember = (userParam: string) =>
+  `EXISTS (SELECT 1 FROM workspace_members m WHERE m.workspace_id = $1 AND m.user_id = ${userParam})`
+
 function toTarget(row: TargetRow): RealtimeThreadTarget {
   return {
     ...row,
@@ -64,7 +72,8 @@ export function createRealtimeThreadTargetStore(): RealtimeThreadTargetStore {
            thread_ref, task_ids, context_text, expires_at, created_by_user_id
          )
          SELECT $1, $2, lower($3), $4, $5, $6::uuid[], $7, $8, $9
-          WHERE EXISTS (
+          WHERE ${actingMember('$10')}
+           AND EXISTS (
             SELECT 1 FROM assistants
              WHERE id = $2 AND workspace_id = $1
           )
@@ -92,18 +101,27 @@ export function createRealtimeThreadTargetStore(): RealtimeThreadTargetStore {
           input.contextText,
           input.expiresAt,
           input.createdByUserId,
+          actingUserId,
         ],
       )
       const row = result.rows[0]
       if (!row) {
+        const membership = await queryWithRLS<{ member: boolean }>(
+          actingUserId,
+          `SELECT ${actingMember('$2')} AS member`,
+          [input.workspaceId, actingUserId],
+        )
+        if (membership.rows[0]?.member !== true) {
+          throw new Error('You are not a current member of this workspace. No realtime thread target was saved.')
+        }
         throw new Error('The assistant or one of the bound task ids is outside this workspace. No realtime thread target was saved.')
       }
       return toTarget(row)
     },
 
     async list(actingUserId, input) {
-      const params: unknown[] = [input.workspaceId, input.assistantId]
-      const clauses = ['workspace_id = $1', 'assistant_id = $2']
+      const params: unknown[] = [input.workspaceId, input.assistantId, actingUserId]
+      const clauses = ['workspace_id = $1', 'assistant_id = $2', actingMember('$3')]
       if (input.channelType) {
         params.push(input.channelType)
         clauses.push(`channel_type = $${params.length}`)
@@ -125,8 +143,9 @@ export function createRealtimeThreadTargetStore(): RealtimeThreadTargetStore {
         actingUserId,
         `DELETE FROM realtime_thread_targets
           WHERE id = $1 AND workspace_id = $2 AND assistant_id = $3
+            AND EXISTS (SELECT 1 FROM workspace_members m WHERE m.workspace_id = $2 AND m.user_id = $4)
           RETURNING id`,
-        [input.id, input.workspaceId, input.assistantId],
+        [input.id, input.workspaceId, input.assistantId, actingUserId],
       )
       return result.rowCount === 1
     },

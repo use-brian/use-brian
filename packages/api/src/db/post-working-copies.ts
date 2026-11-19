@@ -1,10 +1,12 @@
 /** Durable unfinished Feed compositions. [COMP:feed/post-working-copies] */
 import { admitAnchoredSession } from '../workspace-access/session-create-admission.js'
-import { maxSensitivity } from '@use-brian/core'
+import { maxSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type { CampaignEmailMetadata, FeedComposition, FeedLinkedInContext } from '@use-brian/shared'
 import { getPool, query } from './client.js'
 import { seedFirstContentDraftMessage, withPlatformTitlePrefix, type ContentPlanningPlatform, type PostMedia } from './content-planning-store.js'
 import { sessionKindSql } from '../session-kind.js'
+import { conversationAnchorWriteAdmissionActive } from './conversation-visibility.js'
+import { FeedCollaborationError, insertFeedDraftSeed, lockFeedAccess, lockFeedDraftWorkspace, type FeedActor } from './feed-collaboration-store.js'
 
 export type PostWorkingContent = {
   /** Server-stamped, monotonic classification of selected source material. */
@@ -36,12 +38,14 @@ export class WorkingCopyError extends Error {
   constructor(public status: number) { super(`Working copy ${status}`) }
 }
 export const postWorkingCopiesStore = {
-  async get(assistantId: string, sessionId: string): Promise<PostWorkingCopy | null> {
+  async get(assistantId: string, sessionId: string, userId: string): Promise<PostWorkingCopy | null> {
+    const native = conversationAnchorWriteAdmissionActive()
     const result = await query<PostWorkingCopy>(
       `SELECT w.revision, w.mutation_id AS "mutationId", w.content
        FROM feed_post_working_copies w JOIN sessions s ON s.id = w.session_id
-       WHERE s.id = $1 AND s.assistant_id = $2 AND ${sessionKindSql.anchored('s', 'feed_draft')} AND feed_draft_audience_allowed(s.id)`,
-      [sessionId, assistantId],
+       WHERE s.id = $1 AND s.assistant_id = $2 AND ${sessionKindSql.anchored('s', 'feed_draft')}
+       AND ${native ? 'public.conversation_member_read_allowed(s.workspace_id,s.id,$3)' : 'public.feed_draft_audience_allowed(s.id)'}`,
+      native ? [sessionId,assistantId,userId] : [sessionId,assistantId],
     )
     return result.rows[0] ?? null
   },
@@ -50,6 +54,9 @@ export const postWorkingCopiesStore = {
     const client = await getPool().connect()
     try {
       await client.query('BEGIN')
+      const native = conversationAnchorWriteAdmissionActive()
+      const actor: FeedActor = { assistantId,sessionId,userId,kind:'user' }
+      if (native) await lockFeedDraftWorkspace(client,actor,true)
       let created = false
       if (input.create) {
         // Admitted by its anchor (unified-sessions L12) when it is new.
@@ -62,8 +69,8 @@ export const postWorkingCopiesStore = {
           `INSERT INTO sessions (id, assistant_id, user_id, channel_type, channel_id,
              title, title_manually_set, mode, seed_kind, visibility, workspace_id,
              anchor_kind, anchor_ref, effective_clearance)
-           SELECT $1, a.id, $3, 'web', $4, $5, true, 'draft', 'freeform', 'workspace', a.workspace_id,
-             'feed_draft', $1::text, COALESCE($6, a.clearance, 'internal')
+           SELECT $1::uuid, a.id, $3, 'web', $4, $5, true, 'draft', 'freeform', 'workspace', a.workspace_id,
+             'feed_draft', $1::uuid::text, COALESCE($6, a.clearance, 'internal')
            FROM assistants a WHERE a.id = $2
            ON CONFLICT (id) DO NOTHING RETURNING id`,
           [sessionId, assistantId, userId, `draft:${sessionId}`,
@@ -79,6 +86,7 @@ export const postWorkingCopiesStore = {
         [sessionId, assistantId],
       )).rows[0]
       if (!session) throw new WorkingCopyError(404)
+      if (native) await lockFeedAccess(client,actor)
       const previous = (await client.query<PostWorkingCopy>(
         `SELECT revision, mutation_id AS "mutationId", content
          FROM feed_post_working_copies WHERE session_id = $1`, [sessionId],
@@ -102,11 +110,7 @@ export const postWorkingCopiesStore = {
       if (created) {
         const seed = seedFirstContentDraftMessage({ kind: 'freeform',
           format: input.content.postFormat, brief: input.content.privateBrief })
-        if (seed) await client.query(
-          `INSERT INTO session_messages (session_id, role, content, sequence_num, sender_user_id)
-           VALUES ($1, 'user', $2, 1, $3)`,
-          [sessionId, JSON.stringify([{ type: 'text', text: seed }]), userId],
-        )
+        if (seed) await insertFeedDraftSeed(client,actor,seed)
       }
       // Do not rewrite a legacy title just because caption text changed.
       if (!previous || input.content.title !== previous.content.title) {
@@ -138,6 +142,7 @@ export const postWorkingCopiesStore = {
       return copy
     } catch (error) {
       await client.query('ROLLBACK')
+      if (error instanceof FeedCollaborationError) throw new WorkingCopyError(error.status)
       throw error
     } finally { client.release() }
   },

@@ -1,9 +1,9 @@
-/** Ordinary shared web/chat admission only, backed by migration 633.
- * Generic shared writers lack human provenance and fail closed in
- * ready mode; personal, channel/public and resumed sessions gain no defaults. */
+/** Ordinary shared web/chat creation provenance, including ready v2 workspaces.
+ * Generic shared writers lack human provenance and fail closed in ready mode;
+ * only the classic rollback model supplies access-mode defaults. */
 import { classifySession } from '../session-kind.js'
 import type { PoolClient } from 'pg'
-import { scopeGrantContains } from '@use-brian/core'
+import { scopeGrantContains } from '@use-brian/agent-runtime/security/context-scope.js'
 import type { query } from '../db/client.js'
 import { createDbContextScopeStore } from '../db/context-scope-store.js'
 import { resolveOperationCeilingsSystem } from '../db/workspace-store.js'
@@ -61,7 +61,8 @@ export async function admitSessionCreate<T extends Input>(client: PoolClient, pa
   if (params.expectedPolicyRevision !== undefined && params.expectedPolicyRevision !== policy?.revision) {
     throw new WorkspaceAccessError('access_policy_conflict', 409)
   }
-  if (!usesClassicModeAdmission(policy)) return params
+  // Provenance is required by SQL independently of the permission-model flag.
+  if (!policy || policy.setupState === 'legacy') return params
   if (!human || !isPersonalChatRoot(params)) {
     throw new WorkspaceAccessError('session_admission_unsupported', 409)
   }
@@ -88,8 +89,9 @@ export async function admitSessionCreate<T extends Input>(client: PoolClient, pa
   if (sharedProject && params.contextGroupId) throw new WorkspaceAccessError('project_context_department_conflict', 409)
   const groupId = params.contextGroupId !== undefined ? params.contextGroupId
     : sharedProject ? null
+    : policy.departmentReadV2 ? assistant.defaultWorkspaceGroupId
     : policy.mode === 'simple' ? policy.defaultDepartmentId : assistant.defaultWorkspaceGroupId
-  if (params.contextGroupId === undefined && !groupId && !sharedProject) {
+  if (!policy.departmentReadV2 && params.contextGroupId === undefined && !groupId && !sharedProject) {
     throw new WorkspaceAccessError(policy.mode === 'simple' ? 'access_mode_default_invalid' : 'context_selection_required', 409)
   }
   const execute: typeof query = (sql, values) => client.query(sql, values)
@@ -219,7 +221,8 @@ export async function admitChannelRoom(client: PoolClient, params: {
   const department = { contextGroupId: group?.id ?? null, contextProjectId: projects[0] ?? null, contextCompartments: compartments }
   await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [params.workspaceId])
   const policy = await readAdmissionPolicy(client, params.workspaceId)
-  if (!usesClassicModeAdmission(policy)) return { effectiveClearance, ...department }
+  // The integration/audience above remains authority in both permission models.
+  if (!policy || policy.setupState === 'legacy') return { effectiveClearance, ...department }
   await client.query("SELECT set_config('app.session_creation_admission',$1,true)", [JSON.stringify({
     protocol: '1', provenance: 'channel_room', workspaceId: params.workspaceId,
     policyRevision: policy.revision, actor: params.userId,

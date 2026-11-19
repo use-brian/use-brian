@@ -8,15 +8,17 @@ import type pg from 'pg'
 import {
   emptyApplicationCounts,
   ExtractionApplicationError,
-  type AccessContext,
   type ExtractionApplicationClaim,
   type ExtractionApplicationItem,
   type ExtractionApplicationMutation,
   type ExtractionApplicationRun,
   type ExtractionApplicationStorePort,
-  type FrozenCandidate,
-  type FrozenExtractionPlan,
-} from '@use-brian/core'
+} from '@use-brian/core/ingest/application.js'
+import type {
+  FrozenCandidate,
+  FrozenExtractionPlan,
+} from '@use-brian/core/ingest/extraction-plan.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 
 import { buildAccessPredicate } from './access-predicate.js'
 import { getPool, queryWithRLS } from './client.js'

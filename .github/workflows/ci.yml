@@ -65,8 +65,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Verify retained migration source
-        run: node packages/api/scripts/retained-native-reader/build.mjs --check
+      - name: Verify canonical conversation migration source
+        run: node packages/api/scripts/conversation-store/build.mjs --check
 
       # Clean API compilation can exceed 4 GiB; keep this a step-local build budget.
       - name: Build
@@ -139,6 +139,8 @@ jobs:
         run: pnpm exec turbo run build --filter="@use-brian/api^..."
 
       - name: Unit tests
+        env:
+          BRIAN_TEST_PARTITION: ordinary
         run: pnpm --filter @use-brian/api exec vitest run --shard=${{ matrix.shard }}
 
   app-web-tests:
@@ -169,6 +171,8 @@ jobs:
         run: pnpm exec turbo run build --filter="app-web^..."
 
       - name: Unit tests
+        env:
+          BRIAN_TEST_PARTITION: ordinary
         run: pnpm --filter app-web exec vitest run --shard=${{ matrix.shard }}
 
   offline-continuity:
@@ -253,6 +257,8 @@ jobs:
 
       # Turbo builds this package's dependency closure before its test task.
       - name: Unit tests
+        env:
+          BRIAN_TEST_PARTITION: ordinary
         run: pnpm exec turbo run test --filter="${{ matrix.package }}"
 
   remaining-tests:

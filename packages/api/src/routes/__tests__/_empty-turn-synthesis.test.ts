@@ -20,7 +20,7 @@ import {
   composeEmptyTurnSynthesis,
   type EmptyTurnSynthesisInputTurn,
 } from '../_empty-turn-synthesis.js'
-import type { LLMProvider, ContentBlock, Message } from '@use-brian/core'
+import type { LLMProvider, ContentBlock, Message } from '@use-brian/agent-runtime/providers/types.js'
 
 function makeFakeProvider(streamedText: string): LLMProvider {
   async function* fakeStream() {

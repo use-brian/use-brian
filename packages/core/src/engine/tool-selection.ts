@@ -2,27 +2,22 @@ import { decisionUsageModelId } from '../decisions/usage.js'
 import { createLlmDecisionProvider } from '../decisions/adapters/llm.js'
 import type { DecisionCompletionRoute, DecisionExecutionPort } from '../decisions/hydra.js'
 import type { DecisionQuestion, DecisionResponse } from '../decisions/types.js'
-import { isInputAuthorityError } from '../providers/input-authority.js'
-import type { Message, TokenUsage, ToolDefinition } from '../providers/types.js'
+import { isInputAuthorityError } from '@use-brian/agent-runtime/providers/input-authority.js'
+import type { Message, TokenUsage, ToolDefinition } from '@use-brian/agent-runtime/providers/types.js'
+import type { ToolSelectionConfig, ToolSelectionResult } from '@use-brian/agent-runtime/engine/query-loop-ports.js'
 
-export type ToolSelectionResult = {
-  names: string[]
-  model: string | null
-  usage: TokenUsage | null
-  path: string
-  failureKind?: string
-  durationMs: number
+// The result and the runtime half of the options are declared with the
+// query-loop port (`query-loop-ports.ts`); this module is the core default
+// `selectToolSchemas` port and adds the decision-runtime route to the option.
+declare module '@use-brian/agent-runtime/engine/query-loop-ports.js' {
+  interface ToolSelectionConfig {
+    runtime: DecisionExecutionPort
+    workspaceId?: string
+    llm: DecisionCompletionRoute
+  }
 }
-export type ToolSelectionOptions = {
-  runtime: DecisionExecutionPort
-  workspaceId?: string
-  llm: DecisionCompletionRoute
-  /** Trusted host input slice with its own current source authority. */
-  input?: { messages: Message[]; assertInputAuthority: () => Promise<void> }
-  /** Host decision already completed against its admitted preparation inputs. */
-  preselected?: readonly string[]
-  onResult?: (result: ToolSelectionResult) => void | Promise<void>
-}
+export type { ToolSelectionResult }
+export type ToolSelectionOptions = ToolSelectionConfig
 
 /** Compact vocabulary shared by standalone selection and combined preparation. */
 export function buildToolSelectionQuestions(definitions: readonly Pick<ToolDefinition, 'name' | 'description'>[]) {

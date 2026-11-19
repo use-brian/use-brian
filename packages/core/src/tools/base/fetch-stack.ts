@@ -18,10 +18,10 @@
  * add post-MVP (same HTTP-proxy interface as Jina).
  */
 
-import { sanitizeDeep } from '../../security/sanitize.js'
+import { sanitizeDeep } from '@use-brian/agent-runtime/security/sanitize.js'
 import { FetchProviderError, FetchStackExhaustedError, type FetchAttempt } from './_fetch-error.js'
 import { readFetchCache, writeFetchCache } from './fetch-cache.js'
-import type { CacheStore } from '../../compaction/cache-tool.js'
+import type { CacheStore } from '@use-brian/agent-runtime/compaction/cache-tool.js'
 import type { ExternalCost } from '../../billing/external-cost.js'
 
 // ── Types ─────────────────────────────────────────────────────────

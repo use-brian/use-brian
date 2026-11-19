@@ -3,7 +3,8 @@
  *
  * [COMP:connectors/lifecycle]
  */
-import { classifyTool, defaultPolicy, type McpSettingsStore } from '@use-brian/core'
+import { classifyTool, defaultPolicy } from '@use-brian/agent-runtime/mcp/classifier.js'
+import type { McpSettingsStore } from '@use-brian/agent-runtime/mcp/types.js'
 import {
   ALL_EXACT_INSTANCE_GOVERNANCE_CONNECTOR_IDS,
   APP_LEVEL_ASSISTANT_ID,
@@ -24,6 +25,15 @@ import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import type { WorkspaceToolPolicyStore } from '../db/workspace-tool-policy-store.js'
 import { listUsableWorkspaceConnectors, type UsableConnector } from './usable-connectors.js'
 import type { ConnectorLifecycleDrivers } from './lifecycle-drivers.js'
+import {
+  cliDescriptorSourceKey,
+  dynamicSourceBindingKey,
+  dynamicToolDescriptors,
+  getSharedDescriptorLifecycle,
+  remoteDescriptorSourceKey,
+  type DescriptorLifecycle,
+  type DynamicSourceRef,
+} from '../mcp/descriptors.js'
 
 export type ConnectorLifecycleTarget =
   | { kind: 'primary'; provider: string }
@@ -63,6 +73,26 @@ export type ConnectorLifecycleServiceOptions = {
   policy: ConnectorLifecyclePolicy
   drivers?: ConnectorLifecycleDrivers
   canMutateWorkspaceInstance?: (userId: string, instance: ConnectorInstance) => Promise<boolean>
+  /**
+   * Capability-catalog descriptor lifecycle (`mcp/descriptors.ts`). Defaults
+   * to the process-wide store the catalog reads. Connect/refresh discovery
+   * records dynamic descriptors here; edits invalidate them.
+   */
+  descriptorLifecycle?: DescriptorLifecycle
+}
+
+/** A connector instance whose discovered tools the catalog caches (custom MCP, CLI). */
+type DynamicDescriptorSource = Pick<ConnectorInstance, 'id' | 'provider' | 'custom' | 'url' | 'updatedAt' | 'config'>
+
+function dynamicDescriptorRef(instance: DynamicDescriptorSource, actorId: string): DynamicSourceRef | null {
+  const cli = instance.provider === 'cli'
+  if (!cli && !(instance.custom && instance.url)) return null
+  return {
+    sourceKey: cli ? cliDescriptorSourceKey(instance.id) : remoteDescriptorSourceKey(instance.id),
+    family: cli ? 'cli' : 'remote-mcp',
+    connectorId: instance.provider,
+    bindingKey: dynamicSourceBindingKey(instance, actorId),
+  }
 }
 
 function oldestFirst(instances: ConnectorInstance[]): ConnectorInstance[] {
@@ -74,6 +104,27 @@ function oldestFirst(instances: ConnectorInstance[]): ConnectorInstance[] {
 export function createConnectorLifecycleService(options: ConnectorLifecycleServiceOptions) {
   const registry = options.registry ?? OFFICIAL_CONNECTORS
   const byId = new Map(registry.map((entry) => [entry.id, entry]))
+  const descriptors = options.descriptorLifecycle ?? getSharedDescriptorLifecycle()
+
+  /** Feed a connect/refresh-time discovery into the catalog descriptor lifecycle. */
+  function recordDiscovery(
+    userId: string,
+    instance: DynamicDescriptorSource,
+    tools: ReadonlyArray<{ name: string; description: string; inputSchema?: Record<string, unknown> }>,
+  ): void {
+    const ref = dynamicDescriptorRef(instance, userId)
+    if (!ref) return
+    descriptors.record(ref, dynamicToolDescriptors({ family: ref.family, connectorId: ref.connectorId, tools }))
+  }
+
+  /** Credentials, URL or connection state changed: the cached catalog no longer applies. */
+  function invalidateDescriptors(instance: ConnectorInstance, disconnected = false): void {
+    for (const sourceKey of [remoteDescriptorSourceKey(instance.id), cliDescriptorSourceKey(instance.id)]) {
+      descriptors.invalidate(sourceKey)
+    }
+    const ref = dynamicDescriptorRef(instance, '')
+    if (disconnected && ref) descriptors.markUnavailable(ref, 'the connector was disconnected')
+  }
 
   async function personal(userId: string): Promise<ConnectorInstance[]> {
     return oldestFirst(await options.instanceStore.listByUser(userId, userId))
@@ -108,6 +159,9 @@ export function createConnectorLifecycleService(options: ConnectorLifecycleServi
     const instance = await resolveTarget(userId, target)
     const updated = await options.instanceStore.update(userId, instance.id, updates)
     if (!updated) throw new ConnectorLifecycleError('not_found', 'Connector instance not found')
+    if (updates.connected !== undefined || updates.url !== undefined || updates.credentials !== undefined || updates.configPatch) {
+      invalidateDescriptors(updated, updates.connected === false)
+    }
     return updated
   }
 
@@ -279,6 +333,7 @@ export function createConnectorLifecycleService(options: ConnectorLifecycleServi
       const instance = await resolveTarget(userId, target)
       const deleted = await options.instanceStore.delete(userId, instance.id)
       if (!deleted) throw new ConnectorLifecycleError('not_found', 'Connector instance not found')
+      invalidateDescriptors(instance)
     },
 
     async transferToWorkspace(input: {
@@ -300,6 +355,7 @@ export function createConnectorLifecycleService(options: ConnectorLifecycleServi
       if (!transferred) {
         throw new ConnectorLifecycleError('forbidden', 'Connector transfer was not authorized')
       }
+      invalidateDescriptors(transferred)
       return transferred
     },
 
@@ -333,6 +389,7 @@ export function createConnectorLifecycleService(options: ConnectorLifecycleServi
       const driver = options.drivers?.[instance.provider]
       if (!driver?.discoverTools) return { serverName: instance.label, tools: [] }
       const discovered = await driver.discoverTools({ userId, instance })
+      recordDiscovery(userId, instance, discovered.tools)
       return {
         serverName: discovered.serverName,
         tools: await effectiveTools(userId, discovered.serverName, discovered.tools),
@@ -345,10 +402,14 @@ export function createConnectorLifecycleService(options: ConnectorLifecycleServi
       tools: ReadonlyArray<{
         name: string
         description: string
+        inputSchema?: Record<string, unknown>
         classification?: ConnectorToolProjection['classification']
         defaultPolicy?: ConnectorToolProjection['policy']
       }>
+      /** The discovered instance; when given, its descriptors enter the catalog lifecycle. */
+      source?: DynamicDescriptorSource
     }): Promise<ConnectorToolProjection[]> {
+      if (input.source) recordDiscovery(input.userId, input.source, input.tools)
       return effectiveTools(input.userId, input.serverName, input.tools)
     },
 

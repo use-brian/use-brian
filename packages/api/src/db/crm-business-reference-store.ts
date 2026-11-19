@@ -11,7 +11,6 @@
 
 import type { PoolClient, QueryResultRow } from 'pg'
 import {
-  CrmOperationsError,
   CrmReferenceFormatSchema,
   explainCrmReferenceFormat,
   normalizeCrmBusinessReference,
@@ -27,7 +26,8 @@ import {
   type CrmReferenceReadPort,
   type CrmReferenceTargetKind,
   type CrmReferenceViewer,
-} from '@use-brian/core'
+} from '@use-brian/core/crm/business-references.js'
+import { CrmOperationsError } from '@use-brian/core/crm/operations-types.js'
 import { query } from './client.js'
 import { buildAccessPredicate, buildCurrentMemberSourcePredicate, mutationActorAccess } from './access-predicate.js'
 import { queryCrmPage } from '../crm-operations/pagination.js'

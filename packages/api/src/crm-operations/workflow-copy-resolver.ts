@@ -1,6 +1,6 @@
 /** Workflow copy eligibility and canonical retirement. [COMP:crm/privacy-copies] */
 import type {PoolClient} from 'pg'
-import type {CrmPrivacyBlocker} from '@use-brian/core'
+import type {CrmPrivacyBlocker} from '@use-brian/core/crm/operations-types.js'
 
 export async function inspectWorkflowCopyConflicts(client:PoolClient,workspaceId:string):Promise<CrmPrivacyBlocker[]> {
   const result=await client.query<{reason:string;count:number}>(`WITH selected AS(

@@ -23,7 +23,7 @@ import type {
   EntityType,
   PropertyDef,
 } from '../doc-types.js'
-import type { ToolContext } from '../../tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 // ── Fixtures ─────────────────────────────────────────────────────────
 

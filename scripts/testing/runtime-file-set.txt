@@ -1,0 +1,22 @@
+# M4 runtime file set (docs/plans/oss-chat-m4-runtime-separation-plan.md, section 2).
+# Moved from packages/core/src to packages/agent-runtime/src in step 3 (same
+# relative layout); each old core path is an `export *` forwarding shim.
+# Step 2 exit gate: the type-inclusive closure of these files stays inside the
+# set plus `closure.allow` in import-graph.config.json (one reason per entry).
+#   node scripts/testing/import-graph.mjs --closure @scripts/testing/runtime-file-set.txt
+# Paths are OSS-relative globs, one per line. Tests are excluded by the harness.
+#
+# engine/: plan list, plus query-loop-ports.ts (injected port types, step 2) and
+# decline-copy.ts (model-facing decline strings the executor emits; no imports).
+# Stays in core (packages/core/src/engine), injected or barrel-only: tool-selection.ts, routine-read.ts,
+# routine-read-ownership.ts, query-loop-defaults.ts, doc-history.ts,
+# research-depth.ts, index.ts.
+packages/agent-runtime/src/engine/{query-loop,query-loop-ports,turn-output,tool-executor,stall-watchdog,turn-ledger,loop-detector,tool-pairing,output-provenance,hooks,turn-inbox,tool-discovery,document-flow-debug,grounding-gate,decline-copy}.ts
+# providers/: all files, including codex-app-server/* and sharp-loader.ts.
+packages/agent-runtime/src/providers/**
+packages/agent-runtime/src/tools/{types,capability-gate,tool-failure,schema-tolerance}.ts
+packages/agent-runtime/src/tools/base/ask-question.ts
+packages/agent-runtime/src/security/{sanitize,sensitivity,derived-scope,compartments,context-scope,evidence,source-evidence,authority-source,access-context,access-ceiling,execution-context,department-read,workspace-delegation}.ts
+packages/agent-runtime/src/compaction/{compact,cache-tool,index}.ts
+packages/agent-runtime/src/billing/cost-tracker.ts
+packages/agent-runtime/src/mcp/{types,classifier,input-schema}.ts

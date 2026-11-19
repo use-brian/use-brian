@@ -1,6 +1,6 @@
 import { decisionTransportBudget, registerDecisionTransportOwner } from '../transport-budget.js'
 import { assertDecisionResponseAuthority } from '../authority-ownership.js'
-import { assertInputAuthority, isInputAuthorityError } from '../../providers/input-authority.js'
+import { assertInputAuthority, isInputAuthorityError } from '@use-brian/agent-runtime/providers/input-authority.js'
 /** TypeSafe System One / Jev decision adapter. [COMP:decisions/typesafe] */
 
 import type {

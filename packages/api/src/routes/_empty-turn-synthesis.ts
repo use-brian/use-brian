@@ -43,8 +43,8 @@
  * banner.
  */
 
-import type { ContentBlock, LLMProvider, Message, TokenUsage } from '@use-brian/core'
-import { collectStream } from '@use-brian/core'
+import type { ContentBlock, LLMProvider, Message, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
 
 export type EmptyTurnSynthesisInputTurn = {
   content: ContentBlock[]

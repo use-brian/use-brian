@@ -6,9 +6,9 @@ import type {
   ProviderRequest,
   ProviderSession,
   StreamChunk,
-} from '../../providers/types.js'
-import { buildTool, type Tool, type ToolContext } from '../../tools/types.js'
-import { NO_TOOL_TIMEOUT } from '../../engine/tool-executor.js'
+} from '@use-brian/agent-runtime/providers/types.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { NO_TOOL_TIMEOUT } from '@use-brian/agent-runtime/engine/tool-executor.js'
 import {
   createDelegateDocEditTool,
   DOC_EDIT_MAX_TOOL_CALLS,
@@ -561,17 +561,17 @@ describe('[COMP:doc/edit-agent] context-clean Doc editor', () => {
     const requests: ProviderRequest[] = []
     const input = vi.fn(async () => { throw new Error('fictional source revoked') })
     const load = vi.fn(async () => 'Protected page')
-    const context: ToolContext = { ...parentContext, assertModelInputAuthority: input,
+    const context: ToolContext = { ...parentContext, admitModelInput: input,
       authority: { assertCurrent: vi.fn(async () => {}), execute: async effect => effect() },
       mutationCompartments: ['team:operations'], projectIds: ['fictional-project'], sessionPersisted: true }
     const child = isolateDocEditToolContext(context)
     expect(child.authority).toBe(context.authority)
-    expect(child.assertModelInputAuthority).toBe(input)
+    expect(child.admitModelInput).toBe(input)
     expect(child.mutationCompartments).toEqual(['team:operations'])
     expect(child.projectIds).toEqual(['fictional-project'])
     await expect(runDocEditAgent({ provider: providerFrom(() => textTurn('Must not run'), requests), model: 'cheap',
       fallbackModel: 'standard', systemPrompt: 'Editor', instruction: 'Edit the page.', tools: new Map(), context,
-      loadPageContext: load })).rejects.toThrow('fictional source revoked')
+      loadPageContext: load })).rejects.toMatchObject({reason:'authority_changed',cause:expect.objectContaining({message:'fictional source revoked'})})
     expect(load).not.toHaveBeenCalled()
     expect(requests).toHaveLength(0)
   })

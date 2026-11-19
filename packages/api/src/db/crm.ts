@@ -1,16 +1,29 @@
 import type {
-  AccessContext,
-  CompanyListFilters, CompanyListRow, CompanyRecord, CompanyUpdateFields,
-  ContactListFilters, ContactListRow, ContactRecord, ContactUpdateFields,
+  CompanyListFilters,
+  CompanyListRow,
+  CompanyRecord,
+  CompanyUpdateFields,
+  ContactListFilters,
+  ContactListRow,
+  ContactRecord,
+  ContactUpdateFields,
   CrmExternalRef,
   CrmAmount,
-  DealListFilters, DealListRow, DealRecord, DealStage, DealUpdateFields,
-  EntityLinksStore,
-  EntityRecord,
-  Sensitivity,
-  StableExternalIdentity,
-} from '@use-brian/core'
-import { bindScopeSources, boundScopeSources, DEAL_STAGES, validApplicationDate, decodeCrmAmount, crmAmountSchema, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
+  DealListFilters,
+  DealListRow,
+  DealRecord,
+  DealStage,
+  DealUpdateFields,
+} from '@use-brian/core/crm/types.js'
+import type { StableExternalIdentity } from '@use-brian/core/decision-learning/types.js'
+import type { EntityLinksStore, EntityRecord } from '@use-brian/core/entities/types.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { validApplicationDate } from '@use-brian/core/application-platform/values.js'
+import { DEAL_STAGES, decodeCrmAmount, crmAmountSchema } from '@use-brian/core/application-platform/record-values.js'
+import { unionScopeRequirements } from '@use-brian/agent-runtime/security/context-scope.js'
+import { maxSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import type pg from 'pg'
 import { z } from 'zod'
 import { mapCanonicalCrmRows,queryLegacyCanonicalCrmSql,queryLegacyCanonicalCrmBatch,readLegacyCanonicalCrmPoint } from './crm-reader.js'

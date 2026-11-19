@@ -1,7 +1,13 @@
 /** Transactional draft/publication authority for website programme content. [COMP:crm/programme-catalogue] */
 import type { Pool, PoolClient } from 'pg'
-import { AssociationError, ProgrammeCatalogueDocumentSchema, programmePublicationIssues, resolveProgrammeCatalogue,
-  type ProgrammeCatalogueDocument, type ProgrammeSite, type AssociationActor } from '@use-brian/core'
+import { AssociationError, type AssociationActor } from '@use-brian/core/association/domain.js'
+import {
+  ProgrammeCatalogueDocumentSchema,
+  programmePublicationIssues,
+  resolveProgrammeCatalogue,
+  type ProgrammeCatalogueDocument,
+  type ProgrammeSite
+} from '@use-brian/core/association/programme-catalogue.js'
 import { getPool } from './client.js'
 
 type State = { draft_version: number; draft: ProgrammeCatalogueDocument | null; published_revision: number; observations: Record<string, { revision: number; observedAt: string }> }

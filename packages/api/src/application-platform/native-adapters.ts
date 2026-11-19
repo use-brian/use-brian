@@ -2,26 +2,38 @@
 import { z } from 'zod'
 import { createHash } from 'node:crypto'
 import type { PoolClient } from 'pg'
-import { applicationAuthorityCreationScope, parseApplicationCrmFieldDefinition, type ApplicationModuleDefinition, type ApplicationOperationContext } from '@use-brian/core'
+import { applicationAuthorityCreationScope } from '@use-brian/core/application-platform/access.js'
+import type { ApplicationModuleDefinition, ApplicationOperationContext } from '@use-brian/core/application-platform/contracts.js'
+import { parseApplicationCrmFieldDefinition } from '@use-brian/core/application-platform/values.js'
 import { ApplicationPlatformError, applicationJsonSchema as importedJsonSchema, applicationResourceRefSchema, applicationQuerySchema, type ApplicationRecordProjection,
   type ApplicationResourceDefinition, type ApplicationResourceRef } from '@use-brian/shared'
 import { crmCompanyPatch,crmContactPatch,crmDealPatch,authorizeCanonicalCrmPatch,patchCanonicalCrmFields,type CanonicalCrmType,type CanonicalCrmPatch } from '../db/crm.js'
 import { createTask,authorizeCanonicalTaskPatch,patchCanonicalTaskFields } from '../db/tasks.js'
 import { publishTaskLifecycle } from '../task-event-fanout.js'
 import { getApplicationExecutionBinding } from './execution-context.js'
-import { canonicalGenericReadContext, readCanonicalNativeRecord } from './field-evidence.js'
+import { canonicalGenericReadContext, readCanonicalNativeRecord, readCanonicalNativeRecords } from './field-evidence.js'
 import { queryCanonicalNativeRecords, readCanonicalNativeQueryDefinition, validateCanonicalNativeResource } from './native-reader.js'
 import { canonicalNativeResourceDefinitions } from './native-resources.js'
-import { boundScopeSources } from '@use-brian/core'
+import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { readCurrentScopeSources } from '../db/derived-scope-store.js'
 
 const readInput=z.object({type:z.enum(['company','person','deal','task','file','workspace_member']),id:z.string().uuid(),fields:z.array(z.string().min(1).max(256)).max(256).refine(fields=>new Set(fields).size===fields.length).optional()}).strict()
+const companyPageInput = z.object({ids: z.array(z.string().uuid()).min(1).max(101)}).strict()
+const companyListFields = ['name', 'domain'] as const
+async function readCompanyPage(context: Context, ids: string[]) {
+  const definition = (await resources(context)).find(item => item.typeKey === 'company')
+  if (!definition || !companyListFields.every(key => definition.fields.some(field => field.key === key))) {
+    throw new ApplicationPlatformError('access_unavailable', 'The companies are unavailable.')
+  }
+  const records = await readCanonicalNativeRecords(canonicalGenericReadContext(context), definition, ids, companyListFields)
+  return bindScopeSources({records}, records.flatMap(record => boundScopeSources(record)))
+}
 const queryInput=z.object({type:z.enum(['company','person','deal','task']),query:applicationQuerySchema}).strict()
 type Context=ApplicationOperationContext<PoolClient>
 const creations = new WeakMap<Context, { type: 'company' | 'person' | 'deal' | 'task'; fields: string[]; scope: { sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[] } }>()
 const crmPatches=new WeakMap<Context,Array<{type:CanonicalCrmType;id:string;patch:CanonicalCrmPatch}>>()
 
-const taskPatches=new WeakMap<Context,{id:string;patch:import('@use-brian/core').TaskUpdateFields}>()
+const taskPatches=new WeakMap<Context,{id:string;patch:import('@use-brian/core/tasks/types.js').TaskUpdateFields}>()
 const definitions=canonicalNativeResourceDefinitions()
 async function resources(context: Context, queryType?: string): Promise<ApplicationResourceDefinition[]> {
   const app = getApplicationExecutionBinding(context.execution)
@@ -251,4 +263,29 @@ export function createCanonicalNativeApplicationModule():ApplicationModuleDefini
    execute:(context,raw)=>query(context,queryInput.parse(raw)),authorizeResult:authorizeQueryResult},get:{input:readInput,authorize:async(context,raw)=>{const input=readInput.parse(raw);await read(context,input.type,input.id,input.fields)},
    execute:async(context,raw)=>{const input=readInput.parse(raw);return read(context,input.type,input.id,input.fields)},authorizeResult:authorizeReadResult}},
  }
+}
+
+/** The fixed company directory projection is exposed by the external-service transport. */
+export function createExternalServiceNativeApplicationModule(): ApplicationModuleDefinition<PoolClient> {
+  const native = createCanonicalNativeApplicationModule()
+  return {
+    ...native,
+    application: {...native.application, queries: [...native.application.queries, 'get_companies']},
+    queries: {
+      ...native.queries,
+      get_companies: {
+       input:companyPageInput,
+       authorize: async context => { await context.execution.security.authority.assertCurrent() },
+       execute: (context, raw) => readCompanyPage(context, companyPageInput.parse(raw).ids),
+       async authorizeResult(context, raw) {
+         const original = raw as {records: ApplicationRecordProjection[]}
+         const current = await readCompanyPage(context, original.records.map(record => record.ref.id))
+         if (current.records.some((record, index) => record.ref.version !== original.records[index].ref.version
+           || record.policyVersion !== original.records[index].policyVersion)) {
+           throw new ApplicationPlatformError('access_unavailable', 'The companies changed.')
+         }
+       },
+      },
+    },
+  }
 }

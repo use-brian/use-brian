@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
-import { SITE_CONTENT_COLLECTIONS } from '@use-brian/core'
+import { SITE_CONTENT_COLLECTIONS } from '@use-brian/core/association/site-content.js'
 import { createSiteContentStore } from '../site-content-store.js'
 import { createAssociationWorkspaceModulesStore } from '../../association/workspace-module.js'
 const url=process.env.MEMBERSHIP_TEST_DATABASE_URL

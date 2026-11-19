@@ -3332,6 +3332,10 @@ export const en = {
     pendingQuestion: {
       heading: "I need your input",
       placeholder: "Type your answer…",
+      /** The suspended question offers single-choice options. */
+      chooseAnswer: "Choose an answer",
+      /** The choice that opens the free-text box when typed answers are allowed. */
+      customAnswer: "Write another answer",
       submit: "Send answer",
       submitting: "Sending…",
       cancel: "Cancel",
@@ -9500,6 +9504,37 @@ export const en = {
     "noProjects": "No available Projects"
 },
   chatApp: {
+    offlineRetainedHistory: "Offline history. Last synced: {time}",
+    visibility: {
+      membersUnavailable: "Workspace members are unavailable. Participant changes are paused.",
+      projectsUnavailable: "Projects are unavailable. Project changes are paused.",
+      "raiseCap": "Raise clearance cap",
+      "capNotice": "A cap can only be raised. Use a new conversation for a lower cap.",
+      "project": "Project",
+      "noProject": "No Project",
+      "projectNotice": "A private chat stays private. Moving a workspace conversation into a Project narrows access; moving it out requires an admin.",
+      "saveProject": "Save Project",
+
+      "title": "Conversation visibility",
+      "cap": "Clearance cap: {cap}",
+      "boundaries": "Department and Project boundaries: {count}",
+      "caps": {
+            "public": "Public",
+            "internal": "Internal",
+            "confidential": "Confidential"
+      },
+      "privateByKind": "This one-to-one chat stays private. Only its owner can share content through a handoff.",
+      "private": "Private",
+      "workspace": "Workspace",
+      "participants": "Participants (the starter is always included)",
+      "unnamedParticipant": "Participant",
+      "narrowNotice": "Earlier readers may already have seen this conversation. Their offline copies expire within 24 hours.",
+      "widenNotice": "Adding readers shares the whole conversation. Participants receive a notice and the change is audited.",
+      "save": "Save visibility",
+      "saving": "Saving",
+      "failed": "Could not update visibility. Try again.",
+      "conflict": "Visibility changed elsewhere. Refresh the conversation and try again."
+},
     displayHistory: {
       "label": "Saved message",
       "notice": "These saved messages are shown for reference only. They are not sent to the assistant.",
@@ -9640,6 +9675,8 @@ export const en = {
     queuedNotice: "The assistant will reply after the current turn finishes.",
     postFailed: "Could not post your message. Try again.",
     stopTurnFailed: "Could not stop the turn. Try again.",
+    /** Send while a turn this chat re-attached to is still running and could not take the message. */
+    sendWhileTurnRunning: "Your assistant is still working on this chat. Wait for the reply or stop it, then send again.",
     mentionInsertAria: "Mention {name}",
     slashMenuLabel: "Commands",
     slashInsertAria: "Run /{slug}",
@@ -9734,6 +9771,7 @@ export const en = {
     liveWorkStopTitle: "Stop this turn",
     liveWorkNoProgress: "No progress for {minutes}m",
     turnStoppedBy: "{name} stopped this turn.",
+    turnStopped: "This turn was stopped.",
     turnStoppedByYou: "You stopped this turn.",
     turnFailed: "This reply could not be completed. Check the conversation before trying again.",
     turnReconnecting:
@@ -9742,6 +9780,11 @@ export const en = {
       "The previous turn stopped responding and was reset, so the chat is unblocked. Nothing was lost: your messages are still here. Send again to continue.",
     pinnedContext: "Pins",
     assistantClearanceBlocked: "That assistant is cleared above this room and cannot answer here.",
+    /** A mentioned assistant cleared below the conversation (never names a clearance level). */
+    clearanceBelowRejectedRoom: "{name} is not cleared to read this room, so it cannot answer here. Remove the mention, or ask a workspace admin to raise its clearance.",
+    clearanceBelowRejectedMessage: "{name} is not cleared to read this message, so it cannot answer here. Remove the mention, or ask a workspace admin to raise its clearance.",
+    clearanceBelowSkippedRoom: "{name} was skipped because it is not cleared to read this room. A workspace admin can raise its clearance.",
+    clearanceBelowSkippedMessage: "{name} was skipped because it is not cleared to read this message. A workspace admin can raise its clearance.",
     deliveryAudienceBlocked: "This answer drew on information that not everyone in this shared chat can see, so it was not posted here. Ask again in a personal chat.",
     // The Chat side pane: Work + pinned + open tabs (chat-parity D4-D8).
     // [COMP:app-web/chat-side-pane]

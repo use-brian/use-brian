@@ -79,7 +79,7 @@ import {
   DEFAULT_EMBED_BUDGET_SEGMENTS,
   DEFAULT_EMBED_RECENCY_WINDOW_MONTHS,
   type EmbeddingResult,
-} from '@use-brian/core'
+} from '@use-brian/core/embeddings/worker.js'
 
 const store = createDbEmbeddingStore()
 

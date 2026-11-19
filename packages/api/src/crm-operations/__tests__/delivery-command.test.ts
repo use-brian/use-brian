@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { SendCrmMessageCommandSchema, SaveCrmMailboxIntegrationGrantCommandSchema } from '@use-brian/core'
+import { SendCrmMessageCommandSchema, SaveCrmMailboxIntegrationGrantCommandSchema } from '@use-brian/core/crm/operations-types.js'
 
 const id='11111111-1111-4111-8111-111111111111'
 const message={kind:'send_message',deliveryId:id,connectorInstanceId:id,purposeKey:'updates',

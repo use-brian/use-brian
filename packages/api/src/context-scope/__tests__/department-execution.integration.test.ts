@@ -1,27 +1,28 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
-import { buildTool } from '@use-brian/core'
+import { queryLoop } from '@use-brian/core/engine/query-loop-defaults.js'
+import { createTaskTools } from '@use-brian/core/tasks/tools.js'
+import { NOOP_TURN_LEDGER } from '@use-brian/agent-runtime/engine/turn-ledger.js'
+import { createTurnOutputCollector } from '@use-brian/agent-runtime/engine/turn-output.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
 import { z } from 'zod'
 import { getPool, getAppPool, query, queryWithRLS } from '../../db/client.js'
 import { createDbChannelUserStore, resolveChannelUser } from '../../db/channel-user-store.js'
 import { findAssistantById } from '../../db/users.js'
-import { createTaskTools } from '../../../../core/src/tasks/tools.js'
 import { createDbTaskStore } from '../../db/tasks-store.js'
-import { bindToolsToAgentAccess } from '../../context-scope/agent-access-tools.js'
+import { openAssistantTurn, type AssistantTurn } from '../../turn/kernel.js'
 import { runWithAgentAccess } from '../../db/agent-access-context.js'
 import { createMemory, getMemoryById, searchMemories } from '../../db/memories.js'
 import { connectorExposureAllowed } from '../../context-scope/connector-exposure.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
 import { findSessionAuthorityById } from '../../db/sessions.js'
-import { executionToolContext } from '../../../../core/src/security/execution-context.js'
-import { queryLoop } from '../../../../core/src/engine/query-loop.js'
-import { createTurnOutputCollector } from '../../../../core/src/engine/turn-output.js'
-import { NOOP_TURN_LEDGER } from '../../../../core/src/engine/turn-ledger.js'
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 
 const fixtureEnabled=Boolean(process.env.BRIAN_ASSURANCE_FIXTURE)
 if(fixtureEnabled)await assertLocalFixture()
-afterAll(async()=>{if(fixtureEnabled){await getAppPool().end();await getPool().end()}})
+const owners: AssistantTurn[] = []
+afterAll(async()=>{for (const owner of owners.splice(0)) await owner.finish(); if(fixtureEnabled){await getAppPool().end();await getPool().end()}})
 describe.skipIf(!fixtureEnabled)('[COMP:api/agent-access-ceiling] shared assistant department isolation',()=>{
 it('preserves actor and assistant grants through Feishu identity, tools, RLS, model output and revocation',async()=>{
 const record=(name:string,pass:boolean,detail:unknown)=>expect(pass,`${name}: ${JSON.stringify(detail)}`).toBe(true)
@@ -66,26 +67,36 @@ const secrets={sales:'CANARY_SALES_COPPER_417',finance:'CANARY_FINANCE_VIOLET_92
   return {...r.turnScope,access:r.executionContext.security.access,executionContext:r.executionContext}
  }
  const raw=createTaskTools(createDbTaskStore())
- // Same bind arguments as channel-pipeline.ts prepareAssistantRun callback.
- const toolsFor=(s:any)=>bindToolsToAgentAccess(new Map(Object.entries(raw)),{
-  clearance:s.access.clearance,compartments:s.access.compartments,mutationCompartments:s.access.mutationCompartments,
-  projectIds:s.access.projectIds,sharedAudience:s.access.sharedAudience,
- })
+ const toolsFor=async(s:any,candidates=new Map(Object.entries(raw)))=>{
+  const owner=await openAssistantTurn({sessionId:s.executionContext.lifecycle.sessionId,assistantId:assistant,
+   policy:{admission:'personal'},abortController:new AbortController()})
+  owners.push(owner)
+  owner.bindModelPreparation({kind:'execution',toolProfile:'channel',execution:s.executionContext,
+   assertCurrent:s.executionContext.security.authority.assertCurrent.bind(s.executionContext.security.authority)},
+   {provider:{name:'fixture',models:[]} as never,configuredProviders:undefined,resolveWorkspaceCustomLlm:null,resolveLegacyByoKey:null,buildLegacyByoProvider:null})
+  return {owner,tools:owner.prepareTools(candidates)}
+ }
  const context=(s:any)=>({...executionToolContext(s.executionContext,{appId:'Use Brian'}),activeCapabilities:new Set(['tasks','home_app:tasks:read'])})
- const list=async(s:any)=>{const t=toolsFor(s).get('listTasks')!;return s.executionContext.security.authority.execute(()=>t.execute(t.inputSchema.parse({limit:100}),context(s)))}
- const get=async(s:any,taskId:string)=>{const t=toolsFor(s).get('getTask')!;return s.executionContext.security.authority.execute(()=>t.execute(t.inputSchema.parse({id:taskId}),context(s)))}
+ const perform=async(s:any,name:string,input:unknown)=>{
+  const {owner,tools}=await toolsFor(s)
+  try {const tool=tools.get(name)!;return await tool.execute(tool.inputSchema.parse(input),context(s))}
+  finally {await owner.finish()}
+ }
+ const list=async(s:any)=>perform(s,'listTasks',{limit:100})
+ const get=async(s:any,taskId:string)=>perform(s,'getTask',{id:taskId})
  for(const [user,label,own,other] of [[alice,'Alice','sales','finance'],[bob,'Bob','finance','sales']] as const){
   const s=await scope(user),result=await list(s),body=JSON.stringify(result)
+  expect(JSON.stringify(await get(s,tasks[own]))).toContain(secrets[own])
   record(`${label} task list includes own canary and General`,body.includes(secrets[own])&&body.includes(secrets.general),result)
   record(`${label} task list excludes other department`,!body.includes(secrets[other]),{forbiddenPresent:body.includes(secrets[other])})
-  const denied=await get(s,tasks[other]);record(`${label} guessed task UUID denied`,!JSON.stringify(denied).includes(secrets[other]),denied)
+  const denied=await get(s,tasks[other]).catch(error=>{expect(error).toMatchObject({code:'scope_source_changed'});return null});record(`${label} guessed task UUID denied`,!JSON.stringify(denied).includes(secrets[other]),denied)
   const m=await runWithAgentAccess(s.access,()=>searchMemories(s.access,{searchQuery:'CANARY',limit:100}))
   record(`${label} memory search sees own and excludes other`,JSON.stringify(m).includes(secrets[own])&&!JSON.stringify(m).includes(secrets[other]),{summaries:m.map(x=>x.summary)})
   const deniedMemory=await runWithAgentAccess(s.access,()=>getMemoryById(s.access,memories[other]))
   record(`${label} guessed memory UUID denied`,deniedMemory===null,{found:deniedMemory!==null})
   record(`${label} connector exposure excludes other`,connectorExposureAllowed(s,{compartments:[`team:${own==='sales'?sales:finance}`],projectIds:[]})&&!connectorExposureAllowed(s,{compartments:[`team:${other==='sales'?sales:finance}`],projectIds:[]}),{departments:s.access.departmentRead?.departments})
  }
- const bobScope=await scope(bob), privateRead=await get(bobScope,tasks.private)
+ const bobScope=await scope(bob), privateRead=await get(bobScope,tasks.private).catch(error=>{expect(error).toMatchObject({code:'scope_source_changed'});return null})
  record('Another user cannot read private General task',!JSON.stringify(privateRead).includes(secrets.private),privateRead)
  const adminScope=await scope(admin),adminTasks=JSON.stringify(await list(adminScope))
  record('Workspace admin has no department bypass for task list',!adminTasks.includes(secrets.sales)&&!adminTasks.includes(secrets.finance),{sales:adminTasks.includes(secrets.sales),finance:adminTasks.includes(secrets.finance)})
@@ -93,7 +104,8 @@ const secrets={sales:'CANARY_SALES_COPPER_417',finance:'CANARY_FINANCE_VIOLET_92
  let connectorCalls=0
  const connector=buildTool({name:'fixtureConnector',description:'Synthetic external call',inputSchema:z.object({}),execute:async()=>{connectorCalls++;return {data:'Authorized connector result'}}})
  const before=await scope(alice),lease=before.executionContext.security.authority
- const discovered=bindToolsToAgentAccess(new Map([[connector.name,connector]]),before.access).get(connector.name)!
+ const discoveredOwner=await toolsFor(before,new Map([[connector.name,connector]]))
+ const discovered=discoveredOwner.tools.get(connector.name)!
  expect((await discovered.execute({},context(before))).data).toBe('Authorized connector result')
  await lease.assertCurrent()
  await query('DELETE FROM department_edges WHERE workspace_id=$1 AND user_id=$2',[w,alice])
@@ -103,6 +115,7 @@ const secrets={sales:'CANARY_SALES_COPPER_417',finance:'CANARY_FINANCE_VIOLET_92
  record('Live authority lease rejects revoked department',rejected,{rejected})
  await expect(discovered.execute({},context(before))).rejects.toMatchObject({reason:'authority_changed'})
  expect(connectorCalls).toBe(1)
+ await discoveredOwner.owner.finish()
  await query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,user_id,clearance,origin) VALUES($1,$2,'user',$3,'confidential','store')",[w,sales,alice])
  await expect(lease.assertCurrent()).rejects.toMatchObject({reason:'authority_changed'})
  const expiring=await scope(alice)
@@ -117,8 +130,8 @@ const secrets={sales:'CANARY_SALES_COPPER_417',finance:'CANARY_FINANCE_VIOLET_92
  const capped=await scope(bob),cappedList=JSON.stringify(await list(capped))
  record('Messaging task binding respects assistant department removal',!cappedList.includes(secrets.finance),{forbiddenPresent:cappedList.includes(secrets.finance),resolvedDepartments:capped.access.departmentRead?.departments})
  const rawRows=buildTool({name:'rawRows',description:'Exercise only independent RLS.',inputSchema:z.object({}),execute:async(_input,ctx)=>({data:(await queryWithRLS(ctx.userId,'SELECT title FROM tasks WHERE workspace_id=$1',[w])).rows})})
- const boundRaw=bindToolsToAgentAccess(new Map([[rawRows.name,rawRows]]),capped.executionContext.security.access).get(rawRows.name)!
- expect(JSON.stringify(await boundRaw.execute({},context(capped)))).not.toContain(secrets.finance)
+ const rawOwner=await toolsFor(capped,new Map([[rawRows.name,rawRows]]))
+ try {expect(JSON.stringify(await rawOwner.tools.get(rawRows.name)!.execute({},context(capped)))).not.toContain(secrets.finance)} finally {await rawOwner.owner.finish()}
 
  let providerReceived='';let providerTurn=0
  const send=async function*(messages:any[]){
@@ -136,11 +149,13 @@ const secrets={sales:'CANARY_SALES_COPPER_417',finance:'CANARY_FINANCE_VIOLET_92
   }
  }
  const provider={name:'fixture',models:['fixture'],stream:({messages}:any)=>send(messages),createSession:()=>({send})}
- for await(const event of queryLoop({ledger:NOOP_TURN_LEDGER,provider:provider as any,model:'fixture',systemPrompt:'Synthetic isolation test',messages:[{role:'user',content:'List all tasks, including Finance.'}],tools:toolsFor(capped),context:context(capped) as any,maxTurns:3})){void event}
+ const cappedOwner=await toolsFor(capped)
+ try {for await(const event of queryLoop({ledger:NOOP_TURN_LEDGER,provider:provider as any,model:'fixture',systemPrompt:'Synthetic isolation test',messages:[{role:'user',content:'List all tasks, including Finance.'}],tools:cappedOwner.tools,context:context(capped) as any,maxTurns:3})){void event}} finally {await cappedOwner.owner.finish()}
  record('Real query loop withholds forbidden task from provider input',!providerReceived.includes(secrets.finance),{forbiddenReachedProvider:providerReceived.includes(secrets.finance),providerCalls:providerTurn,received:providerReceived})
  await query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,assistant_id,clearance,origin) VALUES($1,$2,'assistant',$3,'confidential','store') ON CONFLICT DO NOTHING",[w,finance,assistant])
  const positive=await scope(bob);providerTurn=0;providerReceived=''
- for await(const event of queryLoop({ledger:NOOP_TURN_LEDGER,provider:provider as any,model:'fixture',systemPrompt:'Synthetic isolation test',messages:[{role:'user',content:'List Finance tasks.'}],tools:toolsFor(positive),context:context(positive) as any,maxTurns:3})){void event}
+ const positiveOwner=await toolsFor(positive)
+ try {for await(const event of queryLoop({ledger:NOOP_TURN_LEDGER,provider:provider as any,model:'fixture',systemPrompt:'Synthetic isolation test',messages:[{role:'user',content:'List Finance tasks.'}],tools:positiveOwner.tools,context:context(positive) as any,maxTurns:3})){void event}} finally {await positiveOwner.owner.finish()}
  record('Positive control: authorized task reaches scripted provider',providerReceived.includes(secrets.finance),{canaryReachedProvider:providerReceived.includes(secrets.finance),providerCalls:providerTurn})
  let revokeTurn=0,revoked=false,revocationError='';const collected=createTurnOutputCollector({format:'channel'})
  const revokeSend=async function*(messages:any[]){
@@ -159,7 +174,8 @@ const secrets={sales:'CANARY_SALES_COPPER_417',finance:'CANARY_FINANCE_VIOLET_92
   }
  }
  const revokeProvider={name:'fixture',models:['fixture'],stream:({messages}:any)=>revokeSend(messages),createSession:()=>({send:revokeSend})}
- try{for await(const event of queryLoop({ledger:NOOP_TURN_LEDGER,provider:revokeProvider as any,model:'fixture',systemPrompt:'Synthetic isolation test',messages:[{role:'user',content:'Read my Finance task.'}],tools:toolsFor(positive),context:context(positive) as any,maxTurns:3})){collected.observe(event)}}catch(e){revocationError=String(e)}
+ const revokeOwner=await toolsFor(positive)
+ try{for await(const event of queryLoop({ledger:NOOP_TURN_LEDGER,provider:revokeProvider as any,model:'fixture',systemPrompt:'Synthetic isolation test',messages:[{role:'user',content:'Read my Finance task.'}],tools:revokeOwner.tools,context:context(positive) as any,maxTurns:3})){collected.observe(event)}}catch(e){revocationError=String(e)} finally {await revokeOwner.owner.finish()}
  const selected=collected.select()
  record('Query loop retracts buffered secret when user is revoked mid-turn',revoked&&!JSON.stringify(selected).includes(secrets.finance),{revoked,selected,revocationError})
 

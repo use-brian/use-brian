@@ -47,7 +47,8 @@ describe('[COMP:feed/draft-generation] estimate and candidate contract', () => {
   })
 })
 
-import { aiStudioTransport, vertexTransport, type FilesApi } from '@use-brian/core'
+import type { FilesApi } from '@use-brian/core/workspace-files/api.js'
+import { aiStudioTransport, vertexTransport } from '@use-brian/agent-runtime/providers/google-transport.js'
 import { FEED_IMAGE_CAPABILITY } from '@use-brian/shared'
 describe('[COMP:feed/draft-generation] configured image execution', () => {
   it('scenario 4: quotes workspace BYO without calling the provider and records zero platform COGS', async () => {

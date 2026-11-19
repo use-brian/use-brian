@@ -12,7 +12,7 @@ import {
 } from '../scheduled-trigger.js'
 import type { JobStore, ScheduledJob } from '../../scheduling/types.js'
 import type { WorkflowRecord, WorkflowStore } from '../types.js'
-import type { ToolContext } from '../../tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const WORKSPACE_ID = '00000000-0000-0000-0000-000000000001'
 const PRIMARY_ASSISTANT_ID = '00000000-0000-0000-0000-000000000002'

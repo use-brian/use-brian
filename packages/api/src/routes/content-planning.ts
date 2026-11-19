@@ -1,3 +1,5 @@
+import { resolvePlanningAccess, type PlanningAccessContext } from '../content-planning/access.js'
+export { resolvePlanningAccess, type PlanningAccessContext } from '../content-planning/access.js'
 import { guardFeedStream } from '../content-planning/source-authority.js'
 import { FeedCollaborationError } from '../db/feed-collaboration-store.js'
 /**
@@ -12,7 +14,6 @@ import { FeedCollaborationError } from '../db/feed-collaboration-store.js'
 
 import { Router, type Response } from 'express'
 import {
-  canMemberDraftRole,
   getWorkspaceMembershipSystem,
 } from '../db/workspace-store.js'
 import { query } from '../db/client.js'
@@ -59,13 +60,6 @@ export function parseContentDraftSessionTitle(value: unknown): string | 'invalid
   return title.length > 0 && title.length <= MAX_DRAFT_SESSION_TITLE_CHARS
     ? title
     : 'invalid'
-}
-
-export type PlanningAccessContext = {
-  userId: string
-  workspaceId: string
-  role: 'owner' | 'admin' | 'member'
-  canDraft: boolean
 }
 
 export interface ContentPlanningRouteOptions {
@@ -194,6 +188,7 @@ export function contentPlanningRoutes(
         res.json({
           sessions: await store.listSessions({
             assistantId: req.params.assistantId,
+            userId: ctx.userId,
             platform,
           }),
         })
@@ -612,41 +607,6 @@ export function contentPlanningRoutes(
  * Exported so the plan router (`content-plan.ts`) reuses this exact gate
  * rather than reimplementing it (docs/plans/feed-revamp.md §6).
  */
-export async function resolvePlanningAccess(
-  userId: string,
-  assistantId: string,
-): Promise<PlanningAccessContext | null> {
-  const result = await query<{
-    workspaceId: string | null
-    kind: string
-    appType: string | null
-  }>(
-    `SELECT workspace_id AS "workspaceId", kind, app_type AS "appType"
-       FROM assistants
-      WHERE id = $1`,
-    [assistantId],
-  )
-  const assistant = result.rows[0]
-  if (
-    !assistant?.workspaceId
-    || assistant.kind !== 'app'
-    || assistant.appType !== 'distribution'
-  ) {
-    return null
-  }
-  const membership = await getWorkspaceMembershipSystem(
-    userId,
-    assistant.workspaceId,
-  )
-  if (!membership) return null
-  return {
-    userId,
-    workspaceId: assistant.workspaceId,
-    role: membership.role,
-    canDraft: canMemberDraftRole(membership.role, membership.canDraft),
-  }
-}
-
 export function parseContentDraftSeed(
   value: unknown,
   platform: ContentPlanningPlatform,

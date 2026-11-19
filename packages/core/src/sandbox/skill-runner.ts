@@ -1,4 +1,4 @@
-import type { DepartmentReadGrant } from '../security/department-read.js'
+import type { DepartmentReadGrant } from '@use-brian/agent-runtime/security/department-read.js'
 /**
  * The governed logic-block runner + its tool surface (R2-5/R2-9/R2-10).
  *
@@ -20,9 +20,9 @@ import type { DepartmentReadGrant } from '../security/department-read.js'
  * touch — the 1984 case. A flagged contract refuses to run at all.
  */
 import { z } from 'zod'
-import { buildTool, type Tool, type ToolContext, type ToolResult } from '../tools/types.js'
-import { isAttendedTurn } from '../tools/capability-gate.js'
-import type { Sensitivity } from '../security/sensitivity.js'
+import { buildTool, type Tool, type ToolContext, type ToolResult } from '@use-brian/agent-runtime/tools/types.js'
+import { isAttendedTurn } from '@use-brian/agent-runtime/tools/capability-gate.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import {
   contractAllowsRun,
   contractIsReadOnly,

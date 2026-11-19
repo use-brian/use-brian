@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { countDecisionEvidence } from '../decision-learning/evidence.js'
+import type { MemoryLearningContext } from '@use-brian/agent-runtime/security/access-context.js'
 
 /** [COMP:memory/learning] Semantic eligibility; never a substitute for authorization. */
 export const MEMORY_LEARNING_VERSION = 1 as const
@@ -16,7 +17,12 @@ export const memoryApplicabilitySchema = z.object({
   exceptionTo: z.string().uuid().optional(),
 }).strict().refine(value => !value.operationKey || !!value.operation, 'An operation key requires an operation')
 export type MemoryApplicability = z.infer<typeof memoryApplicabilitySchema>
-export type MemoryLearningContext = Omit<MemoryApplicability, 'exceptionTo'>
+// Declared with AccessContext in the runtime security subset; one symbol.
+export type { MemoryLearningContext }
+type SameShape<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false
+type AssertTrue<T extends true> = T
+/** Compile-time guard: the runtime declaration must equal the schema minus `exceptionTo`. */
+type _MemoryLearningContextMatchesSchema = AssertTrue<SameShape<Omit<MemoryApplicability, 'exceptionTo'>, MemoryLearningContext>>
 
 export const memoryLearningProposalSchema = z.object({
   intent: z.enum(['one_off', 'explicit', 'inferred']),

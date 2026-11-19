@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { buildTool, type Tool } from '../types.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import {
   createEngineAskers,
   EngineInputError,
@@ -9,7 +9,7 @@ import {
 } from '../../engines/ask-engines.js'
 import { encodeExternalCostMeta } from '../../billing/external-cost.js'
 import { flatEngineCostUsd, engineCostModel } from '../../billing/engine-provider-rates.js'
-import type { ExternalCredentialPool } from '../../providers/credential-pool.js'
+import type { ExternalCredentialPool } from '@use-brian/agent-runtime/providers/credential-pool.js'
 import { recordToolSpend, resolveToolCredential } from './provider-credential.js'
 
 /**

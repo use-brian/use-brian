@@ -10,7 +10,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import type { FilesApi, FilesContext } from '@use-brian/core'
+import type { FilesApi, FilesContext } from '@use-brian/core/workspace-files/api.js'
 import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
 import {
   claimNextGDriveCatalogSync,

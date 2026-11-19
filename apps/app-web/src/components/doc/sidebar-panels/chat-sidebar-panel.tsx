@@ -67,6 +67,7 @@ import {
   deleteSession,
   setRoomCapture,
   renameSessionTitle,
+  readChatTurnStatus,
   type DocSession,
   type WorkspaceSession,
 } from "@/lib/api/sessions";
@@ -166,6 +167,7 @@ const ROOM_ACTIVITY_STATUS_POLL_MS = 3_000;
 const ROOM_ACTIVITY_OVERRIDE_GRACE_MS = 10_000;
 
 type RoomActivityOverride = {
+  turnId?: string | null;
   working: boolean;
   changedAt: number;
 };
@@ -231,7 +233,7 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
         if (
           !row && override.working ||
           row && (row.statusReadStartedAt ?? 0) > override.changedAt &&
-          (persistedWorking === override.working ||
+          (row.turnId && override.turnId && row.turnId !== override.turnId || persistedWorking === override.working ||
             !override.working || now - override.changedAt >= ROOM_ACTIVITY_OVERRIDE_GRACE_MS)
         ) {
           delete next[sessionId];
@@ -243,20 +245,44 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
   }, [sharedRows, rows]);
 
   useEffect(() => {
+    let active = true;
+    const revisions = new Map<string, number>();
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<ChatSessionActivityDetail>).detail;
       if (!detail || detail.workspaceId !== workspaceId) return;
-      setActivityBySession((current) => ({
-        ...current,
-        [detail.sessionId]: {
-          working: detail.working,
-          changedAt: Date.now(),
-        },
-      }));
+      if (detail.turnId != null && !/^[a-f0-9]{64}$/.test(detail.turnId)) return;
+      const revision = (revisions.get(detail.sessionId) ?? 0) + 1;
+      revisions.set(detail.sessionId, revision);
+      const previous = activityBySession[detail.sessionId];
+      const row = [...(rows ?? []), ...(sharedRows ?? [])].find(value => value.id === detail.sessionId);
+      const displayedTurnId = row && (row.statusReadStartedAt ?? 0) > (previous?.changedAt ?? 0)
+        ? row.turnId ?? null : previous ? previous.turnId ?? null : row?.turnId ?? null;
+      const apply = (working: boolean, turnId: string | null, changedAt: number, fromRead = false) => {
+        if (!active || revisions.get(detail.sessionId) !== revision) return;
+        setActivityBySession(current => {
+          if (!active || revisions.get(detail.sessionId) !== revision) return current;
+          if (fromRead && current[detail.sessionId] !== previous) return current;
+          if (!fromRead && !working && displayedTurnId && displayedTurnId !== turnId) return current;
+          return { ...current, [detail.sessionId]: { working, turnId, changedAt } };
+        });
+      };
+      const observedAt = Date.now();
+      if (detail.working || detail.turnId && displayedTurnId !== null) {
+        apply(detail.working, detail.turnId ?? null, observedAt);
+        return;
+      }
+      // A legacy terminal signal identifies no owner. Reconcile current state
+      // without treating unavailable/unknown status as completed or redirecting
+      // a delayed old read onto a later activity/list/workspace generation.
+      void readChatTurnStatus(detail.sessionId).then(status => {
+        if (status.status === 'running' || status.status === 'idle') {
+          apply(status.status === 'running', status.turnId, observedAt, true);
+        }
+      }).catch(() => {});
     };
     window.addEventListener(CHAT_SESSION_ACTIVITY_EVENT, handler);
-    return () => window.removeEventListener(CHAT_SESSION_ACTIVITY_EVENT, handler);
-  }, [workspaceId]);
+    return () => { active = false; window.removeEventListener(CHAT_SESSION_ACTIVITY_EVENT, handler); };
+  }, [workspaceId, rows, sharedRows, activityBySession]);
 
   const base = `/w/${workspaceId}/chat`;
   const onChatSurface = pathname === base;

@@ -12,7 +12,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import type { StreamableHTTPClientTransportOptions } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
-import type { McpServerConfig, McpToolInfo } from '@use-brian/core'
+import type { McpServerConfig, McpToolInfo } from '@use-brian/agent-runtime/mcp/types.js'
 
 const CONNECT_TIMEOUT = 10_000
 const CALL_TIMEOUT = 30_000

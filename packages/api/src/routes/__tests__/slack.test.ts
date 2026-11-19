@@ -61,21 +61,26 @@ vi.mock('../../db/sessions.js', () => ({
 }))
 
 // Mock core
-vi.mock('@use-brian/core', async () => {
-  const actual = await vi.importActual<typeof import('@use-brian/core')>('@use-brian/core')
-  return {
-    ...actual,
-    queryLoop: vi.fn(),
-    buildMemoryContext: vi.fn(() => ''),
-    createMemoryTools: vi.fn(() => ({
-      saveMemory: { name: 'saveMemory' },
-      getMemory: { name: 'getMemory' },
-    })),
-    extractPatterns: vi.fn(() => []),
-    ensureToolResultPairing: vi.fn((msgs: unknown[]) => msgs),
-    synthesizeMissingToolResults: vi.fn(() => []),
-  }
-})
+vi.mock('@use-brian/core/engine/query-loop-defaults.js', async () => ({
+  ...(await vi.importActual<typeof import('@use-brian/core/engine/query-loop-defaults.js')>('@use-brian/core/engine/query-loop-defaults.js')),
+  queryLoop: vi.fn(),
+}))
+vi.mock('@use-brian/core/memory/context-builder.js', async () => ({
+  ...(await vi.importActual<typeof import('@use-brian/core/memory/context-builder.js')>('@use-brian/core/memory/context-builder.js')),
+  buildMemoryContext: vi.fn(() => ''),
+}))
+vi.mock('@use-brian/core/memory/tools.js', async () => ({
+  ...(await vi.importActual<typeof import('@use-brian/core/memory/tools.js')>('@use-brian/core/memory/tools.js')),
+  createMemoryTools: vi.fn(() => ({
+    saveMemory: { name: 'saveMemory' },
+    getMemory: { name: 'getMemory' },
+  })),
+}))
+vi.mock('@use-brian/agent-runtime/engine/tool-pairing.js', async () => ({
+  ...(await vi.importActual<typeof import('@use-brian/agent-runtime/engine/tool-pairing.js')>('@use-brian/agent-runtime/engine/tool-pairing.js')),
+  ensureToolResultPairing: vi.fn((msgs: unknown[]) => msgs),
+  synthesizeMissingToolResults: vi.fn(() => []),
+}))
 // The live budget gate (monthly credit cap) lives in billing/credit-gate.js;
 // mock it so the gate is deterministic and never touches the DB.
 vi.mock('../../billing/credit-gate.js', () => ({

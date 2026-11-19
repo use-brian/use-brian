@@ -1,8 +1,9 @@
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
 import express from 'express'
 import request from 'supertest'
-import {boundScopeSources,type LLMProvider} from '@use-brian/core'
-import {assertSourceModelInputAuthority} from '../model-source-authority.js'
+import type {LLMProvider} from '@use-brian/agent-runtime/providers/types.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
+import {admitModelInput} from '../../context-scope/admission.js'
 import {generateTitle} from '../../routes/attended-session-title.js'
 import {brainRoutes} from '../../routes/brain.js'
 import {requireAuth} from '../../auth/middleware.js'
@@ -84,7 +85,7 @@ describe.sequential('[COMP:api/application-persistence] actual native Knowledge 
   const fields=sources.filter(source=>source.resourceKind==='application_field');expect(fields).toHaveLength(1)
   expect((await f.f.pool.query(`SELECT resource_id,selection,fields FROM application_field_resources WHERE workspace_id=$1 AND id=$2`,[f.f.workspaceId,fields[0].resourceId])).rows)
    .toEqual([{resource_id:source.id,selection:'read',fields:['branch','id','lastSyncedAt','repo','rootPath','sourceType']}])
-  const shared=await f.context(f.f.secondId,true);shared.scopeAccumulator.note({sources});await expect(assertSourceModelInputAuthority(shared)).resolves.toBeUndefined()
+  const shared=await f.context(f.f.secondId,true);shared.scopeAccumulator.note({sources});await expect(admitModelInput(shared)).resolves.toBeUndefined()
   const before=await snapshot()
   if(change==='source-location role')await policy.revoke(f.f.ownerId)
   else await f.f.pool.query('UPDATE workspace_knowledge_sources SET last_synced_at=clock_timestamp() WHERE id=$1',[source.id])
@@ -92,14 +93,14 @@ describe.sequential('[COMP:api/application-persistence] actual native Knowledge 
   const replay=await f.context(f.f.ownerId,true);replay.scopeAccumulator.note({sources});let extractions=0,calls=0
   const provider:LLMProvider={name:'fictional-source-card',models:['fixture'],createSession(){throw new Error('Stateless fixture required')},stream:async function*(){calls++;
    yield{type:'message_start',model:'fixture'};yield{type:'text_delta',text:'Fictional source title'};yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:2,outputTokens:2}}}}
-  await expect(generateTitle(provider,[{role:'user',get content(){extractions++;return JSON.stringify(projection)}}],'fixture',()=>assertSourceModelInputAuthority(replay)))
+  await expect(generateTitle(provider,[{role:'user',get content(){extractions++;return JSON.stringify(projection)}}],'fixture',()=>admitModelInput(replay)))
    .rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
   expect(extractions).toBe(0);expect(calls).toBe(0)
   const second=await f.context(f.f.secondId,true),current=change==='source-location role'?projection:await store.getSourceForViewer(second.executionContext!.security.access,source.id,{execution:second.executionContext!,accumulator:second.scopeAccumulator})
   expect(current?.repo).toBe(source.repo);if(!current)throw new Error('Independent current source-card projection required')
   if(change==='mutable sync metadata')expect(current.lastSyncedAt).toBeInstanceOf(Date)
   second.scopeAccumulator.note({sources:boundScopeSources(current)})
-  await expect(generateTitle(provider,[{role:'user',content:JSON.stringify(current)}],'fixture',()=>assertSourceModelInputAuthority(second)))
+  await expect(generateTitle(provider,[{role:'user',content:JSON.stringify(current)}],'fixture',()=>admitModelInput(second)))
    .resolves.toEqual({title:'Fictional source title',model:'fixture',usage:{inputTokens:2,outputTokens:2}})
   expect(calls).toBe(1)
  })

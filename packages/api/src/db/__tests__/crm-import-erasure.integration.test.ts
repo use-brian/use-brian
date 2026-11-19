@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
-import { CrmOperationsCommandSchema, type CrmOperationsContext } from '@use-brian/core'
+import { CrmOperationsCommandSchema, type CrmOperationsContext } from '@use-brian/core/crm/operations-types.js'
 import { flushWorkspaceData } from '../workspace-flush.js'
 import { getPool, getAppPool } from '../client.js'
 import { createCrmImportSources, type CrmImportSources } from '../crm-import-sources.js'

@@ -2,11 +2,12 @@
 import { randomUUID } from 'node:crypto'
 import express, { Router } from 'express'
 import { z } from 'zod'
-import type { AccessCeiling, ExecutionContext } from '@use-brian/core'
+import type { AccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { ApplicationPlatformError, applicationCommandSchema, applicationJsonSchema } from '@use-brian/shared'
 import { ApplicationPlatformService } from '../application-platform/service.js'
 import { bindExternalServiceReceiptIdentity } from '../application-platform/external-service-receipt-identity.js'
-import { createCanonicalNativeApplicationModule } from '../application-platform/native-adapters.js'
+import { createExternalServiceNativeApplicationModule } from '../application-platform/native-adapters.js'
 import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
 import { AuthorityChangedError } from '../context-scope/authority-lease.js'
 import { getPool } from '../db/client.js'
@@ -17,7 +18,7 @@ import { serveStatelessMcp } from '../brain-mcp/stateless.js'
 import type { BrainTool } from '../brain-mcp/tools.js'
 import { authenticateExternalService, type ExternalServiceContext } from './context.js'
 
-const queryKeys = ['get', 'query', 'file_candidates', 'member_candidates'] as const
+const queryKeys = ['get', 'get_companies', 'query', 'file_candidates', 'member_candidates'] as const
 const commandKeys = ['create_company', 'create_contact', 'patch_company', 'patch_contact'] as const
 const queryInput = z.object({ key: z.enum(queryKeys), input: applicationJsonSchema }).strict()
 const commandInput = z.object({ key: z.enum(commandKeys), command: applicationCommandSchema }).strict()
@@ -64,7 +65,7 @@ export function externalServiceCanonicalRoutes(options: {
   const router = Router({ mergeParams: true }), authenticate = options.authenticate ?? authenticateExternalService
   // Construction is lazy: importing an auth-only router must not open a database.
   let dispatcher = options.service
-  const service = () => dispatcher ??= new ApplicationPlatformService([createCanonicalNativeApplicationModule()])
+  const service = () => dispatcher ??= new ApplicationPlatformService([createExternalServiceNativeApplicationModule()])
   router.use(express.json({ limit: '256kb' }))
   router.use('/canonical', (_req, res, next) => { res.set('Cache-Control', 'no-store'); next() })
   const invoke = async (execution: ExecutionContext, context: ExternalServiceContext, mode: 'query' | 'command' | 'reconcile', raw: unknown) => {

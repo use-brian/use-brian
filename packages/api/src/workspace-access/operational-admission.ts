@@ -5,7 +5,8 @@ import { createDbCapabilityStore } from '../db/capability-store.js'
  * by a trusted server surface, not inferred from creator/owner or a snapshot.
  */
 import type { PoolClient } from 'pg'
-import { accessCeilingContains, pinAccessCeiling, parseAuthoringAuthority, type WorkflowTrigger, type AuthoringAuthority } from '@use-brian/core'
+import type { WorkflowTrigger } from '@use-brian/core/workflow/types.js'
+import { accessCeilingContains, pinAccessCeiling, parseAuthoringAuthority, type AuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { captureAuthoringAuthoritySystem, resolveWorkflowAuthoringScope } from '../context-scope/workflow-authority.js'
 import { readAdmissionPolicy, usesClassicModeAdmission } from './admission-policy-read.js'
 import { admitWorkspaceResource } from './resource-admission.js'

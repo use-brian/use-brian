@@ -22,11 +22,11 @@
  * [COMP:api/page-event-fanout]
  */
 
+import type { WorkflowEventDispatcher } from '@use-brian/core/workflow/event-trigger.js'
 import {
   createPageLifecycleTrigger,
   type PageLifecycleEvent,
-  type WorkflowEventDispatcher,
-} from '@use-brian/core'
+} from '@use-brian/core/workflow/page-event-trigger.js'
 
 let sink: ((event: PageLifecycleEvent) => Promise<void>) | null = null
 

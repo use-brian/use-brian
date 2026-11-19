@@ -14,8 +14,8 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
-import { notFoundFailure } from '../tools/tool-failure.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { notFoundFailure } from '@use-brian/agent-runtime/tools/tool-failure.js'
 import type { ControlPlaneReader } from './types.js'
 
 export type ControlPlaneTools = {

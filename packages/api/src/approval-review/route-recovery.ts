@@ -16,7 +16,7 @@
  * [COMP:api/operational-route-recovery]
  */
 import { z } from 'zod'
-import { selectOperationalRoute, type OperationalRoute, type RouteProbe, type RouteSelection } from '@use-brian/core'
+import { selectOperationalRoute, type OperationalRoute, type RouteProbe, type RouteSelection } from '@use-brian/core/approval-review/route-recovery.js'
 import { getPool, queryWithRLS } from '../db/client.js'
 import {
   getRouteBindingForViewer,

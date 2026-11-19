@@ -9,19 +9,21 @@
  */
 
 import {
-  CrmOperationsError,
   crmReferenceDefinitionIssues,
   crmReferenceNeedsBusinessDate,
   crmReferenceNeedsCategory,
   crmReferencePartitionKey,
   formatCrmBusinessReference,
   normalizeCrmBusinessReference,
-  requireCrmIntegrationResources,
   resolveCrmBusinessDate,
   type CrmBusinessDate,
   type CrmBusinessReferenceCommand,
+} from '@use-brian/core/crm/business-references.js'
+import { requireCrmIntegrationResources } from '@use-brian/core/crm/integration-authority.js'
+import {
+  CrmOperationsError,
   type CrmOperationsContext,
-} from '@use-brian/core'
+} from '@use-brian/core/crm/operations-types.js'
 import type { CrmOperationsTransaction } from '../db/crm-operations-store.js'
 import { readCrmMutationSource, readCrmReference } from '../db/crm.js'
 import { lockAccount } from '../db/crm-commercial-context-store.js'

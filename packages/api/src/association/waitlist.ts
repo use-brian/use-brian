@@ -2,10 +2,20 @@
 import type { Pool, PoolClient } from 'pg'
 import { associationOrderReadPredicate, assertAssociationOrderAuthority, withAssociationWaitlistSubmission } from './source-scope.js'
 import {
-  AssociationOrderCreateSchema, AssociationWaitlistOfferInputSchema, associationWaitlistReferences,
-  CrmOperationsError, crmOperationsSha256, requireCrmIntegrationResources,
-  type AssociationActor, type AssociationOrderCreateInput, type AssociationWaitlistOfferInput,
-} from '@use-brian/core'
+  CrmOperationsError,
+  crmOperationsSha256,
+} from '@use-brian/core/application-platform/operation-contract.js'
+import {
+  AssociationOrderCreateSchema,
+  type AssociationActor,
+  type AssociationOrderCreateInput,
+} from '@use-brian/core/association/domain.js'
+import {
+  AssociationWaitlistOfferInputSchema,
+  associationWaitlistReferences,
+  type AssociationWaitlistOfferInput,
+} from '@use-brian/core/association/waitlist.js'
+import { requireCrmIntegrationResources } from '@use-brian/core/crm/integration-authority.js'
 import { lockCrmIntegrationCredential } from '../db/crm-integration-store.js'
 import { lockAssociationModule, requireAssociationAdmission } from './workspace-module.js'
 import { lockAssociationInventory } from './inventory.js'

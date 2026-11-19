@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { createTranscriptionPrefTools, type WorkspaceTranscriptionPrefsPort } from '../transcription-tools.js'
-import type { ToolContext } from '../../tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const context = (workspaceId?: string): ToolContext =>
   ({

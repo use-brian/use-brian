@@ -1,6 +1,6 @@
 /** Captured copy sets shared by export, review and purge. [COMP:crm/privacy-copies] */
 import type { PoolClient } from 'pg'
-import { CrmOperationsError, type CrmPrivacyBlocker } from '@use-brian/core'
+import { CrmOperationsError, type CrmPrivacyBlocker } from '@use-brian/core/crm/operations-types.js'
 import { CRM_PRIVACY_COVERAGE } from './privacy-coverage.js'
 import { readCrmPrivacyPolicy } from './privacy-policy.js'
 import { prepareCrmImportCopies, inspectCrmImportCopyConflicts } from './import-copy-resolver.js'

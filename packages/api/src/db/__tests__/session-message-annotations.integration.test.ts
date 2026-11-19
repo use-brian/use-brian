@@ -1,13 +1,18 @@
 import { afterAll,afterEach,describe,expect,it,vi } from 'vitest'
-import { bindScopeSources,boundScopeSources,classifyTopic,executionToolContext,type LLMProvider,type StreamFn,type TopicClassifierOptions } from '@use-brian/core'
+import { classifyTopic, type TopicClassifierOptions } from '@use-brian/core/memory/topic-classifier.js'
+import type { LLMProvider, StreamFn } from '@use-brian/agent-runtime/providers/types.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { persistentContextFixture } from '../../application-platform/__tests__/fixtures/persistent-context.js'
 import { persistentSourceFixture } from '../../application-platform/__tests__/fixtures/persistent-source.js'
-import { assertSourceModelInputAuthority } from '../../application-platform/model-source-authority.js'
+import { admitModelInput } from '../../context-scope/admission.js'
 import { applyRLSGucs,getAppPool,getPool } from '../client.js'
 import { addSessionMessage,getSessionMessages } from '../sessions.js'
 import { bindSessionContextRetainedAuthority,writeSessionContextRevision,withSessionMessagePublication } from '../session-context-revisions.js'
 import { readSessionMessageAnnotation,writeSessionMessageAnnotation,prepareSessionMessageAnnotation } from '../session-message-annotations.js'
-import { publishNativeSessionMessageBatch } from '../session-message-publication.js'
+import { publishNativeSessionMessageBatch } from '../conversation-store.js'
+import { connectActingAs } from '../../__tests__/fixtures/bootstrap-role.js'
+import type { PoolClient } from 'pg'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 
@@ -22,8 +27,21 @@ describe.sequential('[COMP:api/session-message-annotations] actual immutable mes
   const stream=vi.fn<StreamFn>(async function*(){yield {type:'text_delta',text:'{"topic_label":"fictional current request","state":"continue","confidence":0.9}'}})
   const provider:LLMProvider={name:'fixture',models:['fixture'],stream,createSession(){throw new Error('Unused synthetic provider session')}}
   const options=bindScopeSources<TopicClassifierOptions>({provider,model:'fixture',currentMessage:(message.content as Array<{text:string}>)[0].text,
-   recentUserTurns:[],knownTopicsThisSession:[],replyToText:null,authority,assertInputAuthority:()=>assertSourceModelInputAuthority(context)},history.flatMap(boundScopeSources))
+   recentUserTurns:[],knownTopicsThisSession:[],replyToText:null,authority,assertInputAuthority:()=>admitModelInput(context)},history.flatMap(boundScopeSources))
   return {authority,message,history,classification:await classifyTopic(options)}
+ }
+ async function sourceIds(kind:string,id:string){
+  // Canonical effects retain their own frame; follow that immutable lineage,
+  // rather than requiring the displaced writer's direct-edge representation.
+  return (await f!.pool.query(`WITH RECURSIVE sources(kind,id,version) AS (
+   SELECT s.source_kind,s.source_id,s.source_version FROM scope_derivations d
+    JOIN scope_derivation_sources s ON s.workspace_id=d.workspace_id AND s.derivation_id=d.id
+    WHERE d.workspace_id=$1 AND d.resource_kind=$2 AND d.resource_id=$3
+   UNION
+   SELECT s.source_kind,s.source_id,s.source_version FROM sources parent
+    JOIN scope_derivations d ON d.workspace_id=$1 AND d.resource_kind=parent.kind AND d.resource_id=parent.id AND d.resource_version=parent.version
+    JOIN scope_derivation_sources s ON s.workspace_id=d.workspace_id AND s.derivation_id=d.id
+  ) SELECT id FROM sources`,[f!.workspaceId,kind,id])).rows.map(row=>row.id)
  }
  async function pendingReply(){
   f=await persistentContextFixture();const current=await input()
@@ -63,11 +81,8 @@ describe.sequential('[COMP:api/session-message-annotations] actual immutable mes
   current.authority.accumulator.note({sources:laterSources})
   const saved=await current.publish()
   const annotation=await readSessionMessageAnnotation(f!.session.id,current.message.id,await f!.modelContext())
-  const edges=async(kind:string,id:string)=>(await f!.pool.query(`SELECT s.source_id FROM scope_derivations d
-   JOIN scope_derivation_sources s ON s.workspace_id=d.workspace_id AND s.derivation_id=d.id
-   WHERE d.workspace_id=$1 AND d.resource_kind=$2 AND d.resource_id=$3`,[f!.workspaceId,kind,id])).rows.map(row=>row.source_id)
-  expect(await edges('session_context_revision',annotation!.revisionId)).not.toContain(later.id)
-  expect(await edges('session_message',saved[0].id)).toContain(later.id)
+  expect(await sourceIds('session_context_revision',annotation!.revisionId)).not.toContain(later.id)
+  expect(await sourceIds('session_message',saved[0].id)).toContain(later.id)
  })
  it('rejects a changed annotation head atomically with the reply',async()=>{
   const current=await pendingReply(),before=(await f!.history()).length
@@ -94,8 +109,7 @@ describe.sequential('[COMP:api/session-message-annotations] actual immutable mes
   expect(raw).toMatchObject({topic_label:null,topic_confidence:null,reply_to_text:null,content:current.message.content})
   expect(await readSessionMessageAnnotation(f.session.id,current.message.id,await f.modelContext(f.secondId))).toMatchObject({revisionId:annotation!.revisionId,topicLabel:'fictional current request'})
   expect((await f.history()).flatMap(boundScopeSources)).toEqual(original)
-  const edges=(await f.pool.query(`SELECT edge.source_id FROM scope_derivations d JOIN scope_derivation_sources edge ON edge.workspace_id=d.workspace_id AND edge.derivation_id=d.id
-   WHERE d.workspace_id=$1 AND d.resource_kind='session_context_revision' AND d.resource_id=$2`,[f.workspaceId,annotation!.revisionId])).rows.map(row=>row.source_id)
+  const edges=await sourceIds('session_context_revision',annotation!.revisionId)
   for(const source of original)expect(edges).toContain(source.resourceId)
   expect((await f.pool.query('SELECT read_session_context_revision($1,$2) AS value',[f.workspaceId,annotation!.revisionId])).rows[0].value).toBeNull()
  })
@@ -140,7 +154,7 @@ describe.sequential('[COMP:api/session-message-annotations] actual immutable mes
   expect((await f.pool.query("SELECT read_scope_source($1,'session_context_revision',$2) AS source",[f.workspaceId,descendant!.id])).rows[0].source.held).toBe(true)
  })
  it('withholds a withdrawn independent annotation and keeps another reader and the authored body usable',async()=>{
-  f=await persistentContextFixture();const current=await input(),original=(await f.history()).flatMap(boundScopeSources)
+  f=await persistentContextFixture('confidential');const current=await input(),original=(await f.history()).flatMap(boundScopeSources)
   independent=await persistentSourceFixture(f)
   bindSessionContextRetainedAuthority(current.authority.execution,(execution,sources,action)=>independent!.coordinator.prepare(execution,sources,action))
   const generated=bindScopeSources({...current.classification},[...boundScopeSources(current.classification),independent.root])
@@ -177,16 +191,18 @@ describe.sequential('[COMP:api/session-message-annotations] actual immutable mes
   } finally {await direct.query('ROLLBACK');direct.release()}
   // Independently prove RLS defense using a transaction-local nonlogin probe.
   // The real runtime gets no grant; rollback removes this fixture-only role.
-  const probe=await f.pool.connect(),probeRole='annotation_probe_'+crypto.randomUUID().replaceAll('-','')
+  // The ordinary owner cannot create or assume roles: a bootstrap login acts
+  // as the owner, and only the role creation runs as the bootstrap role.
+  const acting=await connectActingAs(),probe=acting.client,probeRole='annotation_probe_'+crypto.randomUUID().replaceAll('-','')
   try {
-   await probe.query('BEGIN');await applyRLSGucs(probe,f.ownerId)
-   await probe.query(`CREATE ROLE ${probeRole} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS`)
+   await probe.query('BEGIN');await applyRLSGucs(probe as unknown as PoolClient,f.ownerId)
+   await acting.privileged(()=>probe.query(`CREATE ROLE ${probeRole} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS`))
    await probe.query(`GRANT USAGE ON SCHEMA public TO ${probeRole}`)
    await probe.query(`GRANT SELECT ON session_message_annotation_heads TO ${probeRole}`)
    await probe.query(`SET LOCAL ROLE ${probeRole}`)
    expect((await probe.query("SELECT has_table_privilege(current_user,'session_message_annotation_heads','SELECT') AS allowed")).rows[0].allowed).toBe(true)
    expect((await probe.query('SELECT * FROM session_message_annotation_heads')).rows).toEqual([])
-  } finally {await probe.query('ROLLBACK');probe.release()}
+  } finally {await probe.query('ROLLBACK');await probe.end()}
  })
  it('refuses a fabricated parent or another invocation session without partial annotation effects',async()=>{
   f=await persistentContextFixture();const current=await input()

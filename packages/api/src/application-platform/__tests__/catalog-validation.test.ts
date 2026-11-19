@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PoolClient } from 'pg'
 import type { ApplicationResourceDefinition } from '@use-brian/shared'
-import { createExecutionContext, type ApplicationOperationContext, type PropertyDef } from '@use-brian/core'
+import type { ApplicationOperationContext } from '@use-brian/core/application-platform/contracts.js'
+import type { PropertyDef } from '@use-brian/core/entities/doc-types.js'
+import { createExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { createHash } from 'node:crypto'
 
 const state = vi.hoisted(() => ({ application: false, fields: [] as Array<Record<string, unknown>> }))

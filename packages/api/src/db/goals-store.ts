@@ -1,5 +1,5 @@
 import type { OperationalHumanAuthor } from '../workspace-access/operational-admission.js'
-import type { GoalStore } from '@use-brian/core'
+import type { GoalStore } from '@use-brian/core/goals/types.js'
 import {
   countOpenSubGoalsSystem,
   createGoal,

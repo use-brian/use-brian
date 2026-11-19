@@ -1,14 +1,29 @@
 import {bindToolsToAgentAccess} from '../../context-scope/agent-access-tools.js'
 import {afterAll,afterEach,describe,it,expect,vi} from 'vitest'
-import {boundScopeSources,executionToolContext,createGoogleCalendarTools,createMcpSearchTools,buildToolIndex,inheritRoutineCalendarRead,queryLoop,NOOP_TURN_LEDGER,consumeHostReadObservation,combineHostReadObservations,
- type GoogleCalendarApi,type LLMProvider,type ToolContext,type HostReadReceipt} from '@use-brian/core'
+import { queryLoop } from '@use-brian/core/engine/query-loop-defaults.js'
+import { inheritRoutineCalendarRead } from '@use-brian/core/engine/routine-read-ownership.js'
+import {
+ consumeHostReadObservation,
+ combineHostReadObservations
+} from '@use-brian/core/engine/routine-read.js'
+import { createMcpSearchTools, buildToolIndex } from '@use-brian/core/mcp/tool-search.js'
+import {
+ createGoogleCalendarTools,
+ type GoogleCalendarApi
+} from '@use-brian/core/tools/base/google-calendar.js'
+import type { HostReadReceipt } from '@use-brian/agent-runtime/engine/query-loop-ports.js'
+import { NOOP_TURN_LEDGER } from '@use-brian/agent-runtime/engine/turn-ledger.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import type {HostObservation} from '@use-brian/shared'
 import {executionFixture,fixtureDecisionProvider} from '../../../../core/src/decisions/__tests__/execution-fixture.js'
 import {getAppPool,getPool} from '../../db/client.js'
-import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
-import {publishNativeSessionMessageBatch} from '../../db/session-message-publication.js'
+import {readAdmittedSessionQuery} from '../../db/conversation-store.js'
+import {publishNativeSessionMessageBatch} from '../../db/conversation-store.js'
 import {toStampedMessages,addSessionMessage} from '../../db/sessions.js'
-import {assertSourceModelInputAuthority} from '../model-source-authority.js'
+import {admitModelInput} from '../../context-scope/admission.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -23,7 +38,7 @@ describe.sequential('[COMP:api/native-host-observation] executed host carrier pu
   const query=await readAdmittedSessionQuery({sessionId:f.session.id,throughSequence:3,authority}),sources=boundScopeSources(query)
   authority.accumulator.note({sources})
   const context:ToolContext={...executionToolContext(authority.execution,{appId:'fictional-host-read'}),scopeAccumulator:authority.accumulator}
-  context.assertModelInputAuthority=current=>assertSourceModelInputAuthority(current)
+  context.admitModelInput=current=>admitModelInput(current)
   return{f,authority,context,sources,command:{sessionId:f.session.id,authority,derivation:{producer:'fixture:host-read',sources},derivationTarget:f.envelope}}
  }
  it('commits real executor observations and the reply atomically, preserving source lineage and reload attribution',async()=>{
@@ -39,7 +54,7 @@ describe.sequential('[COMP:api/native-host-observation] executed host carrier pu
   }})}
   const runtime=executionFixture({llm:provider,totalTimeoutMs:60_000,primaryTimeoutMs:50_000,primary:fixtureDecisionProvider(async request=>{
    const state=request.state as unknown as {targets:Array<{id:string}>;ranges:Array<{id:string}>}
-   const answers:import('@use-brian/core').DecisionAnswer[]=request.questions.map(question=>question.kind==='boolean'
+   const answers:import('@use-brian/core/decisions/types.js').DecisionAnswer[]=request.questions.map(question=>question.kind==='boolean'
     ? {kind:'boolean',questionId:question.id,value:question.id===state.targets[0].id,evidence:{source:'unavailable'}}
     : {kind:'choice',questionId:question.id,value:question.id==='routine'?'calendar':state.ranges[0].id,evidence:{source:'unavailable'}})
    return{providerId:'fixture-decision',model:request.model,answers}

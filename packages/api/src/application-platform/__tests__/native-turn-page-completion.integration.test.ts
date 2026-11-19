@@ -1,9 +1,9 @@
 import {randomUUID} from 'node:crypto'
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
-import {boundScopeSources} from '@use-brian/core'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {getAppPool,getPool} from '../../db/client.js'
-import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
-import {publishNativeSessionMessageBatch} from '../../db/session-message-publication.js'
+import {readAdmittedSessionQuery} from '../../db/conversation-store.js'
+import {publishNativeSessionMessageBatch} from '../../db/conversation-store.js'
 import {withSessionMessagePublication} from '../../db/session-context-revisions.js'
 import {createWorkspaceFile} from '../../db/workspace-files.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
@@ -80,21 +80,23 @@ describe.sequential('[COMP:api/native-turn-frame] sealed native Page obligations
    VALUES($1,$2,'Fictional source page','tasks','table','{"blocks":[]}','saved','internal') RETURNING page_event_revision`,[f.workspaceId,f.ownerId])).rows[0]
   return{f,authority,sources:allSources,command,op,page,file}
  }
- it('eliminates per-edge Page walks while retaining two fresh proofs and durable cleanup',async()=>{
-  const{f,authority,sources,command,op}=await setup(9)
+ const publicationPageWork:number[]=[]
+ it.each([1,9])('shares source preparation across %s outputs with two fresh proofs and durable cleanup',async count=>{
+  const{f,authority,sources,command,op}=await setup(count)
   const rows=await withSessionMessagePublication(authority,sources,async db=>{
    await op(db,'trace');const before=await op(db,'stats')
    const rows=await publishNativeSessionMessageBatch(command,db)
    await db.query('SET CONSTRAINTS ALL IMMEDIATE')
    const after=await op(db,'stats')
-   expect((after.native_turn_page_event??0)-(before.native_turn_page_event??0)).toBeGreaterThan(9)
-   expect((after.read_resource_page_dependencies??0)-(before.read_resource_page_dependencies??0)).toBe(0)
-   expect((after.read_native_turn_compact_requirements??0)-(before.read_native_turn_compact_requirements??0)).toBe(2)
+   expect((after.native_turn_page_event??0)-(before.native_turn_page_event??0)).toBeGreaterThan(count)
+   publicationPageWork.push((after.read_resource_page_dependencies??0)-(before.read_resource_page_dependencies??0))
+   expect(publicationPageWork.at(-1)).toBe(publicationPageWork[0])
+   expect((after.conversation_prepare_publications??0)-(before.conversation_prepare_publications??0)).toBe(2)
    expect(await op(db,'state')).toEqual({work:0,debt:0,events:0,fired:0})
    return rows
   })
-  expect(rows).toHaveLength(9)
-  expect((await f.pool.query('SELECT count(*)::int count FROM session_messages WHERE session_id=$1',[f.session.id])).rows[0].count).toBe(12)
+  expect(rows).toHaveLength(count)
+  expect((await f.pool.query('SELECT count(*)::int count FROM session_messages WHERE session_id=$1',[f.session.id])).rows[0].count).toBe(3+count)
  })
  it('keeps completion debt and field callbacks pending after a Page-only flush',async()=>{
   const{authority,sources,command,op}=await setup()
@@ -119,13 +121,13 @@ describe.sequential('[COMP:api/native-turn-frame] sealed native Page obligations
    expect((after.read_resource_page_dependencies??0)-(before.read_resource_page_dependencies??0)).toBeGreaterThan(0)
   })
  })
- it('falls back before payload writes when only the Page constraint is immediate',async()=>{
+ it('publishes one canonical frame when only the Page constraint is immediate',async()=>{
   const{f,authority,sources,command}=await setup()
   await withSessionMessagePublication(authority,sources,async db=>{
    await db.query('SET CONSTRAINTS page_derivation_dependencies IMMEDIATE')
    expect(await publishNativeSessionMessageBatch(command,db)).toHaveLength(3)
   })
-  expect((await f.pool.query('SELECT id FROM native_turn_frames WHERE workspace_id=$1',[f.workspaceId])).rows).toEqual([])
+  expect((await f.pool.query('SELECT id FROM native_turn_frames WHERE workspace_id=$1',[f.workspaceId])).rows).toHaveLength(1)
  })
  it.each(['forged','missing-event','missing-seal','completion','helper'] as const)('refuses %s after Page delegation and rolls back every output',async action=>{
   const{f,authority,sources,command,op}=await setup()

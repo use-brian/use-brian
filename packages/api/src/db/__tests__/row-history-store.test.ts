@@ -14,8 +14,9 @@
  */
 
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { bindScopeSources, boundScopeSources, ContextScopeAccumulator } from '@use-brian/core'
-import type { RetrievalActor } from '@use-brian/core'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
+import type { RetrievalActor } from '@use-brian/core/retrieval/types.js'
 
 vi.mock('../memories.js', async (importActual) => ({
   ...(await importActual<typeof import('../memories.js')>()),

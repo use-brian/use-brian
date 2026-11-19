@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isAttendedTurn, provenanceSessionId } from '@use-brian/core'
+import { isAttendedTurn, provenanceSessionId } from '@use-brian/agent-runtime/tools/capability-gate.js'
 import { classifySession, clientSessionPolicy, feedAnchoredRead, policyFor, sessionKindSql, sessionPolicy, transportPolicy, type SessionKindRow } from '../session-kind.js'
 
 /**
@@ -21,6 +21,14 @@ const A2A: SessionKindRow = { channelType: 'assistant-call', anchorKind: null, c
 const CRON: SessionKindRow = { channelType: 'cron', anchorKind: null, channelId: 'j' }
 
 describe('[COMP:api/session-policy] sessionPolicy drift ledger', () => {
+  it('selects committed buffered publication only for ordinary human shared web rooms',()=>{
+    expect(policyFor(ROOM).durableBufferedPublication).toBe(true)
+    for(const row of [PERSONAL,DRAFT,DOC_THREAD,OFFICE,FEED_THREAD,INBOX,TELEGRAM_DM,WORKFLOW,PROGRAMMATIC,A2A,CRON,
+      {...ROOM,transient:true},{...ROOM,appOrigin:'doc'},
+      {channelType:'assistant_mcp',anchorKind:'none',visibility:'workspace',channelId:'workspace-mcp:assistant_key:11111111-1111-4111-8111-111111111111'}]){
+      expect(policyFor(row).durableBufferedPublication).toBe(false)
+    }
+  })
   it('keeps context-only topic history out of learning until capture is explicitly enabled', () => {
     const room={channelType:'telegram',anchorKind:'channel',visibility:'workspace',providerConversationContext:true}
     expect(policyFor({...room,roomCapture:false}).surfacesBeyondAnchor).toBe(false)

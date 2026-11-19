@@ -31,8 +31,8 @@
 
 import * as Y from 'yjs'
 import { applyDrawingActions, drawingActionsSchema, type DrawingEditOp, type DrawingEditResult } from '@use-brian/shared/drawing'
-import type { Block, Page } from '@use-brian/core/dist/views/blocks.js'
-import { blockSchema } from '@use-brian/core/dist/views/blocks.js'
+import type { Block, Page } from '@use-brian/core/views/blocks.js'
+import { blockSchema } from '@use-brian/core/views/blocks.js'
 import { FRAGMENT_FIELD, ID_NODE_TYPES, META_MAP } from './schema.js'
 import { pageToYDoc, yDocToSnapshot } from './encode.js'
 import { DrawingCollaboration, drawingNamespace, findDrawing } from './drawing.js'

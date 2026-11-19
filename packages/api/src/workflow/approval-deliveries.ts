@@ -15,7 +15,7 @@
  * [COMP:channels/approval-deliveries]
  */
 
-import type { DeliverToChannel } from '@use-brian/core'
+import type { DeliverToChannel } from '@use-brian/core/workflow/executor.js'
 import { query } from '../db/client.js'
 import { addSessionMessage, findSessionById } from '../db/sessions.js'
 import type { ApprovalDeliveryDispatcher } from './approval.js'

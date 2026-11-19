@@ -1,9 +1,15 @@
+import {withCurrentReadAuthority} from '../context-scope/authority-lease.js'
 import { hasWorkspaceMcpRetainedAuthority } from '../db/session-context-revisions.js'
 import {tryNativeInvocationEvidence} from '../context-scope/native-invocation-evidence.js'
+import {admitTurnConversationRecords,assertConversationFloor,recordEvidenceParts} from '../context-scope/conversation-record-admission.js'
 import { nativeSessionQueryContextSources } from './session-query-context.js'
 import { readPersistentSessionContextAncestors } from '../db/session-context-ancestry.js'
+import { beginClosureAdmission } from '../context-scope/admission-closure.js'
 /** Fresh source permission at model input/output boundaries. [COMP:api/external-source-access] */
-import { ContextScopeAccumulator, type ExecutionContext, type ScopeSource, type ToolContext } from '@use-brian/core'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { SourceProtocolError } from '@use-brian/brian-app/connector'
 import { getAppPool, applyRLSGucs, rollbackAndRelease, runWithAgentAccess } from '../db/client.js'
 import { validateCallerScopeEvidence, validateAudienceScopeEvidence } from '../context-scope/caller-evidence.js'
@@ -13,7 +19,6 @@ import { getSharedRetainedSourceAuthority } from './source-runtime.js'
 import { readApplicationFieldAncestors } from './field-evidence.js'
 import { applyApplicationRLSContext, getApplicationExecutionBinding, releaseApplicationTransactionBinding } from './execution-context.js'
 
-const invalid = new WeakSet<ExecutionContext>()
 function denied(): never { throw new SourceProtocolError('source_access_denied') }
 
 /** Keep the private exception chain for server logs, never JSON/wire output. */
@@ -24,57 +29,82 @@ function sourceAuthorityError(error: unknown): SourceProtocolError {
   })
 }
 
-/** No proof/allow cache: every call prepares a new source operation. Native authority stays separate. */
-export async function assertSourceModelInputAuthority(context: ToolContext): Promise<void> {
-  return assertSourceModelAuthority(context, 'context')
-}
-
-/** Input permission never substitutes for the actual recipient's delivery decision.
- * A server-owned metadata guard may narrow admission inside the same SQL frame;
- * it must not open a nested source operation or perform a mutation there. */
-export async function assertSourceModelOutputAuthority(context: ToolContext, narrowingGuard?: () => Promise<void>): Promise<void> {
-  return assertSourceModelAuthority(context, 'deliver', narrowingGuard)
-}
-
-async function assertSourceModelAuthority(context: ToolContext, action: 'context' | 'deliver', narrowingGuard?: () => Promise<void>): Promise<void> {
+/** Complete model-effect admission. Native evidence and live lease facts share
+ * one statement; independent asynchronous work retains fresh surrounding checks. */
+export async function admitModelSourceEvidence(context: ToolContext, action: 'context' | 'deliver', narrowingGuard?: () => Promise<void>): Promise<void> {
   const validate = action === 'deliver' ? validateAudienceScopeEvidence : validateCallerScopeEvidence
   const execution = context.executionContext
   try {
-    if (execution && invalid.has(execution)) denied()
     const accumulated = context.scopeAccumulator?.evidence
-    const evidence = new ContextScopeAccumulator(execution?.security.provenance)
+    let evidence = new ContextScopeAccumulator(execution?.security.provenance)
     evidence.note(accumulated)
     let sources = evidence.evidence.sources ?? []
-    if (!sources.length) { if(narrowingGuard)denied();return }
+    if (!sources.length) {
+      if(narrowingGuard)denied()
+      const before=JSON.stringify(context.scopeAccumulator?.evidence)
+      await context.authority?.assertCurrent()
+      if(JSON.stringify(context.scopeAccumulator?.evidence)!==before)denied()
+      return
+    }
     const accumulator = context.scopeAccumulator
     if (!execution || !(accumulator instanceof ContextScopeAccumulator)) denied()
     const originalEvidence = JSON.stringify(accumulator.evidence)
-    await execution.security.authority.assertCurrent()
     const workspaceId = execution.security.access.workspaceId
     if (sources.some(source => source.workspaceId !== workspaceId)) denied()
+    const recordParts=recordEvidenceParts(evidence.evidence)
+    // Outward frames require a host-bound destination, supplied by the
+    // attended delivery owner. Dispatch validates every fresh source owner.
+    if(recordParts&&(action!=='context'||narrowingGuard))denied()
+    const note=async(current:import('@use-brian/agent-runtime/security/context-scope.js').ScopeEvidence)=>{
+      const recordFrame=recordParts
+        ?await admitTurnConversationRecords(execution,recordParts.records,'dispatch')
+        :undefined
+      if(JSON.stringify(accumulator.evidence)!==originalEvidence)denied()
+      if(!recordFrame){accumulator.note(current);return}
+      const combined=new ContextScopeAccumulator(current)
+      combined.note({sources:recordFrame.sources})
+      assertConversationFloor(combined.evidence,recordFrame.destination)
+      accumulator.note(combined.evidence)
+    }
+    if(recordParts){
+      evidence=new ContextScopeAccumulator(recordParts.fresh)
+      sources=evidence.evidence.sources??[]
+      if(!sources.length){await note(evidence.evidence);return}
+    }
     const native=await tryNativeInvocationEvidence(execution,evidence.evidence,execution.security.ceiling,action==='deliver'?'audience':'caller',narrowingGuard)
     if(native){
-      await execution.security.authority.assertCurrent()
-      if(JSON.stringify(accumulator.evidence)!==originalEvidence)denied()
-      accumulator.note(native);return
+      await note(native);return
     }
 
-    evidence.note({sources:await readPersistentSessionContextAncestors(workspaceId,sources)})
+    // This admission's view of its turn's admission closure (one witness read).
+    const closure = beginClosureAdmission(execution)
+    const admitted=await withCurrentReadAuthority(execution.security.authority,async()=>{
+    // Ancestry discovery is metadata; the turn's closure may hold this exact
+    // input's result while every source it relies on is unchanged.
+    const roots = sources, discoverAncestry = async () => {
+      const persistent = await readPersistentSessionContextAncestors(workspaceId, roots)
+      const expanded = new ContextScopeAccumulator(evidence.evidence); expanded.note({ sources: persistent })
+      const reached = expanded.evidence.sources ?? []
+      return { persistent, ancestors: await readExternalSourceAncestors(workspaceId, reached), fields: await readApplicationFieldAncestors(workspaceId, reached) }
+    }
+    const discovered = closure ? await closure.discover('model-source', [...roots], discoverAncestry,
+      value => value.ancestors.length ? null : [...roots, ...value.persistent, ...value.fields]) : await discoverAncestry()
+    evidence.note({sources:discovered.persistent})
     sources=evidence.evidence.sources ?? []
-    const ancestors = await readExternalSourceAncestors(workspaceId, sources)
-    const fields = await readApplicationFieldAncestors(workspaceId, sources)
+    const ancestors = discovered.ancestors
+    const fields = discovered.fields
     const external = ancestors.length > 0 || sources.some(source => source.resourceKind === 'external_source')
     const persistent = sources.some(source=>source.resourceKind==='session_context_revision')
     const wiring = getSharedRetainedSourceAuthority()
     const prepare = wiring ? ((e: ExecutionContext, roots: readonly ScopeSource[], requested: 'context' | 'deliver') => wiring.coordinator.prepare(e, roots, requested)) : undefined
-    const cohort = fields.length ? await nativeSessionQueryContextSources(execution, sources, prepare) : { sources, independent: false }
+    const cohortRoots = sources, discoverCohort = () => nativeSessionQueryContextSources(execution, cohortRoots, prepare)
+    const cohort = !fields.length ? { sources, independent: false } : closure ? await closure.discover('model-source-cohort', [...cohortRoots], discoverCohort,
+      value => value.independent ? null : [...cohortRoots, ...value.sources]) : await discoverCohort()
     if (!external && !fields.length && !persistent && !cohort.independent) {
       if(narrowingGuard)denied()
       const current = await validate(evidence.evidence, execution.security.ceiling)
-      await execution.security.authority.assertCurrent()
       if (JSON.stringify(accumulator.evidence) !== originalEvidence) denied()
-      accumulator.note(current)
-      return
+      return current
     }
     const application = getApplicationExecutionBinding(execution)
     // Native delegated consumers keep their original host actor, assistant,
@@ -117,10 +147,12 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
         await applyApplicationRLSContext(client, execution)
         if (contextProof) {
           await pinPreparedExternalSourceAuthority(client, execution, contextProof)
-          if (action === 'deliver') await validateCallerScopeEvidence(evidence.evidence, execution.security.ceiling, client)
+          if (action === 'deliver') await validateCallerScopeEvidence(evidence.evidence, execution.security.ceiling, client, undefined, closure)
         }
         if (prepared) await pinPreparedExternalSourceAuthority(client, execution, prepared)
-        const current = await validate(evidence.evidence, execution.security.ceiling, client)
+        const current = action === 'deliver'
+          ? await validateAudienceScopeEvidence(evidence.evidence, execution.security.ceiling, client, undefined, closure)
+          : await validateCallerScopeEvidence(evidence.evidence, execution.security.ceiling, client, undefined, closure)
         // A server-owned guard can only narrow the result. Keep it inside
         // these same native/source locks, never before their acquisition.
         await narrowingGuard?.()
@@ -132,11 +164,11 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
     } finally { releaseApplicationTransactionBinding(client); await rollbackAndRelease(client) }
     if (contextProof) await assertPreparedExternalSourceAuthorityCurrent(execution, contextProof)
     if (prepared) await assertPreparedExternalSourceAuthorityCurrent(execution, prepared)
-    await execution.security.authority.assertCurrent()
     if (wiring && getSharedRetainedSourceAuthority() !== wiring || JSON.stringify(accumulator.evidence) !== originalEvidence) denied()
-    accumulator.note(raised)
+    return raised
+    })
+    await note(admitted)
   } catch (error) {
-    if (execution) invalid.add(execution)
     throw Object.assign(sourceAuthorityError(error), {
       reason: 'authority_changed' as const,retrySafe: false,
     })

@@ -97,7 +97,7 @@ import {
   createEntityMergeStore,
   createSpecializationCascadeStore,
 } from '../entity-merge-store.js'
-import type { ApplyMergeInput, EntityMergeRecord } from '@use-brian/core'
+import type { ApplyMergeInput, EntityMergeRecord } from '@use-brian/core/corrections/entity-merge.js'
 import { appendDecisionEvent } from '../decision-event-store.js'
 import { appendDecisionDerivation } from '../decision-provenance-store.js'
 

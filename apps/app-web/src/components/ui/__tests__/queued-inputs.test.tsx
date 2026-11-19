@@ -11,7 +11,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToString } from "react-dom/server";
 import { QueuedInputs, type QueuedInputsDict } from "../queued-inputs";
-import type { QueuedInput } from "@/lib/use-mid-turn-queue";
+import type { QueuedInput } from "@/lib/queued-input";
 
 const dict: QueuedInputsDict = {
   pending: "Queued",

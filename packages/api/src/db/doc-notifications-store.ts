@@ -26,8 +26,8 @@
  * [COMP:api/doc-notifications-store]
  */
 
-import type { DocNotificationsStore, InboxMention } from '@use-brian/core'
-import { canRead } from '@use-brian/core'
+import type { DocNotificationsStore, InboxMention } from '@use-brian/core/doc/inbox-types.js'
+import { canRead } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { query, queryWithRLS } from './client.js'
 
 const MENTION_COLS = `

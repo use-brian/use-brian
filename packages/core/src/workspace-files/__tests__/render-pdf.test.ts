@@ -3,7 +3,7 @@ import { createRenderPdfTool, normalizePdfPath } from '../render-pdf.js'
 import { createFileTools } from '../tools.js'
 import type { FilesApi, FilesWriteBytesParams } from '../api.js'
 import type { WorkspaceFile } from '../types.js'
-import type { ToolContext } from '../../tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { PdfRenderError, type PdfRenderer } from '../../doc/convert/to-pdf.js'
 import { markdownToBlocks } from '../../doc/markdown.js'
 

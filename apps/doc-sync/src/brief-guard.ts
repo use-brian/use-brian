@@ -19,7 +19,7 @@
  */
 import * as Y from 'yjs'
 import { applyOpsToYDoc, type DocOp, yDocToSnapshot } from '@use-brian/doc-model'
-import { canonicalBlocksJson, extractDirectionRegion, type BriefLayout } from '@use-brian/core/dist/doc/brief-types.js'
+import { canonicalBlocksJson, extractDirectionRegion, type BriefLayout } from '@use-brian/core/doc/brief-types.js'
 import { storePageSnapshot, type SysQuery } from './persistence.js'
 
 export type BriefRegionLayout = Pick<BriefLayout, 'directionStartId' | 'contextStartId'>

@@ -1,7 +1,8 @@
+import { resolveDurableResumePolicy } from '../../turn/prepare.js'
 import { describe, it, expect } from 'vitest'
 import { z } from 'zod'
-import { buildTool, type Tool, type ToolContext } from '@use-brian/core'
-import { resolveDurableResumePolicy, resolveResumeOutcomeNote } from '../session-resume-replay.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import {  resolveResumeOutcomeNote } from '../session-resume-replay.js'
 import { MODEL_MAP } from '../../model-resolution.js'
 
 // ─────────────────────────────────────────────────────────────────────

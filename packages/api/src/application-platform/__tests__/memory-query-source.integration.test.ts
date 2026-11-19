@@ -6,14 +6,20 @@ import {authSessionStore} from '../../db/auth-session-store.js'
 import {createTokens} from '../../auth/jwt.js'
 import {requireAuth} from '../../auth/middleware.js'
 import {memoryRoutes} from '../../routes/memories.js'
-import {boundScopeSources,createMemoryTools,type EntityLinksStore,type MemoryRecallBuffer,type ScopeSource} from '@use-brian/core'
+import type {EntityLinksStore} from '@use-brian/core/entities/types.js'
+import type {MemoryRecallBuffer} from '@use-brian/core/memory/recall-buffer.js'
+import {createMemoryTools} from '@use-brian/core/memory/tools.js'
+import type {ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {getAppPool,getPool} from '../../db/client.js'
+import {initializeConversationVisibility} from '../../db/conversation-visibility.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
 import {createMemory} from '../../db/memories.js'
 import {readRetainedContextFrame} from '../../db/session-context-revisions.js'
-import {assertSourceModelInputAuthority} from '../model-source-authority.js'
+import {admitModelInput} from '../../context-scope/admission.js'
 import {configureConnectorSourceRuntimeFactory} from '../source-runtime.js'
 import {sourceModeFixture} from './fixtures/source-modes.js'
+import {persistentContextFixture} from './fixtures/persistent-context.js'
 import {originalMemoryAuthority,saveOriginalMemory} from './fixtures/retained-memory.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -42,6 +48,32 @@ describe.sequential('[COMP:api/application-persistence] actual retained Memory c
    expect((await x.f.pool.query("SELECT read_scope_source($1,'memory',$2) AS source",[x.f.workspaceId,saved.id])).rows[0].source).toEqual(before)
   }finally{await x.cleanup()}
  })
+ it.each([false,true])('keeps each private prompt index and its own evidence under the paired frame, department v2 %s',async(departmentV2)=>{
+  const x=await sourceModeFixture('internal')
+  try{
+   const {workspaceId,assistantId,ownerId}=x.f
+   await x.f.pool.query('UPDATE workspaces SET department_read_v2=$2 WHERE id=$1',[workspaceId,departmentV2])
+   const params={workspaceId,assistantId,createdByUserId:ownerId,sensitivity:'internal' as const}
+   const personal=await createMemory({...params,userId:ownerId,summary:'Fictional ranked private index memory'})
+   const current=await originalMemoryAuthority(x),access=current.execution.security.access
+   const readPair=()=>store.getPairedPromptIndexes!(access,1,current)
+   const emptyWorkspace=await readPair()
+   expect(emptyWorkspace.workspace).toEqual({status:'fulfilled',value:[]})
+   expect(emptyWorkspace.ranked).toMatchObject({status:'fulfilled',value:{rows:[{id:personal.id}],totalCount:1}})
+   const team=await createMemory({...params,userId:null,scope:'workspace',summary:'Fictional team index memory'})
+   await x.f.pool.query('UPDATE memories SET last_recalled_at=now() WHERE id=$1',[personal.id])
+   const paired=await readPair()
+   const scalarRanked=await store.getIndexRanked(access,1,current),scalarWorkspace=await store.getWorkspaceIndex(access,false,current)
+   expect(paired).toEqual({ranked:{status:'fulfilled',value:scalarRanked},workspace:{status:'fulfilled',value:scalarWorkspace}})
+   if(paired.ranked.status!=='fulfilled'||paired.workspace.status!=='fulfilled')throw new Error('Missing paired proof')
+   expect(paired.ranked.value).toMatchObject({rows:[{id:personal.id}],totalCount:2})
+   expect(paired.workspace.value.map(row=>row.id)).toEqual([team.id])
+   expect(boundScopeSources(paired.ranked.value)).toEqual(boundScopeSources(scalarRanked))
+   expect(boundScopeSources(paired.workspace.value)).toEqual(boundScopeSources(scalarWorkspace))
+   expect(boundScopeSources(paired.ranked.value)).not.toEqual(boundScopeSources(paired.workspace.value))
+   await expect(store.getPairedPromptIndexes!({...access,userId:x.f.secondId},1,current)).rejects.toMatchObject({code:'scope_evidence_missing'})
+  }finally{await x.cleanup()}
+ })
  it('delegates a complete native Memory query cohort with a source-denied independent candidate to the full source validator',async()=>{
   const x=await sourceModeFixture('internal')
   try{
@@ -58,6 +90,13 @@ describe.sequential('[COMP:api/application-persistence] actual retained Memory c
     'SELECT read_native_attended_memory_evidence($1,$2,$3,$4) AS value',[x.f.workspaceId,domains.map(s=>s.resourceKind),domains.map(s=>s.resourceId),domains.map(s=>s.version)])).rows[0].value)
    expect(value).toBeNull()
    expect((await store.search(current.execution.security.access,{query:'source-backed'},current)).map(row=>row.id)).not.toContain(saved.id)
+   // A denied independent candidate is absent from stored result ancestry.
+   // Reopening its source grant must still invalidate the original query floor
+   // at the actual model boundary, through the canonical capture's coordinator.
+   current.accumulator.note({sources:roots})
+   await expect(admitModelInput(current.context)).resolves.toBeUndefined()
+   await x.sourcePool.query("INSERT INTO grants(kind,account_id,record_id,fields,actions) VALUES('human',$1,'record-1',ARRAY['description','cost'],ARRAY['read','context','derive','retain','deliver','export','mutate'])",[x.f.ownerId])
+   await expect(admitModelInput(current.context)).rejects.toMatchObject({reason:'authority_changed'})
   }finally{configureConnectorSourceRuntimeFactory(undefined);await x.cleanup()}
  })
  it('retains empty-query domain evidence and invalidates cached absence when the complete current cohort changes',async()=>{
@@ -74,9 +113,9 @@ describe.sequential('[COMP:api/application-persistence] actual retained Memory c
     [x.f.workspaceId,sources.map(source=>source.resourceId)])).rows
    expect(domains).toHaveLength(1);expect(domains[0].domain.kind).toBe('memory_query_domain_v1')
    expect(domains[0].fields).toEqual(expect.arrayContaining(['summary','detail','tags','recall_count','last_recalled_at']))
-   current.accumulator.note({sources});await expect(assertSourceModelInputAuthority(current.context)).resolves.toBeUndefined()
+   current.accumulator.note({sources});await expect(admitModelInput(current.context)).resolves.toBeUndefined()
    await x.f.memory('Fictional new current native candidate')
-   await expect(assertSourceModelInputAuthority(current.context)).rejects.toMatchObject({reason:'authority_changed'})
+   await expect(admitModelInput(current.context)).rejects.toMatchObject({reason:'authority_changed'})
   }finally{configureConnectorSourceRuntimeFactory(undefined);await x.cleanup()}
  })
  it('holds a cached actual query on source contraction and preserves native audience denial for another source-authorized reader',async()=>{
@@ -86,9 +125,9 @@ describe.sequential('[COMP:api/application-persistence] actual retained Memory c
    configureConnectorSourceRuntimeFactory(x.factory,{instances:x.instances})
    const current=await originalMemoryAuthority(x),result=await store.search(current.execution.security.access,{query:'source-backed'},current)
    expect(result.map(row=>row.id)).toContain(saved.id)
-   current.accumulator.note({sources:boundScopeSources(result)});await expect(assertSourceModelInputAuthority(current.context)).resolves.toBeUndefined()
+   current.accumulator.note({sources:boundScopeSources(result)});await expect(admitModelInput(current.context)).resolves.toBeUndefined()
    await x.sourcePool.query("DELETE FROM grants WHERE kind='human' AND account_id=$1",[x.f.ownerId])
-   await expect(assertSourceModelInputAuthority(current.context)).rejects.toMatchObject({reason:'authority_changed'})
+   await expect(admitModelInput(current.context)).rejects.toMatchObject({reason:'authority_changed'})
    const other=await originalMemoryAuthority(x,x.f.secondId),otherRows=await store.search(other.execution.security.access,{query:'source-backed'},other)
    expect(otherRows).toEqual([])
   }finally{configureConnectorSourceRuntimeFactory(undefined);await x.cleanup()}
@@ -110,7 +149,12 @@ describe.sequential('[COMP:api/application-persistence] actual retained Memory c
     LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
      SELECT (r3_memory_field_catalog(w,o,t)-'scope')||jsonb_build_object('recordVersion',m.scope_version::text,'source',read_scope_source(w,'memory',m.id))
      FROM memories m WHERE m.workspace_id=w AND m.id=i::uuid $$;
-    REVOKE ALL ON FUNCTION r3_memory_field_catalog(uuid,jsonb,text),r3_memory_field_record(uuid,jsonb,text,text) FROM PUBLIC`)
+    REVOKE ALL ON FUNCTION r3_memory_field_catalog(uuid,jsonb,text),r3_memory_field_record(uuid,jsonb,text,text) FROM PUBLIC;
+    DO $owner$ DECLARE migration_owner text:=(SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid='application_native_field_contracts'::regclass);BEGIN
+     EXECUTE format('ALTER TABLE r3_memory_field_fixture OWNER TO %I',migration_owner);
+     EXECUTE format('ALTER FUNCTION r3_memory_field_catalog(uuid,jsonb,text) OWNER TO %I',migration_owner);
+     EXECUTE format('ALTER FUNCTION r3_memory_field_record(uuid,jsonb,text,text) OWNER TO %I',migration_owner);
+    END $owner$`)
    await pool.query(`INSERT INTO r3_memory_field_fixture(workspace_id,fields)
     SELECT $1,jsonb_agg(jsonb_build_object('key',key,'read',CASE WHEN key='detail' THEN '[["detail_reader"]]'::jsonb ELSE '[]'::jsonb END,
      'write','[]'::jsonb,'releaseReadTo','[]'::jsonb,'releaseWriteTo','[]'::jsonb)) FROM unnest(application_memory_field_keys()) key`,[x.f.workspaceId])
@@ -125,7 +169,7 @@ describe.sequential('[COMP:api/application-persistence] actual retained Memory c
    expect(row).toMatchObject({id:saved.id,summary:'Fictional source-backed memory tool result',detail:'Fictional preserved mixed ancestry'})
    expect(boundScopeSources(row!).some(source=>source.resourceKind==='application_field')).toBe(true)
    current.accumulator.note({sources:boundScopeSources(row!)})
-   await expect(assertSourceModelInputAuthority(current.context)).resolves.toBeUndefined()
+   await expect(admitModelInput(current.context)).resolves.toBeUndefined()
    const native=await createMemory({workspaceId:x.f.workspaceId,userId:x.f.ownerId,assistantId:x.f.assistantId,createdByUserId:x.f.ownerId,
     summary:'Fictional native private cohort control',detail:'Fictional role protected native detail',sensitivity:'internal'})
    const nativeCurrent=await originalMemoryAuthority(x),nativeRow=await store.getById(nativeCurrent.execution.security.access,native.id,nativeCurrent)
@@ -134,7 +178,7 @@ describe.sequential('[COMP:api/application-persistence] actual retained Memory c
    const nativeCohort=await readRetainedContextFrame(nativeCurrent,nativeSources,async db=>(await db.query<{value:unknown}>(
     'SELECT read_native_attended_memory_evidence($1,$2,$3,$4) AS value',[x.f.workspaceId,nativeSources.map(s=>s.resourceKind),nativeSources.map(s=>s.resourceId),nativeSources.map(s=>s.version)])).rows[0].value)
    expect(nativeCohort).toMatchObject({admitted:true})
-   await expect(assertSourceModelInputAuthority(nativeCurrent.context)).resolves.toBeUndefined()
+   await expect(admitModelInput(nativeCurrent.context)).resolves.toBeUndefined()
    const auth=await authSessionStore.create(x.f.ownerId,{deviceLabel:'Fictional field browser',userAgent:'Fixture',ipAddress:'127.0.0.1'})
    if(!auth)throw new Error('Missing actual Memory field browser session')
    const secret='fictional-native-memory-field-http-secret',token=createTokens(x.f.ownerId,secret,auth).accessToken
@@ -144,13 +188,43 @@ describe.sequential('[COMP:api/application-persistence] actual retained Memory c
    await pool.query("UPDATE application_native_role_assignments SET status='revoked' WHERE workspace_id=$1 AND user_id=$2 AND module_key='native'",[x.f.workspaceId,x.f.ownerId])
    const after=await originalMemoryAuthority(x)
    expect(await store.getById(after.execution.security.access,native.id,after)).toBeNull()
-   await expect(assertSourceModelInputAuthority(nativeCurrent.context)).rejects.toMatchObject({reason:'authority_changed'})
+   await expect(admitModelInput(nativeCurrent.context)).rejects.toMatchObject({reason:'authority_changed'})
    expect(await store.getById(after.execution.security.access,saved.id,after)).toBeNull()
    const unavailable=await point();expect(unavailable.status).toBe(404)
    expect(JSON.stringify(unavailable.body)).not.toContain('Fictional preserved mixed ancestry')
    const index=await store.getIndexRanked(after.execution.security.access,10,after)
    expect(index.rows.map(row=>row.id)).toContain(saved.id)
-   await expect(assertSourceModelInputAuthority(current.context)).rejects.toMatchObject({reason:'authority_changed'})
+   await expect(admitModelInput(current.context)).rejects.toMatchObject({reason:'authority_changed'})
+   // The ranked read additionally asks for created_at. Refusing that field
+   // must preserve the fresh scalar workspace result and its own evidence.
+   await pool.query(`UPDATE r3_memory_field_fixture p SET fields=(SELECT jsonb_agg(CASE WHEN value->>'key'='created_at'
+    THEN jsonb_set(value,'{read}','[["detail_reader"]]'::jsonb) ELSE value END) FROM jsonb_array_elements(p.fields)) WHERE p.workspace_id=$1`,[x.f.workspaceId])
+   const limited=await originalMemoryAuthority(x),ctx=limited.execution.security.access
+   const paired=await store.getPairedPromptIndexes!(ctx,10,limited)
+   expect(paired.ranked).toMatchObject({status:'rejected',reason:{code:'42501',message:'query_domain_unavailable'}})
+   const workspace=await store.getWorkspaceIndex(ctx,false,limited)
+   expect(paired.workspace).toEqual({status:'fulfilled',value:workspace})
+   if(paired.workspace.status!=='fulfilled')throw new Error('Missing authorized workspace result')
+   expect(boundScopeSources(paired.workspace.value)).toEqual(boundScopeSources(workspace))
+   await initializeConversationVisibility()
+   const roomFixture = await persistentContextFixture('internal')
+   try {
+    await roomFixture.pool.query('INSERT INTO r3_memory_field_fixture SELECT $1,fields FROM r3_memory_field_fixture WHERE workspace_id=$2',
+     [roomFixture.workspaceId,x.f.workspaceId])
+    await roomFixture.pool.query(`INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key)
+      VALUES($1,'{"kind":"native","moduleKey":"native"}','memory','native')`,[roomFixture.workspaceId])
+    const shared = await roomFixture.modelContext()
+    const sharedAccess = shared.execution.security.access
+    const team = await createMemory({workspaceId:roomFixture.workspaceId,assistantId:roomFixture.assistantId,userId:null,
+     createdByUserId:roomFixture.ownerId,summary:'Fictional independent Room field floor',scope:'workspace',sensitivity:'internal'})
+    const room = await store.getPairedPromptIndexes!(sharedAccess,10,shared)
+    expect(room.ranked).toMatchObject({status:'rejected',reason:{code:'42501',message:'query_domain_unavailable'}})
+    const roomScalar = await store.getWorkspaceIndex(sharedAccess,false,shared)
+    expect(room.workspace).toEqual({status:'fulfilled',value:roomScalar})
+    if (room.workspace.status!=='fulfilled') throw new Error('Missing authorized Room workspace result')
+    expect(room.workspace.value.map(row=>row.id)).toContain(team.id)
+    expect(boundScopeSources(room.workspace.value)).toEqual(boundScopeSources(roomScalar))
+   } finally {await roomFixture.cleanup()}
   }finally{
    configureConnectorSourceRuntimeFactory(undefined)
    await x.f.pool.query("DELETE FROM application_native_resource_owners WHERE workspace_id=$1 AND module_key='native'",[x.f.workspaceId])
@@ -227,6 +301,7 @@ describe.sequential('[COMP:api/application-persistence] actual retained Memory c
    }catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
    const current=await originalMemoryAuthority(x)
    await expect(store.getIndexRanked(current.execution.security.access,1,current)).rejects.toMatchObject({code:'42501',message:'query_domain_complexity_unavailable'})
+   await expect(store.getPairedPromptIndexes!(current.execution.security.access,1,current)).rejects.toMatchObject({code:'42501',message:'query_domain_complexity_unavailable'})
   }finally{await x.cleanup()}
  })
 })

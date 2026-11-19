@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { PoolClient } from 'pg'
-import type { AccessCeiling, ScopeEvidence, ScopeSource } from '@use-brian/core'
+import type { AccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import type { ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { readValidatedNativePublicationCohorts } from '../caller-evidence.js'
 
 const workspaceId = 'b1000000-0000-4000-8000-000000000001'
@@ -12,7 +14,7 @@ function source(suffix: string, overrides: Partial<ScopeSource> = {}): ScopeSour
   return { workspaceId, userId, assistantId, sensitivity: 'internal', compartments: [], projectIds: [],
     resourceKind: 'application_field', resourceId: `b1000000-0000-4000-8000-${suffix.padStart(12, '0')}`, version: 'original', ...overrides }
 }
-function fixture(retained = false) {
+function fixture() {
   const annotation = source('11'), reply = source('12', { sensitivity: 'confidential', compartments: ['reply-only'] })
   const ancestor = source('13', { resourceKind: 'workspace_file', version: '2' })
   const currentAnnotation = { ...annotation, version: 'current', compartments: ['current-annotation'] }
@@ -24,28 +26,20 @@ function fixture(retained = false) {
     { immutable: [annotation, reply], current: [currentAnnotation, reply, ancestor] },
     { immutable: [annotation], current: [currentAnnotation, ancestor] },
   ] }
-  let installed = true, value: unknown = packet, beforeRead: (() => void) | undefined
-  const query = vi.fn(async (sql: string, args?: unknown[]) => {
-    if (sql === 'SELECT to_regprocedure($1) IS NOT NULL AS available') {
-      expect(args).toEqual(['public.read_native_retained_publication_cohorts(uuid,jsonb)'])
-      return { rows: [{ available: retained }] }
-    }
-    if (sql === "SELECT to_regprocedure('public.read_native_turn_publication_cohorts(uuid,jsonb)') IS NOT NULL AS available") {
-      beforeRead?.(); return { rows: [{ available: installed }] }
-    }
-    if (sql === 'SELECT read_native_turn_publication_cohorts($1,$2) AS value'
-      || sql === 'SELECT read_native_retained_publication_cohorts($1,$2) AS value') return { rows: [{ value }] }
-    throw new Error(`Unexpected publication-cohort query: ${sql}`)
+  let value: unknown = packet, beforeRead: (() => void) | undefined
+  const query = vi.fn(async (sql: string, _args?: unknown[]) => {
+    if (!sql.startsWith('SELECT capture_conversation_evidence')) throw new Error(`Unexpected publication-cohort query: ${sql}`)
+    beforeRead?.()
+    return { rows: [{ value }] }
   })
   return { annotation, reply, ancestor, evidence, packet, query, client: { query } as unknown as Pick<PoolClient, 'query'>,
-    reads: () => query.mock.calls.filter(([sql]) => sql.startsWith('SELECT read_')),
-    unavailable: () => { installed = false }, result: (next: unknown) => { value = next }, mutate: (run: () => void) => { beforeRead = run } }
+    reads: () => query.mock.calls,
+    result: (next: unknown) => { value = next }, mutate: (run: () => void) => { beforeRead = run } }
 }
 
-describe.each(['canonical', 'retained'] as const)('[COMP:api/caller-scope-evidence] %s publication cohort acquisition', protocol => {
-  const makeFixture = () => fixture(protocol === 'retained')
-  const acquisitionSql = protocol === 'retained' ? 'SELECT read_native_retained_publication_cohorts($1,$2) AS value'
-    : 'SELECT read_native_turn_publication_cohorts($1,$2) AS value'
+const acquisitionSql = 'SELECT capture_conversation_evidence($1,NULL,NULL,$2) AS value'
+describe('[COMP:api/caller-scope-evidence] canonical publication cohort acquisition', () => {
+  const makeFixture = fixture
   it('uses one identity-only acquisition while preserving independent original floors and current labels', async () => {
     const f = makeFixture(), checked = await readValidatedNativePublicationCohorts(f.evidence, ceiling, f.client)
     expect(f.reads()).toHaveLength(1)
@@ -85,13 +79,11 @@ describe.each(['canonical', 'retained'] as const)('[COMP:api/caller-scope-eviden
     expect(checked![0].sensitivity).toBe('confidential')
   })
 
-  it.each(['absent', 'unsupported'] as const)('preserves independent fallback for %s acquisition', async state => {
+  it('delegates unsupported source families without probing another reader', async () => {
     const f = makeFixture()
-    if (state === 'absent') f.unavailable(); else f.result(null)
+    f.result(null)
     expect(await readValidatedNativePublicationCohorts(f.evidence, ceiling, f.client)).toBeNull()
-    const expectedReads = state === 'absent' ? [] : protocol === 'retained'
-      ? [acquisitionSql, 'SELECT read_native_turn_publication_cohorts($1,$2) AS value'] : [acquisitionSql]
-    expect(f.reads().map(([sql]) => sql)).toEqual(expectedReads)
+    expect(f.reads().map(([sql]) => sql)).toEqual([acquisitionSql])
   })
 
   it.each(['denied', 'missing-packet', 'missing-cohort', 'missing-current-root', 'missing-immutable-root', 'wrong-workspace'] as const)

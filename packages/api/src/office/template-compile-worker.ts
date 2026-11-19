@@ -1,20 +1,22 @@
 /** Template-mode admission worker for scratch/promote/upload jobs.
  * [COMP:api/office-generation] */
 import { createHash, randomUUID } from 'node:crypto'
+import { importOfficeDocument } from '@use-brian/core/office/docx/index.js'
+import type { ExtractedOfficeResource } from '@use-brian/core/office/package.js'
+import { importOfficePresentation } from '@use-brian/core/office/pptx/index.js'
+import type { BrandTypographyContext } from '@use-brian/core/office/templates/brand-typography.js'
 import {
   compileOfficeTemplate,
-  canRead,
-  scopeGrantContains,
-  inferOfficeTemplateRouting,
-  importOfficeDocument,
-  importOfficePresentation,
-  importOfficeSpreadsheet,
-  officeTemplateRoutingDiagnostics,
-  type ExtractedOfficeResource,
   type OfficeTemplateAdmissionReceipt,
   type OfficeTemplateResourceAdmission,
-  type BrandTypographyContext,
-} from '@use-brian/core'
+} from '@use-brian/core/office/templates/compiler.js'
+import {
+  inferOfficeTemplateRouting,
+  officeTemplateRoutingDiagnostics,
+} from '@use-brian/core/office/templates/routing.js'
+import { importOfficeSpreadsheet } from '@use-brian/core/office/xlsx/index.js'
+import { scopeGrantContains } from '@use-brian/agent-runtime/security/context-scope.js'
+import { canRead } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { getBrandStore } from '../db/brand-store.js'
 import { OfficeTemplateRoutingDraftSchema, type OfficeImportDiagnostic, type OfficeArtifactSnapshot } from '@use-brian/office-model'
 import type { OfficeGenerationJobRow } from '../db/office-generation.js'

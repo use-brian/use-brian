@@ -15,7 +15,7 @@
  */
 import { Router, type Request, type Response } from 'express'
 import { z } from 'zod'
-import { CLIENT_COMPARTMENT_PREFIX, isClientCompartment } from '@use-brian/core'
+import { CLIENT_COMPARTMENT_PREFIX, isClientCompartment } from '@use-brian/agent-runtime/security/compartments.js'
 import type { CompartmentStore } from '../db/compartment-store.js'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i

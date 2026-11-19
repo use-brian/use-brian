@@ -7,7 +7,19 @@
  */
 
 import { readFile } from 'node:fs/promises'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { z } from 'zod'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import type { DepartmentReadGrant } from '@use-brian/agent-runtime/security/department-read.js'
+import { createExecutionContext, executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { buildTool, type CurrentAuthorityBoundary } from '@use-brian/agent-runtime/tools/types.js'
+
+vi.mock('../../turn/lease.js', async original => ({ ...await original<typeof import('../../turn/lease.js')>(),
+  takeTurnLease: vi.fn(async () => ({ taken: true, token: 'matrix-token', turnId: 'c'.repeat(64) })),
+  startLeaseHeartbeat: () => () => {}, releaseTurn: vi.fn(async () => true),
+}))
+const { openAssistantTurn } = await import('../../turn/kernel.js')
+const { currentAgentAccess } = await import('../../db/agent-access-context.js')
 
 const workspaceRoot = new URL('../../../../../', import.meta.url)
 
@@ -31,7 +43,7 @@ describe('[COMP:api/context-scope-entrypoints] execution entry-point parity', ()
     'packages/api/src/brain-mcp/tools.ts': ['resolveExecutionContextSystem', 'executionToolContext', 'scopeAccumulator'],
     'packages/api/src/routes/assistant-mcp.ts': ['resolveExecutionContextSystem', 'executionToolContext', 'credentialCurrent', 'scopeAccumulator'],
     'packages/api/src/routes/session-resume-replay.ts': ['resolveTurnScopeSystem', 'scopeAccumulator', 'effectiveProjectIds'],
-    'packages/api/src/boot.ts': ['resolveRunScope:', 'turnScope', 'contextProjectId'],
+    'packages/api/src/boot/workflow.register.ts': ['resolveRunScope:', 'turnScope', 'contextProjectId'],
   }
 
   for (const [path, anchors] of Object.entries(paths)) {
@@ -58,7 +70,50 @@ describe('[COMP:api/telegram-byo-route] external guest connector scope', () => {
     expect(content).toContain('const viewerCtx = automaticContextAccess(dataTurnScope.access, dataTurnScope.activeProjectId)')
     // Forward the complete canonical access object, including departmentRead.
     // A reconstruction from legacy flat compartments can drop the v2 ceiling.
-    expect(content).toContain('bindToolsToAgentAccess(candidateTools, execution.security.access)')
+    // Since the D9 transfer the adapter supplies no scope-binding callback
+    // (turn-kernel.md "Tool scope under the original invocation"): it binds its
+    // canonical execution as the owner's `channel` invocation and hands the
+    // roster (connector tools composed in place) to the owner, which binds it
+    // with that complete access. Every connector lane (Telegram, Slack, Teams,
+    // Feishu, WeChat, WhatsApp, Discord, custom bridge and the hosted channel
+    // routes) enters through processChannelMessage in this file.
+    expect(content).toContain("turnOwner.bindModelPreparation({ kind: 'execution', toolProfile: 'channel', execution: executionContext,")
+    expect(content).toContain("turnOwner.prepareCapabilities({ profile: 'channel'")
+    expect(content).toContain('turnOwner.prepareTools(allTools)')
+    expect(content).toContain('candidateTools: allTools')
+    expect(content).not.toContain('bindToolsToAgentAccess(')
+    const prepare = await source('packages/api/src/turn/prepare.ts')
+    expect(prepare).toContain('const canonicalAccess = structuredClone(originalAccess)')
+    expect(prepare).toContain("const projection = toolLane === 'channel' ? canonicalAccess")
+    expect(prepare).toContain('bindToolsToAgentAccess(unbound, projection, {')
+    expect(prepare).toContain('runWithAgentAccess(canonicalAccess, operation)')
+    expect(prepare).toContain('new Map([...bindTools(input.candidateTools)]')
+  })
+
+  it('reaches the tool effect with the complete channel access, departmentRead included', async () => {
+    const departmentRead: DepartmentReadGrant = { workspaceId: 'workspace', userId: 'guest-actor', assistantId: 'assistant',
+      base: 'public', departments: { sales: 'internal' }, contextDepartment: null, binding: null, cap: null }
+    const abort = new AbortController()
+    const authority: CurrentAuthorityBoundary = { assertCurrent: async () => {}, execute: async operation => operation() }
+    const execution = createExecutionContext({
+      identity: { kind: 'attended', principal: { kind: 'workspace_member', userId: 'guest-actor', authenticationKind: 'verified_channel' } },
+      ownership: { kind: 'workspace', workspaceId: 'workspace' },
+      access: { workspaceId: 'workspace', userId: 'guest-actor', assistantId: 'assistant', assistantKind: 'standard', clearance: 'internal',
+        compartments: [], mutationCompartments: [], projectIds: [], visibilityAssistantIds: ['assistant'], departmentRead },
+      writeDefaults: { compartments: [], projectIds: [] }, authority,
+      lifecycle: { sessionId: 'session', channelType: 'telegram', channelId: 'channel', abortSignal: abort.signal },
+    })
+    const owner = await openAssistantTurn({ sessionId: 'session', assistantId: 'assistant', policy: { admission: 'personal' }, abortController: abort })
+    try {
+      owner.bindModelPreparation({ kind: 'execution', toolProfile: 'channel', execution, assertCurrent: async () => {} }, {
+        provider: { name: 'fixture', models: [] } as unknown as LLMProvider,
+        configuredProviders: undefined, resolveWorkspaceCustomLlm: null, resolveLegacyByoKey: null, buildLegacyByoProvider: null })
+      const probe = buildTool({ name: 'connectorProbe', description: 'Read the awaited scope.', inputSchema: z.object({}),
+        execute: async () => { await Promise.resolve(); return { data: currentAgentAccess() } } })
+      const bound = owner.prepareTools(new Map([[probe.name, probe]])).get(probe.name)!
+      const result = await bound.execute({}, executionToolContext(execution, { appId: 'fixture' }))
+      expect(result.data).toMatchObject({ workspaceId: 'workspace', userId: 'guest-actor', departmentRead })
+    } finally { await owner.finish('failed') }
   })
 })
 
@@ -168,7 +223,7 @@ describe('[COMP:brain/context-projection] cross-content projection parity', () =
 describe('[COMP:security/scope-evidence] cross-lane high-water contract', () => {
   it('preserves evidence across reads, synthesis, updates, chunks, merges, and successors', async () => {
     const paths: Record<string, readonly string[]> = {
-      'packages/core/src/engine/tool-executor.ts': [
+      'packages/agent-runtime/src/engine/tool-executor.ts': [
         'options.context.scopeAccumulator?.note(result.scopeEvidence)',
         'renderToolResultData(result.data',
       ],

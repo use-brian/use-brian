@@ -9,7 +9,7 @@
  * [COMP:api/mailbox-imap-client]
  */
 
-import type { MailboxSearchParams } from '@use-brian/core'
+import type { MailboxSearchParams } from '@use-brian/core/tools/base/mailbox.js'
 
 /** The subset of imapflow's SearchObject this module emits. */
 export type ImapSearchQuery = {

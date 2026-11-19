@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
-import type { AccessContext } from '@use-brian/core'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import { getAppPool, getPool } from '../client.js'
 import { runWithAgentAccess } from '../agent-access-context.js'
 import { createOfficeArtifactStore } from '../office-artifacts.js'
@@ -54,11 +54,23 @@ async function fixture() {
     assistantId, extractionId, evidenceHash: 'e'.repeat(64), command: { kind: 'batch', commands: [] }, preview: [{ targetId: randomUUID() }],
     lineage: { fixture: true }, body: 'Unreviewed fictional source evidence.', targetIds: [randomUUID()], access,
     evidenceFiles: rows.rows, evidenceScope: { sensitivity: 'internal', compartments: [compartment], projectIds: [projectId] } }
-  const counts = async () => (await pool.query(`SELECT
-    (SELECT count(*)::int FROM structured_document_fill_proposals WHERE extraction_id=$1) AS proposals,
-    (SELECT count(*)::int FROM office_comment_threads WHERE artifact_id=$2) AS threads,
-    (SELECT count(*)::int FROM office_comment_messages m JOIN office_comment_threads t ON t.id=m.thread_id WHERE t.artifact_id=$2) AS messages,
-    (SELECT count(*)::int FROM office_suggestions WHERE artifact_id=$2) AS suggestions`, [extractionId, artifact.id])).rows[0]
+  // Fill proposals are an actor-path FORCE RLS table (migration 557): even the
+  // ordinary table owner reads them only through the actor policy.
+  const counts = async () => {
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query("SELECT set_config('app.current_user_id',$1,true)", [actor])
+      const row = (await client.query(`SELECT
+        (SELECT count(*)::int FROM structured_document_fill_proposals WHERE extraction_id=$1) AS proposals,
+        (SELECT count(*)::int FROM office_comment_threads WHERE artifact_id=$2) AS threads,
+        (SELECT count(*)::int FROM office_comment_messages m JOIN office_comment_threads t ON t.id=m.thread_id WHERE t.artifact_id=$2) AS messages,
+        (SELECT count(*)::int FROM office_suggestions WHERE artifact_id=$2) AS suggestions`, [extractionId, artifact.id])).rows[0]
+      await client.query('COMMIT')
+      return row
+    } catch (error) { await client.query('ROLLBACK'); throw error }
+    finally { client.release() }
+  }
   return { store: createStructuredFillProposalStore(), input, access, actor, workspaceId, artifact, sourceFileId, compartment, counts }
 }
 

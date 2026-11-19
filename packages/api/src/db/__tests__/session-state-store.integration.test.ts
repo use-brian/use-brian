@@ -1,5 +1,7 @@
 import { describe, it, expect, afterAll, afterEach, beforeEach, vi } from 'vitest'
-import { boundScopeSources, type SessionContextAuthority, type DerivedWriteEvidence } from '@use-brian/core'
+import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
+import type { DerivedWriteEvidence } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { getPool, getAppPool } from '../client.js'
 import { createDbSessionStateStore } from '../session-state-store.js'
 import { persistentContextFixture } from '../../application-platform/__tests__/fixtures/persistent-context.js'

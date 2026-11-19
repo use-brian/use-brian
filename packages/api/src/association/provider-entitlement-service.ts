@@ -5,15 +5,17 @@ import { assertAssociationOrderAuthority, assertAssociationSourceAuthority, load
  * [COMP:crm/provider-entitlement-service]
  */
 import type { Pool, PoolClient } from 'pg'
-import {
-  CrmOperationsError,
-  requireCrmIntegrationResources,
-  type AssociationActor,
-  type CrmOperationsContext,
-  type CrmOperationsServicePort,
-  type ProviderEntitlementEvent,
-  type ProviderInboxEnvelope,
-} from '@use-brian/core'
+import { CrmOperationsError } from '@use-brian/core/application-platform/operation-contract.js'
+import type { AssociationActor } from '@use-brian/core/association/domain.js'
+import type {
+  ProviderEntitlementEvent,
+  ProviderInboxEnvelope,
+} from '@use-brian/core/association/provider-inbox.js'
+import { requireCrmIntegrationResources } from '@use-brian/core/crm/integration-authority.js'
+import type {
+  CrmOperationsContext,
+  CrmOperationsServicePort,
+} from '@use-brian/core/crm/operations-types.js'
 import { lockCrmIntegrationCredential } from '../db/crm-integration-store.js'
 import { lockAssociationModule } from './workspace-module.js'
 import { requireProviderEntitlementActor } from '../crm-operations/entitlement-periods.js'

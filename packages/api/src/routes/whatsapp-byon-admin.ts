@@ -40,7 +40,7 @@ import type {
   ChannelIntegration,
   ChannelIntegrationStore,
 } from '../db/channel-integrations.js'
-import type { IngestRuleEditorStore, IngestRuleSummary } from '@use-brian/core'
+import type { IngestRuleEditorStore, IngestRuleSummary } from '@use-brian/core/ingest/tools.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import { ensureWhatsappConnectorInstance } from '../ingest/whatsapp-connector-instance.js'
 

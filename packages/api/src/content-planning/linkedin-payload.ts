@@ -1,9 +1,10 @@
 import { assertFeedLinkedInDestination } from './linkedin-authority.js'
 /** Byte-backed approval projection. No provider transport lives in this OSS module. */
 import { createHash } from 'node:crypto'
-import { prepareLinkedInImage, type FilesApi } from '@use-brian/core'
+import { prepareLinkedInImage } from '@use-brian/core/media/linkedin-image.js'
+import type { FilesApi } from '@use-brian/core/workspace-files/api.js'
 import { feedLinkedInFileIds, type FeedLinkedInProjection } from '@use-brian/shared'
-import { canonicalFeedValue, projectFeedLinkedIn } from '@use-brian/doc-model'
+import { canonicalFeedValue, projectFeedLinkedIn } from '@use-brian/doc-model/feed.js'
 import { assertFeedFiles, readFeedCopy, requireFeedComposition, withFeedTransaction, FeedCollaborationError, type FeedActor, type FeedScope, type StructuredFeedContent } from '../db/feed-collaboration-store.js'
 export type LinkedInPayload={version:1;revision:number;authorUrn:string|null;projection:FeedLinkedInProjection;assets:Array<{fileId:string;sourceHash:string;hash:string;mimeType:string;size:number;derivativeVersion:1}>}
 let fileService:FilesApi|undefined

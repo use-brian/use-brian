@@ -24,8 +24,8 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '../tools/types.js'
-import { toolFailure } from '../tools/tool-failure.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
+import { toolFailure } from '@use-brian/agent-runtime/tools/tool-failure.js'
 import type {
   EntityKind,
   EntityLinksStore,
@@ -33,7 +33,7 @@ import type {
 } from '../entities/types.js'
 import { EDGE_TYPES, LINK_KINDS } from '../entities/types.js'
 import { applyExplicitLinks, explicitLinksField } from '../entities/explicit-links.js'
-import { resolveWriteScope } from '../security/context-scope.js'
+import { resolveWriteScope } from '@use-brian/agent-runtime/security/context-scope.js'
 
 /**
  * `attributes` JSONB fields routinely arrive as JSON strings rather

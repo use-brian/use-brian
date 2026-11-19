@@ -51,6 +51,15 @@ export class ConnectorSetupError extends Error {
   constructor(public readonly code: string) { super(code); this.name = 'ConnectorSetupError' }
 }
 function fail(code: string): never { throw new ConnectorSetupError(code) }
+
+/** Protected setup storage uses the owner connection even with FORCE RLS. */
+export async function requireConnectorSetupOwner(client: PoolClient): Promise<void> {
+  const owner = (await client.query<{ allowed: boolean }>(`SELECT
+      pg_has_role(current_user,c.relowner,'USAGE') AND pg_has_role(session_user,c.relowner,'USAGE') AS allowed
+    FROM pg_class c WHERE c.oid='public.connector_pending_setups'::regclass`)).rows[0]?.allowed
+  if (owner !== true) fail('connector_setup_failed')
+}
+
 const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
@@ -100,7 +109,7 @@ export function createConnectorSetupService<Request, Proof, Credentials>(options
       const c = await options.pool.connect()
       try {
         await c.query('BEGIN')
-        await c.query("SELECT set_config('app.system_bypass','true',true)")
+        await requireConnectorSetupOwner(c)
         const result = await fn(c)
         await c.query('COMMIT')
         return result

@@ -5,7 +5,7 @@
  * so `goal_recipes_workspace_member` enforces isolation. Rows map to the core
  * `GoalRecipe` shape so `instantiateGoalRecipe` consumes them directly.
  */
-import type { GoalRecipe, GoalRecipeVar } from '@use-brian/core'
+import type { GoalRecipe, GoalRecipeVar } from '@use-brian/core/goals/recipe.js'
 import { query, queryWithRLS } from './client.js'
 
 const FULL_SELECT = `id, name, description, outcome, done_when as "doneWhen", means, budget, policy, vars`

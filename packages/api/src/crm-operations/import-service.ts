@@ -11,24 +11,26 @@ import { beginAssociationCreation, crmSegmentReadScope } from '../association/so
 
 import { createHash, randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { crmAmountSchema } from '@use-brian/core'
+import { crmAmountSchema } from '@use-brian/core/crm/types.js'
 import type { Pool, PoolClient } from 'pg'
 import type {
-  AccessContext,
-  CrmOperationsContext,
-  CrmOperationsServicePort,
-  CrmHistoricalSubmissionImportPort,
   AssociationPromotionImportPort,
   AssociationSourceMembershipImportPort,
   AssociationSourceOrderImportPort,
-  EntityLinksStore,
-  FilesApi,
-  StableExternalIdentity,
-  CrmIntegrationGrant,
-  CrmPage,
-  CrmPageQuery,
-} from '@use-brian/core'
-import { AssociationPromotionImportSchema, AssociationSourceMembershipImportSchema, AssociationSourceOrderImportSchema, CrmOperationsError, actorAuditIdentity, type AssociationActor } from '@use-brian/core'
+} from '@use-brian/core/association/operations.js'
+import type { CrmIntegrationGrant } from '@use-brian/core/crm/integration-authority.js'
+import type {
+  CrmOperationsContext,
+  CrmOperationsServicePort,
+  CrmHistoricalSubmissionImportPort,
+} from '@use-brian/core/crm/operations-types.js'
+import type { CrmPage, CrmPageQuery } from '@use-brian/core/crm/pagination.js'
+import type { StableExternalIdentity } from '@use-brian/core/decision-learning/types.js'
+import type { EntityLinksStore } from '@use-brian/core/entities/types.js'
+import type { FilesApi } from '@use-brian/core/workspace-files/api.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import { AssociationPromotionImportSchema, AssociationSourceMembershipImportSchema, AssociationSourceOrderImportSchema, type AssociationActor } from '@use-brian/core/association/domain.js'
+import { CrmOperationsError, actorAuditIdentity } from '@use-brian/core/crm/operations-types.js'
 import { createCompany, createContact, createDeal, updateContact, type CrmWriteTransaction } from '../db/crm.js'
 import { updateCrmCustomFields } from '../db/crm-r2.js'
 import { updateEntity } from '../db/entities-store.js'

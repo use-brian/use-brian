@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { CampaignLinkRow } from '../../db/campaign-store.js'
 import type { CampaignTrackingStore, CampaignSiteRow } from '../../db/campaign-tracking-store.js'
 import { campaignTrackingRoutes } from '../campaign-tracking.js'
-import { CampaignError } from '@use-brian/core'
+import { CampaignError } from '@use-brian/core/campaigns/types.js'
 
 const PUBLIC_ID = '0123456789abcdef0123456789abcdef'
 const LINK: CampaignLinkRow = {

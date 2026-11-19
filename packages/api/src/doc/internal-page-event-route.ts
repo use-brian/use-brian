@@ -45,12 +45,12 @@
  */
 
 import { Router } from 'express'
+import type { SavedViewStore } from '@use-brian/core/views/types.js'
 import {
   PAGE_LIFECYCLE_ACTIONS,
   type PageLifecycleAction,
   type PageLifecycleEvent,
-  type SavedViewStore,
-} from '@use-brian/core'
+} from '@use-brian/core/workflow/page-event-trigger.js'
 
 export type InternalPageEventRouteOptions = {
   savedViewStore: SavedViewStore

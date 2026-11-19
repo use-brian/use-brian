@@ -109,9 +109,15 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     expect(workflow.jobs['build-test'].if).toContain('always()');
   });
 
-  it('keeps offline regressions mandatory and executable in the focused lane', () => {
+  it('keeps offline regressions mandatory and executable in the focused lane', async () => {
+    const { OFFLINE_CONTINUITY_FILES, unitTestExclusions } = await import(new URL('../../../../scripts/testing/unit-partition.mjs', import.meta.url).href);
     const workflow = yaml.load(readFileSync(join(sourceRoot, '.github/workflows/ci.yml'), 'utf8'));
     const lane = workflow.jobs['offline-continuity'];
+    expect(lane.env?.BRIAN_TEST_PARTITION).toBeUndefined();
+    expect(workflow.jobs['department-isolation-shards'].env?.BRIAN_TEST_PARTITION).toBeUndefined();
+    for (const job of ['api-tests', 'app-web-tests', 'heavyweight-tests']) {
+      expect(workflow.jobs[job].steps.find((step: { name?: string }) => step.name === 'Unit tests').env.BRIAN_TEST_PARTITION).toBe('ordinary');
+    }
     expect(lane['continue-on-error']).not.toBe(true);
     const commands = lane.steps.filter((step: { run?: string }) => step.run?.includes('vitest run'));
     expect(commands).toHaveLength(2);
@@ -122,6 +128,9 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
       const directory = step.run.includes('--filter app-web ') ? 'apps/app-web' : 'apps/app-desktop';
       const files = step.run.match(/(?:src|desktop)\/[^\s]+\.test\.tsx?/g) ?? [];
       expect(files.length).toBeGreaterThan(0);
+      expect([...files].sort()).toEqual([...OFFLINE_CONTINUITY_FILES[directory]].sort());
+      expect(unitTestExclusions(directory, 'ordinary')).toEqual(expect.arrayContaining(files));
+      expect(unitTestExclusions(directory, '')).toEqual([]);
       for (const file of files) expect(readFileSync(join(sourceRoot, directory, file), 'utf8')).toContain('[COMP:');
     }
     const app = commands[0].run;
@@ -133,6 +142,10 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     }
     expect(workflow.jobs['build-test'].steps[0].env.OFFLINE_CONTINUITY_RESULT)
       .toBe('${{ needs.offline-continuity.result }}');
+    const turbo = JSON.parse(readFileSync(join(sourceRoot, 'turbo.json'), 'utf8'));
+    expect(turbo.tasks.test.env).toContain('BRIAN_TEST_PARTITION');
+    expect(turbo.tasks.test.inputs).toContain('$TURBO_ROOT$/scripts/testing/unit-partition.mjs');
+    expect(turbo.tasks.test.inputs).toContain('$TURBO_ROOT$/packages/shared/src/department-isolation-coverage.ts');
   });
 
   it('restores same-run dependencies without spending acceptance time recompiling', () => {

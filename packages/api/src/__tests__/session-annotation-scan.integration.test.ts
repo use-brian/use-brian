@@ -2,11 +2,14 @@
 import {randomUUID} from 'node:crypto'
 import {afterAll,beforeAll,describe,expect,it} from 'vitest'
 import type {PoolClient} from 'pg'
-import {boundScopeSources,ContextScopeAccumulator,executionToolContext,type SessionContextAuthority} from '@use-brian/core'
+import type {SessionContextAuthority} from '@use-brian/core/memory/session-state-types.js'
+import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
+import {executionToolContext} from '@use-brian/agent-runtime/security/execution-context.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {applyRLSGucs,getAppPool,getPool,rollbackAndRelease,runWithAgentAccess} from '../db/client.js'
-import {captureSessionTopics,sessionQueryRootMetadata,readAdmittedSessionQuery,type SessionQueryAnnotation} from '../db/session-query-reader.js'
+import {captureSessionTopics,sessionQueryRootMetadata,readAdmittedSessionQuery,type SessionQueryAnnotation} from '../db/conversation-store.js'
 import {readSessionQueryFrame,writeSessionContextRevision} from '../db/session-context-revisions.js'
-import {assertSourceModelInputAuthority} from '../application-platform/model-source-authority.js'
+import {admitModelInput} from '../context-scope/admission.js'
 import {persistentContextFixture} from '../application-platform/__tests__/fixtures/persistent-context.js'
 const {assertLocalFixture}=await import(new URL('../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -92,7 +95,7 @@ describe.sequential('[COMP:api/native-chat-read-cost] sparse annotation scans',(
   const c=await setup(),before=await snapshot(c),authority=await c.authority()
   const empty=await topics(c,authority);expect(empty).toEqual([]);expect(boundScopeSources(empty).length).toBeGreaterThan(0)
   expect((await domainCurrent(c,empty)).value?.sourceKind).toBe('application_query_domain')
-  await expect(assertSourceModelInputAuthority({...executionToolContext(authority.execution,{appId:'fixture:annotation-control'}),scopeAccumulator:authority.accumulator})).resolves.toBeUndefined()
+  await expect(admitModelInput({...executionToolContext(authority.execution,{appId:'fixture:annotation-control'}),scopeAccumulator:authority.accumulator})).resolves.toBeUndefined()
   const body=await readAdmittedSessionQuery({sessionId:c.f.session.id,throughSequence:c.count,topicThroughSequence:0,authority:await c.authority()})
   expect(body.history.map(row=>row.id)).toEqual(c.messages.map(row=>row.id));expect(body.annotations).toEqual([])
   expect(body.history.map(row=>row.content)).toEqual(before.history.map(row=>row.content))
@@ -107,7 +110,7 @@ describe.sequential('[COMP:api/native-chat-read-cost] sparse annotation scans',(
   expect((await domainCurrent(c,empty)).value?.sourceKind).toBe('application_query_domain')
   const added=await publish(c,2)
   expect((await domainCurrent(c,empty)).value).toBeUndefined()
-  await expect(assertSourceModelInputAuthority({...executionToolContext(authority.execution,{appId:'fixture:annotation-race'}),scopeAccumulator:authority.accumulator})).rejects.toBeDefined()
+  await expect(admitModelInput({...executionToolContext(authority.execution,{appId:'fixture:annotation-race'}),scopeAccumulator:authority.accumulator})).rejects.toBeDefined()
   const fresh=await topics(c,await c.authority())
   expect(fresh).toEqual([{id:c.messages[2].id,sequenceNum:3,topicLabel:added.content.topicLabel,topicConfidence:0.9,replyToText:null}])
   await retains(c,before)
@@ -119,7 +122,7 @@ describe.sequential('[COMP:api/native-chat-read-cost] sparse annotation scans',(
   await pool.query('UPDATE session_context_scope_revisions SET scope_held=true WHERE workspace_id=$1 AND id=$2',[c.f.workspaceId,revision.id])
   const result=await topics(c,await c.authority()).catch(()=>null)
   expect(result===null||result.every(row=>row.topicLabel!=='Fictional held topic')).toBe(true)
-  await expect(assertSourceModelInputAuthority({...executionToolContext(authority.execution,{appId:'fixture:annotation-held'}),scopeAccumulator:authority.accumulator})).rejects.toBeDefined()
+  await expect(admitModelInput({...executionToolContext(authority.execution,{appId:'fixture:annotation-held'}),scopeAccumulator:authority.accumulator})).rejects.toBeDefined()
  },90_000)
 
  it('does not release a present confidential annotation to a lower-clearance workspace member',async()=>{

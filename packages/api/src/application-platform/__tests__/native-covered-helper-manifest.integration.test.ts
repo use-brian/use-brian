@@ -4,9 +4,9 @@ import { getAppPool, getPool, rollbackAndRelease } from '../../db/client.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
-const guard = 'application_native_covered_evidence_helpers_current()'
+const guard = 'native_turn_helpers_current()'
 const nested = ['application_native_file_capture_helpers_current()', 'application_native_worklist_helpers_current()',
-  'application_empty_query_helpers_current()', 'application_memory_statement_helpers_current()']
+  'application_empty_query_helpers_current()']
 const families = [
   ['covered', 'application_native_root_cover(uuid,jsonb)'],
   ['file', 'application_native_file_frame_current(uuid,text[],uuid[],text[],jsonb)'],
@@ -26,10 +26,15 @@ async function definition(client: PoolClient, signature: string) {
     l.lanname FROM pg_proc p JOIN pg_language l ON l.oid=p.prolang WHERE p.oid=$1::regprocedure`, [signature])).rows[0]
 }
 
-describe.sequential('[COMP:api/application-persistence] flattened native covered helper manifest', () => {
+describe.sequential('[COMP:api/application-persistence] canonical native executable contract owner', () => {
   afterAll(async () => { await getAppPool().end(); await getPool().end() })
-  it('retains covered queue eligibility after changing the guard representation', async () => transaction(async client => {
-    expect(await allowed(client, 'application_native_covered_queue_current()')).toBe(true)
+  it('retains the canonical contract after retiring predecessor guards', async () => transaction(async client => {
+    expect(await allowed(client)).toBe(true)
+    for (const retired of ['application_native_covered_queue_current()', 'application_native_covered_evidence_helpers_current()',
+      'application_memory_statement_helpers_current()', 'application_native_dependency_batch_helpers_current()',
+      'application_native_field_reference_helpers_current()']) {
+      expect((await client.query('SELECT to_regprocedure($1) value', [retired])).rows[0].value).toBeNull()
+    }
   }))
 
   it('retains a fresh true result without executing nested guards', async () => transaction(async client => {
@@ -75,18 +80,9 @@ describe.sequential('[COMP:api/application-persistence] flattened native covered
   }))
 
 
-  for (const target of ['application_native_dependency_batch_helpers_current()', 'application_native_field_reference_helpers_current()']) {
+  for (const target of [guard]) {
     const publicationNested = nested.filter(signature => signature !== 'application_native_worklist_helpers_current()')
-    it(`validates ${target} freshly without recursively executing nested guards`, async () => transaction(async client => {
-      await client.query("SET LOCAL track_functions='all'")
-      expect(await allowed(client, target)).toBe(true)
-      expect(await allowed(client, target)).toBe(true)
-      const counts = (await client.query(`SELECT p.proname,s.calls::int FROM pg_stat_xact_user_functions s
-        JOIN pg_proc p ON p.oid=s.funcid WHERE p.oid=ANY($1::regprocedure[])`, [[target, ...publicationNested]])).rows
-      expect(counts.find(row => row.proname === target.slice(0,-2))?.calls).toBe(2)
-      expect(counts.filter(row => row.proname !== target.slice(0,-2)).every(row => row.calls === 0)).toBe(true)
-    }))
-    for (const signature of ['application_memory_field_keys()', 'enqueue_native_field_dependency_work()', ...publicationNested]) {
+    for (const signature of ['application_memory_field_keys()', 'native_turn_capture_event()', ...publicationNested]) {
       for (const drift of ['body', 'COST', 'ACL', 'configuration'] as const) {
         it(`refuses ${target} dependency ${signature} ${drift} drift`, async () => transaction(async client => {
           expect(await allowed(client, target)).toBe(true)
@@ -107,8 +103,8 @@ describe.sequential('[COMP:api/application-persistence] flattened native covered
     }
     for (const mutation of [
       'ALTER TABLE scope_derivation_sources DISABLE TRIGGER USER',
-      'ALTER TABLE native_field_dependency_batches DISABLE ROW LEVEL SECURITY',
-      'ALTER TABLE native_field_dependency_work ADD COLUMN fictional_extra text',
+      'ALTER TABLE native_turn_publication_work DISABLE ROW LEVEL SECURITY',
+      'ALTER TABLE native_turn_publication_events ADD COLUMN fictional_extra text',
       'ALTER TABLE scope_derivation_sources DROP CONSTRAINT scope_derivation_sources_workspace_id_derivation_id_fkey',
     ]) it(`retains ${target} schema validation for ${mutation}`, async () => transaction(async client => {
       expect(await allowed(client, target)).toBe(true)

@@ -1,15 +1,22 @@
 import {randomUUID} from 'node:crypto'
 import {afterAll,describe,expect,it,vi} from 'vitest'
-import {boundScopeSource,ContextScopeAccumulator,createTaskTools,scopeEvidenceFromRows,type AccessContext,type ToolContext} from '@use-brian/core'
-import {getAppPool,getPool} from '../client.js'
+import {createTaskTools} from '@use-brian/core/tasks/tools.js'
+import type {AccessContext} from '@use-brian/agent-runtime/security/access-context.js'
+import {ContextScopeAccumulator, scopeEvidenceFromRows} from '@use-brian/agent-runtime/security/context-scope.js'
+import {boundScopeSource,boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
+import type {ToolContext} from '@use-brian/agent-runtime/tools/types.js'
+import {resolveExecutionContextSystem} from '../../context-scope/execution-context.js'
+import {findAssistantById} from '../users.js'
+import {applyRLSGucs,getAppPool,getPool} from '../client.js'
+import {withTableTriggersSuspended} from '../../__tests__/fixtures/bootstrap-role.js'
 import {runWithAgentAccess} from '../agent-access-context.js'
 import {createDbTaskStore} from '../tasks-store.js'
 import {getTaskByIdSystem,getTaskHistory} from '../tasks.js'
 import {createDbWorkspaceGroupStore} from '../workspace-group-store.js'
 import * as lifecycle from '../../task-event-fanout.js'
-import {addSessionMessage} from '../sessions.js'
+import {addSessionMessage,createWorkspaceChatSession} from '../sessions.js'
 import {validateAudienceScopeEvidence} from '../../context-scope/caller-evidence.js'
-import type {ScopeSource} from '@use-brian/core'
+import type {ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
 import {validateDerivedMemoryInputs} from '../derived-scope-store.js'
 
 // This suite asserts the legacy (pre-v2) model, which workspaces.department_read_v2=false still
@@ -17,6 +24,22 @@ import {validateDerivedMemoryInputs} from '../derived-scope-store.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 const pool=getPool()
+// Canonical task fields refuse owner-pool writes (migration 8051): an ordinary
+// change is made by an authorized member through the app role, and a state the
+// guards refuse to any direct write is a fixture-only legacy row written with
+// the table's own triggers suspended by name inside one transaction (testing.md).
+async function asMember(userId:string,sql:string,values:unknown[]) {
+  const client=await getAppPool().connect()
+  try {await client.query('BEGIN');await applyRLSGucs(client,userId);await client.query(sql,values);await client.query('COMMIT')}
+  catch(error) {await client.query('ROLLBACK');throw error}
+  finally {client.release()}
+}
+async function legacyRow(sql:string,values:unknown[]) {
+  const client=await pool.connect()
+  try {await client.query('BEGIN');await withTableTriggersSuspended(client,['tasks'],()=>client.query(sql,values));await client.query('COMMIT')}
+  catch(error) {await client.query('ROLLBACK');throw error}
+  finally {client.release()}
+}
 
 async function fixture(){
   const workspaceId=randomUUID(),userId=randomUUID(),otherUser=randomUUID(),assistantId=randomUUID(),projectId=randomUUID()
@@ -48,6 +71,27 @@ describe('[COMP:api/task-mutation-scope] canonical task publication and reader e
     expect(await f.rows()).toHaveLength(1)
     await f.groups.addMember(f.userId,f.team.id,f.otherUser)
     expect(await f.store.update(f.otherUser,task.id,{title:'Authorized'})).toMatchObject({title:'Authorized'})
+  })
+  it('treats Project participation as navigation metadata, never read or edit authority',async()=>{
+    const f=await fixture(),task=await f.create()
+    await pool.query("UPDATE workspace_members SET team_scope_mode='assigned' WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.otherUser])
+    await pool.query("INSERT INTO workspace_project_members(project_id,user_id,role) VALUES($1,$2,'lead')",[f.projectId,f.otherUser])
+    // The legacy derivation reader that 631 and 720 gated on participation, as the member's app session.
+    const read=()=>getAppPool().connect().then(async client=>{
+      try {await client.query('BEGIN');await applyRLSGucs(client,f.otherUser)
+        return (await client.query("SELECT read_entity_derivation_source($1,'task',$2) AS source",[f.workspaceId,task.id])).rows[0].source}
+      finally {await client.query('ROLLBACK');client.release()}})
+    // A participant without Team membership or an explicit grant is denied.
+    expect(await read()).toBeNull()
+    expect(await f.store.update(f.otherUser,task.id,{title:'Denied'})).toBeNull()
+    // Team membership authorizes; participation adds nothing and its removal takes nothing away.
+    await f.groups.addMember(f.userId,f.team.id,f.otherUser)
+    await pool.query('DELETE FROM workspace_project_members WHERE project_id=$1 AND user_id=$2',[f.projectId,f.otherUser])
+    expect(await read()).toMatchObject({resourceKind:'task',resourceId:task.id})
+    expect(await f.store.update(f.otherUser,task.id,{title:'Member edit'})).toMatchObject({title:'Member edit'})
+    // An archived Project still refuses its labelled rows.
+    await pool.query("UPDATE workspace_projects SET status='archived' WHERE id=$1",[f.projectId])
+    expect(await read()).toBeNull()
   })
   it('does not let task creation or recent deduplication reuse revoked membership',async()=>{
     const f=await fixture()
@@ -94,7 +138,7 @@ describe('[COMP:api/task-mutation-scope] canonical task publication and reader e
     expect((await f.rows())[0]).toMatchObject({valid_to:null,superseded_by:null})
   })
   it('rolls back a human-only edit when a child belongs to another Team',async()=>{
-    const f=await fixture(),parent=await f.create(),child=await f.create({title:'Child',parentId:parent.id,compartments:[f.otherKey]})
+    const f=await fixture(),parent=await f.create(),child=await f.create({title:'Child',parentId:parent.id,compartments:[f.key,f.otherKey]})
     await pool.query("UPDATE workspace_members SET team_scope_mode='assigned' WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.otherUser])
     await f.groups.addMember(f.userId,f.team.id,f.otherUser)
     await expect(f.store.update(f.otherUser,parent.id,{title:'Denied'})).rejects.toThrow('task_reference_conflict')
@@ -139,7 +183,14 @@ describe('[COMP:api/task-mutation-scope] canonical task publication and reader e
   it('preserves the complete known source floor when the actual task tool creates and updates',async()=>{
     const f=await fixture(),source=await f.create({title:'Source fixture',sensitivity:'confidential',visibility:{userId:f.userId,assistantId:f.assistantId}})
     const accumulator=new ContextScopeAccumulator(scopeEvidenceFromRows([source]))
-    const context={...f.context,scopeAccumulator:accumulator}
+    // A source-derived create carries the attended original execution and its
+    // complete accumulator (tasks.md, "Current source ancestry on native task creation").
+    const session=await createWorkspaceChatSession({assistantId:f.assistantId,starterUserId:f.userId,workspaceId:f.workspaceId,effectiveClearance:'confidential',authenticatedHuman:true})
+    const original=(await resolveExecutionContextSystem({userId:f.userId,workspaceId:f.workspaceId,assistant:(await findAssistantById(f.assistantId))!,memberMode:'member',
+      sharedAudience:false,session,sessionAuthority:session,identity:{kind:'attended',principal:{kind:'workspace_member',userId:f.userId,authenticationKind:'native_session'}},
+      ownership:{kind:'workspace',workspaceId:f.workspaceId},lifecycle:{sessionId:session.id,sessionPersisted:true,channelId:session.channelId,channelType:session.channelType,
+        abortSignal:new AbortController().signal}})).executionContext
+    const context={...f.context,sessionId:session.id,executionContext:original,scopeAccumulator:accumulator} as ToolContext
     const tools=createTaskTools(f.store)
     const saved=await runWithAgentAccess(f.execution(),()=>tools.saveTask.execute({title:'New scoped task'},context))
     expect(saved.isError).not.toBe(true)
@@ -165,12 +216,20 @@ describe('[COMP:api/task-mutation-scope] canonical task publication and reader e
     const f=await fixture(),task=await f.create({visibility:{userId:f.userId,assistantId:f.assistantId}})
     const expected=boundScopeSource(task)!
     const results=[await f.store.getById(f.access,task.id),...(await f.store.list(f.access,{})),await f.store.resolveById!(f.access,task.id),...(await getTaskHistory(f.access,task.id))]
-    for(const row of results){if(!row)throw new Error('Expected readable fixture task');expect(boundScopeSource(row)).toEqual(expected);expect(JSON.stringify(row)).not.toContain('scopeVersion');expect(JSON.stringify(row)).not.toContain(f.assistantId)}
+    // Readers retain selected field evidence alongside the physical task source,
+    // which stays the first evidence anchor (tasks.md, R2 canonical task readers).
+    for(const row of results){if(!row)throw new Error('Expected readable fixture task');expect(boundScopeSources(row)[0]).toEqual(expected);expect(JSON.stringify(row)).not.toContain('scopeVersion');expect(JSON.stringify(row)).not.toContain(f.assistantId)}
   })
   it('checks each historical version and excludes held bodies from system reads',async()=>{
     const f=await fixture(),task=await f.create(),next=await f.store.update(f.userId,task.id,{title:'Restricted version'},{scope:{sensitivity:'confidential',compartments:[],projectIds:[]}})
     const low={...f.access,clearance:'internal' as const}
-    expect((await getTaskHistory(low,task.id)).map(row=>row.title)).toEqual(['Task fixture'])
+    // Each version is admitted under its own original scope and the current
+    // full read/history authority over the live task (tasks.md, R2 canonical task
+    // readers; database-schema.md, task history collections): a full reader sees
+    // both versions, and a reader outside the stronger live row is refused rather
+    // than shown a partial chain.
+    expect((await getTaskHistory(f.access,task.id)).map(row=>row.title)).toEqual(['Task fixture','Restricted version'])
+    await expect(getTaskHistory(low,task.id)).rejects.toMatchObject({code:'access_unavailable'})
     expect(await f.store.getById(low,next!.id)).toBeNull()
     await pool.query('UPDATE tasks SET scope_held=true WHERE id=$1',[next!.id])
     expect(await getTaskByIdSystem(next!.id)).toBeNull()
@@ -191,8 +250,8 @@ describe('[COMP:api/task-mutation-scope] canonical task publication and reader e
     for(const row of rows.filter(row=>row.valid_to!==null))expect(rows.some(next=>next.id===row.superseded_by)).toBe(true)
   })
   it.each(['department','private'])('rolls back the successor when a %s child cannot be repointed',async(kind)=>{
-    const f=await fixture(),parent=await f.create(),child=await f.create({title:'Child fixture',parentId:parent.id,compartments:kind==='department'?[f.otherKey]:[f.key]})
-    if(kind==='private')await pool.query('UPDATE tasks SET user_id=$2 WHERE id=$1',[child.id,f.otherUser])
+    const f=await fixture(),parent=await f.create(),child=await f.create({title:'Child fixture',parentId:parent.id,compartments:kind==='department'?[f.key,f.otherKey]:[f.key]})
+    if(kind==='private')await legacyRow('UPDATE tasks SET user_id=$2 WHERE id=$1',[child.id,f.otherUser])
     const events=vi.spyOn(lifecycle,'publishTaskLifecycle')
     try{
       await expect(runWithAgentAccess(f.execution(),()=>f.store.update(f.userId,parent.id,{title:'Refused'}))).rejects.toThrow('task_reference_conflict')
@@ -230,7 +289,7 @@ describe('[COMP:api/task-mutation-scope] canonical task publication and reader e
     await expect(validateDerivedMemoryInputs(pool,{producer:'task-fixture',sources:[taskSource]})).rejects.toThrow('scope_source_changed')
     await expect(addSessionMessage({sessionId,role:'assistant',content:'The review is complete.',derivation:{producer:'turn:task-fixture',sources:evidence.sources}})).resolves.toBeDefined()
     // A later scope change must still find readers of the retired ancestor.
-    await pool.query("UPDATE tasks SET sensitivity='confidential' WHERE id=$1",[updated!.id])
+    await asMember(f.userId,"UPDATE tasks SET sensitivity='confidential' WHERE id=$1",[updated!.id])
     await expect(validateAudienceScopeEvidence(evidence,ceiling)).rejects.toMatchObject({diagnostic:'source_held'})
   })
   it.each(['content','hold','retract','delete','successor_scope'])('still holds task-list lineage after %s changes',async(change)=>{
@@ -240,7 +299,7 @@ describe('[COMP:api/task-mutation-scope] canonical task publication and reader e
     const previous=await addSessionMessage({sessionId,role:'assistant',content:'A recorded task list.',derivation:{producer:'turn:task-fixture',sources:[taskSource]}})
     if(change==='successor_scope')await f.store.update(f.userId,task.id,{status:'done'},{access:f.access,scope:{sensitivity:'confidential',compartments:[f.key],projectIds:[f.projectId]}})
     else if(change==='delete')await pool.query('DELETE FROM tasks WHERE id=$1',[task.id])
-    else if(change==='content')await pool.query("UPDATE tasks SET title='Changed source body' WHERE id=$1",[task.id])
+    else if(change==='content')await asMember(f.userId,"UPDATE tasks SET title='Changed source body' WHERE id=$1",[task.id])
     else if(change==='hold')await pool.query('UPDATE tasks SET scope_held=true WHERE id=$1',[task.id])
     else await pool.query('UPDATE tasks SET retracted_at=now() WHERE id=$1',[task.id])
     expect((await pool.query('SELECT scope_held FROM session_messages WHERE id=$1',[previous.id])).rows[0].scope_held).toBe(true)
@@ -250,10 +309,16 @@ describe('[COMP:api/task-mutation-scope] canonical task publication and reader e
     const goal=(await pool.query("INSERT INTO goals(workspace_id,host_type,host_id,outcome,done_when,created_by_user_id) VALUES($1,'task',$2,'Fixture outcome','{}',$3) RETURNING id",[f.workspaceId,parent.id,f.userId])).rows[0].id
     const updated=await f.store.update(f.userId,parent.id,{title:'New host'})
     expect((await pool.query('SELECT host_id FROM goals WHERE id=$1',[goal])).rows[0].host_id).toBe(updated!.id)
-    const successor=await f.create({title:'Separate fixture'}),client=await pool.connect()
+    // A successor must continue the same logical task (migration 8051 logical
+    // chain guard), so the transaction retires the host to a same-lineage row
+    // while its Goal still names the old host. That bare successor row is a
+    // fixture-only shape the canonical writer never produces, so it is written
+    // with the table's own triggers suspended; the retirement itself is checked.
+    const successor=randomUUID(),client=await pool.connect()
     try {
       await client.query('BEGIN')
-      await client.query('UPDATE tasks SET valid_to=now(),superseded_by=$2 WHERE id=$1',[updated!.id,successor.id])
+      await withTableTriggersSuspended(client,['tasks'],()=>client.query(`INSERT INTO tasks SELECT (jsonb_populate_record(t,jsonb_build_object('id',$2::uuid))).* FROM tasks t WHERE t.id=$1`,[updated!.id,successor]))
+      await client.query('UPDATE tasks SET valid_to=now(),superseded_by=$2 WHERE id=$1',[updated!.id,successor])
       await expect(client.query('COMMIT')).rejects.toThrow('task_reference_conflict')
       await client.query('ROLLBACK')
     } finally {client.release()}

@@ -3,7 +3,7 @@
  */
 import { Router, type Request, type Response } from 'express'
 import { z } from 'zod'
-import { AssociationCommandSchema, type AssociationContext, type AssociationServicePort } from '@use-brian/core'
+import { AssociationCommandSchema, type AssociationContext, type AssociationServicePort } from '@use-brian/core/association/operations.js'
 import {
   WORKSPACE_MODULES,
   WORKSPACE_MODULE_ACTIONS,

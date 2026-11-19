@@ -2,10 +2,20 @@
 import {createHash,randomUUID} from 'node:crypto'
 import type {PoolClient} from 'pg'
 import {
-  CrmOperationsContextSchema,CrmOperationsUuidSchema,CrmOperationsError,PreviewCrmContactErasureCommandSchema,
-  EraseCrmContactWithPreviewCommandSchema,assertCrmOperationsAuthority,canonicalCrmRequest,
-  type ResourceScope,type CrmOperationsContext,type CrmErasurePreview,type CrmPrivacyServicePort,type CrmPrivacyDomainReview,type CrmPrivacyBlocker,
-} from '@use-brian/core'
+  CrmOperationsContextSchema,
+  CrmOperationsUuidSchema,
+  CrmOperationsError,
+  PreviewCrmContactErasureCommandSchema,
+  EraseCrmContactWithPreviewCommandSchema,
+  assertCrmOperationsAuthority,
+  canonicalCrmRequest,
+  type CrmOperationsContext,
+  type CrmErasurePreview,
+  type CrmPrivacyServicePort,
+  type CrmPrivacyDomainReview,
+  type CrmPrivacyBlocker,
+} from '@use-brian/core/crm/operations-types.js'
+import type { ResourceScope } from '@use-brian/agent-runtime/security/derived-scope.js'
 import {assertCrmPrivacySubjectAuthority} from './privacy-subject-authority.js'
 import {getPool} from '../db/client.js'
 import {createSoftDeleteStore} from '../db/soft-delete-store.js'

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import request from 'supertest'
-import { createInMemoryBrowserProfileStore, type DepartmentReadGrant } from '@use-brian/core'
+import { createInMemoryBrowserProfileStore } from '@use-brian/core/sandbox/profiles.js'
+import type { DepartmentReadGrant } from '@use-brian/agent-runtime/security/department-read.js'
 import { signBrowserExtPairToken, signBrowserExtSessionToken, verifyBrowserExtPairToken } from '../../auth/browser-ext-pair-token.js'
 import { browserExtensionAuthorityRoutes, browserExtensionRoutes } from '../browser-extension.js'
 import { createTestApp } from './helpers.js'

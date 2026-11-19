@@ -13,7 +13,7 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '../tools/types.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { NEED_CARD_KINDS, type HomeDockLayout, type HomeDockStore } from './types.js'
 
 export const setHomeDockInputSchema = z.object({

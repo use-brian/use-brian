@@ -14,7 +14,7 @@
  * Run: GEMINI_API_KEY=... pnpm --filter @use-brian/core tsx scripts/eval-auto-title.ts
  */
 
-import { createGeminiProvider } from '../src/providers/gemini.js'
+import { createGeminiProvider } from '@use-brian/agent-runtime/providers/gemini.js'
 import { generateWorkflowTitle } from '../src/workflow/auto-title.js'
 import type { StructuredSchedule } from '../src/scheduling/schedule.js'
 

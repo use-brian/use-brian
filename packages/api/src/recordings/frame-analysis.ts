@@ -24,8 +24,8 @@ import {
   type FrameBatchRequest,
   type MediaBackend,
   type MediaResult,
-  type TokenUsage,
-} from '@use-brian/core'
+} from '@use-brian/core/media/backend.js'
+import type { TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
 import { formatStamp } from '@use-brian/shared'
 import {
   extractRecordingFrames,

@@ -3,10 +3,11 @@ import {pinSessionTitleClaims,sessionTitleProjection,sessionTitleProjections,ren
 import {sessionRecoveryRoutes} from './session-recovery.js'
 import {sessionLegacyHistoryRoutes} from './session-legacy-history.js'
 import {sessionDisplayHistoryRoutes} from './session-display-history.js'
-import {readPrivateChatPresentation} from '../db/chat-presentation.js'
-import {DerivedScopeError,executionToolContext} from '@use-brian/core'
+import {readNativeConversationHistory,readPrivateChatPresentation} from '../db/chat-presentation.js'
+import {DerivedScopeError} from '@use-brian/agent-runtime/security/derived-scope.js'
+import {executionToolContext} from '@use-brian/agent-runtime/security/execution-context.js'
 import {readAttendedSessionHistory} from './attended-session-context.js'
-import {assertSourceModelOutputAuthority} from '../application-platform/model-source-authority.js'
+import {admitModelOutput} from '../context-scope/admission.js'
 import {isAuthorityChangedError} from '../context-scope/authority-lease.js'
 import { z } from 'zod'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
@@ -17,9 +18,14 @@ import { createSessionStreamAuthority } from '../session-stream-authority.js'
 import { guardFeedStream } from '../content-planning/source-authority.js'
 import { Router } from 'express'
 import { findOrCreateUser, getDefaultAssistant, getUserAssistant, getUserProfilesByIds, getWorkspacePrimaryAssistant } from '../db/users.js'
-import { addSessionMessage, countSessionHumans, createPersonalWebSession, createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessageById, readSessionById, rebindSessionAssistant, updateSessionMessageText } from '../db/sessions.js'
+import { addSessionMessage, countSessionHumans, createPersonalWebSession, createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessageById, readSessionById, rebindSessionAssistant, updateSessionMessageText, type Session } from '../db/sessions.js'
 import { isWorkspaceAdmin, setRoomCapture } from '../channel-room/room.js'
-import { mayAssistantAnswerInRoom, DOC_DOCK_RESUME_ROW } from './_room-binding.js'
+import {
+  roomClearanceFit,
+  DOC_DOCK_RESUME_ROW,
+  ASSISTANT_CLEARANCE_BELOW_CONVERSATION,
+  clearanceBelowRoomDefaultCopy,
+} from './_room-binding.js'
 import { query } from '../db/client.js'
 import { getTurnTrace } from '../ledger/turn-trace.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
@@ -27,7 +33,7 @@ import { resolveUser } from './route-helpers.js'
 import { getWorkspaceRoleSystem, getWorkspaceMembershipWithReadScopeSystem } from '../db/workspace-store.js'
 import { decideSessionRead } from '../session-read-access.js'
 import { classifySession, clientSessionPolicy, feedAnchoredRead, policyFor, sessionKindSql, sessionPolicy } from '../session-kind.js'
-import { canRead, type Sensitivity } from '@use-brian/core'
+import { canRead, type Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import {
   ContextNotAvailableError,
   resolveTurnScopeSystem,
@@ -61,6 +67,12 @@ import { resolveSessionPinLabels } from '../resolve-session-pins.js'
 import { guestAuthorNameForSession, guestSenderProfile } from '../db/guest-comment-store.js'
 import { gateSessionRead } from '../session-read-authority.js'
 import type { ResolveSessionChannelNames } from '../session-channel-names.js'
+import { changeConversationVisibility, conversationCapMutationSchema, conversationProjectMutationSchema,
+  conversationReadersActive, conversationSettingsActive, conversationVisibilityMutationSchema, ConversationVisibilityError,
+  moveConversationProject, raiseConversationCap, readConversationMemberTiers, readConversationVisibility,
+  type ConversationVisibilityActor } from '../db/conversation-visibility.js'
+import { notifyWorkspaceChange } from '../brain-stream/notify.js'
+import { authSessionStore } from '../db/auth-session-store.js'
 
 export { gateSessionRead } from '../session-read-authority.js'
 
@@ -79,6 +91,16 @@ export type SessionRouteOptions = {
    * the relay no-ops. See oss-local-brain-wedge.md §12.5.
    */
   subscribeSessionEvents?: SubscribeSessionEvents
+  /**
+   * True while an answered/decided suspension of this session has a durable
+   * resume enqueued that the lease-holding owner has not yet started (its
+   * resume point exists and its approval was approved, rejected or expired). Lets the
+   * reconnect stream wait for that owner's `turn_started` instead of closing
+   * before the resumed turn exists. Absent = no wait (unit tests, compositions
+   * without durable resume). See askquestion-suspend-resume.md "Resume attach
+   * and poll retirement".
+   */
+  pendingSessionResume?: (sessionId: string) => Promise<boolean>
   /**
    * Live session-event bus publish — the room post path (`POST /:id/messages`)
    * emits `user_message_saved` here so every open viewer fans the post in
@@ -142,6 +164,46 @@ const personalListCursor = z.object({
   beforeId: z.string().uuid().optional(),
 }).refine(value => Boolean(value.before) === Boolean(value.beforeId))
 
+function nativeSettingsActor(req: { userId?: string; authSessionId?: string; authVersion?: number }): ConversationVisibilityActor | null {
+  return req.userId && req.authSessionId && req.authVersion !== undefined
+    ? { userId: req.userId, authSessionId: req.authSessionId, authVersion: req.authVersion } : null
+}
+
+async function sessionDetail(session: Session, viewer: string, titleClaims: ReturnType<typeof pinSessionTitleClaims>) {
+  const kind = classifySession(session)
+  const shared = kind.audience === 'workspace'
+  const [humanCount, profiles, title, recovery] = await Promise.all([
+    shared ? countSessionHumans([session.id], viewer).then(count => count.get(session.id) ?? null).catch(() => null) : 1,
+    shared ? getUserProfilesByIds([session.userId]) : null,
+    sessionTitleProjection({ claims: titleClaims, sessionId: session.id }),
+    query<{ sourceId: string }>(`SELECT r.source_session_id AS "sourceId" FROM session_recoveries r
+      JOIN sessions target ON target.id=r.target_session_id JOIN assistants a ON a.id=target.assistant_id
+      WHERE r.target_session_id=$1 AND r.user_id=$2 AND r.workspace_id=target.workspace_id AND a.workspace_id=r.workspace_id`, [session.id, viewer]),
+  ])
+  const starter = profiles?.get(session.userId)
+  const recoveredFrom = recovery.rows[0]?.sourceId
+  return {
+    id: session.id,
+    ...(recoveredFrom ? { recoveredFromSessionId: recoveredFrom } : {}),
+    title: title.title ?? 'New Chat', titleRevisionId: title.titleRevisionId,
+    channelId: session.channelId, lastActive: session.lastActiveAt,
+    status: session.status, turnId: session.turnId ?? null, turnEndReason: session.turnEndReason ?? null,
+    appOrigin: session.appOrigin, assistantId: session.assistantId, transport: kind.transport, audience: kind.audience,
+    contextGroupId: session.contextGroupId, contextProjectId: session.contextProjectId,
+    ...(shared ? { startedByUserId: session.userId, startedByName: starter?.name ?? null, startedByAvatarUrl: starter?.avatarUrl ?? null } : {}),
+    humanCount, policy: clientSessionPolicy(sessionPolicy(kind, { humanCount: humanCount ?? undefined })),
+  }
+}
+
+const settingsMutations = {
+  visibility: (actor: ConversationVisibilityActor, id: string, body: unknown) =>
+    changeConversationVisibility(actor, id, conversationVisibilityMutationSchema.parse(body)),
+  cap: (actor: ConversationVisibilityActor, id: string, body: unknown) =>
+    raiseConversationCap(actor, id, conversationCapMutationSchema.parse(body)),
+  project: (actor: ConversationVisibilityActor, id: string, body: unknown) =>
+    moveConversationProject(actor, id, conversationProjectMutationSchema.parse(body)),
+}
+
 /** One SSE frame the reconnect relay writes: `event:` name + JSON `data:`. */
 export type ReconnectRelayFrame = { event: string; data: unknown }
 
@@ -170,7 +232,7 @@ export type ReconnectRelayFrame = { event: string; data: unknown }
  * `turn_started`) is not part of a personal turn and yields no frame.
  */
 export function reconnectRelayFrames(
-  event: SessionEvent,
+  event: SessionEvent,expectedTurnId?:string|null,
 ): { frames: ReconnectRelayFrame[]; finalize: boolean } {
   switch (event.kind) {
     case 'turn_stream':
@@ -180,10 +242,11 @@ export function reconnectRelayFrames(
     case 'pins_changed':
       return { frames: [{ event: 'pins_changed', data: event.payload }], finalize: false }
     case 'turn_completed':
+      if(expectedTurnId!==undefined&&(expectedTurnId===null||event.payload.turnId!==expectedTurnId))return{frames:[{event:'turn_completed',data:event.payload}],finalize:false}
       return {
         frames: [
           { event: 'turn_completed', data: event.payload },
-          { event: 'done', data: {} },
+          { event: 'done', data: {turnId:event.payload.turnId??null} },
         ],
         finalize: true,
       }
@@ -192,16 +255,29 @@ export function reconnectRelayFrames(
   }
 }
 
+/** How long a reconnect stream waits for an enqueued durable resume's owner to
+ * start: the poll worker's 60 s tick plus its slot wait, then a bounded close. */
+export const RESUME_FOLLOW_LIMIT_MS = 120_000
+
+/**
+ * While a reconnect stream waits for an enqueued resume, the resumed owner's
+ * `turn_started` (published after it holds the lease) becomes `status running`
+ * with that owner's `turnId`, the same frame a stream opened on a running turn
+ * starts with. Anything else yields nothing.
+ */
+export function resumeStartFrames(event: SessionEvent, now: number = Date.now()): ReconnectRelayFrame[] {
+  if (event.kind !== 'turn_started') return []
+  return [{ event: 'status', data: { status: 'running', turnId: event.payload.turnId ?? null, turnEndReason: null, startedAt: now } }]
+}
+
 /**
  * What the reconnect stream's 5s DB-status backstop sends when it, not the
  * bus, notices the turn ended: the same terminal pair, retaining abnormal
  * status without inventing an author or exposing exception details.
  */
-export function reconnectBackstopFrames(status?: string): readonly ReconnectRelayFrame[] {
-  return [
-    { event: 'turn_completed', data: status === 'timeout' || status === 'failed' ? { reason: status } : {} },
-    { event: 'done', data: {} },
-  ]
+export function reconnectBackstopFrames(status?:string,turnId:string|null=null,turnEndReason?:string|null):readonly ReconnectRelayFrame[]{
+ const reason=turnEndReason&&turnEndReason!=='completed'?turnEndReason:status==='timeout'||status==='failed'?status:undefined
+ return[{event:'turn_completed',data:{turnId,...reason?{reason}:{}}},{event:'done',data:{turnId}}]
 }
 
 export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
@@ -334,7 +410,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       type PersonalRailRow = {
         recoveredFromSessionId: string | null
         id: string; title: string | null; channelId: string;
-        lastActiveAt: Date; status: string; appOrigin: string | null
+        lastActiveAt: Date; status: string; turnId?:string|null;turnEndReason?:string|null; appOrigin: string | null
         assistantId: string; channelType: string
         contextGroupId: string | null; contextProjectId: string | null
         userId: string; visibility: string | null; mode: string | null
@@ -355,7 +431,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       const result = await query<PersonalRailRow>(
         `SELECT s.id, NULL::text AS title, s.channel_id as "channelId",
                 recovery.source_session_id AS "recoveredFromSessionId",
-                s.last_active_at as "lastActiveAt", s.status,
+                s.last_active_at as "lastActiveAt", s.status,native_session_public_turn_id(s.workspace_id,s.id,s.last_turn_lease_token) AS "turnId",s.turn_end_reason AS "turnEndReason",
                 s.app_origin as "appOrigin",
                 s.anchor_kind as "anchorKind",
                 s.assistant_id as "assistantId",
@@ -388,7 +464,9 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       )
 
       // Never disclose a title for a row the current viewer cannot read.
-      const admitted = result.rows.filter((s) => !listWorkspaceId || decideSessionRead({
+      const currentTiers = conversationReadersActive()
+        ? await readConversationMemberTiers(user.id, result.rows.map(row => row.id)) : null
+      const admitted = result.rows.filter((s) => currentTiers ? currentTiers.has(s.id) : !listWorkspaceId || decideSessionRead({
         callerUserId: user.id,
         session: {
           userId: s.userId,
@@ -413,11 +491,14 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       }
 
 
-      const titles=await sessionTitleProjections({claims:titleClaims,sessionIds:readable.map(s=>s.id)})
+      // A disconnected list stops its optional title work (optional-evidence.ts).
+      const titleAbort=new AbortController();res.once('close',()=>{if(!res.writableFinished)titleAbort.abort()})
+      const titles=await sessionTitleProjections({claims:titleClaims,sessionIds:readable.map(s=>s.id),signal:titleAbort.signal})
       const channelNames = listWorkspaceId && opts.resolveChannelNames
         ? await opts.resolveChannelNames({ userId: user.id, workspaceId: listWorkspaceId, rows: readable }).catch(() => new Map<string, string>())
         : new Map<string, string>()
-      res.json(readable.map((s) => ({
+      const currentTiers = conversationReadersActive() ? await readConversationMemberTiers(user.id, readable.map(row => row.id)) : null
+      res.json(readable.filter(row => !currentTiers || currentTiers.has(row.id)).map((s) => ({
         id: s.id,
         ...(s.recoveredFromSessionId ? {recoveredFromSessionId:s.recoveredFromSessionId} : {}),
         title: titles.get(s.id)?.title ?? 'New Chat',
@@ -440,7 +521,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         contextProjectId: s.contextProjectId,
         // The turn slot, so the rail's working pulse reads personal rows the
         // same way it reads rooms (chat-parity T4).
-        status: s.status,
+        status: s.status,turnId:s.turnId??null,turnEndReason:s.turnEndReason??null,
         // What the Chat app renders from (chat-parity T1): a personal chat is
         // a room with one human, never worked out from which list it is in.
         policy: clientSessionPolicy(policyFor(s)),
@@ -508,7 +589,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       }
       type RailRow = {
         id: string; title: string | null; channelId: string
-        lastActiveAt: Date; status: string
+        lastActiveAt: Date; status: string;turnId?:string|null;turnEndReason?:string|null
         starterUserId: string; effectiveClearance: string | null
         assistantId: string; visibility: string | null; mode: string | null
         contextGroupId: string | null; contextProjectId: string | null
@@ -528,7 +609,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
                 s.channel_type AS "channelType", s.anchor_kind AS "anchorKind",
                 s.app_origin AS "appOrigin",
                 s.room_capture AS "roomCapture", s.recording_revision AS "recordingRevision",
-                s.last_active_at AS "lastActiveAt", s.status,
+                s.last_active_at AS "lastActiveAt", s.status,native_session_public_turn_id(s.workspace_id,s.id,s.last_turn_lease_token) AS "turnId",s.turn_end_reason AS "turnEndReason",
                 s.user_id AS "starterUserId",
                 s.effective_clearance AS "effectiveClearance",
                 s.assistant_id AS "assistantId",
@@ -553,7 +634,9 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       // The list never outruns the read gate (L4): the same decision the
       // gate applies (clearance AND current Team/Project/department reach),
       // so a room the caller could not open is not listed, title and all.
-      const admitted = result.rows.filter((r) => decideSessionRead({
+      const currentTiers = conversationReadersActive()
+        ? await readConversationMemberTiers(user.id, result.rows.map(row => row.id)) : null
+      const admitted = result.rows.filter((r) => currentTiers ? currentTiers.has(r.id) : decideSessionRead({
         callerUserId: user.id,
         session: {
           userId: r.starterUserId,
@@ -589,14 +672,17 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
           console.warn('[sessions] room human count failed (rooms stay mention-gated):', err)
           return new Map<string, number>()
         })
-      const titles=await sessionTitleProjections({claims:titleClaims,sessionIds:visible.map(s=>s.id)})
-      res.json(visible.map((s) => ({
+      // A disconnected list stops its optional title work (optional-evidence.ts).
+      const titleAbort=new AbortController();res.once('close',()=>{if(!res.writableFinished)titleAbort.abort()})
+      const titles=await sessionTitleProjections({claims:titleClaims,sessionIds:visible.map(s=>s.id),signal:titleAbort.signal})
+      const currentTiers = conversationReadersActive() ? await readConversationMemberTiers(user.id, visible.map(row => row.id)) : null
+      res.json(visible.filter(row => !currentTiers || currentTiers.has(row.id)).map((s) => ({
         id: s.id,
         title: titles.get(s.id)?.title ?? 'New Chat',
         titleRevisionId: titles.get(s.id)?.titleRevisionId ?? null,
         channelId: s.channelId,
         lastActive: s.lastActiveAt,
-        status: s.status,
+        status: s.status,turnId:s.turnId??null,turnEndReason:s.turnEndReason??null,
         startedByUserId: s.starterUserId,
         startedByName: profiles.get(s.starterUserId)?.name ?? null,
         startedByAvatarUrl: profiles.get(s.starterUserId)?.avatarUrl ?? null,
@@ -753,7 +839,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         title: session.title ?? 'New Chat',
         channelId: session.channelId,
         lastActive: session.lastActiveAt,
-        status: session.status,
+        status: session.status,turnId:session.turnId??null,turnEndReason:session.turnEndReason??null,
         startedByUserId: user.id,
         assistantId: session.assistantId,
         contextGroupId: session.contextGroupId,
@@ -912,7 +998,9 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         channelType,
         channelId,
       })
-      if (!session) { res.status(404).json({ error: 'No session' }); return }
+      if (!session || (conversationReadersActive() && await gateSessionRead(user.id, session))) {
+        res.status(404).json({ error: 'No session' }); return
+      }
 
       const title=await sessionTitleProjection({claims:titleClaims,sessionId:session.id})
       res.json({
@@ -955,46 +1043,48 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       if (!session) { res.status(404).json({ error: 'Session not found' }); return }
       const denied = await gateSessionRead(user.id, session)
       if (denied) { res.status(404).json({ error: 'Session not found' }); return }
-      const kind = classifySession(session)
-      const humanCount = kind.audience === 'workspace'
-        ? (await countSessionHumans([session.id], user.id).catch(() => new Map<string, number>())).get(session.id) ?? null
-        : 1
-      const starter = kind.audience === 'workspace'
-        ? (await getUserProfilesByIds([session.userId])).get(session.userId) ?? null
-        : null
-      const title=await sessionTitleProjection({claims:titleClaims,sessionId:session.id})
-      const recoveredFrom=(await query<{sourceId:string}>(`SELECT r.source_session_id AS "sourceId" FROM session_recoveries r
-        JOIN sessions target ON target.id=r.target_session_id JOIN assistants a ON a.id=target.assistant_id
-        WHERE r.target_session_id=$1 AND r.user_id=$2 AND r.workspace_id=target.workspace_id AND a.workspace_id=r.workspace_id`,[session.id,user.id])).rows[0]?.sourceId
-      res.json({
-        id: session.id,
-        ...(recoveredFrom ? {recoveredFromSessionId:recoveredFrom} : {}),
-        title: title.title ?? 'New Chat',
-        titleRevisionId: title.titleRevisionId,
-        channelId: session.channelId,
-        lastActive: session.lastActiveAt,
-        status: session.status,
-        appOrigin: session.appOrigin,
-        assistantId: session.assistantId,
-        transport: kind.transport,
-        audience: kind.audience,
-        contextGroupId: session.contextGroupId,
-        contextProjectId: session.contextProjectId,
-        ...(kind.audience === 'workspace'
-          ? {
-              startedByUserId: session.userId,
-              startedByName: starter?.name ?? null,
-              startedByAvatarUrl: starter?.avatarUrl ?? null,
-            }
-          : {}),
-        humanCount,
-        policy: clientSessionPolicy(sessionPolicy(kind, { humanCount: humanCount ?? undefined })),
-      })
+      const actor = conversationSettingsActive() ? nativeSettingsActor(req) : null
+      const detail = await sessionDetail(session, user.id, titleClaims)
+      const metadata = actor ? await readConversationVisibility(actor, session.id) : null
+      if (actor && !metadata) { res.status(404).json({ error: 'Session not found' }); return }
+      res.json({ ...detail, ...metadata })
     } catch (err) {
       console.error('Session read error:', err)
       res.status(500).json({ error: 'Failed to load session' })
     }
   })
+
+  for (const [setting, mutate] of Object.entries(settingsMutations)) {
+    router.patch(`/:id/${setting}`, async (req, res) => {
+      res.setHeader('Cache-Control', 'no-store')
+      if (!conversationSettingsActive()) { res.status(404).json({ error: 'Session not found' }); return }
+      const actor = nativeSettingsActor(req)
+      if (!actor) { res.status(401).json({ error: 'authenticated_session_required' }); return }
+      const id = z.string().uuid().safeParse(req.params.id)
+      if (!id.success) { res.status(404).json({ error: 'Session not found' }); return }
+      try {
+        const result = await mutate(actor, id.data, req.body)
+        if (result.version !== req.body.expectedVersion) {
+          publishSessionEvent({ kind: 'conversation_access_changed', sessionId: id.data, payload: { version: result.version } })
+          void query<{ id: string }>('SELECT workspace_id AS id FROM conversation_envelopes WHERE session_id=$1', [id.data])
+            .then(workspace => notifyWorkspaceChange(workspace.rows[0]?.id, 'session', 'update'))
+            .catch(error => console.warn('Conversation workspace refresh failed:', error))
+        }
+        if (!result.readable) { res.json(result); return }
+        const unreadable = { committed: true, readable: false, sessionId: id.data, version: result.version, code: 'conversation_access_denied' }
+        const session = await readSessionById(id.data)
+        if (!session || await gateSessionRead(actor.userId, session)) { res.json(unreadable); return }
+        const detail = await sessionDetail(session, actor.userId, pinSessionTitleClaims(req))
+        const metadata = await readConversationVisibility(actor, id.data)
+        res.json(metadata ? { ...detail, ...metadata } : unreadable)
+      } catch (error) {
+        if (error instanceof z.ZodError) { res.status(400).json({ error: 'Invalid conversation settings' }); return }
+        if (error instanceof ConversationVisibilityError) { res.status(error.status).json({ error: error.code, code: error.code }); return }
+        console.error('Conversation settings update failed:', error)
+        res.status(500).json({ error: 'Failed to update conversation settings' })
+      }
+    })
+  }
 
   /**
    * Per-viewer organization only; the canonical read gate still applies.
@@ -1283,6 +1373,15 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         return
       }
 
+      if (conversationReadersActive()) {
+        const actor = nativeSettingsActor(req)
+        if (!actor) { res.status(401).json({ error: 'authenticated_session_required' }); return }
+        const id = z.string().uuid().safeParse(req.params.id)
+        if (!id.success) { res.status(404).json({ error: 'Session not found' }); return }
+        res.json(await readNativeConversationHistory(actor, id.data))
+        return
+      }
+
       // Workspace-shared sessions need an explicit auth branch: the session's
       // user_id is the original starter, so a per-message history read for a
       // teammate would otherwise fail. `gateSessionRead` authorizes any
@@ -1311,7 +1410,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       const authority = await resolveSessionTitleAuthority({
         claims: pinSessionTitleClaims(req), sessionId: session.id, readOnly: true,
       })
-      const messages = await readAttendedSessionHistory(authority, session.id)
+      const messages = (await readAttendedSessionHistory(authority,session.id)).messages
       // Resolve sender profiles (name + avatar) so the client can attribute
       // *other* members' messages (a comment thread otherwise only knows the
       // current viewer's identity and renders a "?" avatar for everyone else).
@@ -1333,7 +1432,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
           : null
       // Profiles and anchor attribution may await other reads. Recheck the
       // original query's sources and caller at the actual response boundary.
-      await assertSourceModelOutputAuthority({
+      await admitModelOutput({
         ...executionToolContext(authority.execution, { appId: 'native-session-history' }),
         scopeAccumulator: authority.accumulator,
       })
@@ -1363,6 +1462,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       }))
     } catch (err) {
       if (err instanceof WorkspaceAccessError) {
+        if (err.code === 'conversation_access_denied') { res.status(err.status).json({ error: err.code, code: err.code }); return }
         res.status(err.status).json({ error: 'Session history is unavailable with your current access', code: 'session_history_unavailable' })
         return
       }
@@ -1847,8 +1947,10 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
    *   - same workspace as the currently-bound assistant, via
    *     `getUserAssistant` (an unreachable assistant and a nonexistent one
    *     are indistinguishable by design);
-   *   - `mayAssistantAnswerInRoom` — the shared predicate, so this can never
-   *     drift from the mention path's `assistant_clearance_exceeds_room`.
+   *   - `roomClearanceFit` (behind `mayAssistantAnswerInRoom`), the shared
+   *     predicate, so this can never drift from the mention path: above the
+   *     room is `assistant_clearance_exceeds_room`, below it (the assistant
+   *     could not read the room) is `assistant_clearance_below_conversation`.
    *
    * NOT gated on `status='running'`: the live turn resolved its assistant at
    * start and finishes as that one, and a room wedged behind a phantom lock
@@ -1899,15 +2001,21 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         res.status(403).json({ error: 'Assistant not available in this workspace' })
         return
       }
-      if (
-        !mayAssistantAnswerInRoom({
-          assistantClearance: candidate.clearance ?? null,
-          roomClearance: session.effectiveClearance,
-        })
-      ) {
+      const clearanceFit = roomClearanceFit({
+        assistantClearance: candidate.clearance ?? null,
+        roomClearance: session.effectiveClearance,
+      })
+      if (clearanceFit === 'exceeds') {
         res.status(403).json({
           code: 'assistant_clearance_exceeds_room',
           error: 'That assistant is cleared above this room and cannot answer here.',
+        })
+        return
+      }
+      if (clearanceFit === 'below') {
+        res.status(403).json({
+          code: ASSISTANT_CLEARANCE_BELOW_CONVERSATION,
+          error: clearanceBelowRoomDefaultCopy(candidate.name),
         })
         return
       }
@@ -2119,14 +2227,19 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     }
 
     send('status', {
-      status: session.status,
+      status: session.status,turnId:session.turnId??null,turnEndReason:session.turnEndReason??null,
       startedAt: session.status === 'running' ? session.turnStartedAt?.getTime() ?? null : null,
     })
     let closeForAuthority = () => { res.end() }
+    const viewerClaims = pinSessionTitleClaims(req)
     const authority = createSessionStreamAuthority(async () => {
+      if (conversationReadersActive() && (!viewerClaims || !await authSessionStore.validateAccess(viewerClaims))) return false
       const current = await findSessionById(req.params.id)
       return !!current && !(await gateSessionRead(jwtUserId, current))
-    }, () => closeForAuthority())
+    }, reason => {
+      if (reason === 'denied' && conversationReadersActive()) send('access_denied', { code: 'conversation_access_denied' })
+      closeForAuthority()
+    })
     const authorityPoll = setInterval(() => authority.run(() => {}), 5_000)
     authorityPoll.unref?.()
     res.on('close', () => { authority.dispose(); clearInterval(authorityPoll) })
@@ -2223,14 +2336,29 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     }
 
     // Nothing in flight — tell the client immediately so it stops showing a
-    // "working…" state and closes the stream.
+    // "working…" state and closes the stream. One exception: an answered
+    // question (or decided approval) whose durable resume is enqueued but not
+    // yet started. The answer route only enqueues; the resumed turn belongs to
+    // the lease-holding owner, which publishes `turn_started` once it holds the
+    // slot. Hold the stream for that owner (relayed as `status running`) up to
+    // RESUME_FOLLOW_LIMIT_MS rather than closing before the turn exists.
+    let awaitingResume = false
     if (session.status !== 'running') {
-      send('done', {})
-      res.end()
-      return
+      awaitingResume = await (opts.pendingSessionResume?.(session.id) ?? Promise.resolve(false)).catch(() => false)
+      if (res.destroyed || res.writableEnded) return
+      if (!awaitingResume) {
+        send('done', {turnId:session.turnId??null})
+        res.end()
+        return
+      }
     }
 
     let closed = false
+    let resumeLimit: NodeJS.Timeout | null = null
+    // While awaiting a resume, the previous turn's identity is not the one to follow.
+    let subscribedTurnId=awaitingResume?null:session.turnId??null
+    let lifecycleRevision=0
+    let statusRequest=0
     let unsubscribe: (() => void) | null = null
     let poll: NodeJS.Timeout | null = null
     let keepalive: NodeJS.Timeout | null = null
@@ -2241,6 +2369,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       clearInterval(authorityPoll)
       if (poll) clearInterval(poll)
       if (keepalive) clearInterval(keepalive)
+      if (resumeLimit) clearTimeout(resumeLimit)
       unsubscribe?.()
       for (const frame of frames) send(frame.event, frame.data)
       res.end()
@@ -2249,7 +2378,18 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     closeForAuthority = () => finalize([])
     const relayEvent = (event: SessionEvent) => authority.run(() => {
       if (closed) return
-      const relay = reconnectRelayFrames(event)
+      if(event.kind==='turn_started')lifecycleRevision++
+      if (awaitingResume) {
+        // Only the resumed owner's start ends the wait; nothing else is this turn yet.
+        const start = resumeStartFrames(event)
+        if (!start.length || event.kind !== 'turn_started') return
+        awaitingResume = false
+        subscribedTurnId = event.payload.turnId ?? null
+        if (resumeLimit) { clearTimeout(resumeLimit); resumeLimit = null }
+        for (const frame of start) send(frame.event, frame.data)
+        return
+      }
+      const relay = reconnectRelayFrames(event,subscribedTurnId)
       if (relay.finalize) { finalize(relay.frames); return }
       for (const frame of relay.frames) send(frame.event, frame.data)
     })
@@ -2268,14 +2408,39 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     // flips an abandoned turn to 'timeout', which is also caught here. There
     // is no bus payload to relay; preserve the terminal status so an abandoned
     // turn cannot look like a successful reply with an empty transcript.
-    poll = setInterval(() => {
-      void findSessionById(req.params.id)
-        .then((s) => {
-          if (!s || s.status !== 'running') authority.run(() => finalize(reconnectBackstopFrames(s?.status)))
-        })
-        .catch(() => {})
-    }, 5_000)
+    const pollCurrentStatus=()=>{
+      const revision=lifecycleRevision,request=++statusRequest
+      void findSessionById(req.params.id).then(s=>{
+        if(closed||revision!==lifecycleRevision||request!==statusRequest)return
+        if(!s){authority.run(()=>finalize([]));return}
+        if(awaitingResume&&s.status!=='running'){
+          // Still waiting: keep waiting while the resume is pending; if it is
+          // gone, the resumed turn already ran (its bus events were missed).
+          void (opts.pendingSessionResume?.(req.params.id)??Promise.resolve(false)).catch(()=>false).then(pending=>{
+            if(closed||!awaitingResume||pending)return
+            authority.run(()=>finalize(s.turnId&&s.turnId!==session.turnId?reconnectBackstopFrames(s.status,s.turnId,s.turnEndReason):[{event:'done',data:{turnId:null}}]))
+          })
+          return
+        }
+        if(s.status==='running'){
+          awaitingResume=false
+          if(resumeLimit){clearTimeout(resumeLimit);resumeLimit=null}
+          if((s.turnId??null)!==subscribedTurnId){
+            subscribedTurnId=s.turnId??null
+            authority.run(()=>send('status',{status:s.status,turnId:subscribedTurnId,turnEndReason:s.turnEndReason??null,
+              startedAt:s.turnStartedAt?.getTime()??null}))
+          }
+        }else authority.run(()=>finalize(reconnectBackstopFrames(s.status,s.turnId??null,s.turnEndReason)))
+      }).catch(()=>{})
+    }
+    poll=setInterval(pollCurrentStatus,5_000)
     poll.unref?.()
+    if (awaitingResume) {
+      // Bounded: an owner that never starts (worker down, refused authority)
+      // ends the wait with the ordinary nothing-in-flight close.
+      resumeLimit = setTimeout(() => authority.run(() => { if (awaitingResume) finalize([{ event: 'done', data: { turnId: null } }]) }), RESUME_FOLLOW_LIMIT_MS)
+      resumeLimit.unref?.()
+    }
 
     // A long tool call writes nothing for minutes and a proxy cuts an idle
     // response at 100s; now that every turn can be followed here, not just a
@@ -2293,6 +2458,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       clearInterval(authorityPoll)
       if (poll) clearInterval(poll)
       if (keepalive) clearInterval(keepalive)
+      if (resumeLimit) clearTimeout(resumeLimit)
       unsubscribe?.()
     })
   })

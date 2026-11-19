@@ -4,7 +4,8 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { QueryResultRow } from 'pg'
-import { CrmOperationsError, CrmPageQuerySchema, type CrmPage, type CrmPageQuery } from '@use-brian/core'
+import { CrmOperationsError } from '@use-brian/core/crm/operations-types.js'
+import { CrmPageQuerySchema, type CrmPage, type CrmPageQuery } from '@use-brian/core/crm/pagination.js'
 
 type Query = <T extends QueryResultRow>(sql: string, values: unknown[]) => Promise<{ rows: T[] }>
 const Instant = z.string().datetime({ offset: true }).refine((value) => !value.startsWith('0000-') && Number.isFinite(Date.parse(value)))

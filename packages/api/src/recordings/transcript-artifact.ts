@@ -1,7 +1,7 @@
 // [COMP:recordings/transcript-artifact] - persist a recording transcript as a
 // durable workspace file without duplicating it into file_segments.
 
-import type { FilesApi, FilesContext } from '@use-brian/core'
+import type { FilesApi, FilesContext } from '@use-brian/core/workspace-files/api.js'
 import { recordingTranscriptEvidence, type RecordingSegmentProvenance } from '../db/recording-intake-admission.js'
 import { formatTranscript, type TranscriptLineSource } from '@use-brian/shared'
 

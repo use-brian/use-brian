@@ -30,22 +30,19 @@ import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { createGeminiProvider } from '../../providers/gemini.js'
+import { createGeminiProvider } from '@use-brian/agent-runtime/providers/gemini.js'
 import {
   processEpisode,
   type EpisodeUpdaterPort,
   type PipelineBDeps,
   type PipelineBEpisode,
 } from '../pipeline-b.js'
-import type {
-  CrmStore,
-  EntityStore,
-  EntityLinksStore,
-  LLMProvider,
-  MemoryStore,
-  TaskStore,
-} from '../../index.js'
-import type { Sensitivity } from '../../security/sensitivity.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import type { CrmStore } from '../../crm/types.js'
+import type { EntityStore, EntityLinksStore } from '../../entities/types.js'
+import type { MemoryStore } from '../../memory/types.js'
+import type { TaskStore } from '../../tasks/types.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 
 type Fixture = {
   name: string

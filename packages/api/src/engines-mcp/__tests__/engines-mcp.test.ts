@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { createEngineTools, type EnginesEnv } from '../tools.js'
 import { authorizeEnginesRequest, enginesMcpEnabled } from '../server.js'
-import type { ExternalCredentialPool } from '@use-brian/core'
+import type { ExternalCredentialPool } from '@use-brian/agent-runtime/providers/credential-pool.js'
 
 function fakeResponse(body: unknown, status = 200) {
   const raw = typeof body === 'string' ? body : JSON.stringify(body)

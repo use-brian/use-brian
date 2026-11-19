@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { afterAll, describe, expect, it } from 'vitest'
-import type { AccessContext, DepartmentReadGrant } from '@use-brian/core'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import type { DepartmentReadGrant } from '@use-brian/agent-runtime/security/department-read.js'
 import { getPool, getAppPool, queryWithRLS } from '../client.js'
 import { runWithAgentAccess } from '../agent-access-context.js'
 import { createDeal } from '../crm.js'
 import { appendCrmActivity, listCrmTimeline, getCrmReport } from '../crm-r2.js'
 import { createDbWorkspaceGroupStore } from '../workspace-group-store.js'
+import { connectActingAs } from '../../__tests__/fixtures/bootstrap-role.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -118,7 +120,10 @@ describe('[COMP:crm/activity-scope] retained history audience',()=>{
   })
 
   it('backfills existing rows as unproven legacy and withholds them in strict mode',async()=>{
-    const f=await fixture(),client=await pool.connect()
+    // A bootstrap session acting as the ordinary owner: the migration and its
+    // legacy shape run with owner privileges, and only the bootstrap session
+    // user can switch to app_user inside the same rolled-back transaction.
+    const f=await fixture(),session=await connectActingAs(),client=session.client
     const migration=(await readFile(new URL('../../../migrations/581_crm_activity_scope.sql',import.meta.url),'utf8')).replace(/^BEGIN;\s*/,'').replace(/COMMIT;\s*$/,'')
     try {
       await client.query('BEGIN')
@@ -132,11 +137,11 @@ describe('[COMP:crm/activity-scope] retained history audience',()=>{
       await client.query("SELECT set_config('app.current_user_id',$1,true),set_config('app.system_bypass','false',true)",[f.memberId])
       await client.query(`SET LOCAL ROLE ${fixtureRuntimeRole}`)
       expect((await client.query('SELECT id FROM crm_activities WHERE workspace_id=$1',[f.workspaceId])).rows).toHaveLength(1)
-      await client.query('RESET ROLE')
+      await client.query(`SET LOCAL ROLE ${session.role}`)
       await client.query("INSERT INTO workspace_access_policies(workspace_id,classification_mode) VALUES($1,'strict') ON CONFLICT(workspace_id) DO UPDATE SET classification_mode='strict'",[f.workspaceId])
       await client.query(`SET LOCAL ROLE ${fixtureRuntimeRole}`)
       expect((await client.query('SELECT id FROM crm_activities WHERE workspace_id=$1',[f.workspaceId])).rows).toEqual([])
-      await client.query('RESET ROLE')
-    } finally {await client.query('ROLLBACK');client.release()}
+      await client.query(`SET LOCAL ROLE ${session.role}`)
+    } finally {await client.query('ROLLBACK');await client.end()}
   })
 })

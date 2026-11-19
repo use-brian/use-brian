@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { bindScopeSources, boundScopeSources } from '@use-brian/core'
+import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 
 // Mock the pg client before importing the sessions module
 vi.mock('../client.js', () => ({
@@ -33,7 +33,7 @@ import {
   findSlackVisibleMessageByChannelId,
 } from '../sessions.js'
 import { query } from '../client.js'
-import { boundScopeSource } from '@use-brian/core'
+import { boundScopeSource } from '@use-brian/agent-runtime/security/source-evidence.js'
 
 const mockQuery = vi.mocked(query)
 

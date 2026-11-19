@@ -13,8 +13,8 @@
  * runs with system_bypass.
  */
 
-import type { Message } from '@use-brian/core'
-import type { WorkerRunsStore } from '@use-brian/core'
+import type { Message } from '@use-brian/agent-runtime/providers/types.js'
+import type { WorkerRunsStore } from '@use-brian/core/workers/worker.js'
 import { query } from './client.js'
 
 export function createDbWorkerRunsStore(): WorkerRunsStore {

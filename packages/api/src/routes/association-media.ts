@@ -17,7 +17,7 @@
 import { Router, type Request, type Response } from 'express'
 import { randomUUID } from 'node:crypto'
 import multer from 'multer'
-import type { FilesApi, FilesContext } from '@use-brian/core'
+import type { FilesApi, FilesContext } from '@use-brian/core/workspace-files/api.js'
 import type { FilesClientResolver } from '../files/files-api.js'
 import { parseStorageKey } from '../files/gcs-client.js'
 import { WEBSITE_MEDIA_MIME, WEBSITE_MEDIA_PREFIX, type WebsiteMediaFile, type WebsiteMediaStore } from '../db/website-media-store.js'

@@ -11,14 +11,24 @@
  */
 
 import {
-  bindScopeSources,boundScopeSources,inheritScopeSources,stitchMailboxThreads, validateCrmCustomFieldValue as validateCustomFieldValue,
-  CRM_CUSTOM_FIELD_TYPES, CRM_CONFIG_ENTITY_KINDS, CRM_PIPELINE_STAGE_CATEGORIES, CrmOperationsError,
-  type AccessContext,
-  type EntityRecord,
-  type MailboxSearchHit,
+  CRM_CONFIG_ENTITY_KINDS,
+  CRM_PIPELINE_STAGE_CATEGORIES,
   type CrmConfigCommand,
-  type CrmOperationsCommandResult,
-} from '@use-brian/core'
+} from '@use-brian/core/application-platform/record-configuration.js'
+import type { CrmOperationsCommandResult } from '@use-brian/core/crm/operations-types.js'
+import { CrmOperationsError } from '@use-brian/core/application-platform/operation-contract.js'
+import {
+  validateCrmCustomFieldValue as validateCustomFieldValue,
+  CRM_CUSTOM_FIELD_TYPES,
+} from '@use-brian/core/application-platform/record-values.js'
+import type { EntityRecord } from '@use-brian/core/entities/types.js'
+import { stitchMailboxThreads, type MailboxSearchHit } from '@use-brian/core/tools/base/mailbox.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import {
+  bindScopeSources,
+  boundScopeSources,
+  inheritScopeSources,
+} from '@use-brian/agent-runtime/security/source-evidence.js'
 import type { PoolClient } from 'pg'
 import { applicationDecimalText,ApplicationPlatformError } from '@use-brian/shared'
 import { runLegacyCanonicalCrmRead,readLegacyCanonicalCrmConfiguration,mapCanonicalCrmRows,queryLegacyCanonicalCrmSql,queryLegacyCanonicalCrmPrivateSql } from './crm-reader.js'
@@ -1463,8 +1473,6 @@ export async function setCrmDealPipelineStage(input: {
   const updated = await updateEntity(input.ctx.userId, input.entityId, { attributes }, input.ctx, transactionClient,{fieldIntent})
   return updated ? { entity: updated, fromStageId, toStage: stage } : null
 }
-
-export { validateCrmCustomFieldValue as validateCustomFieldValue } from '@use-brian/core'
 
 async function customDefinitionsForWrite(ctx: AccessContext, entityKind: CrmEntityKind, client?: PoolClient): Promise<CrmFieldDefinition[]> {
   mutationActorAccess(ctx.userId, ctx.workspaceId, ctx)

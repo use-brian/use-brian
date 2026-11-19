@@ -17,8 +17,9 @@
 // text) short-circuit to markDone without chunking or decomposition — see
 // docs/architecture/brain/file-artifacts.md §"Explicitly NOT in v1".
 
-import type { FilesContext, FilesReadBytesResult, FilesResult, WorkspaceFile } from '@use-brian/core'
-import { parseFileContent } from '@use-brian/core'
+import type { FilesContext, FilesReadBytesResult, FilesResult } from '@use-brian/core/workspace-files/api.js'
+import type { WorkspaceFile } from '@use-brian/core/workspace-files/types.js'
+import { parseFileContent } from '@use-brian/core/files/parsers.js'
 import { getPool } from '../db/client.js'
 import type { FileIngestJob } from '../db/file-ingest-jobs-store.js'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'

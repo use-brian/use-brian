@@ -1,8 +1,18 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { PoolClient } from 'pg'
-import { ContextScopeAccumulator, boundScopeSources, scopeEvidenceFromRows, executionToolContext, NOOP_TURN_LEDGER,
-  type ExecutionContext, type LLMProvider, type ScopeSource } from '@use-brian/core'
+import { NOOP_TURN_LEDGER } from '@use-brian/agent-runtime/engine/turn-ledger.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import {
+  ContextScopeAccumulator,
+  scopeEvidenceFromRows
+} from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import {
+  executionToolContext,
+  type ExecutionContext
+} from '@use-brian/agent-runtime/security/execution-context.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import type { ApplicationRecordProjection } from '@use-brian/shared'
 import { getAppPool, getPool, applyRLSGucs } from '../../db/client.js'
 import { createDbDocEntityStore } from '../../db/doc-entity-store.js'
@@ -11,7 +21,7 @@ import { readCurrentScopeSources, validateDerivedMemoryInputs } from '../../db/d
 import { findAssistantById } from '../../db/users.js'
 import { validateCallerScopeEvidence } from '../../context-scope/caller-evidence.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
-import { runAssistantTurn } from '../../turn/kernel.js'
+import { runPersistedFixtureTurn as runAssistantTurn } from '../../turn/__tests__/fixtures/owned-turn.js'
 import { ApplicationPlatformService } from '../service.js'
 import { createCanonicalGenericApplicationModule } from '../generic-adapter.js'
 import { readApplicationFieldAncestors } from '../field-evidence.js'
@@ -219,7 +229,7 @@ describe('[COMP:api/application-field-evidence] canonical field observations thr
         yield { type: 'message_end' as const,stopReason: 'end_turn' as const,usage: { inputTokens: 1,outputTokens: 1 } }
       })() }
     },stream: () => { throw new Error('Unexpected fixture provider fallback') } }
-    const run = (execution: ExecutionContext) => runAssistantTurn({ sessionId: execution.lifecycle.sessionId,policy: { admission: 'personal' },sink: { kind: 'return' },lease: { mode: 'none' },
+    const run = (execution: ExecutionContext) => runAssistantTurn({ sessionId: execution.lifecycle.sessionId,policy: { admission: 'personal' },sink: { kind: 'return' },
       abortController: new AbortController(),model: { provider,model: 'fixture-model',configuredProviders: undefined,customLlm: null },
       loop: { ledger: NOOP_TURN_LEDGER,context: { ...executionToolContext(execution,{ appId: 'field-fixture' }),scopeAccumulator: accumulator },
         systemPrompt: 'Fictional field fixture',runtimeSystemContext: JSON.stringify(captured.values),

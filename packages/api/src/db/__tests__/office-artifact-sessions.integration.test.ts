@@ -14,6 +14,12 @@ import {officeLaneExecutionBounds,type OfficeLane} from '../../routes/office-cha
 import {resolveExecutionContextSystem} from '../../context-scope/execution-context.js'
 import type {ResolvedTurnScope} from '../../context-scope/resolve-turn-scope.js'
 import type {ResolvedOfficeAccess} from '../../office/access.js'
+import {resolveOfficeAccess} from '../../office/access.js'
+import {initializeConversationVisibility,conversationReadersActive} from '../conversation-visibility.js'
+import {addSessionMessage} from '../sessions.js'
+import {authSessionStore} from '../auth-session-store.js'
+import {createTokens} from '../../auth/jwt.js'
+import {requireAuth} from '../../auth/middleware.js'
 
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -55,9 +61,10 @@ describe('[COMP:api/office-chat-session] one shared conversation per file',()=>{
       ensureOfficeArtifactSessionSystem({artifactId:f.artifact,assistantId:f.assistant,userId:f.member}),
     ])
     expect(a.sessionId).toBe(b.sessionId)
-    expect((await pool.query('SELECT channel_type,visibility,effective_clearance,workspace_id FROM sessions WHERE id=$1',[a.sessionId])).rows[0])
-      .toEqual({channel_type:'office_thread',visibility:'workspace',effective_clearance:'internal',workspace_id:f.workspace})
-    expect((await pool.query("SELECT count(*)::int AS n FROM sessions WHERE workspace_id=$1 AND channel_type='office_thread'",[f.workspace])).rows[0].n).toBe(1)
+    // Migration 741 stores an Office thread as a web session anchored to the file.
+    expect((await pool.query('SELECT channel_type,anchor_kind,anchor_ref,clearance_source,visibility,effective_clearance,workspace_id FROM sessions WHERE id=$1',[a.sessionId])).rows[0])
+      .toEqual({channel_type:'web',anchor_kind:'office_file',anchor_ref:f.artifact,clearance_source:'anchor',visibility:'workspace',effective_clearance:'internal',workspace_id:f.workspace})
+    expect((await pool.query("SELECT count(*)::int AS n FROM sessions WHERE workspace_id=$1 AND anchor_kind='office_file'",[f.workspace])).rows[0].n).toBe(1)
     expect(await findOfficeArtifactForSessionSystem(a.sessionId)).toEqual({artifactId:f.artifact,workspaceId:f.workspace,sessionId:a.sessionId})
   })
 
@@ -70,7 +77,7 @@ describe('[COMP:api/office-chat-session] one shared conversation per file',()=>{
   it('is read by exactly the file audience: the Office predicate decides, not workspace membership',async()=>{
     const f=await fixture()
     const link=await ensureOfficeArtifactSessionSystem({artifactId:f.artifact,assistantId:f.assistant,userId:f.owner})
-    const session=(await pool.query(`SELECT id,channel_type AS "channelType",user_id AS "userId",assistant_id AS "assistantId",visibility,mode,effective_clearance AS "effectiveClearance" FROM sessions WHERE id=$1`,[link.sessionId])).rows[0]
+    const session=(await pool.query(`SELECT id,channel_type AS "channelType",anchor_kind AS "anchorKind",user_id AS "userId",assistant_id AS "assistantId",visibility,mode,effective_clearance AS "effectiveClearance" FROM sessions WHERE id=$1`,[link.sessionId])).rows[0]
     expect(await gateSessionRead(f.owner,session)).toBeNull()
     expect(await gateSessionRead(f.member,session)).toBeNull()
     expect(await gateSessionRead(f.denied,session)).toEqual({status:404,error:'Session not found'})
@@ -150,5 +157,41 @@ describe('[COMP:api/office-chat-session] the thread is never listed outside the 
     const candidates=(await selectCandidateSessions(1,24)).map(row=>row.sessionId)
     expect(candidates).toContain(web)
     expect(candidates).not.toContain(link.sessionId)
+  })
+})
+
+describe('[COMP:api/conversation-visibility] native Office thread receiving',()=>{
+  it('rechecks the current Office grant on ordinary authenticated history without changing the envelope version',async()=>{
+    await initializeConversationVisibility()
+    expect(conversationReadersActive()).toBe(true)
+    const f=await fixture()
+    await pool.query("UPDATE office_artifacts SET default_workspace_role='deny' WHERE id=$1",[f.artifact])
+    await pool.query(`INSERT INTO office_artifact_grants(artifact_id,workspace_id,user_id,role)
+      VALUES($1,$2,$3,'comment')`,[f.artifact,f.workspace,f.member])
+    const link=await ensureOfficeArtifactSessionSystem({artifactId:f.artifact,assistantId:f.assistant,userId:f.owner})
+    await addSessionMessage({sessionId:link.sessionId,role:'user',senderUserId:f.owner,
+      content:[{type:'text',text:'Fictional Office thread message'}],
+      scope:{workspaceId:f.workspace,userId:null,assistantId:null,sensitivity:'internal',compartments:[],projectIds:[]}})
+    const secret='fictional-office-conversation-device-secret'
+    const server=express().use('/api/sessions',requireAuth(secret),sessionRoutes())
+    const bearer=async(userId:string)=>{
+      const session=await authSessionStore.create(userId,{deviceLabel:'Fictional Office device',userAgent:null,ipAddress:null})
+      if(!session)throw new Error('Expected Office test device')
+      return `Bearer ${createTokens(userId,secret,{id:session.id,authVersion:session.authVersion}).accessToken}`
+    }
+    const [owner,reader,outsider]=await Promise.all([bearer(f.owner),bearer(f.member),bearer(f.denied)])
+    const history=(token:string)=>request(server).get(`/api/sessions/${link.sessionId}/messages`).set('Authorization',token)
+    const version=()=>pool.query<{version:string}>(
+      'SELECT version::text FROM conversation_envelopes WHERE session_id=$1',[link.sessionId]).then(result=>result.rows[0].version)
+    const originalVersion=await version()
+    expect(await resolveOfficeAccess(f.member,f.artifact)).not.toBeNull()
+    expect((await history(reader).expect(200)).text).toContain('Fictional Office thread message')
+    expect((await history(outsider).expect(403)).body.code).toBe('conversation_access_denied')
+    await pool.query('UPDATE office_artifact_grants SET revoked_at=clock_timestamp() WHERE artifact_id=$1 AND user_id=$2',
+      [f.artifact,f.member])
+    expect(await version()).toBe(originalVersion)
+    expect(await resolveOfficeAccess(f.member,f.artifact)).toBeNull()
+    expect((await history(reader).expect(403)).body.code).toBe('conversation_access_denied')
+    expect((await history(owner).expect(200)).text).toContain('Fictional Office thread message')
   })
 })

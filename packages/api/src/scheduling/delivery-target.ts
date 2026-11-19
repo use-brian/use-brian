@@ -21,7 +21,7 @@
  * [COMP:scheduling/delivery-target]
  */
 import { parseTopicChannelId } from '@use-brian/channels'
-import type { DeliveryTargetResolver } from '@use-brian/core'
+import type { DeliveryTargetResolver } from '@use-brian/core/scheduling/delivery-resolution.js'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 
 export function createDeliveryTargetResolver(

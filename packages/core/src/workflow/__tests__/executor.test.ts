@@ -15,8 +15,8 @@ import type {
   WorkflowStore,
   WorkflowTriggerKind,
 } from '../types.js'
-import { buildTool, type Tool, type ToolContext } from '../../tools/types.js'
-import { createExecutionContext } from '../../security/execution-context.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { createExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import type { ConsultRequest, ConsultResponse, ConsultTransport, Task } from '../../a2a/types.js'
 
 // ── Fakes ────────────────────────────────────────────────────────────────

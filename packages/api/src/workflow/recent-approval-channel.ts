@@ -4,7 +4,7 @@
  * [COMP:workflow/recent-approval-channel]
  */
 import { parseTopicChannelId } from '@use-brian/channels'
-import type { DeliverToChannel } from '@use-brian/core'
+import type { DeliverToChannel } from '@use-brian/core/workflow/executor.js'
 import { query } from '../db/client.js'
 import { providerChannelIdFromSession, SLACK_THREAD_SESSION_DELIMITER } from '../db/sessions.js'
 import { PROACTIVE_DELIVERY_TRANSPORTS, sessionKindSql } from '../session-kind.js'

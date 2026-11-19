@@ -72,3 +72,72 @@ describe("[COMP:app-web/question-answer-form] native wrapper", () => {
     expect(mocks.fetch.mock.calls.some(([url]) => String(url).includes("/answer/"))).toBe(false);
   });
 });
+
+const selectAnswer = async (label: string) => {
+  await act(async () => { (host.querySelector('[role="combobox"]') as HTMLButtonElement).click(); });
+  await vi.waitFor(() => expect(document.querySelector('[data-slot="select-content"][data-open]')).toBeTruthy());
+  const popup = document.querySelector('[data-slot="select-content"][data-open]')!;
+  const item = Array.from(popup.querySelectorAll('[role="option"]')).find((el) => el.textContent === label);
+  expect(item).toBeTruthy();
+  // Base UI commits a mouse click only on the highlighted item.
+  await act(async () => item!.dispatchEvent(new MouseEvent("mousemove", { bubbles: true })));
+  await act(async () => (item as HTMLElement).click());
+};
+const pendingWith = (question: Record<string, unknown>) =>
+  reply({ pending: { approvalId: "approval", question: "Which colour?", action: null, ...question }, toolConfirmation: null });
+const answerCalls = () => mocks.fetch.mock.calls.filter(([url]) => String(url).includes("/answer/"));
+
+describe("[COMP:app-web/question-answer-form] question payload options", () => {
+  it("renders served options as a single choice and sends the chosen option through the answer route", async () => {
+    mocks.fetch.mockResolvedValueOnce(pendingWith({ options: ["Blue", "Green"], allowCustom: false }));
+    await render({ action: undefined });
+    expect(host.querySelector('[role="combobox"]')).toBeTruthy();
+    expect(host.textContent).toContain(t.chooseAnswer);
+    // allowCustom false: no free-text box, no "write another answer" choice.
+    expect(host.querySelector("textarea")).toBeNull();
+    await act(async () => { (host.querySelector('[role="combobox"]') as HTMLButtonElement).click(); });
+    await vi.waitFor(() => expect(document.querySelector('[data-slot="select-content"][data-open]')).toBeTruthy());
+    const labels = Array.from(document.querySelector('[data-slot="select-content"][data-open]')!.querySelectorAll('[role="option"]')).map((el) => el.textContent);
+    expect(labels).toEqual(["Blue", "Green"]);
+    await act(async () => { document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); });
+    await selectAnswer("Green");
+    await click(t.submit);
+    expect(answerCalls()).toEqual([[expect.stringMatching(/\/api\/sessions\/session\/answer\/approval$/), expect.objectContaining({ method: "POST", body: JSON.stringify({ answer: "Green" }) })]]);
+    expect(answered).toHaveBeenCalledOnce();
+  });
+
+  it("names the answer form by the served question (M5Q-13)", async () => {
+    mocks.fetch.mockResolvedValueOnce(pendingWith({ options: ["Blue", "Green"] }));
+    await render({ action: undefined });
+    expect(host.querySelector("form")!.getAttribute("aria-label")).toBe("Which colour?");
+  });
+
+  it("with allowCustom, offers a written answer that opens the free-text box", async () => {
+    mocks.fetch.mockResolvedValueOnce(pendingWith({ options: ["Blue", "Green"] })); // absent means true
+    await render({ action: undefined });
+    expect(host.querySelector("textarea")).toBeNull();
+    await selectAnswer(t.customAnswer);
+    expect(host.querySelector("textarea")).toBeTruthy();
+    await type("  Teal  ");
+    await click(t.submit);
+    expect(answerCalls()[0]![1]).toMatchObject({ body: JSON.stringify({ answer: "Teal" }) });
+  });
+
+  it("without options (or with an invalid list) the card is the free-text box alone", async () => {
+    mocks.fetch.mockResolvedValueOnce(pendingWith({ options: ["Same", "Same"] })); // duplicates are dropped at the boundary
+    await render({ action: undefined });
+    expect(host.querySelector('[role="combobox"]')).toBeNull();
+    expect(host.querySelector("textarea")).toBeTruthy();
+    await type("Free text");
+    await click(t.submit);
+    expect(answerCalls()[0]![1]).toMatchObject({ body: JSON.stringify({ answer: "Free text" }) });
+  });
+
+  it("a restored card (question found with no running turn) renders the same options from the pending read", async () => {
+    mocks.fetch.mockResolvedValueOnce(pendingWith({ options: ["Ship today", "Wait for review"], allowCustom: false, context: "Release 4" }));
+    await render({ action: undefined, sessionId: "restored-session" });
+    expect(mocks.fetch).toHaveBeenCalledWith(expect.stringMatching(/\/api\/sessions\/restored-session\/pending$/));
+    expect(host.querySelector('[role="combobox"]')).toBeTruthy();
+    expect(host.querySelector("textarea")).toBeNull();
+  });
+});

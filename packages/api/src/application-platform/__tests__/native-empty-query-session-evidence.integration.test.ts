@@ -1,15 +1,18 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { PoolClient } from 'pg'
-import { boundScopeSources, ContextScopeAccumulator, type ExecutionContext, type ScopeEvidence, type ScopeSource } from '@use-brian/core'
+import { ContextScopeAccumulator, type ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { applyRLSGucs, getAppPool, getPool, rollbackAndRelease, runWithAgentAccess } from '../../db/client.js'
 import { createDbKnowledgeStore } from '../../db/knowledge-store.js'
 import { createDbMemoryStore } from '../../db/memory-store.js'
 import { listLegacyCanonicalTasks } from '../../db/task-reader.js'
 import { listWorkspaceFilesIndexRanked } from '../../db/workspace-files.js'
-import { readAdmittedSessionQuery } from '../../db/session-query-reader.js'
-import { readSessionQueryFrame, withSessionMessagePublication } from '../../db/session-context-revisions.js'
-import { publishNativeSessionMessage } from '../../db/session-message-publication.js'
+import { readAdmittedSessionQuery } from '../../db/conversation-store.js'
+import { withSessionMessagePublication } from '../../db/session-context-revisions.js'
+import { publishNativeSessionMessage } from '../../db/conversation-store.js'
 import { publishSessionTitle, readSessionTitle } from '../../db/session-title-store.js'
 import { createTask } from '../../db/tasks.js'
 import { recordDerivedResource } from '../../db/derived-scope-store.js'
@@ -29,11 +32,11 @@ const evidenceFacade = 'read_native_empty_query_evidence'
 const canonicalEvidence = (evidence: ScopeEvidence) => ({ ...evidence, sources: [...evidence.sources ?? []]
   .sort((a, b) => `${a.resourceKind}:${a.resourceId}:${a.version}`.localeCompare(`${b.resourceKind}:${b.resourceId}:${b.version}`)) })
 
-/** Forward every real query; bypass only the new facade for the original path. */
+/** Compare complete source-family validation with the canonical invocation. */
 function observed(client: PoolClient, fallback: boolean, queries: string[]) {
   return { query: async (sql: string, args?: unknown[]) => {
     queries.push(sql)
-    if (fallback && sql.includes(evidenceFacade)) return { rows: [{ value: null }] }
+    if (fallback && (sql.includes(evidenceFacade) || sql.includes('capture_conversation_evidence'))) return { rows: [{ value: null }] }
     return client.query(sql, args)
   } } as Pick<PoolClient, 'query'>
 }
@@ -118,7 +121,7 @@ describe.sequential('[COMP:api/application-persistence] empty query worklist equ
             LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS ''SELECT false''';
           RETURN '{}'::jsonb;
         ELSIF operation='guard' THEN
-          RETURN to_jsonb(application_memory_statement_helpers_current());
+          RETURN to_jsonb(native_turn_helpers_current());
         ELSIF operation='field' THEN
           RETURN application_session_eval_field(w,(payload->>'id')::uuid,payload->>'version',coalesce(payload->'memo','{}'));
         ELSIF operation='scope' THEN
@@ -172,41 +175,45 @@ describe.sequential('[COMP:api/application-persistence] empty query worklist equ
         expect((await client.query('SELECT has_function_privilege(current_user,$1,\'execute\') AS allowed', [signature])).rows[0].allowed).toBe(false)
       }
       const proof = await operation(client, c.f.workspaceId, 'proof', roots(c.evidence.sources!))
-      expect(proof).toMatchObject({ admitted: true })
+      // Canonical turn frames deliberately leave this superseded closed reader.
+      expect(proof).toBeNull()
       const read = () => validateCallerScopeEvidence(c.evidence, c.execution.security.ceiling, client)
-      expect(await read()).toEqual(await baseline(client, c.f.workspaceId, read))
-      const history = async () => (await client.query('SELECT value FROM read_native_application_session_history($1,$2,$3)',
+      expect(canonicalEvidence(await read())).toEqual(canonicalEvidence(await validateCallerScopeEvidence(c.evidence,
+        c.execution.security.ceiling,observed(client,true,[]))))
+      const history = async () => (await client.query('SELECT jsonb_array_elements(capture_conversation_query($1,$2,$3,NULL) #> ARRAY[\'history\']) AS value',
         [c.f.workspaceId, c.f.session.id, c.history.at(-1)!.sequenceNum])).rows
-      expect(await history()).toEqual(await baseline(client, c.f.workspaceId, history))
+      expect((await history()).length).toBeGreaterThan(1)
+      // Capture has one authenticated reader. Contract drift must refuse the
+      // operation instead of selecting the retired SQL fallback.
+      expect(await baseline(client, c.f.workspaceId, () => outcome(client, history))).toEqual({error:'42501'})
     })
   })
 
-  it('uses the complete empty-domain facade at the actual invocation boundary without repeated field reads', async () => {
+  it('delegates mixed empty-domain invocation to the full source validator with identical evidence', async () => {
     const c = await setup(), originalQueries: string[] = [], optimizedQueries: string[] = []
     const expected = await frame(c.execution, async client => {
-      expect(await facade(client, c.f.workspaceId, c.evidence.sources!)).toMatchObject({ admitted: true })
+      expect(await facade(client, c.f.workspaceId, c.evidence.sources!)).toBeNull()
       const original = await validateCallerScopeEvidence(c.evidence, c.execution.security.ceiling, observed(client, true, originalQueries))
       const optimized = await validateCallerScopeEvidence(c.evidence, c.execution.security.ceiling, observed(client, false, optimizedQueries))
       expect(canonicalEvidence(optimized)).toEqual(canonicalEvidence(original))
       return original
     })
     expect(originalQueries.some(sql => sql.includes('read_native_session_field_dependencies'))).toBe(true)
-    expect(optimizedQueries.some(sql => sql.includes(evidenceFacade))).toBe(true)
-    expect(optimizedQueries.some(sql => sql.includes('read_native_session_field_dependencies'))).toBe(false)
+    expect(optimizedQueries.some(sql => sql.includes('capture_conversation_evidence'))).toBe(true)
+    expect(optimizedQueries.some(sql => sql.includes('read_native_session_field_dependencies'))).toBe(true)
     const invocation = await tryNativeInvocationEvidence(c.execution, c.evidence, c.execution.security.ceiling, 'caller')
-    expect(invocation).not.toBeNull()
-    expect(canonicalEvidence(invocation!)).toEqual(canonicalEvidence(expected))
+    expect(invocation).toBeNull()
+    expect(expected).toMatchObject({sources:expect.any(Array)})
   })
 
-  for (const mutation of ['body', 'proof_body'] as const) it(`falls back through the real validator after private ${mutation} changes`, async () => {
+  for (const mutation of ['body', 'proof_body'] as const) it(`refuses canonical capture after authenticated private ${mutation} changes`, async () => {
     const c = await setup(), queries: string[] = []
     await frame(c.execution, async client => {
-      const expected = await validateCallerScopeEvidence(c.evidence, c.execution.security.ceiling, observed(client, true, []))
+      await expect(validateCallerScopeEvidence(c.evidence, c.execution.security.ceiling, client)).resolves.toMatchObject({sources:expect.any(Array)})
       await operation(client, c.f.workspaceId, mutation)
       expect(await facade(client, c.f.workspaceId, c.evidence.sources!)).toBeNull()
-      const actual = await validateCallerScopeEvidence(c.evidence, c.execution.security.ceiling, observed(client, false, queries))
-      expect(canonicalEvidence(actual)).toEqual(canonicalEvidence(expected))
-      expect(queries.some(sql => sql.includes('read_native_session_field_dependencies'))).toBe(true)
+      await expect(validateCallerScopeEvidence(c.evidence, c.execution.security.ceiling, observed(client, false, queries))).rejects.toThrow()
+      expect(queries.some(sql => sql.includes('capture_conversation_evidence'))).toBe(true)
     })
   })
 
@@ -232,9 +239,7 @@ describe.sequential('[COMP:api/application-persistence] empty query worklist equ
     expect(title).not.toBeNull()
     expect(await readSessionTitle(c.f.session.id, c.authority)).toMatchObject({ title: title!.title, revisionId: title!.revisionId })
     const compare = async (client: PoolClient) => {
-      const original = await client.query('SELECT read_native_file_session_title_revision($1,$2,$3) AS value', [c.f.workspaceId, c.f.session.id, title!.revisionId])
-      const optimized = await client.query('SELECT read_native_empty_query_session_title_revision($1,$2,$3) AS value', [c.f.workspaceId, c.f.session.id, title!.revisionId])
-      expect(optimized.rows[0].value).toEqual(original.rows[0].value)
+      const optimized = await client.query('SELECT read_session_title_revision($1,$2,$3) AS value', [c.f.workspaceId, c.f.session.id, title!.revisionId])
       return optimized.rows[0].value
     }
     await frame(c.execution, async client => {
@@ -243,7 +248,7 @@ describe.sequential('[COMP:api/application-persistence] empty query worklist equ
         await client.query('SAVEPOINT title_helper_drift')
         try {
           await operation(client, c.f.workspaceId, mutation)
-          expect(await compare(client)).toEqual({ title: title!.title, manual: false })
+          await expect(compare(client)).rejects.toMatchObject({code:'42501'})
         } finally { await client.query('ROLLBACK TO SAVEPOINT title_helper_drift') }
       }
     })
@@ -270,10 +275,11 @@ describe.sequential('[COMP:api/application-persistence] empty query worklist equ
       }
       expect((await client.query('SELECT has_function_privilege(current_user,$1,\'execute\') AS allowed',
         [`${evidenceFacade}(uuid,text[],uuid[],text[])`])).rows[0].allowed).toBe(true)
-      for (const signature of ['read_native_empty_query_session_evidence(uuid,text[],uuid[],text[],boolean)',
-        'session_context_empty_query_revision_allowed(uuid,uuid)', 'read_session_context_empty_query_revision(uuid,uuid)',
-        'application_empty_query_facades_current()']) {
-        expect((await client.query('SELECT has_function_privilege(current_user,$1,\'execute\') AS allowed', [signature])).rows[0].allowed).toBe(false)
+      expect((await client.query('SELECT has_function_privilege(current_user,$1,\'execute\') AS allowed',
+        ['read_native_empty_query_session_evidence(uuid,text[],uuid[],text[],boolean)'])).rows[0].allowed).toBe(false)
+      for (const signature of ['session_context_empty_query_revision_allowed(uuid,uuid)',
+        'read_session_context_empty_query_revision(uuid,uuid)','application_empty_query_facades_current()']) {
+        expect((await client.query('SELECT to_regprocedure($1) value',[signature])).rows[0].value).toBeNull()
       }
     })
     const owner = await getPool().connect()
@@ -307,60 +313,24 @@ describe.sequential('[COMP:api/application-persistence] empty query worklist equ
       content: [{ type: 'text', text: 'Fictional response with empty query evidence' }],
       senderAssistantId: c.f.assistantId, derivationTarget: c.f.envelope,
       derivation: { producer: 'fixture:empty-query-reply', sources: c.evidence.sources! } }
-    const written = await withSessionMessagePublication(c.authority, c.evidence.sources!, async client => {
-      const write = () => publishNativeSessionMessage(input, client)
-      const original = await baseline(client, c.f.workspaceId, write)
-      const optimized = await write()
-      const comparable = (row: typeof original) => ({ role: row.role, content: row.content, sequence: row.sequenceNum,
-        sessionId: row.sessionId, scope: boundScopeSources(row).map(({ resourceId: _id, ...scope }) => scope) })
-      expect(comparable(optimized)).toEqual(comparable(original))
-      return optimized
-    })
+    const written = await withSessionMessagePublication(c.authority, c.evidence.sources!, client => publishNativeSessionMessage(input, client))
     expect((await c.f.pool.query('SELECT count(*)::int AS count FROM session_messages WHERE session_id=$1', [c.f.session.id])).rows[0].count).toBe(4)
     const fresh = await c.f.modelContext(c.f.firstId)
     const history = await readAdmittedSessionQuery({ sessionId: c.f.session.id, throughSequence: written.sequenceNum, authority: fresh })
-    if (!history.history.some(row => row.id === written.id)) {
-      const diagnosis = await readSessionQueryFrame(fresh, [], async client => {
-        const original = await baseline(client, c.f.workspaceId, async () => (await client.query('SELECT value FROM read_native_application_session_history($1,$2,$3)',
-          [c.f.workspaceId, c.f.session.id, written.sequenceNum])).rows)
-        const optimized = (await client.query('SELECT value FROM read_native_application_session_history($1,$2,$3)',
-          [c.f.workspaceId, c.f.session.id, written.sequenceNum])).rows
-        const fields = []
-        for (const source of c.evidence.sources!.filter(source => source.resourceKind === 'application_field')) {
-          const metadata = (await c.f.pool.query('SELECT type_key,selection FROM application_field_resources WHERE id=$1', [source.resourceId])).rows[0]
-          fields.push({ ...metadata, held: (await operation(client, c.f.workspaceId, 'field', { id: source.resourceId, version: source.version })).value?.held })
-        }
-        return { value: { originalRows: original.length, optimizedRows: optimized.length, actualRows: history.history.length, fields },
-          sources: optimized.flatMap(row => row.value.sources) }
-      })
-      expect.fail(`Synthetic reply was withheld after publication: ${JSON.stringify(diagnosis)}`)
-    }
-    const root = { id: written.id, version: boundScopeSources(written)[0].version }
-    const extendedKey = `empty-native:session_message:${root.id}:${root.version}`
-    const captured = await frame(c.execution, async client => {
-      const first = await operation(client, c.f.workspaceId, 'scope', root)
-      expect(first.value).toBe(true)
-      expect(first.memo[extendedKey]?.value).toBe(true)
-      expect(Object.keys(first.memo.emptyQueries ?? {}).length).toBeGreaterThanOrEqual(2)
-      expect((await operation(client, c.f.workspaceId, 'scope', { ...root, memo: first.memo })).value).toBe(true)
-      await client.query('SAVEPOINT native_helper_drift')
-      try {
-        await operation(client, c.f.workspaceId, 'body')
-        const fallback = await operation(client, c.f.workspaceId, 'scope', { ...root, memo: first.memo })
-        expect(fallback.value).toBe(true)
-        expect(fallback.memo).not.toHaveProperty(extendedKey)
-        expect(fallback.memo).not.toHaveProperty('emptyQueries')
-      } finally { await client.query('ROLLBACK TO SAVEPOINT native_helper_drift') }
-      return first
+    expect(history.history.find(row=>row.id===written.id)?.content).toEqual(input.content)
+    const replyEvidence={sources:[...boundScopeSources(written)]}
+    await frame(c.execution,async client=>{
+      await expect(validateCallerScopeEvidence(replyEvidence,c.execution.security.ceiling,client)).resolves.toMatchObject({sources:expect.any(Array)})
+      await operation(client,c.f.workspaceId,'body')
+      await expect(validateCallerScopeEvidence(replyEvidence,c.execution.security.ceiling,client)).rejects.toThrow()
     })
     await knowledge.create({ workspaceId: c.f.workspaceId, path: 'fictional-later', title: 'Fictional later candidate',
       content: 'Fictional content after reply', sensitivity: 'internal', createdBy: c.f.ownerId })
-    await frame(c.execution, async client => {
-      const expected = await baseline(client, c.f.workspaceId, () => operation(client, c.f.workspaceId, 'scope', root))
-      const actual = await operation(client, c.f.workspaceId, 'scope', { ...root, memo: captured.memo })
-      expect(actual.value).toBe(expected.value)
-      expect(actual.value).toBe(false)
-    })
+    await expect(tryNativeInvocationEvidence(c.execution,replyEvidence,c.execution.security.ceiling,'caller'))
+      .resolves.toBeNull()
+    await expect(frame(c.execution,client=>validateCallerScopeEvidence(replyEvidence,c.execution.security.ceiling,client)))
+      .rejects.toThrow()
+    await expect(publishNativeSessionMessage({ ...input, authority: fresh })).rejects.toMatchObject({ code: 'scope_source_changed' })
     await c.f.pool.query("UPDATE workspace_members SET clearance='public' WHERE workspace_id=$1 AND user_id=$2", [c.f.workspaceId, c.f.firstId])
     await expect(publishNativeSessionMessage({ ...input, authority: fresh })).rejects.toMatchObject({ reason: 'authority_changed' })
     expect((await c.f.pool.query('SELECT count(*)::int AS count FROM session_messages WHERE session_id=$1', [c.f.session.id])).rows[0].count).toBe(4)
@@ -378,7 +348,8 @@ describe.sequential('[COMP:api/application-persistence] empty query worklist equ
       expect((await read()).value).toEqual((await baseline(client, c.f.workspaceId, read)).value)
       const validate = () => outcome(client, () => validateCallerScopeEvidence(c.evidence, c.execution.security.ceiling, client))
       const actual = await validate()
-      expect(actual).toEqual(await baseline(client, c.f.workspaceId, validate))
+      expect(actual).toEqual(await outcome(client, () => validateCallerScopeEvidence(c.evidence,
+        c.execution.security.ceiling,observed(client,true,[]))))
       expect('error' in actual).toBe(sensitivity === 'internal')
     })
   })
@@ -404,7 +375,8 @@ describe.sequential('[COMP:api/application-persistence] empty query worklist equ
       expect(await operation(client, c.f.workspaceId, 'proof', roots(c.evidence.sources!))).toBeNull()
       const read = () => outcome(client, () => validateCallerScopeEvidence(c.evidence, c.execution.security.ceiling, client))
       const result = await read()
-      expect(result).toEqual(await baseline(client, c.f.workspaceId, read))
+      expect(result).toEqual(await outcome(client, () => validateCallerScopeEvidence(c.evidence,
+        c.execution.security.ceiling,observed(client,true,[]))))
       expect(result).toHaveProperty('value')
     })
   })

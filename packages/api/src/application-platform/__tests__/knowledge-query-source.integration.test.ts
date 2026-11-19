@@ -1,9 +1,11 @@
 import type {PoolClient} from 'pg'
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
-import {createKnowledgeTools,type AccessContext,type LLMProvider} from '@use-brian/core'
+import {createKnowledgeTools} from '@use-brian/core/tools/base/knowledge.js'
+import type {LLMProvider} from '@use-brian/agent-runtime/providers/types.js'
+import type {AccessContext} from '@use-brian/agent-runtime/security/access-context.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {createDbKnowledgeStore,type KnowledgeEntry} from '../../db/knowledge-store.js'
-import {assertSourceModelInputAuthority} from '../model-source-authority.js'
+import {admitModelInput} from '../../context-scope/admission.js'
 import {generateTitle} from '../../routes/attended-session-title.js'
 import {configureConnectorSourceRuntimeFactory} from '../source-runtime.js'
 import {retainedKnowledgeFixture} from './fixtures/retained-knowledge.js'
@@ -78,19 +80,19 @@ describe.sequential('[COMP:api/application-persistence] actual retained-source K
   expect(JSON.stringify(result.data)).toContain(c.row.path)
   if(!result.scopeEvidence)throw new Error('Actual query must retain canonical query evidence')
   context.scopeAccumulator.note(result.scopeEvidence)
-  await expect(assertSourceModelInputAuthority(context)).resolves.toBeUndefined()
+  await expect(admitModelInput(context)).resolves.toBeUndefined()
   await c.source.pool.query("DELETE FROM grants WHERE kind='human' AND account_id=$1",[c.f.ownerId])
   const before=await c.snapshot();let extractions=0,calls=0
   const provider:LLMProvider={name:'fictional-knowledge-query',models:['fixture'],createSession(){throw new Error('Stateless fixture required')},stream:async function*(){calls++;
    yield{type:'message_start',model:'fixture'};yield{type:'text_delta',text:'Fictional query title'};yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:2,outputTokens:2}}}}
-  await expect(generateTitle(provider,[{role:'user',get content(){extractions++;return JSON.stringify(result.data)}}],'fixture',()=>assertSourceModelInputAuthority(context)))
+  await expect(generateTitle(provider,[{role:'user',get content(){extractions++;return JSON.stringify(result.data)}}],'fixture',()=>admitModelInput(context)))
    .rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
   expect(extractions).toBe(0);expect(calls).toBe(0)
   const other=await c.context(c.f.secondId,true),current=await tool.execute(input,other)
   expect(JSON.stringify(current.data)).toContain(c.row.path)
   if(!current.scopeEvidence)throw new Error('Independent current query must retain evidence')
   other.scopeAccumulator.note(current.scopeEvidence)
-  await expect(generateTitle(provider,[{role:'user',content:JSON.stringify(current.data)}],'fixture',()=>assertSourceModelInputAuthority(other)))
+  await expect(generateTitle(provider,[{role:'user',content:JSON.stringify(current.data)}],'fixture',()=>admitModelInput(other)))
    .resolves.toEqual({title:'Fictional query title',model:'fixture',usage:{inputTokens:2,outputTokens:2}})
   expect(calls).toBe(1);expect(await c.snapshot()).toEqual(before)
  })
@@ -103,7 +105,7 @@ describe.sequential('[COMP:api/application-persistence] actual retained-source K
   expect(result.isError).not.toBe(true);expect(JSON.stringify(result.data)).not.toContain(c.row.path)
   expect(result.scopeEvidence?.sources?.some(source=>source.resourceKind==='application_field')).toBe(true)
   context.scopeAccumulator.note(result.scopeEvidence)
-  await expect(assertSourceModelInputAuthority(context)).resolves.toBeUndefined()
+  await expect(admitModelInput(context)).resolves.toBeUndefined()
   if(change==='restored independent grant')await c.source.pool.query(`INSERT INTO grants(kind,account_id,record_id,fields,actions)
    SELECT kind,$1,record_id,fields,actions FROM grants WHERE kind='human' AND account_id=$2`,[c.f.ownerId,c.f.secondId])
   else await store.create({workspaceId:c.f.workspaceId,path:'fictional-added-query',title:'Fictional added Knowledge',content:'Fictional new current candidate',
@@ -111,7 +113,7 @@ describe.sequential('[COMP:api/application-persistence] actual retained-source K
   let extractions=0,calls=0
   const provider:LLMProvider={name:'fictional-query-absence',models:['fixture'],createSession(){throw new Error('Stateless fixture required')},stream:async function*(){calls++;
    yield{type:'message_start',model:'fixture'};yield{type:'text_delta',text:'Fictional absence title'};yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:2,outputTokens:2}}}}
-  await expect(generateTitle(provider,[{role:'user',get content(){extractions++;return JSON.stringify(result.data)}}],'fixture',()=>assertSourceModelInputAuthority(context)))
+  await expect(generateTitle(provider,[{role:'user',get content(){extractions++;return JSON.stringify(result.data)}}],'fixture',()=>admitModelInput(context)))
    .rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
   expect(extractions).toBe(0);expect(calls).toBe(0)
  })
@@ -132,7 +134,15 @@ describe.sequential('[COMP:api/application-persistence] actual retained-source K
     LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
      SELECT (r3_knowledge_query_catalog_fixture(w,o,t)-'scope')||jsonb_build_object('recordVersion',k.scope_version::text,'source',read_scope_source(w,'knowledge_entry',k.id))
      FROM knowledge_entries k WHERE k.workspace_id=w AND k.id=i::uuid $$;
-    REVOKE ALL ON FUNCTION r3_knowledge_query_catalog_fixture(uuid,jsonb,text),r3_knowledge_query_record_fixture(uuid,jsonb,text,text) FROM PUBLIC`)
+    REVOKE ALL ON FUNCTION r3_knowledge_query_catalog_fixture(uuid,jsonb,text),r3_knowledge_query_record_fixture(uuid,jsonb,text,text) FROM PUBLIC;
+    -- The disposable bootstrap creates fixtures, but the native contract requires
+    -- the real ordinary schema owner. Do not weaken the installed port guard.
+    DO $owner$ DECLARE owner_name name;BEGIN
+     SELECT pg_get_userbyid(relowner) INTO STRICT owner_name FROM pg_class WHERE oid='application_native_field_contracts'::regclass;
+     EXECUTE format('ALTER TABLE r3_knowledge_query_field_fixture OWNER TO %I',owner_name);
+     EXECUTE format('ALTER FUNCTION r3_knowledge_query_catalog_fixture(uuid,jsonb,text) OWNER TO %I',owner_name);
+     EXECUTE format('ALTER FUNCTION r3_knowledge_query_record_fixture(uuid,jsonb,text,text) OWNER TO %I',owner_name);
+    END $owner$`)
    await pool.query(`INSERT INTO r3_knowledge_query_field_fixture(workspace_id,fields)
     SELECT $1,jsonb_agg(jsonb_build_object('key',key,'read',CASE WHEN key='content' THEN '["body_reader"]'::jsonb ELSE '[]'::jsonb END,
      'write','[]'::jsonb,'releaseReadTo','[]'::jsonb,'releaseWriteTo','[]'::jsonb)) FROM unnest(application_knowledge_field_keys()) key`,[c.f.workspaceId])
@@ -154,7 +164,7 @@ describe.sequential('[COMP:api/application-persistence] actual retained-source K
    expect(JSON.stringify(result.data)).toContain(c.row.path)
    if(!result.scopeEvidence)throw new Error('Field-governed query must retain actual observations')
    first.scopeAccumulator.note(result.scopeEvidence)
-   await expect(assertSourceModelInputAuthority(first)).resolves.toBeUndefined()
+   await expect(admitModelInput(first)).resolves.toBeUndefined()
    const before=await c.snapshot()
    let revoked=false,protectedComputations=0
    const originalQueries=new Map<PoolClient,PoolClient['query']>()
@@ -187,14 +197,14 @@ describe.sequential('[COMP:api/application-persistence] actual retained-source K
    let extractions=0,calls=0
    const provider:LLMProvider={name:'fictional-knowledge-field-query',models:['fixture'],createSession(){throw new Error('Stateless fixture required')},stream:async function*(){calls++;
     yield{type:'message_start',model:'fixture'};yield{type:'text_delta',text:'Fictional field query title'};yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:2,outputTokens:2}}}}
-   await expect(generateTitle(provider,[{role:'user',get content(){extractions++;return JSON.stringify(result.data)}}],'fixture',()=>assertSourceModelInputAuthority(first)))
+   await expect(generateTitle(provider,[{role:'user',get content(){extractions++;return JSON.stringify(result.data)}}],'fixture',()=>admitModelInput(first)))
     .rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
    expect(extractions).toBe(0);expect(calls).toBe(0)
    const second=await c.context(c.f.secondId,true),current=await tool.execute(input,second)
    expect(JSON.stringify(current.data)).toContain(c.row.path)
    if(!current.scopeEvidence)throw new Error('Separate actual field-role reader must retain observations')
    second.scopeAccumulator.note(current.scopeEvidence)
-   await expect(generateTitle(provider,[{role:'user',content:JSON.stringify(current.data)}],'fixture',()=>assertSourceModelInputAuthority(second)))
+   await expect(generateTitle(provider,[{role:'user',content:JSON.stringify(current.data)}],'fixture',()=>admitModelInput(second)))
     .resolves.toEqual({title:'Fictional field query title',model:'fixture',usage:{inputTokens:2,outputTokens:2}})
    expect(calls).toBe(1);expect(await c.snapshot()).toEqual(before)
   }finally{
@@ -215,12 +225,12 @@ describe.sequential('[COMP:api/application-persistence] actual retained-source K
   const context=await c.context(c.f.ownerId,true),tool=createKnowledgeTools(store).find(value=>value.name==='searchKnowledge')!,result=await tool.execute({query:'selector'},context)
   expect(JSON.stringify(result.data)).toContain(row.id)
   if(!result.scopeEvidence)throw new Error('Selector query must retain actual observations')
-  context.scopeAccumulator.note(result.scopeEvidence);await expect(assertSourceModelInputAuthority(context)).resolves.toBeUndefined()
+  context.scopeAccumulator.note(result.scopeEvidence);await expect(admitModelInput(context)).resolves.toBeUndefined()
   await store.setSourceDisabled({assistantId:c.f.assistantId,sourceId:source.id,disabled:true,userId:c.f.ownerId})
   let extractions=0,calls=0
   const provider:LLMProvider={name:'fictional-knowledge-selector',models:['fixture'],createSession(){throw new Error('Stateless fixture required')},stream:async function*(){calls++;
    yield{type:'message_start',model:'fixture'};yield{type:'text_delta',text:'Fictional selector title'};yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:2,outputTokens:2}}}}
-  await expect(generateTitle(provider,[{role:'user',get content(){extractions++;return JSON.stringify(result.data)}}],'fixture',()=>assertSourceModelInputAuthority(context)))
+  await expect(generateTitle(provider,[{role:'user',get content(){extractions++;return JSON.stringify(result.data)}}],'fixture',()=>admitModelInput(context)))
    .rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
   expect(extractions).toBe(0);expect(calls).toBe(0)
   const current=await tool.execute({query:'selector'},await c.context(c.f.ownerId,true))

@@ -14,7 +14,8 @@ import type { CrmMailContext } from '../crm-operations/delivery-policy.js'
  * [COMP:api/mailbox-imap-client]
  */
 
-import { simpleParser, type ParsedMail } from 'mailparser'
+import type { ParsedMail } from 'mailparser'
+import { lazyImplementation } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
 import {
   MAILBOX_ATTACHMENT_MAX_BYTES,
   MAILBOX_DEFAULT_WINDOW_DAYS,
@@ -24,7 +25,7 @@ import {
   type MailboxMessage,
   type MailboxSearchHit,
   type MailboxSearchParams,
-} from '@use-brian/core'
+} from '@use-brian/core/tools/base/mailbox.js'
 import { buildImapSearchQuery, hasNonAsciiTerm } from './search-criteria.js'
 import {
   defaultMailboxSessionCache,
@@ -38,6 +39,14 @@ import { composeMailboxMessage, sendComposedMessage } from './smtp.js'
 import { bareEmailAddress, senderIdentities } from './send-as.js'
 import type { MailboxAccountSettings } from './types.js'
 import { isAliMailImapHost } from './presets.js'
+
+/**
+ * The MIME parser (mailparser) loads on the first message parse, not at boot
+ * (M4 step 5). A failed load is `ImplementationUnavailableError`: a read
+ * fails honestly instead of returning an empty or partial message.
+ */
+export const loadSimpleParser = lazyImplementation('The email parser (mailparser)',
+  () => import('mailparser').then((m) => m.simpleParser))
 
 const SNIPPET_SOURCE_BYTES = 16 * 1024
 const FULL_MESSAGE_SOURCE_BYTES = 4 * 1024 * 1024
@@ -326,6 +335,7 @@ async function fetchSnippet(
       { uid: true },
     )
     if (!msg || !msg.source) return undefined
+    const simpleParser = await loadSimpleParser()
     const parsed = await simpleParser(msg.source)
     const text = parsed.text ?? (typeof parsed.html === 'string' ? htmlToText(parsed.html) : '')
     const collapsed = collapseWhitespace(text)
@@ -674,6 +684,7 @@ export function createMailboxApi(opts: CreateMailboxApiOptions): MailboxApi {
           )
           if (!msg || !msg.source) throw new Error(`Message ${id} not found.`)
           fetched = msg
+          const simpleParser = await loadSimpleParser()
           parsed = await simpleParser(msg.source)
         } finally {
           lock.release()

@@ -45,7 +45,7 @@
  * "Recall-outcome tagging".
  */
 
-import type { Sensitivity } from '../security/sensitivity.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 
 export type MemoryRecallKind = 'index_inject' | 'tool_call' | 'consolidation'
 

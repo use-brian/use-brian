@@ -34,31 +34,31 @@
  * [COMP:api/whatsapp-ingest]
  */
 
+import type { AnalyticsLogger } from '@use-brian/core/analytics/logger.js'
+import type { CrmStore } from '@use-brian/core/crm/types.js'
+import type { EntityLinksStore, EntityStore } from '@use-brian/core/entities/types.js'
+import { whatsappFilterImplementations } from '@use-brian/core/ingest/adapters/whatsapp/filters.js'
+import { normalizeWhatsappGroup } from '@use-brian/core/ingest/adapters/whatsapp/normalize.js'
+import type { WhatsappGroupWindow } from '@use-brian/core/ingest/adapters/whatsapp/types.js'
+import {
+  createIngestEngine,
+  type IngestEngine,
+  type IngestRule,
+  type PlaceholderResolver,
+} from '@use-brian/core/ingest/engine.js'
 import {
   composeFilters,
-  computeNextRun,
-  createIngestEngine,
-  normalizeWhatsappGroup,
-  processEpisode,
   universalFilters,
-  whatsappFilterImplementations,
-  type AnalyticsLogger,
-  type CrmStore,
-  type EntityLinksStore,
-  type EntityStore,
   type FilterRegistry,
-  type IngestEngine,
   type IngestEvent,
-  type IngestRule,
-  type LLMProvider,
-  type MemoryStore,
-  type PipelineBEpisode,
-  type UsageStore,
-  type PlaceholderResolver,
-  type SourceKind,
-  type TaskStore,
-  type WhatsappGroupWindow,
-} from '@use-brian/core'
+} from '@use-brian/core/ingest/filters.js'
+import { processEpisode, type PipelineBEpisode } from '@use-brian/core/ingest/pipeline-b.js'
+import type { SourceKind } from '@use-brian/core/ingest/types.js'
+import type { MemoryStore } from '@use-brian/core/memory/types.js'
+import { computeNextRun } from '@use-brian/core/scheduling/schedule.js'
+import type { TaskStore } from '@use-brian/core/tasks/types.js'
+import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
 import { appendBatchEvent } from '../db/pending-ingest-batches-store.js'
 import type { DbEpisodesStore } from '../db/episodes-store.js'
 import type { IngestRuleRow, IngestRulesStore } from '../db/ingest-rules-store.js'
@@ -164,8 +164,8 @@ export type WhatsappIngestorDeps = {
    * ("mike ships feat A by sunday") becomes a ticket.
    */
   tasks?: TaskStore
-  taskAdmission?: import('@use-brian/core').TaskAdmissionPort
-  application?: import('@use-brian/core').PipelineBApplicationPort
+  taskAdmission?: import('@use-brian/core/tasks/admission.js').TaskAdmissionPort
+  application?: import('@use-brian/core/ingest/pipeline-b-application.js').PipelineBApplicationPort
   episodes: DbEpisodesStore
   /** DB rules for the paired connector_instance — loaded per event. */
   ingestRulesStore: IngestRulesStore

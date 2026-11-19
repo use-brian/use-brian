@@ -39,6 +39,7 @@ import { fetchWorkspaceTasks } from "@/lib/api/tasks";
 import { leaseSurfaceContent, surfaceContentRemaining } from "@/lib/offline/surface-content-cache";
 import { getUserInfo } from "@/lib/user";
 import { currentOfflineWriteAuthority } from "@/lib/offline/application-write-authority";
+import { chatHistoryMemoryKey } from "@/lib/offline/chat-history-cache";
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 import { getView, listWorkspaceAssistants } from "@/lib/api/views";
 import { listWorkflows } from "@/lib/api/workflow";
@@ -362,11 +363,11 @@ export function brandCacheKey(workspaceId: string): string {
  * marks stay workspace-first so they match every viewer variant.
  */
 export function chatRosterCacheKey(workspaceId: string): string {
-  return `chat-roster:${workspaceId}${viewerSuffix()}`;
+  return `chat-roster:${workspaceId}${viewerSuffix()}:${encodeURIComponent(publicRuntimeConfig().apiUrl ?? "http://localhost:4000")}`;
 }
 
 export function chatSessionsCacheKey(workspaceId: string): string {
-  return `chat-sessions:${workspaceId}${viewerSuffix()}`;
+  return `chat-sessions:${workspaceId}${viewerSuffix()}:${encodeURIComponent(publicRuntimeConfig().apiUrl ?? "http://localhost:4000")}`;
 }
 
 export function channelRecordingsCacheKey(workspaceId: string, channelId: string): string {
@@ -374,7 +375,7 @@ export function channelRecordingsCacheKey(workspaceId: string, channelId: string
 }
 
 export function chatSharedSessionsCacheKey(workspaceId: string, projectId?: string | null): string {
-  return `chat-shared:${workspaceId}${viewerSuffix()}${projectId === undefined ? "" : `:project:${projectId ?? "general"}`}`;
+  return `chat-shared:${workspaceId}${viewerSuffix()}:${encodeURIComponent(publicRuntimeConfig().apiUrl ?? "http://localhost:4000")}${projectId === undefined ? "" : `:project:${projectId ?? "general"}`}`;
 }
 
 export function chatArchivedSessionsCacheKey(workspaceId: string, audience: "personal" | "workspace"): string {
@@ -383,7 +384,7 @@ export function chatArchivedSessionsCacheKey(workspaceId: string, audience: "per
 
 /** One short-lived intent read per viewer, consumed by chat selection. */
 export function chatTranscriptIntentCacheKey(): string {
-  return `chat-transcript-intent${viewerSuffix()}`;
+  return `chat-transcript-intent${viewerSuffix()}:${encodeURIComponent(publicRuntimeConfig().apiUrl ?? "http://localhost:4000")}`;
 }
 
 /**
@@ -395,7 +396,7 @@ export function chatTranscriptIntentCacheKey(): string {
  * write-through of streamed rows).
  */
 export function chatTranscriptCacheKey(sessionId: string): string {
-  return `chat-transcript:${sessionId}`;
+  return chatHistoryMemoryKey(sessionId);
 }
 
 /**

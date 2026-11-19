@@ -14,13 +14,13 @@
  */
 
 import type {
-  Block,
   CustomPageTemplate,
   CustomPageTemplateSummary,
   ExtractionSpec,
-  PageTemplateCategory,
-} from '@use-brian/core'
-import { normalizeExtractionSpec } from '@use-brian/core'
+} from '@use-brian/core/doc/custom-template-types.js'
+import type { PageTemplateCategory } from '@use-brian/core/doc/templates.js'
+import type { Block } from '@use-brian/core/views/blocks.js'
+import { normalizeExtractionSpec } from '@use-brian/core/doc/custom-template-types.js'
 
 import { queryWithRLS } from './client.js'
 

@@ -16,7 +16,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import type { EntityRecord } from '@use-brian/core'
+import type { EntityRecord } from '@use-brian/core/entities/types.js'
 
 vi.mock('../client.js', () => ({
   query: vi.fn(async () => ({ rows: [], rowCount: 0 })),

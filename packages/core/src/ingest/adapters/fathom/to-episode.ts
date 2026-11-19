@@ -18,7 +18,7 @@
  * [COMP:brain/source-adapters/fathom]
  */
 
-import type { Sensitivity } from '../../../security/sensitivity.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { MANUAL_PASTE_INLINE_MAX_BYTES } from '../../schemas.js'
 import type { EpisodeActor, EpisodeEnvelope } from '../../types.js'
 

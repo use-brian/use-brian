@@ -26,7 +26,7 @@ import type {
   ProvenanceWalk,
   RecallEvent,
 } from '../types.js'
-import type { ToolContext } from '../../tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 // ── Fixtures ─────────────────────────────────────────────────────────
 

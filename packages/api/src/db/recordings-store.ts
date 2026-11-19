@@ -24,7 +24,7 @@
  * [COMP:recordings/recordings-store]
  */
 
-import type { AccessContext } from '@use-brian/core'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import { query, queryWithRLS } from './client.js'
 import { admitWorkspaceResource } from '../workspace-access/resource-admission.js'
 import { readAdmissionPolicy } from '../workspace-access/admission-policy-read.js'

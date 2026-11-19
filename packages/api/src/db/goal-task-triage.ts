@@ -1,4 +1,6 @@
-import type { GoalBrief, GoalStore, TaskRecord, SessionContextAuthority } from '@use-brian/core'
+import type { GoalBrief, GoalStore } from '@use-brian/core/goals/types.js'
+import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
+import type { TaskRecord } from '@use-brian/core/tasks/types.js'
 import { getWorkspaceAccessMode } from '../workspace-access/mode-policy.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import {assertTaskGoalSourceCompatible} from '../workspace-access/goal-source-admission.js'

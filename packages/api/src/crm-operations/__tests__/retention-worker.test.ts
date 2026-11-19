@@ -1,5 +1,6 @@
 import {describe,it,expect,vi} from 'vitest'
-import {CrmRetentionPolicySchema,CrmOperationsCommandSchema} from '@use-brian/core'
+import {CrmOperationsCommandSchema} from '@use-brian/core/crm/operations-types.js'
+import {CrmRetentionPolicySchema} from '@use-brian/core/crm/retention-types.js'
 import {createCrmRetentionWorker} from '../retention-worker.js'
 
 const policy={scheduled:false,intervalSeconds:60,resolvedSubmissionsSeconds:null,openSubmissions:null,

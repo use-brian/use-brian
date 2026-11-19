@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
-import type { CrmIntegrationAuthority, CrmOperationsContext } from '@use-brian/core'
+import type { CrmIntegrationAuthority } from '@use-brian/core/crm/integration-authority.js'
+import type { CrmOperationsContext } from '@use-brian/core/crm/operations-types.js'
 import { importGrantSnapshot, requireImportCeiling, requireImportRowAuthority } from '../import-authority.js'
 
 const credentialId = randomUUID(), eventId = randomUUID(), otherEvent = randomUUID()

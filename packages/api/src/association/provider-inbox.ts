@@ -2,10 +2,22 @@ import { beginAssociationCreation, assertAssociationOrderAuthority, assertAssoci
 /** Durable provider admission, leases and atomic application. [COMP:crm/provider-inbox] */
 import { randomUUID } from 'node:crypto'
 import type { Pool, PoolClient } from 'pg'
+import { deriveResourceScope } from '@use-brian/agent-runtime/security/derived-scope.js'
 import {
-  AssociationActorSchema, AssociationError, CrmOperationsError, CrmIntegrationScopeError, ProviderInboxEnvelopeSchema, crmOperationsSha256, deriveResourceScope,
-  type AssociationActor, type ProviderInboxEnvelope, type ProviderReceiptState,
-} from '@use-brian/core'
+  CrmOperationsError,
+  crmOperationsSha256,
+} from '@use-brian/core/application-platform/operation-contract.js'
+import {
+  AssociationActorSchema,
+  AssociationError,
+  type AssociationActor,
+} from '@use-brian/core/association/domain.js'
+import {
+  ProviderInboxEnvelopeSchema,
+  type ProviderInboxEnvelope,
+  type ProviderReceiptState,
+} from '@use-brian/core/association/provider-inbox.js'
+import { CrmIntegrationScopeError } from '@use-brian/core/crm/integration-authority.js'
 import { crmPageInstant } from '../crm-operations/pagination.js'
 
 export type ProviderInboxRow = {

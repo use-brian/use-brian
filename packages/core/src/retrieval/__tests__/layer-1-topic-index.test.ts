@@ -5,7 +5,7 @@ import {
   runLayer1TopicIndex,
   type TopicAnalysis,
 } from '../layer-1-topic-index.js'
-import type { LLMProvider, StreamChunk } from '../../providers/types.js'
+import type { LLMProvider, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
 import type { MemoryEntry } from '../../memory/context-builder.js'
 
 function mockProvider(response: string): LLMProvider {

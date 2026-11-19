@@ -1,4 +1,6 @@
-import type { ResourceScope, Sensitivity, AccessContext } from '@use-brian/core'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import type { ResourceScope } from '@use-brian/agent-runtime/security/derived-scope.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { assertExecutionResourceScope, buildCurrentMemberSourcePredicate, buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { queryWithRLS, getAppPool, applyRLSGucs, rollbackAndRelease } from './client.js'

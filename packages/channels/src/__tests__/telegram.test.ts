@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
 import { createTelegramAdapter, parseTopicChannelId, configureTelegramTextDeliveryObserver, type TelegramAdapterConfig, type TelegramTextDelivery } from '../telegram/adapter.js'
 import { createTelegramApi, isTelegramThreadNotFoundError, describeTelegramDownloadFailure, TELEGRAM_BOT_COMMANDS, TelegramApiError } from '../telegram/api.js'
 import { chunkText } from '../chunking.js'
@@ -1156,6 +1156,17 @@ describe('[COMP:channels/telegram] api 429 retry', () => {
 })
 
 describe('[COMP:channels/telegram/voice] api transient retry', () => {
+  beforeEach(() => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] }))
+  afterEach(() => vi.useRealTimers())
+
+  async function complete<T>(operation: Promise<T>): Promise<T> {
+    // Attach rejection handling before advancing timers, including exhaustion.
+    const outcome = operation.then(value => ({ value }), error => ({ error }))
+    await vi.runAllTimersAsync()
+    const result = await outcome
+    if ('error' in result) throw result.error
+    return result.value
+  }
   // Telegram's own gateway, not our request. On 2026-08-17 a `getFile` came
   // back 504 and — because only 429 was retried — the voice note behind it was
   // lost outright. See docs/architecture/media/transcription.md → "The
@@ -1178,8 +1189,15 @@ describe('[COMP:channels/telegram/voice] api transient retry', () => {
     vi.stubGlobal('fetch', mock)
     try {
       const api = createTelegramApi({ token: 'test-token' })
-      const result = await api.getFile('file-id')
-      expect(result.file_path).toBe('voice/file_1.oga')
+      const outcome = api.getFile('file-id').catch((error: unknown) => error)
+      await vi.advanceTimersByTimeAsync(499)
+      expect(calls).toBe(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(calls).toBe(2)
+      await vi.advanceTimersByTimeAsync(999)
+      expect(calls).toBe(2)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(await outcome).toMatchObject({ file_path: 'voice/file_1.oga' })
       expect(calls).toBe(3)
     } finally {
       vi.unstubAllGlobals()
@@ -1195,7 +1213,7 @@ describe('[COMP:channels/telegram/voice] api transient retry', () => {
     vi.stubGlobal('fetch', mock)
     try {
       const api = createTelegramApi({ token: 'test-token' })
-      const err = await api.getFile('file-id').catch((e: unknown) => e)
+      const err = await complete(api.getFile('file-id')).catch((e: unknown) => e)
       expect(err).toBeInstanceOf(TelegramApiError)
       expect((err as TelegramApiError).errorCode).toBe(504)
       expect((err as TelegramApiError).method).toBe('getFile')
@@ -1217,7 +1235,7 @@ describe('[COMP:channels/telegram/voice] api transient retry', () => {
     vi.stubGlobal('fetch', mock)
     try {
       const api = createTelegramApi({ token: 'test-token' })
-      await expect(api.getFile('file-id')).rejects.toThrow(/file is too big/)
+      await expect(complete(api.getFile('file-id'))).rejects.toThrow(/file is too big/)
       expect(calls).toBe(1)
     } finally {
       vi.unstubAllGlobals()
@@ -1238,7 +1256,7 @@ describe('[COMP:channels/telegram/voice] api transient retry', () => {
     vi.stubGlobal('fetch', mock)
     try {
       const api = createTelegramApi({ token: 'test-token' })
-      const err = await api.getFile('file-id').catch((e: unknown) => e)
+      const err = await complete(api.getFile('file-id')).catch((e: unknown) => e)
       // The SyntaxError naming a stray '<' must never BE the explanation.
       expect((err as TelegramApiError).errorCode).toBe(503)
       expect((err as TelegramApiError).description).toBe('Service Unavailable')
@@ -1261,7 +1279,7 @@ describe('[COMP:channels/telegram/voice] api transient retry', () => {
     vi.stubGlobal('fetch', mock)
     try {
       const api = createTelegramApi({ token: 'test-token' })
-      const err = await api.getFile('file-id').catch((e: unknown) => e)
+      const err = await complete(api.getFile('file-id')).catch((e: unknown) => e)
       expect(calls).toBe(3)
       expect((err as TelegramApiError).message).toContain('other side closed')
       expect((err as TelegramApiError).message).toContain('UND_ERR_SOCKET')
@@ -1285,7 +1303,7 @@ describe('[COMP:channels/telegram/voice] api transient retry', () => {
     vi.stubGlobal('fetch', mock)
     try {
       const api = createTelegramApi({ token: 'test-token' })
-      const buf = await api.downloadFile('voice/file_1.oga')
+      const buf = await complete(api.downloadFile('voice/file_1.oga'))
       expect(Array.from(buf)).toEqual([1, 2, 3])
       expect(calls).toBe(2)
     } finally {
@@ -1302,7 +1320,7 @@ describe('[COMP:channels/telegram/voice] api transient retry', () => {
     vi.stubGlobal('fetch', mock)
     try {
       const api = createTelegramApi({ token: 'test-token' })
-      const err = await api.downloadFile('voice/file_1.oga').catch((e: unknown) => e)
+      const err = await complete(api.downloadFile('voice/file_1.oga')).catch((e: unknown) => e)
       expect(err).toBeInstanceOf(TelegramApiError)
       expect((err as TelegramApiError).errorCode).toBe(500)
       expect(calls).toBe(3)

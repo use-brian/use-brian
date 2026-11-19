@@ -1,6 +1,7 @@
 /** Provider grant authority and period replay. [COMP:crm/entitlement-periods] */
 import type { PoolClient } from 'pg'
-import { CrmOperationsError, crmOperationsSha256, type AssociationActor } from '@use-brian/core'
+import type { AssociationActor } from '@use-brian/core/association/domain.js'
+import { CrmOperationsError, crmOperationsSha256 } from '@use-brian/core/crm/operations-types.js'
 
 type PeriodInput = {
   contactId: unknown; planId: unknown; status: unknown; startsAt: unknown; endsAt?: unknown;

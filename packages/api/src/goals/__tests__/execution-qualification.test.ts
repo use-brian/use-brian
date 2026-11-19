@@ -4,7 +4,7 @@
  * the real-database entry path is asserted by the journeys suite.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ExecutionPlanDraft, ExecutionProvenance } from '@use-brian/core'
+import type { ExecutionPlanDraft, ExecutionProvenance } from '@use-brian/core/goals/execution.js'
 
 const store = vi.hoisted(() => ({
   findActiveNativeExecutionSystem: vi.fn(),

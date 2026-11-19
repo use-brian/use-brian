@@ -17,7 +17,7 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '../tools/types.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import type { InspectionStore } from './types.js'
 
 /** Shared no-workspace failure for the inspection tools (see introspection). */

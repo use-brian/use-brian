@@ -25,7 +25,10 @@ async function fixture() {
   const workspaceId = randomUUID(), owner = randomUUID(), userId = randomUUID(), assistantId = randomUUID(), teamId = randomUUID()
   const compartment = `team:${teamId}`
   for (const id of [owner, userId]) await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [id])
-  await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Single connection workflow',$2)", [workspaceId, owner])
+  // These cases exercise the classic (pre-v2) authoring paths, which
+  // workspaces.department_read_v2=false still serves as the cutover's rollback
+  // model (migration 650 made v2 the default); pin the fixture to it.
+  await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Single connection workflow',$2,false)", [workspaceId, owner])
   await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner'),($1,$3,'member')", [workspaceId, owner, userId])
   await pool.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1,$2,'Team',$3,'team',$1::uuid::text,$4)", [teamId, workspaceId, owner, compartment])
   await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,created_by,managed_by,managed_ref_id) VALUES($1,$2,'Team',$3,'team',$4)", [workspaceId, compartment, owner, teamId])

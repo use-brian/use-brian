@@ -4,7 +4,9 @@ import { templateFieldGuidance, validateTemplateFieldValues } from './template-f
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
 import { APP_LEVEL_ASSISTANT_ID } from '@use-brian/shared'
-import { collectStream, type LLMProvider, type Message, type OfficeEvidencePacket } from '@use-brian/core'
+import type { OfficeEvidencePacket } from '@use-brian/core/office/generation/contracts.js'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
+import type { LLMProvider, Message } from '@use-brian/agent-runtime/providers/types.js'
 import {
   applyOfficeCommand,
   assertOfficeArtifactSnapshot,

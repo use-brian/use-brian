@@ -1,4 +1,5 @@
-import { bindScopeSources, boundScopeSources, DerivedScopeError } from '@use-brian/core'
+import { DerivedScopeError } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import type {
   RetrievalActor,
   RetrievalEnvelope,
@@ -8,7 +9,7 @@ import type {
   RowHistoryPrimitive,
   RowHistoryVersion,
   RowStatus,
-} from '@use-brian/core'
+} from '@use-brian/core/retrieval/types.js'
 import { queryWithRLS } from './client.js'
 import { getEntityHistory } from './entities-store.js'
 import { getMemoryHistory } from './memories.js'

@@ -1,6 +1,21 @@
 /** Canonical Association operational source evidence. [COMP:crm/association-source-scope] */
-import { CrmOperationsError, departmentReadGrantJson, deriveResourceScope, DerivedScopeError, intersectDepartmentReadGrants, intersectScopeGrants, scopeGrantContains,
-  type AssociationActor, type DepartmentReadGrant, type ResourceScope, type ScopeSource } from '@use-brian/core'
+import type { AssociationActor } from '@use-brian/core/association/domain.js'
+import { CrmOperationsError } from '@use-brian/core/crm/operations-types.js'
+import {
+  intersectScopeGrants,
+  scopeGrantContains
+} from '@use-brian/agent-runtime/security/context-scope.js'
+import {
+  departmentReadGrantJson,
+  intersectDepartmentReadGrants,
+  type DepartmentReadGrant
+} from '@use-brian/agent-runtime/security/department-read.js'
+import {
+  deriveResourceScope,
+  DerivedScopeError,
+  type ResourceScope,
+  type ScopeSource
+} from '@use-brian/agent-runtime/security/derived-scope.js'
 import type { Pool, PoolClient } from 'pg'
 import type { ResourceDestination } from '@use-brian/shared'
 

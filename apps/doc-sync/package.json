@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@hocuspocus/server": "4.2.0",
+    "@use-brian/agent-runtime": "workspace:*",
     "@use-brian/api": "workspace:*",
     "@use-brian/doc-model": "workspace:*",
     "@use-brian/office-model": "workspace:*",

@@ -20,8 +20,8 @@ vi.mock('../../db/sessions.js', async () => {
   }
 })
 
-import { createGeminiProvider } from '@use-brian/core'
-import type { MemoryStore } from '@use-brian/core'
+import { createGeminiProvider } from '@use-brian/agent-runtime/providers/gemini.js'
+import type { MemoryStore } from '@use-brian/core/memory/types.js'
 import { runProactiveCompaction } from '../proactive-compaction.js'
 import type { Session, SessionMessage } from '../../db/sessions.js'
 

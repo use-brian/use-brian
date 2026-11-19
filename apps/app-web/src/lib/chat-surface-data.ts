@@ -48,7 +48,7 @@
  */
 
 import { recordChatSessionRecency, useChatSessionFeedback } from "@/lib/chat-send-feedback";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import {
   listWorkspaceAssistants,
   type WorkspaceAssistantSummary,
@@ -59,6 +59,7 @@ import {
   type DocSessionMessage,
   setSessionArchived,
   listWorkspaceSessions,
+  type ChatSessionSummary,
   type DocSession,
   type WorkspaceSession,
 } from "@/lib/api/sessions";
@@ -75,21 +76,48 @@ import {
   loadSurfaceCache,
   markSurfaceCacheStale,
   mutateSurfaceCache,
+  mutateSurfaceCachePrefix,
   readSurfaceCache,
   seedSurfaceCache,
   useCachedResource,
   SurfaceCacheEvictionError,
   evictSurfaceCacheKey,
 } from "@/lib/surface-cache";
-import { idbDelete, idbGet, idbSet } from "@/lib/offline/idb";
+import { idbDelete } from "@/lib/offline/idb";
 import { getUserInfo } from "@/lib/user";
-import { CHAT_SESSIONS_REFRESH_EVENT, dispatchChatSessionsRefresh } from "@/lib/chat-session-events";
-import { OFFLINE_AUTHORITY_MS, SURFACE_CONTENT_LEASE_MS, useLeasedResource } from "@/lib/offline/surface-content-cache";
+import { CHAT_SESSIONS_REFRESH_EVENT, dispatchChatSessionsRefresh, type ChatCacheFenceSignal } from "@/lib/chat-session-events";
+import { SURFACE_CONTENT_LEASE_MS, useLeasedResource } from "@/lib/offline/surface-content-cache";
+import { CHAT_OFFLINE_AUTHORITY_MS, chatHistorySyncedAt, captureChatListRead, filterRetainedChatSessions, chatListResponseRead, chatSessionsDiskKey, readChatListDisk, writeChatListDisk, refreshChatCacheFence, tagChatListResponse } from "@/lib/offline/chat-history-cache";
+import { currentOfflineWriteAuthority, type OfflineWriteAuthority } from "@/lib/offline/application-write-authority";
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 
 // ── Disk tier ────────────────────────────────────────────────────────────
 
 const SNAPSHOT_VERSION = 1;
-const SNAPSHOT_PREFIX = "chat-sessions";
+
+/** Direct-link summaries share the rail row's durable cache fence. */
+export function useCurrentChatSummary(workspaceId: string, summary: ChatSessionSummary | null): ChatSessionSummary | null {
+  const sessionId = summary?.id;
+  const subscribe = useCallback((notify: () => void) => {
+    if (!sessionId) return () => {};
+    let listening = true;
+    const fence = (event: Event) => {
+      const signal = (event as CustomEvent<{ cacheFence?: ChatCacheFenceSignal }>).detail?.cacheFence;
+      const scope = currentOfflineWriteAuthority(workspaceId);
+      if (!scope || !signal || signal.viewerId !== scope.viewerId || signal.apiOrigin !== scope.apiOrigin
+        || signal.workspaceId !== workspaceId || signal.sessionId && signal.sessionId !== sessionId) return;
+      void refreshChatCacheFence(scope).then(() => { if (listening) notify(); });
+    };
+    window.addEventListener(CHAT_SESSIONS_REFRESH_EVENT, fence);
+    return () => { listening = false; window.removeEventListener(CHAT_SESSIONS_REFRESH_EVENT, fence); };
+  }, [sessionId, workspaceId]);
+  const read = useCallback(() => {
+    const scope = currentOfflineWriteAuthority(workspaceId);
+    return scope && summary ? filterRetainedChatSessions(scope, [summary])[0] ?? null : null;
+  }, [summary, workspaceId]);
+  return useSyncExternalStore(subscribe, read, () => null);
+}
+
 
 /** The two lists the rail paints, persisted together as one envelope. */
 export type ChatSessionsSnapshot = {
@@ -112,7 +140,7 @@ export function chatSessionsSnapshotKey(
   viewerId: string,
   workspaceId: string,
 ): string {
-  return `${SNAPSHOT_PREFIX}:${viewerId}:${workspaceId}`;
+  return chatSessionsDiskKey({ viewerId, workspaceId, applicationId: "native", apiOrigin: (publicRuntimeConfig().apiUrl ?? "http://localhost:4000").replace(/\/$/, "") });
 }
 
 function isSessionRow(value: unknown): value is DocSession {
@@ -153,28 +181,29 @@ async function readChatSessionsSnapshot(
   viewerId: string,
   workspaceId: string,
 ): Promise<{ snapshot: ChatSessionsSnapshot; expiresAt: number } | null> {
-  const stored = await idbGet<unknown>(
-    chatSessionsSnapshotKey(viewerId, workspaceId),
-  );
+  const scope = currentOfflineWriteAuthority(workspaceId);
+  if (!scope || scope.viewerId !== viewerId) return null;
+  const stored = await readChatListDisk(scope);
   if (!isEnvelope(stored) || !isChatSessionsSnapshot(stored.value)) return null;
   const age = Date.now() - stored.updatedAt;
-  if (!Number.isFinite(age) || age >= OFFLINE_AUTHORITY_MS || age < -60_000) return null;
-  return { snapshot: stored.value, expiresAt: stored.updatedAt + OFFLINE_AUTHORITY_MS };
+  if (!Number.isFinite(age) || age >= CHAT_OFFLINE_AUTHORITY_MS || age < 0) return null;
+  return { snapshot: stored.value, expiresAt: stored.updatedAt + CHAT_OFFLINE_AUTHORITY_MS };
 }
 
-/** Best-effort last-known-good replacement. */
-export async function writeChatSessionsSnapshot(
-  viewerId: string,
-  workspaceId: string,
-  value: ChatSessionsSnapshot,
-  updatedAt = Date.now(),
-): Promise<void> {
-  const envelope: StoredSnapshot = {
-    version: SNAPSHOT_VERSION,
-    updatedAt,
-    value,
-  };
-  await idbSet(chatSessionsSnapshotKey(viewerId, workspaceId), envelope);
+/** Best-effort last-known-good replacement; painting never renews its timestamp. */
+export async function writeChatSessionsSnapshot(viewerId: string, workspaceId: string,
+  value: ChatSessionsSnapshot, updatedAt = Date.now()): Promise<void> {
+  const scope = currentOfflineWriteAuthority(workspaceId);
+  if (!scope || scope.viewerId !== viewerId) return;
+  await writeChatListDisk(scope, { version: SNAPSHOT_VERSION, updatedAt, value });
+}
+
+/** Signals carry no verdict: consult the committed fence before altering rows. */
+export async function reconcileChatSessionLists(scope: OfflineWriteAuthority): Promise<void> {
+  await refreshChatCacheFence(scope);
+  const filter = (rows: DocSession[]) => filterRetainedChatSessions(scope, rows);
+  mutateSurfaceCachePrefix<DocSession[]>(chatSessionsCacheKey(scope.workspaceId), filter);
+  mutateSurfaceCachePrefix<DocSession[]>(chatSharedSessionsCacheKey(scope.workspaceId), filter);
 }
 
 /** Evict after an authoritative denial (the viewer lost the workspace). */
@@ -204,29 +233,76 @@ async function readChatResource<T>(fetch: () => Promise<T>): Promise<T> {
   }
 }
 
+// ── List reads held by mounted hosts ─────────────────────────────────────
+//
+// Each list response waits on server-side title admission (M5Q-10), so a read
+// nobody is waiting for any more is stopped: every host that renders a cached
+// list holds its key while mounted, and when the last holder of a key unmounts
+// or moves to another key while that key's read is in flight, the read is
+// detached from the cache (no failure is recorded, so the next mount paints
+// the disk snapshot and revalidates) and aborted. Identical queries from
+// different keys or hosts already share one request (session-list-requests).
+// chat-app.md → "Listing".
+
+const listHolders = new Map<string, number>();
+const listReads = new Map<string, AbortController>();
+
+/** Run one list read of `key` with a signal its last holder can abort. */
+async function heldListRead<T>(key: string, read: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  listReads.set(key, controller);
+  try { return await read(controller.signal); }
+  finally { if (listReads.get(key) === controller) listReads.delete(key); }
+}
+
+/** Hold a list key while this host is mounted. */
+function useChatListHold(key: string | null): void {
+  useEffect(() => {
+    if (!key) return;
+    listHolders.set(key, (listHolders.get(key) ?? 0) + 1);
+    return () => {
+      listHolders.set(key, (listHolders.get(key) ?? 1) - 1);
+      // One tick of grace: a StrictMode replay or a remount re-holds first.
+      setTimeout(() => {
+        if ((listHolders.get(key) ?? 0) > 0) return;
+        listHolders.delete(key);
+        const read = listReads.get(key);
+        if (!read) return;
+        listReads.delete(key);
+        // Detach before aborting, so the abort is not recorded as a failure.
+        evictSurfaceCacheKey(key);
+        read.abort();
+      }, 0);
+    };
+  }, [key]);
+}
+
 // ── Fetchers ─────────────────────────────────────────────────────────────
 
 /** Workspace-wide history is independently authorized; no roster waterfall. */
 export async function fetchPersonalChatSessions(
   workspaceId: string,
 ): Promise<DocSession[]> {
-  return readChatList(chatSessionsCacheKey(workspaceId), () =>
-    readChatResource(() => listPersonalSessions({ workspaceId, strict: true })));
+  const key = chatSessionsCacheKey(workspaceId);
+  return readChatList(workspaceId, key, () =>
+    readChatResource(() => heldListRead(key, (signal) => listPersonalSessions({ workspaceId, strict: true, signal }))));
 }
 
 /** The fetcher behind `chat-shared:<wid>:<viewer>`. */
 function fetchSharedChatSessions(
   workspaceId: string,
 ): Promise<WorkspaceSession[]> {
-  return readChatList(chatSharedSessionsCacheKey(workspaceId), () =>
-    readChatResource(() => listWorkspaceSessions({ workspaceId, strict: true })));
+  const key = chatSharedSessionsCacheKey(workspaceId);
+  return readChatList(workspaceId, key, () =>
+    readChatResource(() => heldListRead(key, (signal) => listWorkspaceSessions({ workspaceId, strict: true, signal }))));
 }
 
 /** Project-filtered pages share the session invalidation prefix and viewer key. */
 export function useProjectChatSessionsData(workspaceId: string, projectId: string | null) {
   const key = chatSharedSessionsCacheKey(workspaceId, projectId);
-  const rows = useCachedResource(key, () => readChatList(key, () =>
-    readChatResource(() => listWorkspaceSessions({ workspaceId, contextProjectId: projectId, strict: true }))));
+  useChatListHold(key);
+  const rows = useCachedResource(key, () => readChatList(workspaceId, key, () =>
+    readChatResource(() => heldListRead(key, (signal) => listWorkspaceSessions({ workspaceId, contextProjectId: projectId, strict: true, signal })))));
   const [paging, setPaging] = useState(false);
   const [exhaustedCursor, setExhaustedCursor] = useState<string | null>(null);
   const [pageError, setPageError] = useState<unknown>(null);
@@ -236,30 +312,36 @@ export function useProjectChatSessionsData(workspaceId: string, projectId: strin
     if (!last || paging) return;
     setPaging(true); setPageError(null);
     try {
-      const next = await listWorkspaceSessions({ workspaceId, contextProjectId: projectId,
-        before: { id: last.id, lastActive: last.lastActive }, strict: true });
+      const next = await readChatList(workspaceId, key, () => listWorkspaceSessions({ workspaceId, contextProjectId: projectId,
+        before: { id: last.id, lastActive: last.lastActive }, strict: true }));
       mutateSurfaceCache<WorkspaceSession[]>(key, current => [...current, ...next.filter(row => !current.some(old => old.id === row.id))]);
       setExhaustedCursor(next.length < 50 ? next.at(-1)?.id ?? last.id : null);
     } catch (error) { setPageError(error); } finally { setPaging(false); }
   };
-  const presented = useChatSessionFeedback(workspaceId, rows.data);
+  const authority = currentOfflineWriteAuthority(workspaceId);
+  const presented = useChatSessionFeedback(workspaceId, authority && rows.data ? filterRetainedChatSessions(authority, rows.data) : rows.data);
   return { ...rows, data: presented ?? undefined, error: rows.error ?? pageError, paging, hasMore: rows.data?.at(-1)?.id !== exhaustedCursor, more };
 }
 
 /** Keep creations made during an older read; the next read is authoritative. */
-async function readChatList<T extends DocSession>(key: string, fetch: () => Promise<T[]>): Promise<T[]> {
+async function readChatList<T extends DocSession>(workspaceId: string, key: string, fetch: () => Promise<T[]>): Promise<T[]> {
+  const read = await captureChatListRead(workspaceId);
   const before = new Set(readSurfaceCache<T[]>(key).data?.map(row => row.id));
   const statusReadStartedAt = Date.now();
-  const rows = (await fetch()).map(row => ({ ...row, statusReadStartedAt }));
+  const fetched = await fetch();
+  const sourceRead = chatListResponseRead(fetched) ?? read;
+  if (sourceRead) await refreshChatCacheFence(sourceRead.scope);
+  const rows = fetched.map(row => ({ ...row, statusReadStartedAt }));
   const added = (readSurfaceCache<T[]>(key).data ?? []).filter(row =>
     !before.has(row.id) && !rows.some(fetched => fetched.id === row.id));
   // A server snapshot can predate the local send even when it lands later.
   // Preserve only recency on authorized rows, never an absent row or its title.
   const current = new Map((readSurfaceCache<T[]>(key).data ?? []).map(row => [row.id, row]));
-  return [...added, ...rows.map(row => {
+  const merged = [...added, ...rows.map(row => {
     const local = current.get(row.id);
     return local && local.lastActive > row.lastActive ? { ...row, lastActive: local.lastActive } : row;
   })].sort((a, b) => b.lastActive.localeCompare(a.lastActive));
+  return sourceRead ? tagChatListResponse(filterRetainedChatSessions(sourceRead.scope, merged, sourceRead), sourceRead) : [];
 }
 
 /** Publish a server-confirmed creation in every list that renders its audience. */
@@ -313,10 +395,11 @@ export function promoteChatSession(workspaceId: string, sessionId: string, conte
 /** Archived history is separately cached and paged; failures remain visible. */
 export function useArchivedChatSessionsData(workspaceId: string, audience: "personal" | "workspace", enabled: boolean) {
   const key = chatArchivedSessionsCacheKey(workspaceId, audience);
-  const fetchPage = (before?: { id: string; lastActive: string }): Promise<DocSession[]> => audience === "workspace"
-    ? listWorkspaceSessions({ workspaceId, archived: true, strict: true, before })
-    : listPersonalSessions({ workspaceId, archived: true, strict: true, before });
-  const rows = useCachedResource<DocSession[]>(enabled ? key : null, () => fetchPage());
+  const fetchPage = (before?: { id: string; lastActive: string }, signal?: AbortSignal): Promise<DocSession[]> => audience === "workspace"
+    ? listWorkspaceSessions({ workspaceId, archived: true, strict: true, before, signal })
+    : listPersonalSessions({ workspaceId, archived: true, strict: true, before, signal });
+  useChatListHold(enabled ? key : null);
+  const rows = useCachedResource<DocSession[]>(enabled ? key : null, () => readChatList(workspaceId, key, () => heldListRead(key, (signal) => fetchPage(undefined, signal))));
   const [paging, setPaging] = useState(false);
   const [exhaustedCursor, setExhaustedCursor] = useState<string | null>(null);
   const [pageError, setPageError] = useState<unknown>(null);
@@ -335,13 +418,15 @@ export function useArchivedChatSessionsData(workspaceId: string, audience: "pers
     if (!last || paging) return;
     setPaging(true); setPageError(null);
     try {
-      const next = await fetchPage({ id: last.id, lastActive: last.lastActive });
+      const next = await readChatList(workspaceId, key, () => fetchPage({ id: last.id, lastActive: last.lastActive }));
       mutateSurfaceCache<DocSession[]>(key, current => [...current, ...next.filter(row => !current.some(old => old.id === row.id))]);
       setExhaustedCursor(next.length < 50 ? next.at(-1)?.id ?? last.id : null);
     } catch (error) { setPageError(error); } finally { setPaging(false); }
   };
   const refresh = () => { setPageError(null); setExhaustedCursor(null); return rows.refresh(); };
-  return { ...rows, refresh, error: rows.error ?? pageError, paging, hasMore: (rows.data?.length ?? 0) >= 50 && rows.data?.at(-1)?.id !== exhaustedCursor, more };
+  const authority = currentOfflineWriteAuthority(workspaceId);
+  return { ...rows, data: authority && rows.data ? filterRetainedChatSessions(authority, rows.data) : rows.data,
+    refresh, error: rows.error ?? pageError, paging, hasMore: (rows.data?.length ?? 0) >= 50 && rows.data?.at(-1)?.id !== exhaustedCursor, more };
 }
 
 /** The row action and Settings manager share one cache/refresh contract. */
@@ -405,6 +490,8 @@ function markChatSessionsStale(workspaceId: string): void {
 // ── The hook ─────────────────────────────────────────────────────────────
 
 export type ChatSessionsData = {
+  /** Original authoritative read time when a retained disk list is painted. */
+  retainedSyncedAt?: number;
   assistants: WorkspaceAssistantSummary[];
   /** The roster fetch has settled (with rows or with an error). */
   assistantsLoaded: boolean;
@@ -431,6 +518,8 @@ export function useChatSessionsData(
   const sessionsKey = wid ? chatSessionsCacheKey(wid) : null;
   const sharedKey = wid ? chatSharedSessionsCacheKey(wid) : null;
 
+  useChatListHold(sessionsKey);
+  useChatListHold(sharedKey);
   const roster = useLeasedResource<WorkspaceAssistantSummary[]>(rosterKey, () =>
     readChatResource(() => listWorkspaceAssistants(wid as string)),
   );
@@ -478,7 +567,7 @@ export function useChatSessionsData(
     const snapshot = { personal: personal.data, shared: shared.data };
     const updatedAt = Math.min(personal.updatedAt, shared.updatedAt);
     if (!Number.isFinite(updatedAt) || updatedAt <= 0) return;
-    setPersisted({ scope, snapshot, expiresAt: updatedAt + OFFLINE_AUTHORITY_MS });
+    setPersisted({ scope, snapshot, expiresAt: updatedAt + CHAT_OFFLINE_AUTHORITY_MS });
     void writeChatSessionsSnapshot(viewerId, wid, snapshot, updatedAt);
   }, [personal.data, personal.error, personal.updatedAt, roster.error, shared.data, shared.error, shared.updatedAt, scope, viewerId, wid]);
   useEffect(() => {
@@ -516,10 +605,15 @@ export function useChatSessionsData(
     await Promise.all([refreshRoster(), refreshShared(), refreshPersonal()]);
   }, [refreshPersonal, refreshRoster, refreshShared]);
 
-  const presentedPersonal = useChatSessionFeedback(wid, personalDenied ? null : personal.data ?? disk?.personal ?? null);
-  const presentedShared = useChatSessionFeedback(wid, sharedDenied ? null : shared.data ?? disk?.shared ?? null);
+  const authority = wid ? currentOfflineWriteAuthority(wid) : null;
+  const personalRows = personalDenied ? null : personal.data ?? disk?.personal ?? null;
+  const sharedRows = sharedDenied ? null : shared.data ?? disk?.shared ?? null;
+  const presentedPersonal = useChatSessionFeedback(wid, authority && personalRows ? filterRetainedChatSessions(authority, personalRows) : personalRows);
+  const presentedShared = useChatSessionFeedback(wid, authority && sharedRows ? filterRetainedChatSessions(authority, sharedRows) : sharedRows);
 
   return {
+    retainedSyncedAt: disk && (personal.data === undefined || shared.data === undefined)
+      ? persisted!.expiresAt - CHAT_OFFLINE_AUTHORITY_MS : undefined,
     assistants: roster.data ?? EMPTY_ASSISTANTS,
     assistantsLoaded: roster.data !== undefined || roster.error !== undefined,
     personal: presentedPersonal ?? null,
@@ -566,7 +660,7 @@ export function warmChatTranscript(sessionId: string): void {
 /** Consume one intent read. Live refreshes always bypass pre-turn bytes. */
 export async function fetchChatTranscript(
   sessionId: string,
-  options: { force?: boolean; signal: AbortSignal },
+  options: { force?: boolean; signal: AbortSignal; onCached?: (rows: DocSessionMessage[]) => void },
 ): Promise<DocSessionMessage[]> {
   const key = chatTranscriptIntentCacheKey();
   const intent = readSurfaceCache<TranscriptIntent>(key).data;
@@ -581,11 +675,16 @@ export async function fetchChatTranscript(
   }
   // A selection or fresh read supersedes speculative work for any other chat.
   evictSurfaceCacheKey(key);
-  return fetchSessionMessages(sessionId, { strict: true, signal: options.signal });
+  return fetchSessionMessages(sessionId, { strict: true, signal: options.signal, onCached: options.onCached });
 }
 
 /** The cached transcript for a session, or `undefined` when cold. */
 export function readCachedTranscript<T>(sessionId: string): T[] | undefined {
+  const syncedAt = chatHistorySyncedAt(sessionId);
+  if (syncedAt !== undefined && Date.now() - syncedAt >= CHAT_OFFLINE_AUTHORITY_MS) {
+    evictTranscriptCache(sessionId);
+    return undefined;
+  }
   return readSurfaceCache<T[]>(chatTranscriptCacheKey(sessionId)).data;
 }
 

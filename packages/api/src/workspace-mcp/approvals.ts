@@ -1,10 +1,10 @@
 /** Native human review with the original MCP parent ceiling. [COMP:api/workspace-mcp] */
-import type { Tool, ToolContext } from '@use-brian/core'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { authSessionStore } from '../db/auth-session-store.js'
 import { query, queryWithRLS } from '../db/client.js'
 import type { PendingApproval, PendingApprovalsStore } from '../db/pending-approvals-store.js'
-import { assertSourceModelInputAuthority } from '../application-platform/model-source-authority.js'
+import { admitModelInput } from '../context-scope/admission.js'
 import { executeWorkspaceNativeTool } from './catalog.js'
 import { captureWorkspaceMcpDelegation, type WorkspaceMcpDelegation } from './delegation.js'
 import { executeWorkspaceMcpOperation } from './operations.js'
@@ -51,8 +51,7 @@ export function createWorkspaceMcpApprovals(deps: {
         'UPDATE workspace_mcp_operations SET delegation=$3::jsonb WHERE context_id=$1 AND id=$2',
         [contextId, operationId, JSON.stringify(parent)])
       context.createToolInvocationApproval = async params => {
-        await context.authority!.assertCurrent()
-        await assertSourceModelInputAuthority(context)
+        await admitModelInput(context)
         const approval = await deps.store.createToolInvocation({
           workspaceId: parent.workspaceId, blockingSessionId: parent.sessionId,
           originatingAssistantId: parent.assistantId, approverUserId: parent.userId,

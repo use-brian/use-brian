@@ -21,7 +21,7 @@ import {
   type MemoryForReclassification,
   type ReclassificationDeps,
 } from '../reclassifier.js'
-import type { LLMProvider, StreamChunk } from '../../providers/types.js'
+import type { LLMProvider, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
 import type {
   BrainCandidateCreateParams,
   BrainCandidateStore,

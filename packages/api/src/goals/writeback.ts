@@ -16,12 +16,8 @@
  *
  * [COMP:goals/writeback]
  */
-import {
-  type DoneWhenResolvers,
-  type GoalHostTerminal,
-  type GoalRecord,
-  type GoalStore,
-} from '@use-brian/core'
+import type { DoneWhenResolvers } from '@use-brian/core/goals/done-when.js'
+import type { GoalHostTerminal, GoalRecord, GoalStore } from '@use-brian/core/goals/types.js'
 import { query } from '../db/client.js'
 import { createHostStore } from './host-task.js'
 

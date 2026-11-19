@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { NOOP_TURN_LEDGER, type LLMProvider, type ProviderRequest, type StreamChunk, type ToolContext } from '@use-brian/core'
+import { NOOP_TURN_LEDGER } from '@use-brian/agent-runtime/engine/turn-ledger.js'
+import type { LLMProvider, ProviderRequest, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { createInteractionAnswerAdapter, createInteractionRuleEvaluator } from '../live-interaction-model.js'
 import { createLiveInteractionTools } from '../live-interaction-tools.js'
 

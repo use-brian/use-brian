@@ -7,7 +7,7 @@
  * [COMP:crm/domain-events]
  */
 
-import { CrmDomainEventTypeSchema, type CrmDomainEventType } from '../crm/operations-types.js'
+import { CrmDomainEventTypeSchema, type CrmDomainEventType } from '../application-platform/operation-contract.js'
 import type { DispatchEvent } from './event-trigger.js'
 
 export type CrmDomainEventEnvelope = {

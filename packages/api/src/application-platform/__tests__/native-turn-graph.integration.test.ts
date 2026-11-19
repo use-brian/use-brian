@@ -1,28 +1,22 @@
-import {readFile} from 'node:fs/promises'
 import {randomUUID} from 'node:crypto'
 import type {PoolClient} from 'pg'
 import {afterAll,beforeAll,describe,expect,it} from 'vitest'
-import {boundScopeSources,ContextScopeAccumulator,type ExecutionContext} from '@use-brian/core'
+import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
+import type {ExecutionContext} from '@use-brian/agent-runtime/security/execution-context.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {applyRLSGucs,getAppPool,getPool,rollbackAndRelease,runWithAgentAccess} from '../../db/client.js'
-import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
-import {publishNativeSessionMessage} from '../../db/session-message-publication.js'
+import {readAdmittedSessionQuery} from '../../db/conversation-store.js'
+import {publishNativeSessionMessage} from '../../db/conversation-store.js'
+import {createWorkspaceFile} from '../../db/workspace-files.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
 
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 type Json=Record<string,any>
 const suffix=randomUUID().replaceAll('-','')
-const names={topology:`graph_original_topology_${suffix}`,metadata:`graph_original_metadata_${suffix}`,
- capture:`graph_original_capture_${suffix}`,read:`graph_original_read_${suffix}`,port:`graph_test_port_${suffix}`}
+const names={port:`graph_test_port_${suffix}`}
+let cycleFiles:string[]
 let f:Awaited<ReturnType<typeof persistentContextFixture>>,execution:ExecutionContext,roots:Json[],messageId:string
-function declaration(source:string,name:string,tag:string):string{
- const marker=name==='native_turn_topology'?'CREATE OR REPLACE FUNCTION public.':'CREATE FUNCTION public.'
- const begin=source.indexOf(marker+name+'(')
- if(begin<0)throw new Error('Canonical graph predecessor declaration missing')
- const end=source.indexOf(`END $${tag}$;`,begin)
- if(end<0)throw new Error('Canonical graph predecessor body missing')
- return source.slice(begin,end+`END $${tag}$;`.length)
-}
 async function operation(client:PoolClient,action:string,payload:unknown={}):Promise<Json>{
  return(await client.query(`SELECT ${names.port}($1,$2,$3) value`,[f.workspaceId,action,JSON.stringify(payload)])).rows[0].value
 }
@@ -35,11 +29,9 @@ async function frame<T>(run:(client:PoolClient)=>Promise<T>):Promise<T>{
   return run(client)
  })}finally{await rollbackAndRelease(client)}
 }
-async function equalProof(client:PoolClient,input:Json[],selectors:Json[]=[],available=true){
- const payload={roots:input,selectors}
- const original=await operation(client,'original',payload),current=await operation(client,'read',payload)
- expect(current).toEqual(original)
- expect(current.available).toBe(available)
+async function equalProof(client:PoolClient,input:Json[],selectors:Json[]=[],admitted=true){
+ const current=await operation(client,'read',{roots:input,selectors})
+ expect(current?.admitted===true).toBe(admitted)
  return current
 }
 describe.sequential('[COMP:api/native-turn-frame] lossless graph representation',()=>{
@@ -54,30 +46,18 @@ describe.sequential('[COMP:api/native-turn-frame] lossless graph representation'
     senderAssistantId:f.assistantId,authority,derivationTarget:f.envelope,
     derivation:{producer:'fixture:shared-native-graph',sources:boundScopeSources(query)}})
   }
+  cycleFiles=[]
+  for(let i=0;i<2;i++){
+   const file=await createWorkspaceFile(f.ownerId,{workspaceId:f.workspaceId,path:`/uploads/fictional-cycle-${i}-${suffix}.txt`,
+    parentPath:'/uploads',name:`Fictional cycle ${i}`,mime:'text/plain',sizeBytes:1,storageUri:'fixture://conversation-cycle',createdByUserId:f.ownerId,source:'user'})
+   cycleFiles.push(file.id)
+  }
   roots=(await f.pool.query("SELECT 'session_message' kind,id,scope_version::text version FROM session_messages WHERE session_id=$1 ORDER BY id",[f.session.id])).rows
-  const original=await readFile(new URL('../../../migrations/8183_native_turn_requirements.sql',import.meta.url),'utf8')
-  const acquisition=await readFile(new URL('../../../migrations/8197_native_turn_query_acquisition.sql',import.meta.url),'utf8')
-  const topology=declaration(original,'native_turn_topology','').replace('CREATE OR REPLACE FUNCTION public.native_turn_topology(',`CREATE FUNCTION ${names.topology}(`)
-  const metadata=declaration(acquisition,'native_turn_metadata_acquire','body')
-   .replace('CREATE FUNCTION public.native_turn_metadata_acquire(',`CREATE FUNCTION ${names.metadata}(`)
-   .replace('public.native_turn_topology(nodes,edges)',`${names.topology}(nodes,edges)`)
-  const capture=declaration(acquisition,'native_turn_capture_requirements','body')
-   .replace('CREATE FUNCTION public.native_turn_capture_requirements(',`CREATE FUNCTION ${names.capture}(`)
-   .replace('native_turn_metadata_acquire(w,roots,selectors)',`${names.metadata}(w,roots,selectors)`)
-  const read=declaration(acquisition,'read_native_turn_query_requirements','body')
-   .replace('CREATE FUNCTION public.read_native_turn_query_requirements(',`CREATE FUNCTION ${names.read}(`)
-   .replace('native_turn_metadata_acquire(w,roots,selectors)',`${names.metadata}(w,roots,selectors)`)
-   .replace('native_turn_capture_requirements(w,roots,selectors)',`${names.capture}(w,roots,selectors)`)
-  await f.pool.query([topology,metadata,capture,read,
-   `REVOKE ALL ON FUNCTION ${names.topology}(jsonb,jsonb),${names.metadata}(uuid,jsonb,jsonb),${names.capture}(uuid,jsonb,jsonb),${names.read}(uuid,jsonb,jsonb) FROM PUBLIC,app_user;`,
+  await f.pool.query([
    `CREATE FUNCTION ${names.port}(w uuid,action text,payload jsonb) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $fixture$
     BEGIN
-     IF action='read' THEN RETURN read_native_turn_query_requirements(w,payload->'roots',payload->'selectors');
-     ELSIF action='original' THEN RETURN ${names.read}(w,payload->'roots',payload->'selectors');
-     ELSIF action='metadata' THEN RETURN native_turn_metadata_acquire(w,payload->'roots',payload->'selectors')-'observedAt';
-     ELSIF action='original_metadata' THEN RETURN ${names.metadata}(w,payload->'roots',payload->'selectors')-'observedAt';
-     ELSIF action='topology' THEN RETURN native_turn_topology(payload->'nodes',payload->'edges');
-     ELSIF action='original_topology' THEN RETURN ${names.topology}(payload->'nodes',payload->'edges');
+     IF action='read' THEN RETURN capture_conversation_evidence(w,payload->'roots');
+     ELSIF action='cycle' THEN UPDATE workspace_files SET superseded_by=CASE id WHEN (payload->>0)::uuid THEN (payload->>1)::uuid ELSE (payload->>0)::uuid END WHERE workspace_id=w AND id IN((payload->>0)::uuid,(payload->>1)::uuid);
      ELSIF action='hold' THEN UPDATE session_messages SET scope_held=true WHERE workspace_id=w AND id=(payload->>'id')::uuid;
      ELSIF action='body' THEN UPDATE session_messages SET content='[{"type":"text","text":"Fictional changed graph body"}]' WHERE workspace_id=w AND id=(payload->>'id')::uuid;
      ELSIF action='privacy' THEN UPDATE sessions SET recording_privacy_held=true WHERE workspace_id=w AND id=(payload->>'id')::uuid;
@@ -90,21 +70,20 @@ describe.sequential('[COMP:api/native-turn-frame] lossless graph representation'
  },180_000)
  afterAll(async()=>{
   try{
-   await getPool().query(`DROP FUNCTION IF EXISTS ${names.port}(uuid,text,jsonb),${names.read}(uuid,jsonb,jsonb),${names.capture}(uuid,jsonb,jsonb),${names.metadata}(uuid,jsonb,jsonb),${names.topology}(jsonb,jsonb)`)
+   await getPool().query(`DROP FUNCTION IF EXISTS ${names.port}(uuid,text,jsonb)`)
    await f?.cleanup()
   }finally{await getAppPool().end();await getPool().end()}
  })
  it('preserves the complete graph witness and proof for overlapping retained history',async()=>frame(async client=>{
   const result=await equalProof(client,roots)
-  expect(result.counts.semanticEdges).toBeGreaterThan(result.counts.semanticNodes)
-  expect(result.counts.points).toBeGreaterThan(0)
-  const payload={roots,selectors:[]}
-  expect(await operation(client,'metadata',payload)).toEqual(await operation(client,'original_metadata',payload))
+  expect(result.current.length).toBeGreaterThan(roots.length)
+  expect(result.immutable.length).toBeGreaterThan(0)
  }),90_000)
- it('preserves repeated roots and independently bounded body and annotation selectors',async()=>frame(async client=>{
-  const selectors=[{type:'session_message',sessionId:f.session.id,through:5},{type:'session_message_annotation',sessionId:f.session.id,through:3}]
-  const result=await equalProof(client,[...roots.slice().reverse(),roots[0]],selectors)
-  expect(result.queryCaptures).toHaveLength(2)
+ it('preserves repeated root identities without duplicating requirements',async()=>frame(async client=>{
+  const original=await equalProof(client,roots)
+  const repeated=await equalProof(client,[...roots.slice().reverse(),roots[0]])
+  const normalize=(packet:Json)=>Object.fromEntries(Object.entries(packet).map(([key,value])=>[key,Array.isArray(value)?value.map(item=>JSON.stringify(item)).sort():value]))
+  expect(normalize(repeated)).toEqual(normalize(original))
  }),90_000)
  it.each(['hold','body','privacy','revoke'] as const)('preserves a fresh %s refusal after a completed proof',async action=>frame(async client=>{
   await equalProof(client,roots)
@@ -114,16 +93,24 @@ describe.sequential('[COMP:api/native-turn-frame] lossless graph representation'
  it('retains the unsupported-family refusal',async()=>frame(async client=>{
   await equalProof(client,[{kind:'external_source',id:randomUUID(),version:'1'}],[],false)
  }))
- it.each(['diamond','cycle','duplicate-key','overflow'] as const)('preserves exact topological %s behavior',async shape=>frame(async client=>{
-  const node=(id:string,version='1')=>({tag:'source',kind:'session_message',id,version})
-  const a=node(randomUUID()),b=node(randomUUID()),c=node(randomUUID()),d=node(randomUUID())
-  let nodes=[a,b,c,d],edges=[{parent:a,child:b},{parent:a,child:c},{parent:b,child:d},{parent:c,child:d}]
-  if(shape==='cycle')edges.push({parent:d,child:a})
-  if(shape==='duplicate-key')nodes.push({...a})
-  if(shape==='overflow'){nodes=Array.from({length:4097},()=>node(randomUUID()));edges=[]}
-  const input={nodes,edges},current=await operation(client,'topology',input)
-  expect(current).toEqual(await operation(client,'original_topology',input))
-  if(shape==='diamond')expect(current).toHaveLength(4)
-  else expect(current).toBeNull()
+ it('terminates a real stored file cycle and refuses its capture',async()=>frame(async client=>{
+  const fileRoots=cycleFiles.map(id=>({kind:'workspace_file',id,version:'1'}))
+  await equalProof(client,fileRoots)
+  await operation(client,'cycle',cycleFiles)
+  await expect(operation(client,'read',{roots:fileRoots})).rejects.toMatchObject({code:'42501',message:'scope_ancestry_unavailable'})
  }),90_000)
+ it('refuses an oversized root set at the actual capture port',async()=>frame(async client=>{
+  await equalProof(client,Array.from({length:4097},()=>({kind:'session_message',id:randomUUID(),version:'1'})),[],false)
+ }))
+ it('keeps canonical graph internals and their contract registry private',async()=>{
+  expect((await f.pool.query(`SELECT has_table_privilege('app_user','native_turn_contract_helpers','SELECT') read,
+   has_table_privilege('app_user','native_turn_contract_helpers','UPDATE') write`)).rows[0]).toEqual({read:false,write:false})
+  const internals=['conversation_dag','conversation_dag_edges','conversation_dag_point','conversation_dag_envelope','conversation_dag_domain','conversation_dag_scan','conversation_dag_scope']
+  const routines=(await f.pool.query<{name:string;permitted:boolean}>(`SELECT proname name,has_function_privilege('app_user',oid,'EXECUTE') permitted
+   FROM pg_proc WHERE pronamespace='public'::regnamespace AND proname=ANY($1::text[])`,[internals])).rows
+  expect(routines.map(row=>row.name).sort()).toEqual(internals.sort())
+  expect(routines.every(row=>!row.permitted)).toBe(true)
+  expect((await f.pool.query(`SELECT p.oid::regprocedure::text signature FROM pg_proc p
+   WHERE p.pronamespace='public'::regnamespace AND p.proname LIKE 'native_retained_graph_%'`)).rows).toEqual([])
+ })
 })

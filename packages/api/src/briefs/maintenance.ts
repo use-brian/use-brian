@@ -18,7 +18,9 @@ import { createHash, randomUUID } from 'node:crypto'
 import type { PoolClient } from 'pg'
 import * as Y from 'yjs'
 import { applyOpsToYDoc, FRAGMENT_FIELD, healBlockIds, yDocToSnapshot, type DocOp } from '@use-brian/doc-model'
-import { contextSections, type BriefContextSection, type DocGateway, type Ops } from '@use-brian/core'
+import { contextSections, type BriefContextSection } from '@use-brian/core/doc/brief-types.js'
+import type { Ops } from '@use-brian/core/doc/page-types.js'
+import type { DocGateway } from '@use-brian/core/doc/tools.js'
 import { createDocGateway } from '../doc/doc-gateway.js'
 import {
   briefFail,

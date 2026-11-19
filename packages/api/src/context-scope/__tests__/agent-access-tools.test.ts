@@ -1,6 +1,6 @@
 import { describe,expect,it } from 'vitest'
 import { z } from 'zod'
-import { buildTool,type ToolContext } from '@use-brian/core'
+import { buildTool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { currentAgentAccess,runWithAgentAccess } from '../../db/agent-access-context.js'
 import { bindToolsToAgentAccess } from '../agent-access-tools.js'
 
@@ -44,30 +44,30 @@ describe('[COMP:api/agent-access-ceiling] tool invocation boundary',()=>{
 describe('[COMP:api/agent-access-ceiling] host read context forwarding',()=>{
   it.each(['complete','source','timeout','method'] as const)('preserves physical dispatch guards through actual access and MCP wrappers (%s)',async kind=>{
     const {vi}=await import('vitest')
-    const {createGoogleCalendarTools,createMcpSearchTools,buildToolIndex,inheritRoutineCalendarRead,ContextScopeAccumulator,queryLoop,NOOP_TURN_LEDGER}=await import('@use-brian/core')
+    const {createGoogleCalendarTools}=await import('@use-brian/core/tools/base/google-calendar.js'),{createMcpSearchTools,buildToolIndex}=await import('@use-brian/core/mcp/tool-search.js'),{inheritRoutineCalendarRead}=await import('@use-brian/core/engine/routine-read-ownership.js'),{queryLoop}=await import('@use-brian/core/engine/query-loop-defaults.js'),{ContextScopeAccumulator}=await import('@use-brian/agent-runtime/security/context-scope.js'),{NOOP_TURN_LEDGER}=await import('@use-brian/agent-runtime/engine/turn-ledger.js')
     const {executionFixture,fixtureDecisionProvider}=await import('../../../../core/src/decisions/__tests__/execution-fixture.js')
     const controller=new AbortController(),lease={assertCurrent:async()=>{},execute:async<T>(fn:()=>Promise<T>)=>fn()}
     const execution={security:{authority:lease,ceiling:{clearance:'internal'},provenance:{},access:{userId:'actor',workspaceId:'workspace',assistantId:'caller',clearance:'internal',compartments:[],projectIds:[]}},lifecycle:{abortSignal:controller.signal}} as unknown as NonNullable<ToolContext['executionContext']>
     let phase=false,revoked=false,physicalChecks=0,entered!:()=>void,release!:()=>void
     const started=new Promise<void>(resolve=>{entered=resolve}),gate=new Promise<void>(resolve=>{release=resolve})
-    const input:ToolContext={...context,abortSignal:controller.signal,executionContext:execution,authority:lease,scopeAccumulator:new ContextScopeAccumulator(),assertModelInputAuthority:async()=>{
+    const input:ToolContext={...context,abortSignal:controller.signal,executionContext:execution,authority:lease,scopeAccumulator:new ContextScopeAccumulator(),admitModelInput:async()=>{
       if(!phase)return
       physicalChecks++
       if(revoked)throw new Error('Fictional source held during approval')
       if(kind==='timeout'){entered();await gate}
     }}
-    const list=vi.fn(async()=>({items:[]})),canonical=createGoogleCalendarTools({listEvents:list} as unknown as import('@use-brian/core').GoogleCalendarApi).find(tool=>tool.name==='googleCalendarListEvents')!
+    const list=vi.fn(async()=>({items:[]})),canonical=createGoogleCalendarTools({listEvents:list} as unknown as import('@use-brian/core/tools/base/google-calendar.js').GoogleCalendarApi).find(tool=>tool.name==='googleCalendarListEvents')!
     canonical.requiresConfirmation=true;canonical.timeoutMs=15
     const settings={getPolicy:async()=>null,setPolicy:async()=>{},recordUsage:async()=>{},recordUsageAndGetCount:async()=>({timesAllowed:0,timesDenied:0})}
     const direct=createMcpSearchTools({index:buildToolIndex([{kind:'local',serverName:'gcal',tools:[canonical]}]),settingsStore:settings,assistantId:'caller',userId:'actor',exposeLocalReadTools:true}).find(tool=>tool.name===canonical.name)!
     const bound=bindToolsToAgentAccess(new Map([[direct.name,direct]]),{clearance:'internal',compartments:[],projectIds:[]})
     inheritRoutineCalendarRead(direct,bound.get(direct.name)!)
     let compositions=0
-    const events:import('@use-brian/core').QueryEvent[]=[]
-    const provider:import('@use-brian/core').LLMProvider={name:'fixture',models:['fixture'],stream(){throw new Error('Unexpected stateless dispatch')},createSession:()=>({send:async function*(){compositions++;yield{type:'text_delta',text:'Fictional calendar answer'};yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:1,outputTokens:1}}}})}
+    const events:import('@use-brian/agent-runtime/engine/query-loop.js').QueryEvent[]=[]
+    const provider:import('@use-brian/agent-runtime/providers/types.js').LLMProvider={name:'fixture',models:['fixture'],stream(){throw new Error('Unexpected stateless dispatch')},createSession:()=>({send:async function*(){compositions++;yield{type:'text_delta',text:'Fictional calendar answer'};yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:1,outputTokens:1}}}})}
     const runtime=executionFixture({llm:provider,totalTimeoutMs:1000,primaryTimeoutMs:900,primary:fixtureDecisionProvider(async request=>{
       const state=request.state as unknown as {targets:Array<{id:string}>;ranges:Array<{id:string}>}
-      const answers:import('@use-brian/core').DecisionAnswer[]=request.questions.map(question=>question.kind==='boolean'
+      const answers:import('@use-brian/core/decisions/types.js').DecisionAnswer[]=request.questions.map(question=>question.kind==='boolean'
         ? {kind:'boolean',questionId:question.id,value:question.id===state.targets[0].id,evidence:{source:'unavailable'}}
         : {kind:'choice',questionId:question.id,value:question.id==='routine'?'calendar':state.ranges[0].id,evidence:{source:'unavailable'}})
       return{providerId:'fixture-decision',model:request.model,answers}

@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { createGoogleSheetsTools, type GoogleSheetsApi } from '../base/google-sheets.js'
 import { createGoogleDocsTools, type GoogleDocsApi } from '../base/google-docs.js'
 import { createGoogleSlidesTools, type GoogleSlidesApi } from '../base/google-slides.js'
-import type { ToolContext } from '../types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const ctx: ToolContext = {
   userId: 'u1',

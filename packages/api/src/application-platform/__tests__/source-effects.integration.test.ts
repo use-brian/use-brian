@@ -1,5 +1,5 @@
 import {afterAll,describe,expect,it,vi} from 'vitest'
-import {advanceWorkflowRun} from '@use-brian/core'
+import {advanceWorkflowRun} from '@use-brian/core/workflow/executor.js'
 import {getPool,getAppPool} from '../../db/client.js'
 import {configureConnectorSourceRuntimeFactory} from '../source-runtime.js'
 import {createDbWorkflowRunStore,createDbWorkflowStore} from '../../db/workflow-store.js'

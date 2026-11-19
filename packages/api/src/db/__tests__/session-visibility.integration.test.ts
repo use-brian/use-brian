@@ -8,6 +8,12 @@
  *   - a non-member C cannot read it;
  *   - an owner-scoped (`visibility='owner'`) session of A stays invisible to B.
  *
+ * Since migration 8248 a shared Page thread (`anchor_kind='doc_thread'`, which
+ * the 741 kind trigger derives from `channel_type='doc_thread'`) is readable
+ * only through current access to the Page its `comment_threads` row is
+ * attached to. The fixture therefore attaches each thread to a Page in a
+ * teamspace A and B belong to, the shape the comment-thread store creates.
+ *
  * Requires the local `Use Brian` DB with migration 223 applied. Skips silently
  * when the DB isn't reachable / the column is absent — matches the pattern in
  * aggregate-store.integration.test.ts.
@@ -127,6 +133,38 @@ async function makeSession(
   return r.rows[0].id
 }
 
+async function makeTeamspacePage(client: pg.PoolClient, workspaceId: string, creatorId: string, memberIds: string[]): Promise<string> {
+  const space = (await client.query(
+    `INSERT INTO teamspaces (id, workspace_id, name, created_by)
+     VALUES (gen_random_uuid(), $1, 'sv-test-space', $2) RETURNING id`,
+    [workspaceId, creatorId],
+  )).rows[0].id
+  for (const userId of memberIds) {
+    await client.query('INSERT INTO teamspace_members (teamspace_id, user_id) VALUES ($1, $2)', [space, userId])
+  }
+  const page = await client.query(
+    `INSERT INTO saved_views (id, workspace_id, created_by, name, entity, view_type, teamspace_id)
+     VALUES (gen_random_uuid(), $1, $2, 'sv-test-page', 'tasks', 'table', $3) RETURNING id`,
+    [workspaceId, creatorId, space],
+  )
+  return page.rows[0].id
+}
+
+async function attachThread(
+  client: pg.PoolClient,
+  pageId: string,
+  workspaceId: string,
+  sessionId: string,
+  creatorId: string,
+  clearance: 'public' | 'internal' | 'confidential',
+): Promise<void> {
+  await client.query(
+    `INSERT INTO comment_threads (page_id, workspace_id, session_id, anchor_kind, created_by, effective_clearance)
+     VALUES ($1, $2, $3, 'ai_block', $4, $5)`,
+    [pageId, workspaceId, sessionId, creatorId, clearance],
+  )
+}
+
 async function addMessage(client: pg.PoolClient, sessionId: string): Promise<void> {
   await client.query(
     `INSERT INTO session_messages (session_id, role, content, sequence_num)
@@ -174,6 +212,9 @@ describeIf('[COMP:api/session-visibility] Session visibility RLS (integration)',
     sharedSession = await makeSession(client, assistantId, userA, 'doc_thread', 'workspace', ws, 'internal')
     ownerSession = await makeSession(client, assistantId, userA, 'web', 'owner', null)
     confidentialSession = await makeSession(client, assistantId, userA, 'doc_thread', 'workspace', ws, 'confidential')
+    const page = await makeTeamspacePage(client, ws, userA, [userA, userB])
+    await attachThread(client, page, ws, sharedSession, userA, 'internal')
+    await attachThread(client, page, ws, confidentialSession, userA, 'confidential')
     await addMessage(client, sharedSession)
     await addMessage(client, ownerSession)
     await addMessage(client, confidentialSession)

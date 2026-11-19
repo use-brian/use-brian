@@ -11,7 +11,8 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { buildTool, type LLMProvider, type Message, type StreamChunk, type Tool } from '@use-brian/core'
+import type { LLMProvider, Message, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { z } from 'zod'
 
 import {

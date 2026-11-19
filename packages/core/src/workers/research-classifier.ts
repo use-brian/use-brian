@@ -1,10 +1,10 @@
 import { decisionUsageModelId } from '../decisions/usage.js'
 import {buildToolSelectionQuestions} from '../engine/tool-selection.js'
 import {createLlmDecisionProvider,buildLlmDecisionMessages,decisionLlmOutputBudget} from '../decisions/adapters/llm.js'
-import {bindScopeSources,boundScopeSources} from '../security/source-evidence.js'
+import {bindScopeSources,boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {isTrivialChatMessage} from '../classification/trivial-chat.js'
-import {DerivedScopeError} from '../security/derived-scope.js'
-import {assertInputAuthority,assertProviderInputPreparation,captureInputAdmissionProvider,isInputAuthorityError,ownsInputAdmission} from '../providers/input-authority.js'
+import {DerivedScopeError} from '@use-brian/agent-runtime/security/derived-scope.js'
+import {assertInputAuthority,assertProviderInputPreparation,captureInputAdmissionProvider,isInputAuthorityError,ownsInputAdmission} from '@use-brian/agent-runtime/providers/input-authority.js'
 import { decisionCompletionInput } from '../decisions/invocation.js'
 import { captureClassifierDecisionRuntime, assertClassifierBookkeeping, registerClassifierLlmCompletion } from '../decisions/authority-ownership.js'
 import type {SessionContextAuthority} from '../memory/session-state-types.js'
@@ -21,8 +21,8 @@ import type {SessionContextAuthority} from '../memory/session-state-types.js'
 
 import { researchEffort, type ResearchEffort } from './research-effort.js'
 
-import type { LLMProvider, TokenUsage } from '../providers/types.js'
-import { collectStream } from '../providers/accumulator.js'
+import type { LLMProvider, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
 import type {
   DecisionExecutionPort,
   DecisionExecutionOperation,

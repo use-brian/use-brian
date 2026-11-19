@@ -1,5 +1,6 @@
 import type { PoolClient } from 'pg'
-import { deriveResourceScope, type EntityCreateParams, type ResourceScope } from '@use-brian/core'
+import type { EntityCreateParams } from '@use-brian/core/entities/types.js'
+import { deriveResourceScope, type ResourceScope } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { validateDerivedEntityInputs } from '../db/derived-scope-store.js'
 import { assertExecutionResourceScope } from '../db/access-predicate.js'
 import { WorkspaceAccessError } from './policy.js'

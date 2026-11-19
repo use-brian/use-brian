@@ -1,7 +1,9 @@
 /** Fresh source authority for exact persisted observations. [COMP:api/external-source-access] */
 import { randomUUID } from 'node:crypto'
 import type { PoolClient } from 'pg'
-import { ContextScopeAccumulator, resourceScopeKey, scopeGrantContains, type ExecutionContext, type ScopeSource } from '@use-brian/core'
+import { ContextScopeAccumulator, scopeGrantContains } from '@use-brian/agent-runtime/security/context-scope.js'
+import { resourceScopeKey, type ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { SOURCE_PROTOCOL_VERSION, SourceProtocolError, sourceSubjectKey, sourceResourceKey,
   type SourceAction, type SourceObservation, type SourceSubject } from '@use-brian/brian-app/connector'
 import { getPool } from '../db/client.js'

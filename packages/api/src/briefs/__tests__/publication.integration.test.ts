@@ -14,7 +14,7 @@ import { dismissProposal, ensureBrief, inspectBrief, proposeChange, saveDraft, b
 import { actorOf, briefFixture, type BriefFixture } from './fixture.js'
 import express from 'express'
 import request from 'supertest'
-import type { ToolContext } from '@use-brian/core'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { briefRoutes } from '../../routes/briefs.js'
 import { createBriefTools } from '../tools.js'
 import { maintainBriefContext } from '../maintenance.js'

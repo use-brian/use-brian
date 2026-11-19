@@ -10,7 +10,7 @@ import {
   generateWorkflowTitle,
   sanitizeWorkflowTitle,
 } from '../auto-title.js'
-import type { LLMProvider, StreamChunk } from '../../providers/types.js'
+import type { LLMProvider, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
 
 function makeProvider(chunks: StreamChunk[]): LLMProvider {
   return {

@@ -11,7 +11,8 @@
  */
 
 import type { QueryResultRow } from 'pg'
-import { CRM_ERP_CAPABILITIES, CrmOperationsError, type CrmErpReadPort } from '@use-brian/core'
+import { CRM_ERP_CAPABILITIES, type CrmErpReadPort } from '@use-brian/core/crm/erp-bridge.js'
+import { CrmOperationsError } from '@use-brian/core/crm/operations-types.js'
 import { query } from './client.js'
 import { commercialVisibility } from './crm-commercial-context-store.js'
 

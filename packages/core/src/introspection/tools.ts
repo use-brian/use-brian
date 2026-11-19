@@ -32,8 +32,8 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '../tools/types.js'
-import { uuidId } from '../tools/schema-tolerance.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
+import { uuidId } from '@use-brian/agent-runtime/tools/schema-tolerance.js'
 import type { StructuredSchedule } from '../scheduling/schedule.js'
 import type {
   IntrospectionDeps,

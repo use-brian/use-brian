@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { stripDataUris } from '@use-brian/core'
+import { stripDataUris } from '@use-brian/core/files/data-uri.js'
 import { chunkFileText, MAX_SEGMENTS_PER_FILE, type FileChunk } from '../file-segments-store.js'
 
 /**

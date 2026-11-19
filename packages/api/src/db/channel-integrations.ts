@@ -25,8 +25,9 @@ import {
   decryptCredentials as _decryptCredentials,
 } from './credential-crypto.js'
 import { parseTopicChannelId } from '@use-brian/channels'
-import type { Sensitivity } from '@use-brian/core'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { getPool, query, queryWithRLS } from './client.js'
+import { providerChannelIdFromSession } from './session-channel-id.js'
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -706,7 +707,7 @@ export async function getGroupAudienceBindingsSystem(
   workspaceId: string, channelType: string, channelId: string,
   execute: typeof query = query,
 ): Promise<DeliveryAudienceBinding[]> {
-  const parent = parseTopicChannelId(channelId).chatId
+  const parent = parseTopicChannelId(providerChannelIdFromSession(channelType,channelId)).chatId
   const result = await execute<{ binding: DeliveryAudienceBinding }>(
     `SELECT b AS binding FROM channel_integrations ci JOIN channels c ON c.id=ci.channel_id
        CROSS JOIN LATERAL jsonb_array_elements(COALESCE(ci.config->'deliveryAudienceBindings','[]'::jsonb)) b

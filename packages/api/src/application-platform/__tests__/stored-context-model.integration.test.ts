@@ -2,7 +2,14 @@ import {randomUUID} from 'node:crypto'
 import {writeFile} from 'node:fs/promises'
 import type {PoolClient} from 'pg'
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
-import {boundScopeSources,executionToolContext,createCorrectionTools,createRetrievalTools,type RetrievalStore,type LLMProvider,type ScopeSource,type AccessCeiling} from '@use-brian/core'
+import {createCorrectionTools} from '@use-brian/core/corrections/tools.js'
+import {createRetrievalTools} from '@use-brian/core/retrieval/tools.js'
+import type {RetrievalStore} from '@use-brian/core/retrieval/types.js'
+import type {LLMProvider} from '@use-brian/agent-runtime/providers/types.js'
+import type {AccessCeiling} from '@use-brian/agent-runtime/security/access-ceiling.js'
+import type {ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
+import {executionToolContext} from '@use-brian/agent-runtime/security/execution-context.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {authSessionStore} from '../../db/auth-session-store.js'
 import {createDbRowHistoryStore} from '../../db/row-history-store.js'
@@ -12,11 +19,11 @@ import {createMemoryRetractionStore} from '../../db/retraction-store.js'
 import {createSoftDeleteStore} from '../../db/soft-delete-store.js'
 import {createSensitivityReclassificationStore} from '../../db/sensitivity-reclassification-store.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
-import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
+import {readAdmittedSessionQuery} from '../../db/conversation-store.js'
 import {publishSessionTitle,readSessionTitle,sessionTitleHead} from '../../db/session-title-store.js'
 import {resolveSessionTitleAuthority} from '../../routes/session-title-authority.js'
 import {generateTitle} from '../../routes/attended-session-title.js'
-import {assertSourceModelInputAuthority,assertSourceModelOutputAuthority} from '../model-source-authority.js'
+import {admitModelInput,admitModelOutput} from '../../context-scope/admission.js'
 import {validateCallerScopeEvidence} from '../../context-scope/caller-evidence.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
 const{assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
@@ -51,7 +58,7 @@ describe.sequential('[COMP:api/application-persistence] stored native context at
  }
  for(const action of ['context','deliver'] as const)it(`rechecks hidden native Memory ancestry at the actual ${action} model guard and keeps another current reader usable`,async()=>{
   const c=await setup(),first=await c.publish('Fictional model ancestor','Fictional retained model title'),before=await c.source(first.stored.revisionId)
-  const guard=action==='context'?assertSourceModelInputAuthority:assertSourceModelOutputAuthority
+  const guard=action==='context'?admitModelInput:admitModelOutput
   await expect(guard((await c.reader()).context)).resolves.toBeUndefined()
   const cached=await c.reader()
   await c.f.pool.query('UPDATE memories SET scope_held=true WHERE id=$1',[first.memory.id])
@@ -70,7 +77,7 @@ describe.sequential('[COMP:api/application-persistence] stored native context at
     yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:2,outputTokens:2}}}}
   const messages=[{role:'user' as const,get content(){extractions++;return cached.title.title}}]
   await c.f.pool.query('UPDATE memories SET scope_held=true WHERE id=$1',[first.memory.id])
-  await expect(generateTitle(provider,messages,'fixture',()=>assertSourceModelInputAuthority(cached.context))).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
+  await expect(generateTitle(provider,messages,'fixture',()=>admitModelInput(cached.context))).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
   expect(extractions).toBe(0);expect(calls).toBe(0)
  })
 
@@ -168,8 +175,8 @@ describe.sequential('[COMP:api/application-persistence] stored native context at
    expect(title?.revisionId).toBe(stored!.revisionId)
    expect([...new Set(reader.accumulator.evidence.sources?.map(s=>s.resourceKind))]).toEqual(['session_context_revision'])
    report.freshEvidence=structuredClone(reader.accumulator.evidence)
-   report.stage='modelInput';await assertSourceModelInputAuthority(context(reader))
-   report.stage='modelOutput';await assertSourceModelOutputAuthority(context(reader))
+   report.stage='modelInput';await admitModelInput(context(reader))
+   report.stage='modelOutput';await admitModelOutput(context(reader))
    report.stage='finite C-only controls'
    const savedState=await titleState(),cRoot=boundScopeSources(title!)[0]!
    expect(savedState.revisions).toHaveLength(1);expect(savedState.payloads).toHaveLength(1);expect(savedState.heads).toHaveLength(1)

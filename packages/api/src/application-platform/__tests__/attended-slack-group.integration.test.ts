@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
-import { afterAll, afterEach, describe, expect, it } from 'vitest'
-import type { LLMProvider } from '@use-brian/core'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
 import { getAppPool, getPool } from '../../db/client.js'
+import { conversationAnchorWriteAdmissionActive, initializeConversationVisibility } from '../../db/conversation-visibility.js'
 import { findAssistantById } from '../../db/users.js'
 import { createDbCapabilityStore } from '../../db/capability-store.js'
 import { createDbMemoryStore } from '../../db/memory-store.js'
@@ -14,6 +15,7 @@ await assertLocalFixture()
 
 describe.sequential('[COMP:api/channel-room] approved Slack group research admission', () => {
   let fixture: Awaited<ReturnType<typeof persistentContextFixture>> | undefined
+  beforeAll(async () => { await initializeConversationVisibility(); expect(conversationAnchorWriteAdmissionActive()).toBe(true) })
   afterEach(async () => { await fixture?.cleanup(); fixture = undefined })
   afterAll(async () => { await getAppPool().end(); await getPool().end() })
 
@@ -43,7 +45,7 @@ describe.sequential('[COMP:api/channel-room] approved Slack group research admis
     const provider: LLMProvider = {
       name: 'fictional-slack-group', models: ['fixture'],
       async *stream(options) {
-        const research = options.maxTokens === 128 && JSON.stringify(options.messages).includes('recentConversation')
+        const research = JSON.stringify(options.messages).includes('recentConversation')
         if (research) {
           assessments++
           authoredAtAssessment = (await f.pool.query("SELECT id FROM session_messages WHERE session_id=$1 AND role='user'", [sessionRef.id])).rows.length === 1
@@ -93,12 +95,14 @@ describe.sequential('[COMP:api/channel-room] approved Slack group research admis
     expect(current.assessments()).toBe(1)
     expect(current.authoredAtAssessment()).toBe(true)
     expect(current.mainSends()).toBe(1)
+    expect((await current.f.pool.query(`SELECT s.effective_clearance,e.cap FROM public.sessions s
+      JOIN public.conversation_envelopes e ON e.session_id=s.id WHERE s.id=$1`,[current.sessionRef.id])).rows[0])
+      .toEqual({effective_clearance:'internal',cap:'internal'})
     expect(current.responses).toEqual(['Fictional admitted group response'])
     expect(current.notices).toEqual([])
     const room = (await current.f.pool.query('SELECT visibility,anchor_kind,effective_clearance FROM sessions WHERE id=$1', [current.sessionRef.id])).rows[0]
     expect(room).toMatchObject({ visibility: 'workspace', anchor_kind: 'channel', effective_clearance: 'internal' })
   })
-
   it('refuses a revoked original member before entering the main provider', async () => {
     const current = await setup(true)
     await expect(current.run()).rejects.toMatchObject({ reason: 'authority_changed', retrySafe: false })

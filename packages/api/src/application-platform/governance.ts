@@ -1,7 +1,8 @@
 /** Current native module governance; deployed ports remain private. [COMP:api/application-governance] */
 import { z } from 'zod'
 import type { Pool, PoolClient } from 'pg'
-import { CrmConfigCommandSchema,type ExecutionContext } from '@use-brian/core'
+import { CrmConfigCommandSchema } from '@use-brian/core/crm/config-commands.js'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { ApplicationPlatformError } from '@use-brian/shared'
 import { getApplicationExecutionBinding, runApplicationTransaction } from './execution-context.js'
 

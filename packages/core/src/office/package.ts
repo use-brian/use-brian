@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
-import JSZip from 'jszip'
-import { DOMParser } from 'linkedom'
+import type JSZip from 'jszip'
+import { lazyImplementation } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
+import { officeXmlDomParser } from './xml-dom.js'
 type XmlElement = { parentElement?: XmlElement; localName: string; namespaceURI?: string; attributes: ArrayLike<{ name: string }>; getAttribute(name: string): string | null }
 type XmlDocument = { querySelectorAll(selector: string): ArrayLike<XmlElement> }
 import { SpreadsheetTableSchema, validateSpreadsheetTable, type SpreadsheetTable } from '@use-brian/office-model'
@@ -11,6 +12,9 @@ import {
   type OfficePreflightDiagnostic,
   type OfficeResourceRef,
 } from '@use-brian/office-model'
+
+// The ZIP codec loads on the first package read or write, not with the Office modules (M4 step 5).
+const loadJSZip = lazyImplementation('The Office package codec (JSZip)', () => import('jszip').then((m) => m.default))
 
 export const OFFICE_CANONICAL_PART = 'customXml/brian-office.json'
 export const OFFICE_CANONICAL_CONTENT_TYPE = 'application/vnd.use-brian.office+json'
@@ -101,6 +105,7 @@ function relationshipAttributes(tag: string): Record<string, string> {
 
 /** Fail closed: only an unfiltered, header-only, built-in-style simple table is admitted. */
 export function parseSimpleSpreadsheetTableXml(xml: string, id: string): SpreadsheetTable {
+  const DOMParser = officeXmlDomParser()
   const doc = new DOMParser().parseFromString(xml, 'text/xml') as unknown as XmlDocument
   const allowed: Record<string, string[]> = {
     table: ['id', 'name', 'displayName', 'ref', 'headerRowCount', 'totalsRowCount', 'totalsRowShown', 'mc:Ignorable'],
@@ -182,9 +187,14 @@ export async function preflightOfficePackage(
     return { ok: false, family, diagnostics: [error('package.too_large', '', `Office package exceeds ${MAX_PACKAGE_BYTES} bytes`)] }
   }
 
+  const JSZipCodec = await loadJSZip()
+  // Spreadsheet table XML is parsed below inside a catch that reports an
+  // unsupported construct; load the XML parser first, so a load failure is
+  // unavailable rather than a diagnostic about the user's file.
+  if (family === 'spreadsheet') officeXmlDomParser()
   let zip: JSZip
   try {
-    zip = await JSZip.loadAsync(bytes, { checkCRC32: true })
+    zip = await JSZipCodec.loadAsync(bytes, { checkCRC32: true })
   } catch (cause) {
     return { ok: false, family, diagnostics: [error('package.invalid_zip', '', cause instanceof Error ? cause.message : 'Invalid OOXML ZIP package')] }
   }
@@ -264,7 +274,7 @@ export function stableOfficeUuid(seed: string): string {
 }
 
 export async function attachCanonicalOfficePart(bytes: Uint8Array, snapshot: OfficeArtifactSnapshot): Promise<Buffer> {
-  const zip = await JSZip.loadAsync(bytes)
+  const zip = await (await loadJSZip()).loadAsync(bytes)
   zip.file(OFFICE_CANONICAL_PART, canonicalOfficeJson(snapshot))
   const contentTypes = await zip.file('[Content_Types].xml')?.async('string')
   if (!contentTypes) throw new Error('Generated OOXML package has no [Content_Types].xml')

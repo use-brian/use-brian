@@ -47,6 +47,7 @@ import { resolveMessageStoreLaunch } from './message-store-launch.mjs'
 import { bridgeEnv } from './bridge-env.mjs'
 import { resolveApiPort } from './launch-ports.mjs'
 import { resolveDocSyncLaunch, resolveOutpostMailbox } from './launch-outpost.mjs'
+import { resolveLocalDatabaseSelection, startManagedLocalDatabase, applyManagedDatabaseEnv } from './managed-postgres-launch.mjs'
 import { adminRigEnvironment, adminRuntimeNodeOptions, recordAdminGroups, adminStateDirectory, stopOwnedAdminGroups } from './rig-admin.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -266,7 +267,16 @@ writeFileSync(
 )
 
 // External-store escape hatch: a real Postgres URL skips the embedded brain.
-const useEmbedded = !process.env.DATABASE_URL
+// USEBRIAN_LOCAL_DATABASE=managed-postgres selects the explicit managed native
+// branch instead (deployment.md → "Local database runtime").
+let localDatabase
+try {
+  localDatabase = resolveLocalDatabaseSelection(process.env, { platform: platform(), arch: arch() })
+} catch (err) {
+  console.error(`[launch] ${err.message}`)
+  process.exit(1)
+}
+const useEmbedded = localDatabase.kind === 'embedded'
 const databaseUrl = process.env.DATABASE_URL || `postgres://localhost:${PORTS.pglite}/postgres`
 // Core-only: the product surface without the channel bridges (see header).
 const coreOnly = ['1', 'true'].includes((process.env.USEBRIAN_CORE_ONLY ?? '').trim().toLowerCase())
@@ -491,6 +501,8 @@ function pruneTurbopackCache() {
 }
 
 let shuttingDown = false
+// Managed native database handle (null for the embedded and external branches).
+let managedDatabase = null
 function shutdown(code = 0) {
   if (shuttingDown) return
   shuttingDown = true
@@ -499,10 +511,16 @@ function shutdown(code = 0) {
       try { process.kill(-c.pid, 'SIGTERM') } catch (error) { if (error.code !== 'ESRCH') console.warn('[launch] child group shutdown failed:', error.code) }
     } else c.kill('SIGTERM')
   }
-  setTimeout(() => {
+  const exitAfterChildren = () => setTimeout(() => {
     if(adminOnly){try{stopOwnedAdminGroups(ROOT,undefined,(pid,signal)=>process.kill(pid,signal===0?0:'SIGKILL'))}catch(error){console.warn('[launch] owned forced cleanup refused:',error.message)}}
     process.exit(code)
   }, 1500)
+  // The managed database stops through its fenced pg_ctl after the clients.
+  if (managedDatabase) {
+    managedDatabase.stop(20_000).then((result) => {
+      if (result?.timedOut) console.warn('[launch] managed PostgreSQL stop is still running; its fence blocks a new start until it exits.')
+    }, (err) => console.warn('[launch] managed PostgreSQL stop failed:', err?.message ?? err)).finally(exitAfterChildren)
+  } else exitAfterChildren()
 }
 process.on('SIGINT', () => shutdown(0))
 process.on('SIGTERM', () => shutdown(0))
@@ -516,7 +534,36 @@ if(adminOnly){
 console.log('[launch] building workspace packages (turbo-cached)...')
 await runOnce('build', 'pnpm', ['exec', 'turbo', 'run', 'build', '--filter=./packages/*'])
 
-if (useEmbedded) {
+if (localDatabase.kind === 'managed-postgres') {
+  const profileDirectory = join(CONFIG_DIR, 'managed-postgres')
+  console.log(`[launch] starting managed local PostgreSQL at ${profileDirectory} ...`)
+  try {
+    managedDatabase = await startManagedLocalDatabase({
+      root: ROOT,
+      profileDirectory,
+      legacyBrainDirectory: BRAIN_DIR,
+      artifactDirectory: localDatabase.artifactDirectory,
+      transfer: localDatabase.transfer === true,
+      env: process.env,
+      onExit: ({ code, signal, lost }) => {
+        if (shuttingDown) return
+        console.error(`[launch] managed PostgreSQL exited (${lost ? 'ownership lost' : signal ?? code}); shutting down.`)
+        managedDatabase = null
+        shutdown(1)
+      },
+    })
+  } catch (err) {
+    if (err?.code === 'MANAGED_NATIVE_TRANSFER_REQUIRED') {
+      console.error(`[launch] ${BRAIN_DIR} holds an existing embedded brain and was not changed. To move it to managed PostgreSQL, also set USEBRIAN_MANAGED_POSTGRES_TRANSFER=1; unset USEBRIAN_LOCAL_DATABASE to keep using it as is.`)
+    } else if (err?.code === 'MANAGED_NATIVE_TRANSFER_REFUSED') {
+      console.error(`[launch] the transfer of ${BRAIN_DIR} to managed PostgreSQL stopped before the switch (${err?.message ?? err}). The embedded brain is still your brain and was not changed. Unset USEBRIAN_LOCAL_DATABASE to keep using it, or fix the cause and launch again to retry from the start.`)
+    } else console.error(`[launch] managed PostgreSQL refused to start: ${err?.message ?? err}`)
+    process.exit(1)
+  }
+  applyManagedDatabaseEnv(env, managedDatabase.urls)
+  if (managedDatabase.transfer) console.log(`[launch] existing brain transferred to managed PostgreSQL; ${BRAIN_DIR} is kept unchanged (receipt ${managedDatabase.transfer.receiptPath}).`)
+  console.log(`[launch] managed brain ready on 127.0.0.1:${managedDatabase.port}.`)
+} else if (useEmbedded) {
   console.log(`[launch] starting embedded brain (PGLite) at ${BRAIN_DIR} on :${PORTS.pglite} ...`)
   run('pglite', 'pnpm', ['--filter', '@use-brian/api-open', 'exec', 'tsx', 'src/pglite-server.ts'],
     { PGLITE_DATA_DIR: BRAIN_DIR, PGLITE_PORT: String(PORTS.pglite) })

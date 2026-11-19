@@ -6,7 +6,7 @@ vi.mock('../client.js', () => ({
 
 import { createDbCapabilityStore } from '../capability-store.js'
 import { query } from '../client.js'
-import { DuplicateGrantError } from '@use-brian/core'
+import { DuplicateGrantError } from '@use-brian/core/authorization/types.js'
 
 const mockQuery = vi.mocked(query)
 const store = createDbCapabilityStore()

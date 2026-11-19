@@ -21,6 +21,7 @@ const SID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
 
 function harness(opts?: {
   shouldPublish?: () => boolean
+  turnId?: () => string | null
   attribution?: () => { senderUserId: string; assistantId: string } | null
 }) {
   const events: SessionEvent[] = []
@@ -32,6 +33,7 @@ function harness(opts?: {
     publishSessionEvent: (e) => events.push(e),
     shouldPublish: opts?.shouldPublish,
     attribution: opts?.attribution,
+    turnId: opts?.turnId,
     now: () => clock,
   })
   return { events, publisher, tick: (ms: number) => (clock += ms) }
@@ -124,7 +126,23 @@ describe('[COMP:api/session-live-publisher] turn_stream snapshots', () => {
     const { events, publisher } = harness()
     publisher.onTextDelta('hi')
     const payload = (events[0] as { payload: Record<string, unknown> }).payload
-    expect(Object.keys(payload).sort()).toEqual(['activity', 'replyPhase', 'text'])
+    expect(Object.keys(payload).sort()).toEqual(['activity', 'replyPhase', 'text', 'turnId'])
+  })
+
+  it('resolves public correlation at emission and cannot accept an activity payload override', () => {
+    let turnId: string | null = null
+    const { events, publisher } = harness({ turnId: () => turnId })
+    publisher.onTextDelta('before claim')
+    expect(events.at(-1)!.payload).toHaveProperty('turnId', null)
+    turnId = 'a'.repeat(64)
+    publisher.publish(true)
+    expect(events.at(-1)!.payload).toHaveProperty('turnId', turnId)
+    const publish = vi.fn()
+    publishRoomTurnActivity({ mirror: true, sessionId: SID, turnId, senderUserId: 'u1',
+      event: 'status', data: { turnId: 'untrusted', phase: 'working' }, publishSessionEvent: publish })
+    expect(publish.mock.calls[0][0].payload).toMatchObject({ turnId, phase: 'working' })
+    publishTurnCompleted({ sessionId: SID, turnId, senderUserId: 'u1', publishSessionEvent: publish })
+    expect(publish.mock.calls[1][0].payload).toEqual({ turnId, senderUserId: 'u1' })
   })
 
   it('attributed snapshot carries reasoning tail + sender + assistant, reasoning capped', () => {
@@ -208,14 +226,14 @@ describe('[COMP:api/session-live-publisher] activity + completion', () => {
     expect(publish.mock.calls[0][0]).toEqual({
       kind: 'turn_activity',
       sessionId: SID,
-      payload: { event: 'tool_input', senderUserId: 'u1', name: 'x', input: { q: 'hello' } },
+      payload: { turnId: null, event: 'tool_input', senderUserId: 'u1', name: 'x', input: { q: 'hello' } },
     })
   })
 
   it('publishTurnCompleted carries the reason only when one exists', () => {
     const publish = vi.fn()
     publishTurnCompleted({ sessionId: SID, senderUserId: 'u1', publishSessionEvent: publish })
-    expect(publish.mock.calls[0][0].payload).toEqual({ senderUserId: 'u1' })
+    expect(publish.mock.calls[0][0].payload).toEqual({ senderUserId: 'u1', turnId: null })
     publishTurnCompleted({
       sessionId: SID,
       senderUserId: 'u1',
@@ -225,6 +243,7 @@ describe('[COMP:api/session-live-publisher] activity + completion', () => {
     expect(publish.mock.calls[1][0].payload).toEqual({
       senderUserId: 'u1',
       reason: 'stalled_reclaimed',
+      turnId: null,
     })
   })
 })

@@ -16,7 +16,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { processEpisode, type PipelineBDeps, type PipelineBEpisode } from '@use-brian/core'
+import { processEpisode, type PipelineBDeps, type PipelineBEpisode } from '@use-brian/core/ingest/pipeline-b.js'
 import { createMemory } from '../db/memories.js'
 import type { RebuildEpisodeRef, RebuildExtractor } from './rebuild.js'
 

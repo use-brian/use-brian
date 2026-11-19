@@ -1,5 +1,5 @@
 import type { PoolClient } from 'pg'
-import type { Sensitivity } from '@use-brian/core'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { currentAgentAccess } from '../db/agent-access-context.js'
 import { admitWorkspaceResource } from './resource-admission.js'
 import { WorkspaceAccessError } from './policy.js'
