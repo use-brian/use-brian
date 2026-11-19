@@ -2,7 +2,10 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const mocks = vi.hoisted(() => ({ queryGated: vi.fn(), canonicalQuery: vi.fn() }))
+const mocks = vi.hoisted(() => ({
+  queryGated: vi.fn(), canonicalQuery: vi.fn(), appQuery: vi.fn(),
+  applyRLSGucs: vi.fn(), commitTransaction: vi.fn(), rollbackAndRelease: vi.fn(),
+}))
 
 vi.mock('../crm-reader.js', async (importOriginal) => ({
   ...await importOriginal<typeof import('../crm-reader.js')>(),
@@ -11,11 +14,14 @@ vi.mock('../crm-reader.js', async (importOriginal) => ({
 }))
 
 vi.mock('../client.js', () => ({
-  applyRLSGucs: vi.fn(),
+  applyRLSGucs: mocks.applyRLSGucs,
+  commitTransaction: mocks.commitTransaction,
+  getAppPool: () => ({ connect: async () => ({ query: mocks.appQuery }) }),
   getPool: vi.fn(),
   query: vi.fn(),
   queryGated: mocks.queryGated,
   queryWithRLS: vi.fn(),
+  rollbackAndRelease: mocks.rollbackAndRelease,
 }))
 vi.mock('../entities-store.js', () => ({
   getEntityById: vi.fn(),
@@ -108,7 +114,7 @@ describe('[COMP:api/crm-page-http] CRM page store', () => {
     ]))
   })
 
-  it('returns authoritative counts once per stage while preserving currency totals', async () => {
+  it('keeps stage and currency totals in the scoped carrier reader', async () => {
     mocks.canonicalQuery
       .mockResolvedValueOnce({ rows: [{
         deals: '3', contacts: '8', companies: '4', overdue: '1', stale: '2',
@@ -119,7 +125,8 @@ describe('[COMP:api/crm-page-http] CRM page store', () => {
         ],
       }] })
 
-    const summary = await getCrmSummary(ctx, 'pipeline-1')
+    const carrier = { ...ctx, systemRead: true }
+    const summary = await getCrmSummary(carrier, 'pipeline-1')
 
     expect(summary.totals).toEqual({ deals: 3, contacts: 8, companies: 4 })
     expect(summary.attention).toEqual({ overdue: 1, stale: 2, noAmount: 1, orphaned: 3 })
@@ -128,7 +135,7 @@ describe('[COMP:api/crm-page-http] CRM page store', () => {
     }])
     expect(mocks.canonicalQuery).toHaveBeenCalledTimes(1)
     for (const call of mocks.canonicalQuery.mock.calls) {
-      expect(call[0]).toBe(ctx)
+      expect(call[0]).toBe(carrier)
       expect(call[1]).toEqual([
         { type: 'person', fields: ['archivedAt', 'companyId'] },
         { type: 'company', fields: ['archivedAt'] },
@@ -136,6 +143,57 @@ describe('[COMP:api/crm-page-http] CRM page store', () => {
       ])
       expect(call[3]).toContain('pipeline-1')
     }
+    expect(mocks.appQuery).not.toHaveBeenCalled()
+  })
+
+  it('returns sealed stage and currency totals after both ordinary release checks', async () => {
+    const capture = {
+      membership: true,
+      summary: {
+        rollups: [
+          ['deal', 'stage-1', 'USD', 2, 1, '1200', 0, true],
+          ['deal', 'stage-1', 'HKD', 1, 1, '7000', 0, true],
+          ['person', null, '', 8, 0, '0', 3, null],
+          ['company', null, '', 4, 0, '0', 0, null],
+        ],
+        overdue: 1,
+        stale: 2,
+      },
+      sources: null, revision: 'workspace-revision', deadline: null, field_epoch: null,
+      transaction_at: 'transaction-time', requires_lineage: false, packet: 'sealed-evidence',
+      configuration_id: 'configuration-id', configuration_version: 'configuration-version',
+      source_id: 'summary-id', source_identity: 'summary-version', source_user_id: ctx.userId,
+    }
+    mocks.appQuery.mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [capture] })
+      .mockResolvedValueOnce({ rows: [{ current: true }] })
+      .mockResolvedValueOnce({ rows: [{ current: true }] })
+
+    const summary = await getCrmSummary(ctx, 'pipeline-1')
+
+    expect(summary).toEqual({
+      totals: { deals: 3, contacts: 8, companies: 4 },
+      attention: { overdue: 1, stale: 2, noAmount: 1, orphaned: 3 },
+      stages: [{ stageId: 'stage-1', count: 3, values: { USD: 1200, HKD: 7000 } }],
+    })
+    expect(mocks.canonicalQuery).not.toHaveBeenCalled()
+    expect(mocks.applyRLSGucs).toHaveBeenCalledWith({ query: mocks.appQuery }, ctx.userId)
+    const release = {
+      name: 'crm-summary-current',
+      text: 'SELECT check_crm_summary_witness($1,$2,$3,$4,$5,$6,$7,$8) AS current',
+      values: [
+        ctx.workspaceId, ctx.userId, capture.revision, capture.deadline, capture.field_epoch,
+        capture.transaction_at, capture.requires_lineage, capture.packet,
+      ],
+    }
+    expect(mocks.appQuery.mock.calls).toEqual([
+      ['BEGIN'],
+      ['SELECT * FROM read_crm_summary_sealed($1,$2,$3)', [ctx.workspaceId, 'pipeline-1', false]],
+      [release],
+      [release],
+    ])
+    expect(mocks.commitTransaction).toHaveBeenCalledWith({ query: mocks.appQuery })
+    expect(mocks.rollbackAndRelease).toHaveBeenCalledWith({ query: mocks.appQuery })
   })
 
   it('bounds relationship lookup independently from collection pages', async () => {
