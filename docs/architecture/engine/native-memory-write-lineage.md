@@ -6,7 +6,13 @@ Native Memory indexes carry immutable `application_field` observations of an exa
 
 Previously, the new Memory row changed the index's candidate cohort before `record_admitted_application_field_derivation` could record its lineage. The source-reference trigger and final validation consequently rejected an otherwise current write with `scope_source_changed`. Retrying the same conversation could reproduce the same failure.
 
-Migration `8268_native_memory_query_write_lineage.sql` preserves the original query during historical replay by excluding only new Memory outputs explicitly derived from that exact query domain. Original candidates are never excluded by this rule. Unrelated growth, changed/held original inputs, altered policies, and revoked authority retain their existing refusal behavior. Fresh queries include the saved outputs normally. Different selected fields produce a different domain and cannot borrow another query's exclusion.
+Migration `8326_native_memory_query_write_contract.sql` composes the original
+8268 Memory fix with the current canonical conversation installation. Both
+historical query readers exclude new Memory outputs explicitly derived from
+the exact query domain. Original candidates retain their exact version and
+policy checks. Unrelated growth, changed or held inputs, policy changes and
+revoked authority still cause refusal. Fresh queries include saved outputs
+normally. A different field selection creates a different query domain.
 
 The exclusion follows the derived output's resource identity, not just its first version: later versions of an output do not retroactively become inputs to the historical query. This never suppresses version or policy checks for IDs in the query's original candidate set, nor the output's own current-source checks.
 
@@ -24,7 +30,13 @@ After its output guards, the port:
 
 Selectors are usable only in their creating transaction. After publication, only canonical immutable lineage edges justify historical exclusion. There is no caller-supplied admission flag, GUC, reusable receipt, or new execution port.
 
-The migration authenticates executable predecessors, preserves function metadata/ACLs, repins only an explicit dependency set, and reruns the existing native contracts. It does not rewrite historical observations or payloads.
+The normal installer authenticates the 8325 predecessor. It preserves
+function metadata and grants, updates the two enrolled reader entries and
+refreshes the native contract witness. Previously applied 8268 is retained
+in the historical ledger. The installer preserves already written Memory
+values and immutable observations. Portable restore carries the durable
+source edges. The intent table is installation-local and must be empty in a
+committed snapshot.
 
 ## Regression coverage
 
