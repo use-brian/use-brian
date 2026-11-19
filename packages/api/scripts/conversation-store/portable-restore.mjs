@@ -21,6 +21,11 @@ import {authenticateConversationInstallation as authenticateRestoredHead,hasInst
 import {executableRegistryProofSql,compareExecutableRegistryRosters} from './executable-record.mjs'
 import {portableLegacyConversionPredicate,portableLegacyConversionTables,portableOwnerPolicies,restoreStrippedFields} from './portable-restore-seals.mjs'
 
+import {
+ crmSummaryCredentialRule,crmSummaryPortable,crmSummaryProjectionRule,exportCrmSummaryCredentials,installCrmSummaryCredentials,
+ readCrmSummaryCredentials,rebuildCrmSummaryProjections,
+} from './crm-summary-portable.mjs'
+
 export const portableArchiveFormat='use-brian-portable-brain-v1'
 const here=fileURLToPath(new URL('./',import.meta.url))
 const defaultSourceRoot=fileURLToPath(new URL('../../',import.meta.url))
@@ -373,6 +378,7 @@ export async function exportPortableBrain({ownerClient:client,destination,key,so
    // Original proofs of installation-derived tables: retained, never imported.
    const derived={}
    for(const [name,entry] of Object.entries(roster.tables))if(entry.class==='derived'){
+    if(entry.rule===crmSummaryCredentialRule)continue
     const proof=await tableDigest(client,name,entry)
     if(entry.rule==='D8-transaction-scratch'&&proof.rows!==0)throw refusal('portable_restore_origin_scratch_not_empty',name)
     derived[name]={rows:proof.rows,sha256:proof.sha256}
@@ -414,12 +420,14 @@ export async function exportPortableBrain({ownerClient:client,destination,key,so
     sequences[name]={lastValue:row.last_value,isCalled:row.is_called}
    }
    const horizon=await transactionHorizon(client,roster)
+   const crmCredentials=crmSummaryPortable(roster)?await exportCrmSummaryCredentials(client,directory,key):null
    await client.query('COMMIT')
    const derivedArtifact=await sealJson(derived,join(directory,'derived.enc'),key)
    const manifest={format:portableArchiveFormat,createdAt:new Date().toISOString(),archiveId:randomBytes(16).toString('hex'),
     sourceProfile:sourceProfile??'ordinary-owner',...(releaseThrough?{release:{through:releaseThrough}}:{}),
     roster:{digest:roster.digest,counts:roster.counts},shipped:{migrations:shipped.length,sha256:sha(shipped.join('\n'))},ledger,
     installation:{format:installation.format,sourceDefinitionDigest:installation.sourceDefinitionDigest,functions:installation.functions,localContractDigest:installation.localContractDigest},
+    ...(crmCredentials?{credentials:{crmSummary:crmCredentials}}:{}),
     fingerprint,derived:{file:'derived.enc',sha256:derivedArtifact.sha256},tables,sequences,transactionHorizon:horizon}
    const manifestText=JSON.stringify(manifest)
    await sealJson(manifest,join(directory,'manifest.enc'),key)
@@ -564,6 +572,13 @@ export async function importPortableBrain({ownerClient:client,archiveDirectory,k
   const derived=await readArchiveJson(join(archiveDirectory,manifest.derived.file),key,undefined,scratch,'portable_restore_archive_untrusted')
   for(const [name,entry] of Object.entries(roster.tables))if(entry.rule==='D8-transaction-scratch'&&derived[name]?.rows!==0)
    throw refusal('portable_restore_origin_scratch_not_empty',name)
+  const crmSummary=crmSummaryPortable(roster)
+  if(Boolean(manifest.credentials?.crmSummary)!==crmSummary||
+   manifest.credentials&&Object.keys(manifest.credentials).some(name=>name!=='crmSummary'))
+   throw refusal('portable_restore_archive_untrusted','CRM summary credential coverage')
+  let crmCredentials=null
+  if(crmSummary)try{crmCredentials=await readCrmSummaryCredentials(archiveDirectory,manifest.credentials.crmSummary,key)}
+  catch{throw refusal('portable_restore_archive_untrusted','CRM summary credential authentication')}
   const receipt={schema:'portable-brain-import-receipt-v1',archiveId:manifest.archiveId,manifestSha256:expectedManifestSha256,rosterDigest:roster.digest,
    sourceProfile:manifest.sourceProfile??'ordinary-owner',...(releaseThrough?{release:{through:releaseThrough,migrations:shipped.length}}:{}),engineTransitions:[],
    targetAuthentication:[firstAuthentication],tables:{imported:0,rows:0,seedMatched:0,seedReplaced:0},rederived:{},suspendedTriggers:0,deferredFixups:0,reboundSlots:[],erasure:{replayed:0,alreadyPresent:0}}
@@ -593,6 +608,10 @@ export async function importPortableBrain({ownerClient:client,archiveDirectory,k
    const windowed=Object.entries(roster.triggers).filter(([,entry])=>entry.class==='suspended:contract-window').map(([key])=>key)
    await toggle(suspended,'DISABLE')
    receipt.suspendedTriggers=suspended.length;receipt.windowedTriggers=windowed.length
+   if(crmSummary){
+    receipt.currentTable='crm-summary-credentials'
+    receipt.crmCredentialRecords=await installCrmSummaryCredentials(client,crmCredentials)
+   }
    const order=await importOrder(client,roster),byName=new Map(manifest.tables.map(table=>[table.name,table])),fixups=[]
    let stageIndex=0
    for(const name of order){
@@ -703,6 +722,16 @@ export async function importPortableBrain({ownerClient:client,archiveDirectory,k
    for(const [name,value] of Object.entries(manifest.sequences)){
     if(!roster.sequences[name])throw refusal('portable_restore_unknown_sequence',name)
     await client.query('SELECT setval($1::regclass,$2::bigint,$3)',['public.'+name,value.lastValue,value.isCalled])
+   }
+   if(crmSummary){
+    receipt.currentTable='crm-summary-projections'
+    receipt.crmProjections=await rebuildCrmSummaryProjections(client)
+    for(const [name,entry] of Object.entries(roster.tables))if(entry.rule===crmSummaryProjectionRule
+     &&name!=='crm_summary_principal_revisions'&&name!=='crm_summary_release_revisions'){
+     const actual=await tableDigest(client,name,entry),original=derived[name]
+     if(!original||actual.rows!==original.rows||actual.sha256!==original.sha256)
+      throw refusal('portable_restore_crm_projection_digest_mismatch',name)
+    }
    }
    // Run every deferred check against the complete restored set before the
    // suspended triggers are re-enabled (ALTER refuses pending trigger events).
