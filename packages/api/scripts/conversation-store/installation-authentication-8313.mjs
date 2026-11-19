@@ -9,7 +9,7 @@ import { pagePublicationMigrationName, pagePublicationPrefix, pagePublicationRen
   replacePagePublicationSource } from './build-conversation-page-publication.mjs'
 
 const installedPrefix = 'a8313_'
-const migrationSha = 'CANDIDATE_PENDING'
+const migrationSha = '66f7ac2d26ed9dd627b41d5febff5ca4b05980abf349429433cfefbd17a00cee'
 const hash = value => createHash('sha256').update(value).digest('hex')
 
 export function assertAuthenticationReadOnly(sql) {

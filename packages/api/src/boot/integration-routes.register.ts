@@ -11,13 +11,6 @@
  * INVARIANT: never import `@use-brian/api-platform/*` or
  * `@use-brian/shared-server` (closed code arrives through OpenApiPorts).
  */
-import { randomUUID } from 'node:crypto'
-import { APP_LEVEL_ASSISTANT_ID } from '@use-brian/shared'
-import { createAssociationService } from '../association/service.js'
-import { createAssociationStore } from '../db/association-store.js'
-import { getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
-import { createWebsiteMediaStore, recordWebsiteMediaAdded, WEBSITE_MEDIA_MIME, WEBSITE_MEDIA_PREFIX } from '../db/website-media-store.js'
-import { promoteCachedFile } from '@use-brian/core/workspace-files/promote.js'
 import { pinAccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { type Sensitivity, minSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type { EnginesEnv } from '@use-brian/core/engines/ask-engines.js'
@@ -53,7 +46,6 @@ const externalServicesRoutes = lazyRoutes(() => import('../routes/external-servi
 const applicationPlatformRoutes = lazyRoutes(() => import('../routes/application-platform.js'), 'applicationPlatformRoutes')
 const learnJapaneseRoutes = lazyRoutes(() => import('../routes/learn-japanese.js'), 'learnJapaneseRoutes')
 const brainMcpRoutes = lazyRoutes(() => import('../brain-mcp/server.js'), 'brainMcpRoutes')
-const associationRoutes = lazyRoutes(() => import('../routes/association.js'), 'associationRoutes')
 const crmIntegrationRoutes = lazyRoutes(() => import('../routes/crm-integration.js'), 'crmIntegrationRoutes')
 const appsShopifyRoutes = lazyRoutes(() => import('../routes/apps-shopify.js'), 'appsShopifyRoutes')
 
@@ -69,7 +61,6 @@ export function registerIntegrationRoutes(scope: IntegrationRoutesScope) {
     crmCredentialTools, engineeringHistory, docPageStore, brainFileTools, browserSkillsStore, brainKeyStore,
     agentToolset, brainMemoryTools, brainRetrievalTools, workspaceMcpProfile, oauthAuthorizationStore,
     docGateway, programmaticCapture, captureConfiguration, oauthClientStore,
-    associationStore, associationService, associationTools, associationWebsiteMedia, workspaceModulesStore, fileStore, filesResolver,
   } = scope
   // ── Shopify store access, shared by BOTH surfaces that have it ──────────
   //
@@ -143,56 +134,16 @@ export function registerIntegrationRoutes(scope: IntegrationRoutesScope) {
       askShopifyAssistant({ workspaceId, storeScope, task, userId, callerSessionId: 'app:shopify' }),
   }))
 
-  // Association operations uses the same workspace-scoped credentials as
-  // Brain MCP. Mount before the bare authenticated `/api` routers: brain keys
-  // and OAuth access tokens are deliberately not first-party JWTs.
-  app.use('/api/association', associationRoutes({
-    brainKeyStore,
-    authorizationStore: oauthAuthorizationStore,
-    crmService: crmOperationsService,
-    store: associationStore,
-    associationService,
-  }))
   const crmImportSources = createCrmImportSources()
   const crmProductionImports = createCrmProductionImportService({
     filesApi: filesApi ?? undefined, sources: crmImportSources,
     operationsForTransaction: (client) => createCrmOperationsService(createDbCrmOperationsStore(getPool(), client)),
-    associationForTransaction: (client) => createAssociationService({
-      store: createAssociationStore(getPool(), client),
-      modules: workspaceModulesStore,
-      crmService: createCrmOperationsService(createDbCrmOperationsStore(getPool(), client)),
-    }),
     entityLinks: entityLinksStore,
   })
-  const websiteMediaStore = createWebsiteMediaStore()
-  if (filesApi) {
-    const mediaFilesApi = filesApi
-    // Assistant tools add chat uploads to the website media library as the person (the service checked they
-    // are an owner/admin); the upload is read with that person's and assistant's access, then written like the
-    // media route writes (no assistant), since assistant file tools may not write the library directly.
-    associationWebsiteMedia.current = {
-      list: workspaceId => websiteMediaStore.list(workspaceId),
-      async importUpload({ workspaceId, userId, assistantId, fileId, name }) {
-        const member = await getWorkspaceMembershipWithClearanceSystem(userId, workspaceId)
-        if (!member) return { error: 'upload_not_found' }
-        const cached = await fileStore.get(fileId, { workspaceId, userId, assistantId: assistantId ?? APP_LEVEL_ASSISTANT_ID, assistantKind: 'standard', clearance: member.clearance })
-        if (!cached) return { error: 'upload_not_found' }
-        if (!(WEBSITE_MEDIA_MIME as readonly string[]).includes(cached.mimeType)) return { error: 'unsupported_type' }
-        const label = (name ?? cached.fileName).replace(/[/\\\0]/g, '_').trim().slice(0, 180) || 'file'
-        const written = await promoteCachedFile(mediaFilesApi, { workspaceId, userId, assistantId: null, clearance: member.clearance }, cached,
-          { path: `${WEBSITE_MEDIA_PREFIX}${randomUUID()}-${label}`, title: label })
-        if (!written.ok) return { error: written.error.kind }
-        const stored = await websiteMediaStore.get(workspaceId, written.value.id)
-        return stored ? { id: stored.id, name: stored.title ?? stored.name, mime: stored.mime, sizeBytes: stored.sizeBytes } : { error: 'not_stored' }
-      },
-      audit: (workspaceId, mediaId, actor) => recordWebsiteMediaAdded(workspaceId, mediaId, actor),
-    }
-  }
   app.use('/api/crm/integration', crmIntegrationRoutes({
     deliveries: crmDeliveries,
-    credentials: crmIntegrationStore, service: crmOperationsService, association: associationService,
+    credentials: crmIntegrationStore, service: crmOperationsService,
     imports: crmProductionImports, importSources: crmImportSources,
-    ...(filesResolver ? { websiteMedia: { store: websiteMediaStore, resolver: filesResolver } } : {}),
   }))
 
   app.use('/api/brain/mcp', brainMcpRoutes({
@@ -237,7 +188,6 @@ export function registerIntegrationRoutes(scope: IntegrationRoutesScope) {
     approvalReviewTools,
     crmTools: { ...crmTools, ...crmOperationsTools, ...crmBusinessReferenceTools, ...crmCommercialContextTools, ...crmCommercialDocumentTools, ...crmGovernedRecordTools, ...crmDeliveryOversightTools },
     credentialTools: crmCredentialTools,
-    associationTools,
     retrievalTools: brainRetrievalTools,
     fileTools: brainFileTools ?? undefined,
     // Brand primitive (D8): `getBrand` on both key scopes, `saveBrandDraft`
@@ -326,5 +276,5 @@ export function registerIntegrationRoutes(scope: IntegrationRoutesScope) {
     webAppUrl: env.APP_URL,
   }))
 
-  return { websiteMediaStore, crmProductionImports } as const
+  return { crmProductionImports } as const
 }

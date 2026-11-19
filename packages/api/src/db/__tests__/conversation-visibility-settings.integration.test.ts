@@ -79,6 +79,28 @@ settingsSuite('[COMP:api/conversation-visibility] native settings and legacy pro
     await expect(getAppPool().query('SELECT public.conversation_visibility_settings_ready()')).rejects.toMatchObject({ code: '42883' })
   })
 
+  it('raises the cap for an authenticated owner and refuses lowering or stale settings', async () => {
+    const f = await persistentContextFixture('internal')
+    try {
+      const owner = await nativeActor(f.ownerId), member = await nativeActor(f.secondId)
+      const app = express(), secret = 'fictional-m7-cap-secret'
+      app.use(express.json())
+      app.use('/api/sessions', requireAuth(secret), sessionRoutes())
+      const bearer = (actor: typeof owner) => `Bearer ${createTokens(actor.userId, secret,
+        { id: actor.authSessionId, authVersion: actor.authVersion }).accessToken}`
+      const path = `/api/sessions/${f.session.id}`
+      const change = (actor: typeof owner, expectedVersion: number, cap: 'internal' | 'confidential') =>
+        request(app).patch(`${path}/cap`).set('Authorization', bearer(actor)).send({ expectedVersion, cap })
+      await change(member, 1, 'confidential').expect(403)
+      expect((await change(owner, 1, 'confidential').expect(200)).body)
+        .toMatchObject({ conversationCap: 'confidential', conversationVisibilityVersion: 2 })
+      expect((await change(owner, 1, 'internal').expect(409)).body.code).toBe('conversation_visibility_conflict')
+      expect((await change(owner, 2, 'internal').expect(409)).body.code).toBe('conversation_cap_cannot_lower')
+      expect((await request(app).get(path).set('Authorization', bearer(owner)).expect(200)).body)
+        .toMatchObject({ conversationCap: 'confidential', conversationVisibilityVersion: 2 })
+    } finally { await f.cleanup() }
+  })
+
   it('classifies newly created native member, workspace and guest sessions before their first receiving read', async () => {
     const f = await persistentContextFixture('internal')
     const guestId = randomUUID()
@@ -152,8 +174,10 @@ settingsSuite('[COMP:api/conversation-visibility] native settings and legacy pro
         { id: actor.authSessionId, authVersion: actor.authVersion }).accessToken}`
       const path = `/api/sessions/${room.id}`
       const searchPath = `/api/workspace-search/${f.workspaceId}`
+      const searchKey = `conversation:${room.id}`
       const search = () => request(app).get(searchPath).set('Authorization', bearer(recipient))
         .query({ q: 'Fictional displayed answer', kind: 'conversations' }).expect(200)
+      const searchItem = () => request(app).get(`${searchPath}/items/conversations/${searchKey}`).set('Authorization', bearer(recipient))
       const ownerHistory = await request(app).get(`${path}/messages`).set('Authorization', bearer(starter)).expect(200)
       expect(ownerHistory.text).toContain(slimImage)
       expect(ownerHistory.text).not.toContain('RAW_')
@@ -164,7 +188,8 @@ settingsSuite('[COMP:api/conversation-visibility] native settings and legacy pro
       expect(publicHistory.text).toContain('readSomething')
       expect(publicHistory.text).not.toContain('RAW_')
       expect(publicHistory.text).not.toContain(slimImage)
-      expect((await search()).body).toMatchObject({ completeness: 'complete', items: [{ key: room.id }] })
+      expect((await search()).body).toMatchObject({ completeness: 'complete', items: [{ key: searchKey }] })
+      expect((await searchItem().expect(200)).body).toMatchObject({ key: searchKey, text: 'Fictional upload question Fictional displayed answer' })
 
       const update = await request(app).patch(`${path}/visibility`).set('Authorization', bearer(admin))
         .send({ expectedVersion: 1, visibility: 'configured_private' }).expect(200)
@@ -175,7 +200,7 @@ settingsSuite('[COMP:api/conversation-visibility] native settings and legacy pro
         .set('Authorization', bearer(recipient)).expect(200)
       expect(actorList.body).not.toContainEqual(expect.objectContaining({ id: room.id }))
       expect((await search()).body).toMatchObject({ completeness: 'complete', items: [] })
-      await request(app).get(`${searchPath}/items/conversations/${room.id}`).set('Authorization', bearer(recipient)).expect(404)
+      await searchItem().expect(404)
       const roster = await request(app).get(`/api/workspaces/${f.workspaceId}/live`).set('Authorization', bearer(recipient)).expect(200)
       expect(roster.body.items.find((item: { id: string }) => item.id === room.id)).toMatchObject({ tier: 'presence' })
       expect(roster.body.items.find((item: { id: string }) => item.id === room.id)).not.toHaveProperty('title')
@@ -189,7 +214,8 @@ settingsSuite('[COMP:api/conversation-visibility] native settings and legacy pro
         conversationVisibilityVersion: 3, title: 'Fictional upload question' })
       const participantHistory = await request(app).get(`${path}/messages`).set('Authorization', bearer(recipient)).expect(200)
       expect(participantHistory.body).toEqual(publicHistory.body)
-      expect((await search()).body).toMatchObject({ completeness: 'complete', items: [{ key: room.id }] })
+      expect((await search()).body).toMatchObject({ completeness: 'complete', items: [{ key: searchKey }] })
+      expect((await searchItem().expect(200)).body).toMatchObject({ key: searchKey })
       const safeRows = (await queryWithRLS(recipient.userId, 'SELECT role FROM session_messages WHERE session_id=$1 ORDER BY sequence_num', [room.id])).rows
       expect(safeRows).toEqual([{ role: 'assistant' }])
       expect((await queryWithRLS(recipient.userId, 'SELECT read_conversation_search_text_current($1) AS body', [room.id])).rows)
@@ -361,6 +387,7 @@ settingsSuite('[COMP:api/conversation-visibility] native settings and legacy pro
       const provider: LLMProvider = { name: 'fictional-project', models: ['fictional-project'], stream: local, createSession: () => ({ send: local }) }
       const app = express(), secret = 'fictional-conversation-project-route'
       app.use(express.json()); app.use(requireAuth(secret))
+      app.use('/sessions', sessionRoutes())
       app.use('/chat', chatRoutes({ provider, systemPrompt: 'Fictional Project response.', tools: new Map(), memoryStore: createDbMemoryStore(),
         capabilityStore: createDbCapabilityStore(), pendingApprovalsStore: createPendingApprovalsStore() }))
       const token = createTokens(actor.userId, secret, { id: actor.authSessionId, authVersion: actor.authVersion }).accessToken
@@ -380,8 +407,9 @@ settingsSuite('[COMP:api/conversation-visibility] native settings and legacy pro
         await f.pool.query('INSERT INTO workspace_projects(id,workspace_id,name,normalized_name,created_by) VALUES($1,$2,$3,lower($3),$4)',
           [projectId, f.workspaceId, name, f.ownerId])
         const metadata = await readConversationVisibility(actor, sessionId)
-        await expect(moveConversationProject(actor, sessionId, { expectedVersion: metadata!.conversationVisibilityVersion, projectId }))
-          .resolves.toMatchObject({ readable: true, metadata: { conversationVisibility: 'private_by_kind', conversationProjectIds: [] } })
+        const moved = await request(app).patch(`/sessions/${sessionId}/project`).auth(token, { type: 'bearer' })
+          .send({ expectedVersion: metadata!.conversationVisibilityVersion, projectId }).expect(200)
+        expect(moved.body).toMatchObject({ contextProjectId: projectId, conversationVisibility: 'private_by_kind', conversationProjectIds: [] })
         await send(`Continue privately in ${name}`)
         const tagged = await addSessionMessage({
           sessionId, role: 'assistant', content: [{ type: 'text', text: 'Fictional tagged material must stay quarantined.' }],

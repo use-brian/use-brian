@@ -1,73 +1,25 @@
 {
   "schemaVersion": 1,
   "caseDescriptions": {
-    "M1": "Workspace backfill and disabled defaults",
-    "M2": "Independent module, Home and tool authority",
-    "M3": "Transactional order versus shutdown admission",
-    "M4": "Drain restart and disabled recovery",
+    "M1": "Generic workspace module defaults",
+    "M2": "Generic module and CRM authority",
+    "M3": "Transactional generic module admission",
+    "M4": "Generic module draining and blockers",
     "A": "Catalog, manifest and credential conformance",
     "B": "Durable verified intake and replay",
     "C": "Consent ordering and suppression",
     "C2": "Managed send admission and retry",
     "D": "Effective entitlement lifecycle",
     "E": "Participation identity and inventory boundary",
-    "E2": "Order capacity and provider reconciliation",
     "F": "Import reconciliation and resume",
     "G": "Privacy export and reviewed erasure",
     "G2": "Sensitive copies and recovery erasure replay",
-    "H": "Complete workflows and committed inventory events",
+    "H": "Complete CRM workflows and committed events",
     "I": "Restore, integrity and application-role isolation",
-    "J": "Native operator controls",
+    "J": "Native CRM operator controls",
     "K": "Paced workload, outage and burst recovery"
   },
   "suites": [
-    {
-      "group": "database",
-      "file": "packages/api/src/db/__tests__/association-concurrency.integration.test.ts",
-      "cases": [
-        "M3",
-        "M4",
-        "E2",
-        "H",
-        "I"
-      ]
-    },
-    {
-      "group": "database",
-      "file": "packages/api/src/db/__tests__/association-inventory.integration.test.ts",
-      "cases": [
-        "M2",
-        "E",
-        "E2",
-        "H"
-      ]
-    },
-    {
-      "group": "database",
-      "file": "packages/api/src/db/__tests__/association-provider.integration.test.ts",
-      "cases": [
-        "M4",
-        "E2"
-      ]
-    },
-    {
-      "group": "database",
-      "file": "packages/api/src/db/__tests__/association-tools.integration.test.ts",
-      "cases": [
-        "M1",
-        "M2",
-        "E2"
-      ]
-    },
-    {
-      "group": "database",
-      "file": "packages/api/src/db/__tests__/association-waitlist.integration.test.ts",
-      "cases": [
-        "E",
-        "E2",
-        "H"
-      ]
-    },
     {
       "group": "database",
       "file": "packages/api/src/db/__tests__/crm-address-suppression.integration.test.ts",
@@ -163,6 +115,14 @@
     {
       "group": "database",
       "file": "packages/api/src/db/__tests__/crm-erasure-journal.integration.test.ts",
+      "cases": [
+        "G2",
+        "I"
+      ]
+    },
+    {
+      "group": "database",
+      "file": "packages/api/src/db/__tests__/crm-recovery-capture-upgrade.integration.test.ts",
       "cases": [
         "G2",
         "I"
@@ -344,14 +304,6 @@
     },
     {
       "group": "database",
-      "file": "packages/api/src/db/__tests__/provider-inbox.integration.test.ts",
-      "cases": [
-        "E2",
-        "D"
-      ]
-    },
-    {
-      "group": "database",
       "file": "packages/api/src/db/__tests__/workspace-flush-editions.integration.test.ts",
       "cases": [
         "G",
@@ -503,43 +455,8 @@
       "group": "api",
       "file": "packages/api/src/association/__tests__/domain.test.ts",
       "cases": [
-        "E2"
-      ]
-    },
-    {
-      "group": "api",
-      "file": "packages/api/src/association/__tests__/lifecycle-worker.test.ts",
-      "cases": [
-        "M4",
-        "E2"
-      ]
-    },
-    {
-      "group": "api",
-      "file": "packages/api/src/association/__tests__/provider-inbox-worker.test.ts",
-      "cases": [
-        "D",
-        "E2"
-      ]
-    },
-    {
-      "group": "api",
-      "file": "packages/api/src/association/__tests__/provider-reference.test.ts",
-      "cases": [
-        "D",
-        "E2",
-        "K"
-      ]
-    },
-    {
-      "group": "api",
-      "file": "packages/api/src/association/__tests__/service.test.ts",
-      "cases": [
         "A",
-        "B",
-        "C",
-        "D",
-        "E"
+        "F"
       ]
     },
     {
@@ -548,14 +465,6 @@
       "cases": [
         "A",
         "I"
-      ]
-    },
-    {
-      "group": "api",
-      "file": "packages/api/src/routes/__tests__/association.test.ts",
-      "cases": [
-        "M2",
-        "E2"
       ]
     },
     {
@@ -586,22 +495,6 @@
       "cases": [
         "M1",
         "M2"
-      ]
-    },
-    {
-      "group": "core",
-      "file": "packages/core/src/association/__tests__/tools.test.ts",
-      "cases": [
-        "M2",
-        "E2"
-      ]
-    },
-    {
-      "group": "core",
-      "file": "packages/core/src/association/__tests__/waitlist.test.ts",
-      "cases": [
-        "E",
-        "H"
       ]
     },
     {
@@ -691,62 +584,6 @@
       "cases": [
         "M1",
         "M2"
-      ]
-    },
-    {
-      "group": "web",
-      "file": "apps/app-web/src/components/association/__tests__/association-api.test.ts",
-      "cases": [
-        "J"
-      ]
-    },
-    {
-      "group": "web",
-      "file": "apps/app-web/src/components/association/__tests__/association-surface.test.tsx",
-      "cases": [
-        "J"
-      ]
-    },
-    {
-      "group": "web",
-      "file": "apps/app-web/src/components/association/__tests__/credentials-api.test.ts",
-      "cases": [
-        "J"
-      ]
-    },
-    {
-      "group": "web",
-      "file": "apps/app-web/src/components/association/__tests__/credentials-panel.test.tsx",
-      "cases": [
-        "J"
-      ]
-    },
-    {
-      "group": "web",
-      "file": "apps/app-web/src/components/association/__tests__/mailbox-panel.test.tsx",
-      "cases": [
-        "J"
-      ]
-    },
-    {
-      "group": "web",
-      "file": "apps/app-web/src/components/association/__tests__/operator-workflows.test.tsx",
-      "cases": [
-        "J"
-      ]
-    },
-    {
-      "group": "web",
-      "file": "apps/app-web/src/components/association/__tests__/privacy-api.test.ts",
-      "cases": [
-        "J"
-      ]
-    },
-    {
-      "group": "web",
-      "file": "apps/app-web/src/components/association/__tests__/privacy-panel.test.tsx",
-      "cases": [
-        "J"
       ]
     },
     {

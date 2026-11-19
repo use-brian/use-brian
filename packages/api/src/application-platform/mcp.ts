@@ -25,9 +25,15 @@ export async function buildHomeApplicationMcpProfile(req: Request, secret: strin
   if (!result.rows[0]) return null
   const home = await authenticateApplicationHome(token, result.rows[0].appId, secret)
   if (!home) return null
-  const signal = new AbortController(); req.once('aborted', () => signal.abort())
-  const execution = await resolveApplicationExecutionContext({ home }, { abortSignal: signal.signal })
-  return { homeAppId: home.homeAppId, tools: await buildApplicationMcpTools(service, execution) }
+  return {
+    homeAppId: home.homeAppId,
+    workspaceId: home.workspaceId,
+    async buildTools() {
+      const signal = new AbortController(); req.once('aborted', () => signal.abort())
+      const execution = await resolveApplicationExecutionContext({ home }, { abortSignal: signal.signal })
+      return buildApplicationMcpTools(service, execution)
+    },
+  }
 }
 
 function applicationMcpInvoker(execution: ExecutionContext) {

@@ -51,8 +51,6 @@ describe("[COMP:app-web/operator-app-bar] operator app registry", () => {
     expect(operatorAppFromSurface("feed")).toBe("feed");
     expect(operatorAppFromSurface("computer")).toBe("browsers");
     expect(operatorAppFromSurface("chat")).toBe("chat");
-    expect(operatorAppFromSurface("association")).toBe("association");
-    expect(operatorAppPath("w1", "association")).toBe("/w/w1/association");
     expect(operatorAppFromSurface("brain")).toBeNull();
     expect(operatorAppFromSurface("studio")).toBeNull();
     expect(operatorAppFromSurface("workflow")).toBeNull();

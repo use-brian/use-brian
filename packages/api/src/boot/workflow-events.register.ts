@@ -41,15 +41,13 @@ import type { WorkflowEventsScope } from './scope.js'
 // Worker modules that load when the worker starts (deployment.md -> "Boot
 // composition" -> "Lazy routers and workers"); `--no-workers` never loads them.
 const createCrmImportFileCleanupWorker = lazyWorker(() => import('../crm-operations/import-file-cleanup-worker.js'), 'createCrmImportFileCleanupWorker', '[crm-file-cleanup]')
-const createAssociationLifecycleWorker = lazyWorker(() => import('../association/lifecycle-worker.js'), 'createAssociationLifecycleWorker', '[association-lifecycle]')
-const createProviderInboxWorker = lazyWorker(() => import('../association/provider-inbox-worker.js'), 'createProviderInboxWorker', '[provider-inbox]')
 const createCrmEntitlementWorker = lazyWorker(() => import('../crm-operations/entitlement-worker.js'), 'createCrmEntitlementWorker', '[crm-entitlement-expiry]')
 const createCrmRetentionWorker = lazyWorker(() => import('../crm-operations/retention-worker.js'), 'createCrmRetentionWorker', '[crm-retention]')
 const createCampaignConversionOutboxWorker = lazyWorker(() => import('../campaigns/conversion-outbox.js'), 'createCampaignConversionOutboxWorker', '[campaign-conversions]')
 
 export function registerWorkflowEvents(scope: WorkflowEventsScope) {
   const {
-    crmDocumentRuntime, connectorGrantStore, campaignDispatchService, filesResolver, runWorkers, associationStore,
+    crmDocumentRuntime, connectorGrantStore, campaignDispatchService, filesResolver, runWorkers,
     workflowRunStore, workflowExecutorDeps, goalDriver, kbMaintenanceStore,
   } = scope
   // ════════════════════════════════════════════════════════════════
@@ -240,18 +238,11 @@ export function registerWorkflowEvents(scope: WorkflowEventsScope) {
   if (runWorkers) crmIssueWorker.start()
   const crmEntitlementWorker=createCrmEntitlementWorker({onError:()=>console.warn('[crm-entitlement-expiry] A due grant could not be processed; a later scan will retry.')})
   if(runWorkers) crmEntitlementWorker.start()
-  const associationLifecycleWorker=createAssociationLifecycleWorker({onError:()=>console.warn('[association-lifecycle] A lifecycle operation failed; a later scan will retry.')})
-  if(runWorkers) associationLifecycleWorker.start()
-  const providerInboxWorker = createProviderInboxWorker({
-    process: (workspaceId, receiptId) => associationStore.retryProviderEventReceipt(workspaceId, receiptId),
-    onError: () => console.warn('[provider-inbox] A receipt did not apply; inspect its retry or reconciliation state.'),
-  })
-  if (runWorkers) providerInboxWorker.start()
   const crmFileCleanupWorker = filesResolver ? createCrmImportFileCleanupWorker({resolver:filesResolver,onError:()=>console.warn('[crm-file-cleanup] Cleanup failed; inspect the workspace receipt.')}) : null
   if (runWorkers) crmFileCleanupWorker?.start()
 
   return {
     runQueueWorker, workflowEventDispatcher, crmDomainEventWorker, campaignConversionWorker,
-    crmRetentionWorker, crmIssueWorker, crmEntitlementWorker, crmFileCleanupWorker, associationLifecycleWorker, providerInboxWorker,
+    crmRetentionWorker, crmIssueWorker, crmEntitlementWorker, crmFileCleanupWorker,
   } as const
 }

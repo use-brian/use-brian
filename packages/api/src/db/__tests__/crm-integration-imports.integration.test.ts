@@ -3,7 +3,6 @@ import express from 'express'
 import request from 'supertest'
 import pg from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
-import type { AssociationServicePort } from '@use-brian/core/association/operations.js'
 import type { CrmIntegrationGrant } from '@use-brian/core/crm/integration-authority.js'
 import { CrmOperationsCommandSchema, type CrmOperationsContext } from '@use-brian/core/crm/operations-types.js'
 import { createCrmIntegrationStore } from '../crm-integration-store.js'
@@ -47,7 +46,7 @@ async function fixture() {
   }
   const app = express()
   app.use(express.json())
-  app.use('/api/crm/integration', crmIntegrationRoutes({ credentials: keys, service: operations, association: {} as AssociationServicePort, importSources: sources, imports }))
+  app.use('/api/crm/integration', crmIntegrationRoutes({ credentials: keys, service: operations, importSources: sources, imports }))
   const post = (path: string, token: string) => request(app).post(`/api/crm/integration/operations/${path}`).set('Authorization', `Bearer ${token}`)
   return { workspaceId, userId, member, issue, app, post }
 }

@@ -115,7 +115,6 @@ const OfficeTemplatesPage = lazy(() => import("@/app/w/[workspaceId]/office/temp
 const OfficeTemplatePage = lazy(() => import("@/app/w/[workspaceId]/office/templates/[templateId]/page"));
 const ChatPage = lazy(() => import("@/app/w/[workspaceId]/chat/page"));
 const ShopifyPage = lazy(() => import("@/app/w/[workspaceId]/shopify/page"));
-const AssociationPage = lazy(() => import("@/app/w/[workspaceId]/association/page"));
 const CustomHomeAppPage = lazy(() => import("@/app/w/[workspaceId]/apps/[appId]/page"));
 const ComputerLayout = lazy(() => import("@/app/w/[workspaceId]/computer/layout"));
 const BrowsersIndexPage = lazy(() => import("@/app/w/[workspaceId]/computer/page"));
@@ -237,7 +236,6 @@ const OPERATOR_ROUTE_ELEMENTS: Record<OperatorAppKey, ReactNode> = {
   ),
   chat: <Route key="chat" path="chat" element={<ChatPage />} />,
   shopify: <Route key="shopify" path="shopify" element={<ShopifyPage />} />,
-  association: <Route key="association" path="association" element={<AssociationPage />} />,
 };
 
 export function App() {

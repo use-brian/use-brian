@@ -11,7 +11,6 @@ export const HOME_APP_TOOL_CONFIG = [
   { id: 'tasks', capability: 'tasks', toolSets: ['read', 'write'], seedToolSets: true },
   { id: 'crm', capability: 'crm', toolSets: ['read', 'write'], seedToolSets: true },
   { id: 'feed', capability: 'feed', toolSets: ['read', 'write'], seedToolSets: true },
-  { id: 'association', capability: 'association', toolSets: ['read', 'write'], seedToolSets: false },
 ] as const satisfies readonly { id: HomeAppKey; capability: string; toolSets: readonly string[]; seedToolSets: boolean }[]
 
 export type HomeAppToolId = (typeof HOME_APP_TOOL_CONFIG)[number]['id']

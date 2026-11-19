@@ -23,9 +23,8 @@ import type { CaptureConfiguration,EngineeringHistoryCommand } from '@use-brian/
 
 import { Router } from 'express'
 import { serveStatelessMcp } from './stateless.js'
-import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
-import type { AssociationTools } from '@use-brian/core/association/tools.js'
 import type { Embedder } from '@use-brian/core/embeddings/embedder.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 import type { BrainKeyStore } from '../db/brain-keys-store.js'
 import type { OAuthAuthorizationStore } from '../db/oauth-authorization-store.js'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'
@@ -40,6 +39,7 @@ import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.
 import type { BrainKeyScope } from '../db/brain-keys-store.js'
 import {
   buildBrainTools,
+  type BrainTool,
   makeBrainContextResolver,
   resolveAgentCapabilities,
   type BrainCrmTools,
@@ -50,6 +50,12 @@ import {
   type BrainRetrievalTools,
   type BrainTaskTools,
 } from './tools.js'
+
+type HomeApplicationProfile = {
+  homeAppId: string
+  workspaceId: string
+  buildTools: () => Promise<BrainTool[]>
+}
 
 type Options = {
   workspaceProfile?: WorkspaceMcpProfile
@@ -70,7 +76,6 @@ type Options = {
   taskTools: BrainTaskTools
   credentialTools?: Record<string, Tool>
   crmTools: BrainCrmTools
-  associationTools?: AssociationTools
   retrievalTools: BrainRetrievalTools
   /**
    * Workspace filesystem tools. Optional — only the deployments that
@@ -157,7 +162,7 @@ type Options = {
       maxClearance: Sensitivity | null
     } | null>
     consumeBudget?: (appId: string) => Promise<{ allowed: boolean }>
-    applicationProfile?: (req: import('express').Request) => Promise<{ homeAppId: string; tools: import('./tools.js').BrainTool[] } | null>
+    applicationProfile?: (req: import('express').Request) => Promise<HomeApplicationProfile | null>
   }
   storeTools?: (params: {
     workspaceId: string
@@ -183,18 +188,26 @@ export function brainMcpRoutes(opts: Options): Router {
   const router = Router()
 
   router.post('/', async (req, res) => {
-    let application: Awaited<ReturnType<NonNullable<NonNullable<Options['homeApps']>['applicationProfile']>>> = null
-    if (opts.homeApps?.applicationProfile && opts.homeApps.consumeBudget) {
-      try { application = await opts.homeApps.applicationProfile(req) } catch { /* No app capability from an unavailable authority reader. */ }
-    }
     const auth = await authenticateBrainRequest(req, {
       brainKeyStore: opts.brainKeyStore,
       authorizationStore: opts.authorizationStore,
       homeApps: opts.homeApps,
     })
-    if (!auth && application && opts.homeApps?.consumeBudget) {
+    let application: HomeApplicationProfile | null = null
+    if ((!auth || auth.authKind === 'home_app') && opts.homeApps?.applicationProfile && opts.homeApps.consumeBudget) {
+      try {
+        const profile = await opts.homeApps.applicationProfile(req)
+        if (profile && (!auth || profile.workspaceId === auth.workspaceId && profile.homeAppId === auth.keyId)) application = profile
+      } catch { /* No app capability from an unavailable authority reader. */ }
+    }
+
+    let applicationTools: BrainTool[] | undefined
+    if (application) {
+      try { applicationTools = await application.buildTools() } catch { /* No app capability from an unavailable catalog. */ }
+    }
+    if (!auth && application && applicationTools && opts.homeApps?.consumeBudget) {
       if (!(await opts.homeApps.consumeBudget(application.homeAppId)).allowed) { res.status(429).json({ error: 'This app has used its daily budget.' }); return }
-      try { await serveStatelessMcp(req, res, application.tools) }
+      try { await serveStatelessMcp(req, res, applicationTools) }
       catch { if (!res.headersSent) res.status(503).json({ error: 'application_access_unavailable', retrySafe: false }) }
       return
     }
@@ -282,7 +295,6 @@ export function brainMcpRoutes(opts: Options): Router {
       memoryTools: opts.memoryTools,
       taskTools: opts.taskTools,
       crmTools: opts.crmTools,
-      associationTools: opts.associationTools,
       retrievalTools: opts.retrievalTools,
       fileTools: opts.fileTools,
       brandTools: opts.brandTools,
@@ -331,7 +343,7 @@ export function brainMcpRoutes(opts: Options): Router {
             operationNames: new Set(consent.operationNames), readOnly: auth.scope === 'read' }
         })
       }
-      await serveStatelessMcp(req, res, [...tools, ...(application?.tools ?? [])], 'use-brian-brain', auth.workspaceMcpConsent ? workspaceDiscoveryNames : undefined)
+      await serveStatelessMcp(req, res, [...tools, ...(applicationTools ?? [])], 'use-brian-brain', auth.workspaceMcpConsent ? workspaceDiscoveryNames : undefined)
     } catch (err) {
       console.error('[brain-mcp] request failed:', err)
       if (!res.headersSent) {

@@ -4,8 +4,7 @@ import { randomUUID } from 'node:crypto'
 import express from 'express'
 import request from 'supertest'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
-import { crmOperationsSha256 } from '@use-brian/core/application-platform/operation-contract.js'
-import { CrmOperationsCommandSchema, SendCrmMessageCommandSchema, type CrmOperationsContext } from '@use-brian/core/crm/operations-types.js'
+import { CrmOperationsCommandSchema, SendCrmMessageCommandSchema, crmOperationsSha256, type CrmOperationsContext } from '@use-brian/core/crm/operations-types.js'
 import { getPool, getAppPool } from '../client.js'
 import { encryptCredentials } from '../credential-crypto.js'
 import { createDbCrmOperationsStore } from '../crm-operations-store.js'
@@ -321,7 +320,7 @@ describe('[COMP:crm/delivery-receipts] Durable email acceptance and replay',()=>
     const credential=await keys.create(f.workspaceId,f.userId,{label:'Read fixture',expiresAt:'2099-01-01T00:00:00Z',
       grants:[{operation:'crm.delivery.read',selectors:{purposeKeys:['updates'],providerKeys:['outreach']}}]})
     const integration=express();integration.use(express.json())
-    integration.use('/api/crm/integration',crmIntegrationRoutes({credentials:keys,service,deliveries,association:{} as never}))
+    integration.use('/api/crm/integration',crmIntegrationRoutes({credentials:keys,service,deliveries,}))
     const read=await request(integration).get('/api/crm/integration/operations/deliveries/'+f.command.deliveryId).set('Authorization','Bearer '+credential.oneTimeSecret)
     expect(read.status).toBe(200)
     const client=await appPool.connect()

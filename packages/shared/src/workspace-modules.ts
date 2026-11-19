@@ -21,13 +21,7 @@ export function defineWorkspaceModuleRegistry<const Registry extends WorkspaceMo
   return Object.freeze(registry)
 }
 
-export const WORKSPACE_MODULES = defineWorkspaceModuleRegistry({
-  association: {
-    key: 'association',
-    defaultState: 'disabled',
-    blockingCountCompatibility: { field: 'pendingOrders', blockerKey: 'pending_orders' },
-  },
-} as const)
+export const WORKSPACE_MODULES = defineWorkspaceModuleRegistry({} as const)
 
 export type WorkspaceModuleKey = keyof typeof WORKSPACE_MODULES
 
