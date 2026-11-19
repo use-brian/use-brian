@@ -1,16 +1,16 @@
-import { executeOfficeRelease, type OfficeReleaseRouteDeps } from '../routes/office-releases.js'
+import type { OfficeReleaseRouteDeps } from '../routes/office-releases.js'
+import { lazyImplementation } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
 import { changeOfficeLifecycle, type OfficeLifecycleDeps } from './lifecycle.js'
-import { workspaceCredentialDelegation } from '@use-brian/core'
+import { workspaceCredentialDelegation } from '@use-brian/agent-runtime/security/workspace-delegation.js'
 import { captureOfficeWorkspaceAuthority } from './workspace-authority.js'
 import { readOfficeClassification, restrictOfficeClassification, withOfficeClassificationActor } from './classification.js'
+import type { OfficeArtifactToolProjection, OfficeToolPort } from '@use-brian/core/office/tools.js'
 import {
-  canRead,
   ContextScopeAccumulator,
   scopeGrantContains,
-  type OfficeArtifactToolProjection,
-  type OfficeToolPort,
-  type ToolContext,
-} from '@use-brian/core'
+} from '@use-brian/agent-runtime/security/context-scope.js'
+import { canRead } from '@use-brian/agent-runtime/security/sensitivity.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import type { OfficeArtifactSnapshot } from '@use-brian/office-model'
 import { isDurableOfficeArtifact, type OfficeArtifactRow } from '../db/office-artifacts.js'
 import { officeImportDiagnostics, officeGenerationInputQuestion } from '../db/office-generation.js'
@@ -18,6 +18,11 @@ import { readOfficeGenerationRecovery } from './generation-recovery.js'
 import type { OfficeGenerationJobRow } from '../db/office-generation.js'
 import type { ResolvedOfficeAccess } from './access.js'
 import { createWorkspaceOfficeGeneration, createHumanOfficeGeneration, type OfficeHumanGenerationOptions, type OfficeGenerationRequest } from '../db/office-generation-admission.js'
+
+// The release pipeline (validation, every family's renderer, PDF tooling)
+// loads on the first export, not when the Office tool port is built: the Office
+// tool roster stays eager, its export implementation does not (M4 step 5, D13).
+const loadOfficeRelease = lazyImplementation('The Office export pipeline', () => import('../routes/office-releases.js'))
 
 export type OfficeServiceDeps = {
   updateCommentThread?: ReturnType<typeof import('../db/office-comments.js').createOfficeCommentStore>['updateThread']
@@ -44,7 +49,7 @@ export type OfficeServiceDeps = {
   /** Latest persisted event: the job state shown is status plus this, never a generic label. */
   latestJobEvent?(userId: string, jobId: string): Promise<{ code: string; safeNarration: string | null } | null>
   getSnapshot(userId: string, artifactId: string): Promise<{ snapshot: OfficeArtifactSnapshot; canonicalHash?:string } | null>
-  captureObservation(userId:string, artifact:OfficeArtifactRow, canonicalHash?:string|null):Promise<import('@use-brian/core').ScopeSource|null>
+  captureObservation(userId:string, artifact:OfficeArtifactRow, canonicalHash?:string|null):Promise<import('@use-brian/agent-runtime/security/derived-scope.js').ScopeSource|null>
   wakeGeneration?(userId: string): void
 }
 
@@ -216,6 +221,7 @@ export function createOfficeService(deps: OfficeServiceDeps): OfficeService {
         clearance: context.clearance, compartmentGrant: context.compartments ?? null, projectGrant: context.projectIds ?? null,
       })) return null
       const release = deps.release!(); if (!release) return null
+      const { executeOfficeRelease } = await loadOfficeRelease()
       const observation = await deps.captureObservation(context.userId, artifact)
       if (!observation) return null
       const current = async () => { await context.executionContext?.security.authority.assertCurrent() }

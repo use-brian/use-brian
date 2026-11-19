@@ -2,25 +2,27 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import request from 'supertest'
 import { createTestApp } from './helpers.js'
 import { computerRoutes, createInMemoryLocalComputerTaskStore } from '../computer.js'
+import { createInMemoryBrowserSkillGrantStore } from '@use-brian/core/sandbox/browser-skills.js'
+import { createCloudBrowserProvider } from '@use-brian/core/sandbox/cloud-browser-provider.js'
+import { createLocalBrowserProvider } from '@use-brian/core/sandbox/local-browser-provider.js'
 import {
-  BrowserBackendError,
-  BrowserProfileAuthoritySchema,
-  StubSandboxProvider,
-  createCloudBrowserProvider,
-  createInMemoryBrowserProfileStore,
-  createInMemoryBrowserSkillGrantStore,
   createInMemorySandboxTaskStore,
-  createInMemorySessionVault,
-  createLocalBrowserProvider,
   createSandboxOrchestrator,
-} from '@use-brian/core'
+} from '@use-brian/core/sandbox/orchestrator.js'
+import {
+  BrowserProfileAuthoritySchema,
+  createInMemoryBrowserProfileStore,
+  createInMemorySessionVault,
+} from '@use-brian/core/sandbox/profiles.js'
+import { StubSandboxProvider } from '@use-brian/core/sandbox/providers/stub.js'
+import { BrowserBackendError } from '@use-brian/core/sandbox/types.js'
+import type { BrowserAuthBroker } from '@use-brian/core/sandbox/browser-auth-broker.js'
 import type {
-  DepartmentReadGrant,
-  BrowserAuthBroker,
   BrowserCredentialAdminStore,
   BrowserCredentialMetadata,
-  BrowserProvider,
-} from '@use-brian/core'
+} from '@use-brian/core/sandbox/browser-credentials.js'
+import type { BrowserProvider } from '@use-brian/core/sandbox/types.js'
+import type { DepartmentReadGrant } from '@use-brian/agent-runtime/security/department-read.js'
 
 const MEMBER_ROLE = async (_userId: string, _workspaceId: string) => 'member'
 

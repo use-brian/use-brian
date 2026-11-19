@@ -1208,7 +1208,7 @@ describe('[COMP:api/shopify-client] Shopify GraphQL client', () => {
   // The cold @use-brian/core barrel import can exceed the 5s default under
   // full-suite fan-out load, so this row gets an explicit timeout.
   it('answers "last 5 orders" through the tool + client against a mocked GraphQL endpoint', { timeout: 20_000 }, async () => {
-    const { createShopifyTools } = await import('@use-brian/core')
+    const { createShopifyTools } = await import('@use-brian/core/tools/base/shopify.js')
     mockFetch.mockResolvedValue(jsonResponse({
       data: {
         orders: {

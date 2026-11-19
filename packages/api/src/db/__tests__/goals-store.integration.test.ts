@@ -2,15 +2,15 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import type pg from 'pg'
 import { getAppPool, getPool, queryWithRLS } from '../client.js'
 import { captureAuthoringAuthoritySystem } from '../../context-scope/workflow-authority.js'
+import type { DoneWhenResolvers } from '@use-brian/core/goals/done-when.js'
+import { instantiateGoalRecipe } from '@use-brian/core/goals/recipe.js'
 import {
   rollupGoals,
   rollupHost,
-  instantiateGoalRecipe,
   type RollupDeps,
   type RollupGoalDeps,
-  type DoneWhenResolvers,
-  type GoalCreateParams,
-} from '@use-brian/core'
+} from '@use-brian/core/goals/rollup.js'
+import type { GoalCreateParams } from '@use-brian/core/goals/types.js'
 
 /**
  * Guarded disposable-PG integration for the Goal store and native lifecycle.
@@ -839,12 +839,12 @@ describe('[COMP:goals/verifier] verify-termination wiring (integration)', () => 
   let goals: GoalsMod
   let writeback: typeof import('../../goals/writeback.js')
   let goalStoreMod: typeof import('../goals-store.js')
-  let core: typeof import('@use-brian/core')
+  let core: typeof import('@use-brian/core/goals/done-when.js')
   beforeAll(async () => {
     goals = await import('../goals.js')
     writeback = await import('../../goals/writeback.js')
     goalStoreMod = await import('../goals-store.js')
-    core = await import('@use-brian/core')
+    core = await import('@use-brian/core/goals/done-when.js')
   })
 
   it('a {kind:verify} goal: round-trips the store; verifiedDone flips false→true only once the marker is stamped, and the evaluator follows', async () => {

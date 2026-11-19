@@ -1,4 +1,6 @@
-import { createLoopDetector, createToolExecutor, type Tool, type ToolContext } from '@use-brian/core'
+import { createLoopDetector } from '@use-brian/agent-runtime/engine/loop-detector.js'
+import { createToolExecutor } from '@use-brian/agent-runtime/engine/tool-executor.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { runWithAgentAccess } from '../db/client.js'
 import { executeWithCurrentAuthority } from '../context-scope/authority-lease.js'
 import type { ChannelQuestion } from './channel-questions.js'

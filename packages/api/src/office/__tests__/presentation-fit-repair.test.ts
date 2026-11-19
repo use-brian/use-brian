@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { fitOfficeArtifact, type Message } from '@use-brian/core'
+import { fitOfficeArtifact } from '@use-brian/core/office/index.js'
+import type { Message } from '@use-brian/agent-runtime/providers/types.js'
 import type { OfficeTemplateBundle, PresentationSnapshot } from '@use-brian/office-model'
 import { generatePresentationFromTemplate, revisePresentationTargets } from '../presentation-generation.js'
 

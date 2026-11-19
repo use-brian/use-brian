@@ -12,10 +12,15 @@ import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 import { OfficeJobActivity, OfficeJobActivityView, officeBrianScope } from "../job-activity";
+import { conversationRegistry } from "@/lib/chat/conversation-registry";
 import { presentationFixture, uid } from "./editor-fixtures";
 import { getOfficeConversation, resumeOfficeGeneration, startOfficeConversation, steerOfficeJob, type OfficeJob, type OfficeJobEvent } from "@/lib/office/api";
 
-const net = vi.hoisted(() => ({ chatBodies: [] as unknown[], chatFrames: [] as Array<[string, unknown]>, sessionRows: [] as unknown[], keepOpen: false }));
+const net = vi.hoisted(() => ({ chatBodies: [] as unknown[], chatFrames: [] as Array<[string, unknown]>, sessionRows: [] as unknown[], keepOpen: false,
+  follows: [] as ReadableStreamDefaultController<Uint8Array>[],
+  status: { status: "idle", turnId: null } as { status: string; turnId: string | null },
+  statusRead: null as null | (() => Promise<{ status: string; turnId: string | null }>),
+}));
 vi.mock("@/lib/workspace-context", () => ({ useOptionalWorkspaceContext: () => ({ workspaceId: "workspace-a", me: { id: "viewer-a" } }) }));
 vi.mock("@/lib/user", () => ({ getUserInfo: () => ({ id: "viewer-a" }) }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
@@ -26,7 +31,7 @@ vi.mock("@/components/doc/composer-controls", () => ({
 vi.mock("@/lib/api/sessions", async (importOriginal) => ({ ...await importOriginal<typeof import("@/lib/api/sessions")>(), fetchSessionMessages: vi.fn(async () => net.sessionRows) }));
 vi.mock("@/lib/auth-fetch", () => ({
   authFetch: vi.fn(async (url: string, init?: RequestInit) => {
-    if (url.endsWith("/stream")) return new Response(new ReadableStream({ start() { /* follow stream stays open */ } }), { status: 200 });
+    if (url.endsWith("/stream")) return new Response(new ReadableStream<Uint8Array>({ start(controller) { net.follows.push(controller); } }), { status: 200 });
     if (url.endsWith("/api/chat")) {
       net.chatBodies.push(JSON.parse(String(init?.body)));
       const encoder = new TextEncoder();
@@ -35,6 +40,7 @@ vi.mock("@/lib/auth-fetch", () => ({
         if (!net.keepOpen) controller.close();
       } }), { status: 200 });
     }
+    if (url.includes("/api/sessions/")) return Response.json(net.statusRead ? await net.statusRead() : net.status);
     return new Response("{}", { status: 200 });
   }),
 }));
@@ -91,6 +97,9 @@ beforeEach(() => {
   net.chatFrames = [];
   net.sessionRows = [];
   net.keepOpen = false;
+  net.follows = [];
+  net.status = { status: "idle", turnId: null };
+  net.statusRead = null;
   vi.mocked(steerOfficeJob).mockClear();
   vi.mocked(startOfficeConversation).mockClear();
   vi.mocked(resumeOfficeGeneration).mockClear();
@@ -98,7 +107,8 @@ beforeEach(() => {
   document.body.append(host);
   root = createRoot(host);
 });
-afterEach(() => { act(() => root.unmount()); host.remove(); });
+// The registry outlives a mount; each case starts from no conversation.
+afterEach(() => { act(() => root.unmount()); host.remove(); conversationRegistry().disposeAll(); });
 
 async function mount(props: Partial<Parameters<typeof OfficeJobActivity>[0]> = {}) {
   await act(async () => root.render(<I18nProvider locale="en" dict={en as unknown as Dictionary}>
@@ -279,5 +289,57 @@ describe("[COMP:app-web/office-iteration-panel] generation status as Brian's mes
     expect(officeBrianScope(snapshot, [uid(70)])).toEqual({ kind: "object", slide: 1 });
     expect(officeBrianScope(snapshot, [uid(70), uid(72)])).toEqual({ kind: "objects", slide: 1, count: 2 });
     expect(officeBrianScope(snapshot, [uid(999)])).toEqual({ kind: "targets", count: 1 });
+  });
+});
+
+// Drive the mounted receiving component, its real coordinator, real SSE parser
+// and stream hook. HTTP is the only replaced boundary.
+describe("[COMP:app-web/office-iteration-panel] turn-correlated receiving", () => {
+  const first = "a".repeat(64), successor = "b".repeat(64);
+  // The controller coalesces text and snapshot frames into one paint
+  // (animation frame, 100 ms timer fallback); wait past it.
+  const tick = () => new Promise(resolve => setTimeout(resolve, 120));
+  async function follow(event: string, data: unknown) {
+    await act(async () => {
+      net.follows.at(-1)!.enqueue(new TextEncoder().encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+      await tick();
+    });
+  }
+
+  it("keeps successor text and working state through an old completion and recovers normally", async () => {
+    vi.mocked(getOfficeConversation).mockResolvedValueOnce({ sessionId: "session-a", canSend: true, role: "edit", assistant: { id: "assistant-a", name: "Brian" } });
+    await mount();
+    net.status = { status: "running", turnId: first };
+    await follow("status", { status: "running", turnId: first });
+    await follow("snapshot", { turnId: first, text: "Earlier work" });
+    net.status = { status: "running", turnId: successor };
+    await follow("turn_started", { turnId: successor });
+    await follow("snapshot", { turnId: successor, text: "Current work" });
+    expect(host.textContent).toContain("Current work");
+    await follow("turn_completed", { turnId: first, reason: "publication_recovered" });
+    expect(host.textContent).toContain("Current work");
+    expect(host.textContent).not.toContain(en.office.chatTurnFailed);
+    net.status = { status: "idle", turnId: successor };
+    await follow("turn_completed", { turnId: successor, reason: "publication_recovered" });
+    expect(host.textContent).not.toContain("Current work");
+    expect(host.querySelector('[data-office-thinking="true"]')).toBeNull();
+    expect(host.textContent).not.toContain(en.office.chatTurnFailed);
+  });
+
+  it("does not apply a delayed old idle status to an optimistic successor POST", async () => {
+    vi.mocked(getOfficeConversation).mockResolvedValueOnce({ sessionId: "session-a", canSend: true, role: "edit", assistant: { id: "assistant-a", name: "Brian" } });
+    await mount();
+    let resolve!: (value: { status: string; turnId: string | null }) => void;
+    net.statusRead = () => new Promise(done => { resolve = done; });
+    await follow("status", { status: "idle", turnId: first });
+    net.keepOpen = true;
+    net.chatFrames = [["turn_started", { turnId: successor }], ["text_delta", { text: "Successor draft" }]];
+    await type("Continue with the next turn");
+    await send();
+    await act(async () => { await tick(); });
+    expect(host.textContent).toContain("Successor draft");
+    await act(async () => { resolve({ status: "idle", turnId: first }); await tick(); });
+    expect(host.textContent).toContain("Successor draft");
+    expect(host.querySelector('form button[type="submit"]')?.getAttribute("disabled")).not.toBeNull();
   });
 });

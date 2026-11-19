@@ -17,7 +17,7 @@ import {officePdfSessionRoutes} from '../../routes/office-pdf-sessions.js'
 import {createTestApp} from '../../routes/__tests__/helpers.js'
 import {purgeExpiredPdfSessions,runPdfPurgeBlobWorker} from '../../office/lifecycle-worker.js'
 import {createFlatPdfFixture} from '../../../../core/src/office/__tests__/fixtures/pdf/index.js'
-import type {FilesContext} from '@use-brian/core'
+import type {FilesContext} from '@use-brian/core/workspace-files/api.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 const pool=getPool()

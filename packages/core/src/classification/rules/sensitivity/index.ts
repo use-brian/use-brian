@@ -6,7 +6,7 @@
  */
 
 import { scrubCredentials } from '../../../ingest/credential-scrubber.js'
-import type { Sensitivity } from '../../../security/sensitivity.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 
 /**
  * Pre-LLM rule: if content matches any credential / secret regex from

@@ -1,7 +1,7 @@
 /** Native text-only OpenAI Decisions adapter. [COMP:decisions/openai] */
 import { decisionTransportBudget, registerDecisionTransportOwner } from '../transport-budget.js'
 import { assertDecisionResponseAuthority } from '../authority-ownership.js'
-import { assertInputAuthority, isInputAuthorityError } from '../../providers/input-authority.js'
+import { assertInputAuthority, isInputAuthorityError } from '@use-brian/agent-runtime/providers/input-authority.js'
 import type { DecisionAnswer, DecisionCapabilities, DecisionProvider, DecisionRequest, DecisionResponse, JsonValue } from '../types.js'
 import { DecisionProviderError } from '../types.js'
 import { assertDecisionCapabilities, validateDecisionResponse } from '../validate.js'

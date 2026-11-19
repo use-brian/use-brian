@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { CrmOperationsError, type CrmSegmentCatalog, type CrmSegmentPredicate } from '@use-brian/core'
+import { CrmOperationsError } from '@use-brian/core/crm/operations-types.js'
+import type { CrmSegmentCatalog, CrmSegmentPredicate } from '@use-brian/core/crm/segments.js'
 import { compileCrmSegmentPredicate } from '../crm-segment-store.js'
 
 type InternalCatalogEntry = {

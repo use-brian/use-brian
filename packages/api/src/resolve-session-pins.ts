@@ -1,4 +1,6 @@
-import { canRead, type ScopeSource, type ToolContext } from '@use-brian/core'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { canRead } from '@use-brian/agent-runtime/security/sensitivity.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import type { QueryResultRow } from 'pg'
 import { validateCallerScopeEvidence, validateAudienceScopeEvidence } from './context-scope/caller-evidence.js'
 import { query, queryWithRLS, runWithAgentAccess } from './db/client.js'

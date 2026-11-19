@@ -16,14 +16,15 @@ import { resolveCrmDestination, previewCrmDestination } from '../crm-operations/
 import type { Request, Response } from 'express'
 import { z } from 'zod'
 import { applicationJsonSchema } from '@use-brian/shared'
-import type {
-  AccessContext,
-  CrmEmailDraftStore,
-  CrmOperationsServicePort,
-  DealStage,
-  EntityLinksStore,
-} from '@use-brian/core'
-import { crmAmountSchema, EntityMergeError, UndoMergeError, mergeEntities, undoMerge, CrmConfigCommandSchema, CrmOperationsError, type CrmConfigCommand } from '@use-brian/core'
+import type { CrmEmailDraftStore } from '@use-brian/core/crm/email-drafts.js'
+import type { CrmOperationsServicePort } from '@use-brian/core/crm/operations-types.js'
+import type { DealStage } from '@use-brian/core/crm/types.js'
+import type { EntityLinksStore } from '@use-brian/core/entities/types.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import { EntityMergeError, UndoMergeError, mergeEntities, undoMerge } from '@use-brian/core/corrections/entity-merge.js'
+import { CrmConfigCommandSchema, type CrmConfigCommand } from '@use-brian/core/crm/config-commands.js'
+import { CrmOperationsError } from '@use-brian/core/crm/operations-types.js'
+import { crmAmountSchema } from '@use-brian/core/crm/types.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import { resolveWorkspaceViewpoint } from '../db/workspace-viewpoint.js'
 import {

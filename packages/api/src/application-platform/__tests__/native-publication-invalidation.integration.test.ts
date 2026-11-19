@@ -19,7 +19,7 @@ if (legacyInvalidatorBody === canonicalInvalidatorBody) throw new Error('Reviewe
 // This migration intentionally refuses later executable successors. The maintained
 // upgrade runner executes its replay/adversarial cases before migration 8196.
 const upgradeBoundary = process.env.BRIAN_NATIVE_PUBLICATION_UPGRADE_BOUNDARY === '8195'
-  || (await pool.query(`SELECT to_regprocedure('public.publish_native_turn_annotation(uuid,uuid,uuid,uuid,jsonb,text,jsonb,uuid,bigint)') IS NULL AS predecessor`)).rows[0].predecessor
+  || (await pool.query(`SELECT to_regprocedure('public.publish_native_turn_annotation(uuid,uuid,uuid,uuid,jsonb,text,jsonb,uuid,bigint)') IS NULL AND to_regprocedure('public.conversation_prepare_publications(uuid,uuid,jsonb)') IS NULL AS predecessor`)).rows[0].predecessor
 afterAll(async () => { await pool.end() })
 
 /** Recreate only the exact pre-bridge catalog in this rollback-only fixture. */
@@ -31,9 +31,13 @@ async function restorePredecessors(client: PoolClient) {
 
 describe.sequential('[COMP:api/native-turn-frame] current publication guard compatibility', () => {
   it('keeps the structural publication and complete turn guards current after every migration', async () => {
+    if ((await pool.query("SELECT to_regprocedure('application_native_dependency_batch_helpers_current()') retired")).rows[0].retired === null) {
+      expect((await pool.query('SELECT native_turn_helpers_current() current')).rows[0].current).toBe(true)
+    } else {
     const row = (await pool.query(`SELECT application_native_dependency_batch_helpers_current() dependency,
       application_native_field_reference_helpers_current() reference,native_turn_helpers_current() turn`)).rows[0]
     expect(row).toEqual({ dependency: true, reference: true, turn: true })
+    }
   })
 })
 

@@ -1,4 +1,4 @@
-import { resolveGeminiThinkingLevel } from '../providers/gemini.js'
+import { resolveGeminiThinkingLevel } from '@use-brian/agent-runtime/providers/gemini.js'
 /**
  * AI answer engines — the shared ask framework.
  *

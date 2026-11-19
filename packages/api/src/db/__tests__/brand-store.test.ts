@@ -276,6 +276,8 @@ describe('[COMP:brand/store] draft writes', () => {
 
     const sql = flat(rlsCalls[0].sql)
     expect(sql).toContain('SET draft = $3::jsonb')
+    expect(sql).toContain('FROM workspace_members m WHERE m.workspace_id = $2 AND m.user_id = $4')
+    expect(rlsCalls[0].params[3]).toBe(USER)
     // The write path an assistant can reach must not be able to approve.
     expect(sql).not.toContain('active_version_id =')
     expect(sql).not.toMatch(/INSERT INTO workspace_brand_versions/i)
@@ -302,15 +304,23 @@ describe('[COMP:brand/store] reads', () => {
     txRows = [[brandRow()]]
     const store = createBrandStore()
     await store.get(USER, WORKSPACE, { id: BRAND, slug: 'other' })
-    expect(flat(rlsCalls[0].sql)).toContain('b.id = $2')
-    expect(rlsCalls[0].params).toEqual([WORKSPACE, BRAND])
+    expect(flat(rlsCalls[0].sql)).toContain('b.id = $3')
+    expect(rlsCalls[0].params).toEqual([WORKSPACE, USER, BRAND])
   })
 
   it('resolves by slug when no id is given', async () => {
     txRows = [[brandRow()]]
     const store = createBrandStore()
     await store.get(USER, WORKSPACE, { slug: 'northwind' })
-    expect(flat(rlsCalls[0].sql)).toContain('b.slug = $2')
+    expect(flat(rlsCalls[0].sql)).toContain('b.slug = $3')
+  })
+
+  it('requires the acting user to be a current workspace member, not only the RLS policy', async () => {
+    txRows = [[]]
+    const store = createBrandStore()
+    expect(await store.get(USER, WORKSPACE)).toBeNull()
+    expect(flat(rlsCalls[0].sql)).toContain('FROM workspace_members m WHERE m.workspace_id = $1 AND m.user_id = $2')
+    expect(rlsCalls[0].params).toEqual([WORKSPACE, USER])
   })
 
   it('treats an unparseable stored record as absent rather than throwing', async () => {

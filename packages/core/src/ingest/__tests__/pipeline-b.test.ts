@@ -34,8 +34,8 @@ import type {
   EntitySupersedePatch,
 } from '../../entities/types.js'
 import type { MemoryRecord, MemoryStore, MemoryWithMetrics, SoulSynthesisInput } from '../../memory/types.js'
-import type { LLMProvider, ProviderRequest, StreamChunk } from '../../providers/types.js'
-import type { Sensitivity } from '../../security/sensitivity.js'
+import type { LLMProvider, ProviderRequest, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 
 import {
   processEpisode,
@@ -48,7 +48,7 @@ import {
   type PipelineBEpisode,
   type EpisodeUpdaterPort,
 } from '../pipeline-b.js'
-import { estimateStringTokens } from '../../compaction/index.js'
+import { estimateStringTokens } from '@use-brian/agent-runtime/compaction/index.js'
 import type { PlatformEngagementMetrics } from '../types.js'
 import type { PipelineBApplicationPort } from '../pipeline-b-application.js'
 import { executionFixture, fixtureDecisionProvider } from '../../decisions/__tests__/execution-fixture.js'
@@ -2305,7 +2305,7 @@ describe('[COMP:brain/pipeline-b] extraction usage attribution', () => {
     })
     return {
       recordUsage,
-      store: { recordUsage } as unknown as import('../../billing/cost-tracker.js').UsageStore,
+      store: { recordUsage } as unknown as import('@use-brian/agent-runtime/billing/cost-tracker.js').UsageStore,
     }
   }
 
@@ -3465,7 +3465,7 @@ describe('[COMP:tasks/task-readiness] Pipeline B — grounded automatic task qua
         providerKeySource: 'platform',
         inputTokenLimit: 12000,
         maxTokens: 2000,
-        usage: { recordUsage } as unknown as import('../../billing/cost-tracker.js').UsageStore,
+        usage: { recordUsage } as unknown as import('@use-brian/agent-runtime/billing/cost-tracker.js').UsageStore,
       }),
     )
 

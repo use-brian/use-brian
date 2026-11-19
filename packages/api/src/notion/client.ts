@@ -7,7 +7,7 @@
  * See docs/architecture/integrations/notion.md.
  */
 
-import { ConnectorApiError, type ConnectorFailureKind } from '@use-brian/core'
+import { ConnectorApiError, type ConnectorFailureKind } from '@use-brian/core/tools/base/_connector-result.js'
 
 const NOTION_API = 'https://api.notion.com/v1'
 const NOTION_VERSION = '2022-06-28'

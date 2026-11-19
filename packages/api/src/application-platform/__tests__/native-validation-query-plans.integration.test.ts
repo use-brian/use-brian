@@ -2,10 +2,11 @@ import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { PoolClient } from 'pg'
-import { boundScopeSources, ContextScopeAccumulator } from '@use-brian/core'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { getAppPool, getPool, rollbackAndRelease } from '../../db/client.js'
 import { addSessionMessage, createWorkspaceChatSession } from '../../db/sessions.js'
-import { readAdmittedSessionQuery } from '../../db/session-query-reader.js'
+import { readAdmittedSessionQuery } from '../../db/conversation-store.js'
 import { sessionContextGeneration, writeSessionContextRevision } from '../../db/session-context-revisions.js'
 import { persistentContextFixture } from './fixtures/persistent-context.js'
 
@@ -42,7 +43,7 @@ async function original<T>(client: PoolClient, definition: string, read: () => P
   finally { await client.query('ROLLBACK TO SAVEPOINT original_plan') }
 }
 async function guard(client: PoolClient) {
-  return (await client.query<{ allowed: boolean }>('SELECT application_memory_statement_helpers_current() AS allowed')).rows[0].allowed
+  return (await client.query<{ allowed: boolean }>('SELECT native_turn_helpers_current() AS allowed')).rows[0].allowed
 }
 async function appendBodyComment(client: PoolClient, signature: string) {
   const { rows: [fn] } = await client.query<{ definition: string; body: string }>(
@@ -116,6 +117,7 @@ describe.sequential('[COMP:api/application-persistence] native validation query 
       else if (scenario.endsWith('mapping')) {
         const versioned = scenario === 'versioned mapping'
         await client.query(`CREATE TABLE synthetic_file_ancestors(id uuid,workspace_id uuid${versioned ? ',superseded_by uuid' : ''})`)
+        await client.query(`DO $fixture$ BEGIN EXECUTE format('GRANT SELECT ON synthetic_file_ancestors TO %I',(SELECT pg_get_userbyid(proowner) FROM pg_proc WHERE oid='scope_source_ancestors_before_browser_profile(uuid,text,uuid)'::regprocedure));END $fixture$`)
         await client.query('INSERT INTO synthetic_file_ancestors(id,workspace_id) VALUES($1,$2)', [fileIds[2], f.workspaceId])
         if (versioned) {
           await client.query('INSERT INTO synthetic_file_ancestors VALUES($1,$2,$3)', [fileIds[3], f.workspaceId, fileIds[2]])
@@ -195,12 +197,12 @@ describe.sequential('[COMP:api/application-persistence] native validation query 
       await client.query('ROLLBACK TO SAVEPOINT helper_drift')
       expect(await guard(client)).toBe(true)
       expect((await client.query('SELECT application_empty_query_helpers_current() AS allowed')).rows[0].allowed).toBe(true)
-      expect((await client.query('SELECT application_empty_query_facades_current() AS allowed')).rows[0].allowed).toBe(true)
+      expect((await client.query("SELECT to_regprocedure('application_empty_query_facades_current()') value")).rows[0].value).toBeNull()
     }))
   }
 
   it('keeps private helpers private and the recording reader callable by the application role', async () => transaction(async client => {
-    for (const signature of [ancestrySignature, 'application_memory_statement_helpers_current()']) {
+    for (const signature of [ancestrySignature, 'native_turn_helpers_current()']) {
       expect((await client.query("SELECT has_function_privilege('app_user',$1,'EXECUTE') AS allowed", [signature])).rows[0].allowed).toBe(false)
     }
     expect((await client.query("SELECT has_function_privilege('app_user','recording_source_read_allowed(uuid,text,uuid)','EXECUTE') AS allowed")).rows[0].allowed).toBe(true)

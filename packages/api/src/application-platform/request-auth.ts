@@ -1,6 +1,6 @@
 /** Reserved-header adapter; request JSON is never an identity source. [COMP:api/application-auth] */
 import type { Request } from 'express'
-import type { ExecutionContext } from '@use-brian/core'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { ApplicationPlatformError } from '@use-brian/shared'
 import { authenticateApplicationCredential } from './credentials.js'
 import { loadApplicationCredentialStateSystem } from './auth-store.js'

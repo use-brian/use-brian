@@ -1,5 +1,5 @@
 /** Trusted external-service receipt ownership, separate from credentials. [COMP:api/external-services] */
-import type { ExecutionContext } from '@use-brian/core'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { ApplicationPlatformError } from '@use-brian/shared'
 
 type ReceiptIdentity = Readonly<{ kind: 'external_service'; serviceId: string; workspaceId: string; userId: string }>

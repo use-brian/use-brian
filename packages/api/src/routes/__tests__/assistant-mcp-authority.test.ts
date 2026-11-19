@@ -3,13 +3,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { z } from 'zod'
-import {
-  buildTool, createExecutionContext, type ToolContext,
-} from '@use-brian/core'
+import { createExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { buildTool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { createAuthorityLease } from '../../context-scope/authority-lease.js'
 import type { ResolveExecutionContextInput } from '../../context-scope/execution-context.js'
 import { currentAgentAccess } from '../../db/agent-access-context.js'
 import { hashSecret, mintPlaintext, type ApiKeyStore } from '../../db/api-key-store.js'
+import { createDbOAuthAuthorizationStore } from '../../db/oauth-authorization-store.js'
+import { readWorkspaceMcpConsent } from '../../workspace-mcp/consent.js'
 import { assistantMcpRoutes } from '../assistant-mcp.js'
 import { manageBriefSchema } from '../../briefs/tools.js'
 
@@ -37,7 +38,8 @@ vi.mock('../../context-scope/execution-context.js', () => ({
   },
 }))
 
-async function fixture(options: { issuer?: string | null; ask?: boolean; onExecute?: () => void; inputSchema?: z.ZodTypeAny } = {}) {
+async function fixture(options: { issuer?: string | null; ask?: boolean; onExecute?: () => void; inputSchema?: z.ZodTypeAny;
+  contextOnly?: (workspaceId: string) => Promise<boolean>; oauth?: boolean } = {}) {
   const minted = mintPlaintext(KEY)
   const key = {
     id: KEY, assistantId: ASSISTANT, name: 'Test integration', prefix: minted.prefix,
@@ -60,16 +62,32 @@ async function fixture(options: { issuer?: string | null; ask?: boolean; onExecu
   const common = { description: 'An example operation', inputSchema: options.inputSchema ?? z.object({}), execute }
   const read = buildTool({ ...common, name: 'readExample', isReadOnly: true, requiresCapability: 'tasks' })
   const write = buildTool({ ...common, name: 'writeExample', requiresConfirmation: options.ask === true })
+  const expiresAt = new Date(Date.now() + 60_000)
+  const oauthGrant = options.oauth ? {
+    id: KEY, workspaceId: WORKSPACE, userId: 'issuer', clientId: 'fictional-client', scope: 'read' as const,
+    audience: 'assistant' as const, boundAssistantId: ASSISTANT, accessTokenHash: key.keyHash,
+    accessTokenExpiresAt: expiresAt, refreshTokenExpiresAt: null, revokedAt: null, lastUsedAt: null, createdAt: new Date(),
+    codeHash: null, codeChallenge: null, codeRedirectUri: null, codeExpiresAt: null, refreshTokenHash: null,
+    workspaceMcpConsent: readWorkspaceMcpConsent({ version: 1, assistantId: ASSISTANT, operationNames: ['readExample'],
+      maxClearance: 'internal', compartments: [], mutationCompartments: [], projectIds: [], visibilityAssistantIds: [ASSISTANT],
+      contextGroupId: null, contextProjectId: null, expiresAt: expiresAt.toISOString() }),
+  } : null
   const app = express()
   app.use(express.json())
   app.use('/api/v1', assistantMcpRoutes({
+    contextOnly: options.contextOnly,
+    ...(oauthGrant ? {
+      authorizationStoreFor: assistantId => ({ ...createDbOAuthAuthorizationStore({ audience: 'assistant', assistantId }),
+        getByIdSystem: async () => oauthGrant, touchLastUsedAt: async () => {} }),
+      workspaceProfile: {} as never,
+    } : {}),
     apiKeyStore: { getByIdSystem: async () => key } as unknown as ApiKeyStore,
     capabilityStore: { listActive: async () => [...capabilities] } as never,
     agentTools: { reads: new Map([[read.name, read]]), writes: new Map([[write.name, write]]) },
   }))
   async function call(method = 'tools/call', params: unknown = { name: 'readExample', arguments: {} }) {
     const response = await request(app).post(`/api/v1/assistants/${ASSISTANT}/mcp`)
-      .set('Authorization', `Bearer ${minted.plaintext}`)
+      .set('Authorization', `Bearer ${options.oauth ? `oat_${KEY}_${minted.secret}` : minted.plaintext}`)
       .set('Accept', 'application/json, text/event-stream')
       .send({ jsonrpc: '2.0', id: 1, method, params })
     const data = response.text.split('\n').find(line => line.startsWith('data: '))
@@ -82,6 +100,17 @@ async function fixture(options: { issuer?: string | null; ask?: boolean; onExecu
 beforeEach(() => { state.member = true; state.contextInputs = [] })
 
 describe('[COMP:api/assistant-mcp] admitted HTTP execution', () => {
+  it.each([false, true])('blocks a context-only workspace before entering the assistant tool catalog (OAuth: %s)', async oauth => {
+    const contextOnly = vi.fn(async () => true)
+    const f = await fixture({ contextOnly, oauth })
+    const { response, body } = await f.call()
+    expect(response.status).toBe(403)
+    expect(body.error).toBe('memory_connection_required')
+    expect(contextOnly).toHaveBeenCalledExactlyOnceWith(WORKSPACE)
+    expect(state.contextInputs).toHaveLength(0)
+    expect(f.execute).not.toHaveBeenCalled()
+  })
+
   it('executes as the actual issuer through the native policy boundary', async () => {
     const f = await fixture()
     const { response, body } = await f.call()

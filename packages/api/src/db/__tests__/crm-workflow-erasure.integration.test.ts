@@ -1,7 +1,7 @@
 import {randomUUID} from 'node:crypto'
 import {readFile} from 'node:fs/promises'
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
-import type {CrmOperationsContext} from '@use-brian/core'
+import type {CrmOperationsContext} from '@use-brian/core/crm/operations-types.js'
 import {getPool,getAppPool} from '../client.js'
 import {createDbWorkflowRunStore} from '../workflow-store.js'
 import {_resetCoalescerForTests} from '../../brain-stream/notify.js'
@@ -9,7 +9,7 @@ import {createCrmPrivacyService,readCrmErasureReview} from '../../crm-operations
 import {streamCrmPrivacyExport} from '../../crm-operations/privacy-export.js'
 import {acquireCrmPrivacyAdmission} from '../../crm-operations/privacy-admission.js'
 import {readWorkflowInputEvidence} from '../../context-scope/workflow-input-evidence.js'
-import {ContextScopeAccumulator} from '@use-brian/core'
+import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 const pool=getPool(),appPool=getAppPool(),runs=createDbWorkflowRunStore(),privacy=createCrmPrivacyService()
@@ -42,7 +42,7 @@ async function fixture() {
     const step=await runs.createStepRun({runId:id,stepId:'local',stepType:'branch',input:{value}})
     await runs.updateStepRun(step.id,{status:'completed',output:{value},finishedAt:new Date()})
     const scope=new ContextScopeAccumulator()
-    scope.note((await runs.getRunSystem(id))!.vars.__contextScopeEvidence as import('@use-brian/core').ScopeEvidence)
+    scope.note((await runs.getRunSystem(id))!.vars.__contextScopeEvidence as import('@use-brian/agent-runtime/security/context-scope.js').ScopeEvidence)
     scope.note(await readWorkflowInputEvidence(id,workspaceId))
     await runs.updateRun(id,{status:'completed',vars:{value,__contextScopeEvidence:scope.evidence},outcome:{status:'completed',summary:value,logs:[],todo:[],blockers:[],state:{value},finishedAt:new Date().toISOString()},finishedAt:new Date()})
   }

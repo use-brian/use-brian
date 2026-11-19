@@ -26,14 +26,14 @@
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import nodePath from 'node:path'
-import { parseMarkdownFile } from '@use-brian/core'
+import { parseMarkdownFile } from '@use-brian/core/knowledge/parser.js'
 import type {
   KnowledgeRepoWriter,
   KnowledgeRepoWriteResult,
-  KnowledgeWriteActor,
-  Sensitivity,
-  SessionContextAuthority,
-} from '@use-brian/core'
+} from '@use-brian/core/knowledge/types.js'
+import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
+import type { KnowledgeWriteActor } from '@use-brian/core/workflow/knowledge-event-trigger.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import * as github from '../github/client.js'
 import { splitFrontmatterBlock, resolveRepoFilePath, validateKnowledgeEntryPath } from './repo-files.js'
 

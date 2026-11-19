@@ -2,8 +2,13 @@
 import process from 'node:process'
 import { ApplicationSdkError, appIdentifier, appOAuthToken, httpTransport, type ApplicationFetch, type ApplicationTransport, type HttpTransportOptions } from './transport.js'
 import type { ApplicationCallOptions, ApplicationSchemaPorts, ApplicationSchemaPreviewResult, ApplicationSchemaApplyResult } from './application.js'
-export type { ApplicationModuleDefinition, ApplicationOperationContext, ApplicationRegisteredOperation,
-  ApplicationRegisteredCommand, defineApplicationModules } from '@use-brian/core'
+export type {
+  ApplicationModuleDefinition,
+  ApplicationOperationContext,
+  ApplicationRegisteredOperation,
+  ApplicationRegisteredCommand,
+  defineApplicationModules
+} from '@use-brian/core/application-platform/contracts.js'
 
 export function createNativeSchemaPorts(options: HttpTransportOptions & { workspaceId: string; fetch: ApplicationFetch }): ApplicationSchemaPorts {
   if (!process.versions.node || typeof options.fetch !== 'function') throw new ApplicationSdkError('operation_not_available')

@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { createComputerTools, SEND_LIKE_LABEL_PATTERN, type ComputerToolProfiles } from '../tools.js'
 import { createLocalBrowserProvider } from '../local-browser-provider.js'
 import { createInMemoryBrowserProfileStore } from '../profiles.js'
-import type { Tool, ToolContext } from '../../tools/types.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { BrowserBackendError } from '../types.js'
 import type { BrowserProvider, RelayCommandResult } from '../types.js'
 

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { documentFixture, spreadsheetFixture } from '../../../../office-model/src/__tests__/fixtures.js'
-import { inferOfficeTemplateRouting } from '@use-brian/core'
+import { inferOfficeTemplateRouting } from '@use-brian/core/office/templates/routing.js'
 import type { OfficeTemplateBundle } from '@use-brian/office-model'
 import { replaceTemplateRuns, validateTemplateFieldValues } from '../template-fields.js'
 import { generateDocumentFromTemplate } from '../document-generation.js'

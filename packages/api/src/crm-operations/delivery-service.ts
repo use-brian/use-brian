@@ -3,10 +3,21 @@ import { assertCrmDeliveryScope, captureCrmDeliveryScope, withCrmDeliverySourceA
 import { randomUUID } from 'node:crypto'
 import type { PoolClient } from 'pg'
 import {
-  CrmOperationsUuidSchema, CrmOperationsContextSchema, SendCrmMessageCommandSchema, CrmOperationsError,
-  actorAuditIdentity, crmOperationsSha256, requireCrmIntegrationOperation, requireCrmIntegrationResources,
-  type CrmOperationsContext, type CrmDeliveryReceipt, type CrmDeliveryServicePort, type SendCrmMessageCommand,
-} from '@use-brian/core'
+  requireCrmIntegrationOperation,
+  requireCrmIntegrationResources,
+} from '@use-brian/core/crm/integration-authority.js'
+import {
+  CrmOperationsUuidSchema,
+  CrmOperationsContextSchema,
+  SendCrmMessageCommandSchema,
+  CrmOperationsError,
+  actorAuditIdentity,
+  crmOperationsSha256,
+  type CrmOperationsContext,
+  type CrmDeliveryReceipt,
+  type CrmDeliveryServicePort,
+  type SendCrmMessageCommand,
+} from '@use-brian/core/crm/operations-types.js'
 import { lockNativeDeliveryPrincipal } from './delivery-native-authority.js'
 import { getPool } from '../db/client.js'
 import { lockCrmIntegrationCredential } from '../db/crm-integration-store.js'

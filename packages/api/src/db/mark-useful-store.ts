@@ -5,7 +5,7 @@ import type {
   RetrievalActor,
   RetrievalEnvelope,
   RetrievalStore,
-} from '@use-brian/core'
+} from '@use-brian/core/retrieval/types.js'
 import { queryWithRLS } from './client.js'
 
 /**

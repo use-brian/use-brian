@@ -5,10 +5,8 @@
  * [COMP:decisions/promotion-registry]
  */
 import { z } from 'zod'
-import type {
-  DecisionEvaluationProfile,
-  JsonValue,
-} from '@use-brian/core'
+import type { DecisionEvaluationProfile } from '@use-brian/core/decisions/hydra.js'
+import type { JsonValue } from '@use-brian/core/decisions/types.js'
 import {
   validateDecisionPromotion,
   type DecisionEvaluationReport,

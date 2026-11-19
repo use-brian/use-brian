@@ -1,8 +1,4 @@
-import type {
-  AttemptState,
-  PlanSource,
-  PlanStepStatus,
-} from '@use-brian/core'
+import type { AttemptState, PlanSource, PlanStepStatus } from '@use-brian/core/memory/plan-types.js'
 import { query } from './client.js'
 
 export type PlanStepRow = {

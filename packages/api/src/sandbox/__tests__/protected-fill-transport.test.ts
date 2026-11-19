@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { createProtectedFillService } from '../../../../core/src/sandbox/protected-fill.js'
+import { createProtectedFillService } from '@use-brian/core/sandbox/protected-fill.js'
 import { createRelayCommandTransport } from '../relay-transport.js'
 const scope = { userId: 'u', workspaceId: 'w', sessionId: 's', taskId: 't', browserProfileId: 'p', destinationOrigin: 'https://example.com' }
 function setup(fetchImpl: typeof fetch) {

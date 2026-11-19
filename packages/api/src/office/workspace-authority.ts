@@ -1,14 +1,15 @@
 /** Native Office jobs retain the host-observed external connection. [COMP:api/office-generation] */
-import { workspaceCredentialDelegation, type ToolContext } from '@use-brian/core'
+import { workspaceCredentialDelegation } from '@use-brian/agent-runtime/security/workspace-delegation.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { restoreWorkspaceMcpDelegation } from '../workspace-mcp/delegation.js'
 import { createDbCapabilityStore } from '../db/capability-store.js'
 import { runWithAgentAccess } from '../db/client.js'
 import { createAuthorityLease, runWithAuthorityLease } from '../context-scope/authority-lease.js'
 import { bindWorkspaceMcpPublication } from '../db/session-context-revisions.js'
-import { assertSourceModelInputAuthority, assertSourceModelOutputAuthority } from '../application-platform/model-source-authority.js'
+import { admitModelInput, admitModelOutput } from '../context-scope/admission.js'
 import type { OfficeGenerationJobRow } from '../db/office-generation.js'
 
-type Origin = {workspaceDelegation?: import('@use-brian/core').WorkspaceCredentialDelegation;workspaceEvidence?:import('@use-brian/core').ScopeEvidence}
+type Origin = {workspaceDelegation?: import('@use-brian/agent-runtime/security/workspace-delegation.js').WorkspaceCredentialDelegation;workspaceEvidence?:import('@use-brian/agent-runtime/security/context-scope.js').ScopeEvidence}
 export async function captureOfficeWorkspaceAuthority(context?:ToolContext):Promise<Origin> {
   const parent=workspaceCredentialDelegation(context?.executionContext)
   if(!parent)return {}
@@ -26,13 +27,12 @@ export async function withOfficeWorkspaceAuthority<T>(job:OfficeGenerationJobRow
   const execution=context.executionContext!
   bindWorkspaceMcpPublication(execution)
   context.scopeAccumulator!.note(origin.workspaceEvidence)
-  await assertSourceModelInputAuthority(context)
+  await admitModelInput(context)
   const lease = createAuthorityLease(execution.security.ceiling,async()=>{await execution.security.authority.assertCurrent();return execution.security.ceiling})
   return runWithAuthorityLease(lease,()=>runWithAgentAccess(execution.security.access,async()=>{
     await execution.security.authority.assertCurrent()
     const result=await operation()
-    await execution.security.authority.assertCurrent()
-    await assertSourceModelOutputAuthority(context)
+    await admitModelOutput(context)
     return result
   }))
 }

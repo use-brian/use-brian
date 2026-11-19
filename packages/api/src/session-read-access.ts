@@ -18,7 +18,8 @@
  * [COMP:api/live-work-roster]
  */
 import { read, splitScopeLabels, type AccessSnapshot, type Principal, type Tier } from './context-scope/reference-predicate.js'
-import { canRead, scopeGrantContains, type ScopeGrant } from '@use-brian/core'
+import { scopeGrantContains, type ScopeGrant } from '@use-brian/agent-runtime/security/context-scope.js'
+import { canRead } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { classifySession } from './session-kind.js'
 
 /** Workspace audience per the one classifier (rooms, threads, drafts). */

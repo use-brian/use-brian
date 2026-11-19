@@ -7,7 +7,7 @@ import {
   generatePageTitle,
   sanitizeTitle,
 } from '../auto-title.js'
-import type { LLMProvider, StreamChunk } from '../../providers/types.js'
+import type { LLMProvider, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
 
 /**
  * Mock provider whose stream emits `response` as one text_delta, then a

@@ -20,13 +20,13 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import { z } from 'zod'
-import { buildTool, type Tool, type ToolContext } from '../../tools/types.js'
-import { createConfirmationResolver, type ToolConfirmationRequest } from '../../mcp/types.js'
-import type { McpServerConfig, McpSettingsStore } from '../../mcp/types.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { createConfirmationResolver, type ToolConfirmationRequest } from '@use-brian/agent-runtime/mcp/types.js'
+import type { McpServerConfig, McpSettingsStore } from '@use-brian/agent-runtime/mcp/types.js'
 import { buildToolIndex, createMcpSearchTools } from '../../mcp/tool-search.js'
-import { createToolExecutor } from '../tool-executor.js'
-import { createLoopDetector } from '../loop-detector.js'
-import type { ContentBlock } from '../../providers/types.js'
+import { createToolExecutor } from '@use-brian/agent-runtime/engine/tool-executor.js'
+import { createLoopDetector } from '@use-brian/agent-runtime/engine/loop-detector.js'
+import type { ContentBlock } from '@use-brian/agent-runtime/providers/types.js'
 
 const ctx: ToolContext = {
   userId: 'u',

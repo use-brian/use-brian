@@ -42,10 +42,10 @@ vi.mock('../../mailbox/mailbox-api.js', () => ({
   createMailboxApi: (opts: never) => createMailboxApiMock(opts),
 }))
 
-import { injectMcpTools } from '../inject.js'
+import { composeForTest } from './surface-harness.js'
 import type { ConnectorActionAudit, ConnectorActionPreflight } from '../../connector-action-port.js'
 import type { ConnectorInstanceStore } from '../../db/connector-instance-store.js'
-import type { Tool } from '@use-brian/core'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 
 const IMAP_CREDS = {
   type: 'imap' as const,
@@ -80,7 +80,7 @@ async function inject(audit?: ConnectorActionAudit) {
     // The health probe reports every successful seam call (`ok`) here.
     markHealth: vi.fn(async () => false),
   } as unknown as ConnectorInstanceStore
-  await injectMcpTools({
+  await composeForTest({
     userId: 'u-1',
     assistantId: 'a-1',
     tools,

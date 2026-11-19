@@ -1,8 +1,19 @@
 /** Reviewed, durable cleanup of an attributable staged import file. [COMP:crm/file-cleanup] */
 import {createHash,randomUUID} from 'node:crypto'
 import type {PoolClient} from 'pg'
-import {CrmOperationsContextSchema,CrmOperationsError,PreviewCrmImportFileCleanupCommandSchema,ExecuteCrmImportFileCleanupCommandSchema,
-  assertCrmOperationsAuthority,canonicalCrmRequest,type CrmOperationsContext,type CrmImportFileCleanupPort,type ResourceScope} from '@use-brian/core'
+import {
+  PreviewCrmImportFileCleanupCommandSchema,
+  ExecuteCrmImportFileCleanupCommandSchema,
+  type CrmImportFileCleanupPort
+} from '@use-brian/core/crm/file-cleanup-types.js'
+import {
+  CrmOperationsContextSchema,
+  CrmOperationsError,
+  assertCrmOperationsAuthority,
+  canonicalCrmRequest,
+  type CrmOperationsContext
+} from '@use-brian/core/crm/operations-types.js'
+import type { ResourceScope } from '@use-brian/agent-runtime/security/derived-scope.js'
 import {readCrmFileCleanupAuthority,renewCrmFileCleanupAuthority} from './import-file-cleanup-authority.js'
 import {getPool} from '../db/client.js'
 import {acquireCrmPrivacyAdmission} from './privacy-admission.js'

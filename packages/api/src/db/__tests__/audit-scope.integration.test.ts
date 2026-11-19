@@ -6,6 +6,7 @@ import { createContact } from '../crm.js'
 import { createMemory } from '../memories.js'
 import { createDbWorkspaceGroupStore } from '../workspace-group-store.js'
 import { listCrmOperationsAudit } from '../../crm-operations/privacy.js'
+import { connectActingAs } from '../../__tests__/fixtures/bootstrap-role.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 const pool=getPool(),columns=['scope_subject_kind','scope_sources','scope_origin','scope_held','scope_erased']
@@ -138,7 +139,9 @@ describe('[COMP:api/audit-scope] retained audit audiences',()=>{
     expect((await queryWithRLS(f.member,'SELECT id FROM workspace_audit_log WHERE id=$1',[workspaceAuditId])).rows).toEqual([])
   })
   it('backfills a real pre-migration log as legacy rather than inventing provenance',async()=>{
-    const f=await fixture(),{auditId}=await f.append(),client=await pool.connect()
+    // A bootstrap login acting as the ordinary owner replays the migration and
+    // may then assume app_user, which an ordinary owner session cannot do.
+    const f=await fixture(),{auditId}=await f.append(),client=(await connectActingAs()).client
     const migration=(await readFile(new URL('../../../migrations/583_audit_scope.sql',import.meta.url),'utf8')).replace(/^BEGIN;\s*/,'').replace(/COMMIT;\s*$/,'')
     try{
       await client.query('BEGIN')
@@ -154,6 +157,6 @@ describe('[COMP:api/audit-scope] retained audit audiences',()=>{
       await client.query("SELECT set_config('app.current_user_id',$1,true)",[f.owner])
       await client.query('SET LOCAL ROLE app_user')
       expect((await client.query('SELECT id FROM association_audit_log WHERE id=$1',[auditId])).rows).toEqual([])
-    }finally{await client.query('ROLLBACK');client.release()}
+    }finally{await client.query('ROLLBACK');await client.end()}
   })
 })

@@ -8,21 +8,25 @@
  * [COMP:crm/segments]
  */
 
+import type { AssociationActor } from '@use-brian/core/association/domain.js'
+import type { CrmOperationsReadPort } from '@use-brian/core/crm/operations-tools.js'
 import {
   CrmOperationsError,
   CrmDomainEventTypeSchema,
-  CrmSegmentPredicateSchema,
-  CrmPageQuerySchema,
-  validateCrmSegmentCatalog,
-  type CrmOperationsReadPort,
-  type CrmSegmentCatalog,
-  type CrmSegmentCatalogEntry,
+} from '@use-brian/core/crm/operations-types.js'
+import { CrmPageQuerySchema } from '@use-brian/core/crm/pagination.js'
+import {
   buildCrmSegmentCatalog,
   type CrmSegmentCatalogField as CatalogEntry,
+} from '@use-brian/core/crm/segment-catalog.js'
+import {
+  CrmSegmentPredicateSchema,
+  validateCrmSegmentCatalog,
+  type CrmSegmentCatalog,
+  type CrmSegmentCatalogEntry,
   type CrmSegmentPredicate,
   type CrmSegmentRule,
-  type AssociationActor,
-} from '@use-brian/core'
+} from '@use-brian/core/crm/segments.js'
 import type { QueryResultRow } from 'pg'
 import { getPool, query } from './client.js'
 import { crmPageInstant, queryCrmPage } from '../crm-operations/pagination.js'

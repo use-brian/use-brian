@@ -4,9 +4,11 @@
  */
 import { randomUUID } from 'node:crypto'
 import type { PoolClient } from 'pg'
-import { maxSensitivity, type ResourceScope } from '@use-brian/core'
+import type { ResourceScope } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { maxSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { parseTopicChannelId, type TelegramTextDelivery } from '@use-brian/channels'
 import { getPool, query } from './db/client.js'
+import { conversationAnchorWriteAdmissionActive } from './db/conversation-visibility.js'
 import { readSessionById, type Session } from './db/sessions.js'
 import { appendChannelRoomMessage } from './channel-room/messages.js'
 import { admitChannelRoom, admitSessionCreate } from './workspace-access/session-create-admission.js'
@@ -149,14 +151,33 @@ async function appendTelegramRecording(input: RecordingMessage): Promise<Recordi
       await db.query('UPDATE channel_recording_policies SET session_id=$2 WHERE id=$1', [policy.id,id])
       policy.sessionId = id
     }
+    const nativeRecord = conversationAnchorWriteAdmissionActive()
+    if (nativeRecord) {
+      // The policy and provider admission above pin the channel anchor. Pin
+      // its exact recording envelope and check the live recorder's read floor.
+      const floor = await db.query(`SELECT e.session_id FROM public.conversation_envelopes e
+        JOIN public.sessions s ON s.id=e.session_id
+        WHERE e.session_id=$1 AND e.workspace_id=$2 AND e.starter_user_id=$3
+          AND s.workspace_id=e.workspace_id AND s.user_id=e.starter_user_id
+          AND s.recording_policy_id=$4 AND s.recording_revision=$5
+          AND s.anchor_kind='channel' AND s.channel_type='telegram' AND s.channel_id=$6
+          AND s.archived_at IS NULL AND s.visibility=$7
+          AND ($7='workspace')=(e.visibility='workspace')
+          AND public.conversation_member_read_allowed(e.workspace_id,s.id,e.starter_user_id)
+        FOR SHARE OF e,s`, [policy.sessionId,owner.workspaceId,owner.ownerUserId,policy.id,
+        policy.revision,input.conversationId,policy.destination])
+      if (!floor.rows.length) throw unavailable()
+    }
     await db.query('INSERT INTO channel_recording_messages(policy_id,provider_message_id,session_id) VALUES($1,$2,$3)', [policy.id,input.providerMessageId,policy.sessionId])
     const stored = (await db.query<{ clearance: ResourceScope['sensitivity']; compartments: string[]; projectId: string | null }>(
       'SELECT effective_clearance AS clearance,context_compartments AS compartments,context_project_id AS "projectId" FROM sessions WHERE id=$1', [policy.sessionId])).rows[0]
-    await appendChannelRoomMessage({ sessionId: policy.sessionId!, role: input.role ?? 'user', content: [{ type: 'text', text: input.text }],
+    const appended = await appendChannelRoomMessage({ sessionId: policy.sessionId!, role: input.role ?? 'user', content: [{ type: 'text', text: input.text }],
       senderUserId: input.senderUserId, publishedSenderName: input.publishedSenderName, channelMessageId: input.providerMessageId, scope: {
         workspaceId: owner.workspaceId, userId: policy.destination === 'personal' ? owner.ownerUserId : null,
         assistantId: null, sensitivity: stored.clearance, compartments: stored.compartments, projectIds: stored.projectId ? [stored.projectId] : [],
       } }, db)
+    if (nativeRecord && (await db.query('SELECT 1 FROM public.conversation_message_quarantine WHERE message_id=$1',[appended.message.id])).rows.length)
+      throw unavailable()
     await db.query('COMMIT')
   } catch (error) { await db.query('ROLLBACK'); throw error } finally { db.release() }
   // Published receipt capture needs no transcript read or source-session join.

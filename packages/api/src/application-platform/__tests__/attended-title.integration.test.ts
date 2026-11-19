@@ -1,10 +1,14 @@
-import {attendedSessionTurnCount,readAttendedSessionHistory} from '../../routes/attended-session-context.js'
-import {publishNativeSessionMessageBatch} from '../../db/session-message-publication.js'
+import {randomUUID} from 'node:crypto'
+import {readAttendedSessionHistory} from '../../routes/attended-session-context.js'
+import {publishNativeSessionMessageBatch} from '../../db/conversation-store.js'
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
-import {boundScopeSources,type LLMProvider} from '@use-brian/core'
+import type {LLMProvider} from '@use-brian/agent-runtime/providers/types.js'
+import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
+import {addSessionMessage,createWorkspaceChatSession} from '../../db/sessions.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
-import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
+import {readAdmittedSessionQuery} from '../../db/conversation-store.js'
 import {publishSessionTitle,readSessionTitle} from '../../db/session-title-store.js'
 import {generateAttendedSessionTitle} from '../../routes/attended-session-title.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
@@ -33,9 +37,7 @@ describe.sequential('[COMP:api/application-persistence] actual attended title mo
   const llm=provider(),result=await generateAttendedSessionTitle({authority,provider:llm.value,model:'fixture'})
   expect(result).toMatchObject({title:'Fictional generated session title',written:true});expect(llm.inputs).toHaveLength(1)
   expect(JSON.stringify(llm.inputs[0])).toContain('Fictional earlier request')
-  const title=await readSessionTitle(f.session.id,await f.modelContext()),edges=(await f.pool.query(`SELECT edge.source_kind,edge.source_id FROM scope_derivations d
-   JOIN scope_derivation_sources edge ON edge.workspace_id=d.workspace_id AND edge.derivation_id=d.id
-   WHERE d.workspace_id=$1 AND d.resource_kind='session_context_revision' AND d.resource_id=$2`,[f.workspaceId,title!.revisionId])).rows
+  const title=await readSessionTitle(f.session.id,await f.modelContext()),edges=(await f.pool.query(`SELECT kind AS source_kind,id AS source_id FROM application_scope_lineage($1,ARRAY['session_context_revision'],ARRAY[$2::uuid],ARRAY['1'])`,[f.workspaceId,title!.revisionId])).rows
   expect(edges).toContainEqual({source_kind:'memory',source_id:memory.id})
   expect(edges.filter(edge=>edge.source_kind==='application_field').length).toBeGreaterThan(1)
   expect(boundScopeSources(result)).toMatchObject([{resourceKind:'session_context_revision',resourceId:title!.revisionId}])
@@ -62,7 +64,13 @@ describe.sequential('[COMP:api/application-persistence] actual attended title mo
   const llm=provider('Fictional withheld source title',async()=>{await f.pool.query("UPDATE memories SET sensitivity='confidential' WHERE id=$1",[memory.id])})
   await expect(generateAttendedSessionTitle({authority,provider:llm.value,model:'fixture'})).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
   expect(llm.inputs).toHaveLength(1);expect((await f.pool.query('SELECT scope_revision_id FROM session_title_heads WHERE session_id=$1',[f.session.id])).rows).toEqual([])
-  const other=await f.modelContext(f.secondId),current=await store.getById(other.execution.security.access,memory.id);expect(current).not.toBeNull();other.accumulator.note({sources:boundScopeSources(current!)})
+  // A confidential member still cannot expose that memory to the original
+  // internal room. Use an actual confidential destination for the fresh turn.
+  const otherSession=await createWorkspaceChatSession({assistantId:f.assistantId,starterUserId:f.secondId,workspaceId:f.workspaceId,
+   effectiveClearance:'confidential',authenticatedHuman:true})
+  await addSessionMessage({sessionId:otherSession.id,role:'user',content:'Fictional independent confidential request',scope:{...f.envelope,sensitivity:'confidential'}})
+  const other={execution:await f.execution(f.secondId,otherSession),accumulator:new ContextScopeAccumulator()}
+  const current=await store.getById(other.execution.security.access,memory.id);expect(current).not.toBeNull();other.accumulator.note({sources:boundScopeSources(current!)})
   const allowed=provider('Fictional independent current title')
   expect(await generateAttendedSessionTitle({authority:other,provider:allowed.value,model:'fixture'})).toMatchObject({title:'Fictional independent current title',written:true})
  })
@@ -95,12 +103,15 @@ describe.sequential('[COMP:api/application-persistence] actual attended title mo
    messages:[{role:'assistant',content:[{type:'tool_use',id:'fictional-count-tool',name:'fictionalTool',input:{}}]},
     {role:'user',content:[{type:'tool_result',toolUseId:'fictional-count-tool',name:'fictionalTool',content:'Fictional tool output'}]}]})
   const history=await readAttendedSessionHistory(authority,f.session.id,100)
-  expect(history).toEqual([]);expect(await attendedSessionTurnCount(authority,history)).toBe(2)
-  await expect(attendedSessionTurnCount(authority,[...history])).rejects.toMatchObject({code:'scope_evidence_missing'})
+  expect(history.messages).toEqual([]);expect(await history.readTurnCount(authority)).toBe(2)
+  await expect(history.readTurnCount({...authority,execution:{...authority.execution,lifecycle:{...authority.execution.lifecycle,sessionId:randomUUID()}}})).rejects.toMatchObject({code:'scope_evidence_missing'})
+  // Mutating the presentation cannot supply a different count.
+  history.messages.push(...input.history)
+  expect(await history.readTurnCount(authority)).toBe(2)
   await f.pool.query("UPDATE workspace_members SET clearance='public' WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.firstId])
-  await expect(attendedSessionTurnCount(authority,history)).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
+  await expect(history.readTurnCount(authority)).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
   const other=await f.modelContext(f.secondId),current=await readAttendedSessionHistory(other,f.session.id,100)
-  expect(await attendedSessionTurnCount(other,current)).toBe(2)
+  expect(await current.readTurnCount(other)).toBe(2)
  })
  it('publishes a first title over a real seventeen-pair persisted transcript with all original sources',async()=>{
   const f=await setup(),authority=await f.modelContext(f.firstId),input=await readAdmittedSessionQuery({sessionId:f.session.id,throughSequence:3,authority}),sources=[...boundScopeSources(input)]
@@ -116,9 +127,7 @@ describe.sequential('[COMP:api/application-persistence] actual attended title mo
   expect(result).toMatchObject({title:'Fictional generated session title',written:true});expect(llm.inputs).toHaveLength(1)
   const title=await readSessionTitle(f.session.id,await f.modelContext(f.secondId))
   expect(title).toMatchObject({title:'Fictional generated session title'})
-  const retained=(await f.pool.query<{source_id:string}>(`SELECT edge.source_id FROM scope_derivations d JOIN scope_derivation_sources edge
-   ON edge.workspace_id=d.workspace_id AND edge.derivation_id=d.id WHERE d.workspace_id=$1 AND d.resource_kind='session_context_revision'
-   AND d.resource_id=$2 AND edge.source_kind='memory'`,[f.workspaceId,title!.revisionId])).rows.map(row=>row.source_id)
+  const retained=(await f.pool.query<{source_id:string}>(`SELECT id AS source_id FROM application_scope_lineage($1,ARRAY['session_context_revision'],ARRAY[$2::uuid],ARRAY['1']) WHERE kind='memory'`,[f.workspaceId,title!.revisionId])).rows.map(row=>row.source_id)
   for(const source of sources.filter(s=>s.resourceKind==='memory'))expect(retained).toContain(source.resourceId)
  })
 

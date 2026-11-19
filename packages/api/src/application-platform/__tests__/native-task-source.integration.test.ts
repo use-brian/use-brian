@@ -6,7 +6,10 @@ import {createTokens} from '../../auth/jwt.js'
 import {goalsRoutes} from '../../routes/goals.js'
 import {createWorkspaceStore} from '../../db/workspace-store.js'
 import {afterAll,describe,expect,it} from 'vitest'
-import {createTaskTools,ContextScopeAccumulator,boundScopeSources,type TaskRecord} from '@use-brian/core'
+import {createTaskTools} from '@use-brian/core/tasks/tools.js'
+import type {TaskRecord} from '@use-brian/core/tasks/types.js'
+import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {getPool,getAppPool,applyRLSGucs,runWithAgentAccess} from '../../db/client.js'
 import {readRetainedContextFrame} from '../../db/session-context-revisions.js'
 import {nativeQueryDataCeiling} from '../../db/crm-reader.js'
@@ -63,13 +66,22 @@ describe.sequential('[COMP:api/application-persistence] [COMP:tasks/tools] origi
    await expect(listTasks(access,{limit:500})).rejects.toMatchObject({code:'access_unavailable'})
   }finally{await x.cleanup()}
  },60_000)
- it('keeps malformed and unsupported selectors denied in ordinary and optimized Memory admission',async()=>{
+ it('keeps malformed and unsupported selectors denied in ordinary and canonical Memory admission',async()=>{
   const x=await sourceModeFixture(),current=await originalMemoryAuthority(x)
   const name='memory_selector_fixture_'+crypto.randomUUID().replaceAll('-','')
   const access=current.execution.security.access
-  await x.f.pool.query(`CREATE FUNCTION ${name}(w uuid) RETURNS jsonb LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
-   SELECT jsonb_build_object('ordinary',application_memory_query_context(w) IS NOT NULL,'optimized',native_turn_empty_memory_context(w) IS NOT NULL)
-   $$;REVOKE ALL ON FUNCTION ${name}(uuid) FROM PUBLIC;GRANT EXECUTE ON FUNCTION ${name}(uuid) TO app_user`)
+  const captured=await readRetainedContextFrame(current,[],async client=>(await client.query(
+   'SELECT value FROM read_native_memory_query_projection($1,$2,true)',[x.f.workspaceId,['summary']])).rows.map(row=>row.value))
+  expect(captured).toHaveLength(1);expect(captured[0].row).toBeNull()
+  const roots=captured.flatMap(row=>row.sources).map((source:{resourceKind:string;resourceId:string;version:string})=>
+   ({kind:source.resourceKind,id:source.resourceId,version:source.version}))
+  await x.f.pool.query(`CREATE FUNCTION ${name}(w uuid,roots jsonb) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+   DECLARE proof jsonb;
+   BEGIN
+    BEGIN proof:=capture_conversation_evidence(w,roots);
+    EXCEPTION WHEN insufficient_privilege OR invalid_parameter_value OR invalid_text_representation THEN proof:=NULL;END;
+    RETURN jsonb_build_object('ordinary',application_memory_query_context(w) IS NOT NULL,'canonical',coalesce(proof->>'admitted'='true',false));
+   END $$;REVOKE ALL ON FUNCTION ${name}(uuid,jsonb) FROM PUBLIC;GRANT EXECUTE ON FUNCTION ${name}(uuid,jsonb) TO app_user`)
   const client=await getAppPool().connect()
   try{
    await runWithAgentAccess(access,async()=>{
@@ -77,13 +89,13 @@ describe.sequential('[COMP:api/application-persistence] [COMP:tasks/tools] origi
     const ceiling=nativeQueryDataCeiling(access,'task',undefined)
     const inspect=async(stack:unknown)=>{
      await client.query("SELECT set_config('app.native_query_data_ceilings',$1,true)",[JSON.stringify(stack)])
-     return(await client.query(`SELECT ${name}($1) AS value`,[x.f.workspaceId])).rows[0].value
+     return(await client.query(`SELECT ${name}($1,$2) AS value`,[x.f.workspaceId,JSON.stringify(roots)])).rows[0].value
     }
     for(const typeKey of ['task','company','person','deal']){
-     expect(await inspect([{...ceiling,typeKey}])).toEqual({ordinary:true,optimized:true})
+     expect(await inspect([{...ceiling,typeKey}])).toEqual({ordinary:true,canonical:true})
     }
-    expect(await inspect(Array.from({length:16},()=>ceiling))).toEqual({ordinary:true,optimized:true})
-    expect(await inspect([{...ceiling,workspaceId:crypto.randomUUID(),ids:Array.from({length:100},()=>crypto.randomUUID()),assistants:Array.from({length:256},()=>crypto.randomUUID())}])).toEqual({ordinary:true,optimized:true})
+    expect(await inspect(Array.from({length:16},()=>ceiling))).toEqual({ordinary:true,canonical:true})
+    expect(await inspect([{...ceiling,workspaceId:crypto.randomUUID(),ids:Array.from({length:100},()=>crypto.randomUUID()),assistants:Array.from({length:256},()=>crypto.randomUUID())}])).toEqual({ordinary:true,canonical:true})
     for(const stack of [null,{},Array.from({length:17},()=>ceiling),[null],[{}],
      [{...ceiling,typeKey:'memory'}],[{...ceiling,typeKey:'unknown'}],
      [{...ceiling,workspaceId:'not-a-uuid'}],[{...ceiling,tier:4}],
@@ -92,12 +104,12 @@ describe.sequential('[COMP:api/application-persistence] [COMP:tasks/tools] origi
      [{...ceiling,assistants:Array.from({length:257},()=>crypto.randomUUID())}],
      [{...ceiling,compartments:[false]}],[{...ceiling,projectIds:['not-a-uuid']}],
      [{...ceiling,departmentRead:{}}],[{...ceiling,extra:true}]]){
-     expect(await inspect(stack),JSON.stringify(stack)).toEqual({ordinary:false,optimized:false})
+     expect(await inspect(stack),JSON.stringify(stack)).toEqual({ordinary:false,canonical:false})
     }
    })
   }finally{
    await client.query('ROLLBACK');client.release()
-   await x.f.pool.query(`DROP FUNCTION ${name}(uuid)`);await x.cleanup()
+   await x.f.pool.query(`DROP FUNCTION ${name}(uuid,jsonb)`);await x.cleanup()
   }
  },60_000)
  it('independent source read flows through actual Task callback into a Goal and Brian confirmation; source withdrawal holds later read',async()=>{

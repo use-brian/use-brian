@@ -14,7 +14,8 @@ import { settleChatSessionFeedback } from "@/lib/chat-send-feedback";
  * dispatch here and both re-fetch on it. Payloads are signals, never data:
  * subscribers re-fetch through their own authed loader.
  *
- * Same-tab only for now — there is no server-side `session` workspace
+ * Ordinary refreshes are same-tab; cache invalidations also notify other windows.
+ * Same-tab only for server activity for now — there is no server-side `session` workspace
  * primitive. If one lands, route it through `workspace-events.ts` to this
  * event, the way `assistant` routes to `ASSISTANT_REFRESH_EVENT`.
  */
@@ -22,60 +23,45 @@ import { settleChatSessionFeedback } from "@/lib/chat-send-feedback";
 export const CHAT_SESSIONS_REFRESH_EVENT = "sidan:chat-sessions-refresh";
 export const CHAT_SESSION_ACTIVITY_EVENT = "sidan:chat-session-activity";
 
+export type ChatCacheFenceSignal = { apiOrigin: string; viewerId: string; workspaceId: string; sessionId?: string };
 type ChatSessionsRefreshDetail = {
+  cacheFence?: ChatCacheFenceSignal;
   /** Scopes the refresh to a specific workspace. */
   workspaceId: string | null;
 };
 
-export function dispatchChatSessionsRefresh(workspaceId: string | null): void {
+let cacheChannel: BroadcastChannel | null = null;
+function ensureCacheChannel(): BroadcastChannel | null {
+  if (typeof window === "undefined" || typeof window.BroadcastChannel !== "function") return null;
+  if (!cacheChannel) {
+    cacheChannel = new window.BroadcastChannel(CHAT_SESSIONS_REFRESH_EVENT);
+    cacheChannel.onmessage = event => {
+      const signal = event.data as ChatCacheFenceSignal | undefined;
+      if (!signal || typeof signal.apiOrigin !== "string" || typeof signal.viewerId !== "string" || typeof signal.workspaceId !== "string"
+        || signal.sessionId !== undefined && typeof signal.sessionId !== "string") return;
+      window.dispatchEvent(new CustomEvent<ChatSessionsRefreshDetail>(CHAT_SESSIONS_REFRESH_EVENT, { detail: { workspaceId: signal.workspaceId, cacheFence: signal } }));
+    };
+  }
+  return cacheChannel;
+}
+if (typeof window !== "undefined") ensureCacheChannel();
+
+export function dispatchChatSessionsRefresh(workspaceId: string | null, cacheFence?: ChatCacheFenceSignal): void {
   if (typeof window === "undefined") return;
   window.dispatchEvent(
     new CustomEvent<ChatSessionsRefreshDetail>(CHAT_SESSIONS_REFRESH_EVENT, {
-      detail: { workspaceId },
+      detail: { workspaceId, ...(cacheFence ? { cacheFence } : {}) },
     }),
   );
+  if (cacheFence) ensureCacheChannel()?.postMessage(cacheFence);
 }
 
 export type ChatSessionActivityDetail = {
   workspaceId: string;
   sessionId: string;
   working: boolean;
+  turnId?: string | null;
 };
-
-/**
- * A room mirrors every live turn onto its follow stream. Suppress the viewer's
- * own mirror only while this mounted surface still owns the exact room's
- * original POST stream. After navigation, re-entry, or an explicit local
- * abort, that POST is no longer painting this view and the mirror becomes the
- * only live-progress source.
- */
-export function shouldAcceptRoomMirror(params: {
-  senderUserId: string | null;
-  viewerUserId: string | null;
-  sessionId: string;
-  directTurnSessionId: string | null;
-  directStreamInFlight: boolean;
-}): boolean {
-  // A room serializes turns, so an exact-room live POST is necessarily the
-  // turn this mounted surface is already painting. Do not depend on cached
-  // viewer identity: when `getUserInfo()` has not hydrated yet both the POST
-  // and its bus mirror otherwise render, producing a temporary duplicate.
-  const ownsExactRoomPost =
-    params.directTurnSessionId === params.sessionId &&
-    params.directStreamInFlight;
-  if (!ownsExactRoomPost) return true;
-  // Human posts may still fan in while the assistant turn is running. When
-  // both identities are known, keep a teammate's event; otherwise the exact
-  // room ownership is the safer signal for turn-mirror suppression.
-  if (
-    params.senderUserId !== null &&
-    params.viewerUserId !== null &&
-    params.senderUserId !== params.viewerUserId
-  ) {
-    return true;
-  }
-  return false;
-}
 
 /**
  * Same-tab fast path for the Workspace rail's working indicator. The persisted
@@ -87,49 +73,10 @@ export function dispatchChatSessionActivity(
   detail: ChatSessionActivityDetail,
 ): void {
   if (typeof window === "undefined") return;
-  if (!detail.working) settleChatSessionFeedback(detail.workspaceId, detail.sessionId);
+  if (!detail.working) settleChatSessionFeedback(detail.workspaceId, detail.sessionId, detail.turnId ?? null);
   window.dispatchEvent(
     new CustomEvent<ChatSessionActivityDetail>(CHAT_SESSION_ACTIVITY_EVENT, {
       detail,
     }),
   );
-}
-
-/**
- * Whether the chat surface should hold a `GET /api/sessions/:id/stream`
- * subscription for the open session.
- *
- * A room is followed for its whole lifetime (teammate posts, mirrored turns,
- * presence). A personal session opens the stream only while a re-attach is
- * WANTED: after the direct `POST /api/chat` body closed without a terminal
- * event (the turn is still running server-side, see 2026-08-24), and once on
- * hydrate so a reload mid-turn finds the running turn again. When idle the
- * route answers `status` then `done` and closes; one cheap GET.
- */
-export function shouldOpenSessionStream(params: {
-  isRoom: boolean;
-  reconnectWanted: boolean;
-}): boolean {
-  return params.isRoom || params.reconnectWanted;
-}
-
-/**
- * Whether a closed session stream should be re-opened after a beat.
- *
- * Rooms never close server-side on idle, so any close there is a deploy /
- * restart / network blip and the follow stream comes back. A personal
- * session's reconnect stream ends on purpose: the server sends `done` when
- * the turn is over (or was never running) and never reopens. So a non-room
- * reopens ONLY when the body closed without `done` (the transport gave up on
- * a turn that may still be running); after `done` there is nothing to attach
- * to. A cancelled effect (unmount, session switch) never reopens.
- */
-export function shouldReopenSessionStream(params: {
-  isRoom: boolean;
-  sawDone: boolean;
-  cancelled: boolean;
-}): boolean {
-  if (params.cancelled) return false;
-  if (params.isRoom) return true;
-  return !params.sawDone;
 }

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { createTaskTriageJudge, parseTriageVerdict } from '../triage.js'
-import type { LLMProvider, StreamChunk } from '../../providers/types.js'
+import type { LLMProvider, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
 import { executionFixture, fixtureDecisionProvider } from '../../decisions/__tests__/execution-fixture.js'
 
 /**

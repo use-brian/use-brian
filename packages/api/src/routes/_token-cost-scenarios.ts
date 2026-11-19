@@ -47,26 +47,22 @@
  * numbers, extract `buildAllTools()` into a standalone helper.
  */
 
+import { createMcpSearchTools, buildToolIndex } from '@use-brian/core/mcp/tool-search.js'
+import { buildMemoryContext } from '@use-brian/core/memory/context-builder.js'
+import { LAYER_1_SYSTEM_PROMPT } from '@use-brian/core/system-prompt.js'
+import { createGitHubTools } from '@use-brian/core/tools/base/github.js'
+import { createGoogleCalendarTools } from '@use-brian/core/tools/base/google-calendar.js'
+import { createGmailTools } from '@use-brian/core/tools/base/google-gmail.js'
+import { createBaseTools } from '@use-brian/core/tools/base/index.js'
+import { createNotionTools } from '@use-brian/core/tools/base/notion.js'
+import type { McpServerConfig, McpSettingsStore } from '@use-brian/agent-runtime/mcp/types.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 import {
-  buildMemoryContext,
-  LAYER_1_SYSTEM_PROMPT,
-  createBaseTools,
-  createGoogleCalendarTools,
-  createGmailTools,
-  createGitHubTools,
-  createNotionTools,
-  createMcpSearchTools,
-  buildToolIndex,
-  type Tool,
-  type McpServerConfig,
-  type McpSettingsStore,
-} from '@use-brian/core'
-import {
-  attachUserVisibleContext,
   buildFullSystemPrompt,
   buildSplitSystemPrompt,
   formatPrivateRuntimeContext,
 } from './_prompt-builder.js'
+import { attachUserVisibleContext } from '../turn/user-visible-context.js'
 
 // ── Token helpers ────────────────────────────────────────────────
 

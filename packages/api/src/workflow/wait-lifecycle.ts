@@ -1,7 +1,11 @@
 import type {RetainedGoalWorkflowClaim} from '../db/goals.js'
 import { resolveRetainedGoalWorkflowRuntime } from '../workspace-access/goal-source-admission.js'
 /** Existing persisted wait scheduling and scheduler dispatch. [COMP:workflow/wait-lifecycle] */
-import {WorkflowDefinitionSchema,advanceWorkflowRun,stepSuccessors,type ExecutorDeps,type JobStore,type ScheduledJob,type WorkflowStore,type WorkflowRunStore} from '@use-brian/core'
+import type {JobStore, ScheduledJob} from '@use-brian/core/scheduling/types.js'
+import {advanceWorkflowRun, type ExecutorDeps} from '@use-brian/core/workflow/executor.js'
+import {stepSuccessors} from '@use-brian/core/workflow/graph.js'
+import {WorkflowDefinitionSchema} from '@use-brian/core/workflow/schemas.js'
+import type {WorkflowStore, WorkflowRunStore} from '@use-brian/core/workflow/types.js'
 import {getRunIdForStepRun} from '../db/workflow-store.js'
 export async function pauseWorkflowRunForWait(params:Parameters<NonNullable<ExecutorDeps['pauseRunForWait']>>[0],deps:{jobStore:JobStore;runStore:WorkflowRunStore;resolvePrimary:ExecutorDeps['resolvePrimary']}){
  const {runId,stepRunId,workspaceId,triggeredBy,dueAt}=params,retained=await resolveRetainedGoalWorkflowRuntime(runId),primary=retained?.saved.assistantId??await deps.resolvePrimary(workspaceId)

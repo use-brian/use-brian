@@ -15,7 +15,9 @@ vi.mock('../../db/client.js', () => ({
 }))
 
 import { viewsRoutes } from '../views.js'
-import { PdfRenderError, type Page, type SavedView } from '@use-brian/core'
+import { PdfRenderError } from '@use-brian/core/doc/convert/to-pdf.js'
+import type { Page } from '@use-brian/core/views/blocks.js'
+import type { SavedView } from '@use-brian/core/views/types.js'
 
 const WS = '00000000-0000-0000-0000-000000000010'
 const UID = '00000000-0000-0000-0000-000000000020'

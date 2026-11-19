@@ -106,3 +106,23 @@ export class AttachmentCollector {
     return this.items.length
   }
 }
+
+// Core-owned ToolContext field (docs/architecture/engine/tool-hooks.md →
+// "Runtime ports and core-owned context extensions"). The field is the
+// collector's public surface, not the class: a class with a private member is
+// nominal, and a consumer program can load this declaration under two module
+// identities (a project-reference redirect plus a package import), which would
+// make two copies of one collector unassignable to each other.
+declare module '@use-brian/agent-runtime/tools/types.js' {
+  interface ToolContextExtensions {
+    /**
+     * Per-turn outbound-attachment collector for `sendFile`. The tool
+     * registers attachment intent here; the channel route drains it at
+     * `turn_complete` and delivers the documents (bytes resolved via
+     * `FilesApi.readBytes`). Absent in contexts with no delivery surface
+     * (scheduled jobs, workers, workflow steps, MCP) — `sendFile` returns an
+     * honest error there. See docs/architecture/features/files.md → "sendFile".
+     */
+    outboundAttachments?: Pick<AttachmentCollector, keyof AttachmentCollector>
+  }
+}

@@ -1,0 +1,140 @@
+{
+  "schema": 1,
+  "note": "Before and baseline figures for the M6 report, transcribed from the receipts named in each `source` (paths relative to the platform root). Every `quote` must appear verbatim in its source: run `node collect.mjs --verify-baseline`. Machine-readable receipts (`sourceJson`) are read directly by collect.mjs instead of transcribed.",
+  "before": {
+    "label": "2026-11-16 one-turn SQL baseline: one development-data turn, live provider, read from turn_timings and PostgreSQL logs (not a gate; different workload from the fixed-20 fixture)",
+    "source": "docs/plans/evidence/oss-chat-replacement/canonical-publication/one-turn-sql-baseline-2026-11-16.md",
+    "metrics": {
+      "wallMs": { "value": 48140, "quote": "| Total turn | 48.14 s |" },
+      "admissionMs": { "value": 8220, "quote": "| Admission | 8.22 s |" },
+      "contextPreparationMs": { "value": 5180, "quote": "| Context preparation | 5.18 s |", "note": "context preparation, not the `loop_started_at_ms` counter" },
+      "providerLoopMs": { "value": 28660, "quote": "| Provider/tool loop | 28.66 s |" },
+      "audienceChecks": { "value": 38, "quote": "| Audience checks | 38 checks, 4.13 s |" },
+      "audienceCheckMs": { "value": 4130, "quote": "| Audience checks | 38 checks, 4.13 s |" },
+      "publicationMs": { "value": 3350, "quote": "| Reply publication | 1 batch, 3.35 s |" },
+      "idlePollingSqlPer10s": { "value": 756, "quote": "generated 756 SQL calls" },
+      "lockWaitMaxMs": { "value": 4700, "quote": "Lock waits up to 4.7 s on session operations" },
+      "registryGuardCallsPerChat": { "value": "127 private / 139 shared", "quote": "127 calls per private chat and 139 per\nshared chat" }
+    }
+  },
+  "fixed20": {
+    "label": "Fixed-20 HTTP harness, registry guard successor (migration 8276) after, medians of two alternating samples, loaded machine (m1-registry-guard-successor.md Step 3/4)",
+    "source": "docs/plans/evidence/oss-chat-replacement/canonical-publication/m1-registry-guard-successor.md",
+    "scenarios": {
+      "empty-private/legacy": { "foreground": 320, "nested": 31341, "wallMs": 823, "quote": "| Empty private / legacy | 320 → 320 | 31,724 → 31,341 | 50 → 50 | 127 → 127 | 857 → 84 | 1,014 → 409 | 1,580 → 823 |" },
+      "empty-private/department-v2": { "foreground": 325, "nested": 31444, "wallMs": 642, "quote": "| Empty private / v2 | 326 → 325 | 31,829 → 31,444 | 50 → 50 | 127 → 127 | 766 → 82 | 871 → 358 | 1,277 → 642 |" },
+      "populated-private/legacy": { "foreground": 324, "nested": 31802, "wallMs": 530, "quote": "| Populated private / legacy | 324 → 324 | 32,178 → 31,802 | 50 → 50 | 127 → 127 | 777 → 75 | 874 → 320 | 1,231 → 530 |" },
+      "populated-private/department-v2": { "foreground": 332, "nested": 31925, "wallMs": 533, "quote": "| Populated private / v2 | 332 → 332 | 32,298 → 31,925 | 50 → 50 | 127 → 127 | 840 → 75 | 951 → 324 | 1,350 → 533 |" },
+      "shared-room/legacy": { "foreground": 341, "nested": 53580, "wallMs": 711, "quote": "| Shared / legacy | 341 → 341 | 53,997 → 53,580 | 50 → 50 | 139 → 139 | 916 → 86 | 994 → 403 | 1,543 → 711 |" },
+      "shared-room/department-v2": { "foreground": 349, "nested": 46919, "wallMs": 649, "quote": "| Shared / v2 | 349 → 349 | 47,330 → 46,919 | 50 → 50 | 139 → 139 | 916 → 84 | 975 → 373 | 1,495 → 649 |" }
+    }
+  },
+  "warm": {
+    "label": "Thirty-sample warm results (canonical Memory field replacement, before the independent-cohort correction): preparation and finalization p95",
+    "source": "docs/plans/oss-chat-architecture-replacement.md",
+    "scenarios": {
+      "empty-private/legacy": { "preparationP95": 216, "finalizationP95": 377, "quote": "| Empty private / legacy | 216 ms | 377 ms |" },
+      "empty-private/department-v2": { "preparationP95": 222, "finalizationP95": 391, "quote": "| Empty private / department v2 | 222 ms | 391 ms |" },
+      "populated-private/legacy": { "preparationP95": 210, "finalizationP95": 377, "quote": "| Populated private / legacy | 210 ms | 377 ms |" },
+      "populated-private/department-v2": { "preparationP95": 215, "finalizationP95": 394, "quote": "| Populated private / department v2 | 215 ms | 394 ms |" },
+      "shared-room/legacy": { "preparationP95": 300, "finalizationP95": 645, "quote": "| Shared room / legacy | 300 ms | 645 ms |" },
+      "shared-room/department-v2": { "preparationP95": 304, "finalizationP95": 658, "quote": "| Shared room / department v2 | 304 ms | 658 ms |" }
+    },
+    "wallSource": "docs/plans/oss-chat-architecture-replacement.md",
+    "wallLabel": "Final source93 warm qualification, 30 warm samples per scenario: chat p50 and p95 (after)",
+    "wall": {
+      "empty-private/legacy": { "p50": 1225, "p95": 2463, "quote": "| Empty private / legacy | 361 → 332 | 30,485 → 30,168 | 1,169 → 1,225 | 2,932 → 2,463 |" },
+      "empty-private/department-v2": { "p50": 1212, "p95": 2427, "quote": "| Empty private / v2 | 369 → 340 | 30,655 → 30,304 | 1,326 → 1,212 | 2,536 → 2,427 |" },
+      "populated-private/legacy": { "p50": 1167, "p95": 1690, "quote": "| Populated private / legacy | 367 → 338 | 31,055 → 30,648 | 1,332 → 1,167 | 2,527 → 1,690 |" },
+      "populated-private/department-v2": { "p50": 1166, "p95": 2006, "quote": "| Populated private / v2 | 375 → 346 | 31,189 → 30,768 | 1,238 → 1,166 | 1,811 → 2,006 |" },
+      "shared-room/legacy": { "p50": 1313, "p95": 1927, "quote": "| Shared / legacy | 368 → 352 | 52,959 → 52,054 | 1,491 → 1,313 | 2,237 → 1,927 |" },
+      "shared-room/department-v2": { "p50": 1372, "p95": 2651, "quote": "| Shared / v2 | 376 → 360 | 46,417 → 45,595 | 1,422 → 1,372 | 2,447 → 2,651 |" }
+    }
+  },
+  "permissionWorkAlternative": {
+    "label": "Fused-admission prototype at all 50 captures (disposable SQL, not product): smallest honest per-chat ceiling demonstrated",
+    "source": "docs/plans/evidence/oss-chat-replacement/canonical-publication/m1-fused-admission-prototype.md",
+    "private": { "value": "8,026 to 8,305", "quote": "8,026–8,305 (private) and 15,954–17,321 (shared)" },
+    "shared": { "value": "15,954 to 17,321", "quote": "8,026–8,305 (private) and 15,954–17,321 (shared)" }
+  },
+  "fragments": {
+    "label": "Shared-loop buffering fragment scaling (one serial run per setting; ranges across the six scenarios)",
+    "source": "docs/plans/oss-chat-architecture-replacement.md",
+    "2000": { "foreground": "421 to 495", "wallMs": "690 to 1,080", "quote": "At 2,000\nchunks, completion falls from **29.7–33.3 seconds to 0.69–1.08 seconds**, and SQL\nfrom **6,418–6,493 to 421–495 round trips**." }
+  },
+  "admission": {
+    "label": "M2 admission re-measurement, isolated run, samples 1 and 2 (sample 0 warm-up)",
+    "sourceJson": "docs/plans/evidence/oss-chat-replacement/canonical-publication/m2-completion-admission-measurement.json",
+    "source": "docs/plans/evidence/oss-chat-replacement/canonical-publication/m2-completion.md",
+    "quote": "| empty private | 13 | 46–59 ms | 325–417 ms | 300 (77) |"
+  },
+  "modelCalls": {
+    "label": "M3 routing cutover, after (provider boundary), expected per fixed turn",
+    "source": "docs/plans/evidence/oss-chat-replacement/canonical-publication/m3-adapter-routing-cutover.md",
+    "turns": {
+      "web standard trivial": { "value": 0, "quote": "| Web Standard trivial | 0 | 0 | 0/0/0 |" },
+      "web standard trivial reply": { "value": 1, "quote": "| Web Standard trivial reply (topic only) | 1 | 1 | 0/1/0 |" },
+      "web standard short question": { "value": 2, "quote": "| Web Standard short question | 2 | 2 | 1/1/0 |" },
+      "web standard long ordinary": { "value": 3, "quote": "| Web Standard long ordinary | 3 | 3 | 1/1/1 |" },
+      "web standard long, research verdict": { "value": 3, "quote": "| Web Standard long, research verdict | 3 | 3 | 1/1/1 |" },
+      "web standard operate-site": { "value": 1, "quote": "| Web Standard operate-site | 1 | 1 | 0/1/0 |" },
+      "web explicit research": { "value": 1, "quote": "| Web explicit research | 1 | 1 | 0/1/0 |" },
+      "web pro/max long ordinary": { "value": 3, "quote": "| Web Pro/Max long ordinary | 3 | 3 | 1/1/1 |" },
+      "web pro/max long, research verdict": { "value": 2, "quote": "| Web Pro/Max long, research verdict | 2 | 2 | 1/1/0 |" },
+      "web standard long, routed split to preflight": { "value": 3, "quote": "| Web Standard long, routed split to preflight (workers ran) | n/a (added after) | 3 | 1/1/1 |" },
+      "web pro/max long, routed split to coordinator": { "value": 3, "quote": "| Web Pro/Max long, routed split to coordinator (`research_parallel`) | n/a (added after) | 3 | 1/1/1 |" },
+      "channel paid long ordinary": { "value": 3, "quote": "| Channel paid long ordinary | 3 | 3 | (no turnTiming on channel) |" },
+      "channel trivial": { "value": 0, "quote": "| Channel trivial | 0 | 0 | |" }
+    }
+  },
+  "imports": {
+    "staticJson": "docs/plans/evidence/oss-chat-replacement/canonical-publication/m4-import-graph-before-dirty-tree.json",
+    "staticLabel": "M4 static import graph before (dirty tree)",
+    "runtimeSource": "docs/plans/oss-chat-m4-runtime-separation-plan.md",
+    "runtimeLabel": "Pre-M4 runtime trace of compiled dist/boot.js (module import only, no boot)",
+    "runtime": { "loadedModules": 4359, "importMs": 1000, "rssMb": 387, "quote": "| `packages/api/dist/boot.js` | 4359 | 1855 / 2504 | 371 | 1000 ms | 387 MB |" },
+    "bootSource": "docs/plans/evidence/oss-chat-replacement/canonical-publication/m4-boot-split.md",
+    "boot": { "ossHealthMs": 2500, "hostedHealthMs": 1500, "quote": "`/health` 200 after 2.5 s", "quoteHosted": "`/health` 200 after 1.5 s" }
+  },
+  "d13": {
+    "source": "docs/plans/evidence/oss-chat-replacement/canonical-publication/m4-boot-split.md",
+    "label": "M4 step 7 remaining population (boot-split receipt)",
+    "shimPathEdges": { "value": 5, "quote": "(136 files, 590 specifiers, 5 shim" },
+    "coreRootRefs": { "value": 570, "quote": "the 258 files / 570 core-root references" }
+  },
+  "browser": {
+    "source": "docs/plans/evidence/oss-chat-replacement/canonical-publication/m5-browser-qualification/README.md",
+    "label": "M5 browser qualification, first pass (2026-11-17): not qualified",
+    "rows": {
+      "E1": { "390": "Pass 7/7", "1440": "Pass 7/7", "quote": "| **Pass** 7/7 | **Pass** 7/7 | `runs/stack4/new-chat-reload-390`" },
+      "E2": { "390": "Pass 5/5", "1440": "Pass 5/5", "quote": "| **Pass** 5/5 | **Pass** 5/5 | `runs/stack1/composer-accept-*`" },
+      "E3": { "390": "Fail 8/12", "1440": "Fail 7/13", "quote": "| **Fail** 8/12 | **Fail** 7/13 |" },
+      "E4": { "390": "Fail 5/7", "1440": "Fail 5/7", "quote": "| **Fail** 5/7 | **Fail** 5/7 | `runs/stack4/network-loss-*`" },
+      "E5": { "390": "Pass 9/9 room checks", "1440": "Pass 9/9 room checks", "quote": "| **Pass** (room checks 9/9) | **Pass** (room checks 9/9) |" },
+      "E6": { "390": "Pass 5/5 + 3/3", "1440": "Pass 5/5 + 3/3", "quote": "| **Pass** 5/5 + 3/3 | **Pass** 5/5 + 3/3 |" },
+      "E7": { "390": "Fail 3/5", "1440": "Fail 2/5", "quote": "| **Fail** 3/5 | **Fail** 2/5 |" },
+      "E8": { "390": "Pass 5/5", "1440": "Pass 5/5", "quote": "| **Pass** 5/5 | **Pass** 5/5 | `runs/stack3/switch-*`" },
+      "E9": { "390": "Fail", "1440": "Fail", "quote": "| 9 | Multi-assistant `@A @B` response group | **Fail** | **Fail** |" },
+      "E10": { "390": "Partial 5/6", "1440": "Partial 5/6", "quote": "| **Partial** 5/6 | **Partial** 5/6 |" },
+      "E11": { "390": "Partial 4/4 (composer half not run)", "1440": "Pass 7/7", "quote": "| **Partial** 4/4 (composer half not run) | **Pass** 7/7 |" },
+      "E12": { "390": "Pass 3/3", "1440": "Pass 3/3", "quote": "| **Pass** 3/3 | **Pass** 3/3 |" },
+      "E13": { "390": "Partial", "1440": "Pass", "quote": "| D1 | Dock: turn on `/p`" },
+      "E14": { "390": "Pass", "1440": "Pass", "quote": "| D2 | Dock: build log replay when a presentation attaches mid-turn | **Pass** | **Pass** |" },
+      "E15": { "390": "Pass", "1440": "Pass", "quote": "| D3 | Dock and full page attached to the same session (one stream, history precedence) | **Pass** | **Pass** |" },
+      "E16": { "390": "Not verified", "1440": "Not verified", "quote": "| D4 | Dock: reload mid-turn re-attaches and the reply lands | **Not verified** | **Not verified** |" },
+      "E17": { "390": "Reset pass, resume not verified", "1440": "Reset pass, resume not verified", "quote": "| D5 | Dock reset and resume | Reset **pass**; resume **not verified** | Reset **pass**; resume **not verified** |" },
+      "E18": { "390": "Pass 5/5", "1440": "Pass 5/5", "quote": "| D6 | Identity change isolation (same browser profile, owner then another identity) | **Pass** 5/5 | **Pass** 5/5 |" },
+      "E19": { "1440": "Fail / not verifiable", "quote": "| R | Resume end to end (kill API, restart, re-attach, bus frames, history) | not run (shared API) | **Fail / not verifiable** |" }
+    }
+  },
+  "transfer": {
+    "source": "docs/plans/evidence/oss-chat-replacement/canonical-publication/m1-existing-brain-transfer.md",
+    "G1": { "value": "5/5 (run 6), 311 functions, every durable table equal", "quote": "5/5 with `USEBRIAN_TRANSFER_TEST_REPEAT=5` (run 6)" },
+    "G2": { "value": "2/2 after the selection repair", "quote": "| `launcher-receiving.native.test.ts` | 2/2 after the selection repair." }
+  },
+  "gates": {
+    "H1": { "value": "44/45 tasks (integrated run3; 7 hosted Telegram fixture failures later repaired); no combined final pass", "source": "docs/plans/oss-chat-architecture-replacement.md", "quote": "completed44/45 tasks" },
+    "H4": { "value": "pass, 14 of 14 projects (M4 boot split)", "source": "docs/plans/evidence/oss-chat-replacement/canonical-publication/m4-boot-split.md", "quote": "re-run **pass, 14 of 14 projects**" },
+    "H5": { "value": "195/195 node tests and 3/3 vitest (M2 completion)", "source": "docs/plans/evidence/oss-chat-replacement/canonical-publication/m2-completion.md", "quote": "**195/195 node tests and 3/3 vitest pass**" }
+  }
+}

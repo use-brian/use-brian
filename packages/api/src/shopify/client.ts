@@ -15,7 +15,7 @@
  */
 
 import { createHmac, timingSafeEqual } from 'node:crypto'
-import { ConnectorApiError } from '@use-brian/core'
+import { ConnectorApiError } from '@use-brian/core/tools/base/_connector-result.js'
 
 export const SHOPIFY_API_VERSION = '2026-04'
 

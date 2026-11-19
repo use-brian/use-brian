@@ -1,4 +1,4 @@
-import type { PlanStepRecord, PlanStore } from '@use-brian/core'
+import type { PlanStepRecord, PlanStore } from '@use-brian/core/memory/plan-types.js'
 import {
   upsertPlanStep,
   updatePlanStepStatus,

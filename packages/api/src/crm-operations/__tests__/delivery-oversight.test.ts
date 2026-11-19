@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createCrmOperationsService } from '../service.js'
-import type { CrmOperationsContext, CrmOperationsCommand } from '@use-brian/core'
+import type { CrmOperationsContext, CrmOperationsCommand } from '@use-brian/core/crm/operations-types.js'
 const id='11111111-1111-4111-8111-111111111111'
 const context:CrmOperationsContext={workspaceId:id,actor:{kind:'user',userId:id},authority:{role:'member',canWrite:false,canConfigure:false,trustedIdentitySources:[]}}
 describe('[COMP:api/crm-delivery-oversight] canonical command admission',()=>{

@@ -54,16 +54,18 @@ import {
   removeEntityAlias,
   type PromoteEntityToCrmParams,
 } from '../db/entities-store.js'
+import { SYSTEM_ENTITY_KINDS } from '@use-brian/core/entities/types.js'
 import {
-  SYSTEM_ENTITY_KINDS,
-  TASK_STATUSES,
   DOCUMENT_FORMATS,
   documentFormatFromMetadata,
-  convertToPdfWithLibreOffice,
-  LibreOfficeError,
-} from '@use-brian/core'
+} from '@use-brian/core/files/document-formats.js'
+import { convertToPdfWithLibreOffice, LibreOfficeError } from '@use-brian/core/files/libreoffice.js'
+import { TASK_STATUSES } from '@use-brian/core/tasks/types.js'
 import { updateTask } from '../db/tasks.js'
-import type { AccessContext, EntityLinksStore, FilesApi, FilesContext, TaskRecordStatus, TaskUpdateFields } from '@use-brian/core'
+import type { EntityLinksStore } from '@use-brian/core/entities/types.js'
+import type { TaskRecordStatus, TaskUpdateFields } from '@use-brian/core/tasks/types.js'
+import type { FilesApi, FilesContext } from '@use-brian/core/workspace-files/api.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import {
   createBrainEntryMutator,
   isEditableBrainPrimitive,
@@ -88,7 +90,7 @@ type RouteOptions = {
    * Spec: docs/architecture/brain/classification/README.md
    *   §B3 Brain inbox / web UI
    */
-  entityKindClassifier?: import('@use-brian/core').Classifier<import('@use-brian/core').EntityKind>
+  entityKindClassifier?: import('@use-brian/core/classification/types.js').Classifier<import('@use-brian/core/entities/types.js').EntityKind>
   /**
    * Pending-classifications store — when provided, exposes
    * `GET /:workspaceId/pending-classifications` (list unresolved) and
@@ -98,7 +100,7 @@ type RouteOptions = {
    * Spec: docs/architecture/brain/classification/README.md
    *   §Pending-reclassification queue
    */
-  pendingClassificationStore?: import('@use-brian/core').PendingClassificationStore
+  pendingClassificationStore?: import('@use-brian/core/classification/pending-queue.js').PendingClassificationStore
   /**
    * Files API — when provided, exposes `GET
    * /:workspaceId/workspace_file/:rowId/content` so the brain detail

@@ -20,7 +20,7 @@
  * store's concern; the worker exposes `intervalMs` + `batchLimit` knobs).
  */
 
-import { calculateCost, type UsageStore } from '../billing/cost-tracker.js'
+import { calculateCost, type UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
 import { runInBackgroundLane } from '../scheduling/background-lane.js'
 import { GEMINI_EMBEDDING_MODEL_ID, type Embedder } from './embedder.js'
 

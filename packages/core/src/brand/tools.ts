@@ -37,7 +37,7 @@ import {
   type BrandRecord,
   type BrandRecordGroup,
 } from '@use-brian/shared'
-import { buildTool, type Tool } from '../tools/types.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import type { BrandDetail, BrandStore } from './types.js'
 
 export type BrandToolEvent =

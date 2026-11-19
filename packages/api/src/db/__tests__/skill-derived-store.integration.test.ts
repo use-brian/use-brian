@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
-import type { ScopeSource } from '@use-brian/core'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { getAppPool, getPool } from '../client.js'
 import { createMemory, type Memory } from '../memories.js'
 import {

@@ -1,19 +1,21 @@
-import { bindWorkspaceCredentialDelegation, workspaceCredentialDelegation } from '@use-brian/core'
+import { bindWorkspaceCredentialDelegation, workspaceCredentialDelegation } from '@use-brian/agent-runtime/security/workspace-delegation.js'
 import { workspaceMcpContextBinding, workspaceMcpConversationPath } from './contexts.js'
 /** Durable native turns with their original credential parent. [COMP:api/workspace-mcp] */
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { buildTool, type ToolContext, type ScopeEvidence } from '@use-brian/core'
+import type { ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
+import { buildTool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { sanitizeDeliveryText } from '@use-brian/shared'
 import { query, queryWithRLS } from '../db/client.js'
 import { bindWorkspaceMcpPublication } from '../db/session-context-revisions.js'
 import { readAttendedSessionHistory } from '../routes/attended-session-context.js'
-import { assertSourceModelOutputAuthority } from '../application-platform/model-source-authority.js'
+import { admitModelOutput } from '../context-scope/admission.js'
 import { captureWorkspaceMcpDelegation, type WorkspaceMcpDelegation } from './delegation.js'
 import { executeWorkspaceMcpOperation } from './operations.js'
 import type { WorkspaceMcpConsent } from './consent.js'
 import type { WorkspaceTurnBinding, WorkspaceTurnInput, WorkspaceTurnResult } from './native-turn.js'
-import type { PendingApprovalsStore } from '../db/pending-approvals-store.js'
+import type { CreateQuestionParams, PendingApprovalsStore } from '../db/pending-approvals-store.js'
+import { askQuestionPayload } from '@use-brian/agent-runtime/tools/base/ask-question.js'
 
 const inputSchema = z.object({ message: z.string().min(1).max(200_000),
   workspaceFileIds: z.array(z.string().uuid()).max(32).optional(),
@@ -52,6 +54,27 @@ async function readRun(context: ToolContext, id: string): Promise<Run> {
   if (!row) throw new Error('workspace_mcp_run_unavailable')
   await context.authority!.assertCurrent()
   return row
+}
+
+/**
+ * The pending-question record for a workspace MCP run: the full askQuestion
+ * payload (askquestion-suspend-resume.md → "Question payload contract") bound
+ * to the run. A `connector_authorization:*` action is never stored here: this
+ * lane has no capability check to admit it, and a machine answer can never
+ * complete connector authorization. Other action ids are inert metadata.
+ */
+export function workspaceMcpQuestionParams(
+  params: Parameters<NonNullable<ToolContext['createPendingQuestion']>>[0],
+  run: { workspaceId: string; sessionId: string; assistantId: string; userId: string; runId: string },
+): CreateQuestionParams {
+  const { toolUseId, expiresAt, ...input } = params
+  const payload = askQuestionPayload(input)
+  if (!payload) throw new Error('workspace_mcp_question_invalid')
+  const { actionId, ...question } = payload
+  return { workspaceId: run.workspaceId, blockingSessionId: run.sessionId, originatingAssistantId: run.assistantId,
+    approverUserId: run.userId, workspaceMcpRunId: run.runId, ...question,
+    ...(actionId && !actionId.startsWith('connector_authorization:') ? { actionId } : {}),
+    toolUseId, deliveryChannelType: 'web', expiresAt }
 }
 
 export function createWorkspaceMcpRuns(deps: Deps) {
@@ -113,7 +136,7 @@ export function createWorkspaceMcpRuns(deps: Deps) {
       if (['queued', 'running'].includes(row.status)) return { data: summary(row) }
       context.scopeAccumulator!.note(row.evidence)
       bindWorkspaceMcpPublication(context.executionContext!)
-      const messages = await readAttendedSessionHistory({ execution: context.executionContext!, accumulator: context.scopeAccumulator! }, row.session_id)
+      const messages = (await readAttendedSessionHistory({ execution: context.executionContext!, accumulator: context.scopeAccumulator! }, row.session_id)).messages
       const ids = new Set(row.result?.messageIds ?? [])
       const replies = messages.flatMap(message => {
         if (!ids.has(message.id) || message.role !== 'assistant') return []
@@ -129,7 +152,7 @@ export function createWorkspaceMcpRuns(deps: Deps) {
         questions.push({ questionId: id, question: question.approvalPayload.question,
           options: question.approvalPayload.options, status: question.status, expiresAt: question.expiresAt })
       }
-      await assertSourceModelOutputAuthority(context)
+      await admitModelOutput(context)
       await context.authority!.assertCurrent()
       return { data: { ...summary(row), replies,...(row.result?.research?.length?{research:row.result.research}:{}), ...(questions.length ? { questions } : {}) }, scopeEvidence: context.scopeAccumulator!.evidence }
     } })
@@ -236,10 +259,8 @@ export function createWorkspaceMcpRuns(deps: Deps) {
       bindWorkspaceCredentialDelegation(context.executionContext,workspaceParent)
       if (deps.approvalsStore) context.createPendingQuestion = async params => {
         await authority.assertCurrent()
-        const question = await deps.approvalsStore!.createQuestion({ workspaceId: context.workspaceId!, blockingSessionId: context.sessionId,
-          originatingAssistantId: context.assistantId, approverUserId: context.userId, workspaceMcpRunId: job.id,
-          question: params.question, toolUseId: params.toolUseId, options: params.options, allowCustom: params.allowCustom,
-          deliveryChannelType: 'web', expiresAt: params.expiresAt })
+        const question = await deps.approvalsStore!.createQuestion(workspaceMcpQuestionParams(params, { workspaceId: context.workspaceId!,
+          sessionId: context.sessionId, assistantId: context.assistantId, userId: context.userId, runId: job.id }))
         return question.id
       }
       const receipt = await executeWorkspaceMcpOperation({ context, name: 'runBrian', input: job.input, operationId: job.turn_operation_id,

@@ -11,7 +11,7 @@
  * [COMP:inter-assistant/mode-tools]
  */
 
-import type { Tool } from '../tools/types.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 
 /**
  * Filter a tool map to a per-consult allow-list. `allowed = undefined` means

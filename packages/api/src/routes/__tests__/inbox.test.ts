@@ -14,7 +14,8 @@ import express from 'express'
 import request from 'supertest'
 
 import { inboxRoutes } from '../inbox.js'
-import type { CommentThreadStore, DocNotificationsStore } from '@use-brian/core'
+import type { CommentThreadStore } from '@use-brian/core/doc/comment-types.js'
+import type { DocNotificationsStore } from '@use-brian/core/doc/inbox-types.js'
 
 const USER = 'u-1'
 const WS = 'ws-1'

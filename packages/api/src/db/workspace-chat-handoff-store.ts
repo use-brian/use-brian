@@ -6,7 +6,7 @@
 
 import { sessionKindSql } from '../session-kind.js'
 import { randomUUID } from 'node:crypto'
-import type { WorkspaceChatHandoffPort } from '@use-brian/core'
+import type { WorkspaceChatHandoffPort } from '@use-brian/core/tools/base/workspace-chat-handoff.js'
 import { getAppPool } from './client.js'
 import { addSessionMessage } from './sessions.js'
 

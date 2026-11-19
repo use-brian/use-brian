@@ -2,7 +2,8 @@
  * [COMP:agent-surface/connector-authorization]
  */
 import { describe, expect, it, vi } from 'vitest'
-import { CONFIGURE_CAPABILITY, type ToolContext } from '@use-brian/core'
+import { CONFIGURE_CAPABILITY } from '@use-brian/core/authorization/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { bandOf } from '../banding.js'
 import {
   availableOfficialConnectorRows,

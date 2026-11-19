@@ -1,0 +1,1250 @@
+[
+  {
+    "signature": "capture_native_session_projection_batch(uuid,uuid,integer,text)",
+    "body": "d9a96c70db2140a15f97e81955bbb295ee6f35fa9059d39e958d4af0a04dcf78",
+    "pins": [],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "capture_native_session_projection_batch",
+      "prorows": 0,
+      "pronargs": 4,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp",
+        "plan_cache_mode=force_generic_plan"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "s",
+        "through",
+        "t"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": false,
+    "bodyPins": [
+      "observe_application_field_projection(uuid,jsonb,text,uuid,text,text,text,text[])",
+      "application_current_field_snapshot(uuid,uuid)",
+      "application_materialize_field_envelope(uuid,jsonb,integer)",
+      "application_session_query_scan(uuid,uuid,text,integer,text[],jsonb,jsonb)",
+      "read_native_session_field_snapshots(uuid,uuid[],text[])",
+      "application_compute_field_envelope(uuid,jsonb,text,uuid,text,text,text[],integer)"
+    ],
+    "bodyPinHashes": {
+      "observe_application_field_projection(uuid,jsonb,text,uuid,text,text,text,text[])": "e98b2198a8793a57c982fa992f92cdd5dec0232b93de28d5b9b49cb4b061e1f5",
+      "application_current_field_snapshot(uuid,uuid)": "06f3bd17edf6103a9d2014856a9abff19dba216614e6ce17cb13cd1705355403",
+      "application_materialize_field_envelope(uuid,jsonb,integer)": "6b4340ea9aa09be4512d8259bd1055c40d6986f8cb5e6319c3d1341cf5a989d5",
+      "application_session_query_scan(uuid,uuid,text,integer,text[],jsonb,jsonb)": "70c4a1c928f38e61aebedb549340a42516ec3ba01f62c432cf526b3b4a735d72",
+      "read_native_session_field_snapshots(uuid,uuid[],text[])": "50cb4616c970bb1a2960cf9e285a0991c0338f77a13c15e1887ddc2c9309500c",
+      "application_compute_field_envelope(uuid,jsonb,text,uuid,text,text,text[],integer)": "50973b8ff2d29e46ac9fdc0a424b8100d50ce28d3de6964eee52bde01cda43d7"
+    }
+  },
+  {
+    "signature": "scope_source_ancestors(uuid,text,uuid)",
+    "body": "cabe0f65f8e31b0123ebe2328d72f314ee1b82795cfa5cf66deb57c792384282",
+    "pins": [],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "scope_source_ancestors",
+      "prorows": 1000,
+      "pronargs": 3,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": true,
+      "prosecdef": true,
+      "prorettype": "2950",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": [
+        "i",
+        "i",
+        "i",
+        "t"
+      ],
+      "proargnames": [
+        "w",
+        "k",
+        "i",
+        "resource_id"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": [
+        "2950",
+        "25",
+        "2950",
+        "2950"
+      ],
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": false
+  },
+  {
+    "signature": "read_external_source_dependencies(uuid,text[],uuid[],text[])",
+    "body": "49d22c1cfdb98f6eb0d4421a8c080bebc55b3d843f234d0805968366db4186a2",
+    "pins": [],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "read_external_source_dependencies",
+      "prorows": 1000,
+      "pronargs": 4,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": true,
+      "prosecdef": true,
+      "prorettype": "2249",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": [
+        "i",
+        "i",
+        "i",
+        "i",
+        "t",
+        "t"
+      ],
+      "proargnames": [
+        "w",
+        "kinds",
+        "ids",
+        "versions",
+        "node_version",
+        "source"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": [
+        "2950",
+        "1009",
+        "2951",
+        "1009",
+        "25",
+        "3802"
+      ],
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "sql",
+    "appExecute": false
+  },
+  {
+    "signature": "read_scope_source(uuid,text,uuid)",
+    "body": "964be13e8633f714a9df7828421c0d6b1dde0aaff78d3da22b08416d9e6d7aa0",
+    "pins": [],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "read_scope_source",
+      "prorows": 0,
+      "pronargs": 3,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "k",
+        "i"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": false
+  },
+  {
+    "signature": "read_native_session_query_cohort_sources(uuid,text[],uuid[],text[])",
+    "body": "decf5058016df0127f14f201c843b311dad798075d3a86ed41071523139c7018",
+    "pins": [],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "read_native_session_query_cohort_sources",
+      "prorows": 1000,
+      "pronargs": 4,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": true,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": [
+        "i",
+        "i",
+        "i",
+        "i",
+        "t"
+      ],
+      "proargnames": [
+        "w",
+        "kinds",
+        "ids",
+        "versions",
+        "source"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": [
+        "2950",
+        "1009",
+        "2951",
+        "1009",
+        "3802"
+      ],
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": false
+  },
+  {
+    "signature": "application_session_eval_scope_current(uuid,text,uuid,text,jsonb)",
+    "body": "b977bab4f04ae2d61d7c7d042225d41a97346466f95352e6f8c8e934bd2a46ca",
+    "pins": [],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "application_session_eval_scope_current",
+      "prorows": 0,
+      "pronargs": 5,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "k",
+        "i",
+        "v",
+        "memo"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": false
+  },
+  {
+    "signature": "read_native_session_query_cohort_nodes(uuid,jsonb)",
+    "body": "fb48ece57a33fa8c9f8e73ffd892b835bcf51d72661f355336590fdf026c17c4",
+    "pins": [],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "read_native_session_query_cohort_nodes",
+      "prorows": 1000,
+      "pronargs": 2,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": true,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": [
+        "i",
+        "i",
+        "t"
+      ],
+      "proargnames": [
+        "w",
+        "nodes",
+        "source"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": [
+        "2950",
+        "3802",
+        "3802"
+      ],
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": false
+  },
+  {
+    "signature": "read_native_session_cohort_evidence(uuid,text[],uuid[],text[],boolean)",
+    "body": "c3de8dda378c2613c0821138a3a9e30b793ff1825ce08d1d73b0ca024d2840de",
+    "pins": [],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "read_native_session_cohort_evidence",
+      "prorows": 0,
+      "pronargs": 5,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "kinds",
+        "ids",
+        "versions",
+        "include_memory"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": false,
+    "bodyPins": [
+      "application_session_eval_scope_current(uuid,text,uuid,text,jsonb)",
+      "read_native_session_query_cohort_sources(uuid,text[],uuid[],text[])",
+      "read_native_memory_query_cohort_sources(uuid,text[],uuid[],text[])"
+    ],
+    "bodyPinHashes": {
+      "application_session_eval_scope_current(uuid,text,uuid,text,jsonb)": "b977bab4f04ae2d61d7c7d042225d41a97346466f95352e6f8c8e934bd2a46ca",
+      "read_native_session_query_cohort_sources(uuid,text[],uuid[],text[])": "decf5058016df0127f14f201c843b311dad798075d3a86ed41071523139c7018",
+      "read_native_memory_query_cohort_sources(uuid,text[],uuid[],text[])": "8a01f2a9a01cbe613ce23a519610a77e3ae8354bef88df8e99cab0d32bcc2bcd"
+    }
+  },
+  {
+    "signature": "read_admitted_native_scope_snapshot(uuid,text,uuid)",
+    "body": "9bb8cbfb739df75d85cfd47d5c6662a1c23808c729c599b6f0479f2b0ebb1a0e",
+    "pins": [],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "read_admitted_native_scope_snapshot",
+      "prorows": 0,
+      "pronargs": 3,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "k",
+        "i"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": true
+  },
+  {
+    "signature": "read_native_memory_query_cohort_sources(uuid,text[],uuid[],text[])",
+    "body": "8a01f2a9a01cbe613ce23a519610a77e3ae8354bef88df8e99cab0d32bcc2bcd",
+    "pins": [],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "read_native_memory_query_cohort_sources",
+      "prorows": 1000,
+      "pronargs": 4,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": true,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": [
+        "i",
+        "i",
+        "i",
+        "i",
+        "t"
+      ],
+      "proargnames": [
+        "w",
+        "kinds",
+        "ids",
+        "versions",
+        "source"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": [
+        "2950",
+        "1009",
+        "2951",
+        "1009",
+        "3802"
+      ],
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": false
+  },
+  {
+    "signature": "read_entity_derivation_source(uuid,text,uuid)",
+    "body": "a5ed483e058aa51e2c0bf67a353c6473df18be66687f541cece0146ce14d26e4",
+    "pins": [],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "read_entity_derivation_source",
+      "prorows": 0,
+      "pronargs": 3,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "k",
+        "i"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": true
+  },
+  {
+    "signature": "native_private_title_frame(uuid,jsonb)",
+    "body": "268610786776c1a90c8703878f3ac39bba77c5d3dae0a3ac630e8c4ea6564ad8",
+    "pins": [],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "native_private_title_frame",
+      "prorows": 0,
+      "pronargs": 2,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "nodes"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": false
+  },
+  {
+    "signature": "native_private_title_proof(uuid,uuid,uuid)",
+    "body": "8bb2a6087aaf9c62aef680356c929a8f73f846239a042d08763505a9dde8b54e",
+    "pins": [],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "native_private_title_proof",
+      "prorows": 0,
+      "pronargs": 3,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "s",
+        "i"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": false,
+    "bodyPins": [
+      "read_native_memory_query_cohort_sources(uuid,text[],uuid[],text[])",
+      "read_native_session_cohort_evidence(uuid,text[],uuid[],text[],boolean)"
+    ],
+    "bodyPinHashes": {
+      "read_native_memory_query_cohort_sources(uuid,text[],uuid[],text[])": "8a01f2a9a01cbe613ce23a519610a77e3ae8354bef88df8e99cab0d32bcc2bcd",
+      "read_native_session_cohort_evidence(uuid,text[],uuid[],text[],boolean)": "2afff03ed88d3de82386880a3b582bbfa2c4379b06ecbc06fd98ff467f60c376"
+    }
+  },
+  {
+    "signature": "private_transcript_message_fingerprint(session_messages)",
+    "body": "bb8dd79fc59b9ecd69574df3694ebfd2a089c305e8ce0dd4e26cca740e387976",
+    "pins": [],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "private_transcript_message_fingerprint",
+      "prorows": 0,
+      "pronargs": 1,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp",
+        "TimeZone=UTC"
+      ],
+      "proretset": false,
+      "prosecdef": false,
+      "prorettype": "25",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "m"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "i",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "sql",
+    "appExecute": false
+  },
+  {
+    "signature": "application_native_file_frame_current(uuid,text[],uuid[],text[],jsonb)",
+    "body": "6718ca009187e650f1db0f81897c35ced0c7f44fe80b9f8b4eed61f3593c7b5b",
+    "pins": [],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "application_native_file_frame_current",
+      "prorows": 0,
+      "pronargs": 5,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "16",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "kinds",
+        "ids",
+        "versions",
+        "frame"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": false
+  },
+  {
+    "signature": "read_native_file_session_field_snapshots(uuid,uuid[],text[])",
+    "body": "3a9c531f9216e4ed1099dca7a91006bca2dd0268c5800817aa7daf45aa1e8d37",
+    "pins": [],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "read_native_file_session_field_snapshots",
+      "prorows": 1000,
+      "pronargs": 3,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": true,
+      "prosecdef": true,
+      "prorettype": "2249",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": [
+        "i",
+        "i",
+        "i",
+        "t",
+        "t"
+      ],
+      "proargnames": [
+        "w",
+        "ids",
+        "versions",
+        "ord",
+        "snapshot"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": [
+        "2950",
+        "2951",
+        "1009",
+        "23",
+        "3802"
+      ],
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": false
+  },
+  {
+    "signature": "private_legacy_history_binding(sessions)",
+    "body": "ede88958a8c91058b31a37cb1fb64c863ee1009027f7afce094f5b38e72a2c21",
+    "pins": [],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "private_legacy_history_binding",
+      "prorows": 0,
+      "pronargs": 1,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": false,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "s"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "i",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "sql",
+    "appExecute": false
+  },
+  {
+    "signature": "read_private_transcript_source(uuid,uuid)",
+    "body": "0ea4bea3329e6b665a92e25e2077eebb911ea7995c2102357da7aa6bfcc959db",
+    "pins": [],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "read_private_transcript_source",
+      "prorows": 0,
+      "pronargs": 2,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "i"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": false
+  },
+  {
+    "signature": "application_native_file_capture_helpers_current()",
+    "body": "4d6230003dd9276cd99a08150efe3831616f9d973c630a849f0b450f1c6af64b",
+    "pins": [
+      "capture_native_session_projection_batch(uuid,uuid,integer,text)",
+      "application_memory_statement_helpers_current()",
+      "read_native_file_session_evidence(uuid,text[],uuid[],text[],boolean)",
+      "application_empty_query_helpers_current()",
+      "read_native_file_session_cohort_frame(uuid,text[],uuid[],text[],boolean)",
+      "application_native_file_frame_current(uuid,text[],uuid[],text[],jsonb)",
+      "read_native_file_session_field_snapshots(uuid,uuid[],text[])"
+    ],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "application_native_file_capture_helpers_current",
+      "prorows": 0,
+      "pronargs": 0,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "16",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": null,
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": false
+  },
+  {
+    "signature": "native_private_title_helpers_current()",
+    "body": "f88b16a890b99a1f37e01425236d53a4224a1f6d9fb95bea3d97f5184ed938a7",
+    "pins": [
+      "scope_source_ancestors(uuid,text,uuid)",
+      "read_external_source_dependencies(uuid,text[],uuid[],text[])",
+      "read_scope_source(uuid,text,uuid)",
+      "read_native_session_query_cohort_sources(uuid,text[],uuid[],text[])",
+      "application_session_eval_scope_current(uuid,text,uuid,text,jsonb)",
+      "read_native_session_query_cohort_nodes(uuid,jsonb)",
+      "read_native_session_cohort_evidence(uuid,text[],uuid[],text[],boolean)",
+      "read_admitted_native_scope_snapshot(uuid,text,uuid)",
+      "read_native_memory_query_cohort_sources(uuid,text[],uuid[],text[])",
+      "read_entity_derivation_source(uuid,text,uuid)",
+      "application_memory_statement_helpers_current()",
+      "application_empty_query_helpers_current()",
+      "application_native_worklist_helpers_current()",
+      "private_legacy_history_binding(sessions)",
+      "private_transcript_message_fingerprint(session_messages)",
+      "read_private_transcript_source(uuid,uuid)",
+      "native_private_title_frame(uuid,jsonb)",
+      "native_private_title_proof(uuid,uuid,uuid)"
+    ],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "native_private_title_helpers_current",
+      "prorows": 0,
+      "pronargs": 0,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "16",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": null,
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": false
+  },
+  {
+    "signature": "session_context_file_revision_allowed(uuid,uuid)",
+    "body": "a36f3c1440dfa1dad87d5005c312ed2da5bf7d3c30e16bc1383c53f53c2e57de",
+    "pins": [],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "session_context_file_revision_allowed",
+      "prorows": 0,
+      "pronargs": 2,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "16",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "i"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": false,
+    "bodyPins": [
+      "session_context_revision_allowed(uuid,uuid)",
+      "read_native_file_session_evidence(uuid,text[],uuid[],text[],boolean)"
+    ],
+    "bodyPinHashes": {
+      "session_context_revision_allowed(uuid,uuid)": "42a110fb9813834017f41c312fc52cc9e11ba6323adb2e54bab6ad02d210eec4",
+      "read_native_file_session_evidence(uuid,text[],uuid[],text[],boolean)": "abbc6a5ae1b87859acb2006aa87a925db67519d859e026c73b3bf51d6883ee6b"
+    }
+  },
+  {
+    "signature": "read_session_context_file_revision(uuid,uuid)",
+    "body": "334acdc238b0782d7e204515f484e5e06ef6fdb03e59aeddd5ef99256dda369b",
+    "pins": [],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "read_session_context_file_revision",
+      "prorows": 0,
+      "pronargs": 2,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "i"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": false,
+    "bodyPins": [
+      "read_session_context_revision(uuid,uuid)",
+      "read_native_file_session_evidence(uuid,text[],uuid[],text[],boolean)"
+    ],
+    "bodyPinHashes": {
+      "read_session_context_revision(uuid,uuid)": "cf3245e613753ee7ee51676984a74385b01a0c19b42527322e495e11f49616a0",
+      "read_native_file_session_evidence(uuid,text[],uuid[],text[],boolean)": "abbc6a5ae1b87859acb2006aa87a925db67519d859e026c73b3bf51d6883ee6b"
+    }
+  },
+  {
+    "signature": "read_native_file_session_title_revision(uuid,uuid,uuid)",
+    "body": "1efd74ded55c70183f4ca90bb03cbb356bcc35314961a8d61b88ef18a5a3a735",
+    "pins": [],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "read_native_file_session_title_revision",
+      "prorows": 0,
+      "pronargs": 3,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "s",
+        "i"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": true,
+    "bodyPins": [
+      "read_session_title_revision(uuid,uuid,uuid)",
+      "read_native_file_session_evidence(uuid,text[],uuid[],text[],boolean)"
+    ],
+    "bodyPinHashes": {
+      "read_session_title_revision(uuid,uuid,uuid)": "a4e3606c30586996907ff6668a67b23bb1aeee738ce3e436465a07f7efb16492",
+      "read_native_file_session_evidence(uuid,text[],uuid[],text[],boolean)": "abbc6a5ae1b87859acb2006aa87a925db67519d859e026c73b3bf51d6883ee6b"
+    }
+  },
+  {
+    "signature": "read_native_empty_query_evidence(uuid,text[],uuid[],text[])",
+    "body": "632a73985ec9520a5e45a8446e13ff1774f2649e6ab65e49f9a8a43fee96582d",
+    "pins": [],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "read_native_empty_query_evidence",
+      "prorows": 0,
+      "pronargs": 4,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "kinds",
+        "ids",
+        "versions"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": true
+  },
+  {
+    "signature": "session_context_empty_query_revision_allowed(uuid,uuid)",
+    "body": "5deac1df7e9ec71e048008785aa494ec0eb7dd01bba1373e0256016754562f91",
+    "pins": [],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "session_context_empty_query_revision_allowed",
+      "prorows": 0,
+      "pronargs": 2,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "16",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "i"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": false,
+    "bodyPins": [
+      "session_context_revision_allowed(uuid,uuid)",
+      "read_native_file_session_evidence(uuid,text[],uuid[],text[],boolean)"
+    ],
+    "bodyPinHashes": {
+      "session_context_revision_allowed(uuid,uuid)": "42a110fb9813834017f41c312fc52cc9e11ba6323adb2e54bab6ad02d210eec4",
+      "read_native_file_session_evidence(uuid,text[],uuid[],text[],boolean)": "abbc6a5ae1b87859acb2006aa87a925db67519d859e026c73b3bf51d6883ee6b"
+    }
+  },
+  {
+    "signature": "read_session_context_empty_query_revision(uuid,uuid)",
+    "body": "c2663c2d85c3b0dcc168da40b1fc016f9e4837f7efd4412d9a5afbbf15845b72",
+    "pins": [],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "read_session_context_empty_query_revision",
+      "prorows": 0,
+      "pronargs": 2,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "i"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": false,
+    "bodyPins": [
+      "read_session_context_revision(uuid,uuid)",
+      "read_native_file_session_evidence(uuid,text[],uuid[],text[],boolean)"
+    ],
+    "bodyPinHashes": {
+      "read_session_context_revision(uuid,uuid)": "cf3245e613753ee7ee51676984a74385b01a0c19b42527322e495e11f49616a0",
+      "read_native_file_session_evidence(uuid,text[],uuid[],text[],boolean)": "abbc6a5ae1b87859acb2006aa87a925db67519d859e026c73b3bf51d6883ee6b"
+    }
+  },
+  {
+    "signature": "read_native_empty_query_session_title_revision(uuid,uuid,uuid)",
+    "body": "5ba7b7a004054b73d36298a3a7c8384e3fc27f0e6ad5e55ed590af482465925b",
+    "pins": [],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "read_native_empty_query_session_title_revision",
+      "prorows": 0,
+      "pronargs": 3,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "s",
+        "i"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": true,
+    "bodyPins": [
+      "read_session_title_revision(uuid,uuid,uuid)",
+      "read_native_file_session_evidence(uuid,text[],uuid[],text[],boolean)"
+    ],
+    "bodyPinHashes": {
+      "read_session_title_revision(uuid,uuid,uuid)": "a4e3606c30586996907ff6668a67b23bb1aeee738ce3e436465a07f7efb16492",
+      "read_native_file_session_evidence(uuid,text[],uuid[],text[],boolean)": "abbc6a5ae1b87859acb2006aa87a925db67519d859e026c73b3bf51d6883ee6b"
+    }
+  },
+  {
+    "signature": "application_empty_query_facades_current()",
+    "body": "121051c87b62aa66642347a6d428951ea02a5cc7bd13af325be0cb0825d11739",
+    "pins": [
+      "session_context_file_revision_allowed(uuid,uuid)",
+      "read_session_context_file_revision(uuid,uuid)",
+      "read_native_file_session_title_revision(uuid,uuid,uuid)",
+      "application_empty_query_helpers_current()",
+      "read_native_empty_query_evidence(uuid,text[],uuid[],text[])",
+      "session_context_empty_query_revision_allowed(uuid,uuid)",
+      "read_session_context_empty_query_revision(uuid,uuid)",
+      "read_native_empty_query_session_title_revision(uuid,uuid,uuid)"
+    ],
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "application_empty_query_facades_current",
+      "prorows": 0,
+      "pronargs": 0,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "16",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": null,
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": false
+  }
+]

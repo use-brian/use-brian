@@ -2,10 +2,8 @@ import { currentArchivePublication,admitProgrammaticFile,completeProgrammaticFil
 import { admitFileTransaction,admitFileErasure } from '../workspace-access/file-transaction-admission.js'
 import { admitSessionFile, admitUploadedFile, readFileSessionBinding, type FileSessionBinding } from '../workspace-access/file-publication-admission.js'
 import { randomUUID } from 'node:crypto'
+import type { EntityLinksStore } from '@use-brian/core/entities/types.js'
 import type {
-  AccessContext,
-  DerivedWriteEvidence,
-  EntityLinksStore,
   FileSensitivity,
   WorkspaceFile,
   WorkspaceFilePurpose,
@@ -13,9 +11,13 @@ import type {
   WorkspaceFileIndexRow,
   WorkspaceFileMetaPatch,
   WorkspaceFileSupersedePatch,
-} from '@use-brian/core'
+} from '@use-brian/core/workspace-files/types.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import type { DerivedWriteEvidence } from '@use-brian/agent-runtime/security/derived-scope.js'
 import type pg from 'pg'
-import { bindScopeSource, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
+import { unionScopeRequirements } from '@use-brian/agent-runtime/security/context-scope.js'
+import { maxSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { bindScopeSource } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { assertExecutionResourceScope, buildAccessPredicate, buildCurrentMemberSourcePredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { currentAgentAccess } from './agent-access-context.js'

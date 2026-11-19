@@ -10,7 +10,7 @@
  * See docs/architecture/integrations/mcp.md → "Image tool results".
  */
 
-import type { ToolResult, ToolResultImage } from '../tools/types.js'
+import type { ToolResult, ToolResultImage } from '@use-brian/agent-runtime/tools/types.js'
 
 /** Cap on images lifted from a single MCP tool result (defense against abuse). */
 const MAX_MCP_RESULT_IMAGES = 8

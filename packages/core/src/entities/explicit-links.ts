@@ -43,7 +43,7 @@ import { z } from 'zod'
 import type { EntityLinkCreateParams, EntityLinksStore, EntitySource, LinkKind } from './types.js'
 import { EDGE_TYPES, LINK_KINDS } from './types.js'
 import type { SessionContextAuthority } from '../memory/session-state-types.js'
-import { boundScopeSources } from '../security/source-evidence.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 
 const linkKindEnum = z.enum(LINK_KINDS)
 

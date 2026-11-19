@@ -6,7 +6,7 @@ export {
   PdfSignatureImageError,
   normalizePdfSignatureImage,
   type NormalizedPdfSignature,
-} from '@use-brian/core'
+} from '@use-brian/core/office/pdf/signature.js'
 
 export type PdfSessionAssetRole = 'source' | 'signature' | 'snapshot' | 'preview' | 'release'
 

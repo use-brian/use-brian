@@ -5,6 +5,8 @@ import { getPool, getAppPool, queryWithRLS, applyRLSGucs } from '../client.js'
 import { runWithAgentAccess } from '../agent-access-context.js'
 import { createDbWorkspaceGroupStore } from '../workspace-group-store.js'
 import { createMemory } from '../memories.js'
+import { connectActingAs } from '../../__tests__/fixtures/bootstrap-role.js'
+import type { PoolClient } from 'pg'
 
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 // This suite asserts the legacy (pre-v2) model, which workspaces.department_read_v2=false still
@@ -150,7 +152,9 @@ describe('[COMP:api/execution-read-ceiling] direct app-role source projection',(
     })
   })
   it('upgrades existing rows and installs restrictive policies on all nine source tables',async()=>{
-    const f=await fixture('entities'),client=await pool.connect()
+    // A bootstrap login acting as the ordinary owner replays the migration and
+    // may then assume app_user, which an ordinary owner session cannot do.
+    const f=await fixture('entities'),client=(await connectActingAs()).client
     const migration=(await readFile(new URL('../../../migrations/585_agent_read_ceiling.sql',import.meta.url),'utf8')).replace(/^BEGIN;\s*/,'').replace(/COMMIT;\s*$/,'')
     try {
       await client.query('BEGIN')
@@ -162,9 +166,9 @@ describe('[COMP:api/execution-read-ceiling] direct app-role source projection',(
       expect(policies.rows.map(row=>row.tablename)).toEqual([...tables,'memories_shadow'].sort())
       expect(policies.rows.every(row=>row.permissive==='RESTRICTIVE')).toBe(true)
       await client.query('SET LOCAL ROLE app_user')
-      await runWithAgentAccess({...f.access,compartments:[]},()=>applyRLSGucs(client,f.userId))
+      await runWithAgentAccess({...f.access,compartments:[]},()=>applyRLSGucs(client as unknown as PoolClient,f.userId))
       expect((await client.query('SELECT id FROM entities WHERE id=$1',[f.id])).rows).toEqual([])
       await client.query('ROLLBACK')
-    }finally{await client.query('ROLLBACK');client.release()}
+    }finally{await client.query('ROLLBACK');await client.end()}
   })
 })

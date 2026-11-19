@@ -1,6 +1,6 @@
 /** Typed CRM adapters retain actor, full-DTO admission and the canonical writer. */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import type { AccessContext } from '@use-brian/core'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 
 const transactionClient=vi.hoisted(() => ({query:vi.fn(),release:vi.fn()}))
 const canonical=vi.hoisted(() => ({point:vi.fn(),actors:new WeakMap<object,string>()}))

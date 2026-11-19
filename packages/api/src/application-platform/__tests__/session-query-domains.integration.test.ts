@@ -1,12 +1,16 @@
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
-import {bindScopeSources,boundScopeSources,classifyTopic,executionToolContext,type ExecutionContext,type LLMProvider,type ScopeSource,type TopicClassifierOptions} from '@use-brian/core'
+import {classifyTopic, type TopicClassifierOptions} from '@use-brian/core/memory/topic-classifier.js'
+import type {LLMProvider} from '@use-brian/agent-runtime/providers/types.js'
+import type {ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
+import {executionToolContext, type ExecutionContext} from '@use-brian/agent-runtime/security/execution-context.js'
+import {bindScopeSources, boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {applyRLSGucs,getAppPool,getPool,runWithAgentAccess,rollbackAndRelease} from '../../db/client.js'
 import {addSessionMessage} from '../../db/sessions.js'
 import {bindSessionContextRetainedAuthority,writeSessionContextRevision} from '../../db/session-context-revisions.js'
 import {persistentSourceFixture} from './fixtures/persistent-source.js'
-import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
+import {readAdmittedSessionQuery} from '../../db/conversation-store.js'
 import {writeSessionMessageAnnotation} from '../../db/session-message-annotations.js'
-import {assertSourceModelInputAuthority} from '../model-source-authority.js'
+import {admitModelInput} from '../../context-scope/admission.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -28,7 +32,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/application-fi
   })
  }
  async function read(execution:ExecutionContext,kind:'history'|'topics',through:number){
-  const sql=kind==='history'?'SELECT value FROM read_native_application_session_history($1,$2,$3)':'SELECT value FROM read_native_application_session_topics($1,$2,$3)'
+  const sql=kind==='history'?'SELECT jsonb_array_elements(capture_conversation_query($1,$2,$3,NULL) #> ARRAY[\'history\']) AS value':'SELECT jsonb_array_elements(capture_conversation_query($1,$2,NULL,$3) #> ARRAY[\'annotations\']) AS value'
   return frame(execution,async client=>(await client.query<{value:Projection}>(sql,[fixture!.workspaceId,fixture!.session.id,through])).rows.map(row=>row.value))
  }
  async function current(execution:ExecutionContext,source:ScopeSource){
@@ -44,7 +48,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/application-fi
   const context={...executionToolContext(authority.execution,{appId:'fixture'}),scopeAccumulator:authority.accumulator}
   const provider:LLMProvider={name:'fictional-session-topic',models:['fixture'],stream:async function*(){yield{type:'text_delta',text:'{"topic_label":"fictional current request","state":"continue","confidence":0.9}'}},createSession(){throw new Error('Unused background provider session')}}
   const options=bindScopeSources<TopicClassifierOptions>({provider,model:'fixture',currentMessage:'Fictional current request',recentUserTurns:[],knownTopicsThisSession:[],replyToText:null,
-   authority,assertInputAuthority:()=>assertSourceModelInputAuthority(context)},history.flatMap(boundScopeSources))
+   authority,assertInputAuthority:()=>admitModelInput(context)},history.flatMap(boundScopeSources))
   const classification=await classifyTopic(options)
   return writeSessionMessageAnnotation({sessionId:f.session.id,messageId:message.id,classification,replyToText:null,authority})
  }
@@ -105,7 +109,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/application-fi
   const provider:LLMProvider={name:'fictional-query-classifier',models:['fixture'],stream:async function*(){dispatches++;yield{type:'text_delta',text:'{"topic_label":"fictional query topic","state":"continue","confidence":0.9}'}},createSession(){throw new Error('Unused synthetic session')}}
   const context={...executionToolContext(authority.execution,{appId:'fixture'}),scopeAccumulator:authority.accumulator}
   const classified=await classifyTopic(bindScopeSources<TopicClassifierOptions>({provider,model:'fixture',currentMessage:'Fictional current request',recentUserTurns:[],knownTopicsThisSession:[],replyToText:null,
-   authority,assertInputAuthority:()=>assertSourceModelInputAuthority(context)},boundScopeSources(admitted)))
+   authority,assertInputAuthority:()=>admitModelInput(context)},boundScopeSources(admitted)))
   expect(dispatches).toBe(1);expect(boundScopeSources(classified)).toEqual(boundScopeSources(admitted))
   const stored=await writeSessionMessageAnnotation({sessionId:f.session.id,messageId:last.id,classification:classified,replyToText:null,authority})
   expect(stored).toMatchObject({messageId:last.id,topicLabel:'fictional query topic'})
@@ -136,7 +140,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/application-fi
    const context={...executionToolContext(authority.execution,{appId:'fixture'}),scopeAccumulator:authority.accumulator}
    const provider:LLMProvider={name:'fictional-sequential-query',models:['fixture'],stream:async function*(){yield{type:'text_delta',text:'{"topic_label":"fictional sequential topic","state":"continue","confidence":0.9}'}},createSession(){throw new Error('Unused synthetic session')}}
    const classification=await classifyTopic(bindScopeSources<TopicClassifierOptions>({provider,model:'fixture',currentMessage:`Fictional sequential request ${turn}`,
-    recentUserTurns:[],knownTopicsThisSession:admitted.annotations.map(row=>row.topicLabel),replyToText:null,authority,assertInputAuthority:()=>assertSourceModelInputAuthority(context)},boundScopeSources(admitted)))
+    recentUserTurns:[],knownTopicsThisSession:admitted.annotations.map(row=>row.topicLabel),replyToText:null,authority,assertInputAuthority:()=>admitModelInput(context)},boundScopeSources(admitted)))
    expect(await writeSessionMessageAnnotation({sessionId:f.session.id,messageId:message.id,classification,replyToText:null,authority})).toBeTruthy()
   }
  })
@@ -219,7 +223,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/application-fi
  })
  it('refuses owner-bypass payload capture instead of treating the system connection as a reader',async()=>{
   fixture=await persistentContextFixture();const f=fixture
-  await expect(f.pool.query('SELECT value FROM read_native_application_session_history($1,$2,$3)',[f.workspaceId,f.session.id,0])).rejects.toThrow('access_unavailable')
+  await expect(f.pool.query('SELECT jsonb_array_elements(capture_conversation_query($1,$2,$3,NULL) #> ARRAY[\'history\']) AS value',[f.workspaceId,f.session.id,0])).rejects.toThrow('access_unavailable')
  })
 
  it('holds a confidential independent carrier at the actual internal shared-session floor',async()=>{

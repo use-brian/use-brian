@@ -9,7 +9,7 @@
 
 import { describe, it, expect } from 'vitest'
 import { runWithAgentAccess } from '../agent-access-context.js'
-import type { Sensitivity } from '@use-brian/core'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import {
   buildAccessPredicate,
   buildCurrentMemberSourcePredicate,

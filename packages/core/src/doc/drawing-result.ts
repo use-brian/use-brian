@@ -1,9 +1,8 @@
 import type { z } from 'zod'
 import { inflateSync } from 'node:zlib'
 import CRC32 from 'crc-32'
-import sharp from 'sharp'
 import { drawingPreviewSchema, drawingSceneDigest, MAX_DRAWING_PREVIEW_BYTES, type DrawingScene } from '@use-brian/shared/drawing'
-import { buildTool, type Tool, type ToolResultImage } from '../tools/types.js'
+import { buildTool, type Tool, type ToolResultImage } from '@use-brian/agent-runtime/tools/types.js'
 
 // Keep binary assets out of every doc tool's text, including bulk reads and
 // mutation receipts. Only a targeted read delivers one model-visible image.
@@ -52,6 +51,8 @@ export function buildDrawingAwareTool<Input extends z.ZodType>(def: Parameters<t
               // PNG permits at most 16-bit RGBA (8 bytes/pixel). Eight extra
               // filter bytes/row safely cover all seven Adam7 passes too.
               inflateSync(Buffer.concat(idat), { maxOutputLength: height * (width * 8 + 8) })
+              // sharp loads at first use, never at module evaluation (M4 step 5).
+              const { default: sharp } = await import('sharp')
               const decoded = await sharp(Buffer.concat(pixelChunks), {
                 failOn: 'warning', limitInputPixels: width * height,
               }).png().toBuffer({ resolveWithObject: true })

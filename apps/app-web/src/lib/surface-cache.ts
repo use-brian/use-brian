@@ -256,6 +256,13 @@ export function mutateSurfaceCache<T>(
   put(key, { data: updater(current.data) });
 }
 
+/** Patch one resource family without evicting unrelated authorized entries. */
+export function mutateSurfaceCachePrefix<T>(prefix: string, updater: (value: T) => T): void {
+  for (const [key, entry] of store) if (key.startsWith(prefix) && entry.data !== undefined) {
+    put(key, { ...entry, data: updater(entry.data as T) });
+  }
+}
+
 /**
  * Drop cached entries. Pass an exact key, or a key ending in `:` to clear a
  * whole family (`invalidateSurfaceCache('tasks:' + workspaceId)` after a task
@@ -357,7 +364,7 @@ export function subscribeForTest(key: string, listener: Listener): () => void {
   return subscribe(key, listener);
 }
 
-function subscribe(key: string, listener: Listener): () => void {
+export function subscribeSurfaceCache(key: string, listener: Listener): () => void {
   let set = listeners.get(key);
   if (!set) {
     set = new Set();
@@ -369,6 +376,7 @@ function subscribe(key: string, listener: Listener): () => void {
     if (set.size === 0) listeners.delete(key);
   };
 }
+const subscribe = subscribeSurfaceCache;
 
 export type UseCachedResource<T> = CacheEntry<T> & {
   /** No value yet AND a load is running - the only state needing a skeleton. */

@@ -15,7 +15,7 @@
  *
  * [COMP:api/approval-review-consumption]
  */
-import { humanOnlyCategory, matchPattern } from '@use-brian/core'
+import { humanOnlyCategory, matchPattern } from '@use-brian/core/approval-review/contracts.js'
 import { getPool } from '../db/client.js'
 import { createPendingApprovalsStore, type PendingApproval } from '../db/pending-approvals-store.js'
 import {

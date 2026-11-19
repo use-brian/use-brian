@@ -3,7 +3,7 @@ import { buildLinkedInPayload, type LinkedInPayload } from './linkedin-payload.j
 import { randomUUID } from 'node:crypto'
 import type pg from 'pg'
 import { feedLinkedInFileIds, feedConfirmationRequestSchema, type FeedConfirmationRequest, type FeedConfirmationSummary, type FeedLearningScope } from '@use-brian/shared'
-import { canonicalFeedValue, walkFeed } from '@use-brian/doc-model'
+import { canonicalFeedValue, walkFeed } from '@use-brian/doc-model/feed.js'
 import { withFeedTransaction, readFeedCopy, requireFeedComposition, assertFeedFiles, FeedCollaborationError, type FeedActor, type FeedScope, type StructuredFeedContent } from '../db/feed-collaboration-store.js'
 import { appendDecisionEvent } from '../db/decision-event-store.js'
 import { enqueueFeedRun, feedEditorialHash } from '../db/feed-editorial-runs-store.js'

@@ -1,5 +1,5 @@
 import { authFetch } from "../auth-fetch";
-import { fetchLatestSession, fetchSessionMessages, listWorkspaceSessions, listAuditSessions, getChatSessionSummary, listPersonalSessions, setSessionArchived, inspectChatRecovery, recoverChat, isSessionHistoryUnavailable, chatRecoveryFailure } from "../api/sessions";
+import { readChatTurnStatus, stopTurn, fetchLatestSession, fetchSessionMessages, listWorkspaceSessions, listAuditSessions, getChatSessionSummary, listPersonalSessions, setSessionArchived, inspectChatRecovery, recoverChat, isSessionHistoryUnavailable, chatRecoveryFailure, updateConversationVisibility } from "../api/sessions";
 import { PERSONAL_CHAT_POLICY } from "../chat-session-policy";
 vi.mock("../auth-fetch", () => ({ authFetch: vi.fn() }));
 /**
@@ -19,6 +19,30 @@ import {
   stripCommentThreadReplyTag,
   parseMessageAttachments,
 } from "../api/sessions";
+
+describe("[COMP:app-web/sessions-sdk] conversation settings receipts", () => {
+  const sessionId = "11111111-1111-4111-8111-111111111111";
+  const denial = { committed: true, readable: false, sessionId, version: 5, code: "conversation_access_denied" };
+  const change = { expectedVersion: 4, visibility: "configured_private" } as const;
+
+  it("accepts the exact committed unreadable receipt and keeps ordinary write refusal distinct", async () => {
+    vi.mocked(authFetch).mockResolvedValueOnce(Response.json(denial));
+    await expect(updateConversationVisibility(sessionId, change)).resolves.toEqual(denial);
+    vi.mocked(authFetch).mockResolvedValueOnce(Response.json(denial, { status: 403 }));
+    await expect(updateConversationVisibility(sessionId, change)).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("rejects a different session, additional fields or a different success status", async () => {
+    for (const response of [
+      Response.json({ ...denial, sessionId: "22222222-2222-4222-8222-222222222222" }),
+      Response.json({ ...denial, title: "Unexpected title" }),
+      Response.json(denial, { status: 201 }),
+    ]) {
+      vi.mocked(authFetch).mockResolvedValueOnce(response);
+      await expect(updateConversationVisibility(sessionId, change)).rejects.toThrow();
+    }
+  });
+});
 
 describe("[COMP:app-web/sessions-sdk] archived history", () => {
   it("distinguishes empty transcripts from failed or malformed history reads", async () => {
@@ -404,4 +428,28 @@ describe("[COMP:app-web/chat-recovery] typed recovery transport", () => {
     vi.mocked(authFetch).mockResolvedValueOnce(new Response(JSON.stringify({error:"session_recovery_changed"}),{status:409}));
     expect(chatRecoveryFailure(await recoverChat(source,workspace,revision).catch(error=>error))).toBe("changed");
   });
+});
+
+
+it("[COMP:app-web/sessions-sdk] preserves lifecycle identity and sends Stop as an exact optional CAS", async () => {
+  const turnId = "a".repeat(64);
+  vi.mocked(authFetch).mockResolvedValueOnce(Response.json({ status: "idle", turnId, turnEndReason: "publication_recovered" }));
+  await expect(readChatTurnStatus("chat-id")).resolves.toEqual({ status: "idle", turnId, turnEndReason: "publication_recovered" });
+  vi.mocked(authFetch).mockResolvedValueOnce(Response.json({ stopped: false, turnId, outcome: "superseded" }));
+  await expect(stopTurn("chat-id", turnId)).resolves.toMatchObject({ stopped: false, outcome: "superseded" });
+  expect(authFetch).toHaveBeenLastCalledWith(expect.stringContaining("/api/chat/stop"), expect.objectContaining({ body: JSON.stringify({ sessionId: "chat-id", turnId }) }));
+  vi.mocked(authFetch).mockResolvedValueOnce(Response.json({ stopped: false }));
+  await stopTurn("chat-id");
+  expect(authFetch).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({ body: JSON.stringify({ sessionId: "chat-id" }) }));
+  vi.mocked(authFetch).mockResolvedValueOnce(Response.json({ stopped: false, turnId: null }));
+  await stopTurn("chat-id", null);
+  expect(authFetch).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({ body: JSON.stringify({ sessionId: "chat-id", turnId: null }) }));
+  await expect(stopTurn("chat-id", "not-a-public-id")).rejects.toThrow();
+});
+
+it("[COMP:app-web/sessions-sdk] unavailable or malformed lifecycle reads never become idle", async () => {
+  for (const response of [new Response("{}", { status: 503 }), Response.json({ status: "idle", turnId: "invalid" })]) {
+    vi.mocked(authFetch).mockResolvedValueOnce(response);
+    await expect(readChatTurnStatus("chat-id")).rejects.toThrow();
+  }
 });

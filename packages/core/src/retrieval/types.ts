@@ -17,8 +17,8 @@ import type {
   EntityRollupSummary,
 } from '../entities/types.js'
 import type { SessionContextAuthority } from '../memory/session-state-types.js'
-import type { Sensitivity } from '../security/sensitivity.js'
-import type { AssistantKind } from '../security/access-context.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import type { AssistantKind } from '@use-brian/agent-runtime/security/access-context.js'
 
 // ── Envelope ─────────────────────────────────────────────────────────
 

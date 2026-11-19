@@ -3,7 +3,7 @@
  * [COMP:crm/integration-authority]
  */
 import { z } from 'zod'
-import { WorkflowAuthoritySourceSchema } from '../security/authority-source.js'
+import { WorkflowAuthoritySourceSchema } from '@use-brian/agent-runtime/security/authority-source.js'
 
 export const CRM_INTEGRATION_OPERATIONS = [
   'crm.records.read', 'crm.records.write', 'crm.catalog.read', 'crm.catalog.configure',
@@ -174,3 +174,12 @@ const workflowParentSchema = z.object({
 }).strict()
 export const CrmCredentialParentSchema = z.discriminatedUnion('kind', [CrmOAuthCredentialParentSchema, CrmBrainCredentialParentSchema, CrmHomeAppCredentialParentSchema, workflowParentSchema])
 export type CrmCredentialParent = z.infer<typeof CrmCredentialParentSchema>
+
+// Core-owned ToolContext field (docs/architecture/engine/tool-hooks.md →
+// "Runtime ports and core-owned context extensions").
+declare module '@use-brian/agent-runtime/tools/types.js' {
+  interface ToolContextExtensions {
+    /** Captured by successful authentication; never supplied by tool JSON. */
+    crmCredentialParent?: CrmCredentialParent
+  }
+}

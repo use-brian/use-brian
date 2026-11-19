@@ -1,6 +1,6 @@
 import type { Router, Request, Response } from 'express'
 import { z } from 'zod'
-import type { WorkflowRecord, WorkflowStore } from '@use-brian/core'
+import type { WorkflowRecord, WorkflowStore } from '@use-brian/core/workflow/types.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import {
   createPublicationConsentStore, publicationRevision, publicationTarget, type PublicationConsentStore,

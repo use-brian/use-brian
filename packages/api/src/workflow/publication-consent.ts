@@ -1,8 +1,11 @@
 /** Explicit publication of prepared workflow text, not permission to read its sources. */
 import { createHash } from 'node:crypto'
-import {
-  intersectAccessCeilings, type WorkflowRecord, type WorkflowRunStore, type WorkflowStore,
-} from '@use-brian/core'
+import type {
+  WorkflowRecord,
+  WorkflowRunStore,
+  WorkflowStore,
+} from '@use-brian/core/workflow/types.js'
+import { intersectAccessCeilings } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { getPool, query } from '../db/client.js'
 import type { PoolClient } from 'pg'
 import { createDbWorkflowStore, createDbWorkflowRunStore } from '../db/workflow-store.js'

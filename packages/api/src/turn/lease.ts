@@ -17,65 +17,35 @@
  */
 import { query } from '../db/client.js'
 import {
-  claimTurnSlot,
-  isTurnLeaseLive,
-  reclaimStaleTurn,
-  releaseTurnLease,
-  startTurnLease,
-  takeTurnSlot,
+  claimTurnLeaseOutcome,
   touchTurnLease,
   TURN_HEARTBEAT_INTERVAL_MS,
   type TurnEndReason,
+  releaseTurnOutcome,type ReleasedTurn,type RecoveredTurn,
 } from '../db/sessions.js'
 
-export type LiveTurnAdmission = 'proceed' | 'reclaim' | 'reject'
-
-/**
- * Personal-admission guard against taking a slot a LIVE turn still holds.
- * Pure so the invariant is testable; the caller resolves `leaseLive` with
- * `isTurnLeaseLive` only when it matters (`status='running'` and the client
- * did not say `midTurn`).
- *
- *   - `proceed` - no turn is running, or the client is mid-turn (that path
- *                 queues into the running turn), or this is room admission
- *                 (rooms claim atomically and reclaim stale leases themselves).
- *   - `reclaim` - the row says running but the lease is stale: the holder is
- *                 dead. Reclaim it (recording `stalled_reclaimed`) and run.
- *   - `reject`  - the row says running AND the lease is fresh: a turn is
- *                 provably alive and this client just cannot see its stream.
- */
-export function liveTurnAdmission(params: {
-  status: string
-  clientMidTurn: boolean
-  isRoom: boolean
-  /** `isTurnLeaseLive` for this session - only consulted when it can matter. */
-  leaseLive: boolean
-}): LiveTurnAdmission {
-  if (params.status !== 'running') return 'proceed'
-  if (params.clientMidTurn) return 'proceed'
-  if (params.isRoom) return 'proceed'
-  return params.leaseLive ? 'reject' : 'reclaim'
+export class TurnLeaseLostError extends Error {
+  readonly code='turn_lease_lost'
+  readonly reason='ownership_lost'
+  readonly retrySafe=false
+  constructor(){super('The original turn no longer owns its lease.');this.name='TurnLeaseLostError'}
+}
+export class TurnStoppedError extends Error {
+  readonly code='turn_stopped'
+  readonly reason='stopped_by_user'
+  constructor(){super('The original turn was stopped.');this.name='TurnStoppedError'}
+}
+export function turnAbortKind(signal:AbortSignal):'stop'|'lease_lost'|'abort'|null {
+  if(!signal.aborted)return null
+  if(signal.reason instanceof TurnLeaseLostError)return 'lease_lost'
+  if(signal.reason instanceof TurnStoppedError)return 'stop'
+  return 'abort'
 }
 
-/** A runner's pre-persistence admission check (personal sessions). */
-export async function precheckTurnAdmission(params: {
-  sessionId: string
-  status: string
-  admission: 'personal' | 'room'
-  clientMidTurn: boolean
-}): Promise<LiveTurnAdmission> {
-  const isRoom = params.admission === 'room'
-  const needsLeaseCheck = params.status === 'running' && !params.clientMidTurn && !isRoom
-  return liveTurnAdmission({
-    status: params.status,
-    clientMidTurn: params.clientMidTurn,
-    isRoom,
-    leaseLive: needsLeaseCheck ? await isTurnLeaseLive(params.sessionId) : false,
-  })
-}
+export type TurnSlotWait = (sessionId: string, opts?: { signal?: AbortSignal }) => Promise<boolean>
 
 export type TurnSlotOutcome =
-  | { taken: true; token: string }
+  | { taken: true; token: string; turnId:string|null; reclaimed?: true; recovered?:RecoveredTurn }
   | { taken: false; code: 'turn_in_flight' | 'room_turn_wait_timeout' }
 
 /**
@@ -86,39 +56,25 @@ export type TurnSlotOutcome =
 export async function takeTurnLease(params: {
   sessionId: string
   admission: 'personal' | 'room'
-  waitForSlot?: (sessionId: string) => Promise<boolean>
-  /** The answering assistant when the runner re-addresses (see `startTurnLease`). */
+  waitForSlot?: TurnSlotWait
+  signal?: AbortSignal
+  /** The answering assistant when the runner re-addresses (see `claimTurnLease`). */
   assistantId?: string
   /** Includes attended request preparation in the visible elapsed time. */
   startedAt?: Date
 }): Promise<TurnSlotOutcome> {
-  // A personal session with a wait (a messaging channel: a second message
-  // while the first turn runs) waits for the slot instead of refusing.
-  const { sessionId } = params
-  if (params.admission === 'room') {
-    let claimed = await claimTurnSlot(sessionId)
-    while (!claimed) {
-      // A lease that went stale while we waited is reclaimed rather than
-      // waited out: the holder is gone, not slow.
-      if (await reclaimStaleTurn(sessionId)) {
-        claimed = await claimTurnSlot(sessionId)
-        if (claimed) break
-      }
-      if (!params.waitForSlot || !(await params.waitForSlot(sessionId))) {
-        return { taken: false, code: params.waitForSlot ? 'room_turn_wait_timeout' : 'turn_in_flight' }
-      }
-      claimed = await claimTurnSlot(sessionId)
-    }
-  } else {
-    while (await isTurnLeaseLive(sessionId)) {
-      if (!params.waitForSlot || !(await params.waitForSlot(sessionId))) {
-        return { taken: false, code: params.waitForSlot ? 'room_turn_wait_timeout' : 'turn_in_flight' }
-      }
-    }
-    await reclaimStaleTurn(sessionId)
-    await takeTurnSlot(sessionId)
+  // Claim and token creation are one atomic owner operation for every audience.
+  // Waits remain transport-specific, and every wake attempts a fresh claim.
+  for (;;) {
+    params.signal?.throwIfAborted()
+    const claim=await claimTurnLeaseOutcome(params.sessionId,params.assistantId??null,params.startedAt??null)
+    if(claim)return{taken:true,...claim,...claim.recovered?{reclaimed:true as const}:{}}
+    params.signal?.throwIfAborted()
+    if (!params.waitForSlot) return { taken: false, code: 'turn_in_flight' }
+    const available = await params.waitForSlot(params.sessionId, { signal: params.signal })
+    params.signal?.throwIfAborted()
+    if (!available) return { taken: false, code: 'room_turn_wait_timeout' }
   }
-  return { taken: true, token: await startTurnLease(sessionId, params.assistantId ?? null, params.startedAt ?? null) }
 }
 
 /**
@@ -155,9 +111,11 @@ export function startLeaseHeartbeat(params: {
 }
 
 /** Release the lease (token-guarded; idempotent). */
-export async function releaseTurn(sessionId: string, token: string, reason: TurnEndReason = 'completed'): Promise<boolean> {
+export async function releaseTurn(sessionId: string, token: string, reason: TurnEndReason = 'completed',onReleased?:(result:ReleasedTurn)=>void): Promise<boolean> {
   try {
-    return await releaseTurnLease(sessionId, reason, token)
+    const result=await releaseTurnOutcome(sessionId,reason,token)
+    if(result)onReleased?.(result)
+    return !!result
   } catch (err) {
     // Nothing left to fall back on but the sweeper, which now reads the
     // lease we failed to clear, so it WILL fire.
@@ -182,17 +140,32 @@ export const TURN_SLOT_WAIT_TIMEOUT_MS = 240_000
  */
 export async function waitForTurnSlot(
   sessionId: string,
-  opts?: { timeoutMs?: number; pollMs?: number },
+  opts?: { timeoutMs?: number; pollMs?: number; signal?: AbortSignal },
 ): Promise<boolean> {
   const timeoutMs = opts?.timeoutMs ?? TURN_SLOT_WAIT_TIMEOUT_MS
   const pollMs = opts?.pollMs ?? 2_000
   const deadline = Date.now() + timeoutMs
+  const signal = opts?.signal
   for (;;) {
+    signal?.throwIfAborted()
     const row = await query<{ status: string }>(`SELECT status FROM sessions WHERE id = $1`, [sessionId])
+    signal?.throwIfAborted()
     const status = row.rows[0]?.status
     if (!status || status !== 'running') return true
     if (Date.now() >= deadline) return false
-    await new Promise((resolve) => setTimeout(resolve, pollMs))
+    await new Promise<void>((resolve, reject) => {
+      const onAbort = () => {
+        clearTimeout(timer)
+        signal?.removeEventListener('abort', onAbort)
+        reject(signal?.reason)
+      }
+      const timer = setTimeout(() => {
+        signal?.removeEventListener('abort', onAbort)
+        resolve()
+      }, Math.min(pollMs, Math.max(0, deadline - Date.now())))
+      signal?.addEventListener('abort', onAbort, { once: true })
+      if (signal?.aborted) onAbort()
+    })
   }
 }
 
@@ -210,20 +183,15 @@ export function registerTurnAbort(sessionId: string, token: string, abort: () =>
   activeTurnAborts.set(sessionId, { token, abort })
 }
 
-/** Is this exact turn's abort handle registered? */
-export function hasTurnAbort(sessionId: string, token: string): boolean {
-  return activeTurnAborts.get(sessionId)?.token === token
-}
-
 /** Identity-guarded: never evicts a successor turn's handle. */
 export function unregisterTurnAbort(sessionId: string, token: string): void {
   if (activeTurnAborts.get(sessionId)?.token === token) activeTurnAborts.delete(sessionId)
 }
 
 /** Abort the turn running in this process on `sessionId`. True when one was. */
-export function abortLocalTurn(sessionId: string): boolean {
+export function abortLocalTurn(sessionId: string, token:string): boolean {
   const local = activeTurnAborts.get(sessionId)
-  if (!local) return false
+  if (!local||local.token!==token) return false
   local.abort()
   return true
 }

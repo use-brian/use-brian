@@ -6,7 +6,7 @@
  * Relocated out of the closed `ingest/pipeline-b-processor.ts` so the OPEN
  * brain-MCP ingest path can reuse it without importing closed code.
  */
-import type { Sensitivity } from '@use-brian/core'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type { EpisodeSensitivity } from './db/episodes-store.js'
 
 export function toEpisodeSensitivity(s: Sensitivity): EpisodeSensitivity {

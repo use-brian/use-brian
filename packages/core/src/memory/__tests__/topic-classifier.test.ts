@@ -1,10 +1,10 @@
 import { afterEach, describe, it, expect, vi } from 'vitest'
 import { createTopicIdentity, isTopicIdentity } from '../topic-identity.js'
-import { classifyTopic } from '../topic-classifier.js'
-import type { LLMProvider, StreamChunk } from '../../providers/types.js'
-import { createRoutingProvider } from '../../providers/routing.js'
-import { bindScopeSources, boundScopeSources } from '../../security/source-evidence.js'
-import { ContextScopeAccumulator } from '../../security/context-scope.js'
+import { bindRecordTopicAdmission, classifyTopic } from '../topic-classifier.js'
+import type { LLMProvider, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
+import { createRoutingProvider } from '@use-brian/agent-runtime/providers/routing.js'
+import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import type { SessionContextAuthority } from '../session-state-types.js'
 import { executionFixture, fixtureDecisionProvider } from '../../decisions/__tests__/execution-fixture.js'
 
@@ -98,6 +98,29 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
       assertInputAuthority:async()=>{if(++checks===2)throw Object.assign(new Error('revoked'),{reason:'authority_changed',retrySafe:false})}}))
       .rejects.toMatchObject({reason:'authority_changed'})
     expect(stream).not.toHaveBeenCalled()
+  })
+
+  it.each(['bound','copied','mixed'] as const)('uses complete host admission only for the exact record-only invocation (%s)', async mode => {
+    const provider = mockProvider('{"topic_label":"planning","state":"continue","confidence":0.9}')
+    const stream = vi.spyOn(provider,'stream')
+    const assertCurrent = vi.fn(async () => {})
+    const complete = vi.fn(async () => {})
+    const authority = {
+      execution: { security: { authority: { assertCurrent } }, lifecycle: { abortSignal: new AbortController().signal } },
+      accumulator: new ContextScopeAccumulator(),
+    } as unknown as SessionContextAuthority
+    const record = {workspaceId:'fixture-workspace',userId:null,assistantId:null,sensitivity:'internal' as const,
+      compartments:[],projectIds:[],resourceKind:'conversation_record',resourceId:'fictional-record',version:'1'}
+    const sources = mode==='mixed' ? [record,{...record,resourceKind:'memory',resourceId:'fictional-memory'}] : [record]
+    const options = bindScopeSources({provider,model:'mock',currentMessage:'Fictional scoped planning request',recentUserTurns:[],
+      replyToText:null,knownTopicsThisSession:[],authority,assertInputAuthority:complete},sources)
+    bindRecordTopicAdmission(options)
+    const invocation = mode==='copied' ? bindScopeSources({...options},sources) : options
+    await expect(classifyTopic(invocation)).resolves.toMatchObject({topic_label:'planning'})
+    expect(stream).toHaveBeenCalledOnce()
+    expect(complete.mock.calls.length).toBeGreaterThanOrEqual(3)
+    if (mode==='bound') expect(assertCurrent).toHaveBeenCalledTimes(0)
+    else expect(assertCurrent.mock.calls.length).toBeGreaterThanOrEqual(3)
   })
 
   it('keeps the provider path for an explicit reply target even with a short acknowledgment', async () => {

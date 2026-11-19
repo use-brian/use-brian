@@ -59,6 +59,8 @@ export class AccountTeardownBlockedError extends Error {
 export interface AccountTeardownRule {
   action: 'delete' | 'reassign' | 'keep'
   privateWhere?: string
+  /** Rows a `reassign` leaves naming the user: an immutable recorded actor. */
+  recordedWhere?: string
 }
 
 const del: AccountTeardownRule = { action: 'delete' }
@@ -77,6 +79,11 @@ export const ACCOUNT_TEARDOWN_RULES: Readonly<Record<string, AccountTeardownRule
   'workspace_files.user_id': del,
   // The scope key of the user's own sessions (NULL in workspace rooms).
   'session_messages.user_id': del,
+  // The private envelope never falls back to a replacement owner. Retained
+  // starter/audit identities keep a scrubbed Deleted user; participant edges
+  // cascade away. The session's ordinary cascade still removes personal chats.
+  'conversation_envelopes.starter_user_id': keep,
+  'conversation_visibility_audit.actor_user_id': keep,
   // Owner-only RLS keys and per-user state.
   'office_pdf_session_assets.owner_user_id': del,
   'workspace_file_session_bindings.owner_user_id': del,
@@ -86,11 +93,12 @@ export const ACCOUNT_TEARDOWN_RULES: Readonly<Record<string, AccountTeardownRule
   'workflow_schedule_edit_reviews.actor_id': del,
 
   // Ownership of shared content moves to the workspace owner.
-  'entities.created_by_user_id': own,
+  // A canonical CRM record's author is its immutable identity (migration
+  // 8040), a recorded actor; other shared entities move to the owner.
+  'entities.created_by_user_id': { action: 'reassign', recordedWhere: "t.kind IN ('company', 'person', 'deal')" },
   'episodes.created_by_user_id': own,
   'kb_chunks.created_by_user_id': own,
   'memories.created_by_user_id': own,
-  'tasks.created_by_user_id': own,
   // A page with no teamspace is private to its creator.
   'saved_views.created_by': { action: 'reassign', privateWhere: 't.teamspace_id IS NULL' },
   'workspace_groups.created_by': own,
@@ -132,6 +140,8 @@ export const ACCOUNT_TEARDOWN_RULES: Readonly<Record<string, AccountTeardownRule
   'kb_chunks.retracted_by': keep,
   'memories.verified_by_user_id': keep,
   'memories.retracted_by': keep,
+  // The immutable author of a canonical task version (migration 8051).
+  'tasks.created_by_user_id': keep,
   'tasks.verified_by_user_id': keep,
   'tasks.retracted_by': keep,
   'workspace_files.verified_by_user_id': keep,
@@ -159,6 +169,33 @@ export const ACCOUNT_TEARDOWN_RULES: Readonly<Record<string, AccountTeardownRule
   'external_app_record_versions.actor_user_id': keep,
   'external_app_record_observations.actor_user_id': keep,
   'external_app_access_versions.actor_user_id': keep,
+  // Application-platform and source-service authority records: the creator,
+  // issuer, configurer or activator, and every review/approval/event actor.
+  // They carry their own status, revision and authority fingerprints, so the
+  // actor is kept rather than moved. What they authorize is revoked below
+  // (user decision 2026-11-17).
+  'application_clients.created_by_user_id': keep,
+  'application_access_grants.issued_by_user_id': keep,
+  'application_api_credentials.issued_by_user_id': keep,
+  'application_native_role_assignments.issued_by_user_id': keep,
+  'application_scoped_activations.activated_by': keep,
+  'application_authority_events.actor_user_id': keep,
+  'application_activation_reviews.actor_id': keep,
+  'application_credential_reviews.actor_user_id': keep,
+  'application_grant_reviews.actor_user_id': keep,
+  'application_native_governance_events.actor_user_id': keep,
+  'application_native_governance_reviews.actor_user_id': keep,
+  'application_source_setup_approvals.actor_id': keep,
+  'application_source_setup_reviews.actor_id': keep,
+  'connector_source_profiles.created_by_user_id': keep,
+  'connector_attended_setup_approvals.actor_id': keep,
+  'connector_attended_setup_reviews.actor_id': keep,
+  'external_services.created_by_user_id': keep,
+  'source_service_bindings.configured_by_user_id': keep,
+  'source_service_binding_approvals.actor_id': keep,
+  'source_service_release_reviews.actor_id': keep,
+  'workspace_knowledge_binding_reviews.actor_user_id': keep,
+  'workspace_organization_cutover_reviews.actor_user_id': keep,
 }
 
 /**
@@ -285,12 +322,13 @@ function ruleSteps(fk: FkColumn, rule: AccountTeardownRule, inbound: FkColumn[])
   // The default action never reaches a private row, even if its delete was
   // refused this pass: private rows leave only by being deleted.
   const shared = rule.privateWhere ? `${mine} AND NOT (${rule.privateWhere})` : mine
+  const movable = rule.recordedWhere ? `${shared} AND NOT (${rule.recordedWhere})` : shared
   if (rule.action === 'delete') deleteWhere(mine, 'delete')
   if (rule.action === 'reassign') {
     steps.push({
       name: `${name} (reassign to workspace owner)`,
       sql: `UPDATE ${fk.table} t SET ${ident(fk.column)} = ${OWNER}
-             WHERE ${shared} AND ${OWNER} IS NOT NULL AND ${OWNER} <> $1`,
+             WHERE ${movable} AND ${OWNER} IS NOT NULL AND ${OWNER} <> $1`,
       values: [],
     })
   }
@@ -348,13 +386,10 @@ export async function deleteAccountFootprint(
   }
   if (problems.length > 0) throw new AccountTeardownBlockedError(problems)
 
-  // Owner-only, FORCE-RLS tables answer to the system bypass or to their
-  // owner; the leaver is both the subject and, for this transaction, the
-  // actor. The erasure registration (migration 659) is what the pinned
-  // workflow guard checks; it is bound to this transaction's id.
+  // The leaver is also the transaction-local actor for FORCE RLS tables.
+  // The pinned workflow guard checks the transaction-bound erasure registration.
   await client.query(
-    `SELECT set_config('app.system_bypass', 'true', true),
-            set_config('app.current_user_id', $1, true),
+    `SELECT set_config('app.current_user_id', $1, true),
             set_config('app.account_erasure', $1, true)`,
     [userId],
   )
@@ -496,17 +531,10 @@ export async function deleteAccountFootprint(
              WHERE t.user_id = $1 AND ${sessionKindSql.workspaceAudience('t')} AND ${OWNER} IS NOT NULL AND ${OWNER} <> $1`,
       values: [userId],
     },
-    // Tasks assigned to the user move to the owner. `assignee_id` names a
-    // membership row, which goes below and would otherwise unassign them.
-    {
-      name: 'tasks.assignee_id (reassign to workspace owner)',
-      sql: `UPDATE tasks t SET assignee_id = om.id
-              FROM workspace_members lm
-              JOIN workspaces w ON w.id = lm.workspace_id
-              JOIN workspace_members om ON om.workspace_id = w.id AND om.user_id = w.owner_user_id
-             WHERE t.assignee_id = lm.id AND lm.user_id = $1 AND w.owner_user_id <> $1`,
-      values: [userId],
-    },
+    // Tasks assigned to the user were moved to the owner before this
+    // transaction (account-departure.ts): a canonical task changes only
+    // through its non-owner writer. Any it refused are unassigned by
+    // `assignee_id ON DELETE SET NULL` when the membership goes (step 3).
     // Office rows restricted to the user alone are private. An empty list
     // means unrestricted, so the user is never just removed from a list of one.
     ...officeVisibility.flatMap((table) => [
@@ -558,6 +586,42 @@ export async function deleteAccountFootprint(
       name: 'brain_keys (revoke created)',
       sql: `UPDATE brain_keys SET status = 'revoked'
              WHERE status = 'active' AND (created_by = $1 OR issuer_user_id = $1)`,
+      values: [userId],
+    },
+    // Application authority the user issued stops at departure (user
+    // decision 2026-11-17). Each is the canonical revoke: the status guards
+    // (8000, 8001, 8082) admit only the status change, and credentials and
+    // grants get the same authority event the management service writes.
+    {
+      name: 'application_api_credentials (revoke issued)',
+      sql: `WITH revoked AS (
+              UPDATE application_api_credentials SET status = 'revoked'
+               WHERE issued_by_user_id = $1 AND status <> 'revoked' RETURNING workspace_id, app_id, id)
+            INSERT INTO application_authority_events (workspace_id, app_id, actor_user_id, action, resource_id)
+            SELECT workspace_id, app_id, $1, 'credential_revoked', id FROM revoked`,
+      values: [userId],
+    },
+    {
+      name: 'application_access_grants (revoke issued)',
+      sql: `WITH revoked AS (
+              UPDATE application_access_grants SET status = 'revoked'
+               WHERE issued_by_user_id = $1 AND status <> 'revoked' RETURNING workspace_id, app_id, id)
+            INSERT INTO application_authority_events (workspace_id, app_id, actor_user_id, action, resource_id)
+            SELECT workspace_id, app_id, $1, 'grant_revoked', id FROM revoked`,
+      values: [userId],
+    },
+    {
+      name: 'application_scoped_activations (revoke activated)',
+      sql: `UPDATE application_scoped_activations SET status = 'revoked', version = gen_random_uuid()
+             WHERE activated_by = $1 AND status = 'active'`,
+      values: [userId],
+    },
+    // A binding's configurer is immutable: the owner rebinds it through
+    // source.binding.review / apply, never by rewriting this row.
+    {
+      name: 'source_service_bindings (revoke configured)',
+      sql: `UPDATE source_service_bindings SET status = 'revoked'
+             WHERE configured_by_user_id = $1 AND status <> 'revoked'`,
       values: [userId],
     },
     // Every sign-in session ends now, including any kept below.

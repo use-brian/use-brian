@@ -1,9 +1,10 @@
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
-import {createKnowledgeTools,type LLMProvider} from '@use-brian/core'
+import {createKnowledgeTools} from '@use-brian/core/tools/base/knowledge.js'
+import type {LLMProvider} from '@use-brian/agent-runtime/providers/types.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {createDbKnowledgeStore} from '../../db/knowledge-store.js'
 import {configureConnectorSourceRuntimeFactory} from '../source-runtime.js'
-import {assertSourceModelInputAuthority} from '../model-source-authority.js'
+import {admitModelInput} from '../../context-scope/admission.js'
 import {generateTitle} from '../../routes/attended-session-title.js'
 import {retainedKnowledgeFixture} from './fixtures/retained-knowledge.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
@@ -38,16 +39,16 @@ describe.sequential('[COMP:api/application-persistence] actual Knowledge query i
   let extractions=0,calls=0
   const provider:LLMProvider={name:'fictional-query-reuse',models:['fixture'],createSession(){throw new Error('Stateless fixture required')},stream:async function*(){calls++;
    yield{type:'message_start',model:'fixture'};yield{type:'text_delta',text:'Fictional reused query title'};yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:2,outputTokens:2}}}}
-  await expect(generateTitle(provider,[{role:'user',get content(){extractions++;return JSON.stringify(a.data)}}],'fixture',()=>assertSourceModelInputAuthority(replay)))
+  await expect(generateTitle(provider,[{role:'user',get content(){extractions++;return JSON.stringify(a.data)}}],'fixture',()=>admitModelInput(replay)))
    .resolves.toEqual({title:'Fictional reused query title',model:'fixture',usage:{inputTokens:2,outputTokens:2}})
   expect(extractions).toBeGreaterThan(0);expect(calls).toBe(1)
   await f.source.pool.query("DELETE FROM grants WHERE kind='human' AND account_id=$1",[f.f.secondId])
   const contracted=await f.context(f.f.secondId,true);contracted.scopeAccumulator.note(a.scopeEvidence);extractions=0;calls=0
-  await expect(generateTitle(provider,[{role:'user',get content(){extractions++;return JSON.stringify(a.data)}}],'fixture',()=>assertSourceModelInputAuthority(contracted)))
+  await expect(generateTitle(provider,[{role:'user',get content(){extractions++;return JSON.stringify(a.data)}}],'fixture',()=>admitModelInput(contracted)))
    .rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
   expect(extractions).toBe(0);expect(calls).toBe(0)
   const stillAllowed=await f.context(f.f.ownerId,true);stillAllowed.scopeAccumulator.note(a.scopeEvidence)
-  await expect(assertSourceModelInputAuthority(stillAllowed)).resolves.toBeUndefined()
+  await expect(admitModelInput(stillAllowed)).resolves.toBeUndefined()
   expect(await f.snapshot()).toEqual(before)
  })
  it('holds native query payloads when the physical Knowledge schema introduces an unsupported private axis',async()=>{

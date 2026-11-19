@@ -4,7 +4,10 @@ import { prepareScheduleEdit, applyScheduleEdit, scheduleEditRow } from '../work
 import { insertWorkflowScheduleJob } from './job-store.js'
 import { isDeepStrictEqual } from 'node:util'
 import { captureScheduledWorkflowRunAuthoritySystem, captureAuthoringAuthoritySystem, resolveWorkflowAuthoringScope } from '../context-scope/workflow-authority.js'
-import { executionToolContext, pinToolAuthoringAuthority, parseAuthoringAuthority, pinAccessCeiling, taskLifecycleToDispatchEvent, type TaskLifecycleEvent } from '@use-brian/core'
+import { pinToolAuthoringAuthority } from '@use-brian/core/security/tool-authority.js'
+import { taskLifecycleToDispatchEvent, type TaskLifecycleEvent } from '@use-brian/core/workflow/task-event-trigger.js'
+import { parseAuthoringAuthority, pinAccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { parseWorkflowCopyEvidence } from '../context-scope/workflow-input-evidence.js'
 import { validateCallerScopeEvidence } from '../context-scope/caller-evidence.js'
 import type { PoolClient } from 'pg'
@@ -28,12 +31,11 @@ import { admitGoalMaterializationSource } from '../goals/materialization-source.
  * [COMP:api/workflow-store]
  */
 
+import type { EventTriggeredWorkflow } from '@use-brian/core/workflow/event-trigger.js'
+import type { ClaimedRun, RunQueueStore } from '@use-brian/core/workflow/run-queue.js'
 import type {
-  ClaimedRun,
   EventSubscription,
-  EventTriggeredWorkflow,
   PageWorkflowRunSummary,
-  RunQueueStore,
   WorkflowDefinition,
   WorkflowLifecycleState,
   WorkflowModelAlias,
@@ -48,9 +50,8 @@ import type {
   WorkflowStore,
   WorkflowTrigger,
   WorkflowTriggerKind,
-} from '@use-brian/core'
+} from '@use-brian/core/workflow/types.js'
 import { getPool, getAppPool, applyRLSGucs, rollbackAndRelease, query, queryWithRLS } from './client.js'
-import { readWorkflowOutcomeWithLineage } from '../crm-operations/workflow-copy-store.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 
 // ── workflows ───────────────────────────────────────────────────────────
@@ -1112,6 +1113,7 @@ export function createDbWorkflowRunStore(): WorkflowRunStore {
       return result.rows.map(rowToRun)
     },
     async getLatestOutcomeForWorkflowSystem(workflowId, excludeRunId) {
+      const { readWorkflowOutcomeWithLineage } = await import('../crm-operations/workflow-copy-store.js')
       return readWorkflowOutcomeWithLineage(workflowId,excludeRunId)
     },
     async listRunsForPage(userId, pageId, opts) {

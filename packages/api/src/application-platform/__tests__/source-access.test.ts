@@ -1,6 +1,6 @@
 import { generateKeyPairSync, randomUUID } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
-import { createExecutionContext } from '@use-brian/core'
+import { createExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { CONNECTOR_ACTOR_HEADER, createBoundedConnectorReplayConsumer, createConnectorActorVerifier, SOURCE_PROTOCOL_VERSION,
   sourceEffectDigest, type SourceAuthorizationRequest } from '@use-brian/brian-app/connector'
 import { createSourceAccessClient, trustedSourceOperationProof, type SourceAccessProfile } from '../source-access.js'

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { createIngestStoredFileTool } from '../base/ingest-stored-file.js'
 import { createReprocessRecordingTool } from '../base/reprocess-recording.js'
-import type { ToolContext } from '../types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 // The user-reachable ingestion-recovery tools (file-artifacts.md §"Re-ingest",
 // transcription.md §"Re-processing"). The invariant under test in both: an

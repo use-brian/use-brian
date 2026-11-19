@@ -4,7 +4,7 @@
  * re-exports them for compatibility).
  */
 
-import { normalisePath } from '@use-brian/core'
+import { normalisePath } from '@use-brian/core/knowledge/parser.js'
 
 /**
  * Split a raw markdown file into its verbatim frontmatter block (including

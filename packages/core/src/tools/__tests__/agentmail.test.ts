@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { createAgentmailTools, type AgentmailToolApi } from '../base/agentmail.js'
-import type { Tool, ToolContext } from '../types.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 function makeApi(overrides: Partial<AgentmailToolApi> = {}): AgentmailToolApi {
   return {

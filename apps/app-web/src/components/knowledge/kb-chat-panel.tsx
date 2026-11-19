@@ -1,47 +1,41 @@
 "use client";
 
-
-import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Ask & update KB — the embedded chat panel on the focused knowledge source
  * (Studio → Knowledge master-detail, plan D4).
  *
- * A lean web chat host over `@use-brian/chat-ui` + `POST /api/chat` SSE,
- * scoped to the focused source: every turn carries `kbSourceId`, which the
- * chat route injects as PRIVATE runtime context (the provenance split — see
+ * A presentation of the shared conversation controller (M5 WP-E) scoped to
+ * the focused source: every turn carries `kbSourceId`, which the chat route
+ * injects as PRIVATE runtime context (the provenance split — see
  * knowledge-base.md → "Ask & update chat"). Runs as the workspace primary
  * assistant; session resume rides a sticky `kb-scope:<sourceId>` channel id
- * (the tuning-chat pattern).
+ * (the tuning-chat pattern), and the controller seeds the resumed transcript.
+ * Send, the compare-and-set Stop, the re-attach after a dropped stream and the
+ * approvals are the controller's; a confirmation pending at reload is restored.
  *
  * The point of hosting chat HERE is the write loop: KB writes are per-edit
  * approved, so `tool_confirmation_required` renders the shared
  * `ChatConfirmationCard` inline — including the unified-diff preview the
- * server computes for `updateKnowledgeEntry` — and Approve/Deny POSTs
- * `/api/chat/confirm` exactly like the floating dock.
+ * server computes for `updateKnowledgeEntry` — and Approve/Deny goes through
+ * the controller's `respondConfirmation` exactly like the floating dock.
  *
  * [COMP:app-web/kb-chat-panel]
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  ChatMarkdown,
-  useChatSession,
-  useMessageStream,
-  type Message,
-  type PendingConfirmation,
-} from "@use-brian/chat-ui";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { ChatMarkdown, type Message } from "@use-brian/chat-ui";
 import { authFetch } from "@/lib/auth-fetch";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { ChatConfirmationCard } from "@/components/chrome/chat-confirmation-card";
 import { requestApprovalsRefresh } from "@/lib/approvals-events";
-import {
-  fetchSessionMessages,
-  extractMessageText,
-  stopTurn,
-} from "@/lib/api/sessions";
+import { extractMessageText, type DocSessionMessage } from "@/lib/api/sessions";
+import type { ConversationController, ConversationState, PresentationCapabilities } from "@/lib/chat/conversation-controller";
+import { provisionalConversationKey } from "@/lib/chat/conversation-registry";
+import { useConversation } from "@/lib/chat/use-conversation";
 import { listWorkspaceAssistants } from "@/lib/api/views";
 import { pickPrimaryAssistant } from "@/lib/primary-assistant";
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 import { ArrowUp, Square } from "lucide-react";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
@@ -58,6 +52,35 @@ function scopeKbSourceId(scope: KbChatScope): string {
   return scope.kind === "source" ? scope.sourceId : "manual";
 }
 
+/** Authorized history as text turns (the panel renders no tool receipts). */
+export function mapKbHistoryRows(rows: DocSessionMessage[]): Message[] {
+  return rows.flatMap((row): Message[] => {
+    if (row.role !== "user" && row.role !== "assistant") return [];
+    const text = extractMessageText(row.content);
+    return text.trim() ? [{ id: row.id, role: row.role, text, timestamp: new Date(row.timestamp) }] : [];
+  });
+}
+
+/** The inline line a notice shows, or null. Server text is shown for untranslated errors. */
+export function kbNoticeText(
+  state: ConversationState | null,
+  copy: { streamError: string; stopTurnFailed: string; confirmNotAllowed: string; reconnecting: string; reconnectFailed: string },
+): { text: string; tone: "error" | "status" } | null {
+  if (!state) return null;
+  for (let index = state.notices.length - 1; index >= 0; index--) {
+    const notice = state.notices[index]!;
+    switch (notice.code) {
+      case "error": return { text: notice.message ?? copy.streamError, tone: "error" };
+      case "stopTurnFailed": return { text: copy.stopTurnFailed, tone: "error" };
+      case "confirmNotAllowed": return { text: copy.confirmNotAllowed, tone: "error" };
+      case "reconnectFailed": return { text: copy.reconnectFailed, tone: "error" };
+      case "reconnecting": return { text: copy.reconnecting, tone: "status" };
+      default: break;
+    }
+  }
+  return null;
+}
+
 export function KbChatPanel({
   workspaceId,
   scope,
@@ -69,40 +92,29 @@ export function KbChatPanel({
   const copy = t.studioPage.knowledgePage.chat;
   const chatCopy = t.chat;
 
-  const session = useChatSession();
-  const stream = useMessageStream();
   const [input, setInput] = useState("");
-  const [error, setError] = useState<string | null>(null);
   const [assistantId, setAssistantId] = useState<string | null>(null);
   const [resuming, setResuming] = useState(true);
-  const sessionIdRef = useRef<string | null>(null);
+  // The sticky per-source session found by channel; null before the first turn.
+  const [resumed, setResumed] = useState<{ channelId: string; sessionId: string | null } | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   const channelId = scopeChannelId(scope);
   const kbSourceId = scopeKbSourceId(scope);
 
-  useEffect(() => {
-    sessionIdRef.current = session.state.sessionId;
-  }, [session.state.sessionId]);
-
-  // Resolve the workspace primary + resume the sticky per-source session.
+  // Resolve the workspace primary + find the sticky per-source session.
   // Keyed on the scope so switching rail rows swaps the whole thread.
   useEffect(() => {
     let cancelled = false;
     setResuming(true);
-    setError(null);
-    session.setSession(null);
-    session.loadMessages([]);
-    session.clearConfirmations();
+    setResumed(null);
     (async () => {
+      let sessionId: string | null = null;
       try {
         const assistants = await listWorkspaceAssistants(workspaceId);
         const primary = pickPrimaryAssistant(assistants);
         if (cancelled) return;
-        if (!primary) {
-          setResuming(false);
-          return;
-        }
+        if (!primary) return;
         setAssistantId(primary.id);
         const res = await authFetch(
           `${API_URL}/api/sessions/by-channel?assistantId=${encodeURIComponent(primary.id)}&channelId=${encodeURIComponent(channelId)}`,
@@ -110,240 +122,103 @@ export function KbChatPanel({
         if (cancelled) return;
         if (res.ok) {
           const body = (await res.json()) as { id?: string };
-          if (body.id && !cancelled) {
-            session.setSession(body.id);
-            const rows = await fetchSessionMessages(body.id);
-            if (cancelled) return;
-            const restored: Message[] = rows
-              .filter((m) => m.role === "user" || m.role === "assistant")
-              .map((m) => ({
-                id: m.id,
-                role: m.role as "user" | "assistant",
-                text: extractMessageText(m.content),
-                timestamp: new Date(m.timestamp),
-              }))
-              .filter((m) => m.text.trim().length > 0);
-            session.loadMessages(restored);
-          }
+          if (body.id) sessionId = body.id;
         }
       } catch {
         /* resume is best-effort — a miss just starts fresh */
       } finally {
-        if (!cancelled) setResuming(false);
+        if (!cancelled) {
+          setResumed({ channelId, sessionId });
+          setResuming(false);
+        }
       }
     })();
     return () => {
       cancelled = true;
-      stream.abort();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId, channelId]);
+
+  // The controller entry: the resumed session, else a provisional entry for
+  // this scope that a first turn's `session` frame adopts.
+  const clientId = useId();
+  const presentationId = useId();
+  const heldRef = useRef<{ channelId: string; controller: ConversationController | null }>({ channelId, controller: null });
+  if (heldRef.current.channelId !== channelId) heldRef.current = { channelId, controller: null };
+  const held = heldRef.current.controller;
+  const adoptedSessionId = held && !held.isDisposed() ? held.getSessionId() : null;
+  const resumedSessionId = resumed?.channelId === channelId ? resumed.sessionId : null;
+  const capabilities = useMemo<PresentationCapabilities>(
+    () => ({ profile: "dock", mapHistoryRows: mapKbHistoryRows }),
+    [],
+  );
+  const { controller, value: state } = useConversation(
+    {
+      workspaceId,
+      sessionId: resumedSessionId ?? adoptedSessionId,
+      provisionalKey: provisionalConversationKey("kb", `${channelId}:${clientId}`),
+      presentationId,
+      capabilities,
+    },
+    (snapshot) => snapshot,
+  );
+  heldRef.current.controller = controller;
+
+  const transcript = state?.transcript;
+  const messages = transcript?.messages ?? [];
+  const direct = transcript?.isStreaming === true;
+  const mirrored = !direct && state?.mirror.active === true;
+  const isStreaming = direct || mirrored;
+  const streamingText = direct ? transcript!.streamingText : mirrored ? state!.mirror.text : "";
+  const pending = (transcript?.pendingConfirmations ?? []).filter(
+    (c) => c.status === "pending" || c.status === "approving",
+  );
+  const notice = kbNoticeText(state, {
+    streamError: copy.streamError,
+    stopTurnFailed: t.chatApp.stopTurnFailed,
+    confirmNotAllowed: t.chatApp.confirmNotAllowed,
+    reconnecting: chatCopy.turnReconnecting,
+    reconnectFailed: chatCopy.turnReconnectFailed,
+  });
 
   // Keep the thread pinned to the bottom while streaming.
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [session.state.messages, session.state.streamingText, session.state.pendingConfirmations]);
+  }, [messages, streamingText, transcript?.pendingConfirmations]);
 
   const sendMessage = useCallback(
-    async (text: string) => {
+    (text: string) => {
       const trimmed = text.trim();
-      if (!trimmed || !assistantId) return;
-
-      session.appendMessage({
-        id: `local-${Date.now()}`,
-        role: "user",
+      if (!trimmed || !assistantId || !controller) return;
+      const before = controller.getSnapshot().identity.generation;
+      void controller.send({
+        presentationId,
         text: trimmed,
-        timestamp: new Date(),
+        assistantId,
+        bodyExtras: { channelId, kbSourceId },
+        // Failed before the server accepted it: the text returns; nothing is resent.
+        onRejected: () => setInput((current) => (current.trim() ? current : trimmed)),
       });
-      setInput("");
-      setError(null);
-      session.dispatch({ type: "stream/start" });
-
-      let finalText = "";
-
-      await stream.start({
-        url: `${API_URL}/api/chat`,
-        authFetch: (input, init) => authFetch(input.toString(), init),
-        body: {
-          message: trimmed,
-          assistantId,
-          workspaceId,
-          sessionId: sessionIdRef.current ?? undefined,
-          channelId,
-          kbSourceId,
-        },
-        onEvent: (event) => {
-          const raw = event.data;
-          const payload: Record<string, unknown> =
-            typeof raw === "object" && raw !== null
-              ? (raw as Record<string, unknown>)
-              : (() => {
-                  try {
-                    return JSON.parse(raw as string) as Record<string, unknown>;
-                  } catch {
-                    return {};
-                  }
-                })();
-          switch (event.event) {
-            case "session": {
-              const sid = payload.sessionId;
-              if (typeof sid === "string" && sid) session.setSession(sid);
-              break;
-            }
-            case "text_delta": {
-              const text = payload.text;
-              if (typeof text === "string" && text) {
-                session.dispatch({ type: "stream/append", text });
-                finalText += text;
-              }
-              break;
-            }
-            case "tool_confirmation_required": {
-              const toolCallId =
-                typeof payload.toolCallId === "string" ? payload.toolCallId : "";
-              if (!toolCallId) break;
-              const conf: PendingConfirmation = {
-                toolCallId,
-                toolName:
-                  typeof payload.toolName === "string" ? payload.toolName : "",
-                displayName:
-                  typeof payload.displayName === "string"
-                    ? payload.displayName
-                    : undefined,
-                input:
-                  payload.input && typeof payload.input === "object"
-                    ? (payload.input as Record<string, unknown>)
-                    : {},
-                description:
-                  typeof payload.description === "string"
-                    ? payload.description
-                    : undefined,
-                displayLines: Array.isArray(payload.displayLines)
-                  ? (payload.displayLines as string[])
-                  : undefined,
-                sessionId: sessionIdRef.current ?? "",
-                status: "pending",
-              };
-              session.addConfirmation(conf);
-              break;
-            }
-            case "tool_result": {
-              // A confirmed tool that failed at execution flips its pill red.
-              const id = typeof payload.id === "string" ? payload.id : "";
-              if (!id || payload.isError !== true) break;
-              const conf = session.state.pendingConfirmations.find(
-                (p) => p.toolCallId === id,
-              );
-              if (conf && conf.status === "approved") {
-                session.updateConfirmation(id, {
-                  status: "failed",
-                  ...(typeof payload.errorMessage === "string"
-                    ? { result: payload.errorMessage }
-                    : {}),
-                });
-              }
-              break;
-            }
-            case "assistant_message_saved": {
-              session.dispatch({
-                type: "stream/finalize",
-                finalMessage: {
-                  id:
-                    (payload.id as string | undefined) ??
-                    `assistant-${Date.now()}`,
-                  role: "assistant",
-                  text: finalText,
-                  timestamp: new Date(),
-                },
-              });
-              finalText = "";
-              break;
-            }
-            case "error": {
-              setError(
-                (payload as { message?: string }).message ??
-                  (payload.error as string | undefined) ??
-                  copy.streamError,
-              );
-              session.dispatch({ type: "stream/abort" });
-              break;
-            }
-          }
-        },
-        onDone: () => {
-          if (finalText.length > 0) {
-            session.dispatch({
-              type: "stream/finalize",
-              finalMessage: {
-                id: `assistant-${Date.now()}`,
-                role: "assistant",
-                text: finalText,
-                timestamp: new Date(),
-              },
-            });
-          } else {
-            session.dispatch({ type: "stream/abort" });
-          }
-        },
-        onError: (err) => {
-          setError(err instanceof Error ? err.message : copy.streamError);
-          session.dispatch({ type: "stream/abort" });
-        },
-      });
+      // A refused start (busy, invalid) leaves the run generation unchanged.
+      if (controller.getSnapshot().identity.generation !== before) setInput("");
     },
-    [assistantId, channelId, kbSourceId, session, stream, workspaceId, copy.streamError],
+    [assistantId, channelId, controller, kbSourceId, presentationId],
   );
 
   const handleConfirmation = useCallback(
     async (toolCallId: string, action: "approve" | "deny", comment?: string) => {
-      const conf = session.state.pendingConfirmations.find(
-        (p) => p.toolCallId === toolCallId,
-      );
-      if (!conf) return;
-      session.updateConfirmation(toolCallId, {
-        status: action === "approve" ? "approving" : "denied",
-      });
-      try {
-        const res = await authFetch(`${API_URL}/api/chat/confirm`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            sessionId: conf.sessionId || sessionIdRef.current,
-            toolCallId,
-            decision: action === "approve" ? "allow" : "deny",
-            ...(action === "deny" && comment ? { comment } : {}),
-          }),
-        });
-        if (res.ok) {
-          const data = (await res.json().catch(() => ({}))) as { result?: string };
-          session.updateConfirmation(toolCallId, {
-            status: action === "approve" ? "approved" : "denied",
-            result: data.result,
-          });
-          requestApprovalsRefresh(workspaceId);
-        } else {
-          session.updateConfirmation(toolCallId, { status: "pending" });
-        }
-      } catch {
-        session.updateConfirmation(toolCallId, { status: "pending" });
-      }
+      if (!controller) return;
+      const outcome = await controller.respondConfirmation(toolCallId, action, comment);
+      if (outcome === "resolved") requestApprovalsRefresh(workspaceId);
     },
-    [session, workspaceId],
+    [controller, workspaceId],
   );
 
   const onSend = useCallback(() => {
-    if (stream.inFlight()) return;
-    void sendMessage(input);
-  }, [input, sendMessage, stream]);
-
-  const messages = session.state.messages;
-  const isStreaming = session.state.isStreaming;
-  const streamingText = session.state.streamingText;
-  const pending = session.state.pendingConfirmations.filter(
-    (c) => c.status === "pending" || c.status === "approving",
-  );
+    if (isStreaming) return;
+    sendMessage(input);
+  }, [input, isStreaming, sendMessage]);
 
   return (
     <div className="flex h-[26rem] max-h-[60dvh] min-h-0 flex-col overflow-hidden rounded-xl border border-border bg-card">
@@ -397,9 +272,15 @@ export function KbChatPanel({
           ))}
         </div>
 
-        {error && (
-          <div className="mt-3 rounded-lg bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
-            {error}
+        {notice && (
+          <div
+            role={notice.tone === "error" ? "alert" : "status"}
+            className={cn(
+              "mt-3 rounded-lg px-3 py-2 text-[12px]",
+              notice.tone === "error" ? "bg-destructive/10 text-destructive" : "bg-muted/60 text-muted-foreground",
+            )}
+          >
+            {notice.text}
           </div>
         )}
       </div>
@@ -417,7 +298,7 @@ export function KbChatPanel({
             }}
             rows={1}
             placeholder={assistantId ? copy.placeholder : copy.noAssistant}
-            disabled={!assistantId || resuming}
+            disabled={!assistantId || resuming || !controller}
             className={cn(
               "min-h-[2.25rem] max-h-32 flex-1 resize-none rounded-lg border border-border bg-background px-3 py-2 text-[16px] md:text-[13px]",
               "placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 disabled:opacity-50",
@@ -426,17 +307,9 @@ export function KbChatPanel({
           {isStreaming ? (
             <button
               type="button"
-              onClick={() => {
-                const sid = sessionIdRef.current;
-                stream.abort();
-                session.dispatch({ type: "stream/abort" });
-                // The server no longer reads a client close as Stop
-                // (2026-08-24: a dropped connection keeps the turn running
-                // so it can be re-attached), so the explicit stop is the
-                // only thing that ends it. Idempotent server-side, and the
-                // local teardown already happened, so a failure is swallowed.
-                if (sid) void stopTurn(sid).catch(() => {});
-              }}
+              // One Stop entry point: the controller's compare-and-set Stop.
+              onClick={() => void controller?.stop()}
+              disabled={state?.run.stopRequested === true}
               aria-label={copy.stop}
               title={copy.stop}
               className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"

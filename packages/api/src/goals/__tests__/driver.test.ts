@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
-import type { DispatchEvent, EventSubscription, GoalRecord, GoalStore } from '@use-brian/core'
+import type { GoalRecord, GoalStore } from '@use-brian/core/goals/types.js'
+import type { DispatchEvent } from '@use-brian/core/workflow/event-trigger.js'
+import type { EventSubscription } from '@use-brian/core/workflow/types.js'
 import {
   createGoalDriver,
   isGoalAuthorityFailure,

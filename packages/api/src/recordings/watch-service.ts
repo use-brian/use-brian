@@ -1,4 +1,5 @@
-import type { FilesApi, SavedViewStore } from '@use-brian/core'
+import type { SavedViewStore } from '@use-brian/core/views/types.js'
+import type { FilesApi } from '@use-brian/core/workspace-files/api.js'
 import { LIVE_MARKER_ID_PREFIX } from '@use-brian/shared'
 import { query } from '../db/client.js'
 import type { PoolClient } from 'pg'

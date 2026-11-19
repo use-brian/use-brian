@@ -36,9 +36,9 @@
  */
 
 import { z } from 'zod'
-import { DerivedScopeError } from '../security/derived-scope.js'
-import { buildTool, type Tool } from '../tools/types.js'
-import { notFoundFailure, toolFailure } from '../tools/tool-failure.js'
+import { DerivedScopeError } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
+import { notFoundFailure, toolFailure } from '@use-brian/agent-runtime/tools/tool-failure.js'
 import {
   retractMemory,
   MemoryRetractionError,

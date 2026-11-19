@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import type { Message } from '../../providers/types.js'
+import type { Message } from '@use-brian/agent-runtime/providers/types.js'
 import {
   elideStaleDocToolResults,
   ELIDED_DOC_RESULT_PLACEHOLDER,

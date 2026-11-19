@@ -1,12 +1,13 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest'
-import { boundScopeSources, type LLMProvider } from '@use-brian/core'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { persistentContextFixture } from '../../application-platform/__tests__/fixtures/persistent-context.js'
 import { getAppPool, getPool } from '../client.js'
 import { addSessionMessage } from '../sessions.js'
 import { enqueueNativeSessionStateJob, claimSessionStateJob, finishSessionStateJob, sessionStateJobCurrent } from '../session-state-jobs.js'
 import { createSessionStateWorker } from '../../workers/session-state-worker.js'
 import { createDbSessionStateStore } from '../session-state-store.js'
-import { readAdmittedSessionQuery } from '../session-query-reader.js'
+import { readAdmittedSessionQuery } from '../conversation-store.js'
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
 let f: Awaited<ReturnType<typeof persistentContextFixture>>

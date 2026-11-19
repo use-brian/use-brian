@@ -14,11 +14,11 @@
 import {
   deriveResearchDeliveryStatus,
   extractResearchWriteReceipts,
-  type QueryEvent,
   type ResearchArtifactKind,
   type ResearchSourceRef,
   type ResearchWriteReceipt,
-} from '@use-brian/core'
+} from '@use-brian/core/research/contracts.js'
+import type { QueryEvent } from '@use-brian/agent-runtime/engine/query-loop.js'
 import type { ResearchActivity, SettleResearchActivityInput } from '../db/research-store.js'
 
 /** Read tools whose successful result means the source was actually read. */

@@ -1,8 +1,7 @@
 import { pinToolAuthoringAuthority } from '../security/tool-authority.js'
 import { browserInputScope } from './input-scope.js'
-import type { DepartmentReadGrant } from '../security/department-read.js'
+import type { DepartmentReadGrant } from '@use-brian/agent-runtime/security/department-read.js'
 import { createHash } from 'node:crypto'
-import { extractPdfText } from '../files/pdf-text.js'
 import { browserFileName, BrowserDownloadsSchema, validateDownloadChunk, decodeBrowserData, MAX_BROWSER_UPLOAD, BROWSER_DOWNLOAD_CHUNK } from './browser-files.js'
 import { isProtectedFillOrigin, type ProtectedFillScope } from './protected-fill.js'
 /**
@@ -28,10 +27,10 @@ import { isProtectedFillOrigin, type ProtectedFillScope } from './protected-fill
  */
 import { z } from 'zod'
 import { SnapshotObservationState, renderSnapshotNode, type ObservationMode } from './snapshot-observation.js'
-import { buildTool, type Tool, type ToolContext, type ToolResult } from '../tools/types.js'
-import { isAttendedTurn } from '../tools/capability-gate.js'
-import { minSensitivity, type Sensitivity } from '../security/sensitivity.js'
-import { estimateStringTokens } from '../compaction/compact.js'
+import { buildTool, type Tool, type ToolContext, type ToolResult } from '@use-brian/agent-runtime/tools/types.js'
+import { isAttendedTurn } from '@use-brian/agent-runtime/tools/capability-gate.js'
+import { minSensitivity, type Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { estimateStringTokens } from '@use-brian/agent-runtime/compaction/compact.js'
 import {
   looksLikeCaptcha,
   looksLikeConnectionBlock,
@@ -1381,6 +1380,8 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
         let note = 'Binary file saved; no text extraction is available for this format.'
         if (file.mime.split(';')[0] === 'application/pdf' || /\.pdf$/i.test(name)) {
           try {
+            // The PDF parser loads on the first downloaded PDF, not with the browser tools (M4 step 5).
+            const { extractPdfText } = await import('../files/pdf-text.js')
             text = await extractPdfText(bytes)
             note = text ? 'PDF text layer extracted.' : 'PDF has no extractable text layer (possibly scanned/image-only); OCR is required.'
           } catch { note = 'PDF saved, but text extraction failed; no text is available.' }

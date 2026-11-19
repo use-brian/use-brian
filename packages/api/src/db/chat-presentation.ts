@@ -1,11 +1,14 @@
 /** Owner-readable presentation, never model/source evidence. [COMP:api/session-display-history] */
 import { z } from 'zod'
 import { parseHostObservation } from '@use-brian/shared'
-import { applyRLSGucs, getAppPool, runWithAgentAccess } from './client.js'
+import { askQuestionPayload } from '@use-brian/agent-runtime/tools/base/ask-question.js'
+import { applyRLSGucs, getAppPool, getPool, rollbackAndRelease, runWithAgentAccess } from './client.js'
 import type { AuthTokenClaims } from './auth-session-store.js'
 import { resolveSessionTitleAuthority } from '../routes/session-title-authority.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { getUserProfilesByIds } from './users.js'
+import { guestSenderProfile } from './guest-comment-store.js'
+import type { ConversationVisibilityActor } from './conversation-visibility.js'
 
 const attachment = z.object({ fileId: z.string(), workspaceId: z.string().uuid(), path: z.string(), name: z.string(),
   mime: z.string(), sizeBytes: z.number().nonnegative(), caption: z.string().optional() })
@@ -63,14 +66,46 @@ function pageReceipt(name: string, content: unknown, failed: boolean): string {
   return pageIds.length ? JSON.stringify({ pageIds }) : ''
 }
 
+/** The displayable part of a question payload: never the routing fields
+ * (`actionId`, `version`), which the pending read serves server-derived. */
+function presentedQuestion(input: unknown): Block | null {
+  const payload = askQuestionPayload(input)
+  if (!payload) return null
+  const { question, options, allowCustom, context } = payload
+  return { question, ...(options ? { options } : {}), ...(allowCustom !== undefined ? { allowCustom } : {}),
+    ...(context !== undefined ? { context } : {}) }
+}
+
+/**
+ * A question round: an assistant row whose only calls are askQuestion, each
+ * answered by a successful result in the next row. The engine reaches it only
+ * when askQuestion is the round's sole tool (misuse is stripped before
+ * publication), so the round ends the turn and its text is the question the user
+ * saw, not intermediate narration (askquestion-suspend-resume.md).
+ */
+function questionRound(rows: readonly StoredRow[], index: number): boolean {
+  const row = rows[index], next = rows[index + 1]
+  if (row.role !== 'assistant' || row.available === false || !Array.isArray(row.content)) return false
+  const calls = row.content.filter(record).filter(block => block.type === 'tool_use')
+  if (calls.length === 0 || calls.some(block => block.name !== 'askQuestion' || typeof block.id !== 'string')) return false
+  if (!next || next.role !== 'user' || next.available === false || next.sequence !== row.sequence + 1 || !Array.isArray(next.content)) return false
+  const results = next.content.filter(record).filter(block => block.type === 'tool_result')
+  return calls.every(call => results.some(result => result.toolUseId === call.id && result.isError !== true
+    && (result.name === undefined || result.name === 'askQuestion')))
+}
+
 /** Retain only displayed output and confirmed activity, not raw tool payloads. */
 export function projectPrivateChatRows(rows: readonly StoredRow[]) {
   const presented = rows.map(row => ({ ...row, content: [] as Block[], attachments: row.attachments ?? [],
     replyToText: row.replyToText ? presentationTexts([row.replyToText], [], false)[0] : null }))
-  const calls = new Map<string, { slot: Block; id: string; name: string; input: unknown }>()
-  const complete = (call: { slot: Block; id: string; name: string; input: unknown }, content: unknown, failed: boolean, target: Block[]) => {
+  type Call = { slot: Block; id: string; name: string; input: unknown; asked?: boolean }
+  const calls = new Map<string, Call>()
+  const complete = (call: Call, content: unknown, failed: boolean, target: Block[]) => {
     const document = !failed && call.name === 'presentDocument' ? documentInput.safeParse(call.input) : null
-    Object.assign(call.slot, { type: 'tool_use', id: call.id, name: call.name, input: document?.success ? document.data : {} })
+    // A delivered question keeps its payload so a reload shows what was asked.
+    const question = !failed && call.asked && call.name === 'askQuestion' ? presentedQuestion(call.input) : null
+    Object.assign(call.slot, { type: 'tool_use', id: call.id, name: call.name,
+      input: document?.success ? document.data : question ?? {} })
     target.push({ type: 'tool_result', toolUseId: call.id, name: call.name, isError: failed,
       content: pageReceipt(call.name, content, failed) })
   }
@@ -78,7 +113,8 @@ export function projectPrivateChatRows(rows: readonly StoredRow[]) {
     if (row.available === false) { calls.clear(); return }
     const target = presented[index].content
     const blocks = typeof row.content === 'string' ? [{ type: 'text', text: row.content }] : Array.isArray(row.content) ? row.content.filter(record) : []
-    const carrier = blocks.some(block => block.type === 'tool_result' || block.type === 'host_observation'
+    const asked = questionRound(rows, index)
+    const carrier = !asked && blocks.some(block => block.type === 'tool_result' || block.type === 'host_observation'
       || row.role === 'assistant' && block.type === 'tool_use')
     // Call IDs may repeat between turns. Never pair across an authored input.
     if (row.role === 'user' && !carrier || index > 0 && row.sequence !== rows[index - 1].sequence + 1) calls.clear()
@@ -92,8 +128,11 @@ export function projectPrivateChatRows(rows: readonly StoredRow[]) {
         if (text.trim()) target.push({ type: 'text', text })
       }
       if (row.role === 'assistant' && block.type === 'tool_use' && typeof block.id === 'string' && typeof block.name === 'string') {
+        // The question shows as text even when the model's own text omitted it.
+        const question = asked ? presentedQuestion(block.input)?.question : undefined
+        if (typeof question === 'string' && !texts.some(text => text.includes(question))) target.push({ type: 'text', text: question })
         const slot = {}; target.push(slot)
-        calls.set(block.id, { slot, id: `${row.id}:${block.id}`, name: block.name, input: block.input })
+        calls.set(block.id, { slot, id: `${row.id}:${block.id}`, name: block.name, input: block.input, asked })
       }
       if (row.role === 'user' && block.type === 'tool_result' && typeof block.toolUseId === 'string') {
         const call = calls.get(block.toolUseId)
@@ -102,9 +141,9 @@ export function projectPrivateChatRows(rows: readonly StoredRow[]) {
         }
       }
       const observation = parseHostObservation(block)
-      if (observation && row.role === 'user') {
-        // Host observations are user-role carriers; expose an activity row,
-        // not a forged human utterance or the host's private read payload.
+      if (observation) {
+        // Native receivers display the executor's assistant-owned carrier as
+        // activity. Legacy carriers keep the same safe visual projection.
         presented[index].role = 'assistant'
         presented[index].senderUserId = null
         presented[index].publishedSenderName = null
@@ -129,11 +168,66 @@ export function projectPrivateChatRows(rows: readonly StoredRow[]) {
   return presented.map(row => ({ ...row, content: row.content.filter(block => typeof block.type === 'string') }))
 }
 
+const nativeHistory = z.object({ sessionId: z.string().uuid(), version: z.number().int().positive(), guestName: z.string().nullable(),
+  rows: z.array(rowSchema.extend({ senderName: z.string().nullable(), senderAvatarUrl: z.string().nullable(),
+    authoredByViewer: z.boolean() }).strict()) }).strict()
+
+export async function readNativeConversationHistory(actor: ConversationVisibilityActor, sessionId: string) {
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+    await applyRLSGucs(client, actor.userId)
+    const result = await client.query<{ value: unknown }>(
+      'SELECT read_native_conversation_history($1,$2,$3) AS value', [sessionId, actor.authSessionId, actor.authVersion])
+    const history = nativeHistory.parse(result.rows[0]?.value)
+    if (history.sessionId !== sessionId) throw new Error('conversation_history_identity_mismatch')
+    const rows = history.rows.map(({ authoredByViewer, senderName: _name, senderAvatarUrl: _avatar, ...row }) => ({
+      ...row,
+      content: !authoredByViewer && Array.isArray(row.content)
+        ? row.content.filter(block => !record(block) || block.type !== 'image') : row.content,
+    }))
+    const presented = projectPrivateChatRows(rows).map((row, index) => {
+      const original = history.rows[index]
+      const guest = guestSenderProfile(row.senderUserId, history.guestName)
+      return { ...row, senderName: guest?.name ?? (row.senderUserId ? original.senderName : null),
+        senderAvatarUrl: guest || !row.senderUserId ? null : original.senderAvatarUrl }
+    })
+    await client.query('COMMIT')
+    return presented
+  } catch (error) {
+    const pgError = error as { code?: string; message?: string }
+    if (pgError.code === '42501' && pgError.message === 'conversation_access_denied') {
+      throw new WorkspaceAccessError('conversation_access_denied', 403)
+    }
+    throw error
+  } finally {
+    await rollbackAndRelease(client)
+  }
+}
+
 export async function readPrivateChatPresentation(input: { claims: Readonly<AuthTokenClaims>; sessionId: string }) {
   const command = structuredClone(input), { claims } = command
   if (!claims.sessionId || claims.authVersion === undefined) throw new WorkspaceAccessError('authenticated_session_required', 401)
   const { execution } = await resolveSessionTitleAuthority({ ...command, readOnly: true })
   const workspaceId = execution.security.access.workspaceId
+  // One consistent snapshot across pages (REPEATABLE READ). Its parent `FOR SHARE`
+  // raises 40001 when a concurrent writer (a Stop or turn settlement committing on
+  // the session row) changed the row after the snapshot. The read is idempotent,
+  // so it retries on a fresh snapshot, which then sees the committed settlement;
+  // a serialization conflict is never reported as a failed history read.
+  for (let attempt = 1; ; attempt++) {
+    try { return await readPrivateChatSnapshot(command, execution, workspaceId) }
+    catch (error) {
+      if ((error as { code?: string }).code !== '40001' || attempt >= PRESENTATION_SERIALIZATION_ATTEMPTS) throw error
+      await new Promise(resolve => setTimeout(resolve, 25 * attempt))
+    }
+  }
+}
+const PRESENTATION_SERIALIZATION_ATTEMPTS = 4
+
+async function readPrivateChatSnapshot(command: { claims: Readonly<AuthTokenClaims>; sessionId: string },
+  execution: Awaited<ReturnType<typeof resolveSessionTitleAuthority>>['execution'], workspaceId: string) {
+  const { claims } = command
   return runWithAgentAccess(execution.security.access, async () => {
     const client = await getAppPool().connect()
     try {

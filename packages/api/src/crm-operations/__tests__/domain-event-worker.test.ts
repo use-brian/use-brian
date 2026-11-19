@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { WorkflowEventInput, CrmDomainEventEnvelope } from '@use-brian/core'
+import type { CrmDomainEventEnvelope } from '@use-brian/core/workflow/crm-event-trigger.js'
+import type { WorkflowEventInput } from '@use-brian/core/workflow/event-trigger.js'
 import {
   crmWorkflowAdmission,
   createCrmDomainEventWorker,

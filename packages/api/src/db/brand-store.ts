@@ -5,7 +5,12 @@
  * Implements the `BrandStore` port declared in
  * `packages/core/src/brand/types.ts`. Every read and write runs on the app
  * pool under RLS, scoped to the acting user, so a member of one workspace
- * cannot reach another's brand even with a valid uuid.
+ * cannot reach another's brand even with a valid uuid. `get` and `saveDraft`
+ * are reached from chat tools, the brand prompt context (including the
+ * public-turn owner principal), office routes and the template-compile worker
+ * without a route membership check, so they also carry an explicit
+ * `workspace_members` predicate on the acting user: a principal that is no
+ * longer a member gets `null` on every pooled connection (8293).
  *
  * ## The one invariant this file exists to hold
  *
@@ -44,7 +49,7 @@ import type {
   BrandVersionSummary,
   BrandSensitivity,
   BrandStatus,
-} from '@use-brian/core'
+} from '@use-brian/core/brand/types.js'
 import { getAppPool, queryWithRLS, rollbackAndRelease } from './client.js'
 import { publishBrandLifecycle } from '../brand-event-fanout.js'
 
@@ -91,6 +96,10 @@ const BRAND_FROM = `
   FROM workspace_brands b
   LEFT JOIN workspace_brand_versions v ON v.id = b.active_version_id
 `
+
+/** The acting user (`userParam`) is a current member of the workspace named by `workspaceParam`. */
+const actingMember = (workspaceParam: string, userParam: string) =>
+  `EXISTS (SELECT 1 FROM workspace_members m WHERE m.workspace_id = ${workspaceParam} AND m.user_id = ${userParam})`
 
 /**
  * Parse a stored record body.
@@ -184,18 +193,19 @@ export function createBrandStore(): BrandStore {
       // WHERE, so passing a slug that belongs to a different brand than the
       // id can never silently resolve to whichever the planner reached first.
       let where = 'b.is_default'
-      const params: unknown[] = [workspaceId]
+      const params: unknown[] = [workspaceId, userId]
       if (ref?.id) {
-        where = 'b.id = $2'
+        where = 'b.id = $3'
         params.push(ref.id)
       } else if (ref?.slug) {
-        where = 'b.slug = $2'
+        where = 'b.slug = $3'
         params.push(ref.slug)
       }
       const res = await queryWithRLS<BrandRow>(
         userId,
         `SELECT ${BRAND_SELECT} ${BRAND_FROM}
           WHERE b.workspace_id = $1 AND ${where}
+            AND ${actingMember('$1', '$2')}
           LIMIT 1`,
         params,
       )
@@ -274,12 +284,13 @@ export function createBrandStore(): BrandStore {
            UPDATE workspace_brands
               SET draft = $3::jsonb, updated_at = now()
             WHERE id = $1 AND workspace_id = $2
+              AND ${actingMember('$2', '$4')}
             RETURNING *
          )
          SELECT ${BRAND_SELECT}
            FROM updated b
            LEFT JOIN workspace_brand_versions v ON v.id = b.active_version_id`,
-        [brandId, workspaceId, JSON.stringify(record)],
+        [brandId, workspaceId, JSON.stringify(record), userId],
       )
       if (res.rows.length === 0) return null
       const saved = toDetail(res.rows[0])

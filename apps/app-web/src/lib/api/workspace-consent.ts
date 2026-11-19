@@ -4,7 +4,8 @@ import { getAccessToken } from '@/lib/auth-fetch';
 import { publicRuntimeConfig } from '@/lib/runtime-public-config';
 const uuid = z.string().uuid();
 const schema = z.object({ clientName: z.string().nullable(), clientUri: z.string().nullable(), scope: z.enum(['read','read_write']),
-  workspaces: z.array(z.object({ id: uuid, name: z.string() })), workspaceAccessAvailable: z.boolean(), workspaceAccessRequired: z.boolean().optional(), assistantId: uuid.optional() });
+  workspaces: z.array(z.object({ id: uuid, name: z.string(), memoryOnly: z.boolean().optional() })),
+  workspaceAccessAvailable: z.boolean(), workspaceAccessRequired: z.boolean().optional(), assistantId: uuid.optional() });
 export type WorkspaceConsentReview = z.infer<typeof schema>;
 function endpoint(assistantId?: string) {
   return `${publicRuntimeConfig().apiUrl}${assistantId ? `/api/v1/assistants/${uuid.parse(assistantId)}/oauth` : '/api/brain/oauth'}/consent`;
@@ -37,9 +38,11 @@ export async function fetchWorkspaceConsent(req: string, assistantId?: string, s
 export async function decideWorkspaceConsent(req: string, assistantId: string | undefined, review: WorkspaceConsentReview,
   input: { workspaceId: string; decision: 'allow' | 'deny'; grantedScope: 'read' | 'read_write'; workspaceAccess: boolean }) {
   const current = schema.parse(review);
-  if (current.assistantId !== assistantId || !current.workspaces.some(w => w.id === input.workspaceId)
+  const workspace = current.workspaces.find(w => w.id === input.workspaceId);
+  if (current.assistantId !== assistantId || !workspace
     || current.scope === 'read' && input.grantedScope !== 'read'
-    || input.decision === 'allow' && (current.workspaceAccessRequired && !input.workspaceAccess || input.workspaceAccess && !current.workspaceAccessAvailable)) throw Error('access_unavailable');
+    || input.decision === 'allow' && (current.workspaceAccessRequired && !input.workspaceAccess
+      || input.workspaceAccess && (!current.workspaceAccessAvailable || workspace.memoryOnly))) throw Error('access_unavailable');
   const response = await send(endpoint(assistantId), { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ req: requestValue(req), ...input }) });
   const { redirectUrl } = z.object({ redirectUrl: z.string().url() }).parse(await response.json());

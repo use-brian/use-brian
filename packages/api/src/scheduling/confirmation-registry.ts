@@ -1,5 +1,5 @@
 /** Single process-local registry shared by scheduled producers, web and channels. */
-import type { ConfirmationDecision, ConfirmationResolver } from '@use-brian/core'
+import type { ConfirmationDecision, ConfirmationResolver } from '@use-brian/agent-runtime/mcp/types.js'
 import { isInboxSentinel } from '../session-kind.js'
 
 export const SHARED_TELEGRAM_CONFIRMATION_INTEGRATION = 'system:telegram'

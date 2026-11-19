@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
-import type { SandboxTaskRecord, SessionBundle } from '@use-brian/core'
+import type { SandboxTaskRecord } from '@use-brian/core/sandbox/orchestrator.js'
+import type { SessionBundle } from '@use-brian/core/sandbox/types.js'
 
 const transaction = vi.hoisted(() => ({ query: vi.fn(), release: vi.fn() }))
 vi.mock('../client.js', () => ({ query: vi.fn(), getPool: () => ({ connect: async () => transaction }) }))

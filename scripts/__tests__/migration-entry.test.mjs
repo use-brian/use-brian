@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { runtimeRoleSql } from '../crm/runtime-role.mjs'
-import { createLocalFixture } from '../crm/local-fixture.mjs'
+import { createLocalFixture, fixtureCommandEnvironment, parseLocalFixtureArguments } from '../crm/local-fixture.mjs'
 
 test('[COMP:crm/assurance-fixture] importing actual migrator is inert even with poisoned workspace configuration', () => {
   const source = `const {runMigrations}=await import('./packages/api/scripts/migrate.ts');if(typeof runMigrations!=='function')throw Error('missing API');console.log('inert-import')`
@@ -44,6 +44,27 @@ test('fixture refuses unreviewed runtime roles and callback boundaries before st
   for(const runtimeRole of ['owner','assurance_app','admin_fixture_app']) await assert.rejects(createLocalFixture({runtimeRole}), /Unsupported fixture runtime role/)
   await assert.rejects(createLocalFixture({beforeApply:async()=>{}}), /explicit pending migration filename/)
   await assert.rejects(createLocalFixture({beforeApplyFile:'../8000.sql',beforeApply:async()=>{}}), /explicit pending migration filename/)
+})
+
+test('[COMP:crm/assurance-fixture] fixture command inherits harness controls but never a database selector or credential', () => {
+  const caller = { PATH: '/usr/bin', HOME: '/home/fictional', BRIAN_CHAT_COST_OUTPUT: '/tmp/fictional-cost.json', BRIAN_CHAT_COST_SAMPLES: '31',
+    DATABASE_URL: 'postgres://127.0.0.1:5432/ambient', TEST_DATABASE_URL: 'postgres://db.example/ambient', CONTEXT_SCOPE_TEST_DATABASE_URL: 'postgres://db.example/scope',
+    USEBRIAN_LOCAL_DATABASE: 'managed-postgres', PGHOST: 'db.example', PGHOSTADDR: '192.0.2.1', PGSERVICE: 'ambient', PGPASSFILE: '/tmp/fictional-pass',
+    BRIAN_ASSURANCE_FIXTURE: '/tmp/other-marker', BRIAN_ASSURANCE_TEMPLATE: 'other', BRIAN_ASSURANCE_STATEMENT_STATS: 'true', MIGRATION_DIRS: '/elsewhere', PG_POOL_MAX: '99',
+    CAMPAIGN_PERMISSION_REPORT: '/tmp/fictional-report.json', BRIAN_MESSAGE_STORE_HMAC_SECRET: 'fictional', BRIAN_RUNTIME_PASSWORD: 'fictional',
+    BRIAN_MESSAGE_STORE_DATABASE_URL: 'postgres://db.example/store', ANTHROPIC_API_KEY: 'fictional', NODE_OPTIONS: '--inspect' }
+  const fixture = { PATH: '/pg18/bin:/usr/bin', DATABASE_URL: 'postgresql://assurance_owner:x@127.0.0.1:40001/brian_assurance',
+    PGHOST: '127.0.0.1', PGPORT: '40001', PG_POOL_MAX: '8', BRIAN_ASSURANCE_FIXTURE: '/tmp/owned-marker', MIGRATION_DIRS: '', NODE_ENV: 'test' }
+  const env = fixtureCommandEnvironment(caller, fixture)
+  assert.equal(env.BRIAN_CHAT_COST_OUTPUT, '/tmp/fictional-cost.json')
+  assert.equal(env.BRIAN_CHAT_COST_SAMPLES, '31')
+  assert.equal(env.CAMPAIGN_PERMISSION_REPORT, '/tmp/fictional-report.json')
+  for (const [key, value] of Object.entries(fixture)) assert.equal(env[key], value, key)
+  for (const key of ['TEST_DATABASE_URL', 'CONTEXT_SCOPE_TEST_DATABASE_URL', 'USEBRIAN_LOCAL_DATABASE', 'PGHOSTADDR', 'PGSERVICE', 'PGPASSFILE',
+    'BRIAN_ASSURANCE_TEMPLATE', 'BRIAN_ASSURANCE_STATEMENT_STATS', 'BRIAN_MESSAGE_STORE_HMAC_SECRET', 'BRIAN_RUNTIME_PASSWORD',
+    'BRIAN_MESSAGE_STORE_DATABASE_URL', 'ANTHROPIC_API_KEY', 'NODE_OPTIONS', 'HOME']) assert.equal(env[key], undefined, key)
+  assert.equal(parseLocalFixtureArguments(['--', 'node']).statementStatistics, false)
+  assert.equal(parseLocalFixtureArguments(['--statement-statistics', '--pg-bin', '/pg18/bin', '--', 'node']).statementStatistics, true)
 })
 
 test('disposable activation follows successful migration or the explicit prefix boundary', async () => {

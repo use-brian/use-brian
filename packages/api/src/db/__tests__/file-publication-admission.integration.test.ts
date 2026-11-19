@@ -7,7 +7,7 @@ import {createDbWorkspaceFilesStore} from '../workspace-files-store.js'
 import {createWorkspaceFileUploadsStore} from '../workspace-file-uploads-store.js'
 import {createChunkedFileUploadService,chunkedUploadPartKey} from '../../files/chunked-upload.js'
 import {createFilesApi} from '../../files/files-api.js'
-import type {FilesContext} from '@use-brian/core'
+import type {FilesContext} from '@use-brian/core/workspace-files/api.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 // This suite asserts the legacy (pre-v2) model, which workspaces.department_read_v2=false still
 // serves as the cutover's rollback path (migration 650, decision D22); its workspaces are pinned to it.

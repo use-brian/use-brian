@@ -17,7 +17,9 @@
 import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { randomUUID } from 'node:crypto'
-import { createHomeTools, queryLoop, type HomeDockStore, type HomeSignals } from '@use-brian/core'
+import { queryLoop } from '@use-brian/core/engine/query-loop-defaults.js'
+import { createHomeTools } from '@use-brian/core/home/tools.js'
+import type { HomeDockStore, HomeSignals } from '@use-brian/core/home/types.js'
 
 type Provider = Parameters<typeof queryLoop>[0]['provider']
 

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
-import { encodeExternalCostMeta, flatSearchCostUsd } from '@use-brian/core'
+import { encodeExternalCostMeta } from '@use-brian/core/billing/external-cost.js'
+import { flatSearchCostUsd } from '@use-brian/core/billing/search-provider-rates.js'
 import { recordExternalCostFromMeta } from '../billing-external.js'
 
 const base = {

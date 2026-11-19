@@ -118,6 +118,8 @@ export type WatchActivityEntry = {
 };
 
 export type WatchState = {
+  status?: string;
+  turnId?: string | null;
   /** Full reply-so-far from the latest snapshot. */
   text: string;
   /** Raw running-tool name from the snapshot (client maps to a label). */
@@ -207,7 +209,17 @@ export function reduceWatchEvent(
   state: WatchState,
   frame: { event: string; data: Record<string, unknown> },
 ): WatchState {
+  const turnId = typeof frame.data.turnId === "string" && /^[a-f0-9]{64}$/.test(frame.data.turnId) ? frame.data.turnId : null;
+  if (state.turnId && turnId && state.turnId !== turnId &&
+      ["turn_completed", "done", "activity"].includes(frame.event)) return state;
+  if (turnId && state.turnId !== turnId && ["status", "turn_started", "snapshot"].includes(frame.event)) {
+    state = { ...initialWatchState(), turnId, status: "running" };
+  }
   switch (frame.event) {
+    case "turn_started":
+      return { ...state, status: "running", ended: false, closed: false };
+    case "status":
+      return { ...state, status: typeof frame.data.status === "string" ? frame.data.status : state.status, ended: frame.data.status !== "running", endReason: typeof frame.data.turnEndReason === "string" ? frame.data.turnEndReason : null };
     case "snapshot": {
       return {
         ...state,

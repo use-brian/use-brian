@@ -2,10 +2,10 @@
  * Transaction-bound persistence shared by CRM and Association catalog commands.
  * This module owns records only and never begins or completes a transaction.
  *
- * [COMP:crm/provider-entitlement-service]
+ * [COMP:crm/catalog-records]
  */
 import type { PoolClient, QueryResultRow } from 'pg'
-import { AssociationError } from '@use-brian/core'
+import { AssociationError } from '@use-brian/core/association/domain.js'
 import type { EventInput, PlanInput } from '../association/domain.js'
 import { lockAssociationInventory, refreshAssociationInventory } from '../association/inventory.js'
 

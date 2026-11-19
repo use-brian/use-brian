@@ -10,8 +10,8 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '../types.js'
-import { toolFailure } from '../tool-failure.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
+import { toolFailure } from '@use-brian/agent-runtime/tools/tool-failure.js'
 
 export const WORKSPACE_CHAT_HANDOFF_MAX_CHARS = 8_000
 

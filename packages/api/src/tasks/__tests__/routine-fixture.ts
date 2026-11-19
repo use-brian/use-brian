@@ -1,6 +1,7 @@
 /** Native configuration/event setup shared by the routine PG suites. Fictional data only. */
 import { randomUUID } from 'node:crypto'
-import { taskLifecycleToDispatchEvent, type WorkflowDefinition } from '@use-brian/core'
+import { taskLifecycleToDispatchEvent } from '@use-brian/core/workflow/task-event-trigger.js'
+import type { WorkflowDefinition } from '@use-brian/core/workflow/types.js'
 import { createDbWorkflowStore, createDbWorkflowRunStore } from '../../db/workflow-store.js'
 import { captureAuthoringAuthoritySystem } from '../../context-scope/workflow-authority.js'
 import { authSessionStore } from '../../db/auth-session-store.js'

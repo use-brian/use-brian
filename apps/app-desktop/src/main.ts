@@ -140,11 +140,13 @@ import {
 } from "./bundled-cors.js";
 import { quickCaptureUrl, recordTargetUrl } from "./quick-capture.js";
 import {
+  chatWindowSurvivesIdentityChange,
   companionClickFollowsChatBlur,
   desktopChatRoute,
   nativeUseBrianTarget,
   parseCompanionState,
   workspaceIdFromDesktopRoute,
+  type ChatWindowIdentityTransition,
   type CompanionState,
 } from "./desktop-chat.js";
 import {
@@ -341,6 +343,13 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let brianPetWindow: BrowserWindow | null = null;
 let desktopChatWindow: BrowserWindow | null = null;
+/**
+ * The Nearby window's load state: the route it should end on, whether a load is
+ * in flight, whether it has shown the app, and follow-ups that run once the
+ * latest route has loaded. Owned by `loadDesktopChat`.
+ */
+type DesktopChatLoad = { win: BrowserWindow; route: string; inFlight: boolean; loaded: boolean; after: Array<() => void> };
+let desktopChatLoad: DesktopChatLoad | null = null;
 let awakeBrianBlockerId: number | null = null;
 let keepBrianAwake = false;
 let lastWorkspaceId: string | null = null;
@@ -929,6 +938,12 @@ function notifyUseBrian(win: BrowserWindow): void {
 }
 
 function messageBrian(opts: { forceOpen?: boolean; useBrian?: boolean } = {}): void {
+  // Never open a chat renderer under an identity that is being replaced; the
+  // replacement main window supplies fresh context for a queued request.
+  if (browserIdentityChanging || changingTarget) {
+    if (opts.useBrian) pendingNearbyUseBrian = true;
+    return;
+  }
   if (!lastWorkspaceId) {
     if (opts.useBrian) pendingNearbyUseBrian = true;
     return;
@@ -1042,16 +1057,103 @@ function messageBrian(opts: { forceOpen?: boolean; useBrian?: boolean } = {}): v
   });
   win.on("closed", () => {
     if (desktopChatWindow === win) desktopChatWindow = null;
+    if (desktopChatLoad?.win === win) desktopChatLoad = null;
     desktopChatBlurredAt = 0;
     publishCompanionState({ phase: "idle" });
   });
 
-  void loadApp(win, {
-    route: desktopChatRoute(lastWorkspaceId, lastAssistantId ?? undefined),
-  }).catch((error) => {
-    console.warn("Failed to open the Brian chat window:", error);
-    if (!win.isDestroyed()) win.close();
+  loadDesktopChat(win, desktopChatRoute(lastWorkspaceId, lastAssistantId ?? undefined));
+}
+
+/**
+ * True when the window already shows `route`. A fragment-only `loadFile`
+ * navigates within the document, yet Electron rejects it with ERR_FAILED.
+ */
+function desktopChatShowsRoute(win: BrowserWindow, route: string): boolean {
+  try {
+    const current = new URL(win.webContents.getURL());
+    return current.hash.slice(1) === route || current.pathname + current.search === route;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolves true once the window shows `route`. Electron rejects a fragment-only
+ * load before the in-page navigation commits, so a rejected reload waits briefly
+ * for that navigation before it counts as failed.
+ */
+function desktopChatLands(win: BrowserWindow, route: string, timeoutMs = 1000): Promise<boolean> {
+  if (win.isDestroyed()) return Promise.resolve(false);
+  if (desktopChatShowsRoute(win, route)) return Promise.resolve(true);
+  const contents = win.webContents;
+  return new Promise<boolean>((resolve) => {
+    const done = (landed: boolean) => {
+      clearTimeout(timer);
+      contents.removeListener("did-navigate-in-page", check);
+      contents.removeListener("did-navigate", check);
+      resolve(landed);
+    };
+    const check = () => { if (!win.isDestroyed() && desktopChatShowsRoute(win, route)) done(true); };
+    const timer = setTimeout(() => done(!win.isDestroyed() && desktopChatShowsRoute(win, route)), timeoutMs);
+    contents.on("did-navigate-in-page", check);
+    contents.on("did-navigate", check);
   });
+}
+
+function isAbortedLoad(error: unknown): boolean {
+  return (error as { code?: unknown } | null)?.code === "ERR_ABORTED" || /ERR_ABORTED/.test(String(error));
+}
+
+/**
+ * Load `route` into the Nearby window, then run `after`. A call while a load is
+ * in flight only replaces the target route (and queues `after`): the current
+ * load is never superseded by the app itself, and once it settles the latest
+ * route is loaded if it differs. A load that ends with a newer route pending
+ * (including one aborted by a superseding navigation) is not a failure, nor is a
+ * rejected reload that landed in place (the window shows the route). Only a
+ * failed first load closes the window; a failed reload keeps the current page.
+ * Spec: app-desktop.md "Context updates during the Nearby window's load".
+ */
+function loadDesktopChat(win: BrowserWindow, route: string, after?: () => void): void {
+  if (win.isDestroyed()) return;
+  if (desktopChatLoad?.win !== win) desktopChatLoad = { win, route, inFlight: false, loaded: false, after: [] };
+  const state = desktopChatLoad;
+  state.route = route;
+  if (after) state.after.push(after);
+  if (state.inFlight) return;
+  state.inFlight = true;
+  const requested = route;
+  const settle = (ok: boolean, error?: unknown) => {
+    // A rejected reload may still land in place; the load stays in flight
+    // (later updates keep deferring) until that is known.
+    if (!ok && state.loaded && !win.isDestroyed() && desktopChatLoad === state) {
+      void desktopChatLands(win, requested).then((landed) => finish(landed, error));
+      return;
+    }
+    finish(ok, error);
+  };
+  const finish = (ok: boolean, error?: unknown) => {
+    state.inFlight = false;
+    if (win.isDestroyed() || desktopChatLoad !== state) return;
+    if (ok) state.loaded = true;
+    if (state.route !== requested) {
+      loadDesktopChat(win, state.route);
+      return;
+    }
+    const follow = state.after.splice(0);
+    if (ok) {
+      for (const run of follow) run();
+      return;
+    }
+    if (!state.loaded) {
+      console.warn("Failed to open the Brian chat window:", error);
+      win.close();
+      return;
+    }
+    console.warn(isAbortedLoad(error) ? "Brian chat window reload was interrupted:" : "Brian chat window reload failed:", error);
+  };
+  void loadApp(win, { route: requested }).then(() => settle(true), (error: unknown) => settle(false, error));
 }
 
 function publishCompanionState(state: CompanionState): void {
@@ -1078,6 +1180,77 @@ function positionDesktopChat(): void {
     Math.min(area.y + area.height - DESKTOP_CHAT_HEIGHT, pet.y + pet.height - DESKTOP_CHAT_HEIGHT),
   );
   desktopChatWindow.setPosition(x, y, false);
+}
+
+/**
+ * Close a window through `close()`, so the renderer's beforeunload guard for
+ * unsaved work (for example a live dock recording) can veto. Resolves true once
+ * the window is gone and false on a veto.
+ *
+ * Electron destroys the window before it emits "closed", and from then on
+ * reading `win.webContents` throws "Object has been destroyed". The contents
+ * handle is therefore captured while the window is alive, and nothing after
+ * `close()` touches the window except `isDestroyed()` and its JS listeners.
+ * Spec: app-desktop.md "Account switch and the chat window" (destroyed-window
+ * rule).
+ */
+function closeHonoringUnload(win: BrowserWindow): Promise<boolean> {
+  if (win.isDestroyed()) return Promise.resolve(true);
+  const contents = win.webContents;
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const settle = (closed: boolean) => {
+      if (settled) return;
+      settled = true;
+      win.removeListener("closed", onClosed);
+      if (!contents.isDestroyed()) contents.removeListener("will-prevent-unload", onVeto);
+      resolve(closed);
+    };
+    const onClosed = () => settle(true);
+    const onVeto = () => settle(false);
+    win.once("closed", onClosed);
+    contents.once("will-prevent-unload", onVeto);
+    win.close();
+    if (win.isDestroyed()) settle(true);
+  });
+}
+
+/**
+ * Retire the dedicated chat renderer before a different identity becomes
+ * active. It shares the account session, so leaving it open would hand the
+ * previous account's transcript, draft binding and late frames to the
+ * replacement. Returns false when the chat window vetoes its unload; the caller
+ * must then leave the identity unchanged. `messageBrian` refuses to reopen it
+ * while the identity is changing. Spec: app-desktop.md "Account switch and the
+ * chat window".
+ */
+async function retireDesktopChatForIdentityChange(transition: ChatWindowIdentityTransition): Promise<boolean> {
+  if (chatWindowSurvivesIdentityChange(transition)) return true;
+  const win = desktopChatWindow;
+  if (!win || win.isDestroyed()) return true;
+  if (!(await closeHonoringUnload(win))) return false;
+  if (desktopChatWindow === win) desktopChatWindow = null;
+  return true;
+}
+
+/**
+ * The companion's workspace/assistant context and a pending native prompt
+ * belong to the identity that produced them. Called at the commit point of a
+ * same-deployment identity change, so the replacement main window supplies the
+ * next context; a failed switch keeps the current one.
+ */
+function forgetCompanionContext(): void {
+  lastWorkspaceId = null;
+  lastAssistantId = null;
+  pendingUseBrianPrompt = null;
+  pendingNearbyUseBrian = false;
+}
+
+function revealDesktopChat(): void {
+  if (!desktopChatWindow || desktopChatWindow.isDestroyed()) return;
+  positionDesktopChat();
+  desktopChatWindow.show();
+  desktopChatWindow.focus();
 }
 
 function positionBrianPet(): void {
@@ -1757,17 +1930,10 @@ async function activateTarget(
     if (!(await targetOperations.idle())) return false;
     const oldWindow = mainWindow;
     const bounds = oldWindow?.getBounds();
-    // close() honors the renderer's beforeunload guard for unsaved work.
-    for (const win of [desktopChatWindow, oldWindow]) {
-      if (!win || win.isDestroyed()) continue;
-      const closed = await new Promise<boolean>((resolve) => {
-        win.once("closed", () => resolve(true));
-        win.webContents.once("will-prevent-unload", () => resolve(false));
-        win.close();
-        if (win.isDestroyed()) resolve(true);
-      });
-      if (!closed) return false;
-    }
+    // close() honors the renderer's beforeunload guard for unsaved work. The
+    // chat window goes first: it must never outlive the identity it rendered.
+    if (!(await retireDesktopChatForIdentityChange({ kind: "deployment-switch" }))) return false;
+    if (oldWindow && !oldWindow.isDestroyed() && !(await closeHonoringUnload(oldWindow))) return false;
     // Closing may flush work. It must finish against the original config.
     if (!(await targetOperations.idle())) { ensureWindow(); return false; }
     const raw = serializePersistedTarget(kind, appUrl, apiUrl, auth, publicConfig);
@@ -3121,6 +3287,13 @@ async function completeSignInImpl(code: string): Promise<void> {
         staged.current = { target: selectedTarget, session: result, route };
         return; // Drain this operation before replacing the old account windows.
       }
+      // The chat window keeps rendering only a restore proven to be its own
+      // identity; otherwise it closes before the restored credentials land.
+      const restore: ChatWindowIdentityTransition = { kind: "session-restored", restoredUserId: result.user.id,
+        previousUserId: currentUser ?? null, intendedUserId: intent?.userId ?? null };
+      if (!(await retireDesktopChatForIdentityChange(restore))) { publishSignInState("error"); return; }
+      if (generation !== authGeneration || target !== cfg) return;
+      const sameIdentity = chatWindowSurvivesIdentityChange(restore);
       if (cfg.bundled) {
         // Saving the new identity preserves every previously saved account.
         if (!persistSession(result)) {
@@ -3143,6 +3316,7 @@ async function completeSignInImpl(code: string): Promise<void> {
           await targetSession().cookies.set(spec);
         }
       }
+      if (!sameIdentity) forgetCompanionContext();
       const win = ensureWindow();
       for (const accountWindow of [mainWindow, desktopChatWindow]) {
         if (accountWindow && !accountWindow.isDestroyed() && isAppPage(accountWindow)) {
@@ -3357,6 +3531,9 @@ async function switchAccountImpl(accountId: string): Promise<SwitchResult> {
   }
 
   if (sessionRefreshInFlight) await sessionRefreshInFlight;
+  // Retire the chat window before the new identity can become active, and
+  // outside the operation queue so any unload work settles under the old one.
+  if (!(await retireDesktopChatForIdentityChange({ kind: "account-switch" }))) return { ok: false, error: "switch" };
   return targetOperations.run(async () => {
     const store = await readAccountStoreFromJar();
     const dir = await readAccountDirFromJar();
@@ -3401,6 +3578,7 @@ async function switchAccountImpl(accountId: string): Promise<SwitchResult> {
     for (const spec of buildSessionCookies(cfg.appUrl, result)) {
       await targetSession().cookies.set(spec);
     }
+    forgetCompanionContext();
     const win = ensureWindow();
     await loadApp(win); // reload so the new account's workspace/page resolves cleanly
     focusWindow(win);
@@ -3418,6 +3596,10 @@ async function signOut(): Promise<void> {
 
 async function signOutImpl(): Promise<void> {
   if (removingAccount) return;
+  // Before any credential state changes: a vetoed chat-window unload (unsaved
+  // work) cancels the sign-out and shows that window instead.
+  if (!(await retireDesktopChatForIdentityChange({ kind: "sign-out" }))) { revealDesktopChat(); return; }
+  forgetCompanionContext();
   cancelSignIn();
   ++credentialGeneration;
   notifyNativeSessionCleared("logout");
@@ -4414,12 +4596,9 @@ if (!gotLock) {
           positionDesktopChat();
           desktopChatWindow.show();
           desktopChatWindow.focus();
-          void loadApp(desktopChatWindow, {
-            route: desktopChatRoute(workspaceId, assistantId),
-          }).then(() => {
-            if (desktopChatWindow && !desktopChatWindow.isDestroyed()) {
-              notifyUseBrian(desktopChatWindow);
-            }
+          const chat = desktopChatWindow;
+          loadDesktopChat(chat, desktopChatRoute(workspaceId, assistantId), () => {
+            if (desktopChatWindow === chat && !chat.isDestroyed()) notifyUseBrian(chat);
           });
           return;
         }
@@ -4427,9 +4606,7 @@ if (!gotLock) {
         return;
       }
       if (changed && desktopChatWindow && !desktopChatWindow.isDestroyed()) {
-        void loadApp(desktopChatWindow, {
-          route: desktopChatRoute(workspaceId, assistantId),
-        });
+        loadDesktopChat(desktopChatWindow, desktopChatRoute(workspaceId, assistantId));
       }
     },
   );
@@ -4733,8 +4910,13 @@ if (!gotLock) {
       !browserIdentityChanging && trustedTokenSender(event);
     if (!trusted() || !input || typeof input !== "object") return { ok: false };
     const type = (input as { type?: unknown }).type;
-    // Capability, not an implicit permission grant: pairing has its own native consent.
-    if (type === "status" || type === "request-control") return { ok: true, hasControl: true, ...embeddedBrowser.status() };
+    // The native device setting governs pairing and command execution.
+    if (type === "status" || type === "request-control") return { ok: true, hasControl: embeddedBrowser.status().browserEnabled, ...embeddedBrowser.status() };
+    if (type === "set-enabled") {
+      try { embeddedBrowser.setEnabled((input as { enabled?: unknown }).enabled); }
+      catch { return { ok: false, ...embeddedBrowser.status() }; }
+      return { ok: true, ...embeddedBrowser.status() };
+    }
     if (type === "show") { embeddedBrowser.show(); return { ok: true }; }
     // The Chat side pane's browser slot and live-turn chat (chat-parity T7).
     // CSS px from the app frame, scaled to window DIP by its own zoom.

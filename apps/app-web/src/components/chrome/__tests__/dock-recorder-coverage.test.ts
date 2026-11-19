@@ -171,16 +171,21 @@ describe("[COMP:app-web/dock-recorder] recorder stickiness coverage", () => {
   it("keeps interaction answers in their originating session without replacing typed streaming messages", () => {
     const dock = read("components/chrome/floating-chat.tsx");
     const answers = dock.slice(dock.indexOf("<LiveInteractionJobs"), dock.indexOf("{showEmpty ?"));
-    expect(answers).toContain("sessionId={session.state.sessionId}");
-    expect(answers).toContain("if (sessionIdRef.current !== sid) return;");
-    expect(answers).toContain("canonicalInteractionAdditions(session.state.messages,");
-    expect(answers).toContain('session.dispatch({ type: "message/append", message })');
+    // Voice-job rows go into the shared conversation as canonical appends
+    // (same id replaces), only for the session that asked.
+    expect(answers).toContain("sessionId={sessionId}");
+    expect(answers).toContain("if (sessionIdRef.current !== sid || !controller) return;");
+    expect(answers).toContain("canonicalInteractionAdditions(transcript.messages,");
+    expect(answers).toContain("controller.appendMessage(message)");
     expect(answers).not.toMatch(/router\.|navigate\(|setSession\(|setMessages\(/);
     const binding = dock.slice(dock.indexOf("ensureInteractionSession:"), dock.indexOf("getSessionId: () =>", dock.indexOf("ensureInteractionSession:")));
     expect(binding).toContain("const existing = sessionIdRef.current;");
     expect(binding).toContain("if (existing) return existing;");
-    expect(binding).toContain('if (threadEpochRef.current !== epoch) throw new Error("Chat changed");');
+    // A reset of the shared doc thread while the create was out wins.
+    expect(binding).toContain('if (readDockThread(key).epoch !== epoch) throw new Error("Chat changed");');
     expect(binding).toContain("if (sessionIdRef.current) return sessionIdRef.current;");
+    // The created session binds the shared thread, so every dock instance moves to it.
+    expect(binding).toContain("updateDockThread(key, { sessionId: created.id });");
   });
 
   it("the Chat route hide pairs with the Chat surface composer rehost", () => {

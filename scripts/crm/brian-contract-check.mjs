@@ -11,7 +11,7 @@ import { inspectDatabase } from '../operations/recovery-common.mjs'
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const catalogPath = join(root, 'scripts/crm/fixtures/association-assurance.json')
 const packages = { database: 'packages/api', api: 'packages/api', core: 'packages/core', shared: 'packages/shared', web: 'apps/app-web' }
-const caseIds = ['M1', 'M2', 'M3', 'M4', 'A', 'B', 'C', 'C2', 'D', 'E', 'E2', 'F', 'G', 'G2', 'H', 'I', 'J', 'K']
+const caseIds = ['M1', 'M2', 'M3', 'M4', 'A', 'B', 'C', 'C2', 'D', 'E', 'F', 'G', 'G2', 'H', 'I', 'J', 'K']
 const hash = value => createHash('sha256').update(value).digest('hex')
 const redact = value => String(value).replace(/postgres(?:ql)?:\/\/[^\s"']+/g, '[redacted database URL]')
   .replace(/sk_(?:crm|intake|brain)_[A-Za-z0-9_-]+/g, '[redacted credential]').replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [redacted]')

@@ -43,11 +43,36 @@ export {
 } from './interaction-controller.js'
 
 export {
+  turnTranscriptReducer,
+  turnTranscriptActionsFromFrame,
+  reduceTurnTranscriptFrame,
+  buildTurnTranscriptMessage,
+  armsAnswerReset,
+  stripFollowUpBlocks,
+  finalizeTurnActivityNotes,
+  initialTurnTranscript,
+  FULL_PAGE_TURN_TRANSCRIPT,
+  DOCK_TURN_TRANSCRIPT,
+  type TurnTranscriptState,
+  type TurnTranscriptAction,
+  type TurnTranscriptOptions,
+  type TurnTranscriptProfile,
+  type TurnTranscriptCollect,
+  type TurnTranscriptMessage,
+  type TurnFrameAdapter,
+  type TurnTool,
+  type TurnView,
+  type TurnResearch,
+  type ToolNarration,
+} from './turn-transcript.js'
+
+export {
   useMessageStream,
   runStream,
   TERMINAL_STREAM_EVENTS,
   type AuthFetch,
   type StreamOptions,
+  type StreamCompletion,
   type StartStream,
   type UseMessageStreamResult,
 } from './useMessageStream.js'

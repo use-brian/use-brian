@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { ToolContext, UsageStore } from '@use-brian/core'
+import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { createBrowserAgentUsageRecorder } from '../browser-agent-metering.js'
 
 const context: ToolContext = {

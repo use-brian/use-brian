@@ -1,4 +1,4 @@
-import type { WorkspaceFile } from '@use-brian/core'
+import type { WorkspaceFile } from '@use-brian/core/workspace-files/types.js'
 import type { Response } from 'express'
 import { ChunkedUploadError } from '../files/chunked-upload.js'
 import { isMediaMime, resolveRecordingForFile, type RecordingForFileDeps } from './recording-for-file.js'

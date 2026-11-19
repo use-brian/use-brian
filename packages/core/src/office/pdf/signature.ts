@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto'
-import sharp from 'sharp'
+import { lazyImplementation } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
+
+// The image codec loads on the first signature image, not with the PDF module (M4 step 5).
+const loadSharp = lazyImplementation('The signature image codec (sharp)', () => import('sharp').then((m) => m.default))
 
 export const PDF_SIGNATURE_MAX_BYTES = 5 * 1024 * 1024
 export const PDF_SIGNATURE_MAX_DIMENSION = 4_096
@@ -26,6 +29,7 @@ export async function normalizePdfSignatureImage(bytes: Uint8Array, declaredMime
   if (!['image/png', 'image/jpeg'].includes(declaredMime) || bytes.byteLength === 0 || bytes.byteLength > PDF_SIGNATURE_MAX_BYTES) {
     throw new PdfSignatureImageError()
   }
+  const sharp = await loadSharp()
   try {
     const pipeline = sharp(bytes, { failOn: 'warning', limitInputPixels: PDF_SIGNATURE_MAX_DIMENSION ** 2 })
     const metadata = await pipeline.metadata()

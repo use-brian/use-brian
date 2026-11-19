@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { createGoalClarityAssessor, parseClarityVerdict } from '../clarity.js'
-import type { LLMProvider, StreamChunk } from '../../providers/types.js'
+import type { LLMProvider, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
 
 /**
  * [COMP:goals/clarity] The confirmation clarity gate (task-goal-seeker.md §12).

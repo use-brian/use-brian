@@ -21,7 +21,8 @@
  */
 
 import type { DrawingEditOp, DrawingEditResult } from '@use-brian/shared/drawing'
-import type { DocGateway, Page } from '@use-brian/core'
+import type { DocGateway } from '@use-brian/core/doc/tools.js'
+import type { Page } from '@use-brian/core/views/blocks.js'
 
 export type DocGatewayOptions = {
   /** ws(s):// sync URL; the internal HTTP endpoint is the http(s) twin. */

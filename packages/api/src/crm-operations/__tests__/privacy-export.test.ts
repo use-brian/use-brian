@@ -1,7 +1,7 @@
 import {EventEmitter} from 'node:events'
 import type {Response} from 'express'
 import {beforeEach,describe,expect,it,vi} from 'vitest'
-import type {CrmOperationsContext} from '@use-brian/core'
+import type {CrmOperationsContext} from '@use-brian/core/crm/operations-types.js'
 
 const mocks=vi.hoisted(()=>({query:vi.fn(),release:vi.fn(),connect:vi.fn()}))
 vi.mock('../../db/client.js',()=>({query:async()=>{throw new Error('Unexpected direct database query in privacy-export fixture')},getPool:()=>({connect:mocks.connect,query:mocks.query})}))

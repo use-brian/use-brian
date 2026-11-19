@@ -1,14 +1,14 @@
 import { describe, it, expect, vi } from 'vitest'
 import { buildCitationIndex } from '@use-brian/shared'
 import { createTaskTools, type TaskToolEvent } from '../tools.js'
-import { formatToolError } from '../../engine/tool-executor.js'
+import { formatToolError } from '@use-brian/agent-runtime/engine/tool-executor.js'
 import type { TaskRecord, TaskStore } from '../types.js'
 import { applyResponsibilityPatch, TaskResponsibilityError } from '../responsibility.js'
 import type { TaskAdmissionPort, TaskRuleRecord } from '../admission.js'
-import { ContextScopeAccumulator } from '../../security/context-scope.js'
-import type { ToolContext } from '../../tools/types.js'
-import {createExecutionContext} from '../../security/execution-context.js'
-import type { ScopeSource } from '../../security/derived-scope.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import {createExecutionContext} from '@use-brian/agent-runtime/security/execution-context.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 
 // The real store persists provenance (source*, mig 316/334) but does NOT
 // project it back on reads — `TaskRecord` is deliberately a compact,

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { jaroWinkler, normalizeName, resolveEntity } from '../resolver.js'
 import type { EntityCandidate } from '../types.js'
-import type { LLMProvider, StreamChunk } from '../../providers/types.js'
+import type { LLMProvider, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
 import { executionFixture, fixtureDecisionProvider } from '../../decisions/__tests__/execution-fixture.js'
 
 function mockProvider(response: string): LLMProvider {

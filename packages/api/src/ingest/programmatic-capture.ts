@@ -11,19 +11,17 @@ import type { ArchiveCapture } from '../engineering-history/contracts.js'
  * [COMP:api/programmatic-capture]
  */
 
+import { resolveIngestRoute, type IngestRule } from '@use-brian/core/ingest/engine.js'
 import {
   composeFilters,
-  computeNextRun,
-  minSensitivity,
-  resolveIngestRoute,
   universalFilters,
   type FilterRegistry,
   type IngestEvent,
-  type IngestRule,
-  type PendingBatch,
-  type PipelineBResult,
-  type Sensitivity,
-} from '@use-brian/core'
+} from '@use-brian/core/ingest/filters.js'
+import type { PipelineBResult } from '@use-brian/core/ingest/pipeline-b.js'
+import { computeNextRun } from '@use-brian/core/scheduling/schedule.js'
+import type { PendingBatch } from '@use-brian/core/scheduling/types.js'
+import { minSensitivity, type Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type { BrainAuth } from '../brain-mcp/auth.js'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'
 import { toEpisodeSensitivity } from '../episode-sensitivity.js'

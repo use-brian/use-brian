@@ -2,14 +2,14 @@
  * Function tracking is enabled on verified disposable fixture roles by default.
  * Set NATIVE_PRIVATE_TITLE_PROFILE=0 inside the fixture command to skip that gate.
  * Timings are diagnostic; CI gates database work rather than wall clock.
- * Owns no migrations and never changes the original helper/kernel contracts.
+ * Canonical title ownership: fresh acquisition and output; retired reader absence.
  */
 import {randomUUID} from 'node:crypto'
 import express from 'express'
 import request from 'supertest'
 import pg, {type PoolClient} from 'pg'
 import {afterAll,afterEach,beforeAll,describe,expect,it,vi} from 'vitest'
-import {boundScopeSources} from '@use-brian/core'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {applyRLSGucs,getAppPool,getPool,rollbackAndRelease,runWithAgentAccess} from '../../db/client.js'
 import {authSessionStore} from '../../db/auth-session-store.js'
 import {createTokens} from '../../auth/jwt.js'
@@ -17,8 +17,8 @@ import {requireAuth} from '../../auth/middleware.js'
 import {sessionRoutes} from '../../routes/sessions.js'
 import {addSessionMessage,createPersonalWebSession} from '../../db/sessions.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
-import {publishNativeSessionMessageBatch} from '../../db/session-message-publication.js'
-import {readAdmittedSessionQuery,sessionQueryRootMetadata} from '../../db/session-query-reader.js'
+import {publishNativeSessionMessageBatch} from '../../db/conversation-store.js'
+import {readAdmittedSessionQuery,sessionQueryRootMetadata} from '../../db/conversation-store.js'
 import {readJointSessionQueryFrame,readRetainedContextFrame} from '../../db/session-context-revisions.js'
 import * as titles from '../../db/session-title-store.js'
 import {resolveSessionTitleAuthority,sessionTitleProjections} from '../../routes/session-title-authority.js'
@@ -30,7 +30,7 @@ await assertLocalFixture()
 
 type Fixture=Awaited<ReturnType<typeof persistentContextFixture>>
 const fixtures:Fixture[]=[]
-const guard='native_private_title_helpers_current()'
+const guard='native_turn_helpers_current()'
 const profile=process.env.NATIVE_PRIVATE_TITLE_PROFILE!=='0'
 const secret='fictional-private-title-performance-secret'
 
@@ -104,7 +104,6 @@ async function withGuardBody<T>(body:string,run:()=>Promise<T>){
  await getPool().query(original.definition.replace(oldBody,delimiter+body+delimiter))
  try{return await run()}finally{await getPool().query(original.definition)}
 }
-const fallback=<T>(run:()=>Promise<T>)=>withGuardBody('BEGIN RETURN false; END',run)
 
 async function traced<T>(run:()=>Promise<T>){
  const sql:string[]=[],query=pg.Client.prototype.query
@@ -116,14 +115,11 @@ async function traced<T>(run:()=>Promise<T>){
  try{return{value:await run(),sql,elapsedMs:performance.now()-started}}finally{spy.mockRestore()}
 }
 function assertFreshSingleton(sql:string[]){
- expect(sql.filter(text=>/SELECT\s+read_native_private_title_acquisition\(/i.test(text))).toHaveLength(1)
- expect(sql.filter(text=>/SELECT\s+read_native_private_title_evidence\(/i.test(text))).toHaveLength(1)
- // A successful complete proof must not fall through to per-field traversal.
- expect(sql.filter(text=>/\bread_native_session_field_(dependencies|snapshots)\s*\(/i.test(text))).toHaveLength(0)
- const acquisition=sql.findIndex(text=>/SELECT\s+read_native_private_title_acquisition\(/i.test(text))
- const output=sql.findIndex(text=>/SELECT\s+read_native_private_title_evidence\(/i.test(text))
+ expect(sql.filter(text=>/SELECT\s+read_session_title_revision\(/i.test(text))).toHaveLength(1)
+ expect(sql.some(text=>/read_native_(private|file|empty_query).*title/.test(text))).toBe(false)
+ const acquisition=sql.findIndex(text=>/SELECT\s+read_session_title_revision\(/i.test(text))
+ const output=sql.map(text=>/SELECT\s+capture_conversation_evidence\(/i.test(text)).lastIndexOf(true)
  expect(output).toBeGreaterThan(acquisition)
- // Output is a fresh operation, not reuse of the acquisition transaction/proof.
  expect(sql.slice(acquisition+1,output).some(text=>/\b(COMMIT|ROLLBACK)\b/i.test(text))).toBe(true)
 }
 function assertProjection(c:Case,value:Awaited<ReturnType<Case['list']>>){
@@ -170,7 +166,7 @@ describe.sequential('[COMP:api/application-persistence] isolated private title l
    await getPool().query("SET track_functions='all'")
   }
   // Fail loudly if the required migration is missing, rather than silently skip.
-  for(const signature of ['read_native_private_title_evidence(uuid,uuid)','read_native_private_title_acquisition(uuid,uuid,uuid)',guard]){
+  for(const signature of ['read_session_title_revision(uuid,uuid,uuid)',guard]){
    expect((await getPool().query('SELECT to_regprocedure($1) IS NOT NULL installed',[signature])).rows[0].installed,signature).toBe(true)
   }
   for(const populated of [false,true])for(const mixed of [false,true])cases.push(await seed(populated,mixed))
@@ -184,20 +180,11 @@ describe.sequential('[COMP:api/application-persistence] isolated private title l
  for(const populated of [false,true])for(const mixed of [false,true]){
   it(`preserves ${mixed?'mixed canonical fields':'private dialogue'} / ${populated?'populated':'empty'} Memory with bounded fresh database work`,async()=>{
    const c=cases.find(row=>row.populated===populated&&row.mixed===mixed)!
-   // The fallback is the unchanged canonical validator, not a TS allow-result double.
-   await fallback(c.list) // bounded canonical warm-up, symmetric with native below
-   const canonical=await fallback(()=>traced(c.list)),expected=canonical.value
-   assertProjection(c,expected)
-   expect(canonical.sql.filter(sql=>/\bread_native_session_field_dependencies\s*\(/i.test(sql))).toHaveLength(4)
-   expect(canonical.sql.filter(sql=>/\bread_native_session_field_snapshots\s*\(/i.test(sql))).toHaveLength(2)
-   await c.list() // one bounded warm-up, no wall-clock threshold
    const actual=await traced(c.list)
-   expect(actual.value).toEqual(expected)
    assertProjection(c,actual.value);assertFreshSingleton(actual.sql)
-   expect(boundScopeSources(actual.value.get(c.session.id)!)).toEqual(boundScopeSources(expected.get(c.session.id)!))
-   expect(actual.sql.length).toBeLessThan(canonical.sql.length)
-   console.info('private-title-work',JSON.stringify({populated,mixed,canonical:{sqlStatements:canonical.sql.length,elapsedMs:canonical.elapsedMs},
-    native:{sqlStatements:actual.sql.length,elapsedMs:actual.elapsedMs}}))
+   const measured=await work(c.list)
+   expect(measured.functions.some(row=>/^(native_private_title_|read_native_(private|file|empty_query).*title)/.test(row.name))).toBe(false)
+   console.info('canonical-title-work',JSON.stringify({populated,mixed,sqlStatements:actual.sql.length,...measured}))
   },90_000)
  }
  it('keeps titles without direct private evidence on the original acquisition, without a speculative frame',async()=>{
@@ -221,7 +208,7 @@ describe.sequential('[COMP:api/application-persistence] isolated private title l
  },60_000)
  it('serves the actual authenticated browser list DTO without reverting to the old ancestry work',async()=>{
   const c=cases.find(row=>row.populated&&row.mixed)!
-  const expected=await fallback(async()=>c.browserList())
+  const expected=await c.browserList()
   const actual=await traced(async()=>c.browserList())
   expect(actual.value.status,JSON.stringify(actual.value.body)).toBe(200)
   expect(actual.value.headers['cache-control']).toBe('no-store')
@@ -230,43 +217,33 @@ describe.sequential('[COMP:api/application-persistence] isolated private title l
   expect(select(actual.value.body)).toMatchObject({title:c.title.title,titleRevisionId:c.title.revisionId})
   assertFreshSingleton(actual.sql)
  },90_000)
- it('declines a changed new guard without invoking unknown code and keeps complete fallback',async()=>{
-  const c=cases[3],expected=await fallback(c.list)
-  const actual=await withGuardBody("BEGIN RAISE EXCEPTION 'fictional_unknown_private_title_guard_invoked'; END",c.list)
-  expect(actual).toEqual(expected);assertProjection(c,actual)
+ it('refuses changed canonical guard code without invoking it',async()=>{
+  const c=cases[3]
+  const actual=await withGuardBody("SELECT CAST(1 / 0 AS text) = 'unknown'",c.list)
+  expect(actual.get(c.session.id)?.titleRevisionId??null).toBeNull()
+  assertProjection(c,await c.list())
  },90_000)
- it('declines unchanged helper bodies after volatility or ACL drift, retaining canonical fallback',async()=>{
-  const c=cases[3],expected=await fallback(c.list)
-  const signature='private_transcript_message_fingerprint(session_messages)'
+ it('refuses native dependency volatility or ACL drift',async()=>{
+  const c=cases[3],signature='private_transcript_message_fingerprint(session_messages)'
   const original=(await getPool().query<{definition:string}>(
    'SELECT pg_get_functiondef($1::regprocedure) definition',[signature])).rows[0].definition
   await getPool().query('ALTER FUNCTION private_transcript_message_fingerprint(session_messages) VOLATILE')
-  try{
-   const actual=await traced(c.list)
-   expect(actual.value).toEqual(expected)
-   expect(actual.sql.some(sql=>/\bread_native_session_field_dependencies\s*\(/i.test(sql))).toBe(true)
-  }finally{await getPool().query(original)}
-  await getPool().query('GRANT EXECUTE ON FUNCTION native_private_title_frame(uuid,jsonb) TO app_user')
-  try{
-   const actual=await traced(c.list)
-   expect(actual.value).toEqual(expected)
-   expect(actual.sql.some(sql=>/\bread_native_session_field_dependencies\s*\(/i.test(sql))).toBe(true)
-  }finally{await getPool().query('REVOKE EXECUTE ON FUNCTION native_private_title_frame(uuid,jsonb) FROM app_user')}
-  assertFreshSingleton((await traced(c.list)).sql)
+  try{expect((await c.list()).get(c.session.id)?.titleRevisionId??null).toBeNull()}
+  finally{await getPool().query(original)}
+  await getPool().query('GRANT EXECUTE ON FUNCTION native_turn_helpers_current() TO app_user')
+  try{expect((await c.list()).get(c.session.id)?.titleRevisionId??null).toBeNull()}
+  finally{await getPool().query('REVOKE EXECUTE ON FUNCTION native_turn_helpers_current() FROM app_user')}
+  assertProjection(c,await c.list())
  },90_000)
- it('keeps the new internal guard private and owner identity-only reads non-admitting',async()=>{
-  expect((await getAppPool().query("SELECT has_function_privilege(current_user,$1,'EXECUTE') allowed",[guard])).rows[0].allowed).toBe(false)
+ it('retires the private/file/empty title owners and denies owner payload reads',async()=>{
   const c=cases[3]
-  for(const [sql,args] of [
-   ['SELECT read_native_private_title_evidence($1,$2) value',[c.f.workspaceId,c.title.revisionId]],
-   ['SELECT read_native_private_title_acquisition($1,$2,$3) value',[c.f.workspaceId,c.session.id,c.title.revisionId]],
-  ] as const)expect((await c.f.pool.query(sql,[...args])).rows[0].value).toBeNull()
-  // Discover additional private implementation helpers without hard-coding their names.
-  const internals=(await c.f.pool.query<{signature:string}>(`SELECT oid::regprocedure::text signature FROM pg_proc
-   WHERE pronamespace='public'::regnamespace AND proname LIKE 'native_private_title_%'`)).rows
-  expect(internals.length).toBeGreaterThan(0)
-  for(const {signature} of internals)expect((await getAppPool().query(
-   "SELECT has_function_privilege(current_user,$1,'EXECUTE') allowed",[signature])).rows[0].allowed,signature).toBe(false)
+  for(const signature of ['native_private_title_helpers_current()','read_native_private_title_evidence(uuid,uuid)',
+   'read_native_private_title_acquisition(uuid,uuid,uuid)','read_native_file_session_title_revision(uuid,uuid,uuid)',
+   'read_native_empty_query_session_title_revision(uuid,uuid,uuid)']){
+   expect((await getPool().query('SELECT to_regprocedure($1) value',[signature])).rows[0].value).toBeNull()
+  }
+  expect((await c.f.pool.query('SELECT read_session_title_revision($1,$2,$3) value',
+   [c.f.workspaceId,c.session.id,c.title.revisionId])).rows[0].value).toBeNull()
  })
  it('does not bind an owned revision to another session or expose it to a foreign member SQL frame',async()=>{
   const c=cases[3]
@@ -274,18 +251,18 @@ describe.sequential('[COMP:api/application-persistence] isolated private title l
    channelType:'web',channelId:randomUUID(),appOrigin:'chat'},
   {actorUserId:c.f.ownerId,authSessionId:c.device.id,authVersion:c.device.authVersion})
   await frame(c,async client=>{
-   expect((await client.query('SELECT read_native_private_title_acquisition($1,$2,$3) value',
+   expect((await client.query('SELECT read_session_title_revision($1,$2,$3) value',
     [c.f.workspaceId,c.session.id,c.title.revisionId])).rows[0].value).not.toBeNull()
-   expect((await client.query('SELECT read_native_private_title_acquisition($1,$2,$3) value',
+   expect((await client.query('SELECT read_session_title_revision($1,$2,$3) value',
     [c.f.workspaceId,other.id,c.title.revisionId])).rows[0].value).toBeNull()
-   expect((await client.query('SELECT read_native_private_title_acquisition($1,$2,$3) value',
+   expect((await client.query('SELECT read_session_title_revision($1,$2,$3) value',
     [c.f.workspaceId,c.session.id,randomUUID()])).rows[0].value).toBeNull()
   })
   await frame(c,async client=>{
-   expect((await client.query('SELECT read_native_private_title_acquisition($1,$2,$3) value',
+   expect((await client.query('SELECT read_session_title_revision($1,$2,$3) value',
     [c.f.workspaceId,c.session.id,c.title.revisionId])).rows[0].value).toBeNull()
-   expect((await client.query('SELECT read_native_private_title_evidence($1,$2) value',
-    [c.f.workspaceId,c.title.revisionId])).rows[0].value).toBeNull()
+   expect((await client.query('SELECT read_session_title_revision($1,$2,$3) value',
+    [c.f.workspaceId,c.session.id,c.title.revisionId])).rows[0].value).toBeNull()
   },c.f.secondId)
  },60_000)
  it('cannot select title payload when SQL access exceeds the original caller ceiling',async()=>{
@@ -311,8 +288,7 @@ describe.sequential('[COMP:api/application-persistence] isolated private title l
    if(change==='delete')await c.f.pool.query('DELETE FROM memories WHERE id=$1',[c.memory!.id])
    if(change==='hold')await c.f.pool.query('UPDATE memories SET scope_held=true WHERE id=$1',[c.memory!.id])
    if(change==='growth')await c.f.memory('Another fictional research notebook is teal.',c.f.ownerId)
-   const actual=await c.list(),expected=await fallback(c.list)
-   expect(actual).toEqual(expected)
+   const actual=await c.list()
    expect(actual.get(c.session.id)?.titleRevisionId).toBeNull()
    expect(actual.get(c.session.id)?.title).not.toBe(c.title.title)
    // Historical utterance continuity is NOT a renewal of the old current fact.
@@ -335,7 +311,6 @@ describe.sequential('[COMP:api/application-persistence] isolated private title l
    else if(change==='delete')await c.f.pool.query('DELETE FROM session_messages WHERE id=$1',[c.input.id])
    else await c.f.pool.query('UPDATE session_messages SET scope_held=true WHERE id=$1',[c.input.id])
    const actual=await c.list()
-   expect(actual).toEqual(await fallback(c.list))
    expect(actual.get(c.session.id)?.titleRevisionId).toBeNull()
    expect(actual.get(c.session.id)?.title).not.toBe(c.title.title)
   },90_000)
@@ -348,7 +323,7 @@ describe.sequential('[COMP:api/application-persistence] isolated private title l
    await publisher.query('BEGIN')
    await publisher.query("SET LOCAL lock_timeout='1s'")
    await publisher.query('SELECT id FROM workspaces WHERE id=$1 FOR NO KEY UPDATE',[c.f.workspaceId])
-   const reading=client.query('SELECT read_native_private_title_evidence($1,$2) value',[c.f.workspaceId,c.title.revisionId])
+   const reading=client.query('SELECT read_session_title_revision($1,$2,$3) value',[c.f.workspaceId,c.session.id,c.title.revisionId])
    // Consume a possible cancellation even if the lock-order assertion fails.
    void reading.catch(()=>{})
    try{
@@ -363,7 +338,7 @@ describe.sequential('[COMP:api/application-persistence] isolated private title l
     await publisher.query('SELECT scope_revision_id FROM session_title_heads WHERE workspace_id=$1 AND session_id=$2 FOR UPDATE',
      [c.f.workspaceId,c.session.id])
    }finally{await publisher.query('ROLLBACK')}
-   expect((await reading).rows[0].value).toMatchObject({admitted:true})
+   expect((await reading).rows[0].value).toMatchObject({title:c.title.title})
   })}finally{await publisher.query('ROLLBACK');publisher.release()}
  },30_000)
  for(const code of ['57014','55P03'])it(`withholds optional titles on a real final-proof database timeout ${code} and releases the frame`,async()=>{
@@ -372,7 +347,7 @@ describe.sequential('[COMP:api/application-persistence] isolated private title l
   const warning=vi.spyOn(console,'warn').mockImplementation(()=>{})
   let attempts=0
   const spy=vi.spyOn(pg.Client.prototype,'query').mockImplementation(function(this:pg.Client,...args:Parameters<typeof query>){
-   if(typeof args[0]==='string'&&/^SELECT read_native_private_title_evidence\(/.test(args[0])){
+   if(typeof args[0]==='string'&&/^SELECT capture_conversation_evidence\(/.test(args[0])){
     const connection=this
     return(async()=>{
      attempts++
@@ -424,15 +399,4 @@ describe.sequential('[COMP:api/application-persistence] isolated private title l
   expect(actual.get(c.session.id)?.titleRevisionId).not.toBe(c.title.revisionId)
   expect(actual.get(c.session.id)?.title).not.toBe(c.title.title)
  },90_000)
- it.runIf(profile)('at least halves tracked mixed-closure work against unchanged fallback in both Memory cases',async()=>{
-  expect((await getAppPool().query('SHOW track_functions')).rows[0].track_functions).toBe('all')
-  for(const c of cases.filter(row=>row.mixed)){
-   await c.list();await fallback(c.list)
-   const canonical=await fallback(()=>work(c.list)),native=await work(c.list)
-   expect(canonical.calls,'Function tracking must be enabled for fixture roles').toBeGreaterThan(0)
-   expect(native.calls).toBeGreaterThan(0)
-   expect(native.calls).toBeLessThan(canonical.calls/2)
-   console.info('private-title-function-profile',JSON.stringify({populated:c.populated,canonical,native}))
-  }
- },180_000)
 })

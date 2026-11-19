@@ -1,7 +1,7 @@
 import type { Pool } from 'pg'
 /** Application MCP is an authenticated profile of the shared Brain transport. [COMP:api/application-auth] */
 import { z } from 'zod'
-import type { ExecutionContext } from '@use-brian/core'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { ApplicationPlatformError, applicationCommandSchema, applicationJsonSchema } from '@use-brian/shared'
 import { AuthorityChangedError } from '../context-scope/authority-lease.js'
 import type { BrainTool } from '../brain-mcp/tools.js'
@@ -25,9 +25,15 @@ export async function buildHomeApplicationMcpProfile(req: Request, secret: strin
   if (!result.rows[0]) return null
   const home = await authenticateApplicationHome(token, result.rows[0].appId, secret)
   if (!home) return null
-  const signal = new AbortController(); req.once('aborted', () => signal.abort())
-  const execution = await resolveApplicationExecutionContext({ home }, { abortSignal: signal.signal })
-  return { homeAppId: home.homeAppId, tools: await buildApplicationMcpTools(service, execution) }
+  return {
+    homeAppId: home.homeAppId,
+    workspaceId: home.workspaceId,
+    async buildTools() {
+      const signal = new AbortController(); req.once('aborted', () => signal.abort())
+      const execution = await resolveApplicationExecutionContext({ home }, { abortSignal: signal.signal })
+      return buildApplicationMcpTools(service, execution)
+    },
+  }
 }
 
 function applicationMcpInvoker(execution: ExecutionContext) {

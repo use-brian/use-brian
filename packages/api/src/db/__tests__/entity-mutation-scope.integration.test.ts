@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
-import type { AccessContext, EntityCreateParams, CrmOperationsContext } from '@use-brian/core'
+import type { CrmOperationsContext } from '@use-brian/core/crm/operations-types.js'
+import type { EntityCreateParams } from '@use-brian/core/entities/types.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import { applyRLSGucs, getAppPool, getPool } from '../client.js'
 import { runWithAgentAccess } from '../agent-access-context.js'
 import {
@@ -873,15 +875,15 @@ describe('[COMP:api/entity-mutation-scope] canonical entity writers', () => {
     const f = await fixture()
     const record = await createEntity({ ...f.params, kind: kind === 'company' ? 'company' : kind === 'contact' ? 'person' : 'deal',
       displayName: 'Typed fixture', attributes: { stage: 'lead', phone: '555-0100', amount: 10 } })
-    // Canonical full-DTO reads require actual Project membership too; the
-    // explicit projectIds array is a ceiling and never a grant.
+    // Project participation controls navigation. The record still requires a
+    // current active Project, admitted Team reach and the supplied read ceiling.
     await pool.query('INSERT INTO workspace_project_members(project_id,user_id) VALUES($1,$2)',[f.projectId,f.member])
     const client = await getAppPool().connect()
     const explicit = { ...f.access, userId: f.member, mutationCompartments: [f.key] }
-    const edit = async(access?: AccessContext) => {
+    const edit = async(access?: AccessContext,companyPatch:{name?:string}={name:'Revised'}) => {
       await client.query('BEGIN');await applyRLSGucs(client,f.member)
       try {
-        const result=kind === 'company' ? await updateCompany(f.member,record.id,{name:'Revised'},access,client)
+        const result=kind === 'company' ? await updateCompany(f.member,record.id,companyPatch,access,client)
           : kind === 'contact' ? await updateContact(f.member, record.id, { phone: '555-0101' }, undefined, access, client)
           : kind === 'deal' ? await updateDeal(f.member, record.id, { amount: 20 }, undefined, access, client)
           : await setDealStage(f.member, record.id, 'won', access, client)
@@ -899,9 +901,12 @@ describe('[COMP:api/entity-mutation-scope] canonical entity writers', () => {
       if(kind==='company'){
         const before=(await pool.query('SELECT scope_version FROM entities WHERE id=$1',[record.id])).rows[0].scope_version
         await pool.query('DELETE FROM workspace_project_members WHERE project_id=$1 AND user_id=$2',[f.projectId,f.member])
-        await expect(edit(explicit)).rejects.toMatchObject({code:'access_unavailable'})
+        expect(await edit(explicit,{})).toEqual(changed)
         expect((await pool.query('SELECT scope_version FROM entities WHERE id=$1',[record.id])).rows[0].scope_version).toBe(before)
-        await pool.query('INSERT INTO workspace_project_members(project_id,user_id) VALUES($1,$2)',[f.projectId,f.member])
+        await pool.query("UPDATE workspace_projects SET status='archived' WHERE id=$1",[f.projectId])
+        await expect(edit(explicit,{})).rejects.toMatchObject({code:'access_unavailable'})
+        expect((await pool.query('SELECT scope_version FROM entities WHERE id=$1',[record.id])).rows[0].scope_version).toBe(before)
+        await pool.query("UPDATE workspace_projects SET status='active' WHERE id=$1",[f.projectId])
       }
       await pool.query("UPDATE entities SET sensitivity='confidential' WHERE id=$1", [record.id])
       expect(await edit(explicit)).toBeNull()

@@ -1,5 +1,5 @@
 import { currentArchivePublication } from '../workspace-access/file-programmatic-admission.js'
-import type { DerivedWriteEvidence } from '@use-brian/core'
+import type { DerivedWriteEvidence } from '@use-brian/agent-runtime/security/derived-scope.js'
 import type { DerivedWorkspaceFilesStore } from '../db/workspace-files-store.js'
 /**
  * Files API orchestration — stitches the GCS bytes layer
@@ -16,12 +16,13 @@ import type { DerivedWorkspaceFilesStore } from '../db/workspace-files-store.js'
  */
 
 import { createHash, randomUUID } from 'node:crypto'
-import { DerivedScopeError, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
+import { unionScopeRequirements } from '@use-brian/agent-runtime/security/context-scope.js'
+import { DerivedScopeError } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { maxSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { assertExecutionResourceScope } from '../db/access-predicate.js'
 import { executeWithCurrentAuthority } from '../context-scope/authority-lease.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import type {
-  AccessContext,
   FilesApi,
   FilesContext,
   FilesError,
@@ -30,17 +31,21 @@ import type {
   FilesResult,
   FilesSearchParams,
   FilesWriteParams,
+} from '@use-brian/core/workspace-files/api.js'
+import type {
   WorkspaceFile,
   WorkspaceFileIndexRow,
   WorkspaceFileMetaPatch,
   WorkspaceFilesStore,
-} from '@use-brian/core'
+} from '@use-brian/core/workspace-files/types.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import type { GcsFilesClient } from './gcs-client.js'
 import { buildStorageKey, buildStorageUri, type StorageUriScheme } from './gcs-client.js'
 import type { WorkspaceAuditStore } from '../db/workspace-audit-store.js'
 import type { WorkspacePlan } from '../db/workspace-store.js'
 import { localDirectoryMetadata, storageKeyForWorkspaceFile } from './local-directory-import.js'
-import { WEBSITE_MEDIA_PREFIX } from '../db/website-media-store.js'
+/** Reserved legacy website assets remain excluded from ordinary file operations. */
+const WEBSITE_MEDIA_PREFIX = '/doc/website-media/'
 
 /**
  * Per-workspace resolution of the bytes-layer client. The default

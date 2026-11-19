@@ -3,16 +3,15 @@
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import {
-  collectStream,
-  fitOfficeArtifact,
-  inferOfficeTemplateRouting,
   OfficeGenerationFailure,
-  type LLMProvider,
-  type Message,
   type OfficeClaimPlanEntry,
-  type OfficeGenerationFitPolicy,
   type OfficeEvidencePacket,
-} from '@use-brian/core'
+} from '@use-brian/core/office/generation/contracts.js'
+import type { OfficeGenerationFitPolicy } from '@use-brian/core/office/generation/pipeline.js'
+import { fitOfficeArtifact } from '@use-brian/core/office/index.js'
+import { inferOfficeTemplateRouting } from '@use-brian/core/office/templates/routing.js'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
+import type { LLMProvider, Message } from '@use-brian/agent-runtime/providers/types.js'
 import {
   assertOfficeArtifactSnapshot,
   OfficeArtifactSnapshotSchema,

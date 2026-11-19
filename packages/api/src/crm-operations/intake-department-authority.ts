@@ -1,6 +1,7 @@
 /** Current intake credential/definition admission. [COMP:crm/operations-store] */
 import type { PoolClient } from 'pg'
-import { CrmOperationsError, type DepartmentReadGrant } from '@use-brian/core'
+import { CrmOperationsError } from '@use-brian/core/crm/operations-types.js'
+import type { DepartmentReadGrant } from '@use-brian/agent-runtime/security/department-read.js'
 import { renewCrmIntegrationBinding, crmIntegrationExecutionLimits, type CrmIntegrationExecutionLimits } from './integration-department-authority.js'
 
 export async function readCrmIntakeAuthority(

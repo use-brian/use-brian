@@ -8,7 +8,7 @@ import type {
   EmbeddingStore,
   EmbeddingUsageBatch,
 } from '../worker.js'
-import type { UsageStore } from '../../billing/cost-tracker.js'
+import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
 
 function makeCandidate(
   overrides: Partial<EmbeddingCandidate> & { id: string; primitive: EmbeddingPrimitive },

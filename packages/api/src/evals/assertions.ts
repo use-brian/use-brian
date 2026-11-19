@@ -5,7 +5,7 @@
  * [COMP:evals/capability-probes]
  */
 
-import { WorkflowTriggerSchema } from '@use-brian/core'
+import { WorkflowTriggerSchema } from '@use-brian/core/workflow/schemas.js'
 
 import type { HardCheckResult, Probe, Transcript } from './types.js'
 

@@ -1,11 +1,11 @@
 import {takeTurnLease} from '../../turn/lease.js'
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
-import {boundScopeSources} from '@use-brian/core'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {applyRLSGucs,getAppPool,getPool,rollbackAndRelease,runWithAgentAccess} from '../../db/client.js'
-import {addSessionMessage,createWorkspaceChatSession,startTurnLease,releaseTurnLease} from '../../db/sessions.js'
+import {addSessionMessage,createWorkspaceChatSession,claimTurnLease,releaseTurnLease} from '../../db/sessions.js'
 import {bindSessionContextRetainedAuthority,withSessionMessagePublication} from '../../db/session-context-revisions.js'
 import {persistentSourceFixture} from './fixtures/persistent-source.js'
-import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
+import {readAdmittedSessionQuery} from '../../db/conversation-store.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -24,7 +24,9 @@ describe.sequential('[COMP:api/application-persistence] actual field-aware nativ
   expect(stored).toMatchObject({sessionId:f.session.id,role:'assistant',sequenceNum:4})
   expect(boundScopeSources(stored)).toMatchObject([{resourceKind:'session_message',resourceId:stored.id}])
   const edges=(await f.pool.query<{source_id:string;source_version:string}>(`SELECT edge.source_id,edge.source_version FROM scope_derivations d
-   JOIN scope_derivation_sources edge ON edge.workspace_id=d.workspace_id AND edge.derivation_id=d.id
+   JOIN scope_derivation_sources link ON link.workspace_id=d.workspace_id AND link.derivation_id=d.id
+   JOIN scope_derivations frame ON frame.workspace_id=d.workspace_id AND frame.resource_kind='session_context_revision' AND frame.resource_id=link.source_id
+   JOIN scope_derivation_sources edge ON edge.workspace_id=frame.workspace_id AND edge.derivation_id=frame.id
    WHERE d.workspace_id=$1 AND d.resource_kind='session_message' AND d.resource_id=$2 AND edge.source_kind='application_field'`,[f.workspaceId,stored.id])).rows
   expect(edges.map(row=>[row.source_id,row.source_version]).sort()).toEqual(sources.map(source=>[source.resourceId,source.version]).sort())
   const current=await f.modelContext(),readBack=await readAdmittedSessionQuery({sessionId:f.session.id,throughSequence:stored.sequenceNum,authority:current})
@@ -48,7 +50,9 @@ describe.sequential('[COMP:api/application-persistence] actual field-aware nativ
   expect(persisted).toHaveLength(2)
   const closure=(await f.pool.query(`SELECT d.resource_id,count(*)::int AS sources FROM scope_derivations d JOIN scope_derivation_sources e
    ON e.workspace_id=d.workspace_id AND e.derivation_id=d.id WHERE d.workspace_id=$1 AND d.resource_id=ANY($2::uuid[]) GROUP BY d.resource_id`,[f.workspaceId,rows.map(row=>row.id)])).rows
-  expect(closure).toHaveLength(2);expect(closure.every(row=>row.sources===sources.length)).toBe(true)
+  expect(closure).toHaveLength(2);expect(closure.every(row=>row.sources===1)).toBe(true)
+  const frames=(await f.pool.query("SELECT d.resource_id,count(*)::int AS sources FROM scope_derivations d JOIN scope_derivation_sources e ON e.workspace_id=d.workspace_id AND e.derivation_id=d.id WHERE d.workspace_id=$1 AND d.resource_kind='session_context_revision' GROUP BY d.resource_id",[f.workspaceId])).rows
+  expect(frames).toHaveLength(2);expect(frames.every(row=>row.sources===sources.length)).toBe(true)
  })
  it('rolls back an earlier paired row when a later row presents an unrecorded field version',async()=>{
   fixture=await persistentContextFixture();const f=fixture,{authority,sources,params}=await prepared()
@@ -78,8 +82,8 @@ describe.sequential('[COMP:api/application-persistence] actual field-aware nativ
   fixture=await persistentContextFixture();const f=fixture,{authority,sources,params}=await prepared(),client=await f.pool.connect()
   try{await runWithAgentAccess(authority.execution.security.access,async()=>{
    await client.query('BEGIN');await applyRLSGucs(client,f.ownerId)
-   await expect(client.query('SELECT publish_native_session_message($1,$2,$3,$4,$5,$6)',[f.workspaceId,f.session.id,
-    {role:'assistant',content:params.content,channelMessageId:null,senderUserId:null,senderAssistantId:null,attachments:[]},params.derivation.producer,JSON.stringify(sources),f.envelope])).rejects.toMatchObject({code:'42501'})
+   await expect(client.query('SELECT publish_native_session_message_batch($1,$2,$3,$4,$5,$6)',[f.workspaceId,f.session.id,
+    JSON.stringify([{role:'assistant',content:params.content,channelMessageId:null,senderUserId:null,senderAssistantId:null,attachments:[]}]),params.derivation.producer,JSON.stringify(sources),f.envelope])).rejects.toMatchObject({code:'42501'})
   })}finally{await rollbackAndRelease(client)}
  })
  it('refuses another actual session invocation and unproved generated annotation scalars',async()=>{
@@ -117,15 +121,16 @@ describe.sequential('[COMP:api/application-persistence] actual field-aware nativ
   await f.pool.query('DELETE FROM session_messages WHERE id=$1',[carrier.id])
   const authority=await f.modelContext(),input={...params,authority,derivation:{producer:'fixture:gone-transcript-carrier',sources:[root]}}
   const stored=await addSessionMessage(input)
-  const edges=(await f.pool.query(`SELECT edge.source_kind,edge.source_id FROM scope_derivations d JOIN scope_derivation_sources edge
-   ON edge.workspace_id=d.workspace_id AND edge.derivation_id=d.id WHERE d.workspace_id=$1 AND d.resource_kind='session_message' AND d.resource_id=$2`,[f.workspaceId,stored.id])).rows
+  const edges=(await f.pool.query(`SELECT edge.source_kind,edge.source_id FROM scope_derivations d JOIN scope_derivation_sources link ON link.workspace_id=d.workspace_id AND link.derivation_id=d.id
+   JOIN scope_derivations frame ON frame.workspace_id=d.workspace_id AND frame.resource_kind='session_context_revision' AND frame.resource_id=link.source_id
+   JOIN scope_derivation_sources edge ON edge.workspace_id=frame.workspace_id AND edge.derivation_id=frame.id WHERE d.workspace_id=$1 AND d.resource_kind='session_message' AND d.resource_id=$2`,[f.workspaceId,stored.id])).rows
   expect(edges.some(edge=>edge.source_kind==='session_message'&&edge.source_id===carrier.id)).toBe(false)
   expect(edges.filter(edge=>edge.source_kind==='application_field').map(edge=>edge.source_id).sort()).toEqual(sources.map(source=>source.resourceId).sort())
   const original=(await f.history())[0]
   await f.pool.query('UPDATE session_messages SET content=$2 WHERE id=$1',[original.id,JSON.stringify([{type:'text',text:'Fictional changed original query input'}])])
   const current=await f.modelContext()
   await expect(addSessionMessage({...input,authority:current})).rejects.toThrow('scope_source_changed')
-  expect((await f.pool.query("SELECT count(*)::int AS count FROM scope_derivations WHERE workspace_id=$1 AND producer='fixture:gone-transcript-carrier'",[f.workspaceId])).rows[0].count).toBe(1)
+  expect((await f.pool.query("SELECT count(*)::int AS count FROM scope_derivations WHERE workspace_id=$1 AND resource_kind='session_message' AND producer='fixture:gone-transcript-carrier'",[f.workspaceId])).rows[0].count).toBe(1)
  })
  it('preserves independent ancestry on a successful field-backed transcript and holds it after withdrawal',async()=>{
   fixture=await persistentContextFixture('confidential');const f=fixture;await f.history();independent=await persistentSourceFixture(f)
@@ -134,7 +139,9 @@ describe.sequential('[COMP:api/application-persistence] actual field-aware nativ
   bind(authority)
   const input=await readAdmittedSessionQuery({sessionId:f.session.id,throughSequence:carrier.sequenceNum,authority})
   const stored=await addSessionMessage({sessionId:f.session.id,role:'assistant',content:'Fictional retained field-backed independent reply',derivation:{producer:'fixture:field-transcript',sources:boundScopeSources(input)},derivationTarget:f.envelope,authority})
-  const edges=(await f.pool.query(`SELECT edge.source_kind FROM scope_derivations d JOIN scope_derivation_sources edge ON edge.workspace_id=d.workspace_id AND edge.derivation_id=d.id
+  const edges=(await f.pool.query(`SELECT edge.source_kind FROM scope_derivations d JOIN scope_derivation_sources link ON link.workspace_id=d.workspace_id AND link.derivation_id=d.id
+   JOIN scope_derivations frame ON frame.workspace_id=d.workspace_id AND frame.resource_kind='session_context_revision' AND frame.resource_id=link.source_id
+   JOIN scope_derivation_sources edge ON edge.workspace_id=frame.workspace_id AND edge.derivation_id=frame.id
    WHERE d.workspace_id=$1 AND d.resource_kind='session_message' AND d.resource_id=$2`,[f.workspaceId,stored.id])).rows
   expect(edges.some(edge=>edge.source_kind==='application_field')).toBe(true);expect(edges.some(edge=>edge.source_kind==='external_source')).toBe(true)
   const observations=(await f.pool.query('SELECT id,version,observation FROM external_source_observations WHERE workspace_id=$1 ORDER BY id',[f.workspaceId])).rows
@@ -158,8 +165,8 @@ describe.sequential('[COMP:api/application-persistence] actual field-aware nativ
   const source={...sources[0],...(variant==='unknown-kind'?{resourceKind:'fictional-unregistered-kind'}:variant==='empty-version'?{version:''}:{resourceId:null})}
   try{await runWithAgentAccess(authority.execution.security.access,async()=>{
    await client.query('BEGIN');await applyRLSGucs(client,f.ownerId)
-   await expect(client.query('SELECT publish_native_session_message($1,$2,$3,$4,$5,$6)',[f.workspaceId,f.session.id,
-    {role:'assistant',content:params.content,channelMessageId:null,senderUserId:null,senderAssistantId:null,attachments:[]},params.derivation.producer,JSON.stringify([source]),f.envelope])).rejects.toMatchObject({code:'22023',message:'scope_evidence_missing'})
+   await expect(client.query('SELECT publish_native_session_message_batch($1,$2,$3,$4,$5,$6)',[f.workspaceId,f.session.id,
+    JSON.stringify([{role:'assistant',content:params.content,channelMessageId:null,senderUserId:null,senderAssistantId:null,attachments:[]}]),params.derivation.producer,JSON.stringify([source]),f.envelope])).rejects.toMatchObject({code:'22023',message:'scope_evidence_missing'})
   })}finally{await rollbackAndRelease(client)}
   expect((await f.pool.query('SELECT count(*)::int AS count FROM session_messages WHERE session_id=$1',[f.session.id])).rows[0].count).toBe(3)
  })
@@ -194,7 +201,9 @@ describe.sequential('[COMP:api/application-persistence] actual field-aware nativ
   const token=slot.token
   if(state==='released')await releaseTurnLease(f.session.id,'completed',token)
   if(state==='successor'||state==='finished-successor'){
-   const successor=await startTurnLease(f.session.id,f.assistantId)
+   await f.pool.query("UPDATE sessions SET turn_heartbeat_at=now()-interval '2 minutes',last_active_at=now()-interval '2 minutes' WHERE id=$1",[f.session.id])
+   const successor=await claimTurnLease(f.session.id,f.assistantId)
+   if(!successor)throw new Error('Expected successor claim')
    if(state==='finished-successor')await releaseTurnLease(f.session.id,'completed',successor)
   }
   await expect(withSessionMessagePublication(authority,sources,client=>addSessionMessage(params,client),
@@ -203,10 +212,13 @@ describe.sequential('[COMP:api/application-persistence] actual field-aware nativ
  })
  it.each(['wrong-token','released','successor','finished-successor'] as const)('rejects stopped publication after an actual %s lease state',async state=>{
   fixture=await persistentContextFixture();const f=fixture,{authority,sources,params}=await prepared()
-  const token=await startTurnLease(f.session.id,f.assistantId)
+  const token=await claimTurnLease(f.session.id,f.assistantId)
+  if(!token)throw new Error('Expected initial claim')
   if(state==='released')await releaseTurnLease(f.session.id,'completed',token)
   if(state==='successor'||state==='finished-successor'){
-   const successor=await startTurnLease(f.session.id,f.assistantId)
+   await f.pool.query("UPDATE sessions SET turn_heartbeat_at=now()-interval '2 minutes',last_active_at=now()-interval '2 minutes' WHERE id=$1",[f.session.id])
+   const successor=await claimTurnLease(f.session.id,f.assistantId)
+   if(!successor)throw new Error('Expected successor claim')
    if(state==='finished-successor')await releaseTurnLease(f.session.id,'stopped_by_user',successor)
   }
   await expect(withSessionMessagePublication(authority,sources,client=>addSessionMessage(params,client),

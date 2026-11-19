@@ -1,6 +1,6 @@
 "use client";
 
-import type { QueuedInput } from "@/lib/use-mid-turn-queue";
+import type { QueuedInput } from "@/lib/queued-input";
 
 /**
  * Messages handed to the running turn but not yet taken by it (mid-turn
@@ -22,7 +22,7 @@ export type QueuedInputsDict = {
 };
 
 export function QueuedInputs(props: {
-  inputs: QueuedInput[];
+  inputs: readonly QueuedInput[];
   dict: QueuedInputsDict;
   onSteer: (inputId: string) => void;
 }) {

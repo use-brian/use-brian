@@ -1,5 +1,5 @@
 import type { SessionContextAuthority } from './session-state-types.js'
-import type { DerivedWriteEvidence } from '../security/derived-scope.js'
+import type { DerivedWriteEvidence } from '@use-brian/agent-runtime/security/derived-scope.js'
 
 /**
  * Short-term / episodic memory tier.

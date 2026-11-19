@@ -8,7 +8,7 @@ import {notifyWorkspaceChange} from '../brain-stream/notify.js'
 
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { Router, type Request, type Response } from 'express'
-import { computeNextRun } from '@use-brian/core'
+import { computeNextRun } from '@use-brian/core/scheduling/schedule.js'
 import { z } from 'zod'
 import type {
   CaptureRuleInput,

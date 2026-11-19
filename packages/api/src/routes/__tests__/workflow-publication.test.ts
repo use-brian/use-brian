@@ -1,7 +1,7 @@
 import express from 'express'
 import request from 'supertest'
 import { describe, expect, it, vi } from 'vitest'
-import type { WorkflowRecord, WorkflowStore } from '@use-brian/core'
+import type { WorkflowRecord, WorkflowStore } from '@use-brian/core/workflow/types.js'
 import type { WorkspaceStore } from '../../db/workspace-store.js'
 import { mountWorkflowPublicationRoutes } from '../workflow-publication.js'
 import { publicationRevision, type PublicationConsent } from '../../workflow/publication-consent.js'

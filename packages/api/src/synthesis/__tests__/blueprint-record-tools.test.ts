@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { extractionSpecSchema, type Tool, type ToolContext } from '@use-brian/core'
+import { extractionSpecSchema } from '@use-brian/core/doc/custom-template-types.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import {
   blueprintSubjectAnchorKey,
   buildBlueprintSurfacePrompt,

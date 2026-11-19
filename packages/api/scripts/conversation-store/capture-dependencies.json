@@ -1,0 +1,107 @@
+[
+  {
+    "signature": "recording_source_read_allowed(uuid,text,uuid)",
+    "body": "8a584e976f5e93fa624fc4e5442a5e62f7cd8efb90317f85d7168d03b1b6bcc1",
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "recording_source_read_allowed",
+      "prorows": 0,
+      "pronargs": 3,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "16",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "k",
+        "i"
+      ],
+      "proargtypes": [
+        "2950",
+        "25",
+        "2950"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "s",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "sql",
+    "appExecute": true
+  },
+  {
+    "signature": "application_scope_source_edges(uuid,text,uuid,text)",
+    "body": "eb8966087803239c93bcdac1736ba917251adaed34c244feb3f80bc80d2c9077",
+    "language": "plpgsql",
+    "appExecute": false,
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "application_scope_source_edges",
+      "prorows": 1000,
+      "pronargs": 4,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": true,
+      "prosecdef": true,
+      "prorettype": "2249",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": [
+        "i",
+        "i",
+        "i",
+        "i",
+        "t",
+        "t",
+        "t"
+      ],
+      "proargnames": [
+        "w",
+        "k",
+        "i",
+        "v",
+        "kind",
+        "id",
+        "version"
+      ],
+      "proargtypes": [
+        "2950",
+        "25",
+        "2950",
+        "25"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": [
+        "2950",
+        "25",
+        "2950",
+        "25",
+        "25",
+        "2950",
+        "25"
+      ],
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    }
+  }
+]

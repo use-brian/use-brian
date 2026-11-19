@@ -1,4 +1,4 @@
-import type { CacheStore } from '@use-brian/core'
+import type { CacheStore } from '@use-brian/agent-runtime/compaction/cache-tool.js'
 import { query } from './client.js'
 
 export function createDbCacheStore(): CacheStore {

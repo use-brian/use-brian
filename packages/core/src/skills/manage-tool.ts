@@ -31,8 +31,8 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '../tools/types.js'
-import { toolFailure } from '../tools/tool-failure.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
+import { toolFailure } from '@use-brian/agent-runtime/tools/tool-failure.js'
 import { extractPointers, type SkillFilePointerKind } from './loader.js'
 import { validateClassLevelName } from './class-name-validator.js'
 

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import type { DispatchEvent, TaskLifecycleEvent, WorkflowEventDispatcher } from '@use-brian/core'
+import type { DispatchEvent, WorkflowEventDispatcher } from '@use-brian/core/workflow/event-trigger.js'
+import type { TaskLifecycleEvent } from '@use-brian/core/workflow/task-event-trigger.js'
 import { setTaskEventDispatcher, publishTaskLifecycle } from '../task-event-fanout.js'
 
 const EVENT: TaskLifecycleEvent = {

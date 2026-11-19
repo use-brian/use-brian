@@ -5,7 +5,7 @@ import type {PoolClient} from 'pg'
 import express from 'express'
 import request from 'supertest'
 import {afterAll,beforeAll,describe,expect,it,vi} from 'vitest'
-import type {ExecutionContext} from '@use-brian/core'
+import type {ExecutionContext} from '@use-brian/agent-runtime/security/execution-context.js'
 const {createLocalFixture,cleanRuntimeEnvironment,assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 const boundary='8124_application_source_host_retirement.sql'
 const signatures=['application_prepare_source_setup(uuid,uuid,jsonb)','application_apply_source_setup(uuid,uuid)','application_scoped_grant_allowed_before_records(uuid,jsonb)']
@@ -142,7 +142,7 @@ describe.sequential('[COMP:api/source-service-binding] normal host retirement up
   expect((await db.getPool().query('SELECT proposal FROM application_source_setup_reviews WHERE id=$1',[consumedSetup])).rows[0].proposal.effectBinding).toBe('command_v1')
  })
  it('fails an actual pre-retirement bound workflow without dispatch or model fallback despite advertised callbacks',async()=>{
-  const {configureConnectorSourceRuntimeFactory}=await import('../source-runtime.js'),{createDbWorkflowRunStore,createDbWorkflowStore}=await import('../../db/workflow-store.js'),{resolveWorkflowRunScope}=await import('../../context-scope/workflow-authority.js'),{buildWorkflowToolRegistry}=await import('../../workflow/mcp-bridge.js'),{advanceWorkflowRun}=await import('@use-brian/core')
+  const {configureConnectorSourceRuntimeFactory}=await import('../source-runtime.js'),{createDbWorkflowRunStore,createDbWorkflowStore}=await import('../../db/workflow-store.js'),{resolveWorkflowRunScope}=await import('../../context-scope/workflow-authority.js'),{buildWorkflowToolRegistry}=await import('../../workflow/mcp-bridge.js'),{advanceWorkflowRun}=await import('@use-brian/core/workflow/executor.js')
   const effect=vi.fn(),reconcile=vi.fn(),model=vi.fn(async()=>{throw new Error('No model fallback')})
   configureConnectorSourceRuntimeFactory(async(input:any)=>{const value=await x.factory(input);return value?{...value,effectBinding:'command_v1',effect,reconcile}:null},{instances:x.instances})
   try{
@@ -165,7 +165,7 @@ describe.sequential('[COMP:api/source-service-binding] normal host retirement up
   const fresh=await command({kind:'credential.review',appId,input:{name:'Fictional denied key',kind:'service',serviceUserId:service,grantIds:[externalGrant],expiresAt:new Date(Date.now()+1800_000).toISOString()}});expect(fresh.canIssue).toBe(false)
   expect((await db.getPool().query('SELECT to_jsonb(c) AS value FROM application_api_credentials c WHERE id=$1',[key.credentialId])).rows[0].value).toEqual(credentialState)
   expect((await db.getPool().query('SELECT to_jsonb(b) AS value FROM source_service_bindings b WHERE id=$1',[binding])).rows[0].value).toEqual(bindingState)
-  const {resolveSourceServiceExecution}=await import('../source-service-binding.js'),{ContextScopeAccumulator}=await import('@use-brian/core');const currentExecution=await resolveSourceServiceExecution(binding)
+  const {resolveSourceServiceExecution}=await import('../source-service-binding.js'),{ContextScopeAccumulator}=await import('@use-brian/agent-runtime/security/context-scope.js');const currentExecution=await resolveSourceServiceExecution(binding)
   const credentials=await x.instances.getAuthCredentialsSystem(setup.instanceId),readRuntime=await x.factory({workspaceId:x.f.workspaceId,instanceId:setup.instanceId,execution:currentExecution,accumulator:new ContextScopeAccumulator(),headers:{Authorization:'Bearer '+credentials.token}})
   expect(JSON.stringify(await readRuntime.read('readRecord',{id:'record-1',fields:['description']}))).toContain('Fictional released fact')
   const {createSourceAccessClient}=await import('../source-access.js'),{getSharedSourceDeployment}=await import('../source-runtime.js'),deployment=getSharedSourceDeployment()!

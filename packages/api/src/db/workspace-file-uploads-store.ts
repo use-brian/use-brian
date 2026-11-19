@@ -12,14 +12,15 @@ import { readAdmissionPolicy } from '../workspace-access/admission-policy-read.j
  */
 
 import { query, queryWithRLS, getAppPool, applyRLSGucs, rollbackAndRelease } from './client.js'
-import type { AccessContext, ResourceScope } from '@use-brian/core'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import type { ResourceScope } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { admitFileCreate } from '../workspace-access/file-create-admission.js'
 import { assertExecutionResourceScope } from './access-predicate.js'
 
 export type WorkspaceFileUploadStatus = 'pending' | 'assembling' | 'completed' | 'aborted'
 
-export type FileTransferBinding = { sessionId?: string; parent?: import('@use-brian/core').WorkspaceCredentialDelegation;
-  derivation?: import('@use-brian/core').DerivedWriteEvidence; sha256?: string }
+export type FileTransferBinding = { sessionId?: string; parent?: import('@use-brian/agent-runtime/security/workspace-delegation.js').WorkspaceCredentialDelegation;
+  derivation?: import('@use-brian/agent-runtime/security/derived-scope.js').DerivedWriteEvidence; sha256?: string }
 export type WorkspaceFileUpload = {
   transferBinding?: FileTransferBinding | null
   admissionBinding?: ResourceScope

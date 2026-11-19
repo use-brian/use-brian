@@ -1,6 +1,6 @@
 import { expect, vi } from 'vitest'
 import type { IncomingMessageEventInput } from '../../message-events.js'
-import { matchesEvent } from '../../../../core/src/workflow/event-trigger.js'
+import { matchesEvent } from '@use-brian/core/workflow/event-trigger.js'
 
 /** Check the actual workflow predicate, not just the producer's boolean mention gate. */
 export async function expectMentionMatches(input: IncomingMessageEventInput, expected: string[]) {

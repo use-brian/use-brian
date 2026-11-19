@@ -1,5 +1,8 @@
 import { z } from 'zod'
-import { DerivedScopeError,bindScopeSources,boundScopeSources,type EpisodicStore,type EpisodicMemoryRecord,type SessionContextAuthority } from '@use-brian/core'
+import type { EpisodicStore, EpisodicMemoryRecord } from '@use-brian/core/memory/episodic-types.js'
+import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
+import { DerivedScopeError } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { readSessionContextRevisions,writeSessionContextRevision,mutateSessionContextParents,type SessionContextRevision } from './session-context-revisions.js'
 export type EpisodicMemoryRow = EpisodicMemoryRecord
 const payload=z.object({topicLabel:z.string().min(1),summary:z.string().min(1),messageSpan:z.object({

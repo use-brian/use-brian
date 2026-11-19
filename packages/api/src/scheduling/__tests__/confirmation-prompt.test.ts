@@ -25,7 +25,7 @@ vi.mock('@use-brian/channels', async (importOriginal) => ({
 vi.mock('../../feishu/client.js', () => ({ createFeishuApi: vi.fn(() => ({})) }))
 
 import { createCustomAdapter, createFeishuAdapter, createSlackAdapter, createTelegramAdapter, SlackApiError } from '@use-brian/channels'
-import type { ToolConfirmationRequest } from '@use-brian/core'
+import type { ToolConfirmationRequest } from '@use-brian/agent-runtime/mcp/types.js'
 
 import { resolveTelegramBotToken, sendConfirmationPrompt } from '../confirmation-prompt.js'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'

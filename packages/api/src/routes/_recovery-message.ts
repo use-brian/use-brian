@@ -38,8 +38,8 @@
  * See `docs/architecture/engine/query-loop.md` → "Recovery message".
  */
 
-import type { ContentBlock, LLMProvider, TokenUsage } from '@use-brian/core'
-import { collectStream } from '@use-brian/core'
+import type { ContentBlock, LLMProvider, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
 
 /** The minimum buffered-turn shape this helper consumes. */
 export type RecoveryPendingTurn = {

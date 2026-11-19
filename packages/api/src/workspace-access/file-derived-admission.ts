@@ -1,5 +1,7 @@
 import type { PoolClient } from 'pg'
-import { DerivedScopeError, deriveResourceScope, resourceScopeKey, type ScopeSource, type AccessContext, type DerivedWriteEvidence, type WorkspaceFileCreateInput } from '@use-brian/core'
+import type { WorkspaceFileCreateInput } from '@use-brian/core/workspace-files/types.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import { DerivedScopeError, deriveResourceScope, resourceScopeKey, type ScopeSource, type DerivedWriteEvidence } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { validateDerivedEntityInputs } from '../db/derived-scope-store.js'
 import { assertExecutionResourceScope } from '../db/access-predicate.js'
 import { readAdmissionPolicy, usesClassicModeAdmission } from './admission-policy-read.js'

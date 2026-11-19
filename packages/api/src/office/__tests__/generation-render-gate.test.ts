@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
-import { convertToPdfWithLibreOffice, type OfficeGenerationFitPolicy } from '@use-brian/core'
+import { convertToPdfWithLibreOffice } from '@use-brian/core/files/libreoffice.js'
+import type { OfficeGenerationFitPolicy } from '@use-brian/core/office/generation/pipeline.js'
 import { generateAssistantOfficeCommands, officeRevisionFitRepairScope } from '../command-revision.js'
 import { createOfficeGenerationWorker } from '../generation-worker.js'
 import { generateDocumentFromTemplate } from '../document-generation.js'
@@ -9,7 +10,10 @@ import { validateOfficeCandidateRendering, validateOfficeInternalCandidateRender
 import { documentSnapshot, completeSpreadsheetSnapshot, templateBundle, resolveFixtureResource, id } from '../../../../core/src/office/__tests__/fixtures.js'
 import { minimalPdf } from '../../../../core/src/files/__tests__/pdf-fixture.js'
 
-vi.mock('@use-brian/core', async importOriginal => ({ ...await importOriginal<typeof import('@use-brian/core')>(), convertToPdfWithLibreOffice: vi.fn() }))
+vi.mock('@use-brian/core/files/libreoffice.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@use-brian/core/files/libreoffice.js')>()),
+  convertToPdfWithLibreOffice: vi.fn(),
+}))
 const converter = vi.mocked(convertToPdfWithLibreOffice)
 const provider = (value: unknown) => ({ async *stream() {
   yield { type: 'message_start', model: 'test' }

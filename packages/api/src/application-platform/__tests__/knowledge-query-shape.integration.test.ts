@@ -1,6 +1,6 @@
 import {afterAll,afterEach,beforeAll,beforeEach,describe,expect,it} from 'vitest'
 import type {PoolClient} from 'pg'
-import {type AccessContext} from '@use-brian/core'
+import type {AccessContext} from '@use-brian/agent-runtime/security/access-context.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {createDbKnowledgeStore} from '../../db/knowledge-store.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'

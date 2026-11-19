@@ -1,13 +1,13 @@
-import { registeredToolDefinitions } from '../../providers/tool-registration.js'
+import { registeredToolDefinitions } from '@use-brian/agent-runtime/providers/tool-registration.js'
 import { describe, expect, it, vi } from 'vitest'
 import { executionFixture, fixtureDecisionProvider } from '../../decisions/__tests__/execution-fixture.js'
 import type { DecisionRequest } from '../../decisions/types.js'
-import type { LLMProvider, ToolDefinition } from '../../providers/types.js'
+import type { LLMProvider, ToolDefinition } from '@use-brian/agent-runtime/providers/types.js'
 import { selectInitialToolSchemas } from '../tool-selection.js'
-import { createToolDiscovery } from '../tool-discovery.js'
-import { queryLoop } from '../query-loop.js'
-import { NOOP_TURN_LEDGER } from '../turn-ledger.js'
-import { buildTool } from '../../tools/types.js'
+import { createToolDiscovery } from '@use-brian/agent-runtime/engine/tool-discovery.js'
+import { queryLoop } from '../query-loop-defaults.js'
+import { NOOP_TURN_LEDGER } from '@use-brian/agent-runtime/engine/turn-ledger.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
 import { z } from 'zod'
 
 const llm: LLMProvider = { name: 'fixture', models: ['fixture'], toolSchemaMode: () => 'dynamic',
@@ -167,7 +167,7 @@ describe('[COMP:engine/tool-selection] bounded initial schema decisions', () => 
     for await (const _ of queryLoop({ provider, model: 'fixture', systemPrompt: 'Test', messages: [{ role: 'user', content: 'Ambient content excluded from selector' }],
       tools: new Map([[tool.name, tool]]), ledger: NOOP_TURN_LEDGER, deferToolSchemas: true,
       toolSelection: { runtime, llm: base.llm, ...(prepared ? { preselected: ['listTasks', 'notGranted'] } : {}), input: { messages: base.messages, assertInputAuthority: selectionGuard } }, context: {
-        userId: 'u', assistantId: 'a', sessionId: 's', appId: 'test', channelType: 'web', channelId: 'c', assertModelInputAuthority: mainGuard,
+        userId: 'u', assistantId: 'a', sessionId: 's', appId: 'test', channelType: 'web', channelId: 'c', admitModelInput: mainGuard,
         abortSignal: new AbortController().signal,
       } })) { /* drain */ }
     if (prepared) { expect(evaluate).not.toHaveBeenCalled(); expect(selectionGuard).not.toHaveBeenCalled() }

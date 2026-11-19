@@ -1,21 +1,23 @@
 import { PassThrough } from 'node:stream'
 import { describe, expect, it, vi } from 'vitest'
+import { queryLoop } from '@use-brian/core/engine/query-loop-defaults.js'
+import type { QueryEvent } from '@use-brian/agent-runtime/engine/query-loop.js'
+import { NOOP_TURN_LEDGER } from '@use-brian/agent-runtime/engine/turn-ledger.js'
+import type {
+  CodexAppServerProcess,
+} from '@use-brian/agent-runtime/providers/codex-app-server/process.js'
 import {
   CodexRpcClosedError,
   CodexRpcPeer,
-  type CodexAppServerProcess,
-  buildTool,
-  createRoutingProvider,
-  wrapProvider,
-  queryLoop,
-  NOOP_TURN_LEDGER,
-  type QueryEvent,
-} from '@use-brian/core'
+} from '@use-brian/agent-runtime/providers/codex-app-server/rpc.js'
+import { createRoutingProvider } from '@use-brian/agent-runtime/providers/routing.js'
+import { wrapProvider } from '@use-brian/agent-runtime/providers/wrappers.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
 import { MutableProviderAvailability } from '@use-brian/shared/model-registry'
 import { startCodexProviderManager } from '../codex-provider-manager.js'
 import { z } from 'zod'
-import { captureInputAdmissionProvider } from '../../../core/src/providers/input-authority.js'
-import { createLlmDecisionProvider } from '../../../core/src/decisions/adapters/llm.js'
+import { captureInputAdmissionProvider } from '@use-brian/agent-runtime/providers/input-authority.js'
+import { createLlmDecisionProvider } from '@use-brian/core/decisions/adapters/llm.js'
 import { decisionRequest } from '../../../core/src/decisions/__tests__/fixtures.js'
 
 type Frame = { id?: number | string; method?: string; params?: unknown; result?: unknown }
@@ -186,7 +188,7 @@ describe('[COMP:api/codex-provider] OSS Codex provider manager', () => {
           messages: [{ role: 'user', content: 'Reply Fixture done.' }], tools, deferToolSchemas: true, stateless,
           ledger: NOOP_TURN_LEDGER, context: { userId: 'fixture', assistantId: 'fixture', sessionId: 'fixture',
             appId: 'fixture', channelType: 'web', channelId: 'fixture', abortSignal: new AbortController().signal,
-            assertModelInputAuthority: assertInputAuthority },
+            admitModelInput: assertInputAuthority },
         })) events.push(event)
       })()
       const start = await waitForMethod(inference, 'thread/start')

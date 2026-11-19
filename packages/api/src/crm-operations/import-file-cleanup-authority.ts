@@ -1,6 +1,7 @@
 /** Current and saved departmental admission for reviewed cleanup. [COMP:crm/file-cleanup] */
 import type {PoolClient} from 'pg'
-import {CrmOperationsError,deriveResourceScope,resourceScopeKey,type CrmOperationsContext,type ResourceScope,type ScopeSource} from '@use-brian/core'
+import {CrmOperationsError, type CrmOperationsContext} from '@use-brian/core/crm/operations-types.js'
+import {deriveResourceScope, resourceScopeKey, type ResourceScope, type ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
 import {getPool} from '../db/client.js'
 import {assertAssociationSourceAuthority} from '../association/source-scope.js'
 

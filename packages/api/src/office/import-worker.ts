@@ -1,6 +1,9 @@
 /** Bounded DOCX/PPTX/XLSX worker: parse, canonicalize, preflight, then initialize collaboration. [COMP:api/office-generation] */
 import { randomUUID } from 'node:crypto'
-import { importOfficeDocument, importOfficePresentation, importOfficeSpreadsheet, type OfficeImportContext } from '@use-brian/core'
+import { importOfficeDocument } from '@use-brian/core/office/docx/index.js'
+import type { OfficeImportContext } from '@use-brian/core/office/package.js'
+import { importOfficePresentation } from '@use-brian/core/office/pptx/index.js'
+import { importOfficeSpreadsheet } from '@use-brian/core/office/xlsx/index.js'
 import type { OfficeArtifactSnapshot } from '@use-brian/office-model'
 import type { createOfficeGenerationStore } from '../db/office-generation.js'
 

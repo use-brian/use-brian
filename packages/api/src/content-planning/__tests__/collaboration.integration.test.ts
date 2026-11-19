@@ -2,22 +2,34 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { FeedCommand, FeedCommandRequest, FeedEdit } from '@use-brian/shared'
 import { feedParagraph, projectFeed, sliceFeedInline } from '@use-brian/doc-model'
-import { getPool, queryWithRLS } from '../../db/client.js'
+import express from 'express'
+import request from 'supertest'
+import { getAppPool, getPool, queryWithRLS } from '../../db/client.js'
 import { executeFeedCommands, getFeedCollaboration, getFeedThreadMessages, type FeedActor, type StructuredFeedContent } from '../../db/feed-collaboration-store.js'
 import { postWorkingCopiesStore, type PostWorkingContent } from '../../db/post-working-copies.js'
+import { conversationAnchorWriteAdmissionActive, initializeConversationVisibility } from '../../db/conversation-visibility.js'
+import { authSessionStore } from '../../db/auth-session-store.js'
+import { createTokens } from '../../auth/jwt.js'
+import { requireAuth } from '../../auth/middleware.js'
+import { feedCollaborationRoutes } from '../../routes/feed-collaboration.js'
+import { postWorkingCopiesRoutes } from '../../routes/post-working-copies.js'
 
 // Deliberately no skip: this is the phase barrier, not a mocked substitute.
 const url = new URL(process.env.DATABASE_URL ?? 'postgresql://invalid/absent')
-if (!['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) || url.pathname !== '/feed_draft_collaboration_acceptance') throw new Error('Feed integration requires its isolated loopback acceptance database')
+const marker = process.env.BRIAN_ASSURANCE_FIXTURE ? await (await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)).assertLocalFixture() : null
+const databaseName: string = marker?.database ?? 'feed_draft_collaboration_acceptance'
+if (!['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) || url.pathname !== `/${databaseName}`) throw new Error('Feed integration requires its isolated loopback acceptance database')
 const pool = getPool(); const createdWorkspaces: string[] = []; const users: string[] = []
 beforeAll(async () => {
   const row = (await pool.query('SELECT inet_server_addr()::text AS address,current_database() AS name')).rows[0]
   expect(['127.0.0.1/32', '127.0.0.1', '::1/128', '::1']).toContain(row.address)
-  expect(row.name).toBe('feed_draft_collaboration_acceptance')
+  expect(row.name).toBe(databaseName)
+  await initializeConversationVisibility()
 })
 afterAll(async () => {
   for (const id of createdWorkspaces) await pool.query('DELETE FROM workspaces WHERE id=$1', [id])
   for (const id of users) await pool.query('DELETE FROM users WHERE id=$1', [id])
+  await getAppPool().end()
   await pool.end()
 })
 async function fixture(text = 'First paragraph.\n\nThe same phrase.\n\nThe same phrase.') {
@@ -218,13 +230,65 @@ describe('[COMP:feed/draft-review] real database review lifecycle', () => {
   })
 })
 describe('[COMP:feed/draft-comments] PostgreSQL command and anchor barrier', () => {
+  it('serves and appends the exact admitted discussion through authenticated Feed HTTP', async () => {
+    expect(conversationAnchorWriteAdmissionActive()).toBe(true)
+    const f = await fixture(); await f.upgrade()
+    const secret = 'fictional-feed-record-fixture-signing-key'
+    const bearer = async (userId: string) => {
+      const device = (await authSessionStore.create(userId,{deviceLabel:'Feed discussion fixture',userAgent:null,ipAddress:null}))!
+      return `Bearer ${createTokens(userId,secret,{id:device.id,authVersion:device.authVersion}).accessToken}`
+    }
+    const [owner,member] = await Promise.all([bearer(f.actor.userId),bearer(f.other.userId)])
+    const app = express(); app.use(express.json()); app.use('/api/distribution',requireAuth(secret),feedCollaborationRoutes(),postWorkingCopiesRoutes())
+    const path = `/api/distribution/${f.actor.assistantId}/draft-sessions/${f.actor.sessionId}`, threadId = randomUUID()
+    const command = (authorization: string, input: FeedCommand) => request(app).post(`${path}/commands`).set('Authorization',authorization)
+      .send({mutationId:randomUUID(),expectedRevision:2,commands:[input]})
+    await command(owner,{kind:'comment',threadId,target:{kind:'post'},text:'A protected discussion.'}).expect(200)
+    await command(member,{kind:'reply',threadId,text:'A current participant replied.'}).expect(200)
+    const transcript = (await getFeedCollaboration(f.actor)).threads[0]!.transcriptSessionId
+    const history = () => request(app).get(`${path}/threads/${threadId}/messages`).set('Authorization',member)
+    const received = await history().expect(200)
+    expect(received.body.messages.map((m: {senderUserId:string}) => m.senderUserId)).toEqual([f.actor.userId,f.other.userId])
+    expect(received.text).toContain('A current participant replied.')
+    const stamps = await pool.query(`SELECT m.scope_version::int version,m.sensitivity,q.reason FROM session_messages m
+      LEFT JOIN conversation_message_quarantine q ON q.message_id=m.id WHERE m.session_id=$1 ORDER BY sequence_num`,[transcript])
+    expect(stamps.rows).toEqual([{version:1,sensitivity:'public',reason:null},{version:1,sensitivity:'public',reason:null}])
+    const appendRaw = `INSERT INTO public.session_messages(session_id,role,content,sequence_num,sender_user_id)
+      VALUES($1,'user',$2,$3,$4)`
+    const legacyText = JSON.stringify([{type:'text',text:'An old typed Feed comment.'}])
+    await expect(queryWithRLS(f.other.userId,appendRaw,[transcript,legacyText,3,f.other.userId])).rejects.toMatchObject({code:'42501'})
+    // Recover known old owner-written Feed text. Unknown payloads for the same
+    // transcript are absent even when stored beside legitimate history.
+    await pool.query(appendRaw,[transcript,legacyText,3,f.actor.userId])
+    await pool.query(appendRaw,[transcript,JSON.stringify([{type:'text',text:'RAW_EXTRA_FIELD',secret:true}]),4,f.actor.userId])
+    const recovered = await history().expect(200)
+    expect(recovered.text).toContain('An old typed Feed comment.')
+    expect(recovered.text).not.toContain('RAW_EXTRA_FIELD')
+    const planning = createContentPlanningStore()
+    expect((await planning.listSessions({assistantId:f.actor.assistantId,userId:f.other.userId}))[0]?.id).toBe(f.actor.sessionId)
+    const draftPath = `/api/distribution/${f.actor.assistantId}/post-working-copies/${f.actor.sessionId}`
+    expect((await request(app).get(draftPath).set('Authorization',member).expect(200)).body.copy.content.text).toBe(f.content.text)
+    await pool.query('UPDATE public.sessions SET recording_privacy_held=true WHERE id=$1',[transcript])
+    const refused = await history().expect(404)
+    expect(refused.text).not.toContain('A protected discussion.')
+    const snapshot = await request(app).get(`${path}/collaboration`).set('Authorization',member).expect(200)
+    expect(snapshot.body.threads).toEqual([])
+    await command(member,{kind:'reply',threadId,text:'Must refuse after hold.'}).expect(404)
+    expect((await pool.query('SELECT sequence_num FROM session_messages WHERE session_id=$1',[transcript])).rowCount).toBe(4)
+    await pool.query('UPDATE public.sessions SET recording_privacy_held=true WHERE id=$1',[f.actor.sessionId])
+    expect((await request(app).get(draftPath).set('Authorization',member).expect(200)).body.copy).toBeNull()
+    expect(await planning.listSessions({assistantId:f.actor.assistantId,userId:f.other.userId})).toEqual([])
+  })
+
   it('scenarios 2 and 9: upgrades losslessly and stores the legacy snapshot without stripping old-client retries', async () => {
-    const f = await fixture('  **Bold** 中文\n\n[unfinished gap]\n'); const structured = await f.upgrade()
+    const f = await fixture('  **Bold** 中文\n\n[unfinished gap]\n')
+    const beforeUpgrade = await postWorkingCopiesStore.get(f.actor.assistantId,f.actor.sessionId,f.actor.userId)
+    const structured = await f.upgrade()
     expect(projectFeed(structured.composition).text).toBe(f.content.text)
     const snapshot = await getFeedCollaboration(f.actor)
     expect(snapshot.copy!.revision).toBe(2)
     const old = (await pool.query('SELECT content FROM feed_post_revisions WHERE session_id=$1 AND revision=1', [f.actor.sessionId])).rows[0]
-    expect(old.content).toEqual(f.content)
+    expect(old.content).toEqual(beforeUpgrade!.content)
     await expect(postWorkingCopiesStore.put(f.actor.assistantId, f.actor.sessionId, f.actor.userId, { revision: 2, mutationId: snapshot.copy!.mutationId, content: f.content })).rejects.toMatchObject({ status: 409 })
     expect((await getFeedCollaboration(f.actor)).copy!.content).toEqual(structured)
     await expect(pool.query('UPDATE feed_post_working_copies SET content=$2 WHERE session_id=$1', [f.actor.sessionId, JSON.stringify(f.content)])).rejects.toThrow('typed commands')
@@ -239,8 +303,8 @@ describe('[COMP:feed/draft-comments] PostgreSQL command and anchor barrier', () 
     const messages = await getFeedThreadMessages(f.actor, threadId)
     expect(messages.map(m => m.senderUserId)).toEqual([f.actor.userId, f.other.userId])
     const before = await getFeedCollaboration(f.actor)
-    const session = (await pool.query('SELECT mode,channel_type FROM sessions WHERE id=$1', [before.threads[0]!.transcriptSessionId])).rows[0]
-    expect(session).toEqual({ mode: null, channel_type: 'feed_thread' })
+    const session = (await pool.query('SELECT mode,channel_type,anchor_kind FROM sessions WHERE id=$1', [before.threads[0]!.transcriptSessionId])).rows[0]
+    expect(session).toEqual({ mode: null, channel_type: 'web', anchor_kind: 'feed_thread' })
     await f.command([{ kind: 'edit', edits: [{ kind: 'moveBlock', segmentId: segment.id, blockId: segment.content[2]!.attrs.id, afterId: null }] }], 2)
     expect((await getFeedCollaboration(f.actor)).threads[0]!.anchor).toEqual(before.threads[0]!.anchor)
   })
@@ -332,7 +396,7 @@ describe('[COMP:feed/editorial-decisions] Immutable editorial lineage', () => {
 
 import { resolveFeedTurnContext } from '../collaboration-service.js'
 import { buildFeedCollaborationTools } from '../collaboration-tools.js'
-import type { ToolContext } from '@use-brian/core'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 describe('[COMP:feed/draft-suggestions] live selection and proposal lineage', () => {
   it('scenario 11: every reused whole-draft index retains a distinct complete immutable source', async () => {
     const f = await fixture('Original body.'); await f.upgrade()
@@ -381,8 +445,6 @@ describe('[COMP:feed/draft-suggestions] live selection and proposal lineage', ()
   })
 })
 
-import express from 'express'
-import { feedCollaborationRoutes } from '../../routes/feed-collaboration.js'
 describe('[COMP:feed/draft-comments] authenticated HTTP command boundary', () => {
   it('scenarios 3 and 7: HTTP commands share real receipts, authority, conflicts and transcript storage', async () => {
     const f = await fixture(); const content = await f.upgrade(); const foreign = await fixture(); await foreign.upgrade()
@@ -663,7 +725,7 @@ import { createFilesApi, createSingletonFilesClientResolver } from '../../files/
 import { createLocalFilesClient } from '../../files/local-files-client.js'
 import { createDbWorkspaceFilesStore } from '../../db/workspace-files-store.js'
 import { createWorkspaceAuditStore } from '../../db/workspace-audit-store.js'
-import { aiStudioTransport } from '@use-brian/core'
+import { aiStudioTransport } from '@use-brian/agent-runtime/providers/google-transport.js'
 import { exportFeedArticle, readFeedSaveProjection, assertFeedSavedReady } from '../projection.js'
 import { createContentPlanningStore } from '../../db/content-planning-store.js'
 import JSZip from 'jszip'
@@ -730,7 +792,10 @@ describe('[COMP:feed/draft-generation] durable image and output integration', ()
       expect(archive.equals(await exportFeedArticle(f.actor, snapshot.copy!.revision, false, files))).toBe(true)
       const zip = await JSZip.loadAsync(archive); expect((await zip.file(`assets/${row.id}.png`)!.async('nodebuffer')).toString('base64')).toBe(imageBytes)
       const html = await zip.file('article.html')!.async('string'); expect(html.indexOf('Opening paragraph')).toBeLessThan(html.indexOf('<img')); expect(html).not.toContain('Private direction'); expect(html).not.toContain('http://'); expect(html).not.toContain('token=')
-      const saved = await readFeedSaveProjection(f.actor, snapshot.copy!.revision, 'threads'); expect(await assertFeedSavedReady(f.actor, saved!.canonical, 'threads')).not.toBeNull()
+      const saved = await readFeedSaveProjection(f.actor, snapshot.copy!.revision, 'threads')
+      await expect(assertFeedSavedReady(f.actor,saved!.canonical,'threads')).rejects.toMatchObject({code:'public_release_required'})
+      await f.command([{kind:'release',audience:'public'}],snapshot.copy!.revision)
+      expect(await assertFeedSavedReady(f.actor,saved!.canonical,'threads')).not.toBeNull()
       await f.command([{ kind: 'context', title: 'Revised title' }]); await expect(assertFeedSavedReady(f.actor, saved!.canonical, 'threads')).rejects.toMatchObject({ code: 'revision_conflict' })
     } finally { await rm(dir, { recursive: true, force: true }) }
   })

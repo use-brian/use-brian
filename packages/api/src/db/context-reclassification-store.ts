@@ -6,7 +6,7 @@
  * [COMP:brain/context-reclassification]
  */
 
-import { scopeGrantContains, type ScopeGrant } from '@use-brian/core'
+import { scopeGrantContains, type ScopeGrant } from '@use-brian/agent-runtime/security/context-scope.js'
 import {
   applyRLSGucs,
   getAppPool,

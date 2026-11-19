@@ -7,7 +7,11 @@ import request from 'supertest'
 import { once } from 'node:events'
 import { createApplicationClient, createFetchTransport } from '@use-brian/brian-app/application'
 import type { Pool,PoolClient } from 'pg'
-import { ContextScopeAccumulator, executionToolContext, boundScopeSources, type ApplicationModuleDefinition, type ScopeSource } from '@use-brian/core'
+import type { ApplicationModuleDefinition } from '@use-brian/core/application-platform/contracts.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { applicationQuerySchema, applicationResourceSchema, type ApplicationAccessGrant, type ApplicationGrantMaximum, type ApplicationJson } from '@use-brian/shared'
 import { getAppPool, getPool, queryWithRLS } from '../../db/client.js'
 import { consumeHomeAppBudget } from '../../db/home-apps-store.js'
@@ -34,7 +38,7 @@ import { ApplicationManagementService } from '../management.js'
 import { requireAuth } from '../../auth/middleware.js'
 import { authSessionStore } from '../../db/auth-session-store.js'
 import { createTokens } from '../../auth/jwt.js'
-import { assertSourceModelInputAuthority } from '../model-source-authority.js'
+import { admitModelInput } from '../../context-scope/admission.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -870,7 +874,7 @@ describe('[COMP:api/application-auth] database application projections and live 
     expect(await dispatcher.query(secondExecution,'records','field_snapshot',input)).toMatchObject({ held: false })
     const modelContext = { ...executionToolContext(secondExecution,{ appId: 'field-fixture' }),
       scopeAccumulator: new ContextScopeAccumulator({ sources: captured.sources as ScopeSource[] }) }
-    await expect(assertSourceModelInputAuthority(modelContext)).resolves.toBeUndefined()
+    await expect(admitModelInput(modelContext)).resolves.toBeUndefined()
     await expect(dispatcher.query(secondExecution,'records','field_capture',{ requiredFields: ['cost'] })).rejects.toMatchObject({ code: 'access_unavailable' })
     await pool.query("UPDATE application_access_grants SET read_fields='{}' WHERE id=$1", [first.grantId])
     await expect(dispatcher.query(firstExecution,'records','field_snapshot',input)).rejects.toThrow()

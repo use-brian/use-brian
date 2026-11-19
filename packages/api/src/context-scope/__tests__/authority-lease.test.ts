@@ -1,12 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { AccessCeiling } from '@use-brian/core'
+import type { AccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { createAuthorityLease, createSessionAuthorityLease, runWithAuthorityLease, assertCurrentAuthority, executeWithCurrentAuthority } from '../authority-lease.js'
 
 const nativeAuth=vi.hoisted(()=>({valid:true,seen:[] as unknown[]}))
-vi.mock('../../db/auth-session-store.js',()=>({authSessionStore:{validateAccess:async(claims:unknown)=>{nativeAuth.seen.push(structuredClone(claims));return nativeAuth.valid}}}))
 const liveSession = vi.hoisted(() => ({ row: null as Record<string, unknown> | null }))
-vi.mock('../../db/sessions.js', () => ({ findSessionAuthorityById: async () => liveSession.row }))
-vi.mock('../../db/users.js', () => ({ findAssistantById: async (id: string) => ({ id, workspaceId: 'workspace' }) }))
+vi.mock('../session-authority-facts.js', () => ({ readSessionAuthorityFacts: async (input: { assistantId: string; credential?: unknown }) => {
+  if (input.credential) nativeAuth.seen.push(structuredClone(input.credential))
+  return { session: liveSession.row, assistant: { id: input.assistantId, workspaceId: 'workspace' },
+    member: null, credentialCurrent: !input.credential || nativeAuth.valid }
+} }))
 // Each assistant's live ceiling is its own: a standard assistant sees only its rows.
 vi.mock('../resolve-turn-scope.js', () => ({
   resolveLiveAccessCeilingSystem: async ({ assistant,userId }: { assistant: { id: string };userId?:string }) =>
@@ -137,7 +139,7 @@ describe('[COMP:api/authority-lease] current authority at execution boundaries',
     it('keeps a construction-pinned policy callback sticky on session leases', async () => {
       liveSession.row = { ...base }
       let current = true
-      const lease = createSessionAuthorityLease({ starting: initial, session: base, policyCurrent: async () => current })
+      const lease = createSessionAuthorityLease({ starting: initial, session: base, policy: {isCurrent: async () => current, matches: () => current} })
       await expect(lease.assertCurrent()).resolves.toBeUndefined()
       current = false
       await expect(lease.assertCurrent()).rejects.toMatchObject({ reason: 'authority_changed' })
@@ -172,6 +174,18 @@ describe('[COMP:api/authority-lease] current authority at execution boundaries',
       await expect(lease.assertCurrent()).rejects.toMatchObject({ reason: 'authority_changed' })
     })
   })
+  it.each(['visibility','effectiveClearance','contextCompartments'] as const)('refuses a changed session %s instead of retaining the former audience',async field=>{
+    const session={id:'source-session',assistantId:'assistant',userId:'actor',contextGroupId:null,contextProjectId:null,
+      contextLockedAt:new Date('2026-10-07T00:00:00Z'),visibility:'personal',mode:null,effectiveClearance:'internal' as const,contextCompartments:['product']}
+    liveSession.row={...session}
+    const lease=createSessionAuthorityLease({starting:initial,session})
+    await lease.assertCurrent()
+    liveSession.row[field]={visibility:'workspace',mode:'research',effectiveClearance:'public',contextCompartments:[]}[field]
+    await expect(lease.assertCurrent()).rejects.toMatchObject({reason:'authority_changed'})
+    liveSession.row={...session}
+    await expect(lease.assertCurrent()).rejects.toMatchObject({reason:'authority_changed'})
+  })
+
   it('snapshots a detached locked session only when durable reconstruction is explicitly eligible', async () => {
     const session = { id: 'source-session', assistantId: 'assistant', userId: 'actor', contextGroupId: null,
       visibility: 'owner', mode: null, effectiveClearance: null, contextCompartments: [],

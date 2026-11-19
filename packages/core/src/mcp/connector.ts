@@ -5,13 +5,13 @@
  * as Use Brian Tool instances with policy enforcement.
  */
 
-import { createMcpInputSchema, mcpArgumentError } from './input-schema.js'
-import { policyBlockedToolResult } from '../engine/decline-copy.js'
+import { createMcpInputSchema, mcpArgumentError } from '@use-brian/agent-runtime/mcp/input-schema.js'
+import { policyBlockedToolResult } from '@use-brian/agent-runtime/engine/decline-copy.js'
 import { describeMcpToolError } from './errors.js'
-import { buildTool, type Tool } from '../tools/types.js'
-import { classifyTool, defaultPolicy } from './classifier.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
+import { classifyTool, defaultPolicy } from '@use-brian/agent-runtime/mcp/classifier.js'
 import { mcpResultToToolResult } from './tool-result.js'
-import type { McpSettingsStore, McpServerConfig, McpToolInfo } from './types.js'
+import type { McpSettingsStore, McpServerConfig, McpToolInfo } from '@use-brian/agent-runtime/mcp/types.js'
 
 /** Sanitize a string for use in LLM tool names (Gemini restriction). */
 function sanitizeToolName(raw: string): string {

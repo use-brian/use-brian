@@ -25,7 +25,7 @@
  * [COMP:doc/outline-tree]
  */
 
-import { estimateStringTokens } from '../compaction/compact.js'
+import { estimateStringTokens } from '@use-brian/agent-runtime/compaction/compact.js'
 import { buildOutline, renderOutlineEntryLine } from './outline.js'
 import type {
   Block,

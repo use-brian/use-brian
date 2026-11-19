@@ -27,16 +27,16 @@
 
 import { query, queryWithRLS } from './client.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
-import type { SkillContent, SkillMeta } from '@use-brian/core'
+import type { SkillContent, SkillMeta } from '@use-brian/core/skills/types.js'
 import {
-  bindScopeSource,
   SKILL_ACTIVATION_THRESHOLD,
   SKILL_USAGE_CONFIDENCE_INCREMENT,
   SKILL_USAGE_CONFIDENCE_CAP,
   bornConfidence,
   bornActivated,
   bornVerified,
-} from '@use-brian/core'
+} from '@use-brian/core/skills/governance.js'
+import { bindScopeSource } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { bindWorkspaceSkillRevision } from './skill-derived-store.js'
 
 // ── Inputs ─────────────────────────────────────────────────────────
@@ -107,7 +107,7 @@ export type ExpectedSkillRevision = Pick<WorkspaceSkill, 'name' | 'description' 
 
 /** Full row including every V2 column — used by curator + admin paths. */
 export type WorkspaceSkillRow = {
-  runtimeSource?: import('@use-brian/core').ScopeSource | null
+  runtimeSource?: import('@use-brian/agent-runtime/security/derived-scope.js').ScopeSource | null
   id: string
   workspace_id: string
   slug: string
@@ -330,12 +330,18 @@ function rowToWorkspaceSkill(row: WorkspaceSkillRow): WorkspaceSkill {
 // column. Kept centralised so column-shape changes only need touching here.
 const COLS_ALL = '*'
 // Capture the revision beside the body under the same RLS snapshot. This is a
-// read receipt, not permission to publish a derived resource.
+// read receipt, not permission to publish a derived resource. Only a current
+// member of the revision's workspace gets one: a non-member reading a
+// community-published skill gets the skill with runtimeSource NULL on every
+// pooled connection (8293 retired the default-true leg of the revision read).
+// NULLIF keeps an unset or reverted acting user from failing the uuid cast.
 const RUNTIME_SOURCE = `(SELECT jsonb_build_object(
   'resourceKind','workspace_skill_revision','resourceId',sr.id,'version',sr.scope_version::text,
   'workspaceId',sr.workspace_id,'userId',sr.user_id,'assistantId',sr.assistant_id,
   'sensitivity',sr.sensitivity,'compartments',sr.compartments,'projectIds',sr.project_ids)
-  FROM workspace_skill_scope_revisions sr WHERE sr.id=workspace_skills.scope_revision_id AND NOT sr.scope_held)`
+  FROM workspace_skill_scope_revisions sr WHERE sr.id=workspace_skills.scope_revision_id AND NOT sr.scope_held
+  AND EXISTS (SELECT 1 FROM workspace_members sm WHERE sm.workspace_id=sr.workspace_id
+    AND sm.user_id=NULLIF(current_setting('app.current_user_id',true),'')::uuid))`
 
 
 // ── Public store interface (V2 canonical) ──────────────────────────

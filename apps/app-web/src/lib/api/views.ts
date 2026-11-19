@@ -12,7 +12,7 @@ import { currentOfflineWriteAuthority, sameOfflineWriteAuthority, pinOfflineWrit
  * `@use-brian/core` — the core barrel pulls in `skills/loader` which
  * uses Node's `fs`, breaking client bundles. (The same constraint
  * drives `packages/views-renderer/src/types.ts` to import from
- * `@use-brian/core/dist/views/a2ui.js` directly.) The shapes here
+ * `@use-brian/core/views/a2ui.js` directly.) The shapes here
  * mirror the canonical types in `packages/core/src/views/blocks.ts`
  * and `packages/core/src/views/types.ts`; the Zod validators on the
  * server are the authoritative contract.

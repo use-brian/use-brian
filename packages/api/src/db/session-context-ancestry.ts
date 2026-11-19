@@ -1,6 +1,6 @@
 /** Metadata-only persistent obligations behind native references. [COMP:api/application-persistence] */
 import { z } from 'zod'
-import { DerivedScopeError,resourceScopeKey,type ScopeSource } from '@use-brian/core'
+import { DerivedScopeError, resourceScopeKey, type ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { getPool } from './client.js'
 import type { PoolClient } from 'pg'
 const metadata=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nullable(),assistantId:z.string().uuid().nullable(),

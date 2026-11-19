@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createComputerTools } from '../tools.js'
 import type { BrowserProvider, BrowserSnapshot } from '../types.js'
-import type { Tool, ToolContext } from '../../tools/types.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 function fixture() {
   let scan = 0

@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { Router } from 'express'
 import {officeMetadataRoute} from './office-metadata.js'
 import { z } from 'zod'
-import { inferOfficeTemplateRouting, officeTemplateRoutingDiagnostics } from '@use-brian/core'
+import { inferOfficeTemplateRouting, officeTemplateRoutingDiagnostics } from '@use-brian/core/office/templates/routing.js'
 import { OfficeTemplateRoutingDraftSchema, type OfficeArtifactSnapshot, type OfficeTemplateBundle, type PdfSnapshot } from '@use-brian/office-model'
 import type { OfficeArtifactRow } from '../db/office-artifacts.js'
 

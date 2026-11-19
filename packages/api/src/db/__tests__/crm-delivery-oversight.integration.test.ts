@@ -12,7 +12,12 @@ import { createPendingApprovalsStore } from '../pending-approvals-store.js'
 import { runWithAgentAccess } from '../agent-access-context.js'
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
-import { buildTool, createCrmDeliveryOversightTools, processEpisode, type Tool, type LLMProvider, type PipelineBEpisode, type CrmOperationsContext, type DeliveryProposal } from '@use-brian/core'
+import { createCrmDeliveryOversightTools } from '@use-brian/core/crm/delivery-oversight-tools.js'
+import type { DeliveryProposal } from '@use-brian/core/crm/delivery-oversight.js'
+import type { CrmOperationsContext } from '@use-brian/core/crm/operations-types.js'
+import { processEpisode, type PipelineBEpisode } from '@use-brian/core/ingest/pipeline-b.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { getPool, getAppPool, queryWithRLS } from '../client.js'
 import { createCrmDomainEventWorker, createDbCrmDomainEventOutboxStore } from '../../crm-operations/domain-event-worker.js'
 import { createCrmOperationsService } from '../../crm-operations/service.js'
@@ -69,11 +74,18 @@ describe('[COMP:api/crm-delivery-oversight] real source authority and lifecycle 
    (SELECT count(*) FROM crm_engagement_extensions WHERE workspace_id=$1)::int terms,
    (SELECT count(*) FROM scheduled_jobs WHERE assistant_id IN(SELECT id FROM assistants WHERE workspace_id=$1))::int reminders,
    (SELECT count(*) FROM session_messages WHERE workspace_id=$1)::int messages`,[f.workspaceId])).rows[0]
+  // The outbox is global and the worker leases a bounded batch. Deliver any
+  // backlog an earlier suite left in this fixture first, so the counted tick
+  // below can only lease this workspace's events.
+  const backlog=createCrmDomainEventWorker({store:createDbCrmDomainEventOutboxStore(),dispatcher:{dispatchStrict:async()=>{}},workerId:'fictional-backlog-worker'})
+  while(await backlog.tick()>0){/* drain */}
   const before=await count(), saved=await f.record(p.proposal,op),replay=await f.record(p.proposal,op)
   expect(replay).toMatchObject({duplicate:true,record:saved.record})
   let dispatches=0
   await createCrmDomainEventWorker({store:createDbCrmDomainEventOutboxStore(),dispatcher:{dispatchStrict:async()=>{dispatches++}},workerId:'fictional-delivery-worker'}).tick()
   expect(dispatches).toBe(0)
+  // The tick did lease and settle this workspace's projection event without dispatching it.
+  expect((await pool.query('SELECT status FROM crm_domain_event_outbox WHERE workspace_id=$1',[f.workspaceId])).rows).toEqual([{status:'delivered'}])
   expect(await count()).toEqual(before)
   const detail=await reads.get({userId:f.userId},f.workspaceId,saved.record.id as string)
   expect(detail).toMatchObject({commitment:{recognitionState:'recognised',taskIds:[],dueDate:'2026-10-20'},assessment:{coverage:'unobserved',outcome:'unknown',issue:null,nextAction:null}})

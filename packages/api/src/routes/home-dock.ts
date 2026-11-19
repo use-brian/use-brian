@@ -16,7 +16,8 @@
  */
 
 import { Router, type Request, type Response } from 'express'
-import { mergeHomeDock, type HomeDockStore, type HomeSignals, type ResolvedDock } from '@use-brian/core'
+import { mergeHomeDock, type ResolvedDock } from '@use-brian/core/home/merge.js'
+import type { HomeDockStore, HomeSignals } from '@use-brian/core/home/types.js'
 
 export type HomeDockRoutesDeps = {
   homeDockStore: HomeDockStore

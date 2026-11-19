@@ -1,11 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
-import {
-  calculateCost, classifyResearchIntent, classifyTopic, createOpenAiDecisionProvider,
-  decisionUsageModelId, type DecisionEvaluationProfile, type DecisionRequest,
-  type DecisionResponse, type LLMProvider,
-} from '@use-brian/core'
+import { createOpenAiDecisionProvider } from '@use-brian/core/decisions/adapters/openai.js'
+import type { DecisionEvaluationProfile } from '@use-brian/core/decisions/hydra.js'
+import type { DecisionRequest, DecisionResponse } from '@use-brian/core/decisions/types.js'
+import { decisionUsageModelId } from '@use-brian/core/decisions/usage.js'
+import { classifyTopic } from '@use-brian/core/memory/topic-classifier.js'
+import { classifyResearchIntent } from '@use-brian/core/workers/research-classifier.js'
+import { calculateCost } from '@use-brian/agent-runtime/billing/cost-tracker.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
 import { isDecisionModelRow, modelRates, registryRow } from '@use-brian/shared/model-registry'
 import {
   createDecisionAttemptUsageRecorder, createDecisionRuntime,

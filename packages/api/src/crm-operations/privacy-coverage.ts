@@ -108,8 +108,30 @@ const COMMERCIAL_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
   commercialPrivacyEntry('crm_operation_receipts', ['workspace_id','operation_id','command_kind','request_fingerprint','actor_kind','actor_id','result','created_at'], ['request_fingerprint'], 't.operation_id'),
 ]
 
+/** Client delivery oversight (migration 767): evidence shells attached to companies, deals and members. */
+const deliveryOversightPrivacyEntry = (
+  domain: string,
+  columns: readonly string[],
+  excludedColumns: readonly string[],
+  orderBy = 't.id',
+): CrmPrivacyCoverageEntry => ({
+  domain, columns, excludedColumns, workspaceWhere: 'true', subjectWhere: null,
+  subjectRedactions: {}, transforms: {}, orderBy,
+  reason: 'Delivery evidence shells keep native ids, links, states and actors. Quotes, outcomes and statements repeat native Chat, Episode, File or governed-term content and stay with that source; the saved audience floor and replay hash are internal. The projection attaches to companies, deals and members, never to a person subject.',
+})
+
+const DELIVERY_SCOPE_FLOOR = ['user_id','assistant_id','sensitivity','compartments','project_ids'] as const
+const DELIVERY_OVERSIGHT_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
+  deliveryOversightPrivacyEntry('crm_delivery_commitments', ['id','workspace_id','candidate_key','source_kind','source_id','source_revision','source_selector','outcome','due_date','company_id','deal_id','task_ids','goal_ids','agreeing_user_id','recognition_state','recognition_reason','origin_chat_id',...DELIVERY_SCOPE_FLOOR,'request_hash','version','created_at','updated_at'],
+    ['source_selector','outcome',...DELIVERY_SCOPE_FLOOR,'request_hash']),
+  deliveryOversightPrivacyEntry('crm_delivery_observations', ['id','workspace_id','commitment_id','source_kind','source_id','source_revision','source_selector','kind','claim','statement','work_id','reporter_user_id','occurred_at','read_at','withdrawn_at',...DELIVERY_SCOPE_FLOOR,'created_at'],
+    ['source_selector','statement',...DELIVERY_SCOPE_FLOOR]),
+  deliveryOversightPrivacyEntry('crm_delivery_history', ['id','workspace_id','commitment_id','version','operation_id','action','actor_kind','actor_id','reason','source_revision','created_at'], ['reason']),
+]
+
 export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
   ...COMMERCIAL_PRIVACY_COVERAGE,
+  ...DELIVERY_OVERSIGHT_PRIVACY_COVERAGE,
   {"domain": "association_membership_catalogues", "columns": ["workspace_id", "draft_version", "draft", "published_revision", "observations", "updated_at"], "excludedColumns": ["workspace_id", "draft_version", "draft", "published_revision", "observations", "updated_at"], "workspaceWhere": "false", "subjectWhere": null, "subjectRedactions": {}, "transforms": {}, "orderBy": "t.workspace_id", "reason": "Website draft and publication documents have no canonical CRM subject attribution; use the separate website content facility."},
   {"domain": "association_membership_catalogue_revisions", "columns": ["workspace_id", "revision", "document", "actor", "published_at"], "excludedColumns": ["workspace_id", "revision", "document", "actor", "published_at"], "workspaceWhere": "false", "subjectWhere": null, "subjectRedactions": {}, "transforms": {}, "orderBy": "t.workspace_id,t.revision", "reason": "Website draft and publication documents have no canonical CRM subject attribution; use the separate website content facility."},
   {"domain": "association_programme_catalogues", "columns": ["workspace_id", "draft_version", "draft", "published_revision", "observations", "updated_at"], "excludedColumns": ["workspace_id", "draft_version", "draft", "published_revision", "observations", "updated_at"], "workspaceWhere": "false", "subjectWhere": null, "subjectRedactions": {}, "transforms": {}, "orderBy": "t.workspace_id", "reason": "Website draft and publication documents have no canonical CRM subject attribution; use the separate website content facility."},
@@ -2060,11 +2082,14 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
       "privacy_erased",
       "privacy_erased_at", "execution_authority","scheduled_job_id","scheduled_job_claim_id","scheduled_job_snapshot",
       "derivation_source_version","derivation_lineage_revision","task_event_evidence","task_event_valid_until",
-      "knowledge_event_evidence","page_event_evidence","primitive_event_metadata_verified"],
+      "knowledge_event_evidence","page_event_evidence","primitive_event_metadata_verified",
+      "routine_intake_context","invocation_authority"],
+    // Frozen routine intake (3946) and caller authority (8224) are evidence, not run content.
     "excludedColumns": [
       "webhook_body_sha256", "source_goal_id", "execution_authority","scheduled_job_id","scheduled_job_claim_id","scheduled_job_snapshot",
       "derivation_source_version","derivation_lineage_revision","task_event_evidence","task_event_valid_until",
-      "knowledge_event_evidence","page_event_evidence","primitive_event_metadata_verified"],
+      "knowledge_event_evidence","page_event_evidence","primitive_event_metadata_verified",
+      "routine_intake_context","invocation_authority"],
     "workspaceWhere": "t.id IN(SELECT id FROM pg_temp.crm_privacy_copy_workflows)",
     "subjectWhere": "t.id IN(SELECT id FROM pg_temp.crm_privacy_copy_workflows)",
     "subjectRedactions": {

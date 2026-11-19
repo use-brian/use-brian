@@ -3,7 +3,7 @@
  * [COMP:api/crm-config-catalog]
  */
 import { z } from 'zod'
-import { CrmPageQuerySchema } from '@use-brian/core'
+import { CrmPageQuerySchema } from '@use-brian/core/crm/pagination.js'
 import { query } from './client.js'
 import { queryCrmPage } from '../crm-operations/pagination.js'
 

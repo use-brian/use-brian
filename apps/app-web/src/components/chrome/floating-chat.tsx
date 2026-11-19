@@ -1,4 +1,5 @@
 "use client";
+import { ChatRetainedHistoryNotice } from "@/components/chat-app/chat-retained-history-notice";
 import { useDurableDraft } from "@/lib/offline/use-durable-draft";
 
 
@@ -36,39 +37,39 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
  *   │ composer: textarea + Send (Stop while streaming)       │
  *   └────────────────────────────────────────────────────────┘
  *
- * SSE event coverage matches apps/web's ChatExperience (minus
- * `title_update` + `research_quota*` which have no doc surface). Each
- * event funnels through a single `onEvent` switch; long-lived per-turn
- * state lives in refs so callbacks can read the latest without re-binding
- * deps.
+ *
+ * The dock is a PRESENTATION of the shared conversation controller (M5,
+ * `[COMP:app-web/conversation-controller]`): every FloatingChat instance of
+ * this renderer (the desktop dock, the mobile drawer, Feed hosts) attaches to
+ * the same conversation-registry entry for the doc thread through
+ * `useConversation` with the dock profile (`DOCK_TURN_TRANSCRIPT`). The
+ * controller owns the direct stream, the follow/re-attach stream, Stop,
+ * approvals, pending input, mid-turn queue and the per-turn transcript; the
+ * dock keeps the page target and `docViewId`, the surface effects of its own
+ * turns (`onSurfaceEffect`, dispatched once), resize, the collapsed pill, the
+ * `ChatActivity` mirror, recorder ownership and seeds. Notice codes map to
+ * this dock's existing copy. See docs/architecture/features/doc.md →
+ * "One conversation, every dock instance" and chat-app.md → "Shared client
+ * controller ownership".
  *
  * Retry / Copy buttons hover-reveal on every assistant bubble. Retry
- * re-POSTs the most recent user message and tells the server to truncate
- * the prior assistant row (`truncateFromMessageId`) so the response
+ * re-sends the user message and tells the server to truncate from it
+ * (`truncateFromMessageId`, the controller's `edit`) so the response
  * replaces the old one cleanly.
  *
- * Tool-confirmation flow: server emits `tool_confirmation_required` with
- * `{toolCallId, toolName, displayName, input, description, displayLines}`.
- * We render an inline approval card (`ChatConfirmationCard`,
- * chat-confirmation-card.tsx — recognised tools show a rich per-tool
- * preview parsed from `input`, e.g. an email send as a proofreadable
- * email). Approve/Deny POSTs `/api/chat/confirm` and the server resumes
- * the stream.
+ * Tool confirmations render as inline approval cards
+ * (`ChatConfirmationCard`, chat-confirmation-card.tsx: recognised tools show
+ * a rich per-tool preview parsed from `input`); Approve/Deny goes through the
+ * controller's one `respondConfirmation` path (live card or restored card,
+ * 403 shown as `confirmNotAllowed`).
  *
- * askQuestion suspend-resume: when the assistant asks a clarifying
- * question the engine suspends the session (persists a `kind='question'`
- * row, emits `awaiting_approval`, exits without `turn_complete`). We
- * suppress the generic approve/deny card for `askQuestion`, gate the
- * composer, and render `<PendingQuestionPanel>` so the user answers
- * (POST /answer) or cancels (POST /cancel). `GET /pending` on reload
- * restores the panel; after answer/cancel we poll session messages for
- * the resumed reply. See docs/architecture/engine/askquestion-suspend-resume.md.
- *
- * view_payload bridge: chat-ui's `useMessageStream` is event-agnostic,
- * so we consume `view_payload` ourselves and attach the entries to the
- * in-flight assistant message under `views[]`. Each view also fires a
- * `doc:draft-created` window event so the sidebar reload-tick bumps
- * and the new draft surfaces immediately.
+ * askQuestion suspend-resume: the controller presents the suspended question
+ * (from the pending-input probe when the turn ends or on reload, or from a
+ * `pending_question_exists` refusal; never as an approval card); the dock
+ * gates the composer and renders `<PendingQuestionPanel>`. After the panel's
+ * answer/cancel POST, `questionSettled` follows the resumed turn over the
+ * session stream inside the bounded resume window (no message poll). See
+ * docs/architecture/engine/askquestion-suspend-resume.md.
  *
  * [COMP:app-web/floating-chat]
  */
@@ -76,10 +77,12 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
@@ -148,36 +151,37 @@ import {
 } from "lucide-react";
 import {
   ChatComposer,
-  createSSEBuffer,
-  parseSSEStream,
-  useChatSession,
-  useMessageStream,
-  type ActivityNote,
-  type ChatFileAttachment,
-  type CitationSource,
-  type Message,
+  initialChatState,
+  initialTurnTranscript,
   type PendingConfirmation,
   type ToolUsed,
 } from "@use-brian/chat-ui";
 import {
-  useMidTurnQueue,
-  joinQueuedInputs,
-} from "@/lib/use-mid-turn-queue";
-import { useChatController } from "@/lib/chat/use-chat-controller";
+  RESUME_ATTACH_WINDOW_MS,
+  type ConversationBodyExtras,
+  type ConversationController,
+  type ConversationNotice,
+  type ConversationQuestion,
+  type ConversationSendInput,
+  type ConversationState,
+  type PresentationCapabilities,
+} from "@/lib/chat/conversation-controller";
+import { provisionalConversationKey } from "@/lib/chat/conversation-registry";
+import { conversationAttachmentTray } from "@/lib/chat/conversation-attachments";
+import type { ClassifiedTurnFrame } from "@/lib/chat/turn-frames";
+import { useConversation } from "@/lib/chat/use-conversation";
+import { currentOfflineWriteAuthority } from "@/lib/offline/application-write-authority";
 import { QueuedInputs } from "@/components/ui/queued-inputs";
 import {
   ChatMarkdownWithLinks,
   MessageBubble,
   mapSessionRows,
-  stripFollowUps,
   type MessageWithViews,
-  type ViewAttachment,
 } from "@/components/chrome/chat-message-bubble";
 import { ChatConfirmationCard } from "@/components/chrome/chat-confirmation-card";
 import {
   ChatActivityFeed,
   ChatCitationList,
-  type ResearchPhase,
 } from "@/components/chrome/chat-activity";
 import {
   ComputerLiveChip,
@@ -213,20 +217,8 @@ import {
 } from "@/lib/surface-chat-seed";
 import {
   fetchLatestSession,
-  fetchSessionMessages,
-  stopTurn,
   type MessageAttachmentRef,
 } from "@/lib/api/sessions";
-import {
-  finalizeActivityNotes,
-} from "@/lib/activity-receipt";
-import { shouldReopenSessionStream } from "@/lib/chat-session-events";
-import {
-  fetchPendingQuestion,
-  fetchPendingSessionInput,
-  toRestoredConfirmation,
-} from "@/lib/api/pending-questions";
-import { respondByKind } from "@/lib/api/approvals";
 import { PendingQuestionPanel } from "./pending-question-panel";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { ComposerControls } from "@/components/doc/composer-controls";
@@ -293,15 +285,6 @@ type ChatOrigin = "doc" | ChatSurface;
 /** Persisted across sessions so the model choice sticks. */
 const MODEL_STORAGE_KEY = "doc-chat-model";
 
-/** `notice.code` while the dock is re-attached to a turn whose POST stream
- *  died. Keyed so completion clears only this notice, never a later one. */
-const RECONNECT_NOTICE_CODE = "turn_reconnecting";
-/** Bare closes of the reconnect stream reopen after this beat. */
-const RECONNECT_REOPEN_MS = 3_000;
-/** Total time the dock keeps re-attaching before it reports failure. Above
- *  the Cloud Run request cap (30 min) so a turn that outlives one cut still
- *  lands; past it the user is told to reload. */
-const RECONNECT_BUDGET_MS = 35 * 60_000;
 type ModelTier = "standard" | "pro" | "max";
 
 // Per-workspace persisted choice of which assistant this doc chat talks to
@@ -338,23 +321,6 @@ function clampChatSize(size: ChatSize): ChatSize {
     w: Math.round(Math.min(maxW, Math.max(MIN_CHAT_W, size.w))),
     h: Math.round(Math.max(MIN_CHAT_H, Math.min(size.h, maxH))),
   };
-}
-
-/**
- * A dropped or blocked connection (SSE cut mid-stream, offline, or the server
- * severing a long request at its timeout) surfaces from `fetch`/`getReader()`
- * as a `TypeError`, NOT a clean server error with a useful message. Match it so
- * the chat shows a calm "connection dropped" line instead of the raw browser
- * string ("Failed to fetch" / "Load failed" / "NetworkError when attempting to
- * fetch resource"), which reads to the user as an app crash. A real server-sent
- * error (which carries a meaningful message) still surfaces verbatim.
- */
-function isTransportError(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  if (err.name === "TypeError") return true;
-  return /failed to fetch|load failed|network|connection|fetch failed/i.test(
-    err.message,
-  );
 }
 
 /**
@@ -490,6 +456,323 @@ const CLIENT_TIMEZONE: string | null = (() => {
   }
 })();
 
+// ── One doc thread, every dock instance (M5 WP-C) ────────────────────────
+// Which conversation a dock thread is bound to, shared by every FloatingChat
+// instance of this renderer, so the desktop dock, the mobile drawer and the
+// Feed drawer hosts acquire ONE conversation-registry entry: a resize across
+// `lg` or opening the drawer shows the same live turn. Keyed by the write
+// authority (apiOrigin, viewer, workspace) plus the dock origin, so another
+// identity or deployment never sees a binding; reset with local data. A
+// separate desktop chat window is another realm with its own bindings.
+// See docs/architecture/features/doc.md → "One conversation, every dock
+// instance".
+
+export type DockThreadBinding = {
+  /** The bound server session, or null while the thread is provisional. */
+  sessionId: string | null;
+  /** Provisional client id; a reset mints a new one (a new registry entry). */
+  clientId: string;
+  /** Bumped by every reset, so a late lookup cannot rebind a wiped thread. */
+  epoch: number;
+  /** After an answered question: the resumed turn is awaited until then. */
+  awaitingResumeUntil: number | null;
+  /** History epoch when the resume wait began; a later reload ends the wait. */
+  awaitingResumeEpoch: number;
+  /** The latest-session lookup ran (or runs) for this epoch. */
+  resumeLookup: boolean;
+};
+
+type DockThreadEntry = { value: DockThreadBinding; listeners: Set<() => void> };
+const dockThreads = new Map<string, DockThreadEntry>();
+let dockClientSeq = 0;
+
+function mintDockClientId(): string {
+  return typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `dock-${Date.now()}-${++dockClientSeq}`;
+}
+
+function freshDockThread(epoch: number): DockThreadBinding {
+  return {
+    sessionId: null,
+    clientId: mintDockClientId(),
+    epoch,
+    awaitingResumeUntil: null,
+    awaitingResumeEpoch: 0,
+    resumeLookup: false,
+  };
+}
+
+function dockThreadEntry(key: string): DockThreadEntry {
+  let entry = dockThreads.get(key);
+  if (!entry) {
+    entry = { value: freshDockThread(0), listeners: new Set() };
+    dockThreads.set(key, entry);
+  }
+  return entry;
+}
+
+/** Binding key: write authority plus dock origin. */
+export function dockThreadKey(
+  authority: { apiOrigin: string; viewerId: string; workspaceId: string } | null,
+  workspaceId: string,
+  origin: string,
+): string {
+  return authority
+    ? JSON.stringify([authority.apiOrigin, authority.viewerId, authority.workspaceId, origin])
+    : JSON.stringify(["", "", workspaceId, origin]);
+}
+
+export function readDockThread(key: string): DockThreadBinding {
+  return dockThreadEntry(key).value;
+}
+
+/** Patch a binding; a function returning null leaves it unchanged. */
+export function updateDockThread(
+  key: string,
+  patch:
+    | Partial<DockThreadBinding>
+    | ((current: DockThreadBinding) => Partial<DockThreadBinding> | null),
+): void {
+  const entry = dockThreadEntry(key);
+  const next = typeof patch === "function" ? patch(entry.value) : patch;
+  if (!next) return;
+  entry.value = { ...entry.value, ...next };
+  for (const listener of [...entry.listeners]) listener();
+}
+
+/**
+ * "The next send starts a fresh session": a new provisional entry. With
+ * `resume: false` (a surface seed, a session-rebound recovery) the fresh
+ * thread is final: the latest-session lookup is marked done for the new
+ * epoch, so it cannot re-bind the thread the reset just left (M5Q-20).
+ * An assistant switch off the doc surface keeps `resume: true` and resumes
+ * that assistant's latest thread for the surface.
+ */
+export function resetDockThread(key: string, options: { resume?: boolean } = {}): void {
+  const resume = options.resume ?? true;
+  updateDockThread(key, (current) => ({ ...freshDockThread(current.epoch + 1), resumeLookup: !resume }));
+}
+
+function subscribeDockThread(key: string, listener: () => void): () => void {
+  const entry = dockThreadEntry(key);
+  entry.listeners.add(listener);
+  return () => {
+    entry.listeners.delete(listener);
+  };
+}
+
+if (typeof window !== "undefined") {
+  // The registry disposes every controller on this signal; the bindings
+  // that pointed at them start over too.
+  window.addEventListener("brian:local-data-cleared", () => {
+    for (const key of [...dockThreads.keys()]) resetDockThread(key);
+  });
+}
+
+function useDockThread(key: string): DockThreadBinding {
+  const subscribe = useCallback((listener: () => void) => subscribeDockThread(key, listener), [key]);
+  const read = useCallback(() => readDockThread(key), [key]);
+  return useSyncExternalStore(subscribe, read, read);
+}
+
+// A surface seed reaches every mounted dock instance; only the first one
+// resets the thread and queues its auto-send, so one seed is one turn.
+const claimedSurfaceSeeds = new WeakSet<object>();
+
+/** True for the first dock instance that handles this seed event. */
+export function claimSurfaceSeed(seed: object): boolean {
+  if (claimedSurfaceSeeds.has(seed)) return false;
+  claimedSurfaceSeeds.add(seed);
+  return true;
+}
+
+// ── Build-activity log ──────────────────────────────────────────────────
+// The page-body generating widget reads a chronological log of reasoning
+// runs and build steps (lib/build-events.ts). It is rebuilt from the
+// controller's frame observer (`onFrame`) and kept per conversation, so every
+// dock instance on the thread publishes the same log.
+
+type DockBuildLog = {
+  log: EventLog;
+  reasoning: string;
+  seq: number;
+  started: Set<string>;
+  evented: Set<string>;
+};
+type DockBuildLogEntry = { state: DockBuildLog; listeners: Set<() => void> };
+const dockBuildLogs = new WeakMap<object, DockBuildLogEntry>();
+
+function emptyDockBuildLog(): DockBuildLog {
+  return { log: EMPTY_LOG, reasoning: "", seq: 0, started: new Set(), evented: new Set() };
+}
+
+function dockBuildLogEntry(owner: object): DockBuildLogEntry {
+  let entry = dockBuildLogs.get(owner);
+  if (!entry) {
+    entry = { state: emptyDockBuildLog(), listeners: new Set() };
+    dockBuildLogs.set(owner, entry);
+  }
+  return entry;
+}
+
+function publishDockBuildLog(entry: DockBuildLogEntry, next: DockBuildLog) {
+  entry.state = next;
+  for (const listener of [...entry.listeners]) listener();
+}
+
+/** A new turn (or a mid-turn split) starts an empty log. */
+export function resetDockBuildLog(owner: object): void {
+  const entry = dockBuildLogEntry(owner);
+  if (entry.state.log === EMPTY_LOG && !entry.state.reasoning) return;
+  publishDockBuildLog(entry, emptyDockBuildLog());
+}
+
+/** Fold one observed frame into the log (direct frames, or follow `activity`). */
+export function observeDockBuildFrame(
+  owner: object,
+  frame: ClassifiedTurnFrame,
+  narration: NarrationDict,
+): void {
+  const entry = dockBuildLogEntry(owner);
+  const followed = frame.stream === "follow" && frame.event === "activity";
+  const event = followed ? String(frame.payload.event) : frame.event;
+  const payload = frame.payload;
+  if ((frame.stream === "direct" && frame.event === "input_applied") || (frame.stream === "follow" && frame.event === "turn_started")) {
+    resetDockBuildLog(owner);
+    return;
+  }
+  const state = entry.state;
+  const mint = () => `ev-${state.seq++}`;
+  const id = typeof payload.id === "string" ? payload.id : "";
+  switch (event) {
+    case "reasoning": {
+      const delta = typeof payload.text === "string" ? payload.text : "";
+      if (!delta) return;
+      const reasoning = state.reasoning + delta;
+      // Coalesced into one advancing "thinking" line until a step closes it.
+      const log = appendReasoning(state.log, reasoning, mint);
+      publishDockBuildLog(entry, { ...state, reasoning, log });
+      return;
+    }
+    case "tool_start": {
+      const name = typeof payload.name === "string" ? payload.name : "";
+      if (!id || !name || state.started.has(id)) return;
+      state.started.add(id);
+      // The step row appears the moment the call starts; `tool_input`
+      // rewrites it in place with the input-aware narration.
+      const seeded = describeToolFromInput(name, {}, narration);
+      const log = appendStep(state.log, seeded.description, mint, { toolId: id });
+      publishDockBuildLog(entry, { ...state, log });
+      return;
+    }
+    case "tool_dropped": {
+      if (!id) return;
+      state.started.delete(id);
+      state.evented.delete(id);
+      publishDockBuildLog(entry, { ...state, log: removeToolSteps(state.log, id) });
+      return;
+    }
+    case "tool_input": {
+      if (!id || state.evented.has(id)) return;
+      state.evented.add(id);
+      const name = typeof payload.name === "string" ? payload.name : "";
+      const input = payload.input && typeof payload.input === "object"
+        ? (payload.input as Record<string, unknown>)
+        : {};
+      const narrated = describeToolFromInput(name, input, narration);
+      // patchPage: one extra row per remaining op, a live build log.
+      const lines = narrated.opLines && narrated.opLines.length > 0 ? narrated.opLines : [narrated.description];
+      const [first, ...rest] = lines;
+      let log = first ? updateStepText(state.log, id, first, narrated.url) : state.log;
+      for (const line of rest) log = appendStep(log, line, mint, { toolId: id });
+      publishDockBuildLog(entry, { ...state, log });
+      return;
+    }
+  }
+}
+
+const hydratedBuildLogs = new WeakSet<object>();
+
+/**
+ * A dock returning to a still-running turn rebuilds its chronological feed
+ * from the controller's bounded build log, then continues from `onFrame`.
+ */
+export function hydrateDockBuildLog(
+  controller: Pick<ConversationController, "getBuildLog">,
+  narration: NarrationDict,
+): void {
+  if (hydratedBuildLogs.has(controller)) return;
+  hydratedBuildLogs.add(controller);
+  const entry = dockBuildLogEntry(controller);
+  if (entry.state.log !== EMPTY_LOG || entry.state.reasoning) return;
+  for (const frame of controller.getBuildLog().frames) observeDockBuildFrame(controller, frame, narration);
+}
+
+const NO_BUILD_EVENTS: BuildEvent[] = [];
+
+/** The current turn's build events for a conversation. */
+export function readDockBuildEvents(owner: object): BuildEvent[] {
+  return dockBuildLogs.get(owner)?.state.log.events ?? NO_BUILD_EVENTS;
+}
+
+function useDockBuildEvents(owner: object | null): BuildEvent[] {
+  const subscribe = useCallback((listener: () => void) => {
+    if (!owner) return () => {};
+    const entry = dockBuildLogEntry(owner);
+    entry.listeners.add(listener);
+    return () => {
+      entry.listeners.delete(listener);
+    };
+  }, [owner]);
+  const read = useCallback(() => (owner ? readDockBuildEvents(owner) : NO_BUILD_EVENTS), [owner]);
+  return useSyncExternalStore(subscribe, read, read);
+}
+
+/** Slack past the controller's resume window before the wait indicator gives up. */
+const RESUME_WAIT_GRACE_MS = 30_000;
+
+const selectConversation = (state: ConversationState) => state;
+const ACTIVE_RUN_PHASES = new Set(["running", "suspended"]);
+
+/** This dock's copy for a controller error notice (existing keys only). */
+export function dockErrorCopy(
+  notice: Extract<ConversationNotice, { code: "error" }>,
+  t: ReturnType<typeof useT>["chat"],
+  tChatApp: ReturnType<typeof useT>["chatApp"],
+): string {
+  switch (notice.errorCode) {
+    // Dropped provider connection: retrying is safe and usually enough.
+    case "upstream_connection_reset":
+      return notice.customEndpoint ? tChatApp.upstreamConnectionResetCustom : tChatApp.upstreamConnectionReset;
+    // Endpoint unreachable: the copy points at the settings check.
+    case "upstream_unreachable":
+      return notice.customEndpoint ? tChatApp.upstreamUnreachableCustom : tChatApp.upstreamUnreachable;
+    case "session_assistant_mismatch":
+      return tChatApp.sessionRebound;
+    // A dropped or blocked connection reads as a calm "connection dropped"
+    // line, never the raw browser string.
+    case "stream_interrupted":
+    case "stream_failed":
+      return t.streamInterrupted;
+    default:
+      // Server-authored text for codes this dock does not translate.
+      return notice.message ?? t.error;
+  }
+}
+
+/** This dock's copy for a typed turn notice, or null when it has none. */
+export function dockTurnNoticeCopy(
+  notice: Extract<ConversationNotice, { code: "turnNotice" }>,
+  t: ReturnType<typeof useT>["chat"],
+): string | null {
+  if (notice.notice === "budget_downgraded") return t.noticeBudgetDowngraded;
+  // Server-authored English rides in `message`; prefer translated copy.
+  if (notice.notice === "custom_model_image_fallback") return t.noticeCustomModelImageFallback;
+  if (notice.notice === "custom_model_endpoint_fallback") return t.noticeCustomModelEndpointFallback;
+  return notice.message ?? null;
+}
+
 export function FloatingChat({
   workspaceId,
   assistantId,
@@ -613,6 +896,10 @@ export function FloatingChat({
   const rec = useRecordingUpload(workspaceId, activeAssistantId);
   const [pendingRecordings, setPendingRecordings] = useState<StagedRecording[]>([]);
   const att = useFileAttachments(() => sessionIdRef.current ?? undefined, {
+    // One tray per dock origin beside the registry: the desktop dock, the
+    // phone drawer and Feed hosts share it, and it outlives any one mount
+    // (chat-app.md -> "Conversation attachment trays").
+    tray: conversationAttachmentTray(workspaceId, { provisional: provisionalConversationKey("dock", origin) }),
     // Only offer routing when we have a workspace + assistant to bind the
     // recording to; otherwise video falls to the guard (unsupported-here) chip.
     onRouteMedia:
@@ -626,7 +913,9 @@ export function FloatingChat({
         : undefined,
   });
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [error, setError] = useState<string | null>(null);
+  // Errors this dock raises itself (a rebound session); controller notices
+  // supply the rest.
+  const [localError, setLocalError] = useState<string | null>(null);
   // Resolve the assistant's avatar identity for the floating launcher FAB.
   useEffect(() => {
     if (isSidePanel || !selectedAssistantId) return;
@@ -639,11 +928,6 @@ export function FloatingChat({
     };
   }, [isSidePanel, selectedAssistantId]);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
-  const [citations, setCitations] = useState<CitationSource[]>([]);
-  // ToolUsedWithOps extends ToolUsed with optional per-op build-log lines
-  // for patchPage. Defined below in the narration section.
-  const [toolTimeline, setToolTimeline] = useState<ToolUsedWithOps[]>([]);
-  const [notice, setNotice] = useState<InlineNotice | null>(null);
   // Model tier — persisted, plan-gated once /api/usage resolves. Replaces the
   // previously hardcoded "standard" send.
   const [model, setModel] = useState<ModelTier>(() => {
@@ -680,35 +964,6 @@ export function FloatingChat({
   const deferResearchRef = useRef(false);
   const [researchQuota, setResearchQuota] = useState<{ used: number; quota: number; isPaid: boolean } | null>(null);
   const [researchExhausted, setResearchExhausted] = useState(false);
-  // askQuestion suspend-resume. When set, the session is suspended on a
-  // `kind='question'` approval row: the composer is gated and the inline
-  // answer panel renders below the messages. Cleared on submit/cancel.
-  // See docs/architecture/engine/askquestion-suspend-resume.md.
-  const [pendingQuestion, setPendingQuestion] = useState<{
-    approvalId: string;
-    question: string;
-    expiresAt: string | null;
-    sessionId: string;
-  } | null>(null);
-  // Drag-and-drop file attach over the whole chat panel. Disabled while a
-  // clarifying question is pending (the composer is replaced by the answer
-  // panel then, so there's nothing to attach to).
-  const drop = useFileDrop((files) => void att.upload(files), {
-    disabled: !!pendingQuestion || rec.busy,
-  });
-  // Set after the user answers/cancels — the resume worker takes a few
-  // seconds to fire the continuation turn, so we poll session messages
-  // for the synthesised reply to land without a manual refresh.
-  const [resumePolling, setResumePolling] = useState(false);
-  // Turn reconnect. Set when the direct `POST /api/chat` body closed with no
-  // terminal event (the server no longer reads that close as Stop,
-  // 2026-08-24): the turn is still running, so the dock re-attaches over
-  // `GET /api/sessions/:id/stream` and loads the persisted reply when the
-  // stream reports the turn over. The epoch reopens the stream after a
-  // bare close; `reconnectStartedAtRef` bounds how long it keeps trying.
-  const [reconnectSessionId, setReconnectSessionId] = useState<string | null>(null);
-  const [reconnectEpoch, setReconnectEpoch] = useState(0);
-  const reconnectStartedAtRef = useRef<number | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -793,57 +1048,123 @@ export function FloatingChat({
     return subscribeAppViewport(onResize);
   }, [isSidePanel]);
 
-  const session = useChatSession();
-  const stream = useMessageStream();
+  // ── The conversation (M5: this dock is a presentation) ─────────────────
+  // Every dock instance on this thread reads one shared binding and so
+  // acquires one conversation-registry entry. The controller owns the turn:
+  // the direct stream, the follow/re-attach stream, Stop, approvals,
+  // pending input, the mid-turn queue and the per-turn transcript.
+  const writeAuthority = currentOfflineWriteAuthority(workspaceId);
+  const threadKey = dockThreadKey(writeAuthority, workspaceId, origin);
+  const threadKeyRef = useRef(threadKey);
+  threadKeyRef.current = threadKey;
+  const thread = useDockThread(threadKey);
+  // A provisional entry re-keys to its session on the `session` frame. Until
+  // the binding catches up, read the adopted id from the entry this instance
+  // already holds, so the same render keeps the same controller.
+  const boundRef = useRef<{ clientId: string; controller: ConversationController | null }>({
+    clientId: "",
+    controller: null,
+  });
+  const adoptedSessionId =
+    !thread.sessionId &&
+    boundRef.current.clientId === thread.clientId &&
+    boundRef.current.controller &&
+    !boundRef.current.controller.isDisposed()
+      ? boundRef.current.controller.getSessionId()
+      : null;
+  // Capabilities read through refs: they close over state declared below.
+  const surfaceEffectRef = useRef<(frame: ClassifiedTurnFrame) => void>(() => {});
+  const frameObserverRef = useRef<(frame: ClassifiedTurnFrame) => void>(() => {});
+  const narrationRef = useRef(t.toolNarration);
+  narrationRef.current = t.toolNarration;
+  const capabilities = useMemo<PresentationCapabilities>(
+    () => ({
+      profile: "dock",
+      onSurfaceEffect: (frame) => surfaceEffectRef.current(frame),
+      onFrame: (frame) => frameObserverRef.current(frame),
+      describeTool: (name, toolInput) => describeToolFromInput(name, toolInput, narrationRef.current),
+      mapHistoryRows: (rows) => mapSessionRows(rows, narrationRef.current),
+    }),
+    [],
+  );
+  const presentationId = useId();
+  const { controller, value: conversation } = useConversation(
+    {
+      workspaceId,
+      sessionId: thread.sessionId ?? adoptedSessionId,
+      provisionalKey: provisionalConversationKey("dock", `${origin}:${thread.clientId}`),
+      presentationId,
+      capabilities,
+    },
+    selectConversation,
+  );
+  boundRef.current = { clientId: thread.clientId, controller };
+  useLayoutEffect(() => {
+    if (controller) hydrateDockBuildLog(controller, narrationRef.current);
+  }, [controller]);
 
-  // ── Ref mirrors of state so SSE callbacks read latest without resub deps ──
-  const sessionIdRef = useRef<string | null>(null);
-  useEffect(() => {
-    sessionIdRef.current = session.state.sessionId;
-  }, [session.state.sessionId]);
-  const chatController = useChatController(() => sessionIdRef.current);
+  // ── Derived turn state (one snapshot, every instance) ──────────────────
+  const transcript = conversation?.transcript ?? initialChatState;
+  const sessionId = transcript.sessionId;
+  // Read by callbacks (uploads, the recorder binding, interaction answers).
+  const sessionIdRef = useRef<string | null>(sessionId);
+  sessionIdRef.current = sessionId;
+  const mirror = conversation?.mirror ?? null;
+  const directLive = transcript.isStreaming;
+  // A re-attached turn (after a dropped POST, a reload or the resumed
+  // question turn) paints the controller's mirror in the same live bubble.
+  const mirrorLive = !directLive && !!mirror?.active;
+  const isStreaming = directLive || mirrorLive;
+  const liveActivity = directLive
+    ? conversation!.activity
+    : mirrorLive
+      ? mirror!.activity
+      : initialTurnTranscript;
+  const streamingText = directLive ? transcript.streamingText : mirrorLive ? mirror!.text : "";
+  const replyPhase = directLive ? transcript.replyPhase : mirror?.replyPhase ?? "generating";
+  const researchPhase = directLive
+    ? conversation?.researchPhase ?? null
+    : mirrorLive
+      ? mirror!.researchPhase
+      : null;
+  const turnStartedAt = directLive ? liveActivity.startedAt : mirrorLive ? mirror!.startedAt : null;
+  const streamingReasoning = directLive ? liveActivity.reasoning : mirrorLive ? mirror!.reasoning : "";
+  // The assistant the live turn answers as (the streaming avatar).
+  const liveAssistantId = conversation?.liveAssistantId ?? null;
+  const toolTimeline = liveActivity.tools as ToolUsedWithOps[];
+  const citations = liveActivity.citations;
+  const streamingEvents = useDockBuildEvents(controller);
+  const pendingInteraction = conversation?.interaction.pending ?? null;
+  // askQuestion suspend-resume: the controller presents the suspended
+  // question (pending-input probe at turn end or on reload, or a
+  // `pending_question_exists` refusal);
+  // the composer is gated and the inline answer panel renders below.
+  const pendingQuestion =
+    pendingInteraction?.kind === "question"
+      ? (pendingInteraction.payload as ConversationQuestion)
+      : null;
+  const notices = conversation?.notices ?? [];
+  const reconnecting = notices.some((item) => item.code === "reconnecting");
+  const awaitingResume = thread.awaitingResumeUntil !== null;
 
-  // ── Mid-turn input (queue + steer) ─────────────────────────────────────
-  // Messages sent while a turn streams. They live in the hook rather than in
-  // `session.state.messages` until the running turn takes them, because the
-  // streaming assistant bubble renders below every committed message — a
-  // queued message parked in `messages` would appear ABOVE the reply that was
-  // written before it was sent. They render under the live bubble, which is
-  // where they actually belong in time.
-  // See docs/architecture/engine/mid-turn-input.md.
-  const midTurn = useMidTurnQueue({
-    stream,
-    getSessionId: () => sessionIdRef.current,
-    workspaceId,
-    getAssistantId: () => selectedAssistantId,
-    appOrigin: origin,
-    ...(CLIENT_TIMEZONE ? { timezone: CLIENT_TIMEZONE } : {}),
+  // Drag-and-drop file attach over the whole chat panel. Disabled while a
+  // clarifying question is pending (the composer is replaced by the answer
+  // panel then, so there's nothing to attach to).
+  const drop = useFileDrop((files) => void att.upload(files), {
+    disabled: !!pendingQuestion || rec.busy,
   });
 
   // ── Thread reset ─────────────────────────────────────────────────────────
-  // Abort any in-flight stream and wipe the bound session immediately. The
-  // ref is set synchronously (the effect mirror lags a render) so a send
-  // fired before the next paint can't reuse the old session id. Shared by
-  // the assistant switcher, the origin (surface) switch, and surface seeds —
-  // all three mean "the next send starts a fresh session". The epoch bump
-  // invalidates any resume fetch still in flight (it checks the epoch before
-  // dispatching), so a late response can't repopulate the wiped thread.
-  const threadEpochRef = useRef(0);
-  const resetThread = useCallback(() => {
-    threadEpochRef.current += 1;
-    stream.abort();
-    // Do not restore the departing thread's queue into the new composer.
-    // The queue hook abandons retries when ownership changes.
-    sessionIdRef.current = null;
-    session.setSession(null);
-    session.loadMessages([]);
-    session.clearConfirmations();
-    setPendingQuestion(null);
-    setResumePolling(false);
-    setReconnectSessionId(null);
-    setError(null);
-    setNotice(null);
-  }, [stream, session]);
+  // Bind a fresh provisional entry: the next send starts a fresh session.
+  // Shared by the assistant switcher (off doc), surface seeds and the
+  // session-rebound recovery. The departing entry detaches; a turn still
+  // running there keeps its bounded detached stream in the registry, and
+  // its queue never reaches the new composer. The epoch bump invalidates any
+  // latest-session lookup still in flight.
+  const resetThread = useCallback((options: { resume?: boolean } = {}) => {
+    resetDockThread(threadKeyRef.current, { resume: options.resume ?? false });
+    setLocalError(null);
+  }, []);
 
   // ── Assistant switch ─────────────────────────────────────────────────────
   // On the DOC surface a switch is a per-turn re-address, not a thread
@@ -865,7 +1186,7 @@ export function FloatingChat({
       setSwitcherOpen(false);
       if (id === selectedAssistantId) return;
       writeActiveAssistantId(workspaceId, id);
-      if (!isDocOrigin) resetThread();
+      if (!isDocOrigin) resetThread({ resume: true });
       setSelectedAssistantId(id);
     },
     [selectedAssistantId, workspaceId, resetThread, isDocOrigin],
@@ -895,8 +1216,11 @@ export function FloatingChat({
     function onSeed(e: Event) {
       const seed = (e as CustomEvent<SurfaceChatSeed>).detail;
       if (!seed?.prefill?.trim()) return;
-      resetThread();
       setExpanded(true);
+      // Every mounted dock instance hears the seed; the first one owns it,
+      // so one seed resets the shared thread once and sends at most once.
+      if (!claimSurfaceSeed(seed)) return;
+      resetThread();
       if (seed.autoSend) {
         setInput("");
         setPendingSurfaceSeed(seed);
@@ -1130,135 +1454,13 @@ export function FloatingChat({
     return () => window.removeEventListener(BRAIN_ENTRY_VIEW_EVENT, onEntryView);
   }, [workspaceId]);
 
-  // Per-turn buffers — keyed by toolUseId / URL so re-emits replace prior entry.
-  const turnViewsRef = useRef<ViewAttachment[]>([]);
-  const turnTextRef = useRef("");
-  // A multi-step turn streams text in segments separated by tool activity:
-  // any prose the model emits alongside/around an intermediate tool step is
-  // step narration, NOT the answer — the answer is the LAST text segment
-  // (the tool-free synthesis turn). Without segmenting, a stray token the
-  // model glues onto a tool-call turn (observed: Gemini echoing a `"20"`
-  // text part next to an `inspectMyActivity(limit:20)` call) gets concatenated
-  // in front of the real answer, e.g. "20I have diagnosed…".
-  //
-  // `tool_start` arms this flag (once per segment) and clears the live stream
-  // buffer immediately, so the stale segment stops showing in the reply
-  // preview while the tool runs. The next `text_delta` then discards the prior
-  // segment from the finalized-message buffer (`turnTextRef`) before appending.
-  // The finalized-buffer discard is deliberately LAZY (arm-then-discard-on-
-  // next-text) rather than eager: a turn that answers and THEN calls a
-  // bookkeeping tool (text, then `saveMemory`, then end-of-turn) has no later
-  // text to trigger the discard, so `turnTextRef` keeps that answer.
-  const pendingAnswerResetRef = useRef(false);
-  const turnCitationsRef = useRef<CitationSource[]>([]);
-  // Outbound file attachments (`sendFile`) — set by the `attachments` SSE
-  // event, merged into the finalized assistant message at stream end.
-  const turnFileAttachmentsRef = useRef<ChatFileAttachment[]>([]);
-  const turnToolsRef = useRef<ToolUsedWithOps[]>([]);
-  // The receipt's intermediate prose: each segment the answer-reset is about
-  // to discard, captured at `tool_start` against the tool it preceded.
-  const turnNotesRef = useRef<ActivityNote[]>([]);
-  const turnWorkerDescriptionsRef = useRef<Map<string, string>>(new Map());
-  // Accumulates the live `reasoning` SSE event text (verbatim model thinking),
-  // streamed token-by-token alongside tool events. Reset per turn.
-  const turnReasoningRef = useRef("");
-  const [streamingReasoning, setStreamingReasoning] = useState("");
-  // The turn's chronological build-event log — reasoning runs + build-step
-  // narrations interleaved in SSE arrival order — published on the
-  // build-activity bus to drive the inline generating widget's rolling feed.
-  // `eventSeqRef` mints deterministic per-turn ids (counter, never
-  // Date.now/random); `eventedToolIdsRef` dedups a re-emitted `tool_input`.
-  const eventLogRef = useRef<EventLog>(EMPTY_LOG);
-  const eventSeqRef = useRef(0);
-  const eventedToolIdsRef = useRef<Set<string>>(new Set());
-  const [streamingEvents, setStreamingEvents] = useState<BuildEvent[]>([]);
-  const mintEventId = useCallback(() => `ev-${eventSeqRef.current++}`, []);
-  // Per-tool call timing (performance.now at `tool_start`, closed at
-  // `tool_result` into `durationMs`) — the activity feed's per-step readout.
-  const toolStartTimesRef = useRef<Map<string, number>>(new Map());
-  // Turn t0 (epoch ms) — drives the live elapsed counter and the committed
-  // message's "Worked for Ns" receipt.
-  const turnStartedAtRef = useRef<number | null>(null);
-  const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
-  // Latest research/coordinator `status` phase for this turn — the activity
-  // header shows it while no tool narration outranks it.
-  const [researchPhase, setResearchPhase] = useState<ResearchPhase | null>(null);
-  // Server-assigned assistant message id (from `assistant_message_saved`).
-  const assistantIdRef = useRef<string | null>(null);
-  // The assistant ANSWERING this turn — set at send time (the seed's
-  // addressed pick, or the switcher's selection). Stamped onto the committed
-  // streamed message so a mixed-voice doc thread renders the right avatar
-  // per reply, mirroring the persisted rows' `senderAssistantId`.
-  const turnVoiceRef = useRef<string | null>(null);
-  // Set when this turn emitted an askQuestion confirmation (the suspend
-  // path). The event carries no approvalId, so onDone probes GET /pending
-  // to fetch it and surface the answer panel immediately — without making
-  // the user send a doomed message first.
-  const turnAskedQuestionRef = useRef(false);
-
-  // `sendMessage` is defined below but called from inside its own `onDone`
-  // (the flush) — the ref is the only way to reach the current one from
-  // there without a stale closure.
-  const sendMessageRef = useRef<
-    ((text: string) => Promise<boolean>) | null
-  >(null);
-
-  /**
-   * The stream ended with messages still queued: the running turn never took
-   * them (it finished first, the user hit Stop, the connection dropped, or
-   * the delivery was lost). Send them as one ordinary turn — which is what
-   * the user asked for in the first place, and why nothing needed to be
-   * persisted server-side at queue time.
-   *
-   * Deferred a tick: `onDone` runs while the stream's abort registration is
-   * still live, and `sendMessage` refuses to start while one is.
-   */
-  const flushQueuedInputs = useCallback((owningSessionId: string | null) => {
-    const epoch = threadEpochRef.current;
-    setTimeout(() => {
-      // Never deliver a departing thread's fallback through the new composer.
-      if (!owningSessionId || epoch !== threadEpochRef.current || sessionIdRef.current !== owningSessionId) return;
-      const stillWaiting = midTurn.drain(owningSessionId);
-      if (stillWaiting.length > 0) void sendMessageRef.current?.(joinQueuedInputs(stillWaiting));
-    }, 0);
-  }, [midTurn]);
-  // `midTurn` is a fresh object every render, so `flushQueuedInputs` is too.
-  // Long-lived effects (the reconnect stream) reach it through this ref
-  // rather than listing it as a dep and reopening their stream per render.
-  const flushQueuedInputsRef = useRef(flushQueuedInputs);
-  useEffect(() => {
-    flushQueuedInputsRef.current = flushQueuedInputs;
-  }, [flushQueuedInputs]);
-
-  /**
-   * The user's Stop: tear the local stream down AND tell the server. Since
-   * 2026-08-24 the server no longer reads a client close as Stop (a dropped
-   * connection keeps the turn running so it can be re-attached), so the
-   * explicit `POST /api/chat/stop` is the only thing that ends the turn.
-   * Returns the promise so callers can sequence work after the stop lands;
-   * no session id means nothing is running server-side. Stop is idempotent
-   * server-side and the local teardown already happened, so a failed stop
-   * is swallowed rather than surfaced.
-   */
-  const stopRunningTurn = useCallback((): Promise<void> => {
-    const sessionId = sessionIdRef.current;
-    stream.abort();
-    session.dispatch({ type: "stream/abort" });
-    if (!sessionId) return Promise.resolve();
-    return stopTurn(sessionId).then(
-      () => undefined,
-      () => undefined,
-    );
-  }, [stream, session]);
-
   // ── Live activity mirror to parent + collapsed pill ────────────────────
-  const isStreaming = session.state.isStreaming;
-  const streamingText = session.state.streamingText;
+  const pendingConfirmations = transcript.pendingConfirmations as ConfirmationWithFailure[];
   const activity = useMemo<ChatActivity>(() => {
-    const replyGenerating = isStreaming && session.state.replyPhase === "generating";
+    const replyGenerating = isStreaming && replyPhase === "generating";
     const requiresAction =
       Boolean(pendingQuestion) ||
-      session.state.pendingConfirmations.some(
+      pendingConfirmations.some(
         (confirmation) =>
           confirmation.status === "pending" || confirmation.status === "approving",
       );
@@ -1266,7 +1468,7 @@ export function FloatingChat({
       isStreaming: replyGenerating,
       hasStreamingText: Boolean(streamingText),
       requiresAction,
-      isLoading: resumePolling,
+      isLoading: awaitingResume,
     });
     if (!replyGenerating) {
       return { isStreaming: false, streamingText: "", phase, activeTool: null };
@@ -1289,7 +1491,7 @@ export function FloatingChat({
           }
         : null,
     };
-  }, [isStreaming, session.state.replyPhase, pendingQuestion, resumePolling, session.state.pendingConfirmations, streamingText, toolTimeline]);
+  }, [isStreaming, replyPhase, pendingQuestion, awaitingResume, pendingConfirmations, streamingText, toolTimeline]);
 
   const onActivityChangeRef = useRef(onActivityChange);
   useEffect(() => {
@@ -1299,12 +1501,98 @@ export function FloatingChat({
     onActivityChangeRef.current?.(activity);
   }, [activity]);
 
+  // ── Controller notices → this dock's copy ──────────────────────────────
+  const errorNotice = notices.find(
+    (item): item is Extract<ConversationNotice, { code: "error" }> => item.code === "error",
+  );
+  const controllerError = errorNotice
+    ? dockErrorCopy(errorNotice, t, tChatApp)
+    : notices.some((item) => item.code === "reconnectFailed")
+      ? t.turnReconnectFailed
+      : notices.some((item) => item.code === "stopTurnFailed")
+        ? tChatApp.stopTurnFailed
+        : notices.some((item) => item.code === "confirmNotAllowed")
+          ? tChatApp.confirmNotAllowed
+          : null;
+  const error = localError ?? controllerError;
+  const turnNotice = notices.find(
+    (item): item is Extract<ConversationNotice, { code: "turnNotice" }> => item.code === "turnNotice",
+  );
+  const turnNoticeCopy = turnNotice ? dockTurnNoticeCopy(turnNotice, t) : null;
+  const notice: InlineNotice | null = reconnecting
+    ? { code: "reconnecting", message: t.turnReconnecting }
+    : turnNotice && turnNoticeCopy
+      ? { code: "turnNotice", message: turnNoticeCopy }
+      : null;
+  const dismissNotice = useCallback(() => {
+    if (!controller) return;
+    controller.dismissNotice(reconnecting ? "reconnecting" : "turnNotice");
+  }, [controller, reconnecting]);
+
+  // Error codes that change this dock's own state, handled once per notice.
+  const handledNoticesRef = useRef(new WeakSet<object>());
+  useEffect(() => {
+    if (!errorNotice || handledNoticesRef.current.has(errorNotice)) return;
+    handledNoticesRef.current.add(errorNotice);
+    if (errorNotice.errorCode === "research_quota_exhausted") {
+      setResearchExhausted(true);
+      setResearchMode(false);
+    }
+    // The dock is holding a session this surface cannot re-address (a
+    // resume that attached a row bound to another assistant). Nothing was
+    // written server-side, so the recovery is simply to drop the binding:
+    // the next send mints a fresh session. The dock has no new-chat
+    // control, so otherwise every retry hits the same refusal.
+    if (errorNotice.errorCode === "session_assistant_mismatch") {
+      resetThread();
+      setLocalError(tChatApp.sessionRebound);
+    }
+  }, [errorNotice, resetThread, tChatApp.sessionRebound]);
+
+  // Text whose delivery is uncertain comes back to the composer; it is
+  // never resent automatically (offline contract point 7).
+  const unsentCount = conversation?.unsent.length ?? 0;
+  useEffect(() => {
+    if (!controller || unsentCount === 0) return;
+    const texts = controller.takeUnsent();
+    if (texts.length === 0) return;
+    const restored = texts.join("\n\n");
+    setInput((current) => (current.trim() ? `${current}\n\n${restored}` : restored));
+  }, [controller, unsentCount, setInput]);
+
+  // The resumed-question wait ends when the resumed turn paints, when
+  // history is re-read (the reply landed or the bounded window closed), or
+  // at the window's end.
+  const historyEpoch = conversation?.historyEpoch ?? 0;
+  useEffect(() => {
+    const until = thread.awaitingResumeUntil;
+    if (until === null) return;
+    const clear = () =>
+      updateDockThread(threadKey, (current) =>
+        current.awaitingResumeUntil === until ? { awaitingResumeUntil: null } : null,
+      );
+    if (isStreaming || historyEpoch > thread.awaitingResumeEpoch) {
+      clear();
+      return;
+    }
+    const timer = setTimeout(clear, Math.max(0, until - Date.now()));
+    return () => clearTimeout(timer);
+  }, [thread.awaitingResumeUntil, thread.awaitingResumeEpoch, historyEpoch, isStreaming, threadKey]);
+
+  // Surface docks: a general chat turn may have written to the brain (the
+  // assistant saves memories / entities while researching), so nudge the
+  // brain page to re-pull once the turn is over, re-attached turns included.
+  const wasStreamingRef = useRef(false);
+  useEffect(() => {
+    if (wasStreamingRef.current && !isStreaming && !isDocOrigin) requestBrainRefresh(workspaceId);
+    wasStreamingRef.current = isStreaming;
+  }, [isStreaming, isDocOrigin, workspaceId]);
+
   // Publish the full live detail (tool timeline + streaming text + reasoning)
   // to the build-activity bus so the page-body drafting indicator can render
-  // it step-by-step. Fires per token; the bus keeps that off the heavy shell
-  // tree (only the small indicator subtree subscribes). Doc-only — the
-  // indicator lives in the page editor, which a surface dock never overlays.
-  // See lib/build-activity.ts.
+  // it step-by-step. Every instance on the thread publishes the same shared
+  // snapshot. Doc-only — the indicator lives in the page editor, which a
+  // surface dock never overlays. See lib/build-activity.ts.
   useEffect(() => {
     if (!isDocOrigin) return;
     publishBuildActivity({
@@ -1326,33 +1614,33 @@ export function FloatingChat({
     if (!el) return;
     el.scrollTop = el.scrollHeight;
   }, [
-    session.state.messages,
-    session.state.streamingText,
+    transcript.messages,
+    streamingText,
     toolTimeline,
-    session.state.pendingConfirmations,
+    pendingConfirmations,
     pendingQuestion,
-    resumePolling,
+    awaitingResume,
   ]);
 
   // A suspended question is not "active" (isStreaming is false once the
   // turn exits), so the live-activity pill won't signal it. Auto-expand
   // when a question appears — live or restored on reload — so the user
   // sees the answer panel instead of a silently-wedged composer. Fires
-  // once per question (deps = the question ref), so manual collapse still
-  // sticks afterward.
+  // once per question, so manual collapse still sticks afterward.
+  const pendingQuestionId = pendingQuestion?.approvalId ?? null;
   useEffect(() => {
-    if (pendingQuestion) setExpanded(true);
-  }, [pendingQuestion]);
+    if (pendingQuestionId) setExpanded(true);
+  }, [pendingQuestionId]);
 
   useEffect(() => {
     if (!expanded) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        // ESC while streaming aborts the in-flight turn rather than
+        // ESC while streaming stops the in-flight turn rather than
         // closing the panel — matches apps/web's behaviour. Click X to
         // collapse.
-        if (stream.inFlight()) {
-          void stopRunningTurn();
+        if (isStreaming) {
+          void controller?.stop();
           return;
         }
         setExpanded(false);
@@ -1383,448 +1671,288 @@ export function FloatingChat({
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("mousedown", onPointerDown);
     };
-  }, [expanded, stopRunningTurn, stream]);
+  }, [expanded, isStreaming, controller]);
 
-  // ── Session resume on mount ────────────────────────────────────────────
+  // ── Session resume ─────────────────────────────────────────────────────
   //
-  // Page reload should restore the most recent doc-scoped session for
-  // this workspace + assistant so the user doesn't lose their thread on
-  // refresh. One effect owns the full async sequence: list latest →
-  // fetch messages → seed the reducer. Bails on:
-  //
-  //   • assistantId change mid-flight (AbortController + cancelled flag).
-  //   • existing local state (sessionId already set, messages already
-  //     populated, or stream in flight) — we never trample a fresh chat.
-  //   • fetch failure → silent no-op (matches the "no error toast" rule
-  //     in the spec — start fresh instead).
-  //
-  // Resumed messages are minted as `Message` rows identical in shape to
-  // the SSE-finalised ones, so downstream renders (`MessageBubble`,
-  // citations, retry handlers) treat them uniformly. Tool calls and
-  // view payloads are intentionally omitted from the rehydrated state —
-  // those only surface live via SSE; restoring them from `content`
-  // JSONB would require parsing tool_use blocks and re-resolving view
-  // payloads from the server, which is out of scope here.
-  const sessionDispatchRef = useRef(session.dispatch);
+  // A reload restores the most recent session for this surface so the user
+  // does not lose their thread. The lookup runs once per binding epoch for
+  // every instance on the thread; it only BINDS the session. The controller
+  // then seeds the authorized history through `mapHistoryRows`, re-attaches a
+  // turn still running (hydrate probe) and restores a pending question or
+  // tool confirmation. Bails when the thread is already bound or this entry
+  // has started a turn, so a fresh chat is never trampled; a failed lookup
+  // starts fresh.
   useEffect(() => {
-    sessionDispatchRef.current = session.dispatch;
-  }, [session.dispatch]);
-  const streamRef = useRef(stream);
-  useEffect(() => {
-    streamRef.current = stream;
-  }, [stream]);
-
-  useEffect(() => {
-    if (!selectedAssistantId) return;
-    const controller = new AbortController();
-    let cancelled = false;
-
-    void (async () => {
-      // Don't trample an in-flight or already-populated session. The
-      // refs avoid re-triggering the effect when those values change.
-      if (sessionIdRef.current) return;
-      if (streamRef.current.inFlight()) return;
-      // A resetThread() (surface seed / assistant or origin switch) while
-      // this fetch is in flight bumps the epoch — bail instead of
-      // repopulating the freshly-wiped thread.
-      const epoch = threadEpochRef.current;
-
-      const latest = await fetchLatestSession({
-        workspaceId,
-        // The doc dock resumes SURFACE-scoped, across the workspace's
-        // assistants: its thread is per-turn addressable, so the latest doc
-        // thread is the resume target no matter which assistant is
-        // currently picked (the thread's binding is just whoever founded
-        // it). Other origins stay assistant-keyed.
-        ...(origin === "doc"
-          ? { scope: "workspace" as const }
-          : { assistantId: selectedAssistantId }),
-        // Sessions are stamped per-surface — the doc dock resumes its doc
-        // thread, a Brain dock its brain thread, and so on.
-        appOrigin: origin,
-        signal: controller.signal,
-      });
-      if (cancelled || !latest) return;
-      // Defence in depth for the doc dock's `scope: "workspace"` resume. That
-      // thread is per-turn addressable (the switcher re-addresses instead of
-      // starting a new thread), so a row we ATTACH must be one the server
-      // will let the current pick ANSWER on — the `docSurface` policy in `chat.ts`,
-      // i.e. `app_origin === 'doc'`. Attaching anything else produces a dead
-      // thread: every send after a switch fails "Session does not belong to
-      // this assistant", and the rejection itself bumps `last_active_at`, so
-      // the bad row stays newest and the dock re-attaches it on every load.
-      // The server predicate is the fix (`DOC_DOCK_RESUME_ROW`); this guard
-      // covers an older API still serving the wide list.
+    if (!selectedAssistantId || !controller) return;
+    const key = threadKey;
+    const binding = readDockThread(key);
+    if (binding.sessionId || binding.resumeLookup) return;
+    const started = controller.getSnapshot();
+    if (controller.getSessionId() || started.transcript.messages.length > 0 || started.transcript.isStreaming) return;
+    const { epoch, clientId } = binding;
+    updateDockThread(key, { resumeLookup: true });
+    const abort = new AbortController();
+    let settled = false;
+    void fetchLatestSession({
+      workspaceId,
+      // The doc dock resumes SURFACE-scoped, across the workspace's
+      // assistants: its thread is per-turn addressable, so the latest doc
+      // thread is the resume target no matter which assistant is
+      // currently picked (the thread's binding is just whoever founded
+      // it). Other origins stay assistant-keyed.
+      ...(origin === "doc"
+        ? { scope: "workspace" as const }
+        : { assistantId: selectedAssistantId }),
+      // Sessions are stamped per-surface — the doc dock resumes its doc
+      // thread, a Brain dock its brain thread, and so on.
+      appOrigin: origin,
+      signal: abort.signal,
+    }).catch(() => null).then((latest) => {
+      settled = true;
+      if (!latest) return;
+      // Defence in depth for the doc dock's `scope: "workspace"` resume. A
+      // row we ATTACH must be one the server lets the current pick ANSWER
+      // on — the `docSurface` policy in `chat.ts`, i.e. `app_origin ===
+      // 'doc'`; anything else is a dead thread. The server predicate is the
+      // fix (`DOC_DOCK_RESUME_ROW`); this guard covers an older API.
       if (origin === "doc" && latest.appOrigin !== "doc") return;
-
-      // Restore whichever durable human input owns the current turn. Generic
-      // confirmations re-enter the shared confirmation reducer so the same
-      // card renders after navigation/reload; questions keep their answer UI.
-      const controllerProbe = chatController.capture();
-      void fetchPendingSessionInput(latest.id)
-        .then(({ pending, toolConfirmation }) => {
-          if (cancelled || epoch !== threadEpochRef.current) return;
-          if (!chatController.isCurrent(controllerProbe)) return;
-          if (pending) {
-            setPendingQuestion({
-              approvalId: pending.approvalId,
-              question: pending.question ?? "",
-              expiresAt: pending.expiresAt,
-              sessionId: latest.id,
-            });
-            chatController.presentInteraction(controllerProbe, {
-              kind: "question",
-              approvalId: pending.approvalId,
-              source: "restored",
-              status: "pending",
-              payload: pending,
-            });
-          }
-          if (toolConfirmation) {
-            const confirmation = toRestoredConfirmation(toolConfirmation, latest.id);
-            chatController.presentInteraction(controllerProbe, {
-              kind: "tool-confirmation",
-              approvalId: toolConfirmation.approvalId,
-              toolCallId: confirmation.toolCallId,
-              source: "restored",
-              status: "pending",
-              payload: confirmation,
-            });
-            sessionDispatchRef.current({
-              type: "confirmation/add",
-              confirmation,
-            });
-          }
-        })
-        .catch(() => {});
-
-      const rows = await fetchSessionMessages(latest.id, {
-        signal: controller.signal,
-      });
-      if (cancelled) return;
-
-      const messages = mapSessionRows(rows, t.toolNarration);
-
-      if (messages.length === 0) {
-        // Empty session — treat as no resume so a fresh send still
-        // mints a new session id rather than appending to this one.
-        return;
-      }
-
-      // Final guards: another concurrent send may have set the session
-      // id, or a resetThread() may have wiped the thread, while we were
-      // fetching. Either way, bail rather than overwrite.
-      if (sessionIdRef.current) return;
-      if (epoch !== threadEpochRef.current) return;
-
-      const dispatch = sessionDispatchRef.current;
-      dispatch({ type: "session/set", sessionId: latest.id });
-      dispatch({ type: "messages/load", messages });
-    })();
-
-    return () => {
-      cancelled = true;
-      controller.abort();
-    };
-  }, [selectedAssistantId, workspaceId, origin]);
-
-  // askQuestion suspend-resume: after the user answers/cancels, the
-  // resume worker fires a continuation turn on the poll-worker tick.
-  // Poll session messages at 2s (up to 120s) so the synthesised reply
-  // lands without a manual refresh, then stop. See
-  // docs/architecture/engine/askquestion-suspend-resume.md.
-  useEffect(() => {
-    const sid = session.state.sessionId;
-    if (!resumePolling || !sid) return;
-    const startedAt = Date.now();
-    const baseline = session.state.messages.length;
-    const controller = new AbortController();
-    const interval = setInterval(() => {
-      if (Date.now() - startedAt > 120_000) {
-        setResumePolling(false);
-        return;
-      }
-      void fetchSessionMessages(sid, { signal: controller.signal })
-        .then((rows) => {
-          const mapped = mapSessionRows(rows, t.toolNarration);
-          if (mapped.length <= baseline) return;
-          sessionDispatchRef.current({ type: "messages/load", messages: mapped });
-          setResumePolling(false);
-        })
-        .catch(() => {});
-    }, 2_000);
-    return () => {
-      clearInterval(interval);
-      controller.abort();
-    };
-  }, [resumePolling, session.state.sessionId, session.state.messages.length]);
-
-  // ── Turn reconnect ─────────────────────────────────────────────────────
-  // The direct POST body closed with no `done` / `error`, so the turn is
-  // still running server-side. Follow it over `GET /api/sessions/:id/stream`
-  // (reconnect mode): the first frame is `status`; `snapshot` / `activity`
-  // carry the live turn (ignored here: the dock has no mirror bubble, the
-  // persisted reply lands on completion); `turn_completed` or a `status`
-  // that is not `running` means the turn is over and the server follows with
-  // `done` and closes. The transcript is then re-read from the server, the
-  // same way the askQuestion resume poll above lands its reply. A bare close
-  // (proxy cut, deploy) reopens after a beat; past the budget the dock gives
-  // up and says so. Mirrors `chat-surface.tsx`'s session-stream effect minus
-  // the remote-turn paint.
-  useEffect(() => {
-    const sid = reconnectSessionId;
-    if (!sid) return;
-    let cancelled = false;
-    let sawDone = false;
-    const controller = new AbortController();
-    const controllerRun = chatController.capture();
-    chatController.reconnect(controllerRun);
-    const epoch = threadEpochRef.current;
-    const unregisterControllerCleanup = chatController.registerCleanup(
-      controllerRun,
-      () => {
-        cancelled = true;
-        controller.abort();
-      },
-    );
-    const narration = t.toolNarration;
-    const clearReconnectNotice = () =>
-      setNotice((current) =>
-        current?.code === RECONNECT_NOTICE_CODE ? null : current,
+      // A send, reset or switch while the lookup was out wins.
+      const now = controller.getSnapshot();
+      if (controller.getSessionId() || now.transcript.messages.length > 0 || now.transcript.isStreaming) return;
+      updateDockThread(key, (current) =>
+        current.epoch === epoch && current.clientId === clientId && !current.sessionId
+          ? { sessionId: latest.id }
+          : null,
       );
-    const onCompleted = () => {
-      if (sawDone || cancelled || epoch !== threadEpochRef.current || sessionIdRef.current !== sid) return;
-      sawDone = true;
-      chatController.complete(controllerRun);
-      setReconnectSessionId(null);
-      clearReconnectNotice();
-      void fetchSessionMessages(sid)
-        .then((rows) => {
-          // The thread was reset or switched while the fetch was out.
-          if (epoch !== threadEpochRef.current) return;
-          if (sessionIdRef.current !== sid) return;
-          sessionDispatchRef.current({
-            type: "messages/load",
-            messages: mapSessionRows(rows, narration),
-          });
-        })
-        .catch(() => {});
-      // The dead POST could not report durable input raised around the cut,
-      // so restore the current-turn question or tool confirmation.
-      void fetchPendingSessionInput(sid)
-        .then(({ pending, toolConfirmation }) => {
-          if (epoch !== threadEpochRef.current || sessionIdRef.current !== sid) return;
-          if (pending) {
-            setPendingQuestion({
-              approvalId: pending.approvalId,
-              question: pending.question ?? "",
-              expiresAt: pending.expiresAt,
-              sessionId: sid,
-            });
-            chatController.presentInteraction(controllerRun, {
-              kind: "question",
-              approvalId: pending.approvalId,
-              source: "restored",
-              status: "pending",
-              payload: pending,
-            });
-          }
-          if (toolConfirmation) {
-            const confirmation = toRestoredConfirmation(toolConfirmation, sid);
-            chatController.presentInteraction(controllerRun, {
-              kind: "tool-confirmation",
-              approvalId: toolConfirmation.approvalId,
-              toolCallId: confirmation.toolCallId,
-              source: "restored",
-              status: "pending",
-              payload: confirmation,
-            });
-            sessionDispatchRef.current({
-              type: "confirmation/add",
-              confirmation,
-            });
-          }
-        })
-        .catch(() => {});
-      if (!isDocOrigin) requestBrainRefresh(workspaceId);
-      // Queued mid-turn input the dead POST never took: the turn is over
-      // now, so it goes out as an ordinary turn (the queue's "client is
-      // the durable holder" fallback).
-      if (chatController.claimExit(controllerRun)) {
-        flushQueuedInputsRef.current(sid);
-      }
-    };
-    const giveUp = () => {
-      if (sawDone) return;
-      sawDone = true;
-      setReconnectSessionId(null);
-      clearReconnectNotice();
-      setError(t.turnReconnectFailed);
-      chatController.fail(controllerRun, t.turnReconnectFailed);
-    };
-
-    void (async () => {
-      try {
-        const res = await authFetch(
-          `${API_URL}/api/sessions/${encodeURIComponent(sid)}/stream`,
-          { signal: controller.signal },
-        );
-        if (cancelled) return;
-        if (!res.ok || !res.body) {
-          // A rejected open is not something a retry fixes.
-          giveUp();
-          return;
-        }
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        const buf = createSSEBuffer();
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done || cancelled) break;
-          for (const ev of parseSSEStream(decoder.decode(value, { stream: true }), buf)) {
-            if (cancelled || sawDone) break;
-            const payload = coercePayload(ev.data);
-            switch (ev.event) {
-              case "status": {
-                if (payload.status === "running") chatController.connected(controllerRun);
-                else onCompleted();
-                break;
-              }
-              case "turn_completed":
-              case "done":
-                onCompleted();
-                break;
-              default:
-                // `snapshot` / `activity`: no mirror bubble in the dock.
-                break;
-            }
-          }
-        }
-      } catch {
-        // Transport error / abort: reopen below, or the effect was torn down.
-      } finally {
-        if (shouldReopenSessionStream({ isRoom: false, sawDone, cancelled })) {
-          const startedAt = reconnectStartedAtRef.current ?? Date.now();
-          if (Date.now() - startedAt > RECONNECT_BUDGET_MS) {
-            giveUp();
-          } else {
-            setTimeout(() => {
-              if (!cancelled) setReconnectEpoch((n) => n + 1);
-            }, RECONNECT_REOPEN_MS);
-          }
-        }
-      }
-    })();
+    });
     return () => {
-      unregisterControllerCleanup();
-      cancelled = true;
-      controller.abort();
+      if (settled) return;
+      abort.abort();
+      // A torn-down lookup may run again for this epoch.
+      updateDockThread(key, (current) =>
+        current.epoch === epoch && current.clientId === clientId && !current.sessionId
+          ? { resumeLookup: false }
+          : null,
+      );
     };
-  }, [reconnectSessionId, reconnectEpoch, workspaceId, isDocOrigin, t.toolNarration, t.turnReconnectFailed]);
+  }, [selectedAssistantId, workspaceId, origin, controller, threadKey]);
 
-  // ── Send + SSE loop ────────────────────────────────────────────────────
-
-  /** Reset all per-turn buffers/state. Called at the start of each send. */
-  const resetTurnBuffers = useCallback(() => {
-    turnViewsRef.current = [];
-    turnTextRef.current = "";
-    pendingAnswerResetRef.current = false;
-    turnCitationsRef.current = [];
-    turnFileAttachmentsRef.current = [];
-    turnToolsRef.current = [];
-    turnNotesRef.current = [];
-    turnWorkerDescriptionsRef.current = new Map();
-    turnReasoningRef.current = "";
-    eventLogRef.current = EMPTY_LOG;
-    eventSeqRef.current = 0;
-    eventedToolIdsRef.current = new Set();
-    toolStartTimesRef.current = new Map();
-    turnStartedAtRef.current = Date.now();
-    assistantIdRef.current = null;
-    turnAskedQuestionRef.current = false;
-    setCitations([]);
-    setToolTimeline([]);
-    setStreamingReasoning("");
-    setStreamingEvents([]);
-    setTurnStartedAt(turnStartedAtRef.current);
-    setResearchPhase(null);
-  }, []);
-
-  /**
-   * Freeze what the turn has streamed so far into a message. Returns null
-   * when the segment carried nothing worth a bubble (a tool-only prelude, or
-   * a turn that produced nothing at all).
-   *
-   * Two callers: the end of the turn, and the mid-turn split below — a
-   * queued message the running turn takes has to land BETWEEN the text
-   * written before it and the text written after.
-   */
-  const buildStreamedTurnMessage = useCallback((): MessageWithViews | null => {
-    const finalText = stripFollowUps(turnTextRef.current);
-    const views = turnViewsRef.current;
-    const tools = turnToolsRef.current;
-    const citations = turnCitationsRef.current;
-    const fileAttachments = turnFileAttachmentsRef.current;
-    if (
-      finalText.length === 0 &&
-      views.length === 0 &&
-      tools.length === 0 &&
-      fileAttachments.length === 0
-    ) {
-      return null;
+  // ── Surface effects of this dock's turns (dispatched once) ─────────────
+  // The controller hands each surface-effect and presentation frame of a
+  // turn this instance started to this instance only (or to the latest
+  // attached one when the originator is gone), so a sidebar refresh or an
+  // auto-navigation never fires twice across the dock and the drawer.
+  surfaceEffectRef.current = (frame) => {
+    const { payload } = frame;
+    switch (frame.event) {
+      case "goal_accepted": {
+        const notice = goalAcceptedNoticeFromPayload(payload);
+        if (notice) setAcceptedGoal(notice);
+        break;
+      }
+      case "research_quota": {
+        // Server accepted the research turn and bumped the counter.
+        setResearchQuota({
+          used: typeof payload.used === "number" ? payload.used : 0,
+          quota: typeof payload.quota === "number" ? payload.quota : 0,
+          isPaid: payload.isPaid === true,
+        });
+        break;
+      }
+      case "research_quota_exhausted": {
+        // Free workspace hit its lifetime research cap.
+        setResearchExhausted(true);
+        setResearchMode(false);
+        setResearchQuota({
+          used: typeof payload.used === "number" ? payload.used : 0,
+          quota: typeof payload.quota === "number" ? payload.quota : 0,
+          isPaid: false,
+        });
+        break;
+      }
+      case "recording_participants_updated": {
+        const recordingId =
+          typeof payload.recordingId === "string" ? payload.recordingId : "";
+        const pageId =
+          typeof payload.pageId === "string" ? payload.pageId : undefined;
+        if (recordingId) {
+          dispatchRecordingParticipantsUpdated({
+            recordingId,
+            ...(pageId ? { pageId } : {}),
+          });
+        }
+        break;
+      }
+      case "brain_entry_updated": {
+        const primitive =
+          typeof payload.primitive === "string"
+            ? (payload.primitive as BrainPrimitive)
+            : null;
+        const previousRowId =
+          typeof payload.previousRowId === "string" ? payload.previousRowId : null;
+        const liveRowId =
+          typeof payload.liveRowId === "string" ? payload.liveRowId : null;
+        requestBrainRefresh(workspaceId);
+        const open = viewingBrainEntryRef.current;
+        if (
+          primitive &&
+          previousRowId &&
+          liveRowId &&
+          open?.primitive === primitive &&
+          open.rowId === previousRowId
+        ) {
+          viewingBrainEntryRef.current = { primitive, rowId: liveRowId };
+          const params = new URLSearchParams(window.location.search);
+          params.set("row", liveRowId);
+          if (primitive === "task") params.delete("kind");
+          else params.set("kind", primitive);
+          router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+        }
+        break;
+      }
+      case "view_payload": {
+        // `renderView` lands a `data` block on a draft, server-side. Doc is
+        // a draft-first surface: the controller keeps the pointer on the
+        // committed reply (`views[]`); here we (1) bridge to the sidebar
+        // refresh and (2) auto-navigate to a newly created draft.
+        const viewId =
+          typeof payload.viewId === "string" && payload.viewId.length > 0
+            ? payload.viewId
+            : undefined;
+        const action =
+          payload.action === "appended" || payload.action === "created"
+            ? payload.action
+            : undefined;
+        if (viewId && typeof window !== "undefined") {
+          window.dispatchEvent(
+            new CustomEvent("doc:draft-created", {
+              detail: {
+                viewId,
+                toolUseId: typeof payload.toolUseId === "string" ? payload.toolUseId : "",
+                action,
+              },
+            }),
+          );
+          // Created path → land the user on the new draft (soft transition;
+          // the persistent dock survives `router.replace`). Doc-only.
+          if (isDocOrigin && action === "created" && viewId !== activeViewIdRef.current) {
+            router.replace(docPagePath(workspaceId, viewId), { scroll: false });
+          }
+        }
+        break;
+      }
+      case "sub_page_created": {
+        // A new nested sub-page (createSubPage): refresh the sidebar so the
+        // child appears, but do NOT navigate — the user asked to file a
+        // child under the page they're on.
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(
+            new CustomEvent("doc:draft-created", {
+              detail: {
+                viewId: typeof payload.pageId === "string" ? payload.pageId : undefined,
+                action: "created",
+              },
+            }),
+          );
+        }
+        break;
+      }
+      case "page_created": {
+        // A brand-new ROOT page (renderPage): reload the sidebar so the
+        // draft appears, then land the user on it (doc-only).
+        const newPageId = typeof payload.pageId === "string" ? payload.pageId : undefined;
+        if (newPageId && typeof window !== "undefined") {
+          window.dispatchEvent(
+            new CustomEvent("doc:draft-created", {
+              detail: { viewId: newPageId, action: "created" },
+            }),
+          );
+          if (isDocOrigin && newPageId !== activeViewIdRef.current) {
+            router.replace(docPagePath(workspaceId, newPageId), { scroll: false });
+          }
+        }
+        break;
+      }
+      case "comment_posted":
+      case "comment_resolved": {
+        // The editor owns thread state; we just signal "something changed".
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(
+            new CustomEvent(DOC_COMMENTS_CHANGED_EVENT, {
+              detail: {
+                threadId: typeof payload.threadId === "string" ? payload.threadId : undefined,
+              },
+            }),
+          );
+        }
+        break;
+      }
+      case "doc_title_update": {
+        // Auto-title or an explicit `setTitle`/`setIcon`: bridge to the
+        // shell (which owns `activeView` + the sidebar) via a window event.
+        const pageId = typeof payload.pageId === "string" ? payload.pageId : "";
+        const title = typeof payload.title === "string" ? payload.title : "";
+        const icon = typeof payload.icon === "string" ? payload.icon : null;
+        const nameOrigin =
+          payload.nameOrigin === "user" ||
+          payload.nameOrigin === "auto" ||
+          payload.nameOrigin === "placeholder"
+            ? payload.nameOrigin
+            : undefined;
+        const overwrite = payload.overwrite === true;
+        if (pageId && title && typeof window !== "undefined") {
+          window.dispatchEvent(
+            new CustomEvent("doc:title-updated", {
+              detail: { pageId, title, icon, nameOrigin, overwrite },
+            }),
+          );
+        }
+        break;
+      }
+      case "doc_theme_update": {
+        // `refineActiveTheme` rebuilt the active custom theme: bridge the
+        // new tokens (and light/dark intent) to CustomThemesProvider.
+        const themeId = typeof payload.themeId === "string" ? payload.themeId : "";
+        const tokens =
+          payload.tokens && typeof payload.tokens === "object"
+            ? (payload.tokens as { light?: unknown; dark?: unknown })
+            : null;
+        const appearance =
+          payload.appearance === "light" || payload.appearance === "dark"
+            ? payload.appearance
+            : undefined;
+        if (themeId && tokens && typeof window !== "undefined") {
+          window.dispatchEvent(
+            new CustomEvent("doc:theme-changed", {
+              detail: { themeId, tokens, appearance },
+            }),
+          );
+        }
+        break;
+      }
+      // Intentionally unhandled: `title_update` (no session titles here),
+      // `mention_unreachable` (rooms only).
     }
-    // Total wall-clock for the "Worked for Ns · k steps" receipt — only
-    // meaningful when the segment actually ran tools.
-    const activityDurationMs =
-      tools.length > 0 && turnStartedAtRef.current != null
-        ? Math.max(0, Date.now() - turnStartedAtRef.current)
-        : undefined;
-    const activityNotes =
-      tools.length > 0 ? finalizeActivityNotes(turnNotesRef.current, finalText) : undefined;
-    const activityReasoning =
-      tools.length > 0 ? turnReasoningRef.current.trim() || undefined : undefined;
-    return {
-      id: assistantIdRef.current ?? `assistant-${Date.now()}`,
-      role: "assistant",
-      text: finalText,
-      timestamp: new Date(),
-      ...(turnVoiceRef.current ? { senderAssistantId: turnVoiceRef.current } : {}),
-      ...(views.length > 0 ? { views } : {}),
-      ...(tools.length > 0 ? { toolsUsed: tools } : {}),
-      ...(activityNotes ? { activityNotes } : {}),
-      ...(activityReasoning ? { activityReasoning } : {}),
-      ...(activityDurationMs != null ? { activityDurationMs } : {}),
-      ...(citations.length > 0 ? { citations } : {}),
-      ...(fileAttachments.length > 0 ? { fileAttachments } : {}),
-    };
-  }, []);
+  };
 
-  /**
-   * The running turn took one of our queued messages. Close the segment the
-   * assistant wrote BEFORE it arrived, drop the user's bubble in, and start a
-   * fresh segment — otherwise text written earlier renders below the message
-   * and reads as its answer.
-   */
-  const applyQueuedInput = useCallback(
-    (inputId: string, messageId: string, owningSessionId: string) => {
-      const entry = midTurn.take(inputId, owningSessionId);
-      if (!entry) return;
-      const segment = buildStreamedTurnMessage();
-      if (segment) session.dispatch({ type: "message/append", message: segment });
-      session.dispatch({ type: "stream/reset" });
-      resetTurnBuffers();
-      session.appendMessage({
-        id: messageId,
-        role: "user",
-        text: entry.text,
-        timestamp: new Date(),
-      });
-    },
-    [buildStreamedTurnMessage, midTurn, resetTurnBuffers, session],
-  );
+  // Every validated frame of this dock's turns: the build-activity log, and
+  // the thread binding the moment a provisional thread gets its session.
+  frameObserverRef.current = (frame) => {
+    if (!controller) return;
+    observeDockBuildFrame(controller, frame, t.toolNarration);
+    if (frame.stream === "direct" && frame.event === "session" && typeof frame.payload.sessionId === "string") {
+      const adopted = frame.payload.sessionId;
+      const clientId = thread.clientId;
+      updateDockThread(threadKey, (current) =>
+        current.clientId === clientId && !current.sessionId ? { sessionId: adopted } : null,
+      );
+    }
+  };
 
+  // ── Send ───────────────────────────────────────────────────────────────
   const sendMessage = useCallback(
-    async (
+    (
       text: string,
       override?: {
         /**
@@ -1859,7 +1987,7 @@ export function FloatingChat({
       },
     ): Promise<boolean> => {
       // Guard block — each early-return reports `false` so callers (the seed
-      // effect) know the send didn't start and must not burn the nonce.
+      // effect, the recorder's voice clip) know the send didn't start.
       const trimmed = text.trim();
       const seededFileIds = override?.fileIds ?? [];
       const turnRecordingIds =
@@ -1870,1074 +1998,135 @@ export function FloatingChat({
         !att.hasReady &&
         seededFileIds.length === 0 &&
         turnRecordingIds.length === 0
-      ) return false;
-      if (stream.inFlight()) return false;
-      if (att.uploading) return false;
-      if (rec.busy) return false;
+      ) return Promise.resolve(false);
+      if (!controller) return Promise.resolve(false);
+      if (att.uploading) return Promise.resolve(false);
+      if (rec.busy) return Promise.resolve(false);
       // Suspended on a question — the answer flows through the inline
       // panel (POST /answer), never a fresh chat turn. Guards the Retry
       // path too, which calls sendMessage directly past the disabled composer.
-      if (pendingQuestion) return false;
+      if (pendingQuestion) return Promise.resolve(false);
+      const before = controller.getSnapshot();
+      if (before.transcript.isStreaming || ACTIVE_RUN_PHASES.has(before.run.phase)) return Promise.resolve(false);
 
-      let owningSessionId = sessionIdRef.current;
-      const controllerRun = chatController.begin(owningSessionId);
-      const epoch = threadEpochRef.current;
-      const current = () => epoch === threadEpochRef.current && sessionIdRef.current === owningSessionId;
+      // Snapshot the ready attachment ids for this turn. A seed (the
+      // landing's build flow) hands its own ids in — those win, and this
+      // chat's own tray stays as it is.
+      const usesComposerTray = seededFileIds.length === 0;
+      const turnFileIds = usesComposerTray ? att.fileIds() : seededFileIds;
+      // The sent bubble shows the user's own images/files immediately. Reuse
+      // each chip's preview object URL as the thumbnail; `att.detach()`
+      // (on acceptance) clears the tray WITHOUT revoking these, transferring
+      // URL ownership to the message.
+      const userAttachments: MessageAttachmentRef[] = usesComposerTray
+        ? readyAttachments(att.attachments).map((a) => ({
+            id: a.fileId!,
+            name: a.fileName,
+            mime: a.mimeType,
+            ...(a.previewUrl ? { dataUrl: a.previewUrl } : {}),
+          }))
+        : [];
 
-      // Snapshot the ready attachment ids for this turn, then clear the tray.
-      // A seed (the landing's build flow) hands its own ids in — those win,
-      // since this chat's own tray is empty on that path.
-      const turnFileIds =
-        seededFileIds.length > 0 ? seededFileIds : att.fileIds();
-
-      // One-shot insertion anchor: the inline Space-for-AI box passes it on the
-      // autoSend override (via the seed). Absent → the turn appends at the page
-      // end as usual.
-      const anchorBlockId = override?.docAnchorBlockId;
-
-      const localUserId = `local-${Date.now()}`;
-      // Snapshot the ready chips (this render) so the sent bubble shows the
-      // user's own images/files immediately — otherwise they upload + ride the
-      // turn as `fileIds` but leave no visible record. Reuse each chip's preview
-      // object URL as the thumbnail; `att.detach()` (below) clears the tray
-      // WITHOUT revoking these, transferring URL ownership to the message.
-      const userAttachments: MessageAttachmentRef[] = readyAttachments(
-        att.attachments,
-      ).map((a) => ({
-        id: a.fileId!,
-        name: a.fileName,
-        mime: a.mimeType,
-        ...(a.previewUrl ? { dataUrl: a.previewUrl } : {}),
-      }));
-      const userMessage: MessageWithViews = {
-        id: localUserId,
-        role: "user",
-        text: trimmed,
-        timestamp: new Date(),
-        ...(userAttachments.length > 0 ? { userAttachments } : {}),
+      // The landing's picker overrides the chat's current tier for the
+      // build turn; otherwise the chat's own selection is used. An armed
+      // metered pick (confirmed at selection time) wins over the tier —
+      // unless this turn runs research mode, which forces its own model.
+      const researchOn = override?.researchMode ?? researchMode;
+      const useCustom = !!customEndpoint && !override?.model && !researchOn;
+      const useMetered = !!metered && !override?.model && !researchOn;
+      // The custom theme the user currently has applied (a per-user
+      // localStorage value), so "make my theme warmer" works in chat. Only
+      // sent on a custom palette, and only from the doc dock.
+      const themeId =
+        isDocOrigin &&
+        typeof window !== "undefined" &&
+        window.localStorage.getItem("doc:palette") === "custom"
+          ? window.localStorage.getItem("doc:customThemeId")
+          : null;
+      // Anchors the turn to a doc page: an explicit override (the landing's
+      // pre-created draft) wins over the path-derived id; absent both, the
+      // next message mints a new draft. Doc-only.
+      const docViewId = isDocOrigin ? override?.docViewId ?? activeViewIdRef.current : null;
+      // One-shot "Space for AI" insertion anchor (doc-only).
+      const anchorBlockId = isDocOrigin ? override?.docAnchorBlockId : undefined;
+      const bodyExtras: ConversationBodyExtras = {
+        // Stamps newly-created sessions with the surface they came from, so
+        // threads + Recents scope per-surface (migrations 187/255).
+        appOrigin: origin,
+        model: useCustom
+          ? customEndpoint!.selector
+          : useMetered
+            ? metered!.alias
+            : override?.model ?? model,
+        ...(useMetered
+          ? {
+              meteredAccepted: true,
+              ...(metered!.profileId
+                ? { meteredProfileId: metered!.profileId }
+                : { meteredToolRounds: metered!.toolRounds }),
+            }
+          : {}),
+        // Deep-research mode → coordinator + max-tier + higher ceiling,
+        // gated server-side by the workspace's free-research quota.
+        ...(researchOn ? { mode: "research" as const } : {}),
+        ...(docViewId ? { docViewId } : {}),
+        ...(anchorBlockId ? { docAnchorBlockId: anchorBlockId } : {}),
+        // The Brain skill editor route: the viewed skill rides the context.
+        ...(viewingSkillRowIdRef.current
+          ? { viewingSkillRowId: viewingSkillRowIdRef.current }
+          : {}),
+        ...(viewingBrainEntryRef.current
+          ? { viewingBrainEntry: { ...viewingBrainEntryRef.current } }
+          : {}),
+        ...(themeId ? { docActiveThemeId: themeId } : {}),
+        ...(CLIENT_TIMEZONE ? { timezone: CLIENT_TIMEZONE } : {}),
       };
-      session.appendMessage(userMessage);
+      const composerText = text;
+      const turn: ConversationSendInput = {
+        presentationId,
+        text: trimmed,
+        fileIds: turnFileIds,
+        recordingIds: turnRecordingIds,
+        bodyExtras,
+        // Who answers THIS turn — the seed's addressed pick wins over the
+        // switcher's selection. The controller stamps it on the reply as
+        // `senderAssistantId` so a mixed-voice thread renders each avatar.
+        assistantId: override?.assistantId ?? selectedAssistantId,
+        ...(userAttachments.length > 0 ? { userMessage: { userAttachments } } : {}),
+        // Accepted (`session` / `user_message_saved`): the staged chips now
+        // belong to the sent message.
+        onAccepted: () => {
+          if (usesComposerTray) att.detach();
+        },
+        // Failed before acceptance: hand the text back; the chips were never
+        // detached. Nothing is re-sent automatically.
+        onRejected: () => {
+          setInput((current) => (current.trim() ? current : composerText));
+        },
+      };
+      const pending = override?.truncateFromMessageId
+        ? controller.edit({ ...turn, messageId: override.truncateFromMessageId })
+        : controller.send(turn);
+      // The controller begins a turn synchronously when it accepts the
+      // start; a refused start (busy, empty, invalid) leaves the run
+      // generation unchanged.
+      const started = controller.getSnapshot().identity.generation !== before.identity.generation;
+      if (!started) return Promise.resolve(false);
       setInput("");
-      att.detach();
       setPendingRecordings([]);
-      setError(null);
-      setNotice(null);
-      setResumePolling(false);
-      session.clearConfirmations();
-      session.dispatch({ type: "stream/start" });
-      resetTurnBuffers();
-      // Who answers THIS turn — the seed's addressed pick wins over the
-      // switcher's selection (same precedence as the request body below).
-      turnVoiceRef.current = override?.assistantId ?? selectedAssistantId;
-
-      await stream.start({
-        url: `${API_URL}/api/chat`,
-        authFetch: (url, init) => authFetch(String(url), init),
-        body: {
-          message: trimmed,
-          ...(turnFileIds.length > 0 ? { fileIds: turnFileIds } : {}),
-          ...(turnRecordingIds.length > 0
-            ? { attachedRecordingIds: turnRecordingIds }
-            : {}),
-          sessionId: owningSessionId ?? undefined,
-          // The landing's picker overrides the chat's current tier for the
-          // build turn; otherwise the chat's own selection is used. An armed
-          // metered pick (confirmed at selection time) wins over the tier —
-          // unless this turn runs research mode, which forces its own model.
-          model:
-            customEndpoint && !override?.model && !(override?.researchMode ?? researchMode)
-              ? customEndpoint.selector
-              : metered && !override?.model && !(override?.researchMode ?? researchMode)
-              ? metered.alias
-              : override?.model ?? model,
-          ...(metered && !override?.model && !(override?.researchMode ?? researchMode)
-            ? {
-                meteredAccepted: true,
-                ...(metered.profileId
-                  ? { meteredProfileId: metered.profileId }
-                  : { meteredToolRounds: metered.toolRounds }),
-              }
-            : {}),
-          // Deep-research mode → coordinator + max-tier + higher ceiling,
-          // gated server-side by the workspace's free-research quota.
-          ...((override?.researchMode ?? researchMode) ? { mode: "research" as const } : {}),
-          workspaceId,
-          // The selected interlocutor (primary by default, or whatever the
-          // switcher set). A session is assistant-bound; the switch handler
-          // wipes `sessionIdRef` so this turn mints a fresh session when the
-          // assistant changed. A seeded build with a draft-assistant pick
-          // overrides, because the switched state hasn't settled yet.
-          assistantId: override?.assistantId ?? selectedAssistantId,
-          // Migrations 187/255 — stamps newly-created sessions with the
-          // surface they came from, so threads + Recents scope per-surface.
-          appOrigin: origin,
-          // Anchors the turn to a doc page: the model edits THAT page
-          // (`patchPage`) instead of minting a fresh draft. An explicit
-          // override (the landing's pre-created draft) wins over the
-          // path-derived id, which may not have settled yet; absent both,
-          // the next message mints a new draft. Doc-only — a workspace
-          // surface never anchors to a page.
-          ...(isDocOrigin && (override?.docViewId ?? activeViewIdRef.current)
-            ? { docViewId: override?.docViewId ?? activeViewIdRef.current }
-            : {}),
-          // Empty-line "Space for AI": tells the server to inject an
-          // insertion-anchor note so the model generates AFTER this block
-          // (chat.ts → patchPage `add { after }`). Doc-only.
-          ...(isDocOrigin && anchorBlockId
-            ? { docAnchorBlockId: anchorBlockId }
-            : {}),
-          // The Brain skill editor route: tell the server which skill the
-          // user is viewing so its saved contents ride the turn context.
-          ...(viewingSkillRowIdRef.current
-            ? { viewingSkillRowId: viewingSkillRowIdRef.current }
-            : {}),
-          ...(viewingBrainEntryRef.current
-            ? { viewingBrainEntry: viewingBrainEntryRef.current }
-            : {}),
-          // The custom theme the user currently has applied (a per-user
-          // localStorage value). Lets the server inject `refineActiveTheme` so
-          // "make my theme warmer" works in chat. Only sent on a custom
-          // palette, and only from the doc dock (theming is a doc affordance).
-          ...(() => {
-            const themeId =
-              isDocOrigin &&
-              typeof window !== "undefined" &&
-              window.localStorage.getItem("doc:palette") === "custom"
-                ? window.localStorage.getItem("doc:customThemeId")
-                : null;
-            return themeId ? { docActiveThemeId: themeId } : {};
-          })(),
-          ...(override?.truncateFromMessageId
-            ? { truncateFromMessageId: override.truncateFromMessageId }
-            : {}),
-          ...(CLIENT_TIMEZONE ? { timezone: CLIENT_TIMEZONE } : {}),
-        },
-        onEvent: (event) => {
-          if (!current()) return;
-          const payload = coercePayload(event.data);
-          switch (event.event) {
-            case "session": {
-              const id =
-                typeof payload.sessionId === "string"
-                  ? payload.sessionId
-                  : null;
-              if (id) {
-                if (!owningSessionId) chatController.adoptSession(controllerRun, id);
-                owningSessionId = id;
-                sessionIdRef.current = id;
-                session.setSession(id);
-              }
-              break;
-            }
-            case "goal_accepted": {
-              const notice = goalAcceptedNoticeFromPayload(payload);
-              if (notice) setAcceptedGoal(notice);
-              break;
-            }
-            case "reply_text_complete": {
-              session.dispatch({ type: "stream/text-complete" });
-              break;
-            }
-            case "text_delta": {
-              const delta = typeof payload.text === "string" ? payload.text : "";
-              if (delta) {
-                // A new answer segment is starting after intermediate tool
-                // activity — the prior segment was step narration, not the
-                // answer. Discard it from the finalized-message buffer so only
-                // the last segment survives. (`tool_start` already cleared the
-                // live stream buffer when it armed this flag.) See
-                // `pendingAnswerResetRef` above.
-                if (pendingAnswerResetRef.current) {
-                  pendingAnswerResetRef.current = false;
-                  turnTextRef.current = "";
-                }
-                turnTextRef.current += delta;
-                session.dispatch({ type: "stream/append", text: delta });
-              }
-              break;
-            }
-            case "reasoning": {
-              // Verbatim model thinking streamed live token-by-token. Accumulated
-              // into `turnReasoningRef` and published to the build-activity bus so
-              // the page-body indicator can render it in a distinct muted section.
-              const delta = typeof payload.text === "string" ? payload.text : "";
-              if (delta) {
-                turnReasoningRef.current += delta;
-                setStreamingReasoning(turnReasoningRef.current);
-                // Fold the run into the chronological event log — coalesced
-                // into one advancing "thinking" line until a step closes it.
-                const next = appendReasoning(
-                  eventLogRef.current,
-                  turnReasoningRef.current,
-                  mintEventId,
-                );
-                if (next !== eventLogRef.current) {
-                  eventLogRef.current = next;
-                  setStreamingEvents(next.events);
-                }
-              }
-              break;
-            }
-            case "worker_start": {
-              // Worker descriptions land before the tools they spawn —
-              // cache them so `tool_start` can attach the description
-              // to its timeline entry.
-              const workerId =
-                typeof payload.workerId === "string" ? payload.workerId : "";
-              const description =
-                typeof payload.description === "string"
-                  ? payload.description
-                  : undefined;
-              if (workerId && description) {
-                turnWorkerDescriptionsRef.current.set(workerId, description);
-              }
-              break;
-            }
-            case "tool_start": {
-              const id = typeof payload.id === "string" ? payload.id : "";
-              const name = typeof payload.name === "string" ? payload.name : "";
-              if (!id || !name) break;
-              // Dedup — re-emits keep the existing row (status may already
-              // be `done` from a retry replay).
-              if (turnToolsRef.current.some((t) => t.id === id)) break;
-              // A tool step is beginning: any answer prose accumulated so far
-              // was step narration, not the final answer. Arm the segment
-              // reset so the NEXT `text_delta` discards it from the finalized
-              // buffer (lazy — an answer-then-tool turn with no trailing text
-              // keeps its answer), and clear the live stream buffer now so the
-              // stale segment doesn't linger in the reply preview while the
-              // tool runs. Guarded to fire once per segment (no redundant
-              // dispatches across a multi-tool step). See `pendingAnswerResetRef`.
-              if (!pendingAnswerResetRef.current) {
-                pendingAnswerResetRef.current = true;
-                // Keep the segment as a receipt note before it is discarded —
-                // `finalizeActivityNotes` drops it again if it turns out to
-                // be the answer (answer-then-bookkeeping-tool turn).
-                const segment = stripFollowUps(turnTextRef.current).trim();
-                if (segment) {
-                  turnNotesRef.current = [
-                    ...turnNotesRef.current,
-                    { id: `note-${id}`, text: segment, beforeToolId: id },
-                  ];
-                }
-                session.dispatch({ type: "stream/reset" });
-              }
-              toolStartTimesRef.current.set(id, performance.now());
-              const workerId =
-                typeof payload.workerId === "string"
-                  ? payload.workerId
-                  : undefined;
-              const workerDescription = workerId
-                ? turnWorkerDescriptionsRef.current.get(workerId)
-                : undefined;
-              // Seed the friendliest label we can before the input parses —
-              // the static per-tool map ("Checking your calendar") beats a
-              // raw "Running gmailListMessages" placeholder. `tool_input`
-              // upgrades it to the input-aware line moments later.
-              const seeded = describeToolFromInput(name, {}, t.toolNarration);
-              const entry: ToolUsedWithOps = {
-                id,
-                name,
-                status: "running",
-                description: seeded.description,
-                ...(workerId ? { workerId } : {}),
-                ...(workerDescription ? { workerDescription } : {}),
-              };
-              turnToolsRef.current = [...turnToolsRef.current, entry];
-              setToolTimeline(turnToolsRef.current);
-              // Mint the step row now so the feed shows the call the moment
-              // it starts; `tool_input` rewrites the text in place.
-              eventLogRef.current = appendStep(
-                eventLogRef.current,
-                seeded.description,
-                mintEventId,
-                { toolId: id },
-              );
-              setStreamingEvents(eventLogRef.current.events);
-              break;
-            }
-            case "tool_dropped": {
-              // The engine stripped this tool call from the persisted turn
-              // (today: an askQuestion no-op) — retract the phantom timeline
-              // step so the live UI matches what was saved. See
-              // docs/architecture/engine/askquestion-suspend-resume.md.
-              const id = typeof payload.id === "string" ? payload.id : "";
-              if (!id) break;
-              turnToolsRef.current = turnToolsRef.current.filter(
-                (tool) => tool.id !== id,
-              );
-              setToolTimeline(turnToolsRef.current);
-              // Retract the phantom rows from the event feed too.
-              eventLogRef.current = removeToolSteps(eventLogRef.current, id);
-              setStreamingEvents(eventLogRef.current.events);
-              eventedToolIdsRef.current.delete(id);
-              toolStartTimesRef.current.delete(id);
-              break;
-            }
-            case "tool_input": {
-              // Decorate the entry with a human-readable description now
-              // that we know the tool's arguments. For `patchPage`, also
-              // attach per-op narration lines so the build indicator renders
-              // a live log of what the model is writing.
-              const id = typeof payload.id === "string" ? payload.id : "";
-              const name = typeof payload.name === "string" ? payload.name : "";
-              if (!id) break;
-              const input =
-                payload.input && typeof payload.input === "object"
-                  ? (payload.input as Record<string, unknown>)
-                  : {};
-              const narration = describeToolFromInput(
-                name,
-                input,
-                t.toolNarration,
-              );
-              if (!narration) break;
-              turnToolsRef.current = (turnToolsRef.current as ToolUsedWithOps[]).map((tool) =>
-                tool.id === id
-                  ? {
-                      ...tool,
-                      description: narration.description,
-                      ...(narration.url ? { url: narration.url } : {}),
-                      ...(narration.detail ? { detail: narration.detail } : {}),
-                      ...(Object.keys(input).length > 0 ? { input } : {}),
-                      // patchPage: per-op narration lines for the build log.
-                      ...(narration.opLines ? { opLines: narration.opLines } : {}),
-                    }
-                  : tool,
-              );
-              setToolTimeline(turnToolsRef.current);
-              // Upgrade the tool's placeholder row (minted at `tool_start`)
-              // to the input-aware narration, then append one extra row per
-              // remaining `patchPage` op so the feed reads like a live build
-              // log. Dedup a re-emitted `tool_input` for the same tool id.
-              if (!eventedToolIdsRef.current.has(id)) {
-                eventedToolIdsRef.current.add(id);
-                const stepLines =
-                  narration.opLines && narration.opLines.length > 0
-                    ? narration.opLines
-                    : [narration.description];
-                const [first, ...rest] = stepLines;
-                if (first) {
-                  eventLogRef.current = updateStepText(
-                    eventLogRef.current,
-                    id,
-                    first,
-                    narration.url,
-                  );
-                }
-                for (const line of rest) {
-                  eventLogRef.current = appendStep(
-                    eventLogRef.current,
-                    line,
-                    mintEventId,
-                    { toolId: id },
-                  );
-                }
-                setStreamingEvents(eventLogRef.current.events);
-              }
-              break;
-            }
-            case "tool_result": {
-              const id = typeof payload.id === "string" ? payload.id : "";
-              if (!id) break;
-              const isError = payload.isError === true;
-              const errorMessage =
-                typeof payload.errorMessage === "string"
-                  ? payload.errorMessage
-                  : undefined;
-              const startedAtMs = toolStartTimesRef.current.get(id);
-              const output =
-                typeof payload.output === "string" && payload.output ? payload.output : undefined;
-              const durationMs =
-                startedAtMs != null
-                  ? Math.max(0, Math.round(performance.now() - startedAtMs))
-                  : undefined;
-              turnToolsRef.current = turnToolsRef.current.map((tool) =>
-                tool.id === id
-                  ? {
-                      ...tool,
-                      status: isError ? "retried" : "done",
-                      ...(durationMs != null ? { durationMs } : {}),
-                      ...(isError && errorMessage ? { errorMessage } : {}),
-                      ...(output ? { output } : {}),
-                    }
-                  : tool,
-              );
-              setToolTimeline(turnToolsRef.current);
-              // If a confirmed tool failed at execution time, flip the
-              // green "Done" pill to red so the UI doesn't lie.
-              if (isError) {
-                const conf = session.state.pendingConfirmations.find(
-                  (p) => p.toolCallId === id,
-                );
-                if (conf && conf.status === "approved") {
-                  session.updateConfirmation(id, {
-                    status: "failed",
-                    ...(errorMessage ? { result: errorMessage } : {}),
-                  });
-                }
-              }
-              break;
-            }
-            case "recording_participants_updated": {
-              const recordingId =
-                typeof payload.recordingId === "string"
-                  ? payload.recordingId
-                  : "";
-              const pageId =
-                typeof payload.pageId === "string" ? payload.pageId : undefined;
-              if (recordingId) {
-                dispatchRecordingParticipantsUpdated({
-                  recordingId,
-                  ...(pageId ? { pageId } : {}),
-                });
-              }
-              break;
-            }
-            case "citation": {
-              if (!Array.isArray(payload.sources)) break;
-              const raw = payload.sources as Array<{
-                url?: unknown;
-                title?: unknown;
-              }>;
-              for (const s of raw) {
-                if (typeof s.url !== "string" || typeof s.title !== "string") {
-                  continue;
-                }
-                if (
-                  turnCitationsRef.current.some((c) => c.url === s.url)
-                ) {
-                  continue;
-                }
-                turnCitationsRef.current = [
-                  ...turnCitationsRef.current,
-                  { url: s.url, title: s.title },
-                ];
-              }
-              setCitations(turnCitationsRef.current);
-              break;
-            }
-            case "status": {
-              // Research / coordinator phase codes only — `message`-only
-              // statuses (connection retry, turn limit) stay silent. See
-              // docs/architecture/engine/live-streaming.md → research banner.
-              const phase =
-                typeof payload.phase === "string" ? payload.phase : "";
-              if (phase === "research_detected") setResearchPhase("detected");
-              else if (phase === "research_starting") setResearchPhase("starting");
-              else if (phase === "research_parallel") setResearchPhase("parallel");
-              break;
-            }
-            case "tool_confirmation_required": {
-              // askQuestion suspend-resume: the suspended question gets
-              // its own inline answer panel (driven by the paired
-              // `awaiting_approval` below), not the generic approve/deny
-              // card. Rendering both would show two UIs for one row.
-              // The event has no approvalId, so flag the turn and let
-              // onDone probe GET /pending for the row + question.
-              if (payload.toolName === "askQuestion") {
-                turnAskedQuestionRef.current = true;
-                break;
-              }
-              const toolCallId =
-                typeof payload.toolCallId === "string"
-                  ? payload.toolCallId
-                  : "";
-              if (!toolCallId) break;
-              const conf: PendingConfirmation = {
-                toolCallId,
-                approvalId:
-                  typeof payload.approvalId === "string" ? payload.approvalId : undefined,
-                toolName:
-                  typeof payload.toolName === "string" ? payload.toolName : "",
-                displayName:
-                  typeof payload.displayName === "string"
-                    ? payload.displayName
-                    : undefined,
-                input:
-                  payload.input && typeof payload.input === "object"
-                    ? (payload.input as Record<string, unknown>)
-                    : {},
-                description:
-                  typeof payload.description === "string"
-                    ? payload.description
-                    : undefined,
-                displayLines: Array.isArray(payload.displayLines)
-                  ? (payload.displayLines as string[])
-                  : undefined,
-                sessionId: sessionIdRef.current ?? "",
-                status: "pending",
-              };
-              chatController.presentInteraction(controllerRun, {
-                kind: "tool-confirmation",
-                approvalId: conf.approvalId ?? `tool:${toolCallId}`,
-                toolCallId,
-                source: "live",
-                status: "pending",
-                payload: conf,
-              });
-              session.addConfirmation(conf);
-              break;
-            }
-            case "brain_entry_updated": {
-              const primitive =
-                typeof payload.primitive === "string"
-                  ? (payload.primitive as BrainPrimitive)
-                  : null;
-              const previousRowId =
-                typeof payload.previousRowId === "string"
-                  ? payload.previousRowId
-                  : null;
-              const liveRowId =
-                typeof payload.liveRowId === "string"
-                  ? payload.liveRowId
-                  : null;
-              requestBrainRefresh(workspaceId);
-              const open = viewingBrainEntryRef.current;
-              if (
-                primitive &&
-                previousRowId &&
-                liveRowId &&
-                open?.primitive === primitive &&
-                open.rowId === previousRowId
-              ) {
-                viewingBrainEntryRef.current = {
-                  primitive,
-                  rowId: liveRowId,
-                };
-                const params = new URLSearchParams(window.location.search);
-                params.set("row", liveRowId);
-                if (primitive === "task") params.delete("kind");
-                else params.set("kind", primitive);
-                router.replace(`${pathname}?${params.toString()}`, {
-                  scroll: false,
-                });
-              }
-              break;
-            }
-            case "awaiting_approval": {
-              // askQuestion suspend-resume durability marker. For the
-              // askQuestion tool, flip the chat into the suspended state
-              // so the inline answer panel renders + the composer gates.
-              // Other approval kinds keep flowing through the regular
-              // confirmation UX above.
-              if (payload.toolName !== "askQuestion") break;
-              const approvalId =
-                typeof payload.approvalId === "string"
-                  ? payload.approvalId
-                  : "";
-              const sid = sessionIdRef.current ?? "";
-              if (!approvalId || !sid) break;
-              const toolInput =
-                payload.toolInput && typeof payload.toolInput === "object"
-                  ? (payload.toolInput as Record<string, unknown>)
-                  : {};
-              const question =
-                typeof toolInput.question === "string"
-                  ? toolInput.question
-                  : typeof payload.describeText === "string"
-                    ? payload.describeText
-                    : "";
-              setPendingQuestion({
-                approvalId,
-                question,
-                expiresAt:
-                  typeof payload.expiresAt === "string"
-                    ? payload.expiresAt
-                    : null,
-                sessionId: sid,
-              });
-              chatController.presentInteraction(controllerRun, {
-                kind: "question",
-                approvalId,
-                source: "live",
-                status: "pending",
-                payload: { question, sessionId: sid },
-              });
-              break;
-            }
-            case "notice": {
-              const code = typeof payload.code === "string" ? payload.code : "";
-              if (code === "budget_downgraded") {
-                setNotice({
-                  code,
-                  message: t.noticeBudgetDowngraded,
-                });
-              } else if (code === "custom_model_image_fallback") {
-                // Server-authored English rides in `payload.message`; prefer
-                // the translated copy for a code we know.
-                setNotice({
-                  code,
-                  message: t.noticeCustomModelImageFallback,
-                });
-              } else if (code === "custom_model_endpoint_fallback") {
-                setNotice({
-                  code,
-                  message: t.noticeCustomModelEndpointFallback,
-                });
-              } else if (typeof payload.message === "string") {
-                setNotice({ code, message: payload.message });
-              }
-              break;
-            }
-            case "view_payload": {
-              // `renderView` lands a `data` block on a draft, server-side.
-              // Doc is a draft-first surface — we never inline-render
-              // the widget in chat; we just keep a pointer + (1) bridge
-              // to the sidebar refresh, (2) auto-navigate to the draft
-              // when a new one was created so the user sees the result.
-              const toolUseId =
-                typeof payload.toolUseId === "string"
-                  ? payload.toolUseId
-                  : "";
-              const action =
-                payload.action === "appended" || payload.action === "created"
-                  ? payload.action
-                  : undefined;
-              const incoming: ViewAttachment = {
-                toolUseId,
-                payload: undefined,
-                entity:
-                  typeof payload.entity === "string"
-                    ? payload.entity
-                    : undefined,
-                viewType:
-                  typeof payload.viewType === "string"
-                    ? payload.viewType
-                    : undefined,
-                viewId:
-                  typeof payload.viewId === "string" &&
-                  payload.viewId.length > 0
-                    ? payload.viewId
-                    : undefined,
-                action,
-              };
-              turnViewsRef.current = [
-                ...turnViewsRef.current.filter(
-                  (v) => v.toolUseId !== incoming.toolUseId,
-                ),
-                incoming,
-              ];
-              if (incoming.viewId && typeof window !== "undefined") {
-                // Refresh the doc sidebar so the draft surfaces
-                // (created path) or its updated_at floats (appended).
-                window.dispatchEvent(
-                  new CustomEvent("doc:draft-created", {
-                    detail: {
-                      viewId: incoming.viewId,
-                      toolUseId: incoming.toolUseId,
-                      action: incoming.action,
-                    },
-                  }),
-                );
-                // Created path → land the user on the new draft so they
-                // see the result immediately. Appended path leaves the
-                // route alone; the page renderer rereads on focus.
-                // Doc-only: a surface dock unmounts when the route leaves
-                // its surface, which would kill this very stream — the
-                // message's "Open in this doc" pill is the user-initiated
-                // path there.
-                if (
-                  isDocOrigin &&
-                  incoming.action === "created" &&
-                  incoming.viewId !== activeViewIdRef.current
-                ) {
-                  // Canonical path → soft transition (no proxy redirect /
-                  // full reload). The page renderer swaps in place.
-                  router.replace(
-                    docPagePath(workspaceId, incoming.viewId),
-                    { scroll: false },
-                  );
-                }
-              }
-              break;
-            }
-            case "sub_page_created": {
-              // The AI filed a new nested sub-page (createSubPage). It doesn't
-              // ride the renderView/view_payload path, so bridge it to the
-              // same `doc:draft-created` reload event — otherwise the child
-              // sits server-side, invisible, until a manual refresh (its
-              // parent never grows a disclosure chevron). We deliberately do
-              // NOT navigate: the user asked to file a child under the page
-              // they're on, not to jump into it (and one turn may create
-              // several). The always-on sidebar toggle then reveals it.
-              if (typeof window !== "undefined") {
-                window.dispatchEvent(
-                  new CustomEvent("doc:draft-created", {
-                    detail: {
-                      viewId:
-                        typeof payload.pageId === "string"
-                          ? payload.pageId
-                          : undefined,
-                      action: "created",
-                    },
-                  }),
-                );
-              }
-              break;
-            }
-            case "page_created": {
-              // The AI authored a brand-new ROOT page (renderPage) — e.g. the
-              // user explicitly asked for a separate new page. Unlike a
-              // sub-page, surface it the way the renderView/view_payload created
-              // path did: reload the sidebar so the draft appears, then land the
-              // user on it so they see the result immediately. Without this the
-              // page is created server-side but stays invisible until a manual
-              // refresh (the 2026-06-02 orphan-page incident).
-              const newPageId =
-                typeof payload.pageId === "string" ? payload.pageId : undefined;
-              if (newPageId && typeof window !== "undefined") {
-                window.dispatchEvent(
-                  new CustomEvent("doc:draft-created", {
-                    detail: { viewId: newPageId, action: "created" },
-                  }),
-                );
-                // Doc-only auto-nav — same rationale as view_payload above:
-                // leaving the surface would unmount this dock mid-stream.
-                if (isDocOrigin && newPageId !== activeViewIdRef.current) {
-                  router.replace(docPagePath(workspaceId, newPageId), {
-                    scroll: false,
-                  });
-                }
-              }
-              break;
-            }
-            case "comment_posted":
-            case "comment_resolved": {
-              // The AI posted/resolved a comment thread (render-first
-              // annotation, or a fan-out of several). Tell the editor to
-              // refetch this page's threads + repaint the gutter. The editor
-              // owns thread state; we just signal "something changed".
-              if (typeof window !== "undefined") {
-                window.dispatchEvent(
-                  new CustomEvent(DOC_COMMENTS_CHANGED_EVENT, {
-                    detail: {
-                      threadId:
-                        typeof payload.threadId === "string"
-                          ? payload.threadId
-                          : undefined,
-                    },
-                  }),
-                );
-              }
-              break;
-            }
-            case "assistant_message_saved": {
-              const id = typeof payload.id === "string" ? payload.id : null;
-              if (id) {
-                assistantIdRef.current = id;
-                session.dispatch({ type: "stream/saved" });
-              }
-              break;
-            }
-            case "attachments": {
-              // Outbound file attachments (`sendFile`) — emitted once after
-              // the final assistant row persists; merged into the finalized
-              // message in onDone. Re-emits replace (idempotent).
-              if (Array.isArray(payload.attachments)) {
-                turnFileAttachmentsRef.current =
-                  payload.attachments as ChatFileAttachment[];
-              }
-              break;
-            }
-            case "user_message_saved": {
-              const id = typeof payload.id === "string" ? payload.id : null;
-              if (!id) break;
-              // Re-key the optimistic user message so retry hooks can
-              // reference the real row. Rekey (not replace) — the optimistic
-              // message carries `userAttachments` thumbnail previews that a
-              // rebuilt bare message would drop mid-turn.
-              session.dispatch({
-                type: "message/rekey",
-                messageId: localUserId,
-                id,
-              });
-              break;
-            }
-            // The running turn took a message we queued mid-stream: it is now
-            // a real row in the transcript, so it moves out of the queued tray
-            // and into the thread. See mid-turn-input.md.
-            case "input_applied": {
-              const inputId =
-                typeof payload.inputId === "string" ? payload.inputId : null;
-              if (!inputId) break;
-              const messageId =
-                typeof payload.messageId === "string"
-                  ? payload.messageId
-                  : `queued-${inputId}`;
-              if (owningSessionId) applyQueuedInput(inputId, messageId, owningSessionId);
-              break;
-            }
-            case "error": {
-              // askQuestion suspend-resume: the chat route rejects a new
-              // message while the session is suspended on a question.
-              // Restore the answer panel instead of showing a red error —
-              // the row's approvalId + question come straight off the 409.
-              if (payload.code === "pending_question_exists") {
-                const approvalId =
-                  typeof payload.approvalId === "string"
-                    ? payload.approvalId
-                    : "";
-                const sid = sessionIdRef.current ?? "";
-                if (approvalId && sid) {
-                  setPendingQuestion({
-                    approvalId,
-                    question:
-                      typeof payload.question === "string"
-                        ? payload.question
-                        : "",
-                    expiresAt:
-                      typeof payload.expiresAt === "string"
-                        ? payload.expiresAt
-                        : null,
-                    sessionId: sid,
-                  });
-                }
-                break;
-              }
-              if (payload.code === "research_quota_exhausted") {
-                setResearchExhausted(true);
-                setResearchMode(false);
-              }
-              // Dropped provider connection: retrying is safe and usually
-              // enough, so say that instead of the raw socket message.
-              if (payload.code === "upstream_connection_reset") {
-                setError(
-                  payload.customEndpoint === true
-                    ? tChatApp.upstreamConnectionResetCustom
-                    : tChatApp.upstreamConnectionReset,
-                );
-                break;
-              }
-              // Endpoint unreachable: retrying will not help until the
-              // endpoint is back, so the copy points at the settings check.
-              if (payload.code === "upstream_unreachable") {
-                setError(
-                  payload.customEndpoint === true
-                    ? tChatApp.upstreamUnreachableCustom
-                    : tChatApp.upstreamUnreachable,
-                );
-                break;
-              }
-              // The dock is holding a session this surface cannot re-address
-              // (a resume that attached a row bound to another assistant).
-              // Nothing was written server-side, so the recovery is simply to
-              // drop the binding: the next send mints a fresh session. Doing
-              // it here keeps recovery inside the user's own channel — the
-              // dock has no new-chat control, so otherwise every retry hits
-              // the same refusal and the thread is a dead end.
-              if (payload.code === "session_assistant_mismatch") {
-                resetThread();
-                setError(tChatApp.sessionRebound);
-                break;
-              }
-              const msg =
-                typeof payload.message === "string"
-                  ? payload.message
-                  : typeof payload.error === "string"
-                    ? payload.error
-                    : t.error;
-              setError(msg);
-              break;
-            }
-            case "research_quota": {
-              // Server accepted the research turn and bumped the counter.
-              setResearchQuota({
-                used: typeof payload.used === "number" ? payload.used : 0,
-                quota: typeof payload.quota === "number" ? payload.quota : 0,
-                isPaid: payload.isPaid === true,
-              });
-              break;
-            }
-            case "research_quota_exhausted": {
-              // Free workspace hit its lifetime research cap.
-              setResearchExhausted(true);
-              setResearchMode(false);
-              setResearchQuota({
-                used: typeof payload.used === "number" ? payload.used : 0,
-                quota: typeof payload.quota === "number" ? payload.quota : 0,
-                isPaid: false,
-              });
-              break;
-            }
-            case "doc_title_update": {
-              // Two producers (migration 218 + the explicit-metadata stream):
-              //   1. Auto-title — the AI's edit produced a page title + a
-              //      *suggested* emoji icon (COALESCE semantics on the client).
-              //   2. Explicit `setTitle`/`setIcon` via `patchPage` — carries
-              //      `nameOrigin` + `overwrite: true`, the authoritative
-              //      committed values to apply directly.
-              // Bridge both to the shell (which owns `activeView` + the
-              // sidebar) via a window event — same pattern as the
-              // `view_payload` → `doc:draft-created` bridge above. The
-              // shell's `applyAutoTitle` reflects them without a REST rename.
-              const pageId =
-                typeof payload.pageId === "string" ? payload.pageId : "";
-              const title =
-                typeof payload.title === "string" ? payload.title : "";
-              const icon =
-                typeof payload.icon === "string" ? payload.icon : null;
-              const nameOrigin =
-                payload.nameOrigin === "user" ||
-                payload.nameOrigin === "auto" ||
-                payload.nameOrigin === "placeholder"
-                  ? payload.nameOrigin
-                  : undefined;
-              const overwrite = payload.overwrite === true;
-              if (pageId && title && typeof window !== "undefined") {
-                window.dispatchEvent(
-                  new CustomEvent("doc:title-updated", {
-                    detail: { pageId, title, icon, nameOrigin, overwrite },
-                  }),
-                );
-              }
-              break;
-            }
-            case "doc_theme_update": {
-              // The chat's `refineActiveTheme` tool rebuilt the user's active
-              // custom theme server-side. Bridge the new tokens to the
-              // ThemeProvider via a window event (same pattern as title) so the
-              // palette updates live without a page reload. CustomThemesProvider
-              // listens and calls applyCustomTheme.
-              const themeId =
-                typeof payload.themeId === "string" ? payload.themeId : "";
-              const tokens =
-                payload.tokens && typeof payload.tokens === "object"
-                  ? (payload.tokens as { light?: unknown; dark?: unknown })
-                  : null;
-              // The refined theme's light/dark intent — lets CustomThemesProvider
-              // flip the doc mode when the user said "make it darker".
-              const appearance =
-                payload.appearance === "light" || payload.appearance === "dark"
-                  ? payload.appearance
-                  : undefined;
-              if (themeId && tokens && typeof window !== "undefined") {
-                window.dispatchEvent(
-                  new CustomEvent("doc:theme-changed", {
-                    detail: { themeId, tokens, appearance },
-                  }),
-                );
-              }
-              break;
-            }
-            // Intentionally unhandled:
-            //   `title_update` — app-web doesn't show session titles
-          }
-        },
-        onDone: () => {
-          if (!current()) return;
-          chatController.complete(controllerRun);
-          const askedQuestion = turnAskedQuestionRef.current;
-          // Doc is an `app` surface with no chip affordance: the builder
-          // strips any `<followup>[...]</followup>` tag the model volunteered
-          // so it never shows as literal text. The server also strips before
-          // persist (see chat.ts) — this guards the live turn + pre-fix
-          // history.
-          const finalMessage = buildStreamedTurnMessage();
-          if (!finalMessage) {
-            session.dispatch({ type: "stream/abort" });
-          } else {
-            session.dispatch({
-              type: "stream/finalize",
-              finalMessage,
-            });
-          }
-          resetTurnBuffers();
-          // Anything still queued was never taken by this turn — send it as
-          // an ordinary one. See mid-turn-input.md → "the client is the holder".
-          if (chatController.claimExit(controllerRun)) {
-            flushQueuedInputs(owningSessionId);
-          }
-          // Surface docks: a general chat turn may have written to the brain
-          // (the assistant saves memories / entities while researching) —
-          // nudge the brain page to re-pull so new rows appear without a
-          // manual reload. Harmless on non-brain surfaces (only the brain
-          // page listens).
-          if (!isDocOrigin) requestBrainRefresh(workspaceId);
-          // Deferred research (surface seeds): the clarifying first turn is
-          // done — arm research for the answer turn.
-          if (deferResearchRef.current) {
-            deferResearchRef.current = false;
-            setResearchMode(true);
-          }
-          // Suspended on a question this turn — the stream closed without
-          // turn_complete and the suspend event carried no approvalId, so
-          // fetch the pending row now to surface the answer panel + gate
-          // the composer immediately. See askquestion-suspend-resume.md.
-          if (askedQuestion) {
-            const sid = owningSessionId;
-            if (sid) {
-              void fetchPendingQuestion(sid)
-                .then((q) => {
-                  if (!q || !current()) return;
-                  setPendingQuestion({
-                    approvalId: q.approvalId,
-                    question: q.question ?? "",
-                    expiresAt: q.expiresAt,
-                    sessionId: sid,
-                  });
-                })
-                .catch(() => {});
-            }
-          }
-        },
-        onDisconnect: () => {
-          if (!current()) return;
-          chatController.disconnect(controllerRun);
-          // The body closed with no `done` / `error`: a request-timeout cut,
-          // a deploy, a network blip. The server keeps the turn running
-          // (2026-08-24), so drop the live bubble, tell the user, and
-          // re-attach over the session stream; the persisted reply is
-          // loaded when that stream reports the turn over. Queued input is
-          // NOT flushed here: the turn is still running and a re-send
-          // would only be answered `turn_in_flight`.
-          const sid = owningSessionId;
-          session.dispatch({ type: "stream/abort" });
-          resetTurnBuffers();
-          if (!sid) {
-            // No `session` frame ever arrived, so there is nothing to
-            // re-attach to. Report it like any other transport failure.
-            setError(t.streamInterrupted);
-            chatController.fail(controllerRun, t.streamInterrupted);
-            if (chatController.claimExit(controllerRun)) {
-              flushQueuedInputs(owningSessionId);
-            }
-            return;
-          }
-          reconnectStartedAtRef.current = Date.now();
-          setNotice({ code: RECONNECT_NOTICE_CODE, message: t.turnReconnecting });
-          setReconnectSessionId(sid);
-          setReconnectEpoch((n) => n + 1);
-        },
-        onError: (err) => {
-          if (!current()) return;
-          chatController.fail(
-            controllerRun,
-            err instanceof Error ? err.message : t.error,
-          );
-          setError(
-            isTransportError(err)
-              ? t.streamInterrupted
-              : err instanceof Error
-                ? err.message
-                : t.error,
-          );
-          session.dispatch({ type: "stream/abort" });
-          resetTurnBuffers();
-          if (chatController.claimExit(controllerRun)) {
-            flushQueuedInputs(owningSessionId);
-          }
-        },
+      setLocalError(null);
+      void pending.then((result) => {
+        // Deferred research (surface seeds): the clarifying first turn is
+        // done — arm research for the answer turn.
+        if (result === "completed" && deferResearchRef.current) {
+          deferResearchRef.current = false;
+          setResearchMode(true);
+        }
       });
-      // Indicate to the caller (e.g. seed effect) that a stream actually started.
-      return true;
+      return Promise.resolve(true);
     },
-    [selectedAssistantId, workspaceId, origin, isDocOrigin, model, metered, customEndpoint, researchMode, session, stream, t, resetTurnBuffers, resetThread, pendingQuestion, pendingRecordings, rec.status, att, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs],
+    [controller, presentationId, selectedAssistantId, origin, isDocOrigin, model, metered, customEndpoint, researchMode, pendingQuestion, pendingRecordings, rec.busy, att, setInput],
   );
-
-  useEffect(() => {
-    sendMessageRef.current = sendMessage;
-  }, [sendMessage]);
 
   // Surface auto-send is intentionally a two-effect handoff: the event
   // listener above first resets the thread and records the seed, then this
@@ -2960,16 +2149,27 @@ export function FloatingChat({
 
   /**
    * Hand a message to the turn that is already running (mid-turn input), and
-   * clear the composer as an ordinary send would.
+   * clear the composer as an ordinary send would. The controller owns the
+   * queue: it posts the side request, moves a taken input into the thread,
+   * and sends whatever the turn never took as one ordinary turn at its end.
+   * See docs/architecture/engine/mid-turn-input.md.
    */
   const queueMessage = useCallback(
     (text: string, steer: boolean): boolean => {
-      if (!midTurn.queue(text, steer)) return false;
+      if (!controller) return false;
+      const queued = controller.queue(text, steer, {
+        bodyExtras: {
+          appOrigin: origin,
+          ...(CLIENT_TIMEZONE ? { timezone: CLIENT_TIMEZONE } : {}),
+        },
+        assistantId: selectedAssistantId,
+      });
+      if (!queued) return false;
       setInput("");
-      setError(null);
+      setLocalError(null);
       return true;
     },
-    [midTurn],
+    [controller, origin, selectedAssistantId, setInput],
   );
 
   // ── Dock live recording (docs/architecture/media/live-capture.md) ──────
@@ -2998,7 +2198,8 @@ export function FloatingChat({
     ensureInteractionSession: () => ensureDockRecorderInteractionSession(async () => {
       const existing = sessionIdRef.current;
       if (existing) return existing;
-      const epoch = threadEpochRef.current;
+      const key = threadKeyRef.current;
+      const { epoch } = readDockThread(key);
       const response = await authFetch(`${API_URL}/api/sessions/personal`, {
             signal: AbortSignal.timeout(5_000),
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -3007,10 +2208,11 @@ export function FloatingChat({
       if (!response.ok) throw new Error("Could not create interaction chat");
       const { session: created } = await response.json();
       // A concurrent typed send or navigation wins. Never replace its binding.
-      if (threadEpochRef.current !== epoch) throw new Error("Chat changed");
+      if (readDockThread(key).epoch !== epoch) throw new Error("Chat changed");
       if (sessionIdRef.current) return sessionIdRef.current;
+      // Bind the shared thread: every dock instance moves to the new session.
+      updateDockThread(key, { sessionId: created.id });
       sessionIdRef.current = created.id;
-      session.setSession(created.id);
       return created.id;
     }),
     getSessionId: () =>
@@ -3138,26 +2340,20 @@ export function FloatingChat({
 
   const handleRetry = useCallback(
     (assistantMessageId: string) => {
-      if (stream.inFlight()) return;
-      const messages = session.state.messages;
+      if (isStreaming) return;
+      const messages = transcript.messages;
       const idx = messages.findIndex((m) => m.id === assistantMessageId);
       if (idx <= 0) return;
       const precedingUser = messages[idx - 1];
       if (precedingUser.role !== "user") return;
-
-      // Drop the assistant message (and the preceding user) from local
-      // state — the server side will truncate from `precedingUser.id`
-      // and rebuild from there.
-      session.dispatch({
-        type: "messages/load",
-        messages: messages.slice(0, idx - 1),
-      });
-
+      // The controller drops the preceding user message and everything
+      // after from the thread; the server truncates from its id and
+      // rebuilds from there.
       void sendMessage(precedingUser.text, {
         truncateFromMessageId: precedingUser.id,
       });
     },
-    [session, stream, sendMessage],
+    [isStreaming, transcript.messages, sendMessage],
   );
 
   // Retry from the user's own message: re-send the same text and let the
@@ -3166,25 +2362,14 @@ export function FloatingChat({
   // `handleRetry` but anchors on the user row itself.
   const handleRetryFromUser = useCallback(
     (userMessageId: string) => {
-      if (stream.inFlight()) return;
-      const messages = session.state.messages;
-      const idx = messages.findIndex((m) => m.id === userMessageId);
-      if (idx < 0) return;
-      const userMsg = messages[idx];
-      if (userMsg.role !== "user") return;
-
-      // Drop this user message and everything after from local state — the
-      // server truncates from `userMessageId` and rebuilds from there.
-      session.dispatch({
-        type: "messages/load",
-        messages: messages.slice(0, idx),
-      });
-
+      if (isStreaming) return;
+      const userMsg = transcript.messages.find((m) => m.id === userMessageId);
+      if (!userMsg || userMsg.role !== "user") return;
       void sendMessage(userMsg.text, {
         truncateFromMessageId: userMessageId,
       });
     },
-    [session, stream, sendMessage],
+    [isStreaming, transcript.messages, sendMessage],
   );
 
   const handleCopy = useCallback(async (messageId: string, text: string) => {
@@ -3200,94 +2385,50 @@ export function FloatingChat({
     }
   }, []);
 
+  // One Stop for every dock instance: the controller's compare-and-set Stop
+  // waits for the turn's public owner, keeps reading the stream while the
+  // request is pending, aborts locally only once the server confirms, and
+  // then sends whatever was queued as one ordinary turn (the queued text is
+  // why the user reached for Stop in the first place). A failed Stop leaves
+  // the turn running and shows `stopTurnFailed`.
   const handleAbort = useCallback(() => {
-    // An aborted stream never reaches `onDone`, so the flush has to happen
-    // here too. Stopping the current work and still wanting the message you
-    // just queued answered is the normal reading of "stop, and here's the
-    // thing I actually want" — the queued text is why the user reached for
-    // Stop in the first place. It waits for the server-side stop to land,
-    // because a flush racing the still-running turn is answered
-    // `turn_in_flight`.
-    const owningSessionId = sessionIdRef.current;
-    const controllerRun = chatController.capture();
-    chatController.cancel(controllerRun);
-    void stopRunningTurn().finally(() => {
-      if (chatController.claimExit(controllerRun)) {
-        flushQueuedInputs(owningSessionId);
-      }
-    });
-  }, [stopRunningTurn, flushQueuedInputs, chatController]);
+    void controller?.stop();
+  }, [controller]);
 
+  // One approval path: a live card answers `/api/chat/confirm`, a restored
+  // card its approval row; a 403 shows `confirmNotAllowed` and the card
+  // stays retryable.
   const handleConfirmation = useCallback(
     async (
       toolCallId: string,
       action: "approve" | "deny",
       comment?: string,
     ) => {
-      const conf = session.state.pendingConfirmations.find(
-        (p) => p.toolCallId === toolCallId,
-      );
-      if (!conf) return;
-      const controllerRun = chatController.capture();
-      const approvalId = conf.approvalId ?? `tool:${toolCallId}`;
-      chatController.beginResponse(controllerRun, approvalId);
-      session.updateConfirmation(toolCallId, {
-        status: action === "approve" ? "approving" : "denied",
-      });
-      try {
-        let ok = false;
-        let resultText: string | undefined;
-        if (conf.restored && conf.approvalId) {
-          const result = await respondByKind(
-            { id: conf.approvalId, kind: "tool_invocation" },
-            action === "approve" ? "approved" : "rejected",
-            comment,
-          );
-          ok = result.ok;
-        } else {
-          const decision = action === "approve" ? "allow" : "deny";
-          const res = await authFetch(`${API_URL}/api/chat/confirm`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              sessionId: conf.sessionId,
-              toolCallId,
-              decision,
-              // Deny-with-comment: the note rides to the model via
-              // declinedToolResult so the assistant revises, not re-asks.
-              ...(action === "deny" && comment ? { comment } : {}),
-            }),
-          });
-          ok = res.ok;
-          if (res.ok) {
-            const data = (await res.json().catch(() => ({}))) as {
-              result?: string;
-            };
-            resultText = data.result;
-          }
-        }
-        if (ok) {
-          chatController.resolveInteraction(controllerRun, approvalId);
-          session.updateConfirmation(toolCallId, {
-            status: action === "approve" ? "approved" : "denied",
-            result: resultText,
-          });
-          // Same-tab repair for every approval-backed surface (queue + Home
-          // dock). The durable row update also emits the workspace event for
-          // other tabs, but the click's own tab should not wait for that SSE
-          // round trip before removing the handled item.
-          requestApprovalsRefresh(workspaceId);
-        } else {
-          // Reset to pending so the user can retry (e.g. 404 resolver expired).
-          chatController.responseFailed(controllerRun, approvalId);
-          session.updateConfirmation(toolCallId, { status: "pending" });
-        }
-      } catch {
-        chatController.responseFailed(controllerRun, approvalId);
-        session.updateConfirmation(toolCallId, { status: "pending" });
-      }
+      if (!controller) return;
+      const outcome = await controller.respondConfirmation(toolCallId, action, comment);
+      // Same-tab repair for every approval-backed surface (queue + Home
+      // dock): the click's own tab should not wait for the workspace event.
+      if (outcome === "resolved") requestApprovalsRefresh(workspaceId);
     },
-    [session, workspaceId, chatController],
+    [controller, workspaceId],
+  );
+
+  // The panel performed the answer/cancel POST. The controller resolves the
+  // question and follows the resumed turn over the session stream within the
+  // bounded resume window (askquestion-suspend-resume.md → "Resume attach
+  // and poll retirement"); the indicator shows until that turn paints or
+  // history is re-read.
+  const handleQuestionSettled = useCallback(
+    (approvalId: string) => {
+      if (!controller) return;
+      const epochAtSettle = controller.getSnapshot().historyEpoch;
+      if (!controller.questionSettled(approvalId)) return;
+      updateDockThread(threadKeyRef.current, {
+        awaitingResumeUntil: Date.now() + RESUME_ATTACH_WINDOW_MS + RESUME_WAIT_GRACE_MS,
+        awaitingResumeEpoch: epochAtSettle,
+      });
+    },
+    [controller],
   );
 
   // ── Doc deep-link ────────────────────────────────────────────────────
@@ -3299,7 +2440,7 @@ export function FloatingChat({
     [router, workspaceId],
   );
 
-  const messages = session.state.messages as MessageWithViews[];
+  const messages = transcript.messages as MessageWithViews[];
   // Doc-dock per-turn re-address: a mid-thread switch keeps the transcript,
   // so name who the NEXT reply comes from (doc.md → "Next-reply hint").
   // Hidden while streaming: queued input rides the running turn's voice.
@@ -3308,6 +2449,12 @@ export function FloatingChat({
       ? nextReplyVoiceHint(messages, selectedAssistantId)
       : null;
   const showEmpty = messages.length === 0 && !isStreaming;
+  // The streaming avatar is the assistant the live turn answers as (a
+  // seeded pick, a re-addressed doc turn, a re-attached mirror).
+  const liveVoice =
+    (liveAssistantId
+      ? workspaceAssistants.find((a) => a.id === liveAssistantId)
+      : undefined) ?? activeAssistant;
   // A browser tool anywhere in this session's activity (live timeline or a
   // restored receipt) arms the live-browser chip's task probe.
   const browserToolSeen = useMemo(
@@ -3321,10 +2468,6 @@ export function FloatingChat({
   // resolved metadata so the composer chip never names a stale page. See
   // docs/architecture/features/doc.md → "Chat target indicator".
   const chatTarget = resolveChatTarget(pageIdFromPathname(pathname), activePage);
-  // Reducer stores the chat-ui type; we widen at the read boundary so
-  // the local `"failed"` status surfaces through the JSX without the
-  // shared type knowing about it.
-  const pendingConfirmations = session.state.pendingConfirmations as ConfirmationWithFailure[];
   const visiblePending = pendingConfirmations.filter(
     (p) => p.status === "pending" || p.status === "approving",
   );
@@ -3537,7 +2680,7 @@ export function FloatingChat({
             <span className="flex-1 leading-relaxed">{notice.message}</span>
             <button
               type="button"
-              onClick={() => setNotice(null)}
+              onClick={dismissNotice}
               aria-label={t.noticeDismiss}
               className="shrink-0 inline-flex h-5 w-5 items-center justify-center rounded text-amber-700/70 dark:text-amber-300/70 hover:bg-amber-500/15"
             >
@@ -3546,12 +2689,13 @@ export function FloatingChat({
           </div>
         ) : null}
 
+        <ChatRetainedHistoryNotice sessionId={sessionId} onExpire={() => controller?.loadMessages([])} />
         {/* Messages */}
         <div
           ref={scrollRef}
           className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-5"
         >
-          {recorder.interactionChatSessionId && recorder.interactionChatSessionId === session.state.sessionId && recorder.interactionStatus !== "idle" && (
+          {recorder.interactionChatSessionId && recorder.interactionChatSessionId === sessionId && recorder.interactionStatus !== "idle" && (
             <div className="space-y-2 rounded-lg bg-muted/40 p-3">
               <p role={recorder.interactionStatus === "gap" ? "alert" : "status"} className="text-sm">
                 {recorder.interactionStatus === "unavailable" ? interactionT.personalOnly : recorder.interactionStatus === "gap" ? interactionT.error : interactionT.listening}
@@ -3564,14 +2708,14 @@ export function FloatingChat({
             recordingSessionId={recorder.interactionCaptureId ? recorder.interactionChatSessionId : null}
             recordingCaptureId={recorder.interactionCaptureId}
             workspaceId={workspaceId}
-            sessionId={session.state.sessionId}
+            sessionId={sessionId}
             messageIds={new Set(messages.map((message) => message.id))}
             onCanonical={(sid, rows, ids) => {
-              if (sessionIdRef.current !== sid) return;
+              if (sessionIdRef.current !== sid || !controller) return;
               // Refresh ONLY canonical voice-job rows. Never reload or replace
               // the typed turn, optimistic user message, or streaming buffer.
-              for (const message of canonicalInteractionAdditions(session.state.messages, mapSessionRows(rows, t.toolNarration, false), ids)) {
-                session.dispatch({ type: "message/append", message });
+              for (const message of canonicalInteractionAdditions(transcript.messages, mapSessionRows(rows, t.toolNarration, false), ids)) {
+                controller.appendMessage(message);
               }
             }}
           />
@@ -3622,15 +2766,16 @@ export function FloatingChat({
             />
           ))}
 
-          {/* Live tool timeline + streaming text */}
+          {/* Live tool timeline + streaming text: this dock's own turn, or the
+              controller's mirror of a re-attached one. */}
           {isStreaming ? (
             <div className="flex gap-2.5">
-              {activeAssistant ? (
+              {liveVoice ? (
                 <div className="mt-0.5 shrink-0">
                   <AssistantAvatar
-                    id={activeAssistant.id}
-                    name={activeAssistant.name}
-                    iconSeed={activeAssistant.iconSeed ?? undefined}
+                    id={liveVoice.id}
+                    name={liveVoice.name}
+                    iconSeed={liveVoice.iconSeed ?? undefined}
                     size="sm"
                   />
                 </div>
@@ -3644,7 +2789,7 @@ export function FloatingChat({
                   events={streamingEvents}
                   tools={toolTimeline}
                   replyStreaming={streamingText.length > 0}
-                  replyPhase={session.state.replyPhase}
+                  replyPhase={replyPhase}
                   researchPhase={researchPhase}
                   startedAt={turnStartedAt}
                 />
@@ -3655,7 +2800,7 @@ export function FloatingChat({
                       workspaceId={workspaceId}
                       onOpenPage={handleOpenInDoc}
                     />
-                    {session.state.replyPhase === "generating" && (
+                    {replyPhase === "generating" && (
                       <span
                         aria-hidden
                         className="ml-0.5 inline-block h-[16px] w-[2px] align-text-bottom rounded-full bg-foreground animate-pulse"
@@ -3673,9 +2818,9 @@ export function FloatingChat({
           {/* Messages handed to the running turn, not yet taken by it.
               See docs/architecture/engine/mid-turn-input.md. */}
           <QueuedInputs
-            inputs={midTurn.queued}
+            inputs={conversation?.queued ? [...conversation.queued] : []}
             dict={t.queue}
-            onSteer={midTurn.steer}
+            onSteer={(inputId) => void controller?.steer(inputId)}
           />
 
           {/* Resolved confirmation rows (approved/denied/failed) render ABOVE
@@ -3722,36 +2867,21 @@ export function FloatingChat({
               a new message is rejected with pending_question_exists, or
               when GET /pending on reload finds a suspended row. */}
           {pendingQuestion &&
-          (!session.state.sessionId ||
-            session.state.sessionId === pendingQuestion.sessionId) ? (
+          (!sessionId ||
+            sessionId === pendingQuestion.sessionId) ? (
             <PendingQuestionPanel
               sessionId={pendingQuestion.sessionId}
               approvalId={pendingQuestion.approvalId}
               dict={t.pendingQuestion}
-              onAnswered={() => {
-                chatController.resolveInteraction(
-                  chatController.capture(),
-                  pendingQuestion.approvalId,
-                );
-                setPendingQuestion(null);
-                setResumePolling(true);
-              }}
-              onCancelled={() => {
-                chatController.resolveInteraction(
-                  chatController.capture(),
-                  pendingQuestion.approvalId,
-                );
-                setPendingQuestion(null);
-                setResumePolling(true);
-              }}
+              onAnswered={() => handleQuestionSettled(pendingQuestion.approvalId)}
+              onCancelled={() => handleQuestionSettled(pendingQuestion.approvalId)}
             />
           ) : null}
 
-          {/* Resume-in-flight indicator while the continuation turn fires,
-              and the lightweight "working" state while the dock is
-              re-attached to a turn whose POST stream died (no mirror bubble
-              here; the reply loads on completion). */}
-          {resumePolling || reconnectSessionId ? (
+          {/* Resume-in-flight indicator while the continuation turn of an
+              answered question is awaited, and the "working" state while the
+              dock re-attaches to a turn that has not painted yet. */}
+          {awaitingResume || (reconnecting && !streamingText) ? (
             <ResumingIndicator label={t.pendingQuestion.resuming} />
           ) : null}
 
@@ -3778,7 +2908,7 @@ export function FloatingChat({
               never depends on the model relaying a link. */}
           <ComputerLiveChip
             workspaceId={workspaceId}
-            sessionId={session.state.sessionId}
+            sessionId={sessionId}
             browserToolSeen={browserToolSeen}
           />
           {/* Soft double-text guard — warns when another member already has the
@@ -3867,10 +2997,10 @@ export function FloatingChat({
                 ? t.pendingQuestion.composerDisabled
                 : idlePlaceholder
             }
-            sendLabel={isStreaming && session.state.replyPhase === "generating" ? t.queue.send : t.send}
+            sendLabel={isStreaming && replyPhase === "generating" ? t.queue.send : t.send}
             slotAttachments={
               <>
-                {acceptedGoal?.sessionId === session.state.sessionId ? (
+                {acceptedGoal?.sessionId === sessionId ? (
                   <GoalAcknowledgement
                     notice={acceptedGoal}
                     workspaceId={workspaceId}
@@ -3965,12 +3095,12 @@ export function FloatingChat({
             sendButtonClassName={cn(
               "shrink-0 rounded-md px-3 py-2 text-xs font-medium transition-colors",
               "disabled:opacity-50 disabled:pointer-events-none",
-              isStreaming && session.state.replyPhase === "generating"
+              isStreaming && replyPhase === "generating"
                 ? "bg-muted text-foreground/80 hover:bg-muted/80"
                 : "bg-action text-action-foreground hover:bg-action/90",
             )}
             slotPostInput={
-              isStreaming && session.state.replyPhase === "generating" ? (
+              isStreaming && replyPhase === "generating" ? (
                 <button
                   type="button"
                   onClick={handleAbort}
@@ -4146,28 +3276,6 @@ export function FloatingChat({
         )}
     </div>
   );
-}
-
-/**
- * Coerce SSE payload to a record without throwing. Some events ship
- * pre-parsed objects (the canonical case), but a defensive parse
- * handles raw-string fallback from the SSE parser too.
- */
-function coercePayload(data: unknown): Record<string, unknown> {
-  if (data && typeof data === "object") {
-    return data as Record<string, unknown>;
-  }
-  if (typeof data === "string") {
-    try {
-      const parsed = JSON.parse(data);
-      if (parsed && typeof parsed === "object") {
-        return parsed as Record<string, unknown>;
-      }
-    } catch {
-      // Fall through.
-    }
-  }
-  return {};
 }
 
 /**

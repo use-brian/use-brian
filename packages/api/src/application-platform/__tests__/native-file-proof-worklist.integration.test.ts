@@ -1,13 +1,16 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { PoolClient } from 'pg'
-import { boundScopeSources, ContextScopeAccumulator, type ExecutionContext, type ScopeSource } from '@use-brian/core'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { applyRLSGucs, getAppPool, getPool, rollbackAndRelease, runWithAgentAccess } from '../../db/client.js'
 import { createDbMemoryStore } from '../../db/memory-store.js'
 import { listWorkspaceFilesIndexRanked } from '../../db/workspace-files.js'
-import { readAdmittedSessionQuery } from '../../db/session-query-reader.js'
+import { readAdmittedSessionQuery } from '../../db/conversation-store.js'
 import { writeSessionContextRevision } from '../../db/session-context-revisions.js'
-import { publishNativeSessionMessage } from '../../db/session-message-publication.js'
+import { publishNativeSessionMessage } from '../../db/conversation-store.js'
 import { addSessionMessage, createWorkspaceChatSession } from '../../db/sessions.js'
 import { findAssistantById } from '../../db/users.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
@@ -56,7 +59,7 @@ const evidence = (client: PoolClient) => operation(client, 'evidence', roots)
 const capture = (client: PoolClient, type = 'session_message', highWater = through) =>
   operation(client, 'capture', { session: f.session.id, through: highWater, type })
 const history = async (client: PoolClient) => (await client.query(
-  'SELECT value FROM read_native_application_session_history($1,$2,$3)', [f.workspaceId, f.session.id, through])).rows
+  'SELECT jsonb_array_elements(capture_conversation_query($1,$2,$3,NULL) #> ARRAY[\'history\']) AS value', [f.workspaceId, f.session.id, through])).rows
 
 describe.sequential('[COMP:api/application-persistence] invocation-local native proof worklists', () => {
   beforeAll(async () => {
@@ -428,7 +431,7 @@ describe.sequential('[COMP:api/application-persistence] invocation-local native 
     await frame(async client => {
       const actual = await operation(client, 'evidence', oldRoots)
       expect(actual).toEqual(await baseline(client, () => operation(client, 'evidence', oldRoots)))
-      const read = async () => (await client.query('SELECT value FROM read_native_application_session_topics($1,$2,$3)', [f.workspaceId, f.session.id, through])).rows
+      const read = async () => (await client.query('SELECT jsonb_array_elements(capture_conversation_query($1,$2,NULL,$3) #> ARRAY[\'annotations\']) AS value', [f.workspaceId, f.session.id, through])).rows
       const topics = await read()
       expect(topics).toEqual(await baseline(client, read))
       expect(JSON.stringify(topics)).toContain('Fictional newly selected topic')

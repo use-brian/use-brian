@@ -84,6 +84,8 @@ import {
 const DocSurfaceLayout = lazy(() => import("@/app/w/[workspaceId]/p/layout"));
 const RecorderOverlay = lazy(() => import("@/app/recorder-overlay/page"));
 const BrainPage = lazy(() => import("@/app/w/[workspaceId]/brain/page"));
+const MemoryContextPage = lazy(() => import("@/app/w/[workspaceId]/brain/context/page"));
+const MemoryContextWorkspacePage = lazy(() => import("@/app/memory-context/page"));
 const BrainEntityPage = lazy(() => import("@/app/w/[workspaceId]/brain/[entityId]/page"));
 const BrainSkillEditorPage = lazy(() => import("@/app/w/[workspaceId]/brain/skills/[skillRowId]/page"));
 const BrainEntryReaderPage = lazy(() => import("@/app/w/[workspaceId]/brain/entry/[kind]/[id]/page"));
@@ -115,7 +117,6 @@ const OfficeTemplatesPage = lazy(() => import("@/app/w/[workspaceId]/office/temp
 const OfficeTemplatePage = lazy(() => import("@/app/w/[workspaceId]/office/templates/[templateId]/page"));
 const ChatPage = lazy(() => import("@/app/w/[workspaceId]/chat/page"));
 const ShopifyPage = lazy(() => import("@/app/w/[workspaceId]/shopify/page"));
-const AssociationPage = lazy(() => import("@/app/w/[workspaceId]/association/page"));
 const CustomHomeAppPage = lazy(() => import("@/app/w/[workspaceId]/apps/[appId]/page"));
 const ComputerLayout = lazy(() => import("@/app/w/[workspaceId]/computer/layout"));
 const BrowsersIndexPage = lazy(() => import("@/app/w/[workspaceId]/computer/page"));
@@ -237,7 +238,6 @@ const OPERATOR_ROUTE_ELEMENTS: Record<OperatorAppKey, ReactNode> = {
   ),
   chat: <Route key="chat" path="chat" element={<ChatPage />} />,
   shopify: <Route key="shopify" path="shopify" element={<ShopifyPage />} />,
-  association: <Route key="association" path="association" element={<AssociationPage />} />,
 };
 
 export function App() {
@@ -268,6 +268,7 @@ export function App() {
                 create-workspace affordance yet — that gap is desktop-wide,
                 not introduced by this alias. */}
             <Route path="/teams" element={<Boot />} />
+            <Route path="/memory-context" element={<Suspense fallback={null}><MemoryContextWorkspacePage /></Suspense>} />
             <Route path="/accounts" element={<AccountEntry />} />
             <Route path="/redeem" element={<DesktopRedeemRoute />} />
             <Route path="/desktop/chat/:workspaceId" element={<DesktopChatRoute />} />
@@ -288,6 +289,7 @@ export function App() {
 
               {/* Brain */}
               <Route path="brain" element={<BrainPage />} />
+              <Route path="brain/context" element={<MemoryContextPage />} />
               <Route path="brain/skills/:skillRowId" element={<BrainSkillRoute />} />
               <Route path="brain/entry/:kind/:entryId" element={<BrainEntryReaderRoute />} />
               <Route path="brain/:entityId" element={<BrainEntityRoute />} />

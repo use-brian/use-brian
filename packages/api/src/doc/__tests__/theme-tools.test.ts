@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
-import type { LLMProvider, StreamChunk, ToolContext } from '@use-brian/core'
+import type { LLMProvider, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 import { createRefineActiveThemeTool } from '../theme-tools.js'
 import type { DocThemeStore, StoredDocTheme } from '../../db/doc-themes-store.js'

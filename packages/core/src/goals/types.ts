@@ -11,7 +11,7 @@
  * `packages/api/src/db/goals-store.ts` and the host adapters are injected.
  */
 import type { DoneWhenNode } from './done-when.js'
-import type { AuthoringAuthority } from '../security/access-ceiling.js'
+import type { AuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
 
 export const GOAL_STATUSES = [
   'active',

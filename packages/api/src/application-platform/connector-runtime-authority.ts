@@ -1,10 +1,10 @@
 /** Native actor floor shared by discovery, gateway/direct invocation and return. [COMP:api/connector-context] */
 import { createHash } from 'node:crypto'
-import { pinAccessCeiling, type AccessCeiling } from '@use-brian/core'
+import { pinAccessCeiling, type AccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { findAssistantById } from '../db/users.js'
 import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
 import { connectorExposureAllowed, resolveConnectorNativeTurnScopeSystem, type ConnectorContextBinding } from '../context-scope/connector-exposure.js'
-import type { ResolvedTurnScope } from '../context-scope/resolve-turn-scope.js'
+import { resolveTurnScopeMetadataSystem, withinExecutingCaller, type ResolvedTurnScope } from '../context-scope/resolve-turn-scope.js'
 import { AuthorityChangedError, createAuthorityLease } from '../context-scope/authority-lease.js'
 
 export type ConnectorRuntimeActorFacts = {
@@ -15,6 +15,7 @@ export type ConnectorRuntimeActorFacts = {
   /** An independently supplied host identity, when emitted. Conflicts refuse. */
   identityUserId?: string
 }
+/** `scope` is the actor's native floor without any executing caller's ambient projection. */
 type NativeActorState = { scope: ResolvedTurnScope | null }
 type ConnectorNativeActorReader = (facts: Readonly<ConnectorRuntimeActorFacts> & { initiatingUserId: string }) => Promise<NativeActorState | null>
 
@@ -23,7 +24,10 @@ async function readNativeActorSystem(facts: Readonly<ConnectorRuntimeActorFacts>
   if (!assistant || assistant.workspaceId !== facts.workspaceId) return null
   const role = await getWorkspaceRoleSystem(facts.initiatingUserId, facts.workspaceId, true)
   if (role === null) return { scope: null }
-  return { scope: await resolveConnectorNativeTurnScopeSystem({ workspaceId: facts.workspaceId, userId: facts.initiatingUserId, assistant }) }
+  // Metadata resolution: the same facts whether the check runs at admission or
+  // inside a narrower tool projection (a shared room's audience).
+  return { scope: await resolveConnectorNativeTurnScopeSystem({ workspaceId: facts.workspaceId, userId: facts.initiatingUserId, assistant },
+    resolveTurnScopeMetadataSystem) }
 }
 
 /** The reader port is host composition, never connector config/model data. Acceptance uses the canonical reader. */
@@ -57,13 +61,20 @@ export async function createConnectorRuntimeAuthority(rawFacts: ConnectorRuntime
       || state.scope.access.assistantId !== facts.assistantId) throw new AuthorityChangedError()
     return pinAccessCeiling(state.scope.access)
   }
+  // The lease pins and renews the same native floor under the same (no) ambient
+  // projection, so a narrower call-site audience is never read as revocation.
   const pinned = ceiling(initial), lease = createAuthorityLease(pinned, async () => {
     const current = await read(actorFacts)
     return current ? ceiling(current) : null
   })
-  const scope = initial.scope ? structuredClone(initial.scope) : null
+  // Exposure keeps the admission-time caller projection (the ambient this
+  // authority was created under), as before; the native grant stays the floor's.
+  const projected = initial.scope ? withinExecutingCaller(initial.scope) : null
+  const native = initial.scope?.access.departmentRead
+  const scope = projected ? structuredClone({ ...projected, access: { ...projected.access, ...(native ? { departmentRead: native } : {}) } }) : null
   return {
-    cacheKey: createHash('sha256').update(JSON.stringify([facts.workspaceId,actorFacts.initiatingUserId,facts.assistantId,pinned])).digest('hex'),
+    cacheKey: createHash('sha256').update(JSON.stringify([facts.workspaceId,actorFacts.initiatingUserId,facts.assistantId,
+      scope ? pinAccessCeiling(scope.access) : pinned])).digest('hex'),
     allows: (binding: ConnectorContextBinding) => validBinding(binding) && (scope
       ? connectorExposureAllowed(scope, binding) : isGeneral(binding)),
     assertCurrent: () => lease.assertCurrent(),

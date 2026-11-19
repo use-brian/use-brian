@@ -1,13 +1,15 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import pg from 'pg'
-import { ContextScopeAccumulator, type ScopeSource } from '@use-brian/core'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { turnOutputWrite } from '../../context-scope/resolve-turn-scope.js'
-import { createMemory, updateMemory, getMemoryById, getMemoryByIdSystem, getMemoryIndexSystem, listMemoriesWithMetrics, type Memory } from '../memories.js'
+import { createMemory, updateMemory, getMemoryById, getMemoryByIdSystem, getMemoryIndexSystem, getSoul, listMemoriesWithMetrics, upsertSoul, type Memory } from '../memories.js'
 import { getPool, getAppPool, queryWithRLS } from '../client.js'
 import { runWithAgentAccess } from '../agent-access-context.js'
 import { createDbMemoryStore } from '../memory-store.js'
-import { runLightConsolidation, runREMConsolidation, runDeepConsolidation } from '@use-brian/core'
+import { runLightConsolidation, runREMConsolidation, runDeepConsolidation } from '@use-brian/core/consolidation/phases.js'
+import { memoryLearningSchema } from '@use-brian/core/memory/learning.js'
 import { getSoulContext, writeScopedSummary } from '../scoped-summary-store.js'
 import { addSessionMessage, setSessionMessageChannelId } from '../sessions.js'
 
@@ -321,6 +323,34 @@ describe('[COMP:api/derived-scope-store] actual memory writes and source races',
     expect(context.evidence.compartments).toEqual(['finance'])
     expect(context.evidence.sources).toHaveLength(1)
     expect((await getSoulContext({ ...access,compartments: [] })).content).toBeNull()
+  })
+
+  it('admits shared and app legacy SOUL only while the current fallback permits it', async () => {
+    const f = await fixture()
+    const access = { workspaceId: f.workspaceId,userId: f.userId,assistantId: f.assistantId,
+      assistantKind: 'standard' as const,clearance: 'internal' as const,compartments: ['finance'],projectIds: null }
+    await upsertSoul(f.assistantId,f.userId,null,'Legacy shared')
+    await upsertSoul(f.assistantId,f.userId,'Use Brian','Legacy app')
+    expect(await getSoul(f.assistantId,f.userId,'Use Brian')).toBe('Legacy shared\n\nLegacy app')
+    expect(await getSoulContext(access,'Use Brian')).toEqual({content:'Legacy shared\n\nLegacy app',evidence:{}})
+    expect(await getSoulContext(access,'Other app')).toEqual({content:'Legacy shared',evidence:{}})
+    for(const mode of ['review','strict','legacy']){
+      await pool.query('UPDATE workspace_access_policies SET classification_mode=$2 WHERE workspace_id=$1',[f.workspaceId,mode])
+      expect(await getSoulContext(access,'Use Brian')).toEqual({content:mode==='legacy'?'Legacy shared\n\nLegacy app':null,evidence:{}})
+    }
+    const input = await f.create({compartments:['finance'],
+      learning:memoryLearningSchema.parse({version:1,state:'established',origin:'explicit',confirmed:true})})
+    await writeScopedSummary({assistantId:f.assistantId,userId:f.userId,kind:'soul',slotKey:'shared',
+      content:'Current scoped preference',derivation:{producer:'consolidation:soul',sources:[asSource(input)]}})
+    const slot = (await pool.query(`SELECT m.id,m.learning IS NOT NULL AS learned
+      FROM memory_summary_slots s JOIN memories m ON m.id=s.memory_id WHERE s.workspace_id=$1`,[f.workspaceId])).rows[0]
+    expect(slot.learned).toBe(true)
+    expect(await getSoulContext(access,'Use Brian')).toMatchObject({content:'Current scoped preference',
+      evidence:{compartments:['finance'],sources:[{resourceId:slot.id,resourceKind:'memory'}]}})
+    expect(await getSoulContext({...access,compartments:[]},'Use Brian')).toEqual({content:null,evidence:{}})
+    await pool.query('UPDATE memories SET summary=$2 WHERE id=$1',[input.id,'Changed preference'])
+    expect((await pool.query('SELECT scope_held FROM memories WHERE id=$1',[slot.id])).rows).toEqual([{scope_held:true}])
+    expect(await getSoulContext(access,'Use Brian')).toEqual({content:null,evidence:{}})
   })
 
   it('keeps a versioned self-profile in its own SOUL bucket and invalidates it on edit',async()=>{

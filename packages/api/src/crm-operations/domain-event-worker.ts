@@ -12,8 +12,8 @@ import { createHash } from 'node:crypto'
 import {
   crmDomainEventToDispatchEvent,
   type CrmDomainEventEnvelope,
-  type WorkflowEventInput,
-} from '@use-brian/core'
+} from '@use-brian/core/workflow/crm-event-trigger.js'
+import type { WorkflowEventInput } from '@use-brian/core/workflow/event-trigger.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import { query, getPool } from '../db/client.js'
 import { acquireCrmPrivacyWriterAdmission } from './privacy-admission.js'

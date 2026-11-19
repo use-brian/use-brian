@@ -3,7 +3,6 @@ import pg from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
 import { createDbCrmIntakeReadStore } from '../crm-intake-store.js'
 import { listCrmOperationsAudit, listCrmEventDelivery } from '../../crm-operations/privacy.js'
-import { createAssociationStore } from '../association-store.js'
 import { createDbCrmSegmentStore } from '../crm-segment-store.js'
 import { getPool, getAppPool } from '../client.js'
 import { loadAssociationOrderScope } from '../../association/source-scope.js'
@@ -138,39 +137,5 @@ describe('[COMP:crm/operations-pagination] Complete collections in real PostgreS
     await expect(segments.previewSegment(workspaceId, segmentIds[1], { snapshotCursor: first.snapshotNextCursor! })).rejects.toMatchObject({ code: 'invalid_input' })
     await pool.query('UPDATE crm_segments SET version=version+1 WHERE id=$1', [segmentIds[0]])
     await expect(segments.previewSegment(workspaceId, segmentIds[0], { cursor: first.nextCursor! })).rejects.toMatchObject({ code: 'invalid_input' })
-    const legacy = createAssociationStore(pool)
-    const eventId = String((await pool.query('SELECT id FROM association_events WHERE workspace_id=$1 LIMIT 1', [workspaceId])).rows[0].id)
-    await pool.query(`INSERT INTO association_registrations (workspace_id,event_id,attendee_contact_id,attendee_name,status,source_kind,source_id,request_fingerprint)
-      SELECT $1,$2,$3,'Fixture person','registered','manual','legacy_fixture_'||n,repeat('a',64)
-      FROM generate_series(1,104) n`, [workspaceId, eventId, contactId])
-    await pool.query(`INSERT INTO association_orders (workspace_id,contact_id,idempotency_key,request_fingerprint,currency,subtotal_minor,total_minor)
-      SELECT $1,$2,'legacy_fixture_'||n,repeat('a',64),'USD',0,0 FROM generate_series(1,105) n`, [workspaceId, contactId])
-    await pool.query(`INSERT INTO association_notification_outbox (workspace_id,source_kind,source_id,template_key,recipient_kind,recipient_ref)
-      SELECT workspace_id,'enquiry',id,'fixture','contact',contact_id::text FROM association_enquiries WHERE workspace_id=$1`, [workspaceId])
-    const legacyCases = [
-      (cursor: string | null) => legacy.listEnquiries(workspaceId, { limit: 17, cursor }, {credentialKind:'user',credentialId:userId,actingUserId:userId}),
-      (cursor: string | null) => legacy.listPlans(workspaceId, { limit: 17, cursor }),
-      (cursor: string | null) => legacy.listEvents(workspaceId, { limit: 17, cursor }),
-      (cursor: string | null) => legacy.listOrders(workspaceId, { limit: 17, cursor }),
-      (cursor: string | null) => legacy.listEventRegistrations(workspaceId, eventId, { limit: 17, cursor }),
-      (cursor: string | null) => legacy.listNotifications(workspaceId, { limit: 17, cursor }, { credentialKind: 'user', credentialId: userId, actingUserId: userId }),
-    ]
-    for (const read of legacyCases) {
-      const ids: unknown[] = []
-      let next: string | null = null
-      do {
-        const page = await read(next)
-        ids.push(...page.items.map((row) => row.id))
-        next = page.nextCursor
-      } while (next)
-      expect(ids).toHaveLength(105)
-      expect(new Set(ids).size).toBe(105)
-    }
-    const legacyFirst = await legacy.listPlans(workspaceId, { limit: 7, cursor: null })
-    await expect(legacy.listPlans(workspaceId, { limit: 7, cursor: legacyFirst.nextCursor, published: true })).rejects.toMatchObject({ code: 'invalid_input' })
-    await expect(legacy.listEvents(workspaceId, { limit: 7, cursor: legacyFirst.nextCursor })).rejects.toMatchObject({ code: 'invalid_input' })
-    await expect(legacy.listPlans(randomUUID(), { limit: 7, cursor: legacyFirst.nextCursor })).rejects.toMatchObject({ code: 'invalid_input' })
-    const obsolete = Buffer.from(JSON.stringify({ id: legacyFirst.items[0].id, createdAt: legacyFirst.items[0].createdAt })).toString('base64url')
-    await expect(legacy.listPlans(workspaceId, { limit: 7, cursor: obsolete })).rejects.toMatchObject({ code: 'invalid_input' })
   })
 })

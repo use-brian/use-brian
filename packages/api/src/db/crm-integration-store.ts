@@ -3,17 +3,25 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import type { Pool, PoolClient } from 'pg'
 import { z } from 'zod'
 import {
-  CrmIntegrationGrantsSchema, CrmOperationsError, crmOperationsSha256,
-  type CrmIntegrationAuthority, type CrmIntegrationGrant, type AuthoringAuthority, parseAuthoringAuthority,
-  type CrmPage, type CrmPageQuery, type DepartmentReadGrant,
-} from '@use-brian/core'
+  CrmIntegrationGrantsSchema,
+  type CrmCredentialParent,
+  type CrmIntegrationAuthority,
+  type CrmIntegrationGrant,
+} from '@use-brian/core/crm/integration-authority.js'
+import { CrmOperationsError, crmOperationsSha256 } from '@use-brian/core/crm/operations-types.js'
+import type { CrmPage, CrmPageQuery } from '@use-brian/core/crm/pagination.js'
+import {
+  type AuthoringAuthority,
+  parseAuthoringAuthority,
+} from '@use-brian/agent-runtime/security/access-ceiling.js'
+import type { DepartmentReadGrant } from '@use-brian/agent-runtime/security/department-read.js'
 import { applyRLSGucs, getAppPool, getPool } from './client.js'
 import { resolveWorkflowAuthoringScope } from '../context-scope/workflow-authority.js'
 import { runWithAgentAccess } from './agent-access-context.js'
 import { hashSecret, verifySecret } from './api-key-store.js'
 import { queryCrmPage } from '../crm-operations/pagination.js'
 import { admitCrmIntegrationBinding, renewCrmIntegrationBinding, CrmIntegrationDepartmentSelectionSchema, previewCrmIntegrationBindings, CrmIntegrationBindingOptionsSchema, crmIntegrationExecutionLimits,
-  assertCrmCredentialParent, type CrmCredentialParent,
+  assertCrmCredentialParent,
   type CrmIntegrationExecutionLimits,
   type CrmIntegrationDepartmentBinding } from '../crm-operations/integration-department-authority.js'
 
@@ -21,7 +29,8 @@ export const CreateCrmIntegrationCredentialSchema = z.object({
   requestId: z.string().uuid().optional(),
   label: z.string().trim().min(1).max(200),
   expiresAt: z.string().datetime({ offset: true }),
-  grants: CrmIntegrationGrantsSchema,
+  grants: CrmIntegrationGrantsSchema.refine(grants => grants.every(grant => !grant.operation.startsWith('association.')),
+    'Association has been retired.'),
   revokeCredentialId: z.string().uuid().optional(),
   departmentBinding: CrmIntegrationDepartmentSelectionSchema.optional(),
 }).strict()

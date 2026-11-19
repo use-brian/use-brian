@@ -1,12 +1,20 @@
 /** [COMP:api/channel-recording] Reviewed history reaches the model and delivery. */
 import {randomUUID,randomBytes} from 'node:crypto'
+import pg from 'pg'
+import {conversationCaptureSources} from '../db/conversation-store.js'
 import {z} from 'zod'
 // Whole pipeline functional cases have a finite 90 second budget.
 // Generic tests and existing generated topic regressions keep 30 seconds;
 // SQL statements keep their existing 15 second timeout.
 import {afterAll,beforeAll,describe,expect,it,onTestFinished,vi} from 'vitest'
+import {conversationAnchorWriteAdmissionActive,initializeConversationVisibility} from '../db/conversation-visibility.js'
 import {getAppPool,getPool,query,queryWithRLS,applyRLSGucs,rollbackAndRelease,runWithAgentAccess} from '../db/client.js'
-import {buildTool,createGeminiProvider,createRoutingProvider,wrapProvider,type ExecutionContext,type ScopeSource} from '@use-brian/core'
+import {createGeminiProvider} from '@use-brian/agent-runtime/providers/gemini.js'
+import {createRoutingProvider} from '@use-brian/agent-runtime/providers/routing.js'
+import {wrapProvider} from '@use-brian/agent-runtime/providers/wrappers.js'
+import type {ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
+import type {ExecutionContext} from '@use-brian/agent-runtime/security/execution-context.js'
+import {buildTool} from '@use-brian/agent-runtime/tools/types.js'
 import {admitTelegramRecording,recordDeliveredTelegramMessage} from '../channel-recording.js'
 import {createDbChannelIntegrationStore,encryptCredentials} from '../db/channel-integrations.js'
 import {applyTelegramRecordingRecovery} from '../channel-recording-recovery.js'
@@ -18,20 +26,19 @@ import {createDecisionRuntime} from '../decision-runtime.js'
 import {createMemory} from '../db/memories.js'
 import {createDbLinkedAccountStore} from '../db/linked-accounts.js'
 import {channelLinkBindsHere} from '../db/channel-user-store.js'
-const {runTurn,inject,nativeQueries}=vi.hoisted(()=>({runTurn:vi.fn(),inject:vi.fn(),nativeQueries:[] as Array<{available:boolean;sources:number;fields:ScopeSource[]}>}))
-vi.mock('../turn/kernel.js',async original=>({...await original<typeof import('../turn/kernel.js')>(),runAssistantTurn:runTurn}))
-vi.mock('../turn/prepare.js',()=>({prepareAssistantRun:vi.fn(async input=>({model:input.model,tools:input.candidateTools,trustedContext:'',userVisibleContext:''}))}))
-vi.mock('../mcp/inject.js',()=>({injectMcpTools:inject}))
-// Observe the genuine admitted reader without replacing native SQL or proof.
-vi.mock('../application-platform/native-session-query-evidence.js',async original=>{
- const real=await original<typeof import('../application-platform/native-session-query-evidence.js')>()
- const observe=(read:typeof real.readNativeSessionQueryEvidence)=>async(...args:Parameters<typeof read>)=>{
-  const result=await read(...args)
-  nativeQueries.push({available:result!==null,sources:result?.sources.length??0,fields:result?.sources.filter(source=>source.resourceKind==='application_field')??[]})
-  return result
- }
- return{...real,readNativeSessionQueryEvidence:observe(real.readNativeSessionQueryEvidence)}
+const {runTurn,prepareRun,inject,nativeQueries}=vi.hoisted(()=>({runTurn:vi.fn(),inject:vi.fn(),nativeQueries:[] as Array<{available:boolean;sources:number;fields:ScopeSource[]}>,
+ // Observes the adapter's single submission to the actual owner preparation.
+ prepareRun:vi.fn(<T,R>(input:T,prepare:(value:T)=>R)=>prepare(input))}))
+vi.mock('../turn/kernel.js',async original=>{
+ const real=await original<typeof import('../turn/kernel.js')>()
+ return{...real,openAssistantTurn:async(...args:Parameters<typeof real.openAssistantTurn>)=>{
+  const owner=await real.openAssistantTurn(...args),run=owner.run.bind(owner),prepare=owner.prepareRun.bind(owner)
+  vi.spyOn(owner,'run').mockImplementation(input=>runTurn(input,run))
+  vi.spyOn(owner,'prepareRun').mockImplementation(input=>prepareRun(input,prepare) as ReturnType<typeof prepare>)
+  return owner
+ }}
 })
+vi.mock('../mcp/surface.js',()=>({composeSurfaceCapabilities:(_surface:string,input:unknown)=>inject(input)}))
 const {assertLocalFixture}=await import(new URL('../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 const [owner,other,workspace,assistant,channel,integration,source]=Array.from({length:7},()=>randomUUID())
@@ -66,17 +73,43 @@ async function nativeProof(sessionId=recovered,roots?:ScopeSource[],whileOpen?:(
    await applyRLSGucs(client,other)
    await client.query("SELECT set_config('app.v2_assistant_id',$1,true)",[assistant])
    await client.query('SELECT id FROM workspaces WHERE id=$1 FOR SHARE',[workspace])
-   const result=roots
-    ?await client.query('SELECT read_native_turn_scope_evidence($1,$2) AS value',[workspace,JSON.stringify(roots.map(root=>({kind:root.resourceKind,id:root.resourceId,version:root.version})))])
-    :await client.query('SELECT read_native_turn_session_query($1,$2,$3,$3) AS value',[workspace,sessionId,publicHistoryRows])
-   if(whileOpen)await whileOpen(result.rows[0].value,(await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
-   return result.rows[0].value
+   // Work-epoch eligibility and history admission are distinct contracts.
+   // Exercise the current scope proof directly, then the sole query owner;
+   // the deleted query fast path must not survive as a fixture-only runtime.
+   const identities=roots?.map(root=>({kind:root.resourceKind,id:root.resourceId,version:root.version}))
+    ??(await client.query(`SELECT jsonb_build_object('kind','session_message','id',id,'version',scope_version::text) value
+      FROM session_messages WHERE workspace_id=$1 AND session_id=$2 AND sequence_num<=$3 ORDER BY sequence_num`,
+     [workspace,sessionId,publicHistoryRows])).rows.map(row=>row.value)
+   const proof=(await client.query('SELECT capture_conversation_evidence($1,$2) AS value',[workspace,JSON.stringify(identities)])).rows[0].value
+   const value=roots||!proof?proof:{...(await client.query('SELECT capture_conversation_query($1,$2,$3,$3) AS value',
+    [workspace,sessionId,publicHistoryRows])).rows[0].value,proof}
+   if(whileOpen)await whileOpen(value,(await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+   return value
   }finally{await rollbackAndRelease(client)}
  })
 }
 
 describe.sequential('[COMP:api/channel-recording] recovered public history reaches Telegram',()=>{
  beforeAll(async()=>{
+  await initializeConversationVisibility()
+  expect(conversationAnchorWriteAdmissionActive()).toBe(true)
+  // Observe the actual SQL result; an ESM cycle can bypass a module wrapper.
+  // The provider assertions below still prove every recovered row reaches it.
+  const originalQuery=pg.Client.prototype.query
+  vi.spyOn(pg.Client.prototype,'query').mockImplementation(function(this:pg.Client,...args:unknown[]){
+   const text=typeof args[0]==='string'?args[0]:(args[0] as {text?:string})?.text??''
+   const result=Reflect.apply(originalQuery,this,args)
+   if(text.startsWith('SELECT capture_conversation_query(')&&result&&typeof result.then==='function')return result.then((rows:pg.QueryResult)=>{
+    const value=rows.rows[0]?.value
+    if(value?.history?.length&&value?.annotations?.length){
+     const sources=conversationCaptureSources(value,workspace)
+     nativeQueries.push({available:true,sources:sources.length,fields:sources.filter(source=>source.resourceKind==='application_field')})
+    }
+    return rows
+   })
+   return result
+  } as typeof originalQuery)
+
   await query(`INSERT INTO users(id,auth_provider,auth_provider_id,name) SELECT id,'test',id::text,'Fictional recorder' FROM unnest($1::uuid[]) id`,[[owner,other]])
   await query("INSERT INTO workspaces(id,name,owner_user_id,plan) VALUES($1,'Fictional recovery',$2,'pro')",[workspace,owner])
   await query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'owner','confidential'),($1,$3,'admin','confidential')",[workspace,owner,other])
@@ -116,20 +149,24 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
   expect((await query('SELECT recording_privacy_held FROM sessions WHERE id=$1',[source])).rows[0]).toEqual({recording_privacy_held:true})
   expect((await query('SELECT count(*)::int AS count FROM session_messages WHERE session_id=$1',[recovered])).rows[0].count).toBe(publicHistoryRows)
  })
- async function createChannelHarness(kernel?:typeof import('../turn/kernel.js').runAssistantTurn,options:{actorId?:string;replyToMessageId?:string;timeoutTopic?:boolean}={}){
+ async function createChannelHarness(kernel=false,options:{actorId?:string;replyToMessageId?:string;timeoutTopic?:boolean}={}){
   const actorId=options.actorId??other
   const failures:string[]=[]
   vi.spyOn(console,'error').mockImplementation((...args)=>{failures.push(args.map(String).join(' '));originalConsoleError(...args)})
   const injections:Array<{actorIdentity:{userId:string}}>=[]
   inject.mockImplementation(async input=>{injections.push(input);input.tools.set('fictionalCalendarRead',buildTool({name:'fictionalCalendarRead',description:'Fictional read',inputSchema:z.object({}),isReadOnly:true,isConcurrencySafe:true,execute:async()=>({data:'Fixture'})}));return{unavailable:[],searchableSources:[]}})
   const final={content:[{type:'text',text:'The fictional date is December 9.'}],stopReason:'end_turn',usage:{inputTokens:1,outputTokens:1},model:'fixture'}
+  // The ordinary harness answers with the recorded date through the same
+  // managed provider boundary; the kernel-focused harness keeps its own reply.
+  const mainReply=kernel?'Fictional complete reply.':final.content[0].text
   let nativeQueryStart=0
-  runTurn.mockImplementation(async input=>{
-   const {sink,loop}=input
+  runTurn.mockImplementation(async (input,run)=>{
+   const {loop}=input
    expect(nativeQueries.slice(nativeQueryStart).some(proof=>proof.available&&proof.sources>=publicHistoryRows)).toBe(true)
    if(actorId===other)verifiedOtherExecution=loop.context.executionContext
-   if(kernel)return kernel(input)
-   await sink.onEvent({type:'assistant_turn',response:final,toolResults:[]});await sink.onEvent({type:'turn_complete',response:final});return{finalText:final.content[0].text}
+   // Every harness drives the actual owner run, its output admission,
+   // publication and usage settlement; only the provider transport is synthetic.
+   return run(input)
   })
   const sent:string[]=[],providerRequests:unknown[]=[],mainRequests:unknown[]=[]
   const provider=createRoutingProvider({gemini:wrapProvider(createGeminiProvider({kind:'ai-studio',endpoint:model=>`https://fictional.example/models/${model}`,headers:async()=>({})}))})
@@ -150,7 +187,7 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
     })
    }
    const properties=request.generationConfig?.responseJsonSchema?.properties?.answers?.properties as Record<string,{properties:{value:{enum?:string[];type:string}}}>|undefined
-   const text=main?'Fictional complete reply.':properties?JSON.stringify({answers:Object.fromEntries(Object.entries(properties).map(([id,field])=>{
+   const text=main?mainReply:properties?JSON.stringify({answers:Object.fromEntries(Object.entries(properties).map(([id,field])=>{
     const values=field.properties.value.enum??[]
     const value=['ordinary','continue','__new_topic__','none'].find(candidate=>values.includes(candidate))??values[0]
     return[id,{value}]
@@ -194,9 +231,9 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
   expect(normalHarness.providerRequests.length).toBeGreaterThan(0)
   expect(JSON.stringify(normalHarness.providerRequests)).toContain(`Fictional retained public turn ${publicHistoryRows-2}.`)
   expect(JSON.stringify(normalHarness.providerRequests)).not.toContain('PRIVATE_')
-  const first=runTurn.mock.calls[0][0]
-  expectPublicHistory(first.loop.messages)
-  expect(first.loop.tools.has('fictionalCalendarRead'),normalHarness.failures.join('\n')).toBe(true)
+  const first=runTurn.mock.calls[0][0],firstPrepared=prepareRun.mock.calls[0][0] as {messages:unknown;candidateTools:Map<string,unknown>}
+  expectPublicHistory(firstPrepared.messages)
+  expect(firstPrepared.candidateTools.has('fictionalCalendarRead'),normalHarness.failures.join('\n')).toBe(true)
   expect(first.loop.context.userId).toBe(other)
   expect(normalHarness.injections[0].actorIdentity.userId).toBe(other)
   expect(normalHarness.sent).toEqual([normalHarness.final.content[0].text])
@@ -205,17 +242,13 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
   if(!normalHarness)throw new Error('The preceding Telegram delivery did not initialize its harness')
   await normalHarness.turn('1006','Remind me again.')
   expect(runTurn).toHaveBeenCalledTimes(2)
-  expect(JSON.stringify(runTurn.mock.calls[1][0].loop.messages)).toContain('What date did we agree?')
-  expect(JSON.stringify(runTurn.mock.calls[1][0].loop.messages)).toContain(normalHarness.final.content[0].text)
+  expect(JSON.stringify((prepareRun.mock.calls[1][0] as {messages:unknown}).messages)).toContain('What date did we agree?')
+  expect(JSON.stringify((prepareRun.mock.calls[1][0] as {messages:unknown}).messages)).toContain(normalHarness.final.content[0].text)
   expect((await query("SELECT count(*)::int AS count FROM session_messages WHERE session_id=$1 AND role='assistant'",[recovered])).rows[0].count).toBeGreaterThan(1)
  },90_000)
  let realHarness:Awaited<ReturnType<typeof createChannelHarness>>
  it('delivers recovered history through the actual kernel and managed provider boundary',async()=>{
-  const real=await vi.importActual<typeof import('../turn/kernel.js')>('../turn/kernel.js')
-  const realPreparation=await vi.importActual<typeof import('../turn/prepare.js')>('../turn/prepare.js')
-  const preparation=await import('../turn/prepare.js')
-  vi.mocked(preparation.prepareAssistantRun).mockImplementation(realPreparation.prepareAssistantRun)
-  realHarness=await createChannelHarness(real.runAssistantTurn)
+  realHarness=await createChannelHarness(true)
   await realHarness.turn('1007','Hi')
   expect(realHarness.mainRequests).toHaveLength(1)
   expect(JSON.stringify(realHarness.mainRequests[0])).toContain('fictionalCalendarRead')
@@ -259,17 +292,13 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
    console.info('[recovered Telegram namespace setup timing]',{privateMemoryRows,elapsedMs:Math.round(performance.now()-seedStarted)})
    const prior=(await query('SELECT count(*)::int count FROM session_message_annotation_heads WHERE session_id=$1',[recovered])).rows[0].count
    expect(prior).toBeGreaterThanOrEqual(2)
-   const real=await vi.importActual<typeof import('../turn/kernel.js')>('../turn/kernel.js')
-   const preparation=await import('../turn/prepare.js')
-   const realPreparation=await vi.importActual<typeof import('../turn/prepare.js')>('../turn/prepare.js')
-   vi.mocked(preparation.prepareAssistantRun).mockImplementation(realPreparation.prepareAssistantRun)
-   const current=await createChannelHarness(real.runAssistantTurn,{actorId:owner,replyToMessageId:'5',timeoutTopic:true})
+   const current=await createChannelHarness(true,{actorId:owner,replyToMessageId:'5',timeoutTopic:true})
    await current.turn('1009','Hi')
    expect(current.mainRequests).toHaveLength(1)
    expectPublicHistory(current.mainRequests[0])
    expect(JSON.stringify(current.mainRequests[0])).toContain('fictionalCalendarRead')
    expect(runTurn.mock.calls.at(-1)?.[0].loop.context.userId).toBe(owner)
-   expect(runTurn.mock.calls.at(-1)?.[0].loop.tools.get('fictionalCalendarRead')?.isReadOnly).toBe(true)
+   expect((prepareRun.mock.calls.at(-1)?.[0] as {candidateTools:Map<string,{isReadOnly:boolean}>}|undefined)?.candidateTools.get('fictionalCalendarRead')?.isReadOnly).toBe(true)
    expect(current.injections.at(-1)?.actorIdentity.userId).toBe(owner)
    expect(current.sent).toEqual(['Fictional complete reply.'])
    const annotation=(await query(`SELECT (c.content->>'topicConfidence')::float confidence,c.content->>'topicLabel' label,

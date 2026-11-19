@@ -19,6 +19,8 @@ import type { Dictionary } from "@/lib/i18n/dictionaries";
 import type { ViewListRow } from "@/lib/api/views";
 import { EmptyPageLanding } from "../empty-page-landing";
 import { CHAT_SEED_EVENT, requestChatSeed } from "@/lib/chat-seed";
+import { createConversationController } from "@/lib/chat/conversation-controller";
+import { SCOPE, TURN_A, fakeScheduler, fakeTransport, settle } from "@/lib/chat/__tests__/conversation-fakes";
 
 const dict = en as unknown as Dictionary;
 const landingSource = readFileSync(
@@ -322,7 +324,8 @@ describe("[COMP:app-web/empty-page-landing] Draft-assistant picker", () => {
     );
     // The manual switcher resets only OFF the doc surface; the doc branch
     // keeps the thread.
-    expect(floatingChatSource).toContain("if (!isDocOrigin) resetThread();");
+    // Off doc, a switch resets and resumes that assistant's latest thread (M5Q-20 keeps it resumable).
+    expect(floatingChatSource).toContain("if (!isDocOrigin) resetThread({ resume: true });");
   });
 
   it("the dock resumes the doc thread surface-scoped, not per-assistant", () => {
@@ -333,16 +336,34 @@ describe("[COMP:app-web/empty-page-landing] Draft-assistant picker", () => {
     expect(floatingChatSource).toContain('? { scope: "workspace" as const }');
   });
 
-  it("assistant replies carry their answering voice for mixed-voice threads", () => {
+  it("assistant replies carry their answering voice for mixed-voice threads", async () => {
     // Restored rows keep the persisted `sender_assistant_id` stamp; live
-    // turns stamp the addressed assistant at send time — so per-reply
-    // avatars stay truthful once two assistants have answered in one thread.
+    // turns send the addressed assistant (the seed's pick over the
+    // switcher's selection), and the shared conversation controller stamps
+    // it on the committed reply — so per-reply avatars stay truthful once
+    // two assistants have answered in one thread.
     expect(floatingChatSource).toContain(
-      "turnVoiceRef.current = override?.assistantId ?? selectedAssistantId",
+      "assistantId: override?.assistantId ?? selectedAssistantId",
     );
-    expect(floatingChatSource).toContain(
-      "{ senderAssistantId: turnVoiceRef.current }",
-    );
+    const net = fakeTransport();
+    const clock = fakeScheduler();
+    const controller = createConversationController({ scope: SCOPE, sessionId: "s-doc", transport: net.transport, scheduler: clock.scheduler });
+    controller.attach("dock-1", { profile: "dock", pendingProbe: false });
+    for (const follow of net.follows) follow.sse?.close();
+    const sent = controller.send({ presentationId: "dock-1", text: "make me a board", assistantId: "a_sales" });
+    await settle();
+    const { body, sse } = net.lastChat();
+    expect(body.assistantId).toBe("a_sales");
+    sse.send("session", { sessionId: "s-doc", turnId: TURN_A });
+    sse.send("text_delta", { text: "Board ready." });
+    sse.send("assistant_message_saved", { id: "m-1" });
+    sse.send("done", { turnId: TURN_A });
+    sse.close();
+    expect(await sent).toBe("completed");
+    expect(controller.getSnapshot().transcript.messages.at(-1)).toMatchObject({
+      id: "m-1",
+      senderAssistantId: "a_sales",
+    });
     expect(chatMessageBubbleSource).toContain(
       "{ senderAssistantId: m.senderAssistantId }",
     );

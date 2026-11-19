@@ -1,6 +1,21 @@
 /** Canonical Association operational source evidence. [COMP:crm/association-source-scope] */
-import { CrmOperationsError, departmentReadGrantJson, deriveResourceScope, DerivedScopeError, intersectDepartmentReadGrants, intersectScopeGrants, scopeGrantContains,
-  type AssociationActor, type DepartmentReadGrant, type ResourceScope, type ScopeSource } from '@use-brian/core'
+import type { AssociationActor } from '@use-brian/core/association/domain.js'
+import { CrmOperationsError } from '@use-brian/core/crm/operations-types.js'
+import {
+  intersectScopeGrants,
+  scopeGrantContains
+} from '@use-brian/agent-runtime/security/context-scope.js'
+import {
+  departmentReadGrantJson,
+  intersectDepartmentReadGrants,
+  type DepartmentReadGrant
+} from '@use-brian/agent-runtime/security/department-read.js'
+import {
+  deriveResourceScope,
+  DerivedScopeError,
+  type ResourceScope,
+  type ScopeSource
+} from '@use-brian/agent-runtime/security/derived-scope.js'
 import type { Pool, PoolClient } from 'pg'
 import type { ResourceDestination } from '@use-brian/shared'
 
@@ -30,12 +45,8 @@ function operationalSourceDenied(): CrmOperationsError {
     } })
 }
 
-/** Acquire before operational/source locks; canonical admission uses this lock too. */
+/** Serialize CRM creation with workspace source-authority changes. */
 export async function beginAssociationCreation(client: PoolClient, workspaceId: string, nowait = false): Promise<void> {
-  // Module first (association-operations.md, lock order): the module lifecycle
-  // locks its row and then the workspace, so the reverse order here deadlocks
-  // an order against a concurrent shutdown instead of refusing it.
-  await client.query(`SELECT 1 FROM workspace_modules WHERE workspace_id=$1 AND module_key=$2 FOR SHARE${nowait ? ' NOWAIT' : ''}`, [workspaceId, 'association'])
   await client.query(`SELECT id FROM workspaces WHERE id=$1 AND department_read_v2 FOR UPDATE${nowait ? ' NOWAIT' : ''}`, [workspaceId])
 }
 
@@ -71,32 +82,6 @@ export async function admitAssociationSourceScope(
     if (error instanceof WorkspaceAccessError) throw new CrmOperationsError('not_authorized', 'The destination is not available to this actor.')
     throw error
   }
-}
-
-/** Advisory choices use exactly the same source and destination authority as creation. */
-export async function previewAssociationDestinations(client: PoolClient, workspaceId: string, actor: AssociationActor, contactIds: string[]) {
-  await beginAssociationCreation(client, workspaceId)
-  const evidence = await loadAssociationOrderScope(client, workspaceId, contactIds)
-  await assertAssociationSourceAuthority(client, workspaceId, actor, evidence)
-  const authority = await resolveAssociationReadGrant(client, workspaceId, actor)
-  const grant = authority?.grant
-  const departments = grant ? (await client.query<{ id: string; name: string }>(
-    "SELECT id,name FROM workspace_groups WHERE workspace_id=$1 AND kind='team' AND status='active' AND id=ANY($2::uuid[]) ORDER BY name,id",
-    [workspaceId, Object.keys(grant.departments)])).rows : []
-  const candidates: (ResourceDestination | undefined)[] = [undefined, { kind: 'general' }, ...departments.map(row => ({ kind: 'department' as const, departmentId: row.id }))]
-  const choices = []
-  for (const destination of candidates) {
-    try {
-      const admitted = await admitAssociationSourceScope(client, workspaceId, actor, evidence, destination)
-      const ids = admitted.scope.compartments.filter(key => key.startsWith('team:')).map(key => key.slice(5))
-      const names = ids.length ? (await client.query<{ id: string; name: string }>(
-        'SELECT id,name FROM workspace_groups WHERE workspace_id=$1 AND id=ANY($2::uuid[]) ORDER BY name,id', [workspaceId, ids])).rows : []
-      choices.push({ destination: destination ?? null, scope: admitted.scope, departments: names })
-    } catch (error) {
-      if (!(error instanceof CrmOperationsError) || error.code !== 'not_authorized') throw error
-    }
-  }
-  return { choices, validForMs: 30_000 }
 }
 
 /** Saved protection is a floor, while live sources can further restrict it. */
@@ -366,22 +351,6 @@ AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY[
 // Host-only settlement linkage. A transport command cannot install this binding,
 // and a different transaction cannot observe it.
 const checkoutBindings = new WeakMap<PoolClient, { workspaceId: string; checkoutId: string; contactId: string; planId: string }>()
-const waitlistBindings = new WeakMap<PoolClient, { workspaceId: string; submissionId: string; contactId: string }>()
-export async function withAssociationWaitlistSubmission<T>(client: PoolClient, workspaceId: string, submissionId: string,
-  actor: AssociationActor, operation: () => Promise<T>): Promise<T> {
-  await assertAssociationOrderAuthority(client, workspaceId, submissionId, actor, 'submission')
-  const row = (await client.query<{ contactId: string }>('SELECT contact_id AS "contactId" FROM association_enquiries WHERE workspace_id=$1 AND id=$2', [workspaceId, submissionId])).rows[0]
-  if (!row || waitlistBindings.has(client)) throw new CrmOperationsError('not_authorized', 'Waitlist source authority is unavailable.')
-  waitlistBindings.set(client, { workspaceId, submissionId, contactId: row.contactId })
-  try { return await operation() } finally { waitlistBindings.delete(client) }
-}
-export async function associationWaitlistInheritance(client: PoolClient, workspaceId: string, contactId: string, actor: AssociationActor) {
-  const bound = waitlistBindings.get(client)
-  if (!bound) return null
-  if (bound.workspaceId !== workspaceId || bound.contactId !== contactId) throw new CrmOperationsError('not_authorized', 'Waitlist source does not match this order.')
-  const evidence = await assertAssociationOrderAuthority(client, workspaceId, bound.submissionId, actor, 'submission')
-  return evidence ? { ...evidence, submissionId: bound.submissionId } : null
-}
 const providerBindings = new WeakMap<PoolClient, { workspaceId: string; receiptId: string; contactId: string; planId: string | null }>()
 
 /** Only inbox application can attach its frozen source to this transaction. */

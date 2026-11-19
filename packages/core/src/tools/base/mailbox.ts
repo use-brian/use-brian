@@ -26,14 +26,14 @@
  * [COMP:tools/imap-attachments]
  */
 
-import { CrmOperationsStableKeySchema, CrmOperationsError } from '../../crm/operations-types.js'
+import { CrmOperationsStableKeySchema, CrmOperationsError } from '../../application-platform/operation-contract.js'
 import { z } from 'zod'
-import { buildTool, type Tool } from '../types.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import type { FilesApi } from '../../workspace-files/api.js'
 import { MAX_EXTERNAL_DOCUMENT_BYTES } from '../../workspace-files/attachments.js'
 import { ctxFor, errorMessage, idOrPathShape, workspaceGate } from '../../workspace-files/tool-helpers.js'
 import { mailboxFailure } from './_mailbox-error.js'
-import { describeScopeRefusal } from '../../security/derived-scope.js'
+import { describeScopeRefusal } from '@use-brian/agent-runtime/security/derived-scope.js'
 
 /** Default lookback window for searches with no explicit `since` (D12 #4). */
 export const MAILBOX_DEFAULT_WINDOW_DAYS = 90

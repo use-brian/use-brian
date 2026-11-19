@@ -2,9 +2,16 @@ import { sessionKindSql } from '../session-kind.js'
 import { createHash } from 'node:crypto'
 import type pg from 'pg'
 import {
-  MEMORY_CANDIDATE_RETENTION_DAYS, countIndependentMemoryEvidence, deriveMemoryLearning, memoryLearningSchema, proposeMemoryLearning,
-  type DerivedWriteEvidence, type MemoryLearning, type MemoryLearningProposal, type MemoryObservation,
-} from '@use-brian/core'
+  MEMORY_CANDIDATE_RETENTION_DAYS,
+  countIndependentMemoryEvidence,
+  deriveMemoryLearning,
+  memoryLearningSchema,
+  proposeMemoryLearning,
+  type MemoryLearning,
+  type MemoryLearningProposal,
+  type MemoryObservation,
+} from '@use-brian/core/memory/learning.js'
+import type { DerivedWriteEvidence } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { buildMemoryAccessPredicate } from './memory-access-predicate.js'
 import { appendDecisionEvent } from './decision-event-store.js'
 import { appendDecisionDerivation } from './decision-provenance-store.js'

@@ -83,7 +83,7 @@ describe.sequential('[COMP:api/channel-recording] durable legacy privacy quarant
     expect((await query('SELECT session_context_parent_snapshot($1,$2) AS value', [fixture.workspace, fixture.session])).rows[0].value).toBeNull()
     expect((await query('SELECT application_session_query_parent($1,$2) AS value', [fixture.workspace, fixture.session])).rows[0].value).toBeNull()
     // The owner pool cannot turn a denied native history request into values.
-    await expect(query("SELECT read_native_application_session_projection($1,$2,100,'history') AS value",
+    await expect(query('SELECT capture_conversation_query($1,$2,100,NULL) AS value',
       [fixture.workspace, fixture.session])).rejects.toThrow('access_unavailable')
   })
 

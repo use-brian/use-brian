@@ -7,11 +7,11 @@ vi.mock('../../context-scope/execution-context.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../../context-scope/execution-context.js')>()
   return { ...actual,resolveExecutionContextSystem: (input: Parameters<typeof actual.resolveExecutionContextSystem>[0],
     deps: Parameters<typeof actual.resolveExecutionContextSystem>[1] = {}) => actual.resolveExecutionContextSystem(input,{
-      ...deps,pinPolicyEpoch: async () => async () => true,resolveAssistant: async () => input.assistant,
+      ...deps,pinPolicyEpoch: async () => ({isCurrent: async () => true, matches: () => true}),resolveAssistant: async () => input.assistant,
     }) }
 })
 import { z } from 'zod'
-import { buildTool } from '@use-brian/core'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
 const { send, execute } = vi.hoisted(() => ({ send: vi.fn(async () => 'posted'), execute: vi.fn(async () => ({ data: 'done' })) }))
 vi.mock('@use-brian/channels', async (original) => ({ ...(await original<typeof import('@use-brian/channels')>()),
   createTelegramAdapter: vi.fn(() => ({ sendMessage: send })), createSlackAdapter: vi.fn(() => ({ sendMessage: send })),
@@ -67,7 +67,7 @@ function fixture(channelType: 'telegram' | 'slack' | 'feishu' | 'msteams' | 'cus
     messageText: '', questionStore: store, connectorStore: {} as never, mcpSettingsStore: {} as never,
   }
   const integrationStore = { getCredentialsForAssistantIntegrationSystem: vi.fn(async () => ({ id: 'integration', channelId: 'account', credentials: { bot_token: 'token' }, config: { msteamsServiceUrl: 'https://teams.example' } })) } as unknown as ChannelIntegrationStore
-  const deliver = (options: Partial<WorkflowChannelDeliveryOptions> = {}, scopeEvidence?: import('@use-brian/core').ScopeEvidence) => createWorkflowChannelDelivery({ integrationStore, questionStore: store, customChannelStore: { enqueue: vi.fn() }, waConnectorUrl: 'http://connector', waConnectorSecret: 'secret', ...options })({
+  const deliver = (options: Partial<WorkflowChannelDeliveryOptions> = {}, scopeEvidence?: import('@use-brian/agent-runtime/security/context-scope.js').ScopeEvidence) => createWorkflowChannelDelivery({ integrationStore, questionStore: store, customChannelStore: { enqueue: vi.fn() }, waConnectorUrl: 'http://connector', waConnectorSecret: 'secret', ...options })({
     workspaceId: 'workspace', assistantId: 'assistant', userId: 'actor', channelType, channelId: notifications ? 'notifications' : channelId, channelIntegrationId: 'integration', text: '', threadRef, scopeEvidence,
     question: { question: 'Where?', options: ['dev', 'prod'], allowCustom: false },
     questionResponse: { toolName: 'pinned_answer', arguments: { version: 7 }, answerField: 'answer' },

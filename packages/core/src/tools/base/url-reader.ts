@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { buildTool } from '../types.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
 import { createFetchStack } from './fetch-stack.js'
 import { readabilityProvider } from './fetch-readability.js'
 import { jinaProvider } from './fetch-jina.js'
@@ -8,7 +8,7 @@ import { xApiFetchProvider } from './fetch-x-api.js'
 import { xaiFetchProvider, createXaiFetchProvider } from './fetch-xai.js'
 import { isAuthWalledUrl, authWalledGuidance } from './auth-walled-hosts.js'
 import { encodeExternalCostMeta } from '../../billing/external-cost.js'
-import type { ExternalCredentialPool } from '../../providers/credential-pool.js'
+import type { ExternalCredentialPool } from '@use-brian/agent-runtime/providers/credential-pool.js'
 
 /**
  * URL reader tool — reads a web page and returns its extracted readable

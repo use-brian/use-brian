@@ -1,7 +1,6 @@
 import { buildMemoryAccessPredicate } from './memory-access-predicate.js'
 import { admitEntityCreate, admitEntitySuccessor, beginEntityAdmission } from '../workspace-access/entity-create-admission.js'
 import type {
-  AccessContext,
   EntityCreateParams,
   EntityKind,
   EntityLinksStore,
@@ -15,13 +14,17 @@ import type {
   EntitySupersedePatch,
   EntityUpdateFields,
   GetEntityOpts,
-} from '@use-brian/core'
-import { ENTITY_SOURCES, decodeCrmAmount, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
-import type { Sensitivity } from '@use-brian/core'
+} from '@use-brian/core/entities/types.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import { decodeCrmAmount } from '@use-brian/core/application-platform/record-values.js'
+import { ENTITY_SOURCES } from '@use-brian/core/entities/types.js'
+import { unionScopeRequirements } from '@use-brian/agent-runtime/security/context-scope.js'
+import { maxSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type pg from 'pg'
 import { z } from 'zod'
 import { ApplicationPlatformError, applicationJsonSchema } from '@use-brian/shared'
-import { clientCompartment } from '@use-brian/core'
+import { clientCompartment } from '@use-brian/agent-runtime/security/compartments.js'
 import { assertExecutionResourceScope, buildAccessPredicate, buildCurrentMemberSourcePredicate } from './access-predicate.js'
 import { currentAgentAccess } from './agent-access-context.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'

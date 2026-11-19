@@ -1,5 +1,9 @@
 /** Configured generation providers and cheap, bounded reference reads. [COMP:feed/draft-generation] */
-import { calculateCost, createGeminiImageProvider, validateFeedImageSource, aiStudioTransport, type GeneratedImageReceipt, type CodexImageProvider, type GoogleTransport, type FilesApi, type FilesContext, type UsageStore } from '@use-brian/core'
+import type { FilesApi, FilesContext } from '@use-brian/core/workspace-files/api.js'
+import { calculateCost, type UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
+import type { CodexImageProvider } from '@use-brian/agent-runtime/providers/codex-app-server/image.js'
+import { createGeminiImageProvider, validateFeedImageSource, type GeneratedImageReceipt } from '@use-brian/agent-runtime/providers/gemini-image.js'
+import { aiStudioTransport, type GoogleTransport } from '@use-brian/agent-runtime/providers/google-transport.js'
 import { FEED_IMAGE_CAPABILITY, feedImageCost, type FeedImageConfig, type FeedMedia } from '@use-brian/shared'
 import { withFeedTransaction, FeedCollaborationError, type FeedActor } from '../db/feed-collaboration-store.js'
 import { editorialActor, type FeedEditorialRun } from '../db/feed-editorial-runs-store.js'

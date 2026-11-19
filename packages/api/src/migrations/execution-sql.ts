@@ -1,9 +1,14 @@
 import { createHash } from 'node:crypto'
+import { configuredTaskPublicationExecutionSql } from './configured-task-publication-execution.js'
+import { participationRetirementExecutionSql } from './participation-retirement-execution.js'
 import { pageThreadSourceExecutionSql } from './page-thread-execution.js'
 
-/** Executable-only optimization; historical SQL and all contract checks stay intact.
+/** Execution-only adaptation of reviewed historical SQL; contract checks stay intact.
  * [COMP:api/migration-execution-sql]
  */
+const privateTranscriptPreparation = '8268_private_transcript_preparation_eligibility.sql'
+const participationRetirement = '8290_participation_read_retirement.sql'
+const configuredTaskPublication = '8296_configured_task_publication.sql'
 const reviewed: Readonly<Record<string, readonly [string, number]>> = {
   '8188_native_turn_shared_publication.sql': ['b374051b82a095f5ed4e7d9a1c78f8da0d4107c03deba3f9891e2bfcfdb02e65', 1],
   '8196_native_turn_annotation_publication.sql': ['45d10e796082730586ba2969a42c0e8d57c0847beca1cff12f9884b308a27a38', 2],
@@ -27,6 +32,9 @@ const reviewed: Readonly<Record<string, readonly [string, number]>> = {
   '8249_telegram_conversation_context.sql': ['30a27fe9683b924d011f2bcaced1d5f4770f86a470841dd1c1d303cdf8da70ea', 2],
   '8250_page_thread_batch_preparation.sql': ['8b41fe1e2704faccc86920a53abec42cf790db663aec7b049c791371062a857c', 2],
   '8251_private_page_thread_source.sql': ['b49871608d903b4a50586bf12063d4fd789cb2f64cbd1fc3f846261169c73b00', 0],
+  [configuredTaskPublication]: ['55b915bd94214f96266e6da94165f454361d9351dc82d6dab537137b507d2baf', 0],
+  [participationRetirement]: ['5fdaec0ab2468bc805c7163478d58e88b5c407efbc02a55fafdb5dc89a74b8d0', 0],
+  [privateTranscriptPreparation]: ['e5de14be570dea6f612243ef862c72a8e3af68126b0fe1bdbdd8ee8e3b672b80', 0],
 }
 
 const callers = 'FOR caller IN SELECT p.oid,p.prosrc FROM pg_proc p'
@@ -100,6 +108,16 @@ export function toMigrationExecutionSql(sql: string, file: string): string {
   if (!expected) return sql
   if (createHash('sha256').update(sql).digest('hex') !== expected[0]) {
     throw new Error(`${file}: historical migration content changed; refusing execution adapter`)
+  }
+  if (file === configuredTaskPublication) return configuredTaskPublicationExecutionSql(sql)
+  if (file === participationRetirement) return participationRetirementExecutionSql(sql)
+  if (file === privateTranscriptPreparation) {
+    // The original successor guard compares full pg_class rows. Prevent
+    // ANALYZE from changing their planner statistics between those reads.
+    const transactionStart = '\nBEGIN;\n'
+    if (sql.split(transactionStart).length !== 2) throw new Error('8268: unexpected transaction start')
+    return sql.replace(transactionStart,
+      `${transactionStart}LOCK TABLE public.native_turn_contract_helpers, public.native_retained_contract_helpers IN SHARE MODE;\n`)
   }
   const executable = file === '8246_native_private_memory_empty_domain.sql' ? privateMemoryGuardEnrollment(sql)
     : file === '8248_page_thread_context_authority.sql' ? pageThreadSourceExecutionSql(sql)

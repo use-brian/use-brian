@@ -4,7 +4,7 @@ import { readAdmissionPolicy } from './admission-policy-read.js'
  * those resource-specific checks remain the caller's responsibility.
  */
 import type { PoolClient } from 'pg'
-import { intersectScopeGrants, scopeGrantContains, type ScopeGrant } from '@use-brian/core'
+import { intersectScopeGrants, scopeGrantContains, type ScopeGrant } from '@use-brian/agent-runtime/security/context-scope.js'
 import type { ResourceAdmission, ResourceDestination, WorkspaceAccessMode, WorkspaceResourceEnvelope } from '@use-brian/shared'
 import { currentAgentAccess } from '../db/agent-access-context.js'
 import { WorkspaceAccessError } from './policy.js'

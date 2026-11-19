@@ -8,36 +8,19 @@
 
 import { randomUUID } from 'node:crypto'
 import { RESEARCH_EFFORT_BUDGETS, type ResearchEffort } from './research-effort.js'
-import { NOOP_TURN_LEDGER } from '../engine/turn-ledger.js'
+import { NOOP_TURN_LEDGER } from '@use-brian/agent-runtime/engine/turn-ledger.js'
 
-import type { LLMProvider, Message, TokenUsage } from '../providers/types.js'
-import type { Tool, ToolContext } from '../tools/types.js'
-import { filterToolsByCapabilities } from '../tools/capability-gate.js'
-import { queryLoop, type QueryEvent } from '../engine/query-loop.js'
-import { createExecutionContext, executionToolContext } from '../security/execution-context.js'
-import { isAttendedTurn } from '../tools/capability-gate.js'
+import type { LLMProvider, Message, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
+import type { Tool, ToolContext, WorkerResult, WorkerStatus } from '@use-brian/agent-runtime/tools/types.js'
+import { filterToolsByCapabilities } from '@use-brian/agent-runtime/tools/capability-gate.js'
+import { queryLoop, type QueryEvent, type QueryUsageSnapshot } from '@use-brian/agent-runtime/engine/query-loop.js'
+import { createExecutionContext, executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { isAttendedTurn } from '@use-brian/agent-runtime/tools/capability-gate.js'
 
 // ── Types ──────────────────────────────────────────────────────
 
-export type WorkerStatus = 'running' | 'completed' | 'failed' | 'stopped'
-
-export type WorkerResult = {
-  workerId: string
-  description: string
-  status: WorkerStatus
-  result: string
-  /**
-   * Session that spawned this worker. Set at spawn time from the spawning
-   * turn's `context.sessionId`. The notification queue + drain are scoped by
-   * this so a worker's result is delivered ONLY to its own session's turns —
-   * the `createWorkerManager` singleton is shared process-wide across every
-   * user and channel, and without this scope a background worker completing
-   * during another user's turn bled its research into that turn (cross-tenant
-   * leak, 2026-06-02). `null` only in non-route contexts (smoke / scheduled
-   * jobs) where there is no session boundary.
-   */
-  ownerSessionId?: string | null
-}
+// Declared with the engine-facing worker port in tools/types.ts.
+export type { WorkerStatus, WorkerResult }
 
 /**
  * Persistence port for askQuestion suspend-resume worker durability.
@@ -186,7 +169,7 @@ export type WorkerOptions = {
    *  `turn_complete`) so the api layer records its COGS. Identity-carrying so
    *  open core stays billing-agnostic; the normal standalone composition wires
    *  a local COGS store, while bespoke compositions may omit the callback. */
-  onUsage?: (usage: WorkerUsageEvent) => void
+  onUsage?: (usage: WorkerUsageEvent) => unknown
 }
 
 const WORKER_SYSTEM_PROMPT = `You are an isolated read-only worker. Your job is to complete one self-contained task and return the result concisely.
@@ -578,6 +561,10 @@ export function createWorkerManager(options: WorkerOptions) {
     const ownerSessionId: string | null = ownSessionId
     const ownOnEvent = sessionConfig?.onEvent ?? options.onEvent
     const ownOnUsage = options.onUsage
+    const ownUserId = context.userId
+    const ownAssistantId = context.assistantId
+    const ownModelTier = context.workerRuntime?.modelTier
+    const ownProviderKeySource = context.workerRuntime?.providerKeySource
 
     // Persistence — record spawn (skip when rehydrating; the row already
     // exists with `status='running'`). Fire-and-forget; a slow DB write
@@ -680,89 +667,87 @@ export function createWorkerManager(options: WorkerOptions) {
               attribution: context.executionContext.attribution,
             })
           : undefined
-        for await (const event of queryLoop({
-          // Child trace on the invoking lane's recorder (stamped on the
-          // context by the parent queryLoop). NOOP only reachable when a
-          // worker is driven outside any loop (tests).
-          ledger: context.turnLedger ?? NOOP_TURN_LEDGER,
-          provider: workerProvider,
-          model,
-          maxTokens: context.workerRuntime?.maxTokens,
-          inputTokenLimit: context.workerRuntime?.inputTokenLimit,
-          systemPrompt,
-          messages: messagesForLoop,
-          tools: workerTools,
-          context: {
-            ...context,
-            ...(workerExecution
-              ? executionToolContext(workerExecution, { appId: context.appId })
-              : {}),
-            // A worker acts for the turn that spawned it: if a human attends
-            // that turn, they attend the worker's writes too (D13).
-            attended: isAttendedTurn(context),
-            abortSignal: workerAbortSignal,
-            requestTools: workerTools,
-            // Workers must NOT have workerManager — otherwise Phase 4b
-            // triggers inside the worker and deadlocks waiting for sibling workers.
-            workerManager: undefined,
-          },
-          maxTurns,
-          ...(maxToolCalls !== undefined ? { maxToolCalls } : {}),
-          // Stateless: avoid rawHistory accumulation with thought signatures.
-          // Workers are ephemeral — no need to preserve session state, and the
-          // memory savings are significant (~100-200KB per thought signature blob
-          // avoided per turn across 3 concurrent workers).
-          stateless: true,
-          // Phase 3 persistence — write the per-turn-boundary history to
-          // worker_runs so a Cloud Run rotation can rehydrate from this
-          // snapshot. Fire-and-forget; the engine doesn't await this.
-          onTurnEnd: (turn, history) => {
-            lastTurnCount = turn + 1
-            if (ownStore && ownSessionId) {
-              persistFireAndForget(
-                ownStore.recordTurn({
-                  runId,
-                  sessionId: ownSessionId,
+        let usageSnapshot: QueryUsageSnapshot | null = null
+        try {
+          for await (const event of queryLoop({
+            observeUsage: snapshot => { usageSnapshot = structuredClone(snapshot) },
+            // Child trace on the invoking lane's recorder (stamped on the
+            // context by the parent queryLoop). NOOP only reachable when a
+            // worker is driven outside any loop (tests).
+            ledger: context.turnLedger ?? NOOP_TURN_LEDGER,
+            provider: workerProvider,
+            model,
+            maxTokens: context.workerRuntime?.maxTokens,
+            inputTokenLimit: context.workerRuntime?.inputTokenLimit,
+            systemPrompt,
+            messages: messagesForLoop,
+            tools: workerTools,
+            context: {
+              ...context,
+              ...(workerExecution
+                ? executionToolContext(workerExecution, { appId: context.appId })
+                : {}),
+              // A worker acts for the turn that spawned it: if a human attends
+              // that turn, they attend the worker's writes too (D13).
+              attended: isAttendedTurn(context),
+              abortSignal: workerAbortSignal,
+              requestTools: workerTools,
+              // Workers must NOT have workerManager — otherwise Phase 4b
+              // triggers inside the worker and deadlocks waiting for sibling workers.
+              workerManager: undefined,
+            },
+            maxTurns,
+            ...(maxToolCalls !== undefined ? { maxToolCalls } : {}),
+            // Stateless: avoid rawHistory accumulation with thought signatures.
+            // Workers are ephemeral — no need to preserve session state, and the
+            // memory savings are significant (~100-200KB per thought signature blob
+            // avoided per turn across 3 concurrent workers).
+            stateless: true,
+            // Phase 3 persistence — write the per-turn-boundary history to
+            // worker_runs so a Cloud Run rotation can rehydrate from this
+            // snapshot. Fire-and-forget; the engine doesn't await this.
+            onTurnEnd: (turn, history) => {
+              lastTurnCount = turn + 1
+              if (ownStore && ownSessionId) {
+                persistFireAndForget(
+                  ownStore.recordTurn({
+                    runId,
+                    sessionId: ownSessionId,
+                    workerId,
+                    turnCount: lastTurnCount,
+                    history,
+                  }),
+                  'recordTurn',
                   workerId,
-                  turnCount: lastTurnCount,
-                  history,
-                }),
-                'recordTurn',
-                workerId,
-              )
+                )
+              }
+            },
+          })) {
+            if (event.type === 'text_delta') {
+              responseText += event.text
             }
-          },
-        })) {
-          if (event.type === 'text_delta') {
-            responseText += event.text
+            if (event.type === 'tool_start') {
+              // browserReadPage counts as a page read: the enforcement below
+              // is "snippets are not evidence", and a governed-browser read is
+              // evidence the same way a urlReader read is.
+              if (event.name === 'urlReader' || event.name === 'browserReadPage') urlReaderCalls++
+              else if (event.name === 'webSearch') webSearchCalls++
+            }
+            // Forward events to the SPAWNING turn's sink (snapshotted at spawn),
+            // never the singleton's live options.onEvent — see capture block.
+            ownOnEvent?.(workerId, event)
           }
-          if (event.type === 'tool_start') {
-            // browserReadPage counts as a page read: the enforcement below
-            // is "snippets are not evidence", and a governed-browser read is
-            // evidence the same way a urlReader read is.
-            if (event.name === 'urlReader' || event.name === 'browserReadPage') urlReaderCalls++
-            else if (event.name === 'webSearch') webSearchCalls++
-          }
-          if (event.type === 'turn_complete' && ownOnUsage && ownSessionId) {
-            // Terminal-once with accumulated usage — hand the worker's COGS to
-            // the api layer under the spawning turn's billing identity (the same
-            // session the worker_runs row is written under, so a goal iteration
-            // that sums usage_tracking by session captures its workers too).
-            ownOnUsage({
-              workerId,
-              userId: context.userId,
-              assistantId: context.assistantId,
-              sessionId: ownSessionId,
-              workspaceId: ownWorkspaceId,
-              model: event.response.model,
-              modelTier: context.workerRuntime?.modelTier,
-              providerKeySource: context.workerRuntime?.providerKeySource,
-              usage: event.totalUsage,
-            })
-          }
-          // Forward events to the SPAWNING turn's sink (snapshotted at spawn),
-          // never the singleton's live options.onEvent — see capture block.
-          ownOnEvent?.(workerId, event)
+        } finally {
+          // This is producer-observed spend, independent of output admission.
+          // Await the original spawn callback before publishing completion.
+          const captured = usageSnapshot as QueryUsageSnapshot | null
+          if (captured && ownOnUsage && ownSessionId) await ownOnUsage({
+            workerId, userId: ownUserId, assistantId: ownAssistantId,
+            sessionId: ownSessionId, workspaceId: ownWorkspaceId,
+            model: captured.model, modelTier: ownModelTier,
+            providerKeySource: ownProviderKeySource,
+            usage: structuredClone(captured.totalUsage),
+          })
         }
 
         // Research-mode enforcement: a worker that did webSearches without
@@ -845,8 +830,8 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
           // `failed` (not `completed`) so the coordinator's notification XML
           // shows status=failed — a clean signal this worker did NOT deliver
           // usable research (vs. a trustworthy "nothing found" completion).
-          status: protocolViolation || emptyOutput ? 'failed' : 'completed',
-          result: finalResult,
+          status: workerAbortSignal.aborted ? 'stopped' : protocolViolation || emptyOutput ? 'failed' : 'completed',
+          result: workerAbortSignal.aborted ? 'Stopped.' : finalResult,
           ownerSessionId,
         }
 
@@ -889,14 +874,14 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
         const result: WorkerResult = {
           workerId,
           description,
-          status: 'failed',
-          result: `Error: ${err instanceof Error ? err.message : String(err)}`,
+          status: workerAbortSignal.aborted ? 'stopped' : 'failed',
+          result: workerAbortSignal.aborted ? 'Stopped.' : `Error: ${err instanceof Error ? err.message : String(err)}`,
           ownerSessionId,
         }
 
         const entry = workers.get(workerId)
         if (entry) {
-          entry.status = 'failed'
+          entry.status = result.status
           entry.result = result.result
           entry.abortController = undefined
           entry.promise = undefined
@@ -908,7 +893,7 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
               runId,
               sessionId: ownSessionId,
               workerId,
-              status: 'failed',
+              status: result.status,
               result: result.result,
               turnCount: lastTurnCount,
             }),
@@ -941,11 +926,11 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
      * `resetForSession` so concurrent sessions are never disturbed. */
     reset() {
       for (const [workerId, entry] of workers) {
-        if (entry.status === 'running') {
+        if (entry.promise !== undefined) {
           entry.status = 'stopped'
           entry.suppressNotification = true
           entry.abortController?.abort()
-        } else {
+        } else if (entry.promise === undefined) {
           workers.delete(workerId)
         }
       }
@@ -966,7 +951,7 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
     resetForSession(sessionId: string) {
       for (const [workerId, entry] of workers) {
         if (entry.ownerSessionId !== sessionId) continue
-        if (entry.status === 'running') {
+        if (entry.promise !== undefined) {
           entry.status = 'stopped'
           entry.suppressNotification = true
           entry.abortController?.abort()
@@ -1294,7 +1279,7 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
       let cancelled = 0
       for (const entry of workers.values()) {
         if (
-          entry.status === 'running'
+          (entry.status === 'running' || entry.promise !== undefined && !entry.suppressNotification)
           && entry.ownerSessionId === sessionId
         ) {
           entry.status = 'stopped'
@@ -1440,12 +1425,11 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
      * Wait for all running workers to complete.
      */
     async waitAll(): Promise<WorkerResult[]> {
-      // Only running workers have a non-undefined `promise` (it's cleared on
-      // completion to free closure memory). Completed workers are skipped
-      // since their results were already pushed to notifications.
+      // Cancelled workers retain their promise through accounting cleanup.
+      // Completed workers have already dropped it to free closure memory.
       const promises = [...workers.values()]
         .filter((w): w is typeof w & { promise: Promise<WorkerResult> } =>
-          w.status === 'running' && w.promise !== undefined,
+          w.promise !== undefined,
         )
         .map((w) => w.promise)
       return Promise.all(promises)
@@ -1482,3 +1466,12 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
 }
 
 export type WorkerManager = ReturnType<typeof createWorkerManager>
+
+// Core-owned ToolContext field: widens the runtime `WorkerCoordinator` port to
+// the full manager (docs/architecture/engine/tool-hooks.md → "Runtime ports
+// and core-owned context extensions").
+declare module '@use-brian/agent-runtime/tools/types.js' {
+  interface ToolContextExtensions {
+    workerManager?: WorkerManager
+  }
+}

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { createPlanTools, seedPlanFromTasks } from '../plan-tools.js'
 import type { PlanStepRecord, PlanStore } from '../plan-types.js'
-import type { ToolContext } from '../../tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 function makeStore(): PlanStore {
   const rows: PlanStepRecord[] = []

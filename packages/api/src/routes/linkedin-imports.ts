@@ -6,7 +6,7 @@
 
 import { Router } from 'express'
 import multer, { MulterError } from 'multer'
-import type { FilesApi, FilesContext } from '@use-brian/core'
+import type { FilesApi, FilesContext } from '@use-brian/core/workspace-files/api.js'
 
 import { getWorkspacePrimaryAssistant } from '../db/users.js'
 import {

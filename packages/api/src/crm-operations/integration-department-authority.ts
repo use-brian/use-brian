@@ -1,7 +1,12 @@
 /** Durable credential ceiling plus current v2 authority. [COMP:api/crm-integration-auth] */
 import { z } from 'zod'
 import type { PoolClient } from 'pg'
-import { CrmCredentialDepartmentSelectionSchema, CrmCredentialParentSchema, type CrmCredentialParent, CrmOperationsError, crmOperationsSha256, intersectDepartmentReadGrants, intersectScopeGrants, minSensitivity, RANK, type DepartmentReadGrant, type AuthoringAuthority, accessCeilingContains, pinAccessCeiling } from '@use-brian/core'
+import { CrmCredentialDepartmentSelectionSchema, CrmCredentialParentSchema, type CrmCredentialParent } from '@use-brian/core/crm/integration-authority.js'
+import { CrmOperationsError, crmOperationsSha256 } from '@use-brian/core/crm/operations-types.js'
+import { type AuthoringAuthority, accessCeilingContains, pinAccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import { intersectScopeGrants } from '@use-brian/agent-runtime/security/context-scope.js'
+import { intersectDepartmentReadGrants, type DepartmentReadGrant } from '@use-brian/agent-runtime/security/department-read.js'
+import { minSensitivity, RANK } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { loadDepartmentSnapshot, resolveDepartmentReadGrant } from '../context-scope/department-resolver.js'
 import { currentAgentAccess, runWithAgentAccess } from '../db/agent-access-context.js'
 import { admitWorkspaceResource } from '../workspace-access/resource-admission.js'
@@ -224,4 +229,3 @@ export async function previewCrmIntegrationBindings(
   return { mode: 'department-v2' as const, choices, assistants, validForMs: 30_000 }
 }
 
-export { CrmCredentialParentSchema, type CrmCredentialParent } from '@use-brian/core'

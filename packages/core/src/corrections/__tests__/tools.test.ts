@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { ContextScopeAccumulator } from '../../security/context-scope.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import { createCorrectionTools } from '../tools.js'
 import type {
   ApplySoftRetractInput,
@@ -16,7 +16,7 @@ import type {
   RowSensitivitySnapshot,
   SensitivityReclassificationRepository,
 } from '../sensitivity-reclassification.js'
-import type { ToolContext } from '../../tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const WORKSPACE_ID = '00000000-0000-4000-8000-000000000001'
 const USER_ID = 'user-1'

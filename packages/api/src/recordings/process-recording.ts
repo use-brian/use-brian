@@ -1,6 +1,7 @@
 // [COMP:recordings/open-process-recording] - generic OSS recording processor.
 
-import type { FilesApi, RecordingTranscriber } from '@use-brian/core'
+import type { RecordingTranscriber } from '@use-brian/core/media/recording-transcriber.js'
+import type { FilesApi } from '@use-brian/core/workspace-files/api.js'
 import { captureRecordingSegmentProvenance, type RecordingSegmentProvenance } from '../db/recording-intake-admission.js'
 import { getEpisodeByIdSystem } from '../db/episodes-store.js'
 import { getRecordingSystem, updateRecording } from '../db/recordings-store.js'

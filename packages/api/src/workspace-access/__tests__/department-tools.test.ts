@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { ToolContext } from '@use-brian/core'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { createDepartmentTools } from '../department-tools.js'
 import type { DepartmentStore } from '../../db/department-store.js'
 

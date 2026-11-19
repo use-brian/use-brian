@@ -20,7 +20,8 @@ import {
   buildAccessPredicate,
   type AccessContext,
 } from '../../../../packages/api/src/db/access-predicate.js'
-import { migratePglite, preparePgliteRuntimeRole } from '../migrate-pglite.js'
+import { migratePglite } from '../migrate-pglite.js'
+import { openOrdinaryOwnerPglite } from './ordinary-owner-pglite.js'
 
 const historical = process.env.BRIAN_TEST_HISTORY !== '0'
 const WORKSPACE_ID = '00000000-0000-4000-8000-000000000001'
@@ -191,10 +192,11 @@ before(async () => {
   if (process.env.BRIAN_TEST_PGLITE_SNAPSHOT) {
     db = await loadPreparedPglite(process.env.BRIAN_TEST_PGLITE_SNAPSHOT)
   } else {
-    db = new PGlite({ extensions: { vector, pg_trgm } })
-    await db.waitReady
-    await preparePgliteRuntimeRole(db)
+    // The chain runs as the ordinary owner 8274 requires. The suite then reads in
+    // the bootstrap session, exactly like the prepared-image path above.
+    db = await openOrdinaryOwnerPglite()
     await migratePglite(db, fileURLToPath(new URL('../../../../packages/api/migrations', import.meta.url)))
+    await db.exec('RESET ROLE')
   }
   await db.exec(`
     CREATE TABLE context_matrix_rows (
@@ -346,6 +348,9 @@ describe('[COMP:api/context-scope-security-matrix] cross-path security matrix', 
   })
 })
 
+// The bounded historical replays below stop at 474-597, long before 8274's
+// ordinary-owner admission, and create their own NOSUPERUSER fixture roles, so they
+// keep the embedded bootstrap session. Every complete-chain replay above runs as the owner.
 if (historical) describe('[COMP:tasks/project-context] legacy Project-tag backfill', () => {
   it('creates stable Projects, consumes one tag, and is idempotent', async () => {
     const legacyDb = new PGlite({ extensions: { vector, pg_trgm } })

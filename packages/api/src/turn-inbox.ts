@@ -30,7 +30,7 @@
  * Spec: docs/architecture/engine/mid-turn-input.md. `[COMP:api/turn-inbox]`
  */
 
-import type { PendingTurnInput, TurnInboxPort } from '@use-brian/core'
+import type { PendingTurnInput, TurnInboxPort } from '@use-brian/agent-runtime/engine/turn-inbox.js'
 import { query } from './db/client.js'
 import { registerNotifyChannel, startNotifyListener } from './db/notify-listener.js'
 
@@ -64,8 +64,8 @@ export type TurnInboxHandle = {
 }
 
 /**
- * Open an inbox for a turn about to run. The chat route calls this once it
- * owns the session's turn slot and closes it in its `finally` — no inbox means
+ * Open an inbox for a claimed turn. The kernel owner opens it before
+ * preparation and closes it when that same owner finishes — no inbox means
  * nothing is held, which is exactly what a client's `delivered: false` needs to
  * mean.
  *

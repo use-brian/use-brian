@@ -1,5 +1,5 @@
 import type { PoolClient } from 'pg'
-import type { ResourceScope } from '@use-brian/core'
+import type { ResourceScope } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { admitWorkspaceResource } from './resource-admission.js'
 import { WorkspaceAccessError } from './policy.js'
 

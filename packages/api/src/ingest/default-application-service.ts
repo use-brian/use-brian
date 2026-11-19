@@ -1,5 +1,6 @@
 /** Composition helpers shared by OSS boot and the hosted adapter. */
-import type { AccessContext, Sensitivity } from '@use-brian/core'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 
 import { resolveTurnScopeSystem, type TurnScopeAssistant } from '../context-scope/resolve-turn-scope.js'
 import { query } from '../db/client.js'

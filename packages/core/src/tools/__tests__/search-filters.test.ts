@@ -12,8 +12,8 @@ import { serpApiProvider } from '../base/search-serpapi.js'
 import { tavilyProvider } from '../base/search-tavily.js'
 import { baiduProvider } from '../base/search-baidu.js'
 import { duckDuckGoProvider } from '../base/search-ddg.js'
-import { jsonSchemaFromZod, MODEL_HIDDEN_PARAM_MARKER } from '../../engine/query-loop.js'
-import type { ToolContext } from '../types.js'
+import { jsonSchemaFromZod, MODEL_HIDDEN_PARAM_MARKER } from '@use-brian/agent-runtime/engine/query-loop.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const range = { from: '2026-10-01', to: '2026-10-24' }
 const filters: SearchFilters = { dateRange: range, country: 'HK', language: 'zh-TW' }

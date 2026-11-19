@@ -14,7 +14,7 @@ vi.mock('../../db/users.js', () => ({
 
 // Built-ins are read from disk. Pin them to one known entry so the assertions
 // below are about the WORKSPACE group, not about whatever ships in the repo.
-vi.mock('@use-brian/core', async (importOriginal) => {
+vi.mock('@use-brian/core/skills/loader.js', async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>()
   return {
     ...actual,

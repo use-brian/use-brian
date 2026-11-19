@@ -4,11 +4,17 @@ import type { PoolClient } from 'pg'
 import { getAppPool,getPool,applyRLSGucs } from '../../db/client.js'
 import { createDbDocEntityStore } from '../../db/doc-entity-store.js'
 import { createMemory, updateMemory } from '../../db/memories.js'
-import { ContextScopeAccumulator,executionToolContext,NOOP_TURN_LEDGER,boundScopeSources,
-  type ExecutionContext,type LLMProvider } from '@use-brian/core'
+import { NOOP_TURN_LEDGER } from '@use-brian/agent-runtime/engine/turn-ledger.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import {
+  executionToolContext,
+  type ExecutionContext
+} from '@use-brian/agent-runtime/security/execution-context.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { findAssistantById,findOrCreateUser } from '../../db/users.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
-import { runAssistantTurn } from '../../turn/kernel.js'
+import { runPersistedFixtureTurn as runAssistantTurn } from '../../turn/__tests__/fixtures/owned-turn.js'
 import type { ApplicationAccessGrant,ApplicationGrantMaximum,ApplicationRecordProjection,ApplicationQuery } from '@use-brian/shared'
 import { createDbOAuthClientStore } from '../../db/oauth-client-store.js'
 import { hashSecret } from '../../db/api-key-store.js'
@@ -24,7 +30,7 @@ import { authenticateApplicationHome } from '../../application-platform/home-aut
 import { mintBridgeToken } from '../../home-apps/tokens.js'
 import { createWorkspaceStore,type WorkspacePickerPreferenceUpdate } from '../../db/workspace-store.js'
 import { ApplicationManagementService } from '../../application-platform/management.js'
-import { assertSourceModelInputAuthority } from '../../application-platform/model-source-authority.js'
+import { admitModelInput } from '../admission.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -96,6 +102,19 @@ describe('[COMP:api/policy-epoch] canonical invocation policy epochs', () => {
       UPDATE public.application_epoch_fixture_configuration SET state=state; RETURN NULL; END $$`)
     await owner.query(`CREATE TRIGGER application_epoch_fixture_catalog_changed AFTER UPDATE ON application_epoch_fixture_catalog
       FOR EACH ROW EXECUTE FUNCTION application_epoch_fixture_catalog_changed()`)
+    // Production ports and their storage belong to the migration owner, even
+    // when the disposable fixture bootstrap is a separate superuser.
+    await owner.query(`DO $fixture$ DECLARE target name; item record; BEGIN
+      SELECT pg_get_userbyid(relowner) INTO STRICT target FROM pg_class WHERE oid='application_native_field_contracts'::regclass;
+      FOR item IN SELECT oid::regclass AS identity,relkind FROM pg_class WHERE relnamespace='public'::regnamespace
+        AND relname LIKE 'application_epoch_fixture_%' AND relkind IN ('r','S') LOOP
+        EXECUTE format('ALTER %s %s OWNER TO %I',CASE WHEN item.relkind='S' THEN 'SEQUENCE' ELSE 'TABLE' END,item.identity,target);
+      END LOOP;
+      FOR item IN SELECT oid::regprocedure AS identity FROM pg_proc WHERE pronamespace='public'::regnamespace
+        AND proname LIKE 'application_epoch_fixture_%' LOOP
+        EXECUTE format('ALTER FUNCTION %s OWNER TO %I',item.identity,target);
+      END LOOP;
+    END $fixture$`)
     for (const module of ['epoch_fixture','epoch_fixture_other']) await owner.query(`INSERT INTO application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader,catalog_reader,configuration_required,configuration_reader)
       VALUES($1,'1',ARRAY['finance','approver'],'application_epoch_fixture_reader(uuid,jsonb,text,text)'::regprocedure,
         CASE WHEN $1='epoch_fixture' THEN 'application_epoch_fixture_catalog_reader(uuid,jsonb,text)'::regprocedure ELSE NULL END,true,'application_epoch_fixture_configuration_reader(uuid)'::regprocedure)`,[module])
@@ -236,7 +255,7 @@ describe('[COMP:api/policy-epoch] canonical invocation policy epochs', () => {
   async function runModel(actor: ExecutionContext,provider: LLMProvider,output?: string[]) {
     return runAssistantTurn({ sessionId: actor.lifecycle.sessionId,policy: { admission: 'personal' },sink: { kind: 'return',
       onEvent: event => { if (event.type === 'text_delta') output?.push(event.text) },
-    },lease: { mode: 'none' },
+    },
       abortController: new AbortController(),model: { provider,model: 'fixture-model',configuredProviders: undefined,customLlm: null },
       loop: { ledger: NOOP_TURN_LEDGER,context: executionToolContext(actor,{ appId: 'epoch-fixture' }),
         systemPrompt: 'Fictional policy epoch fixture',messages: [{ role: 'user',content: 'Respond after the policy check.' }],tools: new Map(),maxTurns: 1 } })
@@ -467,7 +486,7 @@ describe('[COMP:api/policy-epoch] canonical invocation policy epochs', () => {
     await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[role])
     await expect(first.security.authority.assertCurrent()).rejects.toMatchObject({ reason: 'authority_changed' })
     const independent = await nativeExecution(otherId)
-    await expect(assertSourceModelInputAuthority({ ...executionToolContext(independent,{ appId: 'epoch-fixture' }),
+    await expect(admitModelInput({ ...executionToolContext(independent,{ appId: 'epoch-fixture' }),
       scopeAccumulator: new ContextScopeAccumulator({ sources }) })).resolves.toBeUndefined()
     const same = await queryRecords(fixture,{ fields: ['cost'],aggregate: [{ field: 'cost',operation: 'sum' }] },independent)
     expect(boundScopeSources(same)).toEqual(sources)

@@ -2,7 +2,8 @@
 import { randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
-import type { CrmOperationsContext, FilesApi } from '@use-brian/core'
+import type { CrmOperationsContext } from '@use-brian/core/crm/operations-types.js'
+import type { FilesApi } from '@use-brian/core/workspace-files/api.js'
 import { createCrmProductionImportService } from '../../crm-operations/import-service.js'
 import { getPool } from '../client.js'
 

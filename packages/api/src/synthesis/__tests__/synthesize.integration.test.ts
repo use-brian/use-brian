@@ -1,16 +1,18 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest'
 import pg from 'pg'
+import type { RetrievalActor } from '@use-brian/core/retrieval/types.js'
+import type { WorkspaceDirectoryStore } from '@use-brian/core/workspace/types.js'
 import type {
   LLMProvider,
   Message,
   ProviderSession,
-  RetrievalActor,
   SessionOptions,
   StreamChunk,
-  Tool,
-  WorkspaceDirectoryStore,
-} from '@use-brian/core'
-import { createCrmTools, createTaskTools, createDocTools } from '@use-brian/core'
+} from '@use-brian/agent-runtime/providers/types.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
+import { createCrmTools } from '@use-brian/core/crm/tools.js'
+import { createDocTools } from '@use-brian/core/doc/tools.js'
+import { createTaskTools } from '@use-brian/core/tasks/tools.js'
 
 /**
  * DB-integration proof of the REAL structural-synthesis engine

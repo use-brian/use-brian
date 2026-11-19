@@ -36,8 +36,9 @@ import { readWorkspaceMcpConsent, type WorkspaceMcpConsent } from '../workspace-
  */
 
 import type { Request } from 'express'
-import { isSensitivity, minSensitivity, crmOperationsSha256, type Sensitivity } from '@use-brian/core'
-import type { CrmCredentialParent } from '@use-brian/core'
+import { crmOperationsSha256 } from '@use-brian/core/crm/operations-types.js'
+import { isSensitivity, minSensitivity, type Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import type { CrmCredentialParent } from '@use-brian/core/crm/integration-authority.js'
 import { verifySecret } from '../db/api-key-store.js'
 import {
   parseBrainAuthToken,

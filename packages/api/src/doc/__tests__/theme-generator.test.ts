@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import type { LLMProvider, StreamChunk } from '@use-brian/core'
+import type { LLMProvider, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
 import { CORE_TOKENS } from '@use-brian/shared'
 
 import {

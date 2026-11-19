@@ -8,7 +8,7 @@
  * extra tools. See the open-core split (repo CLAUDE.md; plan in git history) §12.5.
  */
 
-import type { Tool } from '@use-brian/core'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 
 export interface ExtraToolContext {
   /** The turn's tool map. The injector mutates it in place. */

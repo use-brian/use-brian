@@ -15,7 +15,8 @@
  * [COMP:brain/workspace-viewpoint]
  */
 
-import type { AccessContext, Sensitivity } from '@use-brian/core'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { query } from './client.js'
 import { loadDepartmentSnapshot, resolveDepartmentReadGrant } from '../context-scope/department-resolver.js'
 import { effectiveReadClearance, effectiveReadCompartments } from './workspace-store.js'

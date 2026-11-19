@@ -11,7 +11,7 @@
  */
 import { z } from 'zod'
 import { isoDateOrDateTime } from '../entities/index.js'
-import { buildTool, type Tool } from '../tools/types.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { doneWhenSchema } from './done-when.js'
 import { GOAL_HOST_TYPES, GOAL_STATUSES, type GoalHostType, type GoalStatus, type GoalStore } from './types.js'
 import { pinToolAuthoringAuthority } from '../security/tool-authority.js'

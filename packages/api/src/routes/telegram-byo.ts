@@ -64,14 +64,23 @@ import { completeLinkClaim } from './link-claim.js'
 import type { LinkCodeStore } from '../db/link-codes.js'
 import { withChatLock } from '../db/chat-lock.js'
 import { buildAlbumFiledReply, buildDocumentFiledReply, buildOversizeDocReply, classifyMedia, summarizeAlbumIntake } from '../ingest/channel-media-intake.js'
-import type { ContentBlock } from '@use-brian/core'
-import { calculateCost } from '@use-brian/core'
+import type { ContentBlock } from '@use-brian/agent-runtime/providers/types.js'
+import { calculateCost } from '@use-brian/agent-runtime/billing/cost-tracker.js'
 import { sanitizeDeliveryText } from '@use-brian/shared'
 import { resolveChatModelSelection } from '../model-resolution.js'
 import { getWorkspacePlan } from '../db/workspace-store.js'
 import { checkUsageBudget } from './route-helpers.js'
-import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore, TokenUsage } from '@use-brian/core'
-import { transcribeFirstAudio, describeTranscriptionFailure, composeVoiceTurnText, TRANSCRIPTION_DISABLED_REASON, sanitize as sanitizeAnalytics, type MediaBackend } from '@use-brian/core'
+import type { AnalyticsLogger } from '@use-brian/core/analytics/logger.js'
+import type { KnowledgeStoreInterface } from '@use-brian/core/knowledge/types.js'
+import type { MemoryStore } from '@use-brian/core/memory/types.js'
+import type { GDriveFilesStore } from '@use-brian/core/tools/base/gdrive-files.js'
+import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
+import type { McpSettingsStore } from '@use-brian/agent-runtime/mcp/types.js'
+import type { LLMProvider, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
+import { sanitize as sanitizeAnalytics } from '@use-brian/core/analytics/logger.js'
+import type { MediaBackend } from '@use-brian/core/media/backend.js'
+import { transcribeFirstAudio, describeTranscriptionFailure, composeVoiceTurnText, TRANSCRIPTION_DISABLED_REASON } from '@use-brian/core/media/preflight.js'
 import type { ChannelIntegrationStore, ChannelIntegrationConfig, DeliveryAudienceBinding, TelegramCredentials, SeenChat } from '../db/channel-integrations.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
@@ -144,7 +153,7 @@ type TelegramByoRouteOptions = {
   /** Servable background-lane model, resolved at boot; forwarded to the
    * channel pipeline so its background calls work without a Google key. */
   backgroundModel?: string
-  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
+  decisionRuntime?: import('@use-brian/core/decisions/hydra.js').DecisionExecutionPort
   provider: LLMProvider
   configuredProviders?: import('@use-brian/shared/model-registry').ProviderAvailability
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
@@ -173,7 +182,7 @@ type TelegramByoRouteOptions = {
     linkCodeStore: LinkCodeStore
   }
   channelUserStore?: ChannelUserStore
-  workerManager?: import('@use-brian/core').WorkerManager
+  workerManager?: import('@use-brian/core/workers/worker.js').WorkerManager
   connectorStore?: ConnectorStore
   mcpSettingsStore?: McpSettingsStore
   assistantConnectorStore?: AssistantConnectorStore
@@ -187,28 +196,28 @@ type TelegramByoRouteOptions = {
   knowledgeCaptureRuleStore?: import('../knowledge/capture-rules.js').KnowledgeCaptureRuleStore
   gdriveFilesStore?: GDriveFilesStore
   /** Workspace files store (Q3 §10). Optional. */
-  workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
+  workspaceFilesStore?: import('@use-brian/core/workspace-files/types.js').WorkspaceFilesStore
   /** Files orchestration API. Enables outbound documents (`sendFile`). */
-  filesApi?: import('@use-brian/core').FilesApi
+  filesApi?: import('@use-brian/core/workspace-files/api.js').FilesApi
   /** Transient upload cache (`file_cache`). When present, inbound photos are
    *  cached before block-building so the `<attached_file id>` tag gives the
    *  model a promotable reference (`saveFileToBrain` on request). See
    *  docs/architecture/engine/file-handling.md → "Save-on-request". */
-  fileStore?: import('@use-brian/core').FileStore
+  fileStore?: import('@use-brian/core/files/types.js').FileStore
   /** Promotes an over-threshold text paste to a durable artifact
    *  (large-content-artifacts §Phase 3.2). Absent ⇒ pastes pass through. */
   artifactPromoter?: import('../files/artifact-promote.js').ArtifactPromoter | null
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
-  workflowStore?: import('@use-brian/core').WorkflowStore
+  workflowStore?: import('@use-brian/core/workflow/types.js').WorkflowStore
   workspaceSkillStore?: import('../db/skill-store.js').WorkspaceSkillStore
   workspaceSkillEnablementStore?: import('../db/workspace-skill-enablement-store.js').WorkspaceSkillEnablementStore
   workspaceSkillFilesStore?: import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore
   deferredConfirmationStore?: DeferredConfirmationStore
-  episodicStore?: import('@use-brian/core').EpisodicStore
-  sessionStateStore?: import('@use-brian/core').SessionStateStore
-  crmEmailDraftStore?: import('@use-brian/core').CrmEmailDraftStore
-  capabilityStore: import('@use-brian/core').CapabilityStore
+  episodicStore?: import('@use-brian/core/memory/episodic-types.js').EpisodicStore
+  sessionStateStore?: import('@use-brian/core/memory/session-state-types.js').SessionStateStore
+  crmEmailDraftStore?: import('@use-brian/core/crm/email-drafts.js').CrmEmailDraftStore
+  capabilityStore: import('@use-brian/core/authorization/types.js').CapabilityStore
   /**
    * Voice-message transcription config. Mirrors the official Telegram route —
    * see docs/architecture/media/transcription.md.
@@ -1648,7 +1657,7 @@ type ProcessMessageParams = {
   integrationStore: ChannelIntegrationStore
   /** Servable background-lane model, threaded from the route options. */
   backgroundModel?: string
-  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
+  decisionRuntime?: import('@use-brian/core/decisions/hydra.js').DecisionExecutionPort
   adapter: ReturnType<typeof createTelegramAdapter>
   incoming: IncomingMessage
   assistant: { id: string; name: string; ownerUserId: string; defaultModelAlias: string; workspaceId: string | null; systemPrompt: string | null; compartments?: string[] | null; defaultCompartments?: string[]; defaultWorkspaceGroupId?: string | null; defaultProjectId?: string | null; teamScopeMode?: 'legacy' | 'all' | 'assigned'; projectScopeMode?: 'all' | 'assigned'; clearance: 'public' | 'internal' | 'confidential'; kind: 'primary' | 'standard' | 'app' }
@@ -1676,7 +1685,7 @@ type ProcessMessageParams = {
   checkCreditBudget?: import('./route-helpers.js').CreditBudgetGate
   linkedAccountStore?: LinkedAccountStore
   channelUserStore?: ChannelUserStore
-  workerManager?: import('@use-brian/core').WorkerManager
+  workerManager?: import('@use-brian/core/workers/worker.js').WorkerManager
   connectorStore?: ConnectorStore
   mcpSettingsStore?: McpSettingsStore
   assistantConnectorStore?: AssistantConnectorStore
@@ -1690,25 +1699,25 @@ type ProcessMessageParams = {
   knowledgeCaptureRuleStore?: import('../knowledge/capture-rules.js').KnowledgeCaptureRuleStore
   gdriveFilesStore?: GDriveFilesStore
   /** Workspace files store (Q3 §10). Optional. */
-  workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
+  workspaceFilesStore?: import('@use-brian/core/workspace-files/types.js').WorkspaceFilesStore
   /** Files orchestration API. Enables outbound documents (`sendFile`). */
-  filesApi?: import('@use-brian/core').FilesApi
+  filesApi?: import('@use-brian/core/workspace-files/api.js').FilesApi
   /** Transient upload cache (`file_cache`) — inbound photos cached for
    *  save-on-request promotion. See file-handling.md → "Save-on-request". */
-  fileStore?: import('@use-brian/core').FileStore
+  fileStore?: import('@use-brian/core/files/types.js').FileStore
   /** Promotes an over-threshold text paste to a durable artifact
    *  (large-content-artifacts §Phase 3.2). Absent ⇒ pastes pass through. */
   artifactPromoter?: import('../files/artifact-promote.js').ArtifactPromoter | null
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
-  workflowStore?: import('@use-brian/core').WorkflowStore
+  workflowStore?: import('@use-brian/core/workflow/types.js').WorkflowStore
   workspaceSkillStore?: import('../db/skill-store.js').WorkspaceSkillStore
   workspaceSkillEnablementStore?: import('../db/workspace-skill-enablement-store.js').WorkspaceSkillEnablementStore
   workspaceSkillFilesStore?: import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore
-  episodicStore?: import('@use-brian/core').EpisodicStore
-  sessionStateStore?: import('@use-brian/core').SessionStateStore
-  crmEmailDraftStore?: import('@use-brian/core').CrmEmailDraftStore
-  capabilityStore: import('@use-brian/core').CapabilityStore
+  episodicStore?: import('@use-brian/core/memory/episodic-types.js').EpisodicStore
+  sessionStateStore?: import('@use-brian/core/memory/session-state-types.js').SessionStateStore
+  crmEmailDraftStore?: import('@use-brian/core/crm/email-drafts.js').CrmEmailDraftStore
+  capabilityStore: import('@use-brian/core/authorization/types.js').CapabilityStore
   voiceTranscription?: {
     enabled: boolean
     apiKey: string

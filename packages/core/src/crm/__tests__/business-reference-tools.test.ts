@@ -1,10 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { createCrmBusinessReferenceTools } from '../business-reference-tools.js'
 import {
   AssignCrmBusinessReferenceCommandSchema,
-  CrmOperationsCommandSchema,
   CrmReferenceDefinitionInputSchema,
-  assertCrmOperationsAuthority,
-  createCrmBusinessReferenceTools,
   crmReferenceDefinitionIssues,
   crmReferencePartitionKey,
   explainCrmReferenceFormat,
@@ -12,11 +11,14 @@ import {
   normalizeCrmBusinessReference,
   presentCrmBusinessReference,
   resolveCrmBusinessDate,
+  type CrmReferenceReadPort,
+} from '../business-references.js'
+import {
+  CrmOperationsCommandSchema,
+  assertCrmOperationsAuthority,
   type CrmOperationsContext,
   type CrmOperationsServicePort,
-  type CrmReferenceReadPort,
-  type ToolContext,
-} from '../../index.js'
+} from '../operations-types.js'
 
 const WORKSPACE_ID = '00000000-0000-4000-8000-000000000001'
 const USER_ID = '00000000-0000-4000-8000-000000000002'

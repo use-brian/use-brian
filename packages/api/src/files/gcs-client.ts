@@ -24,10 +24,18 @@
  * interface lets tests substitute an in-memory fake (see
  * `packages/api/src/files/__tests__/files-api.test.ts`). Never hit a
  * real bucket from tests.
+ *
+ * The SDK loads on first use (`loadGoogleCloudStorage`), never at module
+ * evaluation: the storage-key helpers here are imported on the chat path, and
+ * an ordinary turn must not load `@google-cloud/storage` (M4 step 5,
+ * docs/plans/oss-chat-m4-runtime-separation-plan.md). `writeStream` stays
+ * synchronous by returning a `deferredWritable` whose `final` waits for the
+ * real upload stream to finish, so a pipeline still resolves only after GCS
+ * has the object.
  */
 
-import { Storage, type Bucket } from '@google-cloud/storage'
-import { Readable, Transform, type Writable } from 'node:stream'
+import type { Bucket, Storage } from '@google-cloud/storage'
+import { finished, Readable, Transform, Writable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 
 export type GcsObjectMetadata = {
@@ -136,15 +144,66 @@ export type GcsClientOptions = {
   credentials?: GcsServiceAccountCredentials
 }
 
+type GoogleCloudStorageModule = typeof import('@google-cloud/storage')
+let storageModule: Promise<GoogleCloudStorageModule> | null = null
+
+/**
+ * Load `@google-cloud/storage` once, at first use. A failed load is not
+ * cached (the next call retries) and surfaces as an actionable error naming
+ * the package, never as a missing object.
+ */
+export function loadGoogleCloudStorage(): Promise<GoogleCloudStorageModule> {
+  storageModule ??= import('@google-cloud/storage').catch((error: unknown) => {
+    storageModule = null
+    throw new Error(`gcs: the "@google-cloud/storage" package could not be loaded (${error instanceof Error ? error.message : String(error)}); install it in the deploying package or select another storage backend`, { cause: error })
+  })
+  return storageModule
+}
+
+/**
+ * A synchronous `Writable` over a destination that opens asynchronously.
+ * Writes wait for the destination and forward with its backpressure; `final`
+ * ends the destination and completes only when it has finished (for GCS,
+ * when the upload is committed); a destination error or open failure
+ * destroys this stream with that error.
+ */
+export function deferredWritable(open: () => Promise<Writable>): Writable {
+  let target: Promise<Writable> | null = null
+  const ready = (): Promise<Writable> => (target ??= open().then((destination) => {
+    destination.once('error', (error) => out.destroy(error))
+    return destination
+  }))
+  const out: Writable = new Writable({
+    write(chunk, encoding, callback) {
+      ready().then((destination) => { destination.write(chunk, encoding, (error) => callback(error ?? null)) }, callback)
+    },
+    final(callback) {
+      ready().then((destination) => {
+        finished(destination, { readable: false }, (error) => callback(error ?? null))
+        destination.end()
+      }, callback)
+    },
+    destroy(error, callback) {
+      if (target) target.then((destination) => { if (!destination.destroyed) destination.destroy(error ?? undefined) }, () => {})
+      callback(error)
+    },
+  })
+  return out
+}
+
 export function createGcsFilesClient({ bucket: bucketName, projectId, credentials }: GcsClientOptions): GcsFilesClient {
-  const opts: ConstructorParameters<typeof Storage>[0] = {}
+  const opts: NonNullable<ConstructorParameters<typeof Storage>[0]> = {}
   if (projectId) opts.projectId = projectId
   if (credentials) opts.credentials = credentials as unknown as NonNullable<typeof opts.credentials>
-  const storage = new Storage(Object.keys(opts).length > 0 ? opts : undefined)
-  const bucket: Bucket = storage.bucket(bucketName)
+  let bucketPromise: Promise<Bucket> | null = null
+  // Built at first use; a failed load or construction is not cached.
+  const bucketHandle = (): Promise<Bucket> => (bucketPromise ??= loadGoogleCloudStorage()
+    .then(({ Storage: StorageClient }) => new StorageClient(Object.keys(opts).length > 0 ? opts : undefined).bucket(bucketName))
+    .catch((error: unknown) => { bucketPromise = null; throw error }))
 
   return {
     async writeBlob(key, bytes, metadata) {
+      const bucket = await bucketHandle()
       await bucket.file(key).save(bytes, {
         contentType: metadata.mime,
         metadata: {
@@ -165,6 +224,7 @@ export function createGcsFilesClient({ bucket: bucketName, projectId, credential
         throw new Error(`gcs: cannot append — blob not found at ${key}`)
       }
       const combined = Buffer.concat([existing.bytes, bytes])
+      const bucket = await bucketHandle()
       await bucket.file(key).save(combined, {
         contentType: existing.mime,
         metadata: {
@@ -180,6 +240,7 @@ export function createGcsFilesClient({ bucket: bucketName, projectId, credential
     },
 
     async readBlob(key) {
+      const bucket = await bucketHandle()
       try {
         const file = bucket.file(key)
         const [contents] = await file.download()
@@ -205,6 +266,7 @@ export function createGcsFilesClient({ bucket: bucketName, projectId, credential
     },
 
     async statBlob(key) {
+      const bucket = await bucketHandle()
       try {
         const [meta] = await bucket.file(key).getMetadata()
         const custom = (meta.metadata ?? {}) as Record<string, string | undefined>
@@ -227,6 +289,7 @@ export function createGcsFilesClient({ bucket: bucketName, projectId, credential
     },
 
     async deleteBlob(key) {
+      const bucket = await bucketHandle()
       try {
         await bucket.file(key).delete()
       } catch (err: unknown) {
@@ -238,6 +301,7 @@ export function createGcsFilesClient({ bucket: bucketName, projectId, credential
     },
 
     async signedReadUrl(key, ttlSec = 3600) {
+      const bucket = await bucketHandle()
       const [url] = await bucket.file(key).getSignedUrl({
         version: 'v4',
         action: 'read',
@@ -247,6 +311,7 @@ export function createGcsFilesClient({ bucket: bucketName, projectId, credential
     },
 
     async signedWriteUrl(key, opts) {
+      const bucket = await bucketHandle()
       const [url] = await bucket.file(key).getSignedUrl({
         version: 'v4',
         action: 'write',
@@ -257,7 +322,7 @@ export function createGcsFilesClient({ bucket: bucketName, projectId, credential
     },
 
     writeStream(key, opts) {
-      return bucket.file(key).createWriteStream({
+      return deferredWritable(async () => (await bucketHandle()).file(key).createWriteStream({
         resumable: true,
         contentType: opts.mime,
         metadata: {
@@ -271,7 +336,7 @@ export function createGcsFilesClient({ bucket: bucketName, projectId, credential
             mime: opts.mime,
           },
         },
-      })
+      }))
     },
   }
 }

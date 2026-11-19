@@ -24,7 +24,10 @@
  */
 
 import { query } from './client.js'
-import { bindScopeSources, DerivedScopeError, type MemoryRecallSink, type ScopeSource, type SessionContextAuthority } from '@use-brian/core'
+import type { MemoryRecallSink } from '@use-brian/core/memory/recall-buffer.js'
+import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
+import { DerivedScopeError, type ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { bindScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { getApplicationExecutionBinding } from '../application-platform/execution-context.js'
 import { readRetainedQueryFrame } from './session-context-revisions.js'
 import { validateCallerScopeEvidence } from '../context-scope/caller-evidence.js'

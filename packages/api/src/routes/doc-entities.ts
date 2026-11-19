@@ -21,7 +21,7 @@
 import { Router, type Request, type Response } from 'express'
 import { z } from 'zod'
 import { ApplicationPlatformError } from '@use-brian/shared'
-import type { DocEntityStore, CellValue, PropertyDef } from '@use-brian/core'
+import type { EntityStore as DocEntityStore, CellValue, PropertyDef } from '@use-brian/core/entities/doc-types.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 
 export type DocEntitiesRouteOptions = {

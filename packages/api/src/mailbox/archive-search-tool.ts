@@ -20,7 +20,8 @@
  */
 
 import { z } from 'zod'
-import { buildTool, inferExactExternalEmail, type Tool } from '@use-brian/core'
+import { inferExactExternalEmail } from '@use-brian/core/tools/base/mailbox.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { searchEmailArchive } from '../db/email-archive-store.js'
 
 export type MailboxArchiveDeps = {

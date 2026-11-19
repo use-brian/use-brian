@@ -1,6 +1,7 @@
 /** Explicit policy and receipt retirement in the caller's transaction. [COMP:crm/operations-privacy] */
 import type { PoolClient } from 'pg'
-import { CrmOperationsError, canonicalCrmRequest, type CrmOperationsCommand, type CrmOperationsContext, type CrmRetentionPolicy } from '@use-brian/core'
+import { CrmOperationsError, canonicalCrmRequest, type CrmOperationsCommand, type CrmOperationsContext } from '@use-brian/core/crm/operations-types.js'
+import type { CrmRetentionPolicy } from '@use-brian/core/crm/retention-types.js'
 import { query } from '../db/client.js'
 
 type Policy = { retention?: CrmRetentionPolicy | null; intakeReplay: { retentionSeconds: number } | null; addressSuppression?: { retentionSeconds: number } | null

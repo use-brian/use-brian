@@ -35,8 +35,8 @@ vi.mock('../../channel-room/room.js', () => ({
   isWorkspaceAdmin: vi.fn(async (userId: string) => userId === 'owner'),
   postPassiveChannelMessage: vi.fn(async () => {}),
 }))
-vi.mock('@use-brian/core', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@use-brian/core')>()),
+vi.mock('@use-brian/core/files/parsers.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@use-brian/core/files/parsers.js')>()),
   parseFileContent: vi.fn(async () => ({ text: '' })),
 }))
 vi.mock('@use-brian/shared', async (importOriginal) => ({

@@ -184,7 +184,7 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
       // token). A re-sync or a status change moves `renderable`, so the open
       // frame revalidates behind its paint instead of showing a stale
       // "needs consent" or a dead entry URL until its token timer fires.
-      return [`home-apps:${workspaceId}`, `home-app-session:${workspaceId}:`, `association-module:${workspaceId}`];
+      return [`home-apps:${workspaceId}`, `home-app-session:${workspaceId}:`];
     case GOAL_REFRESH_EVENT:
       // The `goal` primitive: the goals board (`goals:<wid>:<viewer>:<status>`),
       // the Triage panel (`triage:<wid>:<viewer>`) and every goal detail

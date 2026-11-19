@@ -17,7 +17,7 @@ import {
   normalizeSkillResourcePath,
   sha256,
   skillResourceKindFromPath,
-} from '@use-brian/core'
+} from '@use-brian/core/skills/bundle.js'
 import {
   IMPORT_MAX_SUPPORT_FILES,
   IMPORT_MAX_SUPPORT_FILE_BYTES,

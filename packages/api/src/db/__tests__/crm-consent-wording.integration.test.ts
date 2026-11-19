@@ -2,12 +2,10 @@ import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import pg from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
-import { CrmOperationsCommandSchema, crmOperationsSha256, type CrmOperationsContext } from '@use-brian/core'
+import { CrmOperationsCommandSchema, crmOperationsSha256, type CrmOperationsContext } from '@use-brian/core/crm/operations-types.js'
 import { createDbCrmOperationsStore } from '../crm-operations-store.js'
 import { createCrmOperationsService } from '../../crm-operations/service.js'
 import { createDbCrmIntakeReadStore } from '../crm-intake-store.js'
-import { createAssociationStore } from '../association-store.js'
-import { ConsentInputSchema } from '../../association/domain.js'
 import { exportCrmOperationsPrivacy } from '../../crm-operations/privacy.js'
 import { WORKSPACE_FLUSH_TABLES } from '../workspace-flush.js'
 
@@ -109,18 +107,6 @@ describe('[COMP:crm/operations-store] Actual immutable localized consent wording
       await expect(service.execute(f.context,CrmOperationsCommandSchema.parse({ ...request, idempotencyKey: 'bad',fields: { ...request.fields,language: 'xx' } }))).rejects.toMatchObject({ code: 'invalid_input' })
       expect((await pool.query('SELECT count(*)::int AS count FROM entities WHERE workspace_id=$1',[f.workspaceId])).rows[0]).toEqual(before)
     }
-  })
-
-  it('preserves catalogued legacy versions and keeps uncatalogued historical claims explicitly unlinked', async () => {
-    const f = await fixture(), legacy = createAssociationStore(pool)
-    await service.execute(f.context,save({ purposeId: f.purpose.id,wordingVersion: '2',wording: 'Current text' }))
-    const actor = { credentialKind: 'user' as const,credentialId: f.userId,actingUserId: f.userId }
-    const old = await legacy.appendConsent(f.workspaceId,ConsentInputSchema.parse({ contactId: f.contactId,purpose: 'updates',wordingVersion: '1',action: 'granted',source: 'fixture',locale: 'ja' }),actor)
-    expect(old.record).toMatchObject({ wordingVersionId: f.purpose.wordingVersionId,wording: '同意します',wordingHash: crmOperationsSha256('同意します'),wordingLocale: 'ja' })
-    const input = ConsentInputSchema.parse({ contactId: f.contactId,purpose: 'legacy',wordingVersion: 'old',action: 'granted',source: 'fixture' })
-    expect((await legacy.appendConsent(f.workspaceId,input,actor)).record).toMatchObject({ wording: null,wordingHash: null,wordingVersionId: null,wordingLocale: null })
-    await expect(legacy.appendConsent(f.workspaceId,{ ...input,locale: 'ja' },actor)).rejects.toMatchObject({ code: 'conflict' })
-    await expect(legacy.appendConsent(f.workspaceId,{ ...input,purpose: 'updates',wordingVersion: 'missing' },actor)).rejects.toMatchObject({ code: 'conflict' })
   })
 
   it('applies real app-role isolation and workspace/purpose-safe version foreign keys', async () => {

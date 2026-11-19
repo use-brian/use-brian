@@ -1,11 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import {
-  createCrmOperationsTools, createCrmCredentialTools, createExecutionContext, executionToolContext,
-  type CrmOperationsContext,
-  type CrmOperationsReadPort,
-  type CrmOperationsServicePort,
-  type ToolContext,
-} from '../../index.js'
+import { createExecutionContext, executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { createCrmOperationsTools, createCrmCredentialTools, type CrmOperationsReadPort } from '../operations-tools.js'
+import type { CrmOperationsContext, CrmOperationsServicePort } from '../operations-types.js'
 
 const WORKSPACE_ID = '00000000-0000-4000-8000-000000000001'
 const USER_ID = '00000000-0000-4000-8000-000000000002'

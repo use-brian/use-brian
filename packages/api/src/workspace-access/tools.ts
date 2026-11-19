@@ -3,7 +3,7 @@ import {workspaceAccessExplanationQuerySchema} from './commands.js'
 import {prepareOrganizationCommand,applyOrganizationCommandIntent} from './organization-command-review.js'
 import { z } from 'zod'
 import { SCOPE_REVIEW_KINDS } from './scope-review-registry.js'
-import { buildTool, type ToolContext, type Tool } from '@use-brian/core'
+import { buildTool, type ToolContext, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { getOrganizationChart, OrganizationError } from '../db/org-chart-store.js'
 import { departmentAccessRequestSchema, departmentCommandIntentSchema, organizationCommandIntentSchema } from './commands.js'
 

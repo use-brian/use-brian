@@ -1,4 +1,4 @@
-import type { ExternalCredentialLease, ExternalCredentialPool } from '../../providers/credential-pool.js'
+import type { ExternalCredentialLease, ExternalCredentialPool } from '@use-brian/agent-runtime/providers/credential-pool.js'
 
 export async function resolveToolCredential(
   pool: ExternalCredentialPool | undefined,

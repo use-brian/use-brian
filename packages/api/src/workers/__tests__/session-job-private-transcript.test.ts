@@ -1,8 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import {
-  boundScopeSources, ContextScopeAccumulator, createExecutionContext,
-  type ExecutionContext, type SessionContextAuthority, type ScopeSource,
-} from '@use-brian/core'
+  createExecutionContext,
+  type ExecutionContext,
+} from '@use-brian/agent-runtime/security/execution-context.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { createAuthorityLease } from '../../context-scope/authority-lease.js'
 import {
   bindPrivateTranscriptCredential, inheritPrivateTranscriptCredential, readPrivateTranscript,

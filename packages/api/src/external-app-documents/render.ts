@@ -2,7 +2,9 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { DocumentSnapshotSchema, SpreadsheetSnapshotSchema, type DocumentSnapshot } from '@use-brian/office-model'
-import { exportOfficeDocument, exportOfficeSpreadsheet, convertToPdfWithLibreOffice } from '@use-brian/core'
+import { convertToPdfWithLibreOffice } from '@use-brian/core/files/libreoffice.js'
+import { exportOfficeDocument } from '@use-brian/core/office/docx/index.js'
+import { exportOfficeSpreadsheet } from '@use-brian/core/office/xlsx/index.js'
 
 export const sha256 = (bytes: Uint8Array | string) => createHash('sha256').update(bytes).digest('hex')
 export function canonical(value: unknown): string {

@@ -41,6 +41,10 @@ import {
 
 export type OAuthRoutesOptions = {
   workspaceProfile?: WorkspaceMcpProfile
+  /** Optional selection hint; the normal eligible role set controls consent. */
+  preferredWorkspaceId?: (userId: string) => Promise<string | null>
+  /** Hosted standard Brain profile may grant only memory access for a workspace. */
+  memoryOnly?: (workspaceId: string) => Promise<boolean>
   assistantId?: string
   clientStore: OAuthClientStore
   authorizationStore: OAuthAuthorizationStore
@@ -296,11 +300,20 @@ export function oauthRoutes(opts: OAuthRoutesOptions): Router {
        ORDER BY w.created_at ASC, w.id ASC`,
       [userId, opts.assistantId ?? null],
     )
+    const preferred = await opts.preferredWorkspaceId?.(userId).catch(() => null)
+    const preferredIsEligible = preferred && eligible.rows.some(workspace => workspace.id === preferred)
+    const workspaces = preferredIsEligible
+      ? [...eligible.rows.filter(workspace => workspace.id === preferred), ...eligible.rows.filter(workspace => workspace.id !== preferred)]
+      : eligible.rows
+    const memoryOnly = opts.memoryOnly
+    const reviewedWorkspaces = memoryOnly ? await Promise.all(workspaces.map(async workspace =>
+      await memoryOnly(workspace.id) ? { ...workspace, memoryOnly: true } : workspace,
+    )) : workspaces
     res.json({
       clientName: client.clientName,
       clientUri: client.clientUri,
       scope: consentReq.scope,
-      workspaces: eligible.rows,
+      workspaces: reviewedWorkspaces,
       workspaceAccessAvailable: !!opts.workspaceProfile,
       ...(opts.assistantId ? { assistantId: opts.assistantId, workspaceAccessRequired: true } : {}),
     })
@@ -358,6 +371,9 @@ export function oauthRoutes(opts: OAuthRoutesOptions): Router {
         if ('error' in issued) { res.status(403).json({ error: issued.error }); return }
         res.json({ redirectUrl: buildSuccessRedirect(consentReq.redirectUri, issued.codePlaintext, consentReq.state) })
         return
+      }
+      if (parsed.data.workspaceAccess && await opts.memoryOnly?.(parsed.data.workspaceId)) {
+        res.status(403).json({ error: 'workspace_memory_only' }); return
       }
       if (opts.assistantId && parsed.data.workspaceAccess !== true || parsed.data.workspaceAccess && !opts.workspaceProfile) {
         res.status(400).json({ error: 'workspace_consent_required' }); return

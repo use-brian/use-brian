@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { LLMProvider, StreamChunk } from '@use-brian/core'
+import type { LLMProvider, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
 import { createRecordingAutoTitleWorker, datedRecordingTitle, generateRecordingTopic, recordingTitleExcerpt } from '../auto-title.js'
 import type { RecordingAutoTitleSnapshot } from '../../db/recording-auto-titles.js'
 

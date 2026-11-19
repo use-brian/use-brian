@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { readFileSync } from 'node:fs'
 
 const searchRecording = vi.fn()
 const readRecordingRange = vi.fn()
@@ -26,6 +25,7 @@ import {
   mergeRecordingParticipants,
   recordingSpeakerKey,
 } from '../recording-chat-tools.js'
+import { bootCompositionSource } from '../../boot/__tests__/composition-source.js'
 
 /**
  * The recording surface for chat. Component tag:
@@ -343,10 +343,7 @@ describe('[COMP:recordings/recording-chat-tools] assignRecordingSpeakers', () =>
  * the registration — which is the whole regression worth catching.
  */
 describe('[COMP:recordings/recording-chat-tools] registration in the base tool map', () => {
-  const boot = readFileSync(
-    new URL('../../boot.ts', import.meta.url),
-    'utf8',
-  )
+  const boot = bootCompositionSource()
 
   it('registers searchRecording, listRecordings, and assignRecordingSpeakers', () => {
     expect(boot).toMatch(/tools\.set\(\s*'searchRecording'/)

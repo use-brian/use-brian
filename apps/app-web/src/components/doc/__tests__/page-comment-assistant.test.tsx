@@ -39,8 +39,10 @@ beforeEach(() => {
       calls.push(body);
       mocks.rows.push({ id: `human-${calls.length}`, role: "user", content: body.message, timestamp: "2026-01-01T00:00:00Z", senderUserId: "u1", senderName: "Writer" },
         { id: `reply-${calls.length}`, role: "assistant", content: "Answer", timestamp: "2026-01-01T00:00:00Z", senderUserId: null, senderName: null, senderAssistantId: body.assistantId });
-      return { ok: true, body: new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('event: text_delta\ndata: {"text":"Answer"}\n\n')); controller.close(); } }) };
+      return { ok: true, body: new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('event: text_delta\ndata: {"text":"Answer"}\n\nevent: done\ndata: {}\n\n')); controller.close(); } }) };
     }
+    // The conversation controller reads turn status when a direct stream ends.
+    if (/\/api\/sessions\/[^/]+$/.test(url)) return Response.json({ status: "idle", turnId: null });
     return { ok: false, json: async () => ({}) };
   });
   vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });

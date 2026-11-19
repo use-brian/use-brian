@@ -1,9 +1,9 @@
 /** PostgreSQL persistence for native campaigns. [COMP:campaigns/store] */
 import { createHash, randomUUID } from 'node:crypto'
 import type { PoolClient } from 'pg'
-import type { CampaignCommandReceipt, CampaignContext } from '@use-brian/core'
+import type { CampaignCommandReceipt, CampaignContext } from '@use-brian/core/campaigns/types.js'
 import type { CampaignUtm, CampaignChannel } from '@use-brian/shared/campaigns'
-import { CampaignError } from '@use-brian/core'
+import { CampaignError } from '@use-brian/core/campaigns/types.js'
 import { getPool } from './client.js'
 
 export type CampaignQueryable = Pick<PoolClient, 'query'>

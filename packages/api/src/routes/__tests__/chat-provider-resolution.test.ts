@@ -1,7 +1,8 @@
+import { resolveWorkspaceTurnLlm } from '../../turn/prepare.js'
 import { describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import ts from 'typescript'
-import { ChatTurnRefusal, chatTurnErrorEvent, customModelMediaRefusal, resolveWorkspaceTurnLlm, routineCalendarReadDeclineReason } from '../chat.js'
+import { ChatTurnRefusal, chatTurnErrorEvent, customModelMediaRefusal, routineCalendarReadDeclineReason } from '../chat.js'
 import type { DecisionRouteConfig, DecisionRuntimeAttempt } from '../../decision-runtime.js'
 import { CUSTOM_MODEL_IMAGE_REJECTION } from '../_channel-error-text.js'
 import { AuthorityChangedError } from '../../context-scope/authority-lease.js'
@@ -130,51 +131,65 @@ describe('[COMP:api/chat-route] post-SSE turn refusals', () => {
 
 
 describe('[COMP:api/chat-route] detached failure outcome', () => {
-  // Exercise the actual catch publisher payload without starting unrelated
-  // provider work or duplicating its outcome logic in the fixture.
+  // Execute the actual catch settlement/publisher branch, not its isolated
+  // payload with an invented end reason. Publication consumes owner's outcome.
   const source = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8')
   const tree = ts.createSourceFile('chat.ts', source, ts.ScriptTarget.Latest, true)
-  let payload: ts.Expression | undefined
+  let branch = ''
   function visit(node: ts.Node) {
-    if (ts.isCallExpression(node) && node.expression.getText(tree) === 'publishSessionEvent') {
-      const event = node.arguments[0]
-      if (event && ts.isObjectLiteralExpression(event) && event.properties.some(property =>
-        ts.isPropertyAssignment(property) && property.name.getText(tree) === 'sessionId'
-        && property.initializer.getText(tree) === 'sessionIdForError')) {
-        const property = event.properties.find(property => ts.isPropertyAssignment(property)
-          && property.name.getText(tree) === 'payload') as ts.PropertyAssignment
-        payload = property.initializer
-      }
-    }
+    if (ts.isIfStatement(node) && node.expression.getText(tree).replace(/\s/g, '') === 'sessionIdForError&&userIdForError'
+      && node.thenStatement.getText(tree).includes('await turnOwner?.finish')) branch = node.getText(tree)
     ts.forEachChild(node, visit)
   }
   visit(tree)
-  if (!payload) throw new Error('Missing chat catch completion publisher')
-  const evaluate = new Function('userIdForError', 'postReplyNotice', 'recoveryDelivered',
-    ts.transpileModule(`return (${payload.getText(tree)});`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText)
+  if (!branch) throw new Error('Missing chat catch settlement publisher')
+  const evaluate = async (notice: unknown, recovered: boolean, released = true, stoppedByUser = false) => {
+    const events: unknown[] = []
+    const turnOwner = { released: false, turnId: 'a'.repeat(64), completionReason: 'completed', finish: vi.fn(async (reason: string) => {
+      turnOwner.completionReason = reason; turnOwner.released = released; return released
+    }) }
+    const scope = { sessionIdForError: 'session', userIdForError: 'actor', postReplyNotice: notice, recoveryDelivered: recovered, stoppedByUser,
+      turnOwner, err: new Error('private exception detail'), publishSessionEvent: (event: unknown) => events.push(event) }
+    await new Function(...Object.keys(scope), ts.transpileModule(`return (async () => { let turnCompletionPublished=false; ${branch} })()`,
+      { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText)(...Object.values(scope))
+    return { events, turnOwner }
+  }
 
-  it('publishes only a failed outcome, never exception details or a success', () => {
-    expect(evaluate('actor', null, false)).toEqual({ senderUserId: 'actor', reason: 'failed' })
+  it('publishes only a confirmed failed outcome, never exception details or a success', async () => {
+    const actual = await evaluate(null, false)
+    expect(actual.turnOwner.finish).toHaveBeenCalledExactlyOnceWith('failed')
+    expect(actual.events).toEqual([{ kind: 'turn_completed', sessionId: 'session', payload: { senderUserId: 'actor', turnId: 'a'.repeat(64), reason: 'failed' } }])
   })
 
   it.each([[null, true], [{ code: 'post_reply_authority_changed' }, false], [{ code: 'post_reply_authority_changed' }, true]])(
-    'keeps delivered recovery and completed-reply notices as ordinary completion', (notice, recovered) => {
-      expect(evaluate('actor', notice, recovered)).toEqual({ senderUserId: 'actor' })
+    'keeps delivered recovery and completed-reply notices as ordinary completion', async (notice, recovered) => {
+      const actual = await evaluate(notice, recovered)
+      expect(actual.turnOwner.finish).toHaveBeenCalledExactlyOnceWith('completed')
+      expect(actual.events).toEqual([{ kind: 'turn_completed', sessionId: 'session', payload: { senderUserId: 'actor', turnId: 'a'.repeat(64) } }])
     },
   )
+  it('settles a confirmed Stop as stopped_by_user, never as a failure (M5Q-1)', async () => {
+    const actual = await evaluate(null, false, true, true)
+    expect(actual.turnOwner.finish).toHaveBeenCalledExactlyOnceWith('stopped_by_user')
+    expect(actual.events).toEqual([{ kind: 'turn_completed', sessionId: 'session', payload: { senderUserId: 'actor', turnId: 'a'.repeat(64), reason: 'stopped_by_user' } }])
+  })
+  it('withholds lifecycle completion when exact-owner release is not confirmed', async () => {
+    expect((await evaluate(null, false, false)).events).toEqual([])
+  })
 })
 
 
 describe('[COMP:api/chat-route] routine read model-route eligibility', () => {
-  const tool = { name: 'googleCalendarListEvents' } as import('@use-brian/core').Tool
+  const tool = { name: 'googleCalendarListEvents' } as import('@use-brian/agent-runtime/tools/types.js').Tool
   const tools = new Map([[tool.name, tool]])
   const eligible = {
     nativeOutput: true, nativeTranscript: true, decisionRuntime: true,
     research: false, coordinator: false, site: false, document: false,
-    modelRoute: null, calendarTools: tools, preparedTools: tools,
+    modelRoute: null, calendarTools: tools,
+    adoptsTool: (name: string, candidate: import('@use-brian/agent-runtime/tools/types.js').Tool) => tools.get(name) === candidate,
   }
   it('retains a resolved managed registry route rather than treating its runtime object as custom', async () => {
-    const provider = { name: 'managed-fixture' } as import('@use-brian/core').LLMProvider
+    const provider = { name: 'managed-fixture' } as import('@use-brian/agent-runtime/providers/types.js').LLMProvider
     const runtime = { provider, selector: 'gemini-3.6-flash-standard', profileId: null,
       modelTier: 'standard', providerKeySource: 'platform', routeKind: 'managed', inputTokenLimit: 1_048_576, maxTokens: 8192 } as import('../../custom-llm-runtime.js').ResolvedWorkspaceCustomLlm
     const resolved = await resolveWorkspaceTurnLlm({ workspaceId: 'fictional-workspace', requestedTier: 'standard', platformProvider: provider,
@@ -195,7 +210,9 @@ describe('[COMP:api/chat-route] routine read model-route eligibility', () => {
   })
   it('requires exact bound tool identity independently of advisory schema selection', () => {
     expect(routineCalendarReadDeclineReason({ ...eligible, calendarTools: new Map() })).toBe('calendar_tools')
-    expect(routineCalendarReadDeclineReason({ ...eligible, preparedTools: new Map([[tool.name, { ...tool }]]) })).toBe('tool_identity')
+    // The owner's identity query, not a supplied adopted Map, decides identity.
+    expect(routineCalendarReadDeclineReason({ ...eligible, adoptsTool: () => false })).toBe('tool_identity')
+    expect(routineCalendarReadDeclineReason({ ...eligible, calendarTools: new Map([[tool.name, { ...tool }]]) })).toBe('tool_identity')
   })
 })
 
@@ -204,8 +221,13 @@ describe('[COMP:api/chat-route] routine read model-route eligibility', () => {
 describe('[COMP:api/chat-route] routine completion admission', () => {
   async function fixture(mode: 'llm_only' | 'fallback' | 'primary', refuseAt?: number, customHook = false, extra: { large?: boolean; patch?: (config: DecisionRouteConfig) => DecisionRouteConfig; adapter?: 'unknown' | 'overridden' | 'primitive' } = {}) {
     const { createDecisionRuntime, createDecisionAttemptUsageRecorder } = await import('../../decision-runtime.js')
-    const { createGeminiProvider, createGoogleCalendarTools, ContextScopeAccumulator, registerDecisionMetadataSink, DecisionAdapterRegistry, createTypeSafeDecisionProvider, TYPESAFE_JEV_CAPABILITIES } = await import('@use-brian/core')
-    const { planRoutineCalendarRead } = await import('../../../../core/dist/engine/routine-read.js')
+    const { createGeminiProvider } = await import('@use-brian/agent-runtime/providers/gemini.js')
+    const { createGoogleCalendarTools } = await import('@use-brian/core/tools/base/google-calendar.js')
+    const { ContextScopeAccumulator } = await import('@use-brian/agent-runtime/security/context-scope.js')
+    const { registerDecisionMetadataSink } = await import('@use-brian/core/decisions/authority-ownership.js')
+    const { DecisionAdapterRegistry } = await import('@use-brian/core/decisions/registry.js')
+    const { createTypeSafeDecisionProvider, TYPESAFE_JEV_CAPABILITIES } = await import('@use-brian/core/decisions/adapters/typesafe.js')
+    const { planRoutineCalendarRead } = await import('@use-brian/core/engine/routine-read.js')
     const full = vi.fn(async () => {
       if (full.mock.calls.length === refuseAt) throw Object.assign(new Error('Fictional source withdrawn'), { reason: 'authority_changed', retrySafe: false })
     })
@@ -256,7 +278,7 @@ describe('[COMP:api/chat-route] routine completion admission', () => {
       systemPrompt, messages, tools, calendarTools: tools,
       assertInputAuthority: full, now: Date.parse('2031-06-02T00:00:00Z'),
       context: { userId: 'fictional-user', assistantId: 'fictional-assistant', sessionId: 'fictional-session', appId: 'fixture', channelType: 'web', channelId: 'fixture',
-        abortSignal: controller.signal, authority, executionContext: execution as never, scopeAccumulator: new ContextScopeAccumulator(), assertModelInputAuthority: full },
+        abortSignal: controller.signal, authority, executionContext: execution as never, scopeAccumulator: new ContextScopeAccumulator(), admitModelInput: full },
     })
     return { run, full, fetch, calendarRead, sent, events, outcomes, systemPrompt, messages, metered, provider, lease, controller }
   }
@@ -291,7 +313,7 @@ describe('[COMP:api/chat-route] routine completion admission', () => {
   })
 
   it('pins explicit override dispatch and key attribution across a pending source proof', async () => {
-    const { createGeminiProvider } = await import('@use-brian/core')
+    const { createGeminiProvider } = await import('@use-brian/agent-runtime/providers/gemini.js')
     const provider = createGeminiProvider({ kind: 'ai-studio', endpoint: () => 'https://fictional.example/override', headers: async () => ({}) })
     const selected = { provider, modelId: 'gemini-2.5-flash' }
     const f = await fixture('llm_only', undefined, false, {

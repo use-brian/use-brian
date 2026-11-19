@@ -21,7 +21,7 @@ import {
   _resetTurnInboxes,
 } from '../turn-inbox.js'
 import { registerNotifyChannel } from '../db/notify-listener.js'
-import type { PendingTurnInput } from '@use-brian/core'
+import type { PendingTurnInput } from '@use-brian/agent-runtime/engine/turn-inbox.js'
 
 const input = (over: Partial<PendingTurnInput> & { text: string }): PendingTurnInput => ({
   id: over.id ?? 'i1',

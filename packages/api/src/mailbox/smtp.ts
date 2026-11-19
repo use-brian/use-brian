@@ -19,18 +19,28 @@
  */
 
 import { withCrmMailAdmission, type CrmMailContext, type CrmMailIntent } from '../crm-operations/delivery-policy.js'
-import { createTransport } from 'nodemailer'
-import MailComposer from 'nodemailer/lib/mail-composer/index.js'
 import { createRequire } from 'node:module'
+import { lazyImplementation } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
 import { renderEmailBody } from '@use-brian/channels'
 import type { MailboxAccountSettings } from './types.js'
 
+// The SMTP client, MIME composer and DKIM signer (nodemailer) load on the
+// first compose or send, not at boot (M4 step 5); a failed load is the honest
+// `ImplementationUnavailableError` before any message is built or sent.
+const loadCreateTransport = lazyImplementation('The SMTP client (nodemailer)',
+  () => import('nodemailer').then((m) => m.createTransport))
+const loadMailComposer = lazyImplementation('The email composer (nodemailer)',
+  () => import('nodemailer/lib/mail-composer/index.js').then((m) => m.default))
+
 type DkimSigner = { sign(input: Buffer): NodeJS.ReadableStream }
-const Dkim = createRequire(import.meta.url)('nodemailer/lib/dkim') as new (options: {
+type DkimConstructor = new (options: {
   domainName: string; keySelector: string; privateKey: string; headerFieldNames: string
 }) => DkimSigner
+const loadDkim = lazyImplementation('The DKIM signer (nodemailer)',
+  async () => createRequire(import.meta.url)('nodemailer/lib/dkim') as DkimConstructor)
 
 async function signCampaignMessage(raw: Buffer, dkim: NonNullable<Parameters<typeof composeMailboxMessage>[0]['dkim']>): Promise<Buffer> {
+  const Dkim = await loadDkim()
   const stream = new Dkim({
     ...dkim,
     headerFieldNames: 'from:to:subject:date:message-id:list-unsubscribe:list-unsubscribe-post',
@@ -85,6 +95,7 @@ export async function composeMailboxMessage(params: {
   const listUnsubscribeUrl = params.listUnsubscribeUrl
     ? sanitizeHeaderValue(params.listUnsubscribeUrl)
     : undefined
+  const MailComposer = await loadMailComposer()
   const composer = new MailComposer({
     from: params.from,
     to,
@@ -147,6 +158,7 @@ export async function sendComposedMessage(
   }
   const account = { ...settings }
   return withCrmMailAdmission(context, 'imap', { ...intent, to: frozen.envelope.to }, async () => {
+    const createTransport = await loadCreateTransport()
     const transport = createTransport({
       host: account.smtpHost,
       port: account.smtpPort,
@@ -165,6 +177,7 @@ export async function sendComposedMessage(
 
 /** Connect-time SMTP verification (login + EHLO), used by the connect route. */
 export async function verifySmtpLogin(settings: MailboxAccountSettings): Promise<void> {
+  const createTransport = await loadCreateTransport()
   const transport = createTransport({
     host: settings.smtpHost,
     port: settings.smtpPort,

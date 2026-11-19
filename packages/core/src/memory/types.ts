@@ -13,11 +13,11 @@ import type { MemoryLearning, MemoryLearningProposal, MemoryObservation } from '
  */
 
 import type { SessionContextAuthority } from './session-state-types.js'
-import type { AccessContext } from '../security/access-context.js'
-import type { ScopeSource } from '../security/derived-scope.js'
-import type { Sensitivity } from '../security/sensitivity.js'
-import type { ScopeEvidence } from '../security/context-scope.js'
-import type { DerivedWriteEvidence } from '../security/derived-scope.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import type { ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { DerivedWriteEvidence } from '@use-brian/agent-runtime/security/derived-scope.js'
 
 export type MemoryRecord = {
   learning?: MemoryLearning | null
@@ -385,6 +385,12 @@ export type MemoryStore = {
   /** Get team identity memories (shared facts visible to all members). */
   getWorkspaceIdentity(ctx: AccessContext): Promise<MemoryRecord[]>
 
+  /** Read the identity and tagged prompt lists from one viewer snapshot. */
+  getWorkspacePromptMemories?(ctx: AccessContext, tag: string): Promise<{
+    identity: MemoryRecord[]
+    tagged: MemoryRecord[]
+  }>
+
   /**
    * Get team memory index (summary-only) for system prompt injection.
    *
@@ -394,6 +400,30 @@ export type MemoryStore = {
   getWorkspaceIndex(ctx: AccessContext, validOnly?: boolean, authority?:SessionContextAuthority): Promise<Array<{
     id: string; summary: string; tags: string[]; sensitivity: Sensitivity; compartments?: string[]; projectIds?: string[]
   }>>
+
+  /** Compatible prompt indexes retain independent fields and evidence. */
+  getPairedPromptIndexes?(ctx: AccessContext, limit: number, authority: SessionContextAuthority): Promise<{
+    ranked: PromiseSettledResult<Awaited<ReturnType<MemoryStore['getIndexRanked']>>>
+    workspace: PromiseSettledResult<Awaited<ReturnType<MemoryStore['getWorkspaceIndex']>>>
+  }>
+
+  /** Native automatic Memory sections from one admitted turn acquisition.
+   * A recognized unsupported shape returns null before exposing payload. */
+  getPromptMemoryContext?(ctx: AccessContext, limit: number, authority: SessionContextAuthority): Promise<{
+    indexes: Awaited<ReturnType<NonNullable<MemoryStore['getPairedPromptIndexes']>>>
+    team: Awaited<ReturnType<NonNullable<MemoryStore['getWorkspacePromptMemories']>>>
+    /** Undefined when the app policy contexts differ. Null means the selector found no ID. */
+    selfEntityId?: string | null
+  } | null>
+
+  /** The separate owner-role prompt sections for an active native private Chat. */
+  getPromptAuxiliaryContext?(ctx: AccessContext, appId: string, authority: SessionContextAuthority): Promise<{
+    soul: {content: string | null; evidence: ScopeEvidence}
+    workspace: {name: string; purpose: string} | null
+    preferred: {channelType: string; channelId: string} | null
+    evolution: string | null
+    identity?: MemoryRecord[]
+  } | null>
 
   /**
    * System-level read for the team consolidation worker. Bypasses

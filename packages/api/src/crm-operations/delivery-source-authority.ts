@@ -1,6 +1,16 @@
 /** Saved recipient/evidence floors for durable receipts. [COMP:crm/delivery-receipts] */
-import { actorAuditIdentity, CrmOperationsError, deriveResourceScope, DerivedScopeError,
-  type AssociationActor, type CrmOperationsContext, type ResourceScope, type ScopeSource } from '@use-brian/core'
+import type { AssociationActor } from '@use-brian/core/association/domain.js'
+import {
+  actorAuditIdentity,
+  CrmOperationsError,
+  type CrmOperationsContext
+} from '@use-brian/core/crm/operations-types.js'
+import {
+  deriveResourceScope,
+  DerivedScopeError,
+  type ResourceScope,
+  type ScopeSource
+} from '@use-brian/agent-runtime/security/derived-scope.js'
 import type { PoolClient } from 'pg'
 import { assertAssociationOrderAuthority, assertAssociationSourceAuthority, loadAssociationOrderScope } from '../association/source-scope.js'
 import { withNativeDeliverySourceAuthority } from './delivery-native-authority.js'

@@ -15,13 +15,13 @@ export function DesktopBrowserState({ workspaceId, profileId, onConnectionChange
 }) {
   const state = useSyncExternalStore(browser.subscribe, browser.snapshot, browser.serverSnapshot);
   const c = useT().computer.connectBrowser;
-  const matches = state.workspaceId === workspaceId && (!profileId || state.profileId === profileId);
+  const matches = state.workspaceId === workspaceId && (state.phase === "disabled" || !profileId || state.profileId === profileId);
   const phase = matches ? state.phase : "idle";
   useEffect(() => {
     if (profileId) onConnectionChange?.(profileId, phase === "connected");
   }, [profileId, phase, onConnectionChange]);
   if (!profileId && (!matches || !state.profileId)) return null;
-  const label = phase === "connected" ? c.desktop.connected : phase === "connecting" ? c.oneClickConnecting :
+  const label = phase === "disabled" ? c.desktop.disabled : phase === "connected" ? c.desktop.connected : phase === "connecting" ? c.oneClickConnecting :
     phase === "paused" ? c.desktop.paused : phase === "failed" ? c.desktop.failed : c.desktop.automatic;
   return <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-1 text-xs" aria-live="polite">
     <span>{c.desktop.title}: {label}</span>

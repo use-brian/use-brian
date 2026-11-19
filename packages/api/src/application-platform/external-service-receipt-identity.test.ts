@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { ExecutionContext } from '@use-brian/core'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { bindExternalServiceReceiptIdentity, externalServiceReceiptIdentity } from './external-service-receipt-identity.js'
 
 const identity = { serviceId: 'service-one', workspaceId: 'workspace-one', userId: 'user-one' }

@@ -1,5 +1,5 @@
 /** Shared terminal-send governance for cloud and local skill execution. */
-import type { ToolContext } from '../tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import type { BrowserProfile } from './profiles.js'
 import type {
   BlockApprovalStatus,

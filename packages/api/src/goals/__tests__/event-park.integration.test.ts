@@ -4,8 +4,8 @@ import { randomUUID } from 'node:crypto'
 import {
   createWorkflowEventDispatcher,
   type DispatchEvent,
-  type EventSubscription,
-} from '@use-brian/core'
+} from '@use-brian/core/workflow/event-trigger.js'
+import type { EventSubscription } from '@use-brian/core/workflow/types.js'
 import { createGoalDriver, type GoalDriverDeps, type GoalLoopState } from '../driver.js'
 import { createGoalWorkTools } from '../work-tools.js'
 

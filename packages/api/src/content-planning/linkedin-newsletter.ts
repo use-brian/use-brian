@@ -2,7 +2,7 @@
 import {randomUUID} from 'node:crypto'
 import {z} from 'zod'
 import type pg from 'pg'
-import {canonicalFeedValue,projectFeedLinkedIn} from '@use-brian/doc-model'
+import {canonicalFeedValue,projectFeedLinkedIn} from '@use-brian/doc-model/feed.js'
 import {withFeedTransaction,readFeedCopy,requireFeedComposition,assertFeedFiles,FeedCollaborationError,type FeedActor} from '../db/feed-collaboration-store.js'
 import {readFeedConfirmation,isFeedConfirmationRevoked} from './confirmation.js'
 import {appendDecisionEvent} from '../db/decision-event-store.js'

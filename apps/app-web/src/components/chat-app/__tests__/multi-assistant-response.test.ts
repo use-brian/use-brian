@@ -254,7 +254,7 @@ describe("[COMP:app-web/multi-assistant-response] room mention partition", () =>
     // send() asks for the group whenever there are several targets, in any
     // Chat conversation, and the multi-voice policy enables the parsing.
     const surface = readFileSync(new URL("../chat-surface.tsx", import.meta.url), "utf8");
-    expect(surface).toContain("...(targets.length > 1\n          ? {");
+    expect(surface).toContain("...(targetIds.length > 1 ? { responseGroup: targetIds } : {})");
     expect(surface).toContain("panePolicy.multiVoice && (!override?.truncateFromMessageId || override.resolveMentions)");
   });
 

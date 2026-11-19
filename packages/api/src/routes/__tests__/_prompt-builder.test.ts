@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest'
 import {
-  attachUserVisibleContext,
   buildFullSystemPrompt,
   buildSplitSystemPrompt,
   formatPrivateRuntimeContext,
@@ -8,8 +7,9 @@ import {
   maybeAppendFollowupChips,
   speakerIdentityFromUser,
 } from '../_prompt-builder.js'
-import type { Message } from '@use-brian/core'
-import { systemContextParts } from '@use-brian/core'
+import { attachUserVisibleContext } from '../../turn/user-visible-context.js'
+import type { Message } from '@use-brian/agent-runtime/providers/types.js'
+import { systemContextParts } from '@use-brian/agent-runtime/providers/system-context.js'
 
 const baseArgs = {
   basePrompt: 'LAYER1_BASE',

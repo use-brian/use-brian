@@ -4,7 +4,8 @@
 import { createHash } from 'node:crypto'
 import type { Pool, PoolClient } from 'pg'
 import { z } from 'zod'
-import { CrmOperationsError, type CrmIntegrationGrant, type CrmOperationsContext } from '@use-brian/core'
+import type { CrmIntegrationGrant } from '@use-brian/core/crm/integration-authority.js'
+import { CrmOperationsError, type CrmOperationsContext } from '@use-brian/core/crm/operations-types.js'
 import { importGrantSnapshot, requireImportCeiling, requireImportOperation } from '../crm-operations/import-authority.js'
 import { getPool } from './client.js'
 

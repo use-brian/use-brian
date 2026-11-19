@@ -20,7 +20,7 @@ export function parseShard(value) {
 }
 
 const nativeGroups = [
-  ['derived-store', 'kernel', 'strict-intake', 'ui', 'compatibility'],
+  ['derived-store', 'kernel', 'runtime-kernel', 'strict-intake', 'ui', 'compatibility'],
   ['access-store', 'entrypoints', 'ingest-application-replay'],
   ['workflow-authority', 'operation-stores', 'access-policy', 'review-lifecycle'],
   ['organization'],

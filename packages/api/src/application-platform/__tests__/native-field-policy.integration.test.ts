@@ -3,7 +3,7 @@ import { previewApplicationSchema,applyApplicationSchema } from '../schema-chang
 import { createHash,randomUUID,randomBytes } from 'node:crypto'
 import { writeFile } from 'node:fs/promises'
 import { afterAll,beforeAll,describe,expect,it } from 'vitest'
-import type { Pool, PoolClient } from 'pg'
+import { Client, type Pool, type PoolClient } from 'pg'
 import express from 'express'
 import request from 'supertest'
 import { z } from 'zod'
@@ -13,11 +13,28 @@ import { runWithAgentAccess } from '../../db/agent-access-context.js'
 import { createDbDocEntityStore } from '../../db/doc-entity-store.js'
 import { createMemory,getMemoryById,countMemories,getMemoryIndex,getMemoryStats,searchMemories } from '../../db/memories.js'
 import { readApplicationFieldAncestors } from '../field-evidence.js'
-import { defineNativeApplicationFieldPolicy,decideNativeApplicationFields,ContextScopeAccumulator,executionToolContext,NOOP_TURN_LEDGER,boundScopeSources,createDocEntityTools,
-  buildPayload,renderPage,type NativeApplicationFieldFacts,type ScopeSource,type ExecutionContext,type LLMProvider,type ApplicationModuleDefinition,type PropertyDef } from '@use-brian/core'
+import type { ApplicationModuleDefinition } from '@use-brian/core/application-platform/contracts.js'
+import {
+  defineNativeApplicationFieldPolicy,
+  decideNativeApplicationFields,
+  type NativeApplicationFieldFacts
+} from '@use-brian/core/application-platform/native-field-policy.js'
+import { createDocEntityTools } from '@use-brian/core/entities/doc-tools.js'
+import type { PropertyDef } from '@use-brian/core/entities/doc-types.js'
+import { buildPayload } from '@use-brian/core/views/bindings.js'
+import { renderPage } from '@use-brian/core/views/page-render.js'
+import { NOOP_TURN_LEDGER } from '@use-brian/agent-runtime/engine/turn-ledger.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import {
+  executionToolContext,
+  type ExecutionContext
+} from '@use-brian/agent-runtime/security/execution-context.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { findAssistantById,findOrCreateUser } from '../../db/users.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
-import { runAssistantTurn } from '../../turn/kernel.js'
+import { runPersistedFixtureTurn as runAssistantTurn } from '../../turn/__tests__/fixtures/owned-turn.js'
 import type { ApplicationAccessGrant,ApplicationGrantMaximum,ApplicationRecordProjection,ApplicationQuery } from '@use-brian/shared'
 import { createDbOAuthClientStore } from '../../db/oauth-client-store.js'
 import { hashSecret } from '../../db/api-key-store.js'
@@ -33,7 +50,7 @@ import { createTokens } from '../../auth/jwt.js'
 import { requireAuth } from '../../auth/middleware.js'
 import { buildNativeApplicationSchemaMcpTools } from '../mcp.js'
 import { createCanonicalGenericApplicationModule } from '../generic-adapter.js'
-import { assertSourceModelInputAuthority } from '../model-source-authority.js'
+import { admitModelInput } from '../../context-scope/admission.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -134,6 +151,19 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
           'fields',policy.fields,'source',source);
       END $$`)
     await owner.query('REVOKE ALL ON FUNCTION application_native_deletion_fixture_reader(uuid,jsonb,text,text) FROM PUBLIC')
+    // Bootstrap provisions fixtures; registered ports have the actual ordinary
+    // migration owner's identity, just like deployed native policy readers.
+    await owner.query(`DO $fixture$ DECLARE target name;item record;BEGIN
+      SELECT r.rolname INTO target FROM pg_class c JOIN pg_roles r ON r.oid=c.relowner WHERE c.oid='entity_instances'::regclass;
+      FOR item IN SELECT oid::regclass AS identity,relkind FROM pg_class WHERE relnamespace='public'::regnamespace
+        AND relname LIKE 'application_native_policy_fixture_%' AND relkind IN('r','S') LOOP
+        EXECUTE format('ALTER %s %s OWNER TO %I',CASE WHEN item.relkind='S' THEN 'SEQUENCE' ELSE 'TABLE' END,item.identity,target);
+      END LOOP;
+      FOR item IN SELECT oid::regprocedure AS identity FROM pg_proc WHERE pronamespace='public'::regnamespace
+        AND (proname LIKE 'application_native_policy_fixture_%' OR proname='application_native_deletion_fixture_reader') LOOP
+        EXECUTE format('ALTER FUNCTION %s OWNER TO %I',item.identity,target);
+      END LOOP;
+    END $fixture$`)
     await owner.query(`INSERT INTO application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader,catalog_reader,configuration_required,configuration_reader)
       VALUES('deletion_operations','1',ARRAY['finance','approver'],'application_native_deletion_fixture_reader(uuid,jsonb,text,text)'::regprocedure,
         'application_native_policy_fixture_catalog_reader(uuid,jsonb,text)'::regprocedure,true,'application_native_policy_fixture_configuration(uuid)'::regprocedure)`)
@@ -151,6 +181,10 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
           'fields',policy.fields,'source',public.read_scope_source(w,'entity_instance',r.id));
       END $$`)
     await owner.query('REVOKE ALL ON FUNCTION application_native_writer_fixture_reader(uuid,jsonb,text,text) FROM PUBLIC')
+    await owner.query(`DO $fixture$ DECLARE target name;BEGIN
+      SELECT r.rolname INTO target FROM pg_class c JOIN pg_roles r ON r.oid=c.relowner WHERE c.oid='entity_instances'::regclass;
+      EXECUTE format('ALTER FUNCTION application_native_writer_fixture_reader(uuid,jsonb,text,text) OWNER TO %I',target);
+    END $fixture$`)
     await owner.query(`INSERT INTO application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader,catalog_reader)
       VALUES('writer_operations','1',ARRAY['finance','approver'],'application_native_writer_fixture_reader(uuid,jsonb,text,text)'::regprocedure,
         'application_native_policy_fixture_catalog_reader(uuid,jsonb,text)'::regprocedure)`)
@@ -280,6 +314,56 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
       VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id`,[workspace,module,user,role,ownerId,starts,expires])).rows[0].id as string
   }
   async function clearRoles() { await owner.query('DELETE FROM application_native_role_assignments WHERE workspace_id=ANY($1::uuid[]) AND user_id<>$2',[[workspaceId,otherWorkspaceId],fixtureWriterId]) }
+  it('evaluates distinct field rules once per mask and reads grants again after async changes',async()=>{
+    const port=`field_rule_owner_${randomUUID().replaceAll('-','')}`
+    const marker = await assertLocalFixture(), bootstrapUrl = new URL(process.env.DATABASE_URL!)
+    if (marker.bootstrapRole) bootstrapUrl.username = marker.bootstrapRole
+    const bootstrap = new Client({ connectionString: bootstrapUrl.href }); await bootstrap.connect()
+    const ownerRole = (await owner.query('SELECT current_user AS role')).rows[0].role as string
+    const quotedOwner = `"${ownerRole.replaceAll('"', '""')}"`
+    const alreadyAllowed = (await bootstrap.query("SELECT has_parameter_privilege($1,'track_functions','SET') AS allowed", [ownerRole])).rows[0].allowed
+    try {
+      if (!alreadyAllowed) await bootstrap.query(`GRANT SET ON PARAMETER track_functions TO ${quotedOwner}`)
+    await owner.query(`CREATE FUNCTION ${port}(w uuid,policy jsonb) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER
+      SET search_path=pg_catalog,public,pg_temp AS $fixture$
+      DECLARE before_calls bigint;after_calls bigint;mask jsonb;
+      BEGIN
+       PERFORM set_config('track_functions','all',true);
+       SELECT coalesce((SELECT calls FROM pg_stat_xact_user_functions WHERE funcid='application_native_field_rule_allows(jsonb,text[])'::regprocedure),0) INTO before_calls;
+       mask:=application_native_member_field_permissions(w,policy,nullif(current_setting('app.current_user_id',true),'')::uuid);
+       SELECT coalesce((SELECT calls FROM pg_stat_xact_user_functions WHERE funcid='application_native_field_rule_allows(jsonb,text[])'::regprocedure),0) INTO after_calls;
+       RETURN jsonb_build_object('mask',mask,'ruleCalls',after_calls-before_calls);
+      END $fixture$;
+      REVOKE ALL ON FUNCTION ${port}(uuid,jsonb) FROM PUBLIC;
+      GRANT EXECUTE ON FUNCTION ${port}(uuid,jsonb) TO app_user`)
+    try{
+      const rules:string[][][]=[[],[[]],[['finance']],[['approver']],[['finance','approver']],[['finance'],['approver']]]
+      const policyFields=Array.from({length:96},(_,i)=>({key:`f${String(i).padStart(3,'0')}`,read:rules[i%rules.length],write:rules[(i+2)%rules.length]}))
+      const policy={registered:true,held:false,roleKeys:['finance','approver'],metadata:{moduleKey:'operations',fields:policyFields}}
+      const evaluate=()=>asMember(memberId,async client=>(await client.query(`SELECT ${port}($1,$2) value`,[workspaceId,policy])).rows[0].value as {mask:{read:string[];write:string[]};ruleCalls:number})
+      const expected=(roles:string[])=>Object.fromEntries(['read','write'].map(action=>[action,policyFields.filter(field=>field[action as 'read'|'write'].every(clause=>clause.some(role=>roles.includes(role)))).map(field=>field.key)]))
+      for(const roles of [[],['finance'],['approver'],['finance','approver']]){
+        await clearRoles();for(const role of roles)await assign(role)
+        const result=await evaluate();expect(result.mask).toEqual(expected(roles));expect(result.ruleCalls).toBe(rules.length)
+      }
+      await clearRoles();const grant=await assign('finance')
+      expect((await evaluate()).mask).toEqual(expected(['finance']))
+      await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[grant])
+      expect((await evaluate()).mask).toEqual(expected([]))
+      await assign('finance')
+      expect((await evaluate()).mask).toEqual(expected(['finance']))
+      await clearRoles()
+      await assign('finance',memberId,'operations',workspaceId,'2999-01-01T00:00:00Z')
+      await assign('approver',memberId,'operations',workspaceId,'2020-01-01T00:00:00Z','2021-01-01T00:00:00Z')
+      expect((await evaluate()).mask).toEqual(expected([]))
+      expect(await asMember(memberId,async client=>(await client.query(`SELECT ${port}($1,$2) value`,[workspaceId,{...policy,held:true}])).rows[0].value))
+        .toEqual({mask:null,ruleCalls:0})
+    }finally{await owner.query(`DROP FUNCTION ${port}(uuid,jsonb)`);await clearRoles()}
+    } finally {
+      try { if (!alreadyAllowed) await bootstrap.query(`REVOKE SET ON PARAMETER track_functions FROM ${quotedOwner}`) }
+      finally { await bootstrap.end() }
+    }
+  })
   it('Q02 projects the actual legacy generic store getter before exposing native protected fields', async () => {
     await clearRoles()
     const fixture = await record(), legacy = createDbDocEntityStore({ actorUserId: memberId })
@@ -702,7 +786,7 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
       await assign('finance',ownerId);await assign('approver',ownerId)
       const list=await schemaMcp(value,'tools/list')
       expect(list.status).toBe(200);expect(schemaMcpReply(list).result.tools.map((tool: { name: string }) => tool.name))
-        .toEqual(['applicationSchemaPreview','applicationSchemaApply'])
+        .toEqual(['applicationSchemaApply','applicationSchemaPreview'])
       const preview=await schemaMcp(value,'tools/call',{ name: 'applicationSchemaPreview',arguments: { typeId: fixture.schema.id,expectedVersion: 1,properties: schemaWithCostMaximum(fixture) } })
       const previewResult=schemaMcpReply(preview).result
       expect(previewResult.isError).toBeUndefined()
@@ -1080,13 +1164,13 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     const protectedSource = boundScopeSources(predicate)[0],ordinarySource = boundScopeSources(ordinary)[0]
     const modelContext = { ...executionToolContext(await resolveApplicationExecutionContext(app.authentication),{ appId: 'query-domain-fixture' }),
       scopeAccumulator: new ContextScopeAccumulator({ sources: boundScopeSources(predicate) }) }
-    await expect(assertSourceModelInputAuthority(modelContext)).resolves.toBeUndefined()
+    await expect(admitModelInput(modelContext)).resolves.toBeUndefined()
     expect(await appFieldSnapshot(app,protectedSource)).toMatchObject({ held: false })
     await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[assignment])
     expect(await appFieldSnapshot(app,protectedSource)).toMatchObject({ held: true })
     expect(await appFieldSnapshot(app,ordinarySource)).toMatchObject({ held: false })
     expect(await fieldSnapshot(protectedSource,otherId)).toMatchObject({ held: false })
-    await expect(assertSourceModelInputAuthority(modelContext)).rejects.toMatchObject({ code: 'source_unavailable',retrySafe: false })
+    await expect(admitModelInput(modelContext)).rejects.toMatchObject({ code: 'source_unavailable',retrySafe: false })
   })
   it('admits an independently readable finite query point without requiring the unused original grant ceiling',async () => {
     await clearRoles();const fixture = await record(),app = await application(fixture,'external_user',undefined,['query'])
@@ -1678,7 +1762,7 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
         yield { type: 'message_end' as const,stopReason: 'end_turn' as const,usage: { inputTokens: 1,outputTokens: 1 } }
       })() }
     },stream: () => { throw new Error('Unexpected fixture provider fallback') } }
-    const run = (actor: ExecutionContext) => runAssistantTurn({ sessionId: actor.lifecycle.sessionId,policy: { admission: 'personal' },sink: { kind: 'return' },lease: { mode: 'none' },
+    const run = (actor: ExecutionContext) => runAssistantTurn({ sessionId: actor.lifecycle.sessionId,policy: { admission: 'personal' },sink: { kind: 'return' },
       abortController: new AbortController(),model: { provider,model: 'fixture-model',configuredProviders: undefined,customLlm: null },
       loop: { ledger: NOOP_TURN_LEDGER,context: { ...executionToolContext(actor,{ appId: 'query-domain-fixture' }),scopeAccumulator: accumulator },
         systemPrompt: 'Fictional empty-domain policy fixture',runtimeSystemContext: JSON.stringify(value),messages: [{ role: 'user',content: 'Report the fictional total.' }],tools: new Map(),maxTurns: 1 } })
@@ -1904,7 +1988,7 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
         yield { type: 'message_end' as const,stopReason: 'end_turn' as const,usage: { inputTokens: 1,outputTokens: 1 } }
       })() }
     },stream: () => { throw new Error('Unexpected fixture provider fallback') } }
-    const run = (actor: ExecutionContext) => runAssistantTurn({ sessionId: actor.lifecycle.sessionId,policy: { admission: 'personal' },sink: { kind: 'return' },lease: { mode: 'none' },
+    const run = (actor: ExecutionContext) => runAssistantTurn({ sessionId: actor.lifecycle.sessionId,policy: { admission: 'personal' },sink: { kind: 'return' },
       abortController: new AbortController(),model: { provider,model: 'fixture-model',configuredProviders: undefined,customLlm: null },
       loop: { ledger: NOOP_TURN_LEDGER,context: { ...executionToolContext(actor,{ appId: 'native-field-fixture' }),scopeAccumulator: accumulator },
         systemPrompt: 'Fictional field policy fixture',runtimeSystemContext: JSON.stringify(observed.values),
@@ -1927,17 +2011,24 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
       { type: fixture.type,id: fixture.row.id }) as ApplicationRecordProjection
     const accumulator = new ContextScopeAccumulator({ sources: boundScopeSources(projected) })
     const events: unknown[] = [];let requests = 0,revoke = true
+    let prefixDelivered:()=>void=()=>{}
+    const delivered=new Promise<void>(resolve=>{prefixDelivered=resolve})
     const provider: LLMProvider = { name: 'fixture',models: ['fixture-model'],stream: () => { throw new Error('Unexpected fixture fallback') },
       createSession: () => ({ send: () => (async function* () {
         requests++
         yield { type: 'message_start' as const,model: 'fixture-model' }
         yield { type: 'text_delta' as const,text: 'Fictional permitted prefix' }
-        if (revoke) await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[assignment])
+        // Provider read-ahead is independent of visible delivery. Exercise
+        // revocation after the real sink has received the admitted prefix.
+        if (revoke) {
+          await delivered
+          await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[assignment])
+        }
         yield { type: 'text_delta' as const,text: 'Fictional withheld continuation' }
         yield { type: 'message_end' as const,stopReason: 'end_turn' as const,usage: { inputTokens: 1,outputTokens: 1 } }
       })() }) }
     const run = (execution: ExecutionContext) => runAssistantTurn({ sessionId: execution.lifecycle.sessionId,policy: { admission: 'personal' },
-      sink: { kind: 'sse',onEvent: event => { events.push(event) } },lease: { mode: 'none' },abortController: new AbortController(),
+      sink: { kind: 'sse',onEvent: event => { events.push(event);if(event.type==='text_delta')prefixDelivered() } },abortController: new AbortController(),
       model: { provider,model: 'fixture-model',configuredProviders: undefined,customLlm: null },
       loop: { ledger: NOOP_TURN_LEDGER,context: { ...executionToolContext(execution,{ appId: 'field-output-fixture' }),scopeAccumulator: accumulator },
         systemPrompt: 'Fictional output fixture',runtimeSystemContext: JSON.stringify(projected.values),
@@ -2008,12 +2099,16 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
           FROM entity_instances WHERE id=$6`,[maximum,layer.principal,workspaceId,fixture.origin,fixture.type,row.id])).rows[0]
       }
       const rollbackState=async()=>{
-        const result:Record<string,unknown>={}
-        const tables=(await owner.query(`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public'
-          AND c.relkind IN('r','p') AND EXISTS(SELECT 1 FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attname='workspace_id' AND NOT a.attisdropped) ORDER BY c.relname`)).rows
-        for(const{relname:table}of tables){if(!/^[a-z_]+$/.test(table))throw new Error('Unexpected fixture table')
-          result[table]=(await owner.query(`SELECT to_jsonb(r) AS row FROM ${table} r WHERE workspace_id=$1 ORDER BY to_jsonb(r)::text`,[workspaceId])).rows}
-        return result
+        const client=await owner.connect()
+        try {
+          await client.query('BEGIN');await applyRLSGucs(client,ownerId)
+          const result:Record<string,unknown>={}
+          const tables=(await client.query(`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public'
+            AND c.relkind IN('r','p') AND EXISTS(SELECT 1 FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attname='workspace_id' AND NOT a.attisdropped) ORDER BY c.relname`)).rows
+          for(const{relname:table}of tables){if(!/^[a-z_]+$/.test(table))throw new Error('Unexpected fixture table')
+            result[table]=(await client.query(`SELECT to_jsonb(r) AS row FROM ${table} r WHERE workspace_id=$1 ORDER BY to_jsonb(r)::text`,[workspaceId])).rows}
+          return result
+        } finally {await client.query('ROLLBACK');client.release()}
       }
       const completeBefore=await rollbackState();trace.invalidCurrentBefore=completeBefore
       try{
@@ -2083,9 +2178,9 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     const source = boundScopeSources(projected)[0]
     expect((await owner.query('SELECT fields FROM application_field_resources WHERE id=$1',[source.resourceId])).rows[0].fields).toEqual(['cost','title'])
     const modelContext = { ...executionToolContext(execution,{ appId: 'field-policy-fixture' }),scopeAccumulator: new ContextScopeAccumulator({ sources: boundScopeSources(projected) }) }
-    await expect(assertSourceModelInputAuthority(modelContext)).resolves.toBeUndefined()
+    await expect(admitModelInput(modelContext)).resolves.toBeUndefined()
     await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1",[issuerRole])
-    await expect(assertSourceModelInputAuthority(modelContext)).rejects.toMatchObject({ retrySafe: false })
+    await expect(admitModelInput(modelContext)).rejects.toMatchObject({ retrySafe: false })
     // This human retains an independent native entitlement. It does not repair
     // the application's revoked issuer floor or its old model context.
     expect(await fieldSnapshot(source)).toMatchObject({ held: false })
@@ -2226,13 +2321,13 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
       const memory = await asMember(memberId,client => createMemory({ workspaceId,userId: null,assistantId,sensitivity: 'internal',createdByUserId: memberId,
         summary: 'Fictional Department domain result',derivation: { producer: 'native-domain-fixture',sources } },undefined,client))
       expect(await getMemoryById(actor.security.access,memory.id)).not.toBeNull()
-      await expect(assertSourceModelInputAuthority(context(actor))).resolves.toBeUndefined()
+      await expect(admitModelInput(context(actor))).resolves.toBeUndefined()
       await owner.query('DELETE FROM department_edges WHERE department_id=$1 AND user_id=$2',[departments[0],memberId])
       expect(await getMemoryById((await nativeExecution()).security.access,memory.id)).toBeNull()
-      await expect(assertSourceModelInputAuthority(context(actor))).rejects.toMatchObject({ retrySafe: false })
+      await expect(admitModelInput(context(actor))).rejects.toMatchObject({ retrySafe: false })
       const independent = await nativeExecution(otherId)
       expect(await getMemoryById(independent.security.access,memory.id)).not.toBeNull()
-      await expect(assertSourceModelInputAuthority(context(independent))).resolves.toBeUndefined()
+      await expect(admitModelInput(context(independent))).resolves.toBeUndefined()
     })
   })
   describe('[COMP:api/application-governance] current native role and owner reviews',() => {

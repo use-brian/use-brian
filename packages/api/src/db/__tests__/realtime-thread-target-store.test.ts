@@ -52,6 +52,32 @@ describe('[COMP:api/realtime-thread-target-store] PostgreSQL adapter', () => {
       expect.arrayContaining(['feishu', 'chat-7', 'message-9']),
     )
     expect(queryWithRLS.mock.calls[0]?.[1]).toContain('unnest($6::uuid[])')
+    expect(queryWithRLS.mock.calls[0]?.[1]).toContain('FROM workspace_members m WHERE m.workspace_id = $1 AND m.user_id = $10')
+    expect(queryWithRLS.mock.calls[0]?.[2]?.[9]).toBe(row.createdByUserId)
+  })
+
+  it('names a missing membership instead of blaming the assistant or task ids', async () => {
+    queryWithRLS
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [{ member: false }], rowCount: 1 })
+    const store = createRealtimeThreadTargetStore()
+    await expect(store.set('66666666-6666-6666-6666-666666666666', {
+      workspaceId: row.workspaceId, assistantId: row.assistantId, channelType: 'feishu',
+      conversationRef: 'chat-7', threadRef: 'message-9', taskIds: [], contextText: null,
+      expiresAt: row.expiresAt, createdByUserId: '66666666-6666-6666-6666-666666666666',
+    })).rejects.toThrow(/not a current member/)
+  })
+
+  it('lists and removes only for a current member of the workspace', async () => {
+    queryWithRLS.mockResolvedValue({ rows: [], rowCount: 0 })
+    const store = createRealtimeThreadTargetStore()
+    const actor = row.createdByUserId
+    expect(await store.list(actor, { workspaceId: row.workspaceId, assistantId: row.assistantId, includeExpired: false })).toEqual([])
+    expect(queryWithRLS.mock.calls[0]?.[1]).toContain('FROM workspace_members m WHERE m.workspace_id = $1 AND m.user_id = $3')
+    expect(queryWithRLS.mock.calls[0]?.[2]).toEqual([row.workspaceId, row.assistantId, actor])
+    expect(await store.remove(actor, { id: row.id, workspaceId: row.workspaceId, assistantId: row.assistantId })).toBe(false)
+    expect(queryWithRLS.mock.calls[1]?.[1]).toContain('FROM workspace_members m WHERE m.workspace_id = $2 AND m.user_id = $4')
+    expect(queryWithRLS.mock.calls[1]?.[2]).toEqual([row.id, row.workspaceId, row.assistantId, actor])
   })
 
   it('looks up only an unexpired exact tuple on the trusted inbound path', async () => {

@@ -1,5 +1,6 @@
 /** Office artifact/version/source/grant/audit persistence. [COMP:api/office-store] */
-import type { ScopeSource, WorkspaceCredentialDelegation } from '@use-brian/core'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import type { WorkspaceCredentialDelegation } from '@use-brian/agent-runtime/security/workspace-delegation.js'
 import { queryWithRLS, getAppPool, applyRLSGucs, rollbackAndRelease } from './client.js'
 import type { PoolClient } from 'pg'
 import { usesClassicModeAdmission } from '../workspace-access/admission-policy-read.js'

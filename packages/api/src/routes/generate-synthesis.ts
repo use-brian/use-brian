@@ -13,6 +13,7 @@ import { z } from 'zod'
 import { getWorkspacePlan } from '../db/workspace-store.js'
 import type { PageTemplateStore } from '../db/page-templates-store.js'
 import type { GenerateSynthesizeFn } from '../synthesis/generate-synthesizer.js'
+import type { MemoryAllowance } from '../brain-mcp/memory-allowance.js'
 import type { CreditBudgetGate } from './route-helpers.js'
 
 export type GenerateSynthesisCharge = {
@@ -36,6 +37,7 @@ export type GenerateSynthesisRouteDeps = {
   generateSynthesize?: GenerateSynthesizeFn
   resolvePrimaryAssistantForWorkspace: (workspaceId: string) => Promise<string | null>
   pageTemplateStore: Pick<PageTemplateStore, 'getById'>
+  contextOnly?: MemoryAllowance['contextOnly']
   checkCreditBudget?: CreditBudgetGate
   billing?: GenerateSynthesisBilling
 }
@@ -117,18 +119,17 @@ export function generateSynthesisRoutes(deps: GenerateSynthesisRouteDeps): Route
     const sectionCount = template.extraction.fields.length
     const credits = deps.billing?.quoteCredits(sectionCount) ?? 0
 
-    if (deps.checkCreditBudget) {
-      const plan = await getWorkspacePlan(workspaceId)
-      const gate = await deps.checkCreditBudget(workspaceId, plan)
-      if (gate.status === 'blocked') {
-        res.status(402).json({
-          error: 'credit_limit',
-          creditsUsed: gate.creditsUsed,
-          creditCap: gate.creditCap,
-          resetsAt: gate.resetsAt,
-        })
-        return
-      }
+    const gate = await deps.contextOnly?.(workspaceId)
+      ? { status: 'blocked', creditsUsed: 0, creditCap: 0, resetsAt: null }
+      : deps.checkCreditBudget && await deps.checkCreditBudget(workspaceId, await getWorkspacePlan(workspaceId))
+    if (gate?.status === 'blocked') {
+      res.status(402).json({
+        error: 'credit_limit',
+        creditsUsed: gate.creditsUsed,
+        creditCap: gate.creditCap,
+        resetsAt: gate.resetsAt,
+      })
+      return
     }
 
     const assistantId = await deps.resolvePrimaryAssistantForWorkspace(workspaceId)

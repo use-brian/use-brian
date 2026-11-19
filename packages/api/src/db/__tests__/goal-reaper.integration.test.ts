@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import pg from 'pg'
-import type { GoalRecord, GoalStore } from '@use-brian/core'
+import type { GoalRecord, GoalStore } from '@use-brian/core/goals/types.js'
+import { withTableTriggersSuspended } from '../../__tests__/fixtures/bootstrap-role.js'
 
 /**
  * Integration tests for the goal stall reaper's SQL sweeps and the
@@ -13,7 +14,11 @@ import type { GoalRecord, GoalStore } from '@use-brian/core'
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  // Inside the owned disposable fixture, use its ordinary-owner database (the
+  // reaper itself reads DATABASE_URL); otherwise the local development database.
+  const p = process.env.BRIAN_ASSURANCE_FIXTURE
+    ? new pg.Pool({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 2000 })
+    : new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {
@@ -98,14 +103,18 @@ async function insertGoal(
   )
   const id = r.rows[0].id
   if (opts.staleMinutes) {
-    // The BEFORE UPDATE trigger unconditionally bumps updated_at; disable
-    // triggers for THIS session only to backdate the row.
-    await client.query(`SET session_replication_role = replica`)
-    await client.query(`UPDATE goals SET updated_at = now() - make_interval(mins => $1) WHERE id = $2`, [
-      opts.staleMinutes,
-      id,
-    ])
-    await client.query(`SET session_replication_role = DEFAULT`)
+    // The BEFORE UPDATE trigger unconditionally bumps updated_at. The table
+    // owner suspends the goals triggers by name for this one transaction to
+    // backdate the row; no session-wide trigger bypass.
+    await client.query('BEGIN')
+    try {
+      await withTableTriggersSuspended(client, ['goals'], () =>
+        client.query(`UPDATE goals SET updated_at = now() - make_interval(mins => $1) WHERE id = $2`, [
+          opts.staleMinutes,
+          id,
+        ]))
+      await client.query('COMMIT')
+    } catch (error) { await client.query('ROLLBACK'); throw error }
   }
   return id
 }
@@ -277,6 +286,7 @@ describeIf('[COMP:goals/entity-count] discovery-until-N scenario (the fls flow, 
   let client: pg.PoolClient
   let userId: string
   let workspaceId: string
+  let assistantId: string
 
   beforeAll(async () => {
     process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
@@ -286,6 +296,11 @@ describeIf('[COMP:goals/entity-count] discovery-until-N scenario (the fls flow, 
     client = await pool!.connect()
     userId = await makeUser(client)
     workspaceId = await makeWorkspace(client, userId)
+    // A confirmed goal carries the creator's durable authoring envelope
+    // (goals.md, "Durable goal authoring authority"): a real member and the
+    // workspace assistant whose ceiling is pinned at creation.
+    await client.query(`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'owner') ON CONFLICT DO NOTHING`, [workspaceId, userId])
+    assistantId = await makeAssistant(client, workspaceId)
   })
   afterAll(() => client?.release())
 
@@ -302,6 +317,7 @@ describeIf('[COMP:goals/entity-count] discovery-until-N scenario (the fls flow, 
       means: { workflowId: '00000000-0000-0000-0000-00000000000f' },
       createdByUserId: userId,
       confirmed: true,
+      authoringAuthority: await (await import('../../context-scope/workflow-authority.js')).captureAuthoringAuthoritySystem({ workspaceId, userId, assistantId }),
     })
 
     // Each "workflow run" saves 5 prospect companies — the 5-at-a-time search.

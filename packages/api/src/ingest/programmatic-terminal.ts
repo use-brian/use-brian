@@ -7,10 +7,14 @@ import { createMemory } from '../db/memories.js'
 import { createEntity } from '../db/entities-store.js'
 import { createTask } from '../db/tasks.js'
 import { createTaskAdmissionPort } from '../db/task-admission-store.js'
-import { recordDerivedResource } from '../db/derived-scope-store.js'
 import { candidateEvidence, withProgrammaticCandidate } from './programmatic-candidate-authority.js'
 import { randomUUID } from 'node:crypto'
-import { processEpisode, freezeExtractionPlan, admitTask, type ScopeSource, type PipelineBApplicationCommand, type PipelineBDeps, type PipelineBEpisode, type PipelineBApplicationPort, type ExtractionApplicationRun } from '@use-brian/core'
+import type { ExtractionApplicationRun } from '@use-brian/core/ingest/application.js'
+import { freezeExtractionPlan } from '@use-brian/core/ingest/extraction-plan.js'
+import type { PipelineBApplicationCommand, PipelineBApplicationPort } from '@use-brian/core/ingest/pipeline-b-application.js'
+import { processEpisode, type PipelineBDeps, type PipelineBEpisode } from '@use-brian/core/ingest/pipeline-b.js'
+import { admitTask } from '@use-brian/core/tasks/admission.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'
 import { programmaticIntakeClient, programmaticIntakeClaims } from '../db/programmatic-intake-context.js'
 import { renderBatchWindow } from './programmatic-capture.js'
@@ -101,6 +105,9 @@ export function createProgrammaticEpisodeTerminal(options: Pick<PipelineBDeps,'p
    for(const c of plan.candidates){
     const payload=c.payload as PipelineBApplicationCommand
     if(c.terminalDisposition || !['memory','entity','task','episode_finalization'].includes(c.primitiveKind))throw new Error('capture_candidate_writer_required')
+    const taskCandidate=payload.command==='task' ? {runId,candidateId:c.candidateId,payloadHash:c.payloadHash} : undefined
+    if(taskCandidate) await client.query(`INSERT INTO episode_extraction_items(run_id,candidate_id,primitive_kind,payload_hash,dependency_ids,
+     disposition,attempt_count) VALUES($1,$2,'task',$3,$4,'pending',0)`,[runId,c.candidateId,c.payloadHash,c.dependencyIds])
     let targetId:string=id
     const common={workspaceId:source.workspace_id,userId:null,assistantId:source.assistant_id,createdByUserId:source.intake_binding.actor,
      createdByAssistantId:source.assistant_id,sourceEpisodeId:id,sensitivity:source.episode_sensitivity,compartments:source.compartments,projectIds:source.project_ids,
@@ -118,15 +125,23 @@ export function createProgrammaticEpisodeTerminal(options: Pick<PipelineBDeps,'p
      const verdict=await admitTask(taskPort,{workspaceId:source.workspace_id,title:payload.title,due:payload.dueIso?new Date(payload.dueIso):null,
       lane:'extracted',sourceKind:payload.sourceKind,sourceEpisodeId:id,createdByAssistantId:source.assistant_id,quality:payload.quality})
      if(verdict.outcome!=='allow')throw new Error('capture_task_not_admitted')
-     const row=await createTask(source.intake_binding.actor,{...common,title:payload.title,due:payload.dueIso?new Date(payload.dueIso):null,
+     // The bound actor is createTask's author argument and visibility carries the
+     // row scope, so the memory/entity attribution keys are not task creation keys.
+     const {userId:_userId,assistantId:_assistantId,createdByUserId:_createdByUserId,...taskCommon}=common
+     const row=await createTask(source.intake_binding.actor,{...taskCommon,title:payload.title,due:payload.dueIso?new Date(payload.dueIso):null,
       visibility:{userId:null,assistantId:source.assistant_id}},undefined,client)
-     const version=(await client.query<{version:string}>('SELECT scope_version::text AS version FROM tasks WHERE id=$1',[row.id])).rows[0].version
-     await recordDerivedResource(client,candidateEvidence(snapshot),{...snapshot,resourceKind:'task',resourceId:row.id,version},source.intake_binding.actor)
+     // createTask records the derived resource from the same evidence (as createMemory
+     // and createEntity do), so the terminal does not record it a second time.
      return row.id
-    })
+    },taskCandidate)
     else if(payload.command!=='episode_finalization')throw new Error('capture_candidate_writer_required')
     const receiptId=randomUUID()
-    await client.query(`INSERT INTO episode_extraction_items(run_id,candidate_id,primitive_kind,payload_hash,dependency_ids,
+    if(taskCandidate){
+     const completed=await client.query(`UPDATE episode_extraction_items SET disposition='committed',receipt_id=$3,attempt_count=1,applied_at=now()
+      WHERE run_id=$1 AND candidate_id=$2 AND target_record_id=$4 AND configured_txid=pg_current_xact_id()
+       AND configured_backend_pid=pg_backend_pid() AND disposition='pending'`,[runId,c.candidateId,receiptId,targetId])
+     if(completed.rowCount!==1)throw new Error('capture_candidate_target_changed')
+    } else await client.query(`INSERT INTO episode_extraction_items(run_id,candidate_id,primitive_kind,payload_hash,dependency_ids,
      disposition,target_record_id,receipt_id,attempt_count,applied_at) VALUES($1,$2,$3,$4,$5,'committed',$6,$7,1,now())`,
      [runId,c.candidateId,c.primitiveKind,c.payloadHash,c.dependencyIds,targetId,receiptId])
     items.push({candidateId:c.candidateId,primitiveKind:c.primitiveKind,payloadHash:c.payloadHash,dependencyIds:c.dependencyIds,

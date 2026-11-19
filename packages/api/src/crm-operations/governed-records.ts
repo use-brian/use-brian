@@ -10,23 +10,24 @@
  * [COMP:crm/governed-records]
  */
 
+import { crmDecimalAdd, crmDecimalCompare } from '@use-brian/core/crm/commercial-decimal.js'
 import {
   CrmChangeSetSchema,
   CrmReviewPolicySchema,
   DEFAULT_CRM_REVIEW_POLICIES,
-  crmDecimalAdd,
-  crmDecimalCompare,
-  crmOperationsSha256,
-  maxSensitivity,
-  unionScopeRequirements,
-  type AccessContext,
   type CrmChangeSet,
   type CrmGovernedCommand,
   type CrmGovernanceSubject,
-  type CrmOperationsContext,
   type CrmReviewPolicy,
-  type EntityRecord,
-} from '@use-brian/core'
+} from '@use-brian/core/crm/governed-records.js'
+import {
+  crmOperationsSha256,
+  type CrmOperationsContext,
+} from '@use-brian/core/crm/operations-types.js'
+import type { EntityRecord } from '@use-brian/core/entities/types.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import { unionScopeRequirements } from '@use-brian/agent-runtime/security/context-scope.js'
+import { maxSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type { PoolClient } from 'pg'
 import type { CrmOperationsTransaction } from '../db/crm-operations-store.js'
 import { createCompany, createDeal, readCrmMutationSource, readCrmReference, updateCompany, updateDeal } from '../db/crm.js'

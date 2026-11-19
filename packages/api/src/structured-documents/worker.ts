@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
-import type { FilesApi, FilesContext, WorkspaceFile } from '@use-brian/core'
+import type { FilesApi, FilesContext } from '@use-brian/core/workspace-files/api.js'
+import type { WorkspaceFile } from '@use-brian/core/workspace-files/types.js'
 import type { StructuredExtractionJob, StructuredExtractionStore, ExtractionPatch } from '../db/structured-document-extractions.js'
 import { StructuredOcrError, type StructuredOcrClient } from './client.js'
 import { ConnectorBindingSchema } from './connector.js'

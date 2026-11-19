@@ -1,4 +1,4 @@
-import { OfficeMaterialFactMissing } from '@use-brian/core'
+import { OfficeMaterialFactMissing } from '@use-brian/core/office/generation/contracts.js'
 import { officeTemplateLockedTokenNames, officeTemplateTokenDiagnostics, officeTemplateTokenTargets, type OfficeTemplateBundle, type OfficeRichTextRun } from '@use-brian/office-model'
 
 export function templateFieldGuidance(template: OfficeTemplateBundle): string {

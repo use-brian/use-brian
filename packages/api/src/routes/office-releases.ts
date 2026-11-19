@@ -7,7 +7,11 @@ import { prepareOfficeRelease, reviewOfficeRelease, type OfficeReleaseAcknowledg
 import type { OfficeArtifactRow } from '../db/office-artifacts.js'
 import type { ResolvedOfficeAccess } from '../office/access.js'
 import type { OfficeArtifactSnapshot } from '@use-brian/office-model'
-import { type DocumentPdfPort, type OfficeResourceResolver, type PdfWriterPort, type PresentationPdfPort, type SpreadsheetPdfRequest } from '@use-brian/core'
+import type { DocumentPdfPort } from '@use-brian/core/office/docx/pdf.js'
+import type { OfficeResourceResolver } from '@use-brian/core/office/package.js'
+import type { PdfWriterPort } from '@use-brian/core/office/pdf/writer.js'
+import type { PresentationPdfPort } from '@use-brian/core/office/pptx/pdf.js'
+import type { SpreadsheetPdfRequest } from '@use-brian/core/office/xlsx/pdf.js'
 import type { BrandClaim } from '@use-brian/shared'
 import type { OfficeOutputScope } from '../office/file-binding.js'
 

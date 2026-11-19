@@ -13,7 +13,7 @@ import { authenticateApplicationCredential,mintApplicationCredentialSecret } fro
 import { loadApplicationCredentialStateSystem } from '../auth-store.js'
 import { resolveApplicationExecutionContext } from '../execution-context.js'
 import { createCanonicalNativeApplicationModule } from '../native-adapters.js'
-import { boundScopeSources } from '@use-brian/core'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { updateSelfEntityAttributes } from '../../db/entities-store.js'
 import { queryLegacyCanonicalCrmSql } from '../../db/crm-reader.js'
 import { runApplicationTransaction } from '../execution-context.js'

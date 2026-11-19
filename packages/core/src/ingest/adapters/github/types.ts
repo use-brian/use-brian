@@ -12,7 +12,7 @@
  */
 
 import type { EpisodeEnvelope } from '../../types.js'
-import type { Sensitivity } from '../../../security/sensitivity.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 
 /**
  * Filter-time event type tokens — match the spec's default rule

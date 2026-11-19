@@ -47,6 +47,30 @@ describe('[COMP:api/session-display-history] private chat presentation projectio
   const pending=row(2,'assistant',[{type:'text',text:'Unfinished tool narration'},call('pending')])
   expect(projectPrivateChatRows([legacy,pending]).map(row=>row.content)).toEqual([[],[]])
  })
+ it('keeps a delivered question with its displayable payload (M5Q-13)',()=>{
+  const input={question:'Which colour should the check use?',options:['Blue','Green'],allowCustom:false,context:'Fictional context',actionId:'connector_authorization:fictional',version:2}
+  const asked=row(1,'assistant',[{type:'text',text:'Which colour should the check use?'},call('ask','askQuestion',input)])
+  const output=projectPrivateChatRows([asked,row(2,'user',[result('ask',false,'[Question for user]: Which colour should the check use?')])])
+  expect(output[0].content).toEqual([{type:'text',text:'Which colour should the check use?'},
+   {type:'tool_use',id:`${asked.id}:ask`,name:'askQuestion',input:{question:'Which colour should the check use?',options:['Blue','Green'],allowCustom:false,context:'Fictional context'}}])
+  expect(JSON.stringify(output)).not.toContain('connector_authorization')
+  expect(JSON.stringify(output)).not.toContain('PRIVATE_')
+ })
+ it('shows the question when the model text omitted it, and drops invalid options',()=>{
+  const asked=row(1,'assistant',[{type:'text',text:'One thing first.'},call('ask','askQuestion',{question:'Which region?',options:['EU','EU']})])
+  const output=projectPrivateChatRows([asked,row(2,'user',[result('ask')])])
+  expect(output[0].content.map(b=>b.type==='text'?b.text:b.input)).toEqual(['One thing first.','Which region?',{question:'Which region?'}])
+ })
+ it('keeps hiding narration around a failed, unpaired or mixed question call',()=>{
+  const failed=[row(1,'assistant',[{type:'text',text:'Hidden failed'},call('a','askQuestion',{question:'Q?'})]),row(2,'user',[result('a',true)])]
+  const unpaired=[row(1,'assistant',[{type:'text',text:'Hidden unpaired'},call('a','askQuestion',{question:'Q?'})])]
+  const mixed=[row(1,'assistant',[{type:'text',text:'Hidden mixed'},call('a','askQuestion',{question:'Q?'}),call('b','fictionalTool',{})]),row(2,'user',[result('a'),result('b')])]
+  for(const rows of [failed,unpaired,mixed]){
+   const output=JSON.stringify(projectPrivateChatRows(rows))
+   expect(output).not.toContain('Hidden')
+   expect(output).not.toContain('"question"')
+  }
+ })
  it('keeps Page links only for matched successful page-writing calls',()=>{
   const id=randomUUID(),content=JSON.stringify({pageId:id,private:'PRIVATE_PAGE_BODY'})
   const rows=[row(1,'assistant',[call('page','renderPage',{}),call('wrong','readSomething',{}),call('failed','renderPage',{})]),

@@ -1,7 +1,7 @@
-import { wrapProvider } from '../../providers/wrappers.js'
-import { createGeminiProvider } from '../../providers/gemini.js'
+import { wrapProvider } from '@use-brian/agent-runtime/providers/wrappers.js'
+import { createGeminiProvider } from '@use-brian/agent-runtime/providers/gemini.js'
 import { describe, it, expect, vi } from 'vitest'
-import { NOOP_TURN_LEDGER } from '../turn-ledger.js'
+import { NOOP_TURN_LEDGER } from '@use-brian/agent-runtime/engine/turn-ledger.js'
 import { z } from 'zod'
 import type {
   LLMProvider,
@@ -10,10 +10,10 @@ import type {
   SessionOptions,
   StreamChunk,
   Message,
-} from '../../providers/types.js'
-import { buildTool } from '../../tools/types.js'
+} from '@use-brian/agent-runtime/providers/types.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
 import type { WorkerManager } from '../../workers/worker.js'
-import { queryLoop, isConnectionDropError, isEndpointUnreachableError, streamErrorCode, streamErrorCodes, type QueryEvent } from '../query-loop.js'
+import { queryLoop, isConnectionDropError, isEndpointUnreachableError, streamErrorCode, streamErrorCodes, type QueryEvent } from '@use-brian/agent-runtime/engine/query-loop.js'
 
 // ── Scripted provider with per-turn behaviour ──────────────────
 //

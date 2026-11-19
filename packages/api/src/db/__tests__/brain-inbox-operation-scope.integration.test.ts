@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 
 import { afterAll, describe, expect, it } from 'vitest'
 
-import type { AccessContext } from '@use-brian/core'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 
 import {
   countBrainInbox,
@@ -10,7 +10,7 @@ import {
   listBrainInbox,
   type BrainInboxPrimitive,
 } from '../brain-inbox-store.js'
-import { getAppPool, getPool } from '../client.js'
+import { applyRLSGucs, getAppPool, getPool } from '../client.js'
 import { createMemory } from '../memories.js'
 import { createDbWorkspaceGroupStore } from '../workspace-group-store.js'
 import { resolveWorkspaceViewpoint } from '../workspace-viewpoint.js'
@@ -270,30 +270,39 @@ describe('[COMP:brain/inbox-store] current-source operation scope (integration)'
       expect(detail).toBeNull()
     }
 
-    await pool.query('UPDATE tasks SET compartments=$2 WHERE id=$1', [
-      f.taskId,
-      [f.research.compartmentKey],
-    ])
-    await assertTaskHidden()
-    await pool.query('UPDATE tasks SET compartments=$2 WHERE id=$1', [
-      f.taskId,
-      [f.finance.compartmentKey],
-    ])
+    // Canonical task fields refuse owner-pool writes (migration 8051), so the
+    // workspace owner relabels the task through the app role. Lifecycle columns
+    // (held, retired, retracted) are not canonical fields and stay fixture writes.
+    const relabel = async (set: string, values: unknown[] = []) => {
+      const client = await getAppPool().connect()
+      try {
+        await client.query('BEGIN')
+        await applyRLSGucs(client, f.ownerId)
+        await client.query(`UPDATE tasks SET ${set} WHERE id=$1`, [f.taskId, ...values])
+        await client.query('COMMIT')
+      } catch (error) {
+        await client.query('ROLLBACK')
+        throw error
+      } finally {
+        client.release()
+      }
+    }
 
-    await pool.query("UPDATE tasks SET sensitivity='confidential' WHERE id=$1", [f.taskId])
+    await relabel('compartments=$2', [[f.research.compartmentKey]])
     await assertTaskHidden()
-    await pool.query("UPDATE tasks SET sensitivity='internal' WHERE id=$1", [f.taskId])
+    await relabel('compartments=$2', [[f.finance.compartmentKey]])
 
-    await pool.query('UPDATE tasks SET project_ids=$2 WHERE id=$1', [
-      f.taskId,
-      [f.projectId],
-    ])
+    await relabel("sensitivity='confidential'")
+    await assertTaskHidden()
+    await relabel("sensitivity='internal'")
+
+    await relabel('project_ids=$2', [[f.projectId]])
     await assertTaskHidden({ ...access, projectIds: [] })
-    await pool.query("UPDATE tasks SET project_ids='{}' WHERE id=$1", [f.taskId])
+    await relabel("project_ids='{}'")
 
-    await pool.query('UPDATE tasks SET user_id=$2 WHERE id=$1', [f.taskId, f.ownerId])
+    await relabel('user_id=$2', [f.ownerId])
     await assertTaskHidden()
-    await pool.query('UPDATE tasks SET user_id=NULL WHERE id=$1', [f.taskId])
+    await relabel('user_id=NULL')
 
     await pool.query('UPDATE tasks SET scope_held=true WHERE id=$1', [f.taskId])
     await assertTaskHidden()

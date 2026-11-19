@@ -23,17 +23,18 @@ import { loadDepartmentSnapshot } from '../context-scope/department-resolver.js'
 import { transferAssistant } from './assistant-transfer-admission.js'
 import { seedBuiltinPrimitiveCapabilities } from './capability-seed.js'
 import {
-  minSensitivity,
-  parseTranscriptionPrefs,
   MAX_INBOX_RETENTION_DAYS,
   MIN_INBOX_RETENTION_DAYS,
-} from '@use-brian/core'
+} from '@use-brian/core/doc/inbox-types.js'
+import { parseTranscriptionPrefs } from '@use-brian/core/media/transcription-prefs.js'
+import { minSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import {
   normalizeHomeApps,
   validateHomeApps,
   type HomeAppEntry,
 } from '@use-brian/shared/home-apps'
-import type { Sensitivity, WorkspaceTranscriptionPrefs } from '@use-brian/core'
+import type { WorkspaceTranscriptionPrefs } from '@use-brian/core/media/transcription-prefs.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { joinDefaultTeamspacesSystem, leaveWorkspaceTeamspacesSystem } from './teamspace-store.js'
 import { query, queryWithRLS, getPool } from './client.js'
 import type { ConnectorGrantStore } from './connector-grant-store.js'
@@ -273,7 +274,7 @@ export type WorkspacePickerPreferenceUpdate = {
 }
 
 export type WorkspaceStore = {
-  create(userId: string, name: string, purpose: string): Promise<Workspace>
+  create(userId: string, name: string, purpose: string, transactionClient?: PoolClient): Promise<Workspace>
   list(userId: string): Promise<Workspace[]>
   /**
    * Update only the acting member's picker preferences. Pinning restores a
@@ -692,6 +693,23 @@ export async function resolveReadCeilingsSystem(
   }
 }
 
+export type OperationMembership = {
+  role: 'owner' | 'admin' | 'member'; clearance: Sensitivity;
+  readCompartments: string[] | null; mutationCompartments: string[] | null; departmentReadV2?: string | null;
+}
+
+/** The same predicates serve ordinary resolution and a coherent lease snapshot. */
+export function operationCeilingsFromMembership(member: OperationMembership | null | undefined,
+  assistantClearance: Sensitivity, assistantCompartments: string[] | null, requireMembership = false) {
+  if (!member && requireMembership) throw new Error('authority_unavailable')
+  return {
+    clearance: effectiveReadClearance(member?.role ?? null, member?.clearance ?? null, assistantClearance),
+    compartments: effectiveReadCompartments(member?.role ?? null, member ? member.readCompartments : [], assistantCompartments),
+    mutationCompartments: effectiveReadCompartments(member?.role ?? null, member ? member.mutationCompartments : [], assistantCompartments),
+    ...(member?.departmentReadV2 === 'true' ? { departmentReadV2: true } : {}),
+  }
+}
+
 /** Operation-aware execution path. Keep temporary read grants out of legacy callers. */
 export async function resolveOperationCeilingsSystem(
   userId: string,
@@ -707,19 +725,13 @@ export async function resolveOperationCeilingsSystem(
   }
   // Authority resolution cannot depend on the content RLS policies it authorizes.
   // One statement sees read grants and ordinary membership at the same snapshot.
-  const member = (await authorityQuery<{
-    role: 'owner' | 'admin' | 'member'; clearance: Sensitivity;
-    readCompartments: string[] | null; mutationCompartments: string[] | null; departmentReadV2?: string | null;
-  }>(`SELECT role,clearance,
+  const member = (await authorityQuery<OperationMembership>(`SELECT role,clearance,
       effective_member_read_compartments(user_id,workspace_id) AS "readCompartments",
       effective_member_team_compartments(user_id,workspace_id) AS "mutationCompartments",
       (SELECT to_jsonb(w)->>'department_read_v2' FROM workspaces w WHERE w.id=$1) AS "departmentReadV2"
     FROM workspace_members WHERE workspace_id=$1 AND user_id=$2`,[workspaceId,userId])).rows[0]
-  if (!member && requireMembership) throw new Error('authority_unavailable')
   return {
-    clearance: effectiveReadClearance(member?.role ?? null,member?.clearance ?? null,assistantClearance),
-    compartments: effectiveReadCompartments(member?.role ?? null,member ? member.readCompartments : [],assistantCompartments),
-    mutationCompartments: effectiveReadCompartments(member?.role ?? null,member ? member.mutationCompartments : [],assistantCompartments),
+    ...operationCeilingsFromMembership(member, assistantClearance, assistantCompartments, requireMembership),
     // Permission model v2 flag (migration 649), read through to_jsonb so an
     // older schema reads "off". The resolver switches paths on it.
     // The v2 snapshot must read on the same connection (a caller's transaction
@@ -1352,10 +1364,10 @@ export type WorkspaceStoreCascades = {
 
 export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): WorkspaceStore {
   return {
-    async create(userId, name, purpose) {
-      const client = await getPool().connect()
+    async create(userId, name, purpose, transactionClient) {
+      const client = transactionClient ?? await getPool().connect()
       try {
-        await client.query('BEGIN')
+        if (!transactionClient) await client.query('BEGIN')
 
         const result = await client.query<Workspace>(
           `INSERT INTO workspaces (name, purpose, owner_user_id, icon_seed) VALUES ($1, $2, $3, $4)
@@ -1457,13 +1469,13 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
           ],
         )
 
-        await client.query('COMMIT')
+        if (!transactionClient) await client.query('COMMIT')
         return workspace
       } catch (err) {
-        await client.query('ROLLBACK').catch(() => {})
+        if (!transactionClient) await client.query('ROLLBACK').catch(() => {})
         throw err
       } finally {
-        client.release()
+        if (!transactionClient) client.release()
       }
     },
 

@@ -1,7 +1,15 @@
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { afterAll, describe, expect, it, vi } from 'vitest'
-import { advanceWorkflowRun, buildTool, browserInputScope, pinToolAuthoringAuthority, executionToolContext, ContextScopeAccumulator, type AuthoritySource, type ScopeSource, type SandboxTaskRecord } from '@use-brian/core'
+import { browserInputScope } from '@use-brian/core/sandbox/input-scope.js'
+import type { SandboxTaskRecord } from '@use-brian/core/sandbox/orchestrator.js'
+import { pinToolAuthoringAuthority } from '@use-brian/core/security/tool-authority.js'
+import { advanceWorkflowRun } from '@use-brian/core/workflow/executor.js'
+import type { AuthoritySource } from '@use-brian/agent-runtime/security/authority-source.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
 import { z } from 'zod'
 import { createSandboxTaskStore } from '../../db/sandbox-task-store.js'
 import { createDbWorkspaceFilesStore } from '../../db/workspace-files-store.js'
@@ -416,11 +424,14 @@ describe('[COMP:api/workflow-input-evidence] canonical causal inputs',()=>{
     const history=async(userId:string)=>(await queryWithRLS(userId,'SELECT id FROM workflow_runs WHERE id=$1',[target.id])).rows
     expect(await history(f.member)).toEqual([{id:target.id}])
     expect(await history(f.owner)).toEqual([])
+    const [memberView,ownerView]=await Promise.all([resolveWorkspaceViewpoint(f.member,f.workspaceId),resolveWorkspaceViewpoint(f.owner,f.workspaceId)])
+    if(!memberView?.departmentRead||!ownerView?.departmentRead)throw new Error('Workflow fixture requires current Department grants')
     const ceiling={workspaceId:f.workspaceId,userId:f.member,clearance:'internal' as const,
-      compartments:[f.team.compartmentKey!],mutationCompartments:[f.team.compartmentKey!],projectIds:[projectId],visibilityAssistantIds:[sourceAssistant]}
+      compartments:[f.team.compartmentKey!],mutationCompartments:[f.team.compartmentKey!],projectIds:[projectId],visibilityAssistantIds:[sourceAssistant],
+      departmentRead:memberView.departmentRead}
     expect(await validateCallerScopeEvidence(copied,ceiling)).toEqual(evidence)
     expect(await runWithAgentAccess({...ceiling,sharedAudience:true},()=>history(f.member))).toEqual([])
-    for(const narrowed of [{userId:f.owner},{projectIds:[]},{visibilityAssistantIds:[]}]) {
+    for(const narrowed of [{userId:f.owner,departmentRead:ownerView.departmentRead},{projectIds:[]},{visibilityAssistantIds:[]}]) {
       await expect(validateCallerScopeEvidence(copied,{...ceiling,...narrowed})).rejects.toMatchObject({reason:'caller_evidence_unavailable'})
       await runWithAgentAccess({...ceiling,...narrowed},async()=>{
         const actor=narrowed.userId??f.member
@@ -645,6 +656,8 @@ describe('[COMP:api/workflow-input-evidence] canonical causal inputs',()=>{
       // Remove only those edges inside this rolled-back historical fixture.
       await client.query('DROP TRIGGER workflow_derivation_receipts ON scope_derivation_sources')
       await client.query('DROP TRIGGER page_derivation_receipts ON scope_derivation_sources')
+      await client.query('DROP TRIGGER application_field_sources_immutable ON scope_derivation_sources')
+      await client.query('DROP TRIGGER session_context_lineage_source ON scope_derivation_sources')
       await client.query("DELETE FROM scope_derivation_sources WHERE source_kind NOT IN('memory','entity','entity_link','task','workspace_file','episode','knowledge_entry','kb_chunk','crm_event')")
       // Later source wrappers use different parameter names. Keep them outside
       // this historical replay; transaction rollback restores the live chain.

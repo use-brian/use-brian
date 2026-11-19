@@ -1,5 +1,5 @@
 /** Deterministic recording and replay for the user's local browser. */
-import type { ToolContext } from '../tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import type { BrowserSkill, BrowserSkillRecordingStep } from './browser-skills.js'
 import type { BrowserProfile } from './profiles.js'
 import type {

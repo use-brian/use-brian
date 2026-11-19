@@ -1,4 +1,4 @@
-import { memoryLearningEditSchema, memoryLearningSchema } from '@use-brian/core'
+import { memoryLearningEditSchema, memoryLearningSchema } from '@use-brian/core/memory/learning.js'
 import { memoryLearningAdmissionEnabled } from './db/memory-learning.js'
 /**
  * Brain-entry mutation module.
@@ -11,14 +11,13 @@ import { memoryLearningAdmissionEnabled } from './db/memory-learning.js'
  * [COMP:api/brain-entry-mutation]
  */
 
-import type {
-  AccessContext,
-  DealStage,
-  EntityLinksStore,
-  TaskRecordStatus,
-  TaskUpdateFields,
-} from '@use-brian/core'
-import { DEAL_STAGES, TASK_STATUSES, TaskResponsibilityError } from '@use-brian/core'
+import type { DealStage } from '@use-brian/core/application-platform/record-values.js'
+import type { EntityLinksStore } from '@use-brian/core/entities/types.js'
+import type { TaskRecordStatus, TaskUpdateFields } from '@use-brian/core/tasks/types.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import { DEAL_STAGES } from '@use-brian/core/application-platform/record-values.js'
+import { TaskResponsibilityError } from '@use-brian/core/tasks/responsibility.js'
+import { TASK_STATUSES } from '@use-brian/core/tasks/types.js'
 import { query } from './db/client.js'
 import type { WorkspaceStore } from './db/workspace-store.js'
 import {

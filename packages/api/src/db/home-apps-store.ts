@@ -22,7 +22,7 @@
  * [COMP:api/home-apps-store]
  */
 
-import type { Sensitivity } from '@use-brian/core'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import {
   scopesExceedGrant,
   type AppManifest,

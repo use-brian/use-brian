@@ -1,5 +1,5 @@
 import { interpretConfirmationEvent, type NormalizedConfirmationEvent } from './confirmation-events.js'
-import type { ConfirmationResolver, ToolConfirmationRequest } from './types.js'
+import type { ConfirmationResolver, ToolConfirmationRequest } from '@use-brian/agent-runtime/mcp/types.js'
 
 /** Transport-normalized identity. Integration and sender are never inferred from text. */
 export type ChannelInteractionScope = {

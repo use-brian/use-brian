@@ -42,7 +42,7 @@ export function postWorkingCopiesRoutes(options: {
         res.status(403).json({ error: 'Draft access required' }); return
       }
       if (req.method === 'GET') {
-        res.json({ copy: await store.get(req.params.assistantId, req.params.sessionId) }); return
+        res.json({ copy: await store.get(req.params.assistantId, req.params.sessionId, req.userId) }); return
       }
       const parsed = inputSchema.safeParse(req.body)
       const media = parsed.success ? parsePostMedia(parsed.data.content.media) : null

@@ -13,16 +13,16 @@
 import { withCrmMailAdmission, type CrmMailContext } from '../crm-operations/delivery-policy.js'
 import { randomUUID } from 'node:crypto'
 import type {
-  GmailOutgoingAttachment,
   CalendarEventCreateInput,
   CalendarEventUpdateInput,
   CalendarRecurrenceScope,
   CalendarAttendeeInput,
   CalendarAttachmentInput,
   CalendarEventColorOptions,
-} from '@use-brian/core'
+} from '@use-brian/core/tools/base/google-calendar.js'
+import type { GmailOutgoingAttachment } from '@use-brian/core/tools/base/google-gmail.js'
 import { renderEmailBody } from '@use-brian/channels'
-import { GoogleApiError, parseGoogleErrorBody, type GoogleApiProduct } from '@use-brian/core'
+import { GoogleApiError, parseGoogleErrorBody, type GoogleApiProduct } from '@use-brian/core/tools/base/_google-error.js'
 
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 const CALENDAR_API = 'https://www.googleapis.com/calendar/v3'

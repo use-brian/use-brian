@@ -1,15 +1,17 @@
 /** Local tasks retain original profile, execution and source authority. */
 import {
   BrowserProfileAuthoritySchema,
-  accessCeilingContains,
   canUseProfile,
-  parseAuthoringAuthority,
-  type CurrentAuthorityBoundary,
-  type BrowserCallContext,
   type BrowserProfileAuthority,
   type BrowserProfileStore,
-  type DepartmentReadGrant,
-} from '@use-brian/core'
+} from '@use-brian/core/sandbox/profiles.js'
+import type { BrowserCallContext } from '@use-brian/core/sandbox/types.js'
+import {
+  accessCeilingContains,
+  parseAuthoringAuthority,
+} from '@use-brian/agent-runtime/security/access-ceiling.js'
+import type { DepartmentReadGrant } from '@use-brian/agent-runtime/security/department-read.js'
+import type { CurrentAuthorityBoundary } from '@use-brian/agent-runtime/tools/types.js'
 import type { LocalComputerTaskRecord, LocalComputerTaskStore } from '../routes/computer.js'
 import { resolveBrowserTaskExecutionAuthority } from './task-execution-authority.js'
 import { humanCanReadBrowserProfile } from './profile-authority.js'

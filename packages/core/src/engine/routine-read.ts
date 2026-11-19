@@ -1,10 +1,11 @@
 import { decisionUsageModelId } from '../decisions/usage.js'
-import {ownsRoutineCalendarRead,withRoutineCalendarDispatch} from './routine-read-ownership.js'
+import {ownsRoutineCalendarRead,withRoutineCalendarDispatch,activateRoutineCalendarRead,routineCalendarReadNeedsActivation,type RoutineCalendarActivation} from './routine-read-ownership.js'
 import {renderHostObservation,type HostObservation} from '@use-brian/shared'
-import {createToolExecutor} from './tool-executor.js'
-import type {QueryEvent,QueryLoopOptions} from './query-loop.js'
-import {DEFAULT_HARD_LIMIT,type LoopDetector} from './loop-detector.js'
-import {safeTrace,type TurnTrace} from './turn-ledger.js'
+import {createToolExecutor} from '@use-brian/agent-runtime/engine/tool-executor.js'
+import type {QueryEvent,QueryLoopOptions} from '@use-brian/agent-runtime/engine/query-loop.js'
+import type {HostReadReceipt,RoutineReadConfig,RoutineReadPhaseInput,RoutineReadPhaseResult} from '@use-brian/agent-runtime/engine/query-loop-ports.js'
+import {DEFAULT_HARD_LIMIT,type LoopDetector} from '@use-brian/agent-runtime/engine/loop-detector.js'
+import {safeTrace,type TurnTrace} from '@use-brian/agent-runtime/engine/turn-ledger.js'
 import {z} from 'zod'
 import {randomUUID} from 'node:crypto'
 import {createLlmDecisionProvider,buildLlmDecisionMessages} from '../decisions/adapters/llm.js'
@@ -13,11 +14,11 @@ import {decisionCompletionInput} from '../decisions/invocation.js'
 import type {DecisionExecutionPort,DecisionCompletionRoute,DecisionExecutionOperation} from '../decisions/hydra.js'
 import type {DecisionResponse,DecisionQuestion} from '../decisions/types.js'
 import {TYPESAFE_JEV_CAPABILITIES} from '../decisions/adapters/typesafe.js'
-import type {Message,TokenUsage} from '../providers/types.js'
-import {isInputAuthorityError,assertInputAuthority,ownsInputAdmission} from '../providers/input-authority.js'
-import {estimateStringTokens} from '../compaction/index.js'
-import {fitMessagesToBudget,resolveInputTokenLimit,MODEL_CONTEXT_FIT_RATIO,MAX_TOOL_RESULT_TOKENS} from '../providers/context-budget.js'
-import type {Tool,ToolContext} from '../tools/types.js'
+import type {Message,TokenUsage} from '@use-brian/agent-runtime/providers/types.js'
+import {isInputAuthorityError,assertInputAuthority,ownsInputAdmission} from '@use-brian/agent-runtime/providers/input-authority.js'
+import {estimateStringTokens} from '@use-brian/agent-runtime/compaction/index.js'
+import {fitMessagesToBudget,resolveInputTokenLimit,MODEL_CONTEXT_FIT_RATIO,MAX_TOOL_RESULT_TOKENS} from '@use-brian/agent-runtime/providers/context-budget.js'
+import type {Tool,ToolContext} from '@use-brian/agent-runtime/tools/types.js'
 
 export type RoutineCalendarCall={name:string;input:{calendarId:string;timeMin:string;timeMax:string;maxResults:number}}
 type Candidate={calls:RoutineCalendarCall[]}
@@ -111,7 +112,7 @@ export async function planRoutineCalendarRead(input:{runtime:DecisionExecutionPo
  const started=Date.now(),empty=(path:string):RoutineReadPlanningResult=>({plan:null,durationMs:Date.now()-started,model:null,usage:null,path})
  const context=input.context,execution=context.executionContext,authority=context.authority,assertCurrent=authority?.assertCurrent
  const scope=context.scopeAccumulator,signal=context.abortSignal,full=input.assertInputAuthority
- const sourceHook=context.assertModelInputAuthority,executeAuthority=authority?.execute,timeZone=context.userTimezone,planningNow=input.now??started
+ const sourceHook=context.admitModelInput,executeAuthority=authority?.execute,timeZone=context.userTimezone,planningNow=input.now??started
  if(!execution||!authority||!assertCurrent||!scope||signal.aborted)return empty('unowned')
  const tools=new Map(input.calendarTools),methods=new Map([...tools].map(([name,tool])=>[name,{...tool}]))
  if(!tools.size||[...tools].some(([name,tool])=>input.tools.get(name)!==tool||!tool.isReadOnly||!ownsRoutineCalendarRead(tool)||tool.hiddenFromModel))return empty('unavailable_tools')
@@ -128,7 +129,7 @@ export async function planRoutineCalendarRead(input:{runtime:DecisionExecutionPo
  const originalSources=sourceKeys()
  const current=()=>{
   if(JSON.stringify(input.messages)!==originalMessages||JSON.stringify(input.historyCalls??[])!==originalHistory||input.tools.size!==originalToolCount
-   ||context.assertModelInputAuthority!==sourceHook||context.userTimezone!==timeZone||authority.execute!==executeAuthority
+   ||context.admitModelInput!==sourceHook||context.userTimezone!==timeZone||authority.execute!==executeAuthority
    ||context.executionContext!==execution||context.authority!==authority||authority.assertCurrent!==assertCurrent||execution.security.authority!==authority||context.scopeAccumulator!==scope
    ||context.abortSignal!==signal||signal.aborted||execution.lifecycle.abortSignal.aborted
    ||JSON.stringify(execution.security.ceiling)!==originalCeiling||JSON.stringify(execution.security.provenance)!==originalProvenance
@@ -234,10 +235,22 @@ function consumeRoutineReadPlan(plan:RoutineReadPlan):{calls:RoutineCalendarCall
 }
 
 
-export type RoutineReadOptions={runtime:DecisionExecutionPort;llm:DecisionCompletionRoute;workspaceId?:string;
- calendarTools:ReadonlyMap<string,Tool>;historyCalls?:readonly RoutineCalendarCall[];
- onResult?:(result:RoutineReadPlanningResult)=>void|Promise<void>}
-export type HostReadReceipt=Readonly<{kind:'host_read'}>
+// This module is the core default `routineRead` query-loop port; the runtime
+// declares `RoutineReadConfig` empty and this block adds the routine fields.
+declare module '@use-brian/agent-runtime/engine/query-loop-ports.js' {
+ interface RoutineReadConfig{runtime:DecisionExecutionPort;llm:DecisionCompletionRoute;workspaceId?:string;
+  /** Exact certified adapters; a lazily certified one is activated only after a plan selects it. */
+  calendarTools:ReadonlyMap<string,Tool>;historyCalls?:readonly RoutineCalendarCall[];
+  onResult?:(result:RoutineReadPlanningResult)=>void|Promise<void>
+  /** Late activation outcome of the planned adapters (content-free). */
+  onActivation?:(outcome:RoutineReadActivationOutcome)=>void|Promise<void>}
+}
+/** Fixed categories only; never request, calendar or account data. */
+export type RoutineReadActivationOutcome={status:'ready';activated:number}|{status:'unavailable';reason:'unavailable'|'activation_failed'|'not_canonical'}
+/** Host notice for a planned read whose late activation was unavailable. Not an observation. */
+export const ROUTINE_READ_UNAVAILABLE_NOTICE='The host planned a Google Calendar read for this request, but Google Calendar could not be activated for this turn, so no calendar data was read. Continue the ordinary tool workflow. Do not present calendar results that were not read.'
+export type RoutineReadOptions=RoutineReadConfig
+export type {HostReadReceipt}
 const observations=new WeakMap<object,{execution:NonNullable<ToolContext['executionContext']>;values:HostObservation[]}>()
 const authoredCarriers=new WeakMap<object,{execution:NonNullable<ToolContext['executionContext']>;bytes:string}>()
 function bindCarrier(values:HostObservation[],execution:NonNullable<ToolContext['executionContext']>):HostObservation[]{
@@ -261,7 +274,7 @@ export function consumeHostReadObservation(receipt:HostReadReceipt,execution:Non
 }
 
 /** Exact executor output, with first-page exhaustion and the executor's own cap. */
-function isCompleteRoutineRead(call:RoutineCalendarCall,block:Extract<import('../providers/types.js').ContentBlock,{type:'tool_result'}>,meta:import('../tools/types.js').ToolResultMeta|undefined):boolean{
+function isCompleteRoutineRead(call:RoutineCalendarCall,block:Extract<import('@use-brian/agent-runtime/providers/types.js').ContentBlock,{type:'tool_result'}>,meta:import('@use-brian/agent-runtime/tools/types.js').ToolResultMeta|undefined):boolean{
  return !block.isError && meta?.calendarReadComplete===true && meta.outputTruncated===false
   && meta.calendarReadCalendarId===call.input.calendarId && meta.calendarReadTimeMin===call.input.timeMin
   && meta.calendarReadTimeMax===call.input.timeMax && meta.calendarReadQuery===undefined && meta.calendarReadPageToken===undefined
@@ -275,8 +288,7 @@ function compositionFits(options:QueryLoopOptions,messages:Message[],reservedTok
  return Number.isFinite(budget)&&budget>0&&!fitMessagesToBudget(messages,budget).trimmed
 }
 
-export async function* executeRoutineCalendarRead(input:{options:QueryLoopOptions;tools:Map<string,Tool>;loopDetector:LoopDetector;
- deniedTools:Set<string>;ledger:TurnTrace;assertInputAuthority:()=>Promise<void>}):AsyncGenerator<QueryEvent,{messages:Message[];complete:boolean;records:HostObservation[];calls:number}> {
+export async function* executeRoutineCalendarRead(input:RoutineReadPhaseInput):AsyncGenerator<QueryEvent,RoutineReadPhaseResult> {
  const {options,tools}=input,config=options.routineCalendarRead
  if(!config||options.resumeContext||options.turnInbox?.peek().pending)return{messages:[],complete:false,records:[],calls:0}
  const planned=await planRoutineCalendarRead({...config,systemPrompt:options.systemPrompt+'\n'+(options.runtimeSystemContext??''),
@@ -292,6 +304,30 @@ export async function* executeRoutineCalendarRead(input:{options:QueryLoopOption
  }
  if(!compositionFits(options,options.messages,observationReserve)){
   console.debug('[routine-read] execution declined',{reason:'input_budget',calls:calls.length});return{messages:[],complete:false,records:[],calls:0}
+ }
+ // Late activation (M3): exactly the planned adapters, with fresh authority
+ // before and after; nothing is activated for a turn that planned no read.
+ const pendingActivation=[...new Set(calls.map(call=>call.name))].map(name=>tools.get(name)??unavailable()).filter(routineCalendarReadNeedsActivation)
+ if(pendingActivation.length){
+  if(options.turnInbox?.peek().pending)return{messages:[],complete:false,records:[],calls:0}
+  let failure:Extract<RoutineReadActivationOutcome,{status:'unavailable'}>['reason']|null=null
+  for(const tool of pendingActivation){
+   current();await assertInputAuthority(input.assertInputAuthority);current()
+   let outcome:RoutineCalendarActivation
+   try{outcome=await activateRoutineCalendarRead(tool,options.context)}catch(error){
+    if(isInputAuthorityError(error)||(error as {reason?:unknown}|null)?.reason==='authority_changed'||options.context.abortSignal.aborted)throw error
+    outcome={status:'unavailable',reason:'activation_failed'}
+   }
+   current();await assertInputAuthority(input.assertInputAuthority);current()
+   if(outcome.status!=='ready'){failure=outcome.reason==='not_canonical'||outcome.reason==='activation_failed'?outcome.reason:'unavailable';break}
+  }
+  if(failure){
+   console.info('[routine-read] activation unavailable',{reason:failure,calls:calls.length})
+   await config.onActivation?.({status:'unavailable',reason:failure})
+   return{messages:[{role:'user',content:[{type:'text',text:ROUTINE_READ_UNAVAILABLE_NOTICE}]}],complete:false,records:[],calls:0}
+  }
+  await config.onActivation?.({status:'ready',activated:pendingActivation.length})
+  if(options.turnInbox?.peek().pending)return{messages:[],complete:false,records:[],calls:0}
  }
  let closed=false
  try{

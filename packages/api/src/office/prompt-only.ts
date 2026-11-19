@@ -1,7 +1,10 @@
 /** Source-free construction. Deliberately has no retrieval/template/brand ports. */
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { collectStream, exportOfficeDocument, reparseOfficeDocument, officeSemanticHash, type LLMProvider } from '@use-brian/core'
+import { exportOfficeDocument, reparseOfficeDocument } from '@use-brian/core/office/docx/index.js'
+import { officeSemanticHash } from '@use-brian/core/office/package.js'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
 import { assertOfficeArtifactSnapshot, type DocumentSnapshot } from '@use-brian/office-model'
 import type { OfficeGenerationJobRow } from '../db/office-generation.js'
 

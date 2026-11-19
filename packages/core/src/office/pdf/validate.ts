@@ -1,8 +1,11 @@
 import { createHash } from 'node:crypto'
 import type { PdfRect, PdfSnapshot } from '@use-brian/office-model'
-import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs'
+import { lazyImplementation } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
 import { PdfEngineError } from './errors.js'
 import { expectedPdfRenderReceipts, type PdfRenderReceipt, type PdfWriterResult } from './writer.js'
+
+// PDF.js loads on first use, not with the Office modules (M4 step 5).
+const loadPdfJs = lazyImplementation('The PDF reader (PDF.js)', () => import('pdfjs-dist/legacy/build/pdf.mjs'))
 
 export type ValidatedPdfOutput = {
   sha256: string
@@ -69,6 +72,7 @@ export async function validateRenderedPdf(
     throw new PdfEngineError('pdf_output_invalid', 'Rendered PDF page receipts do not match the canonical snapshot')
   }
 
+  const { getDocument } = await loadPdfJs()
   const loadingTask = getDocument({ data: new Uint8Array(writerResult.bytes), isEvalSupported: false, useSystemFonts: false })
   try {
     const document = await loadingTask.promise

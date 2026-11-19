@@ -16,7 +16,7 @@
 
 import { Router } from 'express'
 import { query } from '../db/client.js'
-import { validateHandle, generateHandle } from '@use-brian/core'
+import { validateHandle, generateHandle } from '@use-brian/core/handles.js'
 
 export function handleRoutes(): Router {
   const router = Router()

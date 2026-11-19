@@ -18,7 +18,7 @@
  */
 
 import type { Block, Page } from './blocks.js'
-import { bindScopeSources,boundScopeSources } from '../security/source-evidence.js'
+import { bindScopeSources,boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import type {
   A2UIWidget,
   BarChartWidget,

@@ -14,6 +14,7 @@
  *
  * [COMP:api/turn-kernel]
  */
+import { calculateCost } from '@use-brian/agent-runtime/billing/cost-tracker.js'
 import { billingPartyForAssistant, type AssistantBillingIdentity } from '../billing-party.js'
 import type { SessionPolicy } from '../session-kind.js'
 
@@ -44,5 +45,52 @@ export async function resolveTurnBilling(params: {
   return {
     payerUserId: await (params.resolveWorkspaceParty ?? billingPartyForAssistant)(params.assistant),
     actorUserId: null,
+  }
+}
+
+/** Main-loop billing metadata belongs to the original turn; spend belongs to
+ * the canonical producer. No mutable route/store options survive capture. */
+export type TurnUsageRow = Parameters<import('@use-brian/agent-runtime/billing/cost-tracker.js').UsageStore['recordUsage']>[0]
+export type TurnUsageBilling = {
+  metadata: Readonly<Pick<TurnUsageRow,
+    'userId' | 'actorUserId' | 'assistantId' | 'sessionId' | 'workspaceId' |
+    'modelTier' | 'source' | 'userMessageId' | 'triggerKey' | 'providerKeySource'>>
+  costPolicy: 'calculate' | 'reported_or_calculated'
+  recordUsage: (row: TurnUsageRow) => Promise<void>
+  onError?: (error: unknown) => void | Promise<void>
+  /** Existing completion-only obligations, independently gated by their host. */
+  afterSettlement?: (row: Readonly<TurnUsageRow>) => void | Promise<void>
+}
+
+export type TurnUsageSettlement =
+  | { status: 'recorded' | 'no_usage' | 'not_configured' }
+  | { status: 'failed'; error: unknown }
+
+export function captureTurnUsageBilling(registration: TurnUsageBilling, producerKeySource?: () => 'user' | 'platform' | undefined) {
+  const metadata = Object.freeze({ ...registration.metadata })
+  const { costPolicy, recordUsage, onError, afterSettlement } = registration
+  return async (spend: import('@use-brian/agent-runtime/engine/query-loop.js').QueryUsageSnapshot | null): Promise<TurnUsageSettlement> => {
+    if (!spend) return { status: 'no_usage' }
+    const { model, totalUsage: usage } = spend
+    const actualKeySource = producerKeySource?.() ?? metadata.providerKeySource
+    const row: TurnUsageRow = {
+      ...metadata, model, providerKeySource: actualKeySource,
+      inputTokens: usage.inputTokens, outputTokens: usage.outputTokens,
+      cacheReadTokens: usage.cacheReadTokens, cacheWriteTokens: usage.cacheWriteTokens,
+      actualCostUsd: actualKeySource === 'user' ? 0
+        : costPolicy === 'reported_or_calculated' ? usage.calculatedCostUsd ?? calculateCost(model, usage)
+          : calculateCost(model, usage),
+    }
+    let outcome: TurnUsageSettlement = { status: 'recorded' }
+    try { await recordUsage({ ...row }) }
+    catch (error) {
+      outcome = { status: 'failed', error }
+      try { await onError?.(error) } catch (reportError) { outcome = { status: 'failed', error: reportError } }
+    }
+    // Provider completion and bookkeeping persistence are independent. Keep
+    // the original completion-only surcharge even when the COGS write failed.
+    try { await afterSettlement?.(Object.freeze({ ...row })) }
+    catch (error) { outcome = { status: 'failed', error } }
+    return outcome
   }
 }

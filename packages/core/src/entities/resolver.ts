@@ -1,6 +1,6 @@
 import { decisionUsageModelId } from '../decisions/usage.js'
-import { collectStream } from '../providers/accumulator.js'
-import type { LLMProvider, TokenUsage } from '../providers/types.js'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
+import type { LLMProvider, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
 import type { EntityCandidate, EntityMention } from './types.js'
 import type { DecisionExecutionPort, DecisionResponse } from '../decisions/index.js'
 import { isJsonValue } from '../decisions/validate.js'

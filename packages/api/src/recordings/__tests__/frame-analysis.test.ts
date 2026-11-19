@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import type { MediaBackend } from '@use-brian/core'
+import type { MediaBackend } from '@use-brian/core/media/backend.js'
 import {
   buildFrameBatchPrompt,
   createRecordingFrameAnalyzer,

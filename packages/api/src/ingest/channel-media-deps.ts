@@ -1,11 +1,8 @@
 // [COMP:brain/open-channel-media-deps] - open universal intake dependencies.
 
-import {
-  documentMimeType,
-  parseFileContent,
-  type FilesApi,
-  type FilesContext,
-} from '@use-brian/core'
+import { documentMimeType } from '@use-brian/core/files/document-formats.js'
+import { parseFileContent } from '@use-brian/core/files/parsers.js'
+import type { FilesApi, FilesContext } from '@use-brian/core/workspace-files/api.js'
 import { createRecording } from '../db/recordings-store.js'
 import { createEpisode } from '../db/episodes-store.js'
 import { countRecentRecordingJobs, enqueueRecordingJob } from '../db/recording-jobs-store.js'

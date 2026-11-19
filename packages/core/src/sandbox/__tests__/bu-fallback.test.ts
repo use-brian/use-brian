@@ -14,7 +14,7 @@ import { createInMemoryBrowserProfileStore, createInMemorySessionVault } from '.
 import { createInMemorySandboxTaskStore, createSandboxOrchestrator } from '../orchestrator.js'
 import { StubSandboxProvider } from '../providers/stub.js'
 import type { BrowserAgentUsage, BrowserUseLlmConfig, BuTraceStep } from '../types.js'
-import type { ToolContext } from '../../tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 function toolContext(overrides: Partial<ToolContext> = {}): ToolContext {
   return {

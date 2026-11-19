@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { ToolContext } from '@use-brian/core'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { createLiveInteractionTools, type LiveInteractionUtterance } from '../live-interaction-tools.js'
 
 const row = (id: string, text: string, startMs = 0): LiveInteractionUtterance => ({ id, text, startMs, endMs: startMs + 100, source: 'microphone' })

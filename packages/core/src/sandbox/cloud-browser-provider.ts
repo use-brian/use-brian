@@ -1,4 +1,4 @@
-import type { CurrentAuthorityBoundary } from '../tools/types.js'
+import type { CurrentAuthorityBoundary } from '@use-brian/agent-runtime/tools/types.js'
 /**
  * Cloud browsing backend (§4.11): the E2B sandbox's agent-browser, reached
  * through the `SandboxProvider` seam. Stateless-orchestrator discipline:

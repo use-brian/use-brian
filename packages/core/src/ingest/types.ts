@@ -13,7 +13,7 @@
  * [COMP:brain/episode-envelope]
  */
 
-import type { Sensitivity } from '../security/sensitivity.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 
 // ── Source kind ──────────────────────────────────────────────────────
 

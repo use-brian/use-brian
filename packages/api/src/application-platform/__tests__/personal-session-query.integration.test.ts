@@ -1,12 +1,13 @@
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
-import {ContextScopeAccumulator,boundScopeSources} from '@use-brian/core'
+import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {authSessionStore} from '../../db/auth-session-store.js'
 import {addSessionMessage,createPersonalWebSession} from '../../db/sessions.js'
 import {findAssistantById} from '../../db/users.js'
 import {resolveExecutionContextSystem} from '../../context-scope/execution-context.js'
 import {sessionMessageInputScope} from '../../context-scope/resolve-turn-scope.js'
-import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
+import {readAdmittedSessionQuery} from '../../db/conversation-store.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()

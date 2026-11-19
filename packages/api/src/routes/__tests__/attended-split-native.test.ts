@@ -1,16 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { bindScopeSources, boundScopeSources, ContextScopeAccumulator, createGeminiProvider, registerDecisionMetadataSink,
-  type SessionContextAuthority } from '@use-brian/core'
+import { registerDecisionMetadataSink } from '@use-brian/core/decisions/authority-ownership.js'
+import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
+import { createGeminiProvider } from '@use-brian/agent-runtime/providers/gemini.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import {
+  bindScopeSources,
+  boundScopeSources
+} from '@use-brian/agent-runtime/security/source-evidence.js'
 import { createDecisionAttemptUsageRecorder, createDecisionRuntime, type DecisionRuntimeAttempt } from '../../decision-runtime.js'
 import { createWorkspaceDecisionRouteResolver } from '../../workspace-decision-routing.js'
 import type { Session, SessionMessage } from '../../db/sessions.js'
-import { captureAttendedSessionClassification, forkAttendedSessionClassification, prepareAttendedSplitMessage } from '../attended-session-context.js'
+import { captureAttendedSessionClassification, forkAttendedSessionClassification, prepareAttendedSplitMessage } from '../attended-turn-routing.js'
 
 // Keep the real splitter, runtime, workspace resolver, and physical adapters.
 // Only persistence and the host's source proof are synthetic.
 const spies = vi.hoisted(() => ({ query: vi.fn(), proof: vi.fn() }))
-vi.mock('../../db/session-query-reader.js', () => ({ readAdmittedSessionQuery: spies.query, captureSessionTopics: vi.fn(), sessionQueryRootMetadata: vi.fn() }))
-vi.mock('../../application-platform/model-source-authority.js', () => ({ assertSourceModelInputAuthority: spies.proof }))
+vi.mock('../../db/conversation-store.js', () => ({ readAdmittedSessionQuery: spies.query, captureSessionTopics: vi.fn(), sessionQueryRootMetadata: vi.fn() }))
+vi.mock('../../context-scope/admission.js', () => ({ admitModelInput: spies.proof }))
 
 const body = 'Compare fictional Acorn and Birch markets and separately research their independent regulatory risks.'
 const workspaceId = 'fictional-workspace'

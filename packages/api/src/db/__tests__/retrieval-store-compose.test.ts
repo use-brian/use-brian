@@ -18,10 +18,12 @@ import type {
   EntityRollup,
   EntityStore,
   GetEntityOpts,
+} from '@use-brian/core/entities/types.js'
+import type {
   RetrievalActor,
   RetrievalEnvelope,
   RetrievalStore,
-} from '@use-brian/core'
+} from '@use-brian/core/retrieval/types.js'
 import { composeRetrievalStore } from '../retrieval-store.js'
 
 const actor: RetrievalActor = {

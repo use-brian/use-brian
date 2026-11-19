@@ -3,7 +3,9 @@ import { setTimeout } from 'node:timers/promises'
 import express from 'express'
 import request from 'supertest'
 import { afterAll, describe, expect, it, vi } from 'vitest'
-import { CrmConfigCommandSchema, CrmOperationsCommandSchema, type CrmIntegrationGrant, type CrmOperationsContext } from '@use-brian/core'
+import { CrmConfigCommandSchema } from '@use-brian/core/crm/config-commands.js'
+import type { CrmIntegrationGrant } from '@use-brian/core/crm/integration-authority.js'
+import { CrmOperationsCommandSchema, type CrmOperationsContext } from '@use-brian/core/crm/operations-types.js'
 import { getPool, getAppPool } from '../client.js'
 import { createDbCrmOperationsStore } from '../crm-operations-store.js'
 import { createCrmOperationsService } from '../../crm-operations/service.js'
@@ -52,7 +54,7 @@ async function blockedBy(pid: number) {
   throw new Error('Configuration fixture never reached its intended lock wait')
 }
 
-describe('[COMP:crm/config-commands] Actual canonical configuration transactions', () => {
+describe('[COMP:crm/config-commands] [COMP:crm/catalog-records] Actual canonical configuration transactions', () => {
   afterAll(async () => { await Promise.all([...new Set([pool, appPool])].map((item) => item.end())) })
 
   it('creates and updates every resource with server-derived attribution, then makes zero writes for identical updates and archive repeats', async () => {
@@ -248,8 +250,7 @@ describe('[COMP:crm/config-commands] Actual canonical configuration transactions
   it('runs member settings, member commands, machine commands and preset creation through the same service', async () => {
     const f = await fixture(), app = express(), workspaceStore = createWorkspaceStore()
     app.use(express.json())
-    app.use('/api/crm/integration', crmIntegrationRoutes({ credentials: keys, service,
-      association: { execute: async () => { throw new Error('Unexpected commerce command') } } }))
+    app.use('/api/crm/integration', crmIntegrationRoutes({ credentials: keys, service,}))
     app.use((req, _res, next) => { req.userId = f.userId; next() })
     app.use('/api/crm', crmOperationsRoutes({ workspaceStore, service, readStore: createDbCrmIntakeReadStore() }))
     app.use('/api/crm', crmRoutes({ workspaceStore, crmOperationsService: service }))

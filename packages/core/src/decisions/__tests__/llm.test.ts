@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { LLMProvider, ProviderRequest, ThinkingLevel } from '../../providers/types.js'
+import type { LLMProvider, ProviderRequest, ThinkingLevel } from '@use-brian/agent-runtime/providers/types.js'
 import { buildToolSelectionQuestions } from '../../engine/tool-selection.js'
 import type { DecisionRequest } from '../types.js'
 import { buildLlmDecisionMessages, createLlmDecisionProvider, decisionLlmOutputBudget } from '../adapters/llm.js'

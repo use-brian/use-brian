@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { classifyResearchIntent, createGeminiProvider, registerDecisionMetadataSink } from '@use-brian/core'
+import { registerDecisionMetadataSink } from '@use-brian/core/decisions/authority-ownership.js'
+import { classifyResearchIntent } from '@use-brian/core/workers/research-classifier.js'
+import { createGeminiProvider } from '@use-brian/agent-runtime/providers/gemini.js'
 import { createDecisionAttemptUsageRecorder, createDecisionRuntime, type DecisionRuntimeAttempt } from '../decision-runtime.js'
 import { createWorkspaceDecisionRouteResolver } from '../workspace-decision-routing.js'
 import { recordOverheadUsage } from '../routes/_overhead-usage.js'

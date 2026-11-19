@@ -368,7 +368,7 @@ describe('[COMP:brain/entity-dedupe] runEntityDedupe', () => {
     updatedAt: new Date('2024-01-01'),
   })
 
-  function fakeLlmProvider(jsonOutput: string): import('../../providers/types.js').LLMProvider {
+  function fakeLlmProvider(jsonOutput: string): import('@use-brian/agent-runtime/providers/types.js').LLMProvider {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const provider: any = {
       name: 'mock',

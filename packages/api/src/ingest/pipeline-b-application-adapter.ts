@@ -5,12 +5,11 @@ import { createCrmOperationsService } from '../crm-operations/service.js'
 import { createDbCrmOperationsStore } from '../db/crm-operations-store.js'
 import { runWithAgentAccess } from '../db/agent-access-context.js'
 import {
-  DROPPED_CANDIDATE_TTL_DAYS,
-  admitTask,
   isPipelineBApplicationCommand,
   type PipelineBApplicationCommand,
   type PipelineBEntityApplication,
-} from '@use-brian/core'
+} from '@use-brian/core/ingest/pipeline-b-application.js'
+import { DROPPED_CANDIDATE_TTL_DAYS, admitTask } from '@use-brian/core/tasks/admission.js'
 
 import { createCompany, createContact, type CrmWriteTransaction } from '../db/crm.js'
 import { createEntityLink } from '../db/entity-links-store.js'

@@ -1,7 +1,7 @@
 /** Provider replay identity, shared by canonical and compatibility persistence.
  * [COMP:crm/operations-store]
  */
-import { CrmOperationsError, crmOperationsSha256 } from '@use-brian/core'
+import { CrmOperationsError, crmOperationsSha256 } from '@use-brian/core/crm/operations-types.js'
 import { crmPageInstant } from './pagination.js'
 
 type Common = {

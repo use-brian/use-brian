@@ -15,7 +15,7 @@ vi.mock('../../context-scope/execution-context.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../../context-scope/execution-context.js')>()
   return { ...actual,resolveExecutionContextSystem: (input: Parameters<typeof actual.resolveExecutionContextSystem>[0],
     deps: Parameters<typeof actual.resolveExecutionContextSystem>[1] = {}) => actual.resolveExecutionContextSystem(input,{
-      ...deps,pinPolicyEpoch: async () => async () => true,resolveAssistant: async () => input.assistant,
+      ...deps,pinPolicyEpoch: async () => ({isCurrent: async () => true, matches: () => true}),resolveAssistant: async () => input.assistant,
     }) }
 })
 import { randomUUID } from 'node:crypto'
@@ -23,7 +23,11 @@ import express from 'express'
 import request from 'supertest'
 import type { Request } from 'express'
 import { z } from 'zod'
-import { buildTool, createAssociationTools, createCrmCredentialTools, createTaskTools, type PipelineBResult, type TaskStore, type Tool, type ToolContext } from '@use-brian/core'
+import { createCrmCredentialTools } from '@use-brian/core/crm/operations-tools.js'
+import type { PipelineBResult } from '@use-brian/core/ingest/pipeline-b.js'
+import { createTaskTools } from '@use-brian/core/tasks/tools.js'
+import type { TaskStore } from '@use-brian/core/tasks/types.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { hashSecret } from '../../db/api-key-store.js'
 import { mintBrainPlaintext, type BrainKeyStore } from '../../db/brain-keys-store.js'
 import { mintBridgeToken } from '../../home-apps/tokens.js'
@@ -423,36 +427,6 @@ describe('[COMP:api/brain-mcp] recording discovery before transcription', () => 
 })
 
 describe('[COMP:api/brain-mcp] buildBrainTools — scope gating', () => {
-  it('advertises native Association tools only for current app/set grants and credential scope', () => {
-    const associationTools = createAssociationTools({ execute: vi.fn() })
-    const base = { workspaceId: 'ws', keyId: 'k', maxClearance: null, ...ALL_STUBS, associationTools }
-    expect(buildBrainTools({ ...base, scope: 'read_write' }).some(tool => tool.name.includes('Association'))).toBe(false)
-    const appRead = new Set(['association', 'home_app:association:read'])
-    expect(buildBrainTools({ ...base, scope: 'read', agentActiveCapabilities: appRead }).filter(tool => tool.name.includes('Association')).map(tool => tool.name))
-      .toEqual(['getAssociationModuleStatus', 'listAssociationTickets'])
-    const all = new Set([...appRead, 'configure', 'home_app:association:write', 'crm', 'home_app:crm:read', 'home_app:crm:write'])
-    const names = buildBrainTools({ ...base, scope: 'read', agentActiveCapabilities: all }).map(tool => tool.name)
-    for (const tool of Object.values(associationTools)) expect(names.includes(tool.name)).toBe(tool.isReadOnly)
-    const readWrite = buildBrainTools({ ...base, scope: 'read_write', agentActiveCapabilities: all }).map(tool => tool.name)
-    // Tools that need a person's confirmation in chat are not offered over MCP, where nobody confirms.
-    for (const tool of Object.values(associationTools)) expect(readWrite.includes(tool.name)).toBe(!tool.requiresConfirmation)
-    expect(readWrite).not.toContain('publishWebsiteContent')
-    expect(readWrite).toContain('updateWebsiteContent')
-  })
-
-  it('rechecks Association permission in a direct MCP call after discovery', async () => {
-    const execute = vi.fn()
-    const tools = buildBrainTools({
-      workspaceId: '11111111-1111-4111-8111-111111111111', scope: 'read_write', keyId: '33333333-3333-4333-8333-333333333333', maxClearance: null,
-      ...ALL_STUBS, associationTools: createAssociationTools({ execute }),
-      agentActiveCapabilities: new Set(['association', 'home_app:association:read']),
-    })
-    // The per-call resolver's database grants omit Association, simulating revocation.
-    const result = await tools.find(tool => tool.name === 'getAssociationModuleStatus')!.handler({})
-    expect(result).toMatchObject({ isError: true })
-    expect(JSON.stringify(result)).toContain('no longer available')
-    expect(execute).not.toHaveBeenCalled()
-  })
 
   it('gates managed delivery discovery on CRM read/write grants and credential scope',()=>{
     for(const scope of ['read','read_write'] as const) for(const caps of [[],['crm'],['crm','home_app:crm:read'],['crm','home_app:crm:write'],['crm','home_app:crm:read','home_app:crm:write']]) {
@@ -2030,7 +2004,7 @@ describe('[COMP:api/brain-mcp] HTTP error bodies reach the external agent with a
   function makeApp(store: BrainKeyStore) {
     const app = express()
     app.use(express.json())
-    app.use('/api/brain/mcp', brainMcpRoutes({ brainKeyStore: store, ...ALL_STUBS }))
+    app.use('/api/brain/mcp', brainMcpRoutes({ brainKeyStore: store, ...ALL_STUBS, resourceMetadataUrl: 'https://api.example.test/.well-known/oauth-protected-resource' }))
     return app
   }
 
@@ -2038,6 +2012,7 @@ describe('[COMP:api/brain-mcp] HTTP error bodies reach the external agent with a
     const { store } = await fakeBrainKey()
     const res = await request(makeApp(store)).post('/api/brain/mcp').send({})
     expect(res.status).toBe(401)
+    expect(res.headers['www-authenticate']).toBe('Bearer resource_metadata="https://api.example.test/.well-known/oauth-protected-resource"')
     expect(res.body.error).toBe('invalid_brain_key')
     expect(res.body.message).toContain('Bearer sk_brain_')
     expect(res.body.message).toContain('oat_')

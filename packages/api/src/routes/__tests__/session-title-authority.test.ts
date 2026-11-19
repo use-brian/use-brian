@@ -5,11 +5,11 @@ vi.mock('../../db/client.js',()=>({getPool:()=>({query:mocks.query})}))
 vi.mock('../../db/auth-session-store.js',()=>({authSessionStore:{validateAccess:mocks.validateAccess}}))
 vi.mock('../../db/sessions.js',()=>({readSessionById:mocks.readSession}))
 vi.mock('../../db/users.js',()=>({getUserAssistant:vi.fn()}))
-vi.mock('../../db/session-query-reader.js',()=>({readAdmittedSessionQuery:vi.fn()}))
+vi.mock('../../db/conversation-store.js',()=>({readAdmittedSessionQuery:vi.fn()}))
 vi.mock('../../db/session-title-store.js',()=>({publishSessionTitle:vi.fn(),readSessionTitle:vi.fn(),sessionTitleHead:vi.fn()}))
 vi.mock('../../context-scope/execution-context.js',()=>({resolveExecutionContextSystem:mocks.resolveExecution}))
 vi.mock('../../session-read-authority.js',()=>({gateSessionRead:vi.fn()}))
-vi.mock('../../application-platform/model-source-authority.js',()=>({assertSourceModelOutputAuthority:vi.fn()}))
+vi.mock('../../context-scope/admission.js',()=>({admitModelOutput:vi.fn()}))
 import {sessionTitleProjections} from '../session-title-authority.js'
 
 const first='00000000-0000-4000-8000-000000000001',second='00000000-0000-4000-8000-000000000002'

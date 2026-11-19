@@ -3,7 +3,8 @@
 import type { PoolClient } from 'pg'
 import { createHash, randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
-import { intersectAccessCeilings, type AuthoringAuthority, type WorkflowStore } from '@use-brian/core'
+import type { WorkflowStore } from '@use-brian/core/workflow/types.js'
+import { intersectAccessCeilings, type AuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { admitOperationalAuthoring, lockOperationalPolicy } from './operational-admission.js'
 import { WorkspaceAccessError } from './policy.js'
 

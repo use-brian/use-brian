@@ -125,6 +125,157 @@ async function assertRetainedBootstrap(db:PGlite,t:TestContext):Promise<void>{
  }finally{await db.exec('DROP FUNCTION public.retained_bootstrap_marker();DROP SEQUENCE public.retained_bootstrap_probe')}
 }
 
+/** Qualify the inherited profile on the existing real shifted-OID upgrade fixture. */
+async function assertPublicationLegacyAclUpgrade(db:PGlite,t:TestContext):Promise<void>{
+ const migration='8272_durable_conversation_publications.sql'
+ const candidate=toPgliteMigrationSql(await readFile(`${migrationsDir}/${migration}`,'utf8'),migration)
+ const privateHelpers=['crm_install_erasure_capture()',
+  'read_session_authority_facts(uuid,uuid,uuid,uuid,uuid,integer,uuid,boolean,boolean)']
+ const publicHelpers=['file_session_binding_allows(uuid)','media_parent_visible(text,uuid)',
+  'office_output_file_allows(uuid,boolean)','pdf_intake_file_visible(uuid)',
+  'project_labels_allowed(jsonb,uuid,text[],boolean)','recording_transcript_file_allows(uuid)']
+ const signatures=[...privateHelpers,...publicHelpers]
+ const state=async()=>{
+  const result:Record<string,unknown>={}
+  const queries={
+   functions:`SELECT to_jsonb(p) value FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+    WHERE n.nspname NOT IN('pg_catalog','information_schema') AND n.nspname!~'^pg_(temp|toast)' ORDER BY p.oid`,
+   policies:`SELECT to_jsonb(p) value FROM pg_policy p WHERE polrelid IN(SELECT oid FROM pg_class WHERE relnamespace='public'::regnamespace) ORDER BY oid`,
+   relations:`SELECT to_jsonb(c) value FROM pg_class c WHERE relnamespace='public'::regnamespace AND relkind IN('r','p') ORDER BY oid`,
+   constraints:`SELECT to_jsonb(c) value FROM pg_constraint c WHERE conrelid IN(SELECT oid FROM pg_class WHERE relnamespace='public'::regnamespace) ORDER BY oid`,
+   triggers:`SELECT to_jsonb(c) value FROM pg_trigger c WHERE tgrelid IN(SELECT oid FROM pg_class WHERE relnamespace='public'::regnamespace) ORDER BY oid`,
+   native:`SELECT to_jsonb(h) value FROM native_turn_contract_helpers h ORDER BY signature`,
+   retained:`SELECT to_jsonb(h) value FROM native_retained_contract_helpers h ORDER BY signature`,
+   defaults:`SELECT to_jsonb(d) value FROM pg_default_acl d ORDER BY oid`,
+   ledger:`SELECT to_jsonb(m) value FROM _migrations m ORDER BY name`,
+  }
+  for(const [name,sql] of Object.entries(queries))result[name]=(await db.query(`SELECT encode(sha256(convert_to(coalesce(jsonb_agg(value)::text,'[]'),'UTF8')),'hex') digest FROM(${sql}) records`)).rows[0]
+  return result
+ }
+ await assertOrdinaryOwner(db)
+ const baseline=await state()
+ const original=(await db.query<{signature:string;metadata:Record<string,unknown>}>(
+  'SELECT p.oid::regprocedure::text signature,to_jsonb(p) metadata FROM pg_proc p WHERE oid=ANY($1::regprocedure[]) ORDER BY signature',[signatures])).rows
+ const defaults=(await db.query('SELECT to_jsonb(d) value FROM pg_default_acl d ORDER BY oid')).rows
+ const refused: Array<{name:string;sql:string;expected:RegExp;marker?:boolean;guardsCurrent?:boolean;snapshotAsBootstrap?:boolean}>=[]
+ for(const signature of signatures){
+  refused.push({name:`${signature} extra principal`,sql:`GRANT EXECUTE ON FUNCTION ${signature} TO legacy_privilege_probe`,expected:/publication_predecessor_changed/})
+  refused.push({name:`${signature} grant option`,sql:`GRANT EXECUTE ON FUNCTION ${signature} TO app_user WITH GRANT OPTION`,expected:/publication_predecessor_changed/})
+ }
+ for(const signature of privateHelpers)refused.push({name:`${signature} PUBLIC execution`,sql:`GRANT EXECUTE ON FUNCTION ${signature} TO PUBLIC`,expected:/publication_predecessor_changed/})
+ refused.push({name:'canonical PUBLIC grant missing',sql:'REVOKE EXECUTE ON FUNCTION file_session_binding_allows(uuid) FROM PUBLIC',expected:/publication_predecessor_changed/})
+ for(const [name,sql] of [
+  ['additional default principal','ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO legacy_privilege_probe'],
+  ['PUBLIC schema default','ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO PUBLIC'],
+  ['default grant option','ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO app_user WITH GRANT OPTION'],
+  ['global default','ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app_user'],
+ ])refused.push({name,sql,expected:/publication_legacy_function_default_changed/})
+ refused.push({name:'installer planner metadata',sql:'ALTER FUNCTION crm_install_erasure_capture() COST 101',expected:/publication_predecessor_changed/})
+ refused.push({name:'constraint namespace differs from named public relation',sql:`RESET ROLE;
+  UPDATE pg_constraint SET connamespace='pg_catalog'::regnamespace WHERE conrelid='public.native_turn_frames'::regclass AND conname='native_turn_frames_pkey';
+  SET ROLE migration_owner`,expected:/publication_constraint_namespace_changed/})
+ const guard=(await db.query<{body:string;definition:string}>("SELECT prosrc body,pg_get_functiondef(oid) definition FROM pg_proc WHERE oid='native_turn_helpers_current()'::regprocedure")).rows[0]
+ refused.push({name:'unknown guard body is refused before execution',sql:`CREATE SEQUENCE public.publication_legacy_unknown_called;
+  CREATE FUNCTION public.publication_legacy_unknown_marker() RETURNS boolean LANGUAGE plpgsql AS $marker$ BEGIN
+   PERFORM nextval('public.publication_legacy_unknown_called');RETURN true;END $marker$;
+  ${guard.definition.replace(guard.body,()=>`SELECT public.publication_legacy_unknown_marker() AND (${guard.body})`)}`,
+  expected:/publication_predecessor_changed/,marker:true})
+ const installerPin=(await db.query<{value:string}>("SELECT encode(sha256(convert_to(to_jsonb(p)::text,'UTF8')),'hex') value FROM pg_proc p WHERE oid='crm_install_erasure_capture()'::regprocedure")).rows[0].value
+ refused.push({name:'unknown original fingerprint consumer',sql:`CREATE SCHEMA publication_legacy_unknown;
+  CREATE FUNCTION publication_legacy_unknown.installer_pin() RETURNS text LANGUAGE sql AS $pin$ SELECT '${installerPin}'::text $pin$`,expected:/publication_unreviewed_pin_consumer: crm_install_erasure_capture/})
+ const markerSql=`CREATE SEQUENCE public.publication_legacy_unknown_called;
+  CREATE FUNCTION public.publication_legacy_unknown_marker() RETURNS boolean LANGUAGE plpgsql AS $marker$ BEGIN
+   PERFORM nextval('public.publication_legacy_unknown_called');RETURN true;END $marker$;`
+ const retained=(await db.query<{body:string;definition:string}>("SELECT prosrc body,pg_get_functiondef(oid) definition FROM pg_proc WHERE oid='native_retained_helpers_current()'::regprocedure")).rows[0]
+ refused.push({name:'retained guard unknown body with coherent self fingerprint',sql:markerSql+
+  retained.definition.replace(retained.body,()=>`SELECT public.publication_legacy_unknown_marker()`)+`;
+
+  UPDATE native_retained_contract_helpers h SET fingerprint=(SELECT encode(sha256(convert_to(to_jsonb(p)::text,'UTF8')),'hex')
+   FROM pg_proc p WHERE p.oid='native_retained_helpers_current()'::regprocedure) WHERE h.signature='native_retained_helpers_current()'`,
+  expected:/publication_retained_guard_changed/,marker:true})
+ refused.push({name:'retained registry forced policy cannot execute before authentication',sql:markerSql+`
+  ALTER TABLE native_retained_contract_helpers FORCE ROW LEVEL SECURITY;
+  CREATE POLICY publication_unknown_policy ON native_retained_contract_helpers USING(public.publication_legacy_unknown_marker())`,
+  expected:/publication_retained_registry_changed/,marker:true,snapshotAsBootstrap:true})
+ refused.push({name:'retained registry has an unreviewed member',sql:`INSERT INTO native_retained_contract_helpers(signature,fingerprint)
+  SELECT 'sensitivity_rank(text)',encode(sha256(convert_to(to_jsonb(p)::text,'UTF8')),'hex') FROM pg_proc p WHERE p.oid='sensitivity_rank(text)'::regprocedure`,
+  expected:/publication_retained_registry_changed/})
+ for(const kind of ['grantee','grantor'] as const){
+  // Corrupt only this synthetic fixture, including its stored local pin: a
+  // display name OWNER must not masquerade as the actual function owner OID.
+  const acl=kind==='grantee'?`ARRAY['=X/migration_owner','"OWNER"=X/migration_owner']::aclitem[]`
+   :`ARRAY['=X/"OWNER"','migration_owner=X/migration_owner']::aclitem[]`
+  refused.push({name:`quoted foreign OWNER ${kind} with coherent registry`,sql:`RESET ROLE;
+   CREATE ROLE "OWNER" NOLOGIN NOSUPERUSER NOBYPASSRLS;
+   UPDATE pg_proc SET proacl=${acl} WHERE oid='file_session_binding_allows(uuid)'::regprocedure;
+   SET ROLE migration_owner;
+   DO $fixture$ DECLARE actual pg_proc;BEGIN
+    SELECT * INTO STRICT actual FROM pg_proc WHERE oid='file_session_binding_allows(uuid)'::regprocedure;
+    UPDATE native_turn_contract_helpers SET contract=actual WHERE signature='file_session_binding_allows(uuid)';
+   END $fixture$`,expected:/publication_predecessor_changed: file_session_binding_allows/,guardsCurrent:true})
+ }
+ for(const scenario of refused)await t.test(`refuses publication inherited profile ${scenario.name} atomically`,async()=>{
+  await db.exec('BEGIN')
+  try{
+   // Only this synthetic corruption fixture uses bootstrap for the catalog
+   // write above; authentication and every migration statement use the owner.
+   await db.exec(scenario.sql);await assertOrdinaryOwner(db)
+   if(scenario.guardsCurrent)assert.deepEqual((await db.query('SELECT native_turn_helpers_current() native,native_turn_publication_contract() publication,native_retained_helpers_current() retained')).rows,[{native:true,publication:true,retained:true}])
+   if(scenario.snapshotAsBootstrap)await db.exec('RESET ROLE')
+   const drifted=await state();await db.exec('SET ROLE migration_owner');await assertOrdinaryOwner(db)
+   await db.exec('SAVEPOINT publication_inherited_attempt')
+   await assert.rejects(db.exec(candidate),scenario.expected)
+   await db.exec('ROLLBACK TO SAVEPOINT publication_inherited_attempt')
+   if(scenario.snapshotAsBootstrap)await db.exec('RESET ROLE')
+   assert.deepEqual(await state(),drifted)
+   await db.exec('SET ROLE migration_owner')
+   if(scenario.marker)assert.equal((await db.query<{is_called:boolean}>('SELECT is_called FROM public.publication_legacy_unknown_called')).rows[0]!.is_called,false)
+  }finally{await db.exec('ROLLBACK')}
+  assert.deepEqual(await state(),baseline)
+ })
+ await t.test('keeps all eight inherited alternatives after genuine post-8269 default cleanup',async()=>{
+  const rollback=new Error('fixture_post8269_default_cleanup_rollback')
+  await assert.rejects(db.transaction(async tx=>{
+   await tx.exec('ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM app_user')
+   assert.deepEqual((await tx.query('SELECT native_turn_helpers_current() native,native_turn_publication_contract() publication,native_retained_helpers_current() retained')).rows,[{native:true,publication:true,retained:true}])
+   const cleanDefaults=(await tx.query('SELECT to_jsonb(d) value FROM pg_default_acl d ORDER BY oid')).rows
+   await tx.exec(candidate)
+   assert.deepEqual((await tx.query('SELECT to_jsonb(d) value FROM pg_default_acl d ORDER BY oid')).rows,cleanDefaults)
+   assert.deepEqual((await tx.query('SELECT native_turn_helpers_current() native,native_turn_publication_contract() publication,native_retained_helpers_current() retained')).rows,[{native:true,publication:true,retained:true}])
+   const redundant=(await tx.query(`SELECT count(*)::int count FROM pg_proc p CROSS JOIN LATERAL aclexplode(p.proacl) a
+    WHERE p.oid=ANY($1::regprocedure[]) AND a.grantee='app_user'::regrole`,[signatures])).rows[0]
+   assert.deepEqual(redundant,{count:0})
+   throw rollback
+  }),error=>error===rollback)
+  assert.deepEqual(await state(),baseline)
+ })
+ await t.test('rolls back inherited ACL repair if a private successor gains runtime access',async()=>{
+  const marker='CREATE TEMP TABLE publication_source_functions('
+  assert.equal(candidate.split(marker).length,2)
+  const variant=candidate.replace(marker,`GRANT EXECUTE ON FUNCTION native_conversation_publication_scope(uuid,uuid) TO app_user;\n${marker}`)
+  await assert.rejects(db.transaction(tx=>tx.exec(variant)),/publication_source_successor_changed/)
+  assert.deepEqual(await state(),baseline)
+ })
+ assert.equal(await migratePglite(db,migrationsDir,{through:migration}),1)
+ assert.equal(await migratePglite(db,migrationsDir,{through:migration}),0)
+ assert.deepEqual((await db.query('SELECT to_jsonb(d) value FROM pg_default_acl d ORDER BY oid')).rows,defaults)
+ const installed=(await db.query<{signature:string;metadata:Record<string,unknown>}>(
+  'SELECT p.oid::regprocedure::text signature,to_jsonb(p) metadata FROM pg_proc p WHERE oid=ANY($1::regprocedure[]) ORDER BY signature',[signatures])).rows
+ assert.equal(installed.length,8)
+ for(const row of installed){
+  const prior=original.find(item=>item.signature===row.signature)!
+  assert.deepEqual({...row.metadata,proacl:prior.metadata.proacl},prior.metadata)
+  const grants=(await db.query<{grantee:string;grantor:string;grantable:boolean}>(`SELECT CASE WHEN a.grantee=p.proowner THEN 'OWNER'
+   WHEN a.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END grantee,
+   CASE WHEN a.grantor=p.proowner THEN 'OWNER' ELSE pg_get_userbyid(a.grantor) END grantor,a.is_grantable grantable
+   FROM pg_proc p CROSS JOIN LATERAL aclexplode(p.proacl) a WHERE p.oid=$1::regprocedure ORDER BY 1`,[row.signature])).rows
+  assert.deepEqual(grants,[{grantee:'OWNER',grantor:'OWNER',grantable:false},
+   ...(publicHelpers.includes(row.signature)?[{grantee:'PUBLIC',grantor:'OWNER',grantable:false}]:[])])
+  assert.equal((await db.query<{allowed:boolean}>("SELECT has_function_privilege('app_user',$1::regprocedure,'EXECUTE') allowed",[row.signature])).rows[0].allowed,publicHelpers.includes(row.signature))
+ }
+ assert.deepEqual((await db.query('SELECT native_turn_helpers_current() native,native_turn_publication_contract() publication,native_retained_helpers_current() retained')).rows,[{native:true,publication:true,retained:true}])
+}
+
 async function assertMigrationSecurity(db: PGlite, forceSkillScopeRls: boolean): Promise<void> {
   assert.deepEqual(
     (await db.query(
@@ -476,7 +627,8 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
           assert.deepEqual(await snapshots(),before)
         }finally{await db.exec('ROLLBACK')}
       })
-      await migratePglite(db, migrationsDir)
+      // Historical repair idempotence belongs to its last supported cohort.
+      await migratePglite(db, migrationsDir, {through:'8268_private_transcript_preparation_eligibility.sql'})
       const mutationAfter=(await db.query<{raw:Record<string,unknown>}>(
         'SELECT to_jsonb(p) raw FROM pg_proc p WHERE oid=$1::regprocedure',[mutationHelper])).rows[0].raw
       assert.deepEqual({...mutationAfter,proacl:mutationBefore.raw.proacl},mutationBefore.raw)
@@ -505,7 +657,7 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
       const queryInstalled = await snapshots()
       await db.transaction(async tx => { await tx.exec(querySql) })
       assert.deepEqual(await snapshots(), queryInstalled)
-      assert.deepEqual((await db.query('SELECT application_native_session_query_acquisition_current() AS current')).rows, [{ current: true }])
+      assert.deepEqual((await db.query('SELECT native_turn_helpers_current() AS current')).rows, [{ current: true }])
       const upgraded = await snapshots()
       await db.transaction(async tx => { await tx.exec(captureSql) })
       assert.deepEqual(await snapshots(), upgraded)
@@ -518,9 +670,201 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
       await db.transaction(async (tx) => { await tx.exec(sql) })
       assert.deepEqual(await snapshots(), before)
       await db.exec('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO app_user')
-      const withLegacyDefault = await snapshots()
-      await assert.rejects(db.transaction(async (tx) => { await tx.exec(sql) }), /Memory guard already installed/)
-      assert.deepEqual(await snapshots(), withLegacyDefault)
+      try {
+        const withLegacyDefault = await snapshots()
+        await assert.rejects(db.transaction(async (tx) => { await tx.exec(sql) }), /Memory guard already installed/)
+        assert.deepEqual(await snapshots(), withLegacyDefault)
+        await migratePglite(db, migrationsDir, {through:'8271_refresh_recovery_capture.sql'})
+        await assertPublicationLegacyAclUpgrade(db,t)
+      } finally {
+        // The negative probe and 8269 compatibility cases deliberately model
+        // restored historical defaults. Normal forward replay continues with
+        // the post-81110 function default profile.
+        await db.exec('ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM app_user')
+      }
+      // Diagnose/qualify the exact historical Page reader before the ordered
+      // 82775 privilege prerequisite. Its known 725 body must not be replaced
+      // or repinned merely to repair an inherited owner-issued runtime ACL.
+      await migratePglite(db,migrationsDir,{through:'8276_registry_guard_successor.sql'})
+      const pagePredecessor=(await db.query<{body_hash:string;acl:unknown}>(`SELECT encode(sha256(convert_to(p.prosrc,'UTF8')),'hex') body_hash,
+        p.proowner::regrole::text owner,to_jsonb(p)-ARRAY['oid','prosrc','pronamespace','proowner','prolang','proargtypes','prorettype'] metadata,
+        (SELECT jsonb_agg(jsonb_build_object('grantee',CASE WHEN a.grantee=0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END,
+          'grantor',a.grantor::regrole::text,'privilege',a.privilege_type,'grantable',a.is_grantable) ORDER BY a.grantee)
+         FROM aclexplode(p.proacl) a) acl
+        FROM pg_proc p WHERE p.oid='public.read_page_event_authority(uuid,uuid,uuid)'::regprocedure`)).rows[0]
+      t.diagnostic('page_authority_historical_predecessor '+JSON.stringify(pagePredecessor))
+      assert.equal(pagePredecessor.body_hash,'454fb6f2dc1dd89dbf7cc8d46c0ceb3e8ac11fa19eb25c4053fcb153f024e79b')
+      assert.deepEqual(pagePredecessor.acl,[
+        {grantee:'app_user',grantor:'migration_owner',privilege:'EXECUTE',grantable:false},
+        {grantee:'migration_owner',grantor:'migration_owner',privilege:'EXECUTE',grantable:false},
+      ])
+      const pageRepair='82775_legacy_page_authority_privileges.sql'
+      const pageOrdered=(await readdir(migrationsDir)).filter(name=>name.endsWith('.sql')).sort()
+      assert.equal(pageOrdered[pageOrdered.indexOf(pageRepair)-1],'8276_registry_guard_successor.sql')
+      assert.equal(pageOrdered[pageOrdered.indexOf(pageRepair)+1],'8277_durable_turn_completions.sql')
+      const pageBefore=(await db.query<{value:{proacl:string[]}}>('SELECT to_jsonb(p) value FROM pg_proc p WHERE oid=$1::regprocedure',
+        ['read_page_event_authority(uuid,uuid,uuid)'])).rows[0].value
+      assert.equal(await migratePglite(db,migrationsDir,{through:pageRepair}),1)
+      const pageAfter=(await db.query<{value:{proacl:string[]}}>('SELECT to_jsonb(p) value FROM pg_proc p WHERE oid=$1::regprocedure',
+        ['read_page_event_authority(uuid,uuid,uuid)'])).rows[0].value
+      assert.deepEqual({...pageAfter,proacl:pageBefore.proacl},pageBefore)
+      assert.deepEqual(pageAfter.proacl,['migration_owner=X/migration_owner'])
+      assert.equal(await migratePglite(db,migrationsDir,{through:pageRepair}),0)
+      // Historical default grants use app-first order. The exact 82860
+      // prerequisite repairs the tuple and its authenticated consumers before
+      // executing the unchanged 8286 title admission migration.
+      const titleRepair='82860_legacy_title_admission_privilege_order.sql'
+      const titleSuccessor='8286_title_revision_admission.sql'
+      const titleSignature='public.session_context_revision_allowed(uuid,uuid)'
+      const titleOrdered=(await readdir(migrationsDir)).filter(name=>name.endsWith('.sql')).sort()
+      assert.equal(titleOrdered[titleOrdered.indexOf(titleRepair)-1],'8285_owner_forced_rls_retirement.sql')
+      assert.equal(titleOrdered[titleOrdered.indexOf(titleRepair)+1],titleSuccessor)
+      await migratePglite(db,migrationsDir,{through:'8285_owner_forced_rls_retirement.sql'})
+      const titleSql=toPgliteMigrationSql(await readFile(`${migrationsDir}/${titleRepair}`,'utf8'),titleRepair)
+      const actualTitle=async()=> (await db.query<{metadata:Record<string,unknown>;fingerprint:string}>(`SELECT
+        to_jsonb(p) metadata,encode(sha256(convert_to(to_jsonb(p)::text,'UTF8')),'hex') fingerprint
+        FROM pg_proc p WHERE p.oid=$1::regprocedure`,[titleSignature])).rows[0]
+      const titlePhysicalState=async()=> ({
+        routines:(await db.query<{signature:string;xmin:string;ctid:string;fingerprint:string}>(`SELECT p.oid::regprocedure::text signature,p.xmin::text xmin,p.ctid::text ctid,
+          encode(sha256(convert_to(to_jsonb(p)::text,'UTF8')),'hex') fingerprint
+          FROM pg_proc p WHERE p.pronamespace='public'::regnamespace ORDER BY p.oid`)).rows,
+        native:(await db.query(`SELECT signature,xmin::text,ctid::text,encode(sha256(convert_to(to_jsonb(h.contract)::text,'UTF8')),'hex') fingerprint
+          FROM native_turn_contract_helpers h ORDER BY signature COLLATE "C"`)).rows,
+        retained:(await db.query('SELECT *,xmin::text,ctid::text FROM native_retained_contract_helpers ORDER BY signature COLLATE "C"')).rows,
+        witness:(await db.query('SELECT to_jsonb(w) witness,xmin::text,ctid::text FROM native_turn_contract_witness w')).rows,
+        ledger:(await db.query('SELECT * FROM _migrations ORDER BY name')).rows,
+      })
+      const historicalTitle=await actualTitle()
+      assert.deepEqual(historicalTitle.metadata.proacl,['app_user=X/migration_owner','migration_owner=X/migration_owner'])
+      const titleTampering=[
+        {name:'different title metadata',sql:`ALTER FUNCTION ${titleSignature} COST 101`,error:/title_acl_prerequisite_contract_changed/},
+        {name:'grant option',sql:`GRANT EXECUTE ON FUNCTION ${titleSignature} TO app_user WITH GRANT OPTION`,error:/title_acl_prerequisite_contract_changed/},
+        {name:'unreviewed fingerprint reader',sql:`CREATE FUNCTION public.fictional_title_privilege_pin() RETURNS text LANGUAGE SQL AS
+          'SELECT ''${historicalTitle.fingerprint}''::text'`,error:/conversion_unreviewed_original_pin_consumer/},
+      ]
+      for(const scenario of titleTampering)await t.test(`refuses historical title ${scenario.name} atomically`,async()=>{
+        await db.exec('BEGIN')
+        try{
+          await db.exec(scenario.sql)
+          const before=await titlePhysicalState()
+          await db.exec('SAVEPOINT unrecognized_title_prerequisite')
+          await assert.rejects(db.exec(titleSql),scenario.error)
+          await db.exec('ROLLBACK TO SAVEPOINT unrecognized_title_prerequisite')
+          assert.deepEqual(await titlePhysicalState(),before)
+        }finally{await db.exec('ROLLBACK')}
+      })
+      const beforeTitleRepair=await titlePhysicalState()
+      assert.equal(await migratePglite(db,migrationsDir,{through:titleRepair}),1)
+      const canonicalTitle=await actualTitle(), afterTitleRepair=await titlePhysicalState()
+      assert.deepEqual({...canonicalTitle.metadata,proacl:historicalTitle.metadata.proacl},historicalTitle.metadata)
+      assert.deepEqual(canonicalTitle.metadata.proacl,['migration_owner=X/migration_owner','app_user=X/migration_owner'])
+      const priorPins=new Map(beforeTitleRepair.routines.map(row=>[row.signature,row.fingerprint]))
+      const changedRoutines=afterTitleRepair.routines.filter(row=>priorPins.get(row.signature)!==row.fingerprint).map(row=>row.signature)
+      assert.ok(changedRoutines.includes('session_context_revision_allowed(uuid,uuid)'))
+      assert.ok(changedRoutines.includes('application_native_title_group_helpers_current()'))
+      t.diagnostic('title_acl_repaired_catalog_members '+JSON.stringify(changedRoutines))
+      const noWriteTitleRepair=async()=>{
+        const before=await titlePhysicalState()
+        await db.transaction(tx=>tx.exec(titleSql))
+        assert.deepEqual(await titlePhysicalState(),before)
+      }
+      await noWriteTitleRepair()
+      assert.equal(await migratePglite(db,migrationsDir,{through:titleSuccessor}),1)
+      await noWriteTitleRepair()
+      const derivationMembers = [
+        'application_patch_canonical_task(uuid,uuid,jsonb,text,jsonb)',
+        'create_source_derived_entity_before_capture(jsonb,jsonb)',
+        'create_source_derived_file(jsonb,jsonb)',
+      ]
+      const configuredMembers = [
+        'application_recheck_native_task_sources()',
+        'check_programmatic_publication_commit()',
+      ]
+      const appGrant = 'app_user=X/migration_owner'
+      const ownerGrant = 'migration_owner=X/migration_owner'
+      const publicGrant = '=X/migration_owner'
+      const finalUpgradeState = async (members: readonly string[]) => ({
+        routines: (await db.query<{
+          signature: string; oid: string; acl: string[]; body: string; metadata: Record<string,unknown>; deps: unknown
+        }>(`SELECT p.oid::regprocedure::text signature,p.oid::text oid,p.proacl::text[] acl,p.prosrc body,
+          to_jsonb(p)-ARRAY['prosrc','proacl'] metadata,
+          (SELECT jsonb_agg(to_jsonb(d) ORDER BY d.classid,d.objid,d.refclassid,d.refobjid) FROM pg_depend d
+           WHERE (d.classid='pg_proc'::regclass AND d.objid=p.oid) OR (d.refclassid='pg_proc'::regclass AND d.refobjid=p.oid)) deps
+          FROM pg_proc p WHERE p.oid=ANY($1::regprocedure[]) ORDER BY signature`, [members])).rows,
+        ledger: (await db.query('SELECT name FROM _migrations ORDER BY name')).rows,
+        defaults: (await db.query(`SELECT to_jsonb(d) FROM pg_default_acl d WHERE d.defaclobjtype='f'
+          AND d.defaclrole=current_user::regrole::oid AND d.defaclnamespace IN (0,'public'::regnamespace)`)).rows,
+      })
+      const rejectsFinalUpgrade = async (file: string, members: readonly string[], setup: string, error: RegExp) => {
+        const original = await finalUpgradeState(members)
+        const executable = toPgliteMigrationSql(await readFile(`${migrationsDir}/${file}`,'utf8'),file)
+        await db.exec('BEGIN')
+        try {
+          await db.exec(setup)
+          const tampered = await finalUpgradeState(members)
+          await db.exec('SAVEPOINT final_upgrade_refusal')
+          await assert.rejects(db.exec(executable), error)
+          await db.exec('ROLLBACK TO SAVEPOINT final_upgrade_refusal')
+          assert.deepEqual(await finalUpgradeState(members), tampered)
+        } finally { await db.exec('ROLLBACK') }
+        assert.deepEqual(await finalUpgradeState(members), original)
+      }
+      const assertFinalUpgradeMembers = async (file: string, members: readonly string[], old: string[][], installed: string[][],
+        changedConfigs: Record<string,string[]> = {}) => {
+        const before = await finalUpgradeState(members)
+        assert.deepEqual(before.defaults, [])
+        assert.deepEqual(before.routines.map(row => row.acl), old)
+        assert.equal(await migratePglite(db,migrationsDir,{through:file}),1)
+        const after = await finalUpgradeState(members)
+        assert.deepEqual(after.defaults, before.defaults)
+        assert.deepEqual(after.routines.map(row => row.acl), installed)
+        assert.deepEqual(after.routines.map(({oid,metadata,deps})=>({oid,metadata,deps})),
+          before.routines.map(({oid,metadata,deps,signature})=>({
+            oid, metadata: changedConfigs[signature] ? {...metadata,proconfig:changedConfigs[signature]} : metadata, deps,
+          })))
+        assert.ok(after.routines.every((row,i)=>row.body!==before.routines[i].body))
+      }
+      const participationRetirement = '8290_participation_read_retirement.sql'
+      await migratePglite(db,migrationsDir,{through:'8289_fused_admission.sql'})
+      await t.test('refuses historical participation retirement with changed metadata or an active legacy default',async()=>{
+        await rejectsFinalUpgrade(participationRetirement,derivationMembers,
+          `ALTER FUNCTION public.${derivationMembers[1]} COST 101`,/participation_retirement_unverified_historical_acl_profile/)
+        await rejectsFinalUpgrade(participationRetirement,derivationMembers,
+          'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO app_user',
+          /participation_retirement_unverified_historical_acl_profile/)
+      })
+      await assertFinalUpgradeMembers(participationRetirement,derivationMembers,
+        [[appGrant,ownerGrant],[publicGrant,appGrant,ownerGrant],[publicGrant,appGrant,ownerGrant]],
+        [[ownerGrant,appGrant],[publicGrant,ownerGrant],[publicGrant,ownerGrant]])
+
+      const configuredPublication = '8296_configured_task_publication.sql'
+      await migratePglite(db,migrationsDir,{through:'8295_conversation_envelope_foundation.sql'})
+      await t.test('refuses mixed ACLs, grant options and unknown configured task trigger edges atomically',async()=>{
+        await rejectsFinalUpgrade(configuredPublication,configuredMembers,
+          `REVOKE EXECUTE ON FUNCTION public.${configuredMembers[0]} FROM app_user`,
+          /configured_task_unverified_historical_source_acl/)
+        await rejectsFinalUpgrade(configuredPublication,configuredMembers,
+          `GRANT EXECUTE ON FUNCTION public.${configuredMembers[1]} TO app_user WITH GRANT OPTION`,
+          /configured_task_source_member_changed/)
+        await rejectsFinalUpgrade(configuredPublication,configuredMembers,
+          `CREATE TRIGGER unknown_task_source AFTER UPDATE ON public.tasks FOR EACH ROW EXECUTE FUNCTION public.${configuredMembers[0]}`,
+          /configured_task_unverified_historical_source_dependencies/)
+      })
+      await assertFinalUpgradeMembers(configuredPublication,configuredMembers,
+        [[appGrant,ownerGrant],[publicGrant,appGrant,ownerGrant]],[[ownerGrant],[ownerGrant]],
+        {'check_programmatic_publication_commit()':['search_path=pg_catalog, public, pg_temp']})
+      await migratePglite(db, migrationsDir)
+      await noWriteTitleRepair()
+      assert.equal(await migratePglite(db, migrationsDir), 0)
+      assert.deepEqual((await db.query(`SELECT
+        to_regprocedure('public.application_native_session_query_acquisition_current()') retired,
+        has_function_privilege('app_user','public.capture_conversation_query(uuid,uuid,integer,integer)','EXECUTE') readable,
+        has_function_privilege('app_user','public.capture_conversation_selection(uuid,uuid,text,integer,text[],jsonb,jsonb,jsonb)','EXECUTE') private_exposed`)).rows,
+      [{retired:null,readable:true,private_exposed:false}])
+      assert.deepEqual((await db.query(`SELECT native_turn_helpers_current() current,
+        to_regprocedure('application_memory_statement_helpers_current()') retired,
+        has_function_privilege('app_user','read_native_session_query_cohort_nodes(uuid,jsonb)','EXECUTE') exposed`)).rows,
+      [{current:true,retired:null,exposed:false}])
     } finally {
       await db.close()
     }

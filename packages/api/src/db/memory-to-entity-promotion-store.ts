@@ -2,8 +2,8 @@ import type {
   MemoryForPromotion,
   EntitySnapshotForPromotion,
   MemoryToEntityPromotionPorts,
-} from '@use-brian/core'
-import type { Sensitivity } from '@use-brian/core'
+} from '@use-brian/core/corrections/memory-to-entity-promotion.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { query } from './client.js'
 import { supersedeEntity as dbSupersedeEntity } from './entities-store.js'
 

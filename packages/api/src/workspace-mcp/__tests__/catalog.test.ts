@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import {
-  buildTool, createExecutionContext, executionToolContext, ContextScopeAccumulator,
-  type Tool, type ToolContext,
-} from '@use-brian/core'
+  createExecutionContext,
+  executionToolContext,
+} from '@use-brian/agent-runtime/security/execution-context.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { createAuthorityLease } from '../../context-scope/authority-lease.js'
 import { currentAgentAccess } from '../../db/agent-access-context.js'
 import { buildWorkspaceMcpCatalog } from '../catalog.js'

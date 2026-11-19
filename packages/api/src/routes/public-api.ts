@@ -30,20 +30,18 @@
 
 import { Router } from 'express'
 import { z } from 'zod'
-import type {
-  LLMProvider,
-  Tool,
-  MemoryStore,
-  UsageStore,
-  CapabilityStore,
-  KnowledgeStoreInterface,
-  AnalyticsLogger,
-  EpisodicStore,
-  SessionStateStore,
-  McpSettingsStore,
-  GDriveFilesStore,
-} from '@use-brian/core'
-import type { EngineHooks } from '@use-brian/core'
+import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
+import type { McpSettingsStore } from '@use-brian/agent-runtime/mcp/types.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
+import type { AnalyticsLogger } from '@use-brian/core/analytics/logger.js'
+import type { CapabilityStore } from '@use-brian/core/authorization/types.js'
+import type { KnowledgeStoreInterface } from '@use-brian/core/knowledge/types.js'
+import type { EpisodicStore } from '@use-brian/core/memory/episodic-types.js'
+import type { SessionStateStore } from '@use-brian/core/memory/session-state-types.js'
+import type { MemoryStore } from '@use-brian/core/memory/types.js'
+import type { GDriveFilesStore } from '@use-brian/core/tools/base/gdrive-files.js'
+import type { EngineHooks } from '@use-brian/agent-runtime/engine/hooks.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
@@ -54,6 +52,7 @@ import {
   verifySecret,
   type ApiKeyStore,
 } from '../db/api-key-store.js'
+import { publicApiKeyCredential } from '../db/public-conversation.js'
 import {
   executePublicTurn,
   handlePublicHistory,
@@ -64,6 +63,8 @@ import { getWorkspaceMembershipSystem } from '../db/workspace-store.js'
 
 export type PublicApiRouteOptions = {
   provider: LLMProvider
+  /** Session live-event bus for the public lane's stale-takeover notice. */
+  publishSessionEvent?: import('../session-event-port.js').PublishSessionEvent
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
   /** Provider names configured at boot — substitutes a servable model when the
    *  resolved default (Gemini) has no key. See `ensureServableModel`. */
@@ -103,7 +104,7 @@ export type PublicApiRouteOptions = {
   /** Workspace-files byte layer — `gmailSendMessage` attachments (forwarded
    *  via `applyMcpInjection`; the confirmation-strip below still drops the
    *  send tool on this surface, so this is parity plumbing). */
-  filesApi?: import('@use-brian/core').FilesApi
+  filesApi?: import('@use-brian/core/workspace-files/api.js').FilesApi
   /**
    * Per-assistant connector WRITE grants — `assertActionAllowed` in the
    * Gmail/GCal write callbacks fires only when this store is present (the
@@ -381,6 +382,7 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
           {
             assistantId: req.params.assistantId,
             identityNamespace: `api:${keyRow.id}`,
+            credential: publicApiKeyCredential(keyRow),
             body,
             contextScope: 'internal-member',
             internalActor: { email: body.actorEmail ?? null, defaultUserId: keyRow.createdBy },
@@ -419,6 +421,7 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
         {
           assistantId: req.params.assistantId,
           identityNamespace: `api:${keyRow.id}`,
+          credential: publicApiKeyCredential(keyRow),
           body,
           contextScope: fullAnonymousLane ? 'assistant-full' : undefined,
           toolPolicy: keyRow.toolPolicy,
@@ -483,6 +486,7 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
           assistantId: req.params.assistantId,
           identityNamespace: `api:${keyRow.id}`,
           externalUserId: q.externalUserId,
+          credential: publicApiKeyCredential(keyRow),
           sessionId: q.sessionId,
           limit: q.limit ?? 100,
           resolvedUserId,

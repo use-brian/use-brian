@@ -1,7 +1,7 @@
 /** Sign the final MCP HTTP envelope, including SDK-auth header merges. [COMP:api/connector-actor-context] */
 import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { CONNECTOR_ACTOR_HEADER } from '@use-brian/brian-app/connector'
-import type { ExecutionContext } from '@use-brian/core'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { ApplicationPlatformError } from '@use-brian/shared'
 import { actorIdentityHeaders, isReservedConnectorHeader, isValidHeaderValue, type ActorIdentity } from '../mcp/auth-headers.js'
 import { mintConnectorActorAssertion, type ConnectorActorBinding, type ConnectorActorMintingPorts } from './connector-actor-context.js'

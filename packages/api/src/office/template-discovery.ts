@@ -1,5 +1,7 @@
 /** Published template discovery for chat. [COMP:api/office-template-discovery] */
-import { canRead, scopeGrantContains, scopeEvidenceFromRows, type OfficeToolPort, type OfficePublishedTemplate } from '@use-brian/core'
+import type { OfficeToolPort, OfficePublishedTemplate } from '@use-brian/core/office/tools.js'
+import { scopeGrantContains, scopeEvidenceFromRows } from '@use-brian/agent-runtime/security/context-scope.js'
+import { canRead } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { defaultOfficeDbQuery, type OfficeDbQuery } from '../db/office-artifacts.js'
 
 type Scope = { sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[] }

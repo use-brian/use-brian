@@ -1,11 +1,14 @@
 /** Canonical generated annotations, separate from authored bodies. [COMP:api/session-message-annotations] */
 import { z } from 'zod'
-import { bindScopeSources,boundScopeSources,DerivedScopeError,type SessionContextAuthority,type TopicClassification } from '@use-brian/core'
+import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
+import type { TopicClassification } from '@use-brian/core/memory/topic-classifier.js'
+import { DerivedScopeError } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { readSessionContextRevisions,writeSessionContextRevision,prepareSessionContextRevision,type SessionContextRevision } from './session-context-revisions.js'
-const payload=z.object({topicLabel:z.string().min(1).max(200),topicConfidence:z.number().finite().min(0).max(1),replyToText:z.string().max(8000).nullable()}).strict()
+export const sessionMessageAnnotationPayloadSchema=z.object({topicLabel:z.string().min(1).max(200),topicConfidence:z.number().finite().min(0).max(1),replyToText:z.string().max(8000).nullable()}).strict()
 export type SessionMessageAnnotation={messageId:string;sessionId:string;revisionId:string;topicLabel:string;topicConfidence:number;replyToText:string|null}
 function record(row:SessionContextRevision):SessionMessageAnnotation {
- return bindScopeSources({messageId:row.parentId,sessionId:row.sessionId,revisionId:row.id,...payload.parse(row.content)},boundScopeSources(row))
+ return bindScopeSources({messageId:row.parentId,sessionId:row.sessionId,revisionId:row.id,...sessionMessageAnnotationPayloadSchema.parse(row.content)},boundScopeSources(row))
 }
 type AnnotationInput={sessionId:string;messageId:string;classification:TopicClassification;replyToText:string|null;
  authority?:SessionContextAuthority;expectedRevision?:string}
@@ -13,7 +16,7 @@ function annotationCommand(input:AnnotationInput){
  const sources=boundScopeSources(input.classification)
  if(!input.authority || !sources.length)throw new DerivedScopeError('scope_evidence_missing')
  const marker='[truncated]',reply=input.replyToText
- const content=payload.parse({topicLabel:input.classification.topic_label,topicConfidence:input.classification.confidence,
+ const content=sessionMessageAnnotationPayloadSchema.parse({topicLabel:input.classification.topic_label,topicConfidence:input.classification.confidence,
   replyToText:reply && reply.length>8000 ? reply.slice(0,8000-marker.length)+marker : reply})
  return{sessionId:input.sessionId,parentId:input.messageId,kind:'message_annotation' as const,content,
   authority:input.authority,expectedRevision:input.expectedRevision,derivation:{producer:'session:message-annotation',sources}}

@@ -4,6 +4,7 @@ import pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 // @ts-expect-error The disposable fixture is a repository-local JS utility.
 import { assertLocalFixture } from '../../../../../scripts/crm/local-fixture.mjs'
+import { connectActingAs, createOwnedScratchDatabase } from '../../__tests__/fixtures/bootstrap-role.js'
 
 /** Applies the open migration files in runner order (one name-sorted sequence,
  * as `scripts/migration-order.ts`) up to and including `last`. */
@@ -76,13 +77,13 @@ describe('workspace access modes M1 PostgreSQL foundation', () => {
     // dropped and replayed inside the fully migrated fixture. Replay the real
     // open migrations through 620 into a disposable database, populate the
     // legacy shape there, then apply the real 621 file.
+    // The bootstrap role creates the scratch database for the ordinary owner,
+    // like the maintained fixture; the replay and upgrade run as that owner.
     const scratch = `access_upgrade_${randomUUID().replaceAll('-', '')}`
     await db.query('ROLLBACK')
-    await db.query(`CREATE DATABASE ${scratch}`)
+    const scratchDatabase = await createOwnedScratchDatabase(scratch)
     await db.query('BEGIN')
-    const url = new URL(process.env.DATABASE_URL!)
-    url.pathname = `/${scratch}`
-    const hist = new pg.Client({ connectionString: url.toString() })
+    const hist = new pg.Client({ connectionString: scratchDatabase.url })
     await hist.connect()
     const main = db
     try {
@@ -112,7 +113,7 @@ describe('workspace access modes M1 PostgreSQL foundation', () => {
       db = main
       await hist.end()
       await main.query('ROLLBACK')
-      await main.query(`DROP DATABASE IF EXISTS ${scratch}`)
+      await scratchDatabase.dispose()
       await main.query('BEGIN')
     }
   }, 300_000)
@@ -189,24 +190,36 @@ describe('workspace access modes M1 PostgreSQL foundation', () => {
   })
 
   it('denies outsider reads and writes under a real non-bypass role; admins can read but not write', async () => {
-    const f = await workspace(), p = await plan(f.w,f.owner), i = await item(f.w,p.id,f.owner), outsider = await user()
-    expect(await row(`SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname='app_user'`)).toEqual({rolsuper:false,rolbypassrls:false})
-    await query(`SET LOCAL ROLE app_user`)
-    await query(`SELECT set_config('app.system_bypass','false',true),set_config('app.current_user_id',$1,true)`,[outsider])
-    for (const [table,id] of [['workspace_access_migration_plans',p.id],['workspace_access_migration_items',i.id]]) {
-      expect((await query(`SELECT * FROM ${table} WHERE id=$1`,[id])).rows).toEqual([])
-      expect((await query(`UPDATE ${table} SET status='cancelled' WHERE id=$1`,[id])).rowCount).toBe(0)
-      expect((await query(`DELETE FROM ${table} WHERE id=$1`,[id])).rowCount).toBe(0)
+    // Only a bootstrap session user may switch to app_user. That session acts as
+    // the ordinary owner for the fixture rows and returns to it afterwards.
+    const main = db, session = await connectActingAs()
+    db = session.client
+    try {
+      await query('BEGIN')
+      const f = await workspace(), p = await plan(f.w,f.owner), i = await item(f.w,p.id,f.owner), outsider = await user()
+      expect(await row(`SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname='app_user'`)).toEqual({rolsuper:false,rolbypassrls:false})
+      expect(await row('SELECT current_user AS role')).toEqual({ role: session.role })
+      await query(`SET LOCAL ROLE app_user`)
+      await query(`SELECT set_config('app.system_bypass','false',true),set_config('app.current_user_id',$1,true)`,[outsider])
+      for (const [table,id] of [['workspace_access_migration_plans',p.id],['workspace_access_migration_items',i.id]]) {
+        expect((await query(`SELECT * FROM ${table} WHERE id=$1`,[id])).rows).toEqual([])
+        expect((await query(`UPDATE ${table} SET status='cancelled' WHERE id=$1`,[id])).rowCount).toBe(0)
+        expect((await query(`DELETE FROM ${table} WHERE id=$1`,[id])).rowCount).toBe(0)
+      }
+      await query('SAVEPOINT outsider_insert')
+      await expect(item(f.w,p.id,f.owner)).rejects.toThrow(/row-level security/)
+      await query('ROLLBACK TO SAVEPOINT outsider_insert')
+      await query(`SELECT set_config('app.current_user_id',$1,true)`,[f.owner])
+      for (const table of ['workspace_access_migration_plans','workspace_access_migration_items']) {
+        expect((await query(`SELECT * FROM ${table} WHERE workspace_id=$1`,[f.w])).rowCount).toBe(1)
+        expect((await query(`UPDATE ${table} SET status='cancelled' WHERE workspace_id=$1`,[f.w])).rowCount).toBe(0)
+      }
+      await session.actAs()
+    } finally {
+      await query('ROLLBACK')
+      db = main
+      await session.client.end()
     }
-    await query('SAVEPOINT outsider_insert')
-    await expect(item(f.w,p.id,f.owner)).rejects.toThrow(/row-level security/)
-    await query('ROLLBACK TO SAVEPOINT outsider_insert')
-    await query(`SELECT set_config('app.current_user_id',$1,true)`,[f.owner])
-    for (const table of ['workspace_access_migration_plans','workspace_access_migration_items']) {
-      expect((await query(`SELECT * FROM ${table} WHERE workspace_id=$1`,[f.w])).rowCount).toBe(1)
-      expect((await query(`UPDATE ${table} SET status='cancelled' WHERE workspace_id=$1`,[f.w])).rowCount).toBe(0)
-    }
-    await query('RESET ROLE')
   })
 
   it('allows workspace deletion to cascade through a Simple default, admissions, plans and items', async () => {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { sanitizeUnicode, sanitizeDeep, redactSecrets, containsSecrets } from '../sanitize.js'
+import { sanitizeUnicode, sanitizeDeep, redactSecrets, containsSecrets } from '@use-brian/agent-runtime/security/sanitize.js'
 import { createRateLimiter } from '../rate-limiter.js'
 
 describe('[COMP:security/sanitize] sanitizeUnicode', () => {

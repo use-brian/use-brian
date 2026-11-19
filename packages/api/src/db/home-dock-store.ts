@@ -13,7 +13,7 @@
  * [COMP:api/home-dock-store]
  */
 
-import { homeDockLayoutSchema, type HomeDockStore } from '@use-brian/core'
+import { homeDockLayoutSchema, type HomeDockStore } from '@use-brian/core/home/types.js'
 import { queryWithRLS } from './client.js'
 
 export function createDbHomeDockStore(): HomeDockStore {

@@ -1,6 +1,6 @@
 /** Bounded, non-ingested CRM submission image normalization. [COMP:crm/submission-attachments] */
 import { createHash } from 'node:crypto'
-import sharp from 'sharp'
+import { lazyImplementation } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
 import {
   CrmOperationsError,
   type CrmIntakeAttachmentPolicy,
@@ -15,6 +15,10 @@ export type PreparedCrmSubmissionAttachment = {
   sizeBytes: number
   sha256: string
 }
+
+// The image normalizer loads on the first submission with attachments, not
+// when the CRM operations service is built (M4 step 5, D13).
+const loadSharp = lazyImplementation('The image normalizer (sharp)', () => import('sharp').then((m) => m.default))
 
 const formats = {
   'image/jpeg': 'jpeg',
@@ -37,6 +41,8 @@ async function normalize(
   if (input.length > policy.maxBytes) invalid('Attachment exceeds its configured byte limit.', attachment.key)
   if (!policy.mimeTypes.includes(attachment.mimeType)) invalid('Attachment MIME type is not allowed.', attachment.key)
 
+  // Outside the catch below: an unavailable normalizer is not an invalid image.
+  const sharp = await loadSharp()
   let output: Buffer
   try {
     const image = sharp(input, { failOn: 'warning', limitInputPixels: 25_000_000, sequentialRead: true }).rotate()

@@ -319,12 +319,14 @@ export function MobileChatDrawer({
           </header>
         </div>
         <div className="min-h-0 flex-1 border-t border-border">
-          {/* Only mount the chat once the sheet has been opened —
-              `<FloatingChat>` boots a session, fetches history, and
-              subscribes to events. Lazily mounting avoids paying that
-              cost on every page load. Once mounted it stays mounted so
-              state survives subsequent open/close cycles. `hideHeader`
-              drops its internal header — this sheet supplies its own. */}
+          {/* Only mount the chat once the sheet has been opened. The inner
+              `<FloatingChat>` attaches as another presentation of the doc
+              thread's one conversation-registry entry (M5), so opening the
+              sheet, or resizing below `lg` mid-turn, shows the same live
+              turn, queue and draft as the desktop dock: no second stream or
+              history fetch. Once mounted it stays mounted so its composer
+              state survives open/close cycles. `hideHeader` drops its
+              internal header — this sheet supplies its own. */}
           {mounted ? (
             <FloatingChat
               workspaceId={workspaceId}

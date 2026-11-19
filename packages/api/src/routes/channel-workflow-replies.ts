@@ -1,4 +1,4 @@
-import type { Tool, ToolContext } from '@use-brian/core'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { maybeHandleApprovalReply } from '../workflow/approval-replies.js'
 import { handleChannelQuestionReply, type ChannelQuestion, type ChannelQuestionStore, type QuestionAddress } from '../workflow/channel-questions.js'
 import { dispatchQuestionResponse } from '../workflow/question-response.js'

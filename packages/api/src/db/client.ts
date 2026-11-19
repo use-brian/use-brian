@@ -2,6 +2,8 @@ import pg from 'pg'
 import { currentAgentAccess,currentAgentClearance,currentAgentCompartments,currentAgentProjectIds } from './agent-access-context.js'
 export { runWithAgentAccess,runWithAgentClearance,currentAgentAccess,currentAgentClearance,currentAgentCompartments,currentAgentProjectIds } from './agent-access-context.js'
 export type { AgentClearance } from './agent-access-context.js'
+import { AsyncResource } from 'node:async_hooks'
+import { captureTurnSqlScope, recordTurnSqlStatement, type SqlPoolLabel } from './turn-sql-accounting.js'
 
 let systemPool: pg.Pool | null = null
 let appPool: pg.Pool | null = null
@@ -162,6 +164,10 @@ export function getPool(): pg.Pool {
     const max = SINGLE_CONNECTION ? 1 : POOL_MAX
     systemPool = new pg.Pool({ connectionString: process.env.DATABASE_URL, ...POOL_OPTS, max })
     attachPoolErrorHandler(systemPool, 'system')
+    // Commit-outcome tracking + opt-in per-turn SQL accounting on every
+    // connection (see instrumentPoolClient). Single-connection mode serves
+    // both roles from this pool, so its statements are labelled `single`.
+    attachClientInstrumentation(systemPool, SINGLE_CONNECTION ? 'single' : 'system')
     // No app.current_user_id sentinel seed here — this is the table OWNER
     // connection, and no table sets FORCE ROW LEVEL SECURITY, so the owner
     // bypasses RLS: the `current_setting('app.current_user_id')::uuid` casts in
@@ -218,6 +224,8 @@ export function getAppPool(): pg.Pool {
     }
     appPool = new pg.Pool({ connectionString: appUrl ?? process.env.DATABASE_URL, ...POOL_OPTS })
     attachPoolErrorHandler(appPool, 'app')
+    // Installed before the sentinel seed so the seed statement is observed too.
+    attachClientInstrumentation(appPool, 'app')
     // Seed the nil-UUID sentinel for app.current_user_id on every app-pool
     // connection. On this Postgres, `SET LOCAL` of a custom `app.*` GUC reverts
     // to '' (empty string), not NULL, when the connection has no session-level
@@ -245,22 +253,203 @@ export function seedCurrentUserIdSentinel(client: pg.PoolClient): void {
     )
 }
 
+type InstrumentableClient = pg.PoolClient & {
+  getTransactionStatus?: () => string | null
+  readyForQuery?: boolean
+  _queryable?: boolean
+  _ending?: boolean
+}
+
+const INSTRUMENTED = Symbol.for('use-brian.db.pool-client-instrumented')
+/** Checkouts whose COMMIT was rejected: the outcome is uncertain, so the connection is destroyed. */
+const uncertainCommits = new WeakMap<object, Error>()
+const COMMIT_STATEMENT = /^\s*(?:COMMIT|END)(?:\s+(?:WORK|TRANSACTION))?\s*;?\s*$/i
+
+function isCommitStatement(text: unknown): boolean {
+  return typeof text === 'string' && text.length <= 40 && COMMIT_STATEMENT.test(text)
+}
+
+function markCommitUncertain(client: object, err: unknown): void {
+  if (!uncertainCommits.has(client)) {
+    uncertainCommits.set(client, err instanceof Error ? err : new Error(String(err)))
+  }
+}
+
 /**
- * ROLLBACK any transaction left open on a checked-out **app-pool** client and
- * release it. Used in the `finally` of the user manual-transaction stores.
+ * Instrument every connection a pool opens, and clear a stale uncertain-commit
+ * mark at each checkout (a caller that released without `rollbackAndRelease`
+ * must not make the next, unrelated checkout destroy a healthy connection).
+ */
+function attachClientInstrumentation(pool: pg.Pool, label: SqlPoolLabel): void {
+  pool.on('connect', (client) => instrumentPoolClient(client, label))
+  pool.on('acquire', (client) => { uncertainCommits.delete(client) })
+  bindPoolConnectContext(pool)
+}
+
+/**
+ * Run a callback-form `pool.connect` callback in the requester's async
+ * context. pg-pool hands a waiting checkout the client from inside the
+ * releasing caller's `release()`, so `pool.query` (which uses the callback
+ * form) would otherwise submit its statement in the releaser's context and
+ * per-turn accounting would charge it to the wrong frame. The prototype's
+ * `connect` is looked up per call so prototype spies keep working; a pool
+ * whose `connect` is an own property (a test double) is left alone.
+ * Exported for tests.
+ */
+export function bindPoolConnectContext(pool: pg.Pool): void {
+  const target = pool as unknown as Record<PropertyKey, unknown>
+  if (Object.prototype.hasOwnProperty.call(target, 'connect') || target[INSTRUMENTED]) return
+  target[INSTRUMENTED] = true
+  target.connect = function (this: pg.Pool, ...args: unknown[]): unknown {
+    const original = Object.getPrototypeOf(pool).connect as (...a: unknown[]) => unknown
+    if (typeof args[0] === 'function') args[0] = AsyncResource.bind(args[0] as (...a: unknown[]) => unknown)
+    return Reflect.apply(original, this, args)
+  }
+}
+
+/**
+ * Wrap one pooled connection's `query` (installed from both pools' `connect`
+ * handlers; idempotent). Every statement is forwarded unchanged to the
+ * prototype's current `query`, so callback, promise and config overloads and
+ * test spies on `pg.Client.prototype.query` keep working. It observes two
+ * things: a rejected `COMMIT`/`END`, which marks the checkout's commit
+ * outcome uncertain for `rollbackAndRelease`; and, only while per-turn SQL
+ * accounting is enabled and a frame is active, each statement's completion
+ * for `recordTurnSqlStatement` (no parameter values, no raw text retained).
+ * Submittables (cursors, streams) pass straight through. Exported for tests.
+ */
+export function instrumentPoolClient(client: pg.PoolClient | pg.Client, pool: SqlPoolLabel): void {
+  const target = client as unknown as Record<PropertyKey, unknown>
+  if (target[INSTRUMENTED]) return
+  target[INSTRUMENTED] = true
+  // An instance-level `query` (a test double) is wrapped as-is; otherwise the
+  // prototype's method is looked up per call so later prototype spies apply.
+  const own = Object.prototype.hasOwnProperty.call(target, 'query') ? target.query as (...a: unknown[]) => unknown : undefined
+  const instrumentedQuery = function (this: object, ...args: unknown[]): unknown {
+    const original = own ?? (Object.getPrototypeOf(client).query as (...a: unknown[]) => unknown)
+    const forward = () => Reflect.apply(original, this, args)
+    const first = args[0] as { text?: unknown; values?: unknown; submit?: unknown; callback?: unknown } | string | undefined
+    if (first !== null && typeof first === 'object' && typeof first.submit === 'function') return forward()
+    const text = typeof first === 'string' ? first : first?.text
+    const commit = isCommitStatement(text)
+    // Attribution is fixed at submission: a callback completion arrives from
+    // the connection's socket, in whatever async context opened it.
+    const scope = typeof text === 'string' ? captureTurnSqlScope() : undefined
+    const record = scope !== undefined
+    if (!commit && !record) return forward()
+    const paramCount = Array.isArray(args[1]) ? args[1].length
+      : first !== null && typeof first === 'object' && Array.isArray(first.values) ? first.values.length : 0
+    const startedAt = performance.now()
+    let settled = false
+    const settle = (err: unknown) => {
+      if (settled) return
+      settled = true
+      if (commit && err) markCommitUncertain(client, err)
+      if (record) {
+        try {
+          recordTurnSqlStatement({ text: text as string, paramCount, pool, elapsedMs: performance.now() - startedAt, ok: !err }, scope)
+        } catch { /* accounting must never fail a statement */ }
+      }
+    }
+    const last = args.length - 1
+    if (last >= 0 && typeof args[last] === 'function') {
+      const callback = args[last] as (this: unknown, ...values: unknown[]) => unknown
+      args[last] = function (this: unknown, ...values: unknown[]) {
+        settle(values[0])
+        return Reflect.apply(callback, this, values)
+      }
+      return forward()
+    }
+    if (first !== null && typeof first === 'object' && typeof first.callback === 'function') {
+      const callback = first.callback as (this: unknown, ...values: unknown[]) => unknown
+      args[0] = {
+        ...first,
+        callback(this: unknown, ...values: unknown[]) {
+          settle(values[0])
+          return Reflect.apply(callback, this, values)
+        },
+      }
+      return forward()
+    }
+    let result: unknown
+    try {
+      result = forward()
+    } catch (err) {
+      settle(err)
+      throw err
+    }
+    if (result && typeof (result as Promise<unknown>).then === 'function') {
+      // Observe without changing what the caller awaits; the derived promise
+      // handles its own rejection, so no unhandled-rejection is introduced.
+      ;(result as Promise<unknown>).then(() => settle(null), (err: unknown) => settle(err ?? new Error('query failed')))
+    }
+    return result
+  }
+  target.query = instrumentedQuery
+}
+
+/**
+ * What releasing a checked-out client must do, from the connection's own
+ * protocol state (spec: database-schema.md → "Transaction completion and
+ * release"). `getTransactionStatus()` is the last ReadyForQuery status; it is
+ * trusted only while `readyForQuery` is true, because an error callback fires
+ * before its ReadyForQuery arrives. Exported for tests.
+ */
+export function transactionReleaseDecision(client: pg.PoolClient): 'release' | 'rollback' | 'destroy' {
+  const c = client as InstrumentableClient
+  if (uncertainCommits.has(c)) return 'destroy'
+  if (c._queryable === false || c._ending === true) return 'destroy'
+  const status = typeof c.getTransactionStatus === 'function' ? c.getTransactionStatus() : undefined
+  if (status === 'I' && c.readyForQuery === true) return 'release'
+  return 'rollback'
+}
+
+/**
+ * Finish a checked-out client's transaction and release it. Used in the
+ * `finally` of every manual-transaction store and of `queryWithRLS`; the name
+ * predates the committed-state contract and is kept for its callers.
  *
- * In the two-role model there is no `system_bypass` to restore: `current_user_id`
- * is `SET LOCAL` (Postgres reverts it at COMMIT/ROLLBACK to the seeded sentinel),
- * so the only cleanup is to roll back a dangling transaction (clearing locks) and
- * release. If even the ROLLBACK fails, the client is destroyed via `release(err)`
- * rather than returned to the pool in an aborted-transaction state.
+ * - Idle (the transaction committed, rolled back, or never began): release
+ *   directly — no ROLLBACK round trip, no `no transaction in progress` warning.
+ * - Unfinished, failed, statement in flight, or status unknown: ROLLBACK, then
+ *   release; if the ROLLBACK fails, destroy the client via `release(err)`.
+ * - COMMIT rejected on this checkout (uncertain outcome) or connection broken:
+ *   destroy via `release(err)`; never return it to the pool.
+ *
+ * `current_user_id` and the agent settings are transaction-local, so nothing
+ * else needs restoring. Never throws: cleanup must not shadow a caller error.
  */
 export async function rollbackAndRelease(client: pg.PoolClient): Promise<void> {
+  const decision = transactionReleaseDecision(client)
+  if (decision === 'release') {
+    client.release()
+    return
+  }
+  if (decision === 'destroy') {
+    const reason = uncertainCommits.get(client) ?? new Error('[db] connection broken; destroying pooled client')
+    uncertainCommits.delete(client)
+    client.release(reason)
+    return
+  }
   try {
     await client.query('ROLLBACK')
     client.release()
   } catch (err) {
     client.release(err as Error)
+  }
+}
+
+/**
+ * COMMIT the client's open transaction. If COMMIT itself throws, the outcome
+ * is uncertain: the checkout is marked so `rollbackAndRelease` destroys the
+ * connection instead of pooling it, and the error is rethrown to the caller.
+ */
+export async function commitTransaction(client: pg.PoolClient): Promise<void> {
+  try {
+    await client.query('COMMIT')
+  } catch (err) {
+    markCommitUncertain(client, err)
+    throw err
   }
 }
 
@@ -273,6 +462,9 @@ export async function rollbackAndRelease(client: pg.PoolClient): Promise<void> {
  * from a session flag — there is no bypass GUC to leak. `current_user_id` is
  * `SET LOCAL`, so it reverts at transaction end to the seeded sentinel; no stale
  * UUID survives onto the pooled connection.
+ *
+ * Exactly four round trips on success (BEGIN, set_config, the statement,
+ * COMMIT); after a successful COMMIT the client is released directly.
  */
 export async function queryWithRLS<T extends pg.QueryResultRow>(
   userId: string,
@@ -280,14 +472,17 @@ export async function queryWithRLS<T extends pg.QueryResultRow>(
   values?: unknown[],
 ): Promise<pg.QueryResult<T>> {
   const client = await getAppPool().connect()
+  let committed = false
   try {
     await client.query('BEGIN')
     await applyRLSGucs(client, userId)
     const result = await client.query<T>(text, values)
-    await client.query('COMMIT')
+    await commitTransaction(client)
+    committed = true
     return result
   } finally {
-    await rollbackAndRelease(client)
+    if (committed) client.release()
+    else await rollbackAndRelease(client)
   }
 }
 
@@ -302,47 +497,43 @@ export async function queryWithRLS<T extends pg.QueryResultRow>(
 export async function applyRLSGucs(
   client: pg.PoolClient,
   userId: string,
+  verifiedAssistantId?: string,
 ): Promise<void> {
-  await client.query(`SET LOCAL app.current_user_id = '${userId.replace(/'/g, "''")}'`)
-  const agentClearance = currentAgentClearance()
-  if (agentClearance) {
-    // Values come from the AGENT_CLEARANCES whitelist — no injection surface.
-    await client.query(`SET LOCAL app.agent_clearance = '${agentClearance}'`)
-  }
-  const agentCompartments = currentAgentCompartments()
-  if (agentCompartments !== undefined) {
-    // JSON preserves the null=universe / []=General distinction and avoids
-    // PostgreSQL array-string escaping. Policy code consumes this as jsonb.
-    await client.query(
-      `SELECT set_config('app.agent_compartments', $1, true)`,
-      [JSON.stringify(agentCompartments)],
-    )
-  }
-  const agentProjectIds = currentAgentProjectIds()
-  if (agentProjectIds !== undefined) {
-    await client.query(
-      `SELECT set_config('app.agent_project_ids', $1, true)`,
-      [JSON.stringify(agentProjectIds)],
-    )
-  }
-  const access=currentAgentAccess()
-  if(access?.sharedAudience)await client.query("SELECT set_config('app.agent_shared_audience','true',true)")
-  if(access?.mutationCompartments!==undefined)await client.query("SELECT set_config('app.agent_mutation_compartments', $1, true)",[JSON.stringify(access.mutationCompartments)])
-  if(access?.workspaceId!==undefined)await client.query("SELECT set_config('app.agent_workspace_id', $1, true)",[access.workspaceId])
-  if(access?.userId!==undefined)await client.query("SELECT set_config('app.agent_actor_id', $1, true)",[access.userId])
-  if(access?.visibilityAssistantIds!==undefined)await client.query("SELECT set_config('app.agent_visibility_assistants', $1, true)",[JSON.stringify(access.visibilityAssistantIds)])
-  // Permission model v2 (migration 649): the inputs department_read_grants()
-  // computes the RLS map from. P is app.current_user_id; the map itself is
-  // derived in SQL, never handed over, so RLS stays independent of the
-  // resolver it is checked against.
-  const v2=access?.departmentRead
-  if(v2){
-    if(v2.userId!==userId)throw new Error('access_actor_mismatch')
-    await client.query(`SELECT set_config('app.v2_active','true',true),set_config('app.v2_assistant_id',$1,true),set_config('app.v2_context_department',$2,true),
-      set_config('app.v2_binding',$3,true),set_config('app.v2_cap',$4,true)`,
-      [v2.assistantId??'',v2.contextDepartment??'',v2.binding===null?'':JSON.stringify(v2.binding),v2.cap??''])
-  }
+  const settings = rlsGucSettings(userId, verifiedAssistantId)
+  await client.query('SELECT set_config(setting.name, setting.value, true) FROM unnest($1::text[], $2::text[]) AS setting(name, value)',
+    [settings.map(([name]) => name), settings.map(([, value]) => value)])
+}
 
+/** Verified host context for a transaction or a single implicit-transaction read. */
+export function rlsGucSettings(userId: string, verifiedAssistantId?: string): ReadonlyArray<readonly [string, string]> {
+  const settings: Array<[string, string]> = [['app.current_user_id', userId]]
+  const clearance = currentAgentClearance()
+  if (clearance) settings.push(['app.agent_clearance', clearance])
+  // Preserve JSON null (universe) versus [] (General), and leave omitted
+  // settings alone when a caller narrows an existing transaction context.
+  const compartments = currentAgentCompartments(), projects = currentAgentProjectIds()
+  if (compartments !== undefined) settings.push(['app.agent_compartments', JSON.stringify(compartments)])
+  if (projects !== undefined) settings.push(['app.agent_project_ids', JSON.stringify(projects)])
+  const access = currentAgentAccess()
+  if (access?.sharedAudience) settings.push(['app.agent_shared_audience', 'true'])
+  if (access?.mutationCompartments !== undefined) settings.push(['app.agent_mutation_compartments', JSON.stringify(access.mutationCompartments)])
+  if (access?.workspaceId !== undefined) settings.push(['app.agent_workspace_id', access.workspaceId])
+  if (access?.userId !== undefined) settings.push(['app.agent_actor_id', access.userId])
+  if (access?.visibilityAssistantIds !== undefined) settings.push(['app.agent_visibility_assistants', JSON.stringify(access.visibilityAssistantIds)])
+  const v2 = access?.departmentRead
+  if (v2) {
+    if (v2.userId !== userId) throw new Error('access_actor_mismatch')
+    settings.push(['app.v2_active', 'true'], ['app.v2_assistant_id', v2.assistantId ?? ''],
+      ['app.v2_context_department', v2.contextDepartment ?? ''],
+      ['app.v2_binding', v2.binding === null ? '' : JSON.stringify(v2.binding)], ['app.v2_cap', v2.cap ?? ''])
+  }
+  if (verifiedAssistantId !== undefined) {
+    if (v2?.assistantId && v2.assistantId !== verifiedAssistantId) throw new Error('access_assistant_mismatch')
+    const setting = settings.find(([name]) => name === 'app.v2_assistant_id')
+    if (setting) setting[1] = verifiedAssistantId
+    else settings.push(['app.v2_assistant_id', verifiedAssistantId])
+  }
+  return settings
 }
 
 /**

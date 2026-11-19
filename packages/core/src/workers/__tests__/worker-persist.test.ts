@@ -23,7 +23,7 @@ import type {
   StreamChunk,
   Message,
   ProviderRequest,
-} from '../../providers/types.js'
+} from '@use-brian/agent-runtime/providers/types.js'
 
 function makeFakeProvider(responseText: string, seenModels?: string[]): LLMProvider {
   function* chunks(): Generator<StreamChunk> {

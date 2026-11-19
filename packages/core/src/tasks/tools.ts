@@ -1,11 +1,11 @@
 import { z } from 'zod'
 import { extractCitations, formatStamp, type CitationIndex } from '@use-brian/shared'
-import type { AccessContext } from '../security/access-context.js'
-import { ContextScopeAccumulator, createdRowEvidence, intersectScopeGrants, resolveWriteScope, scopeEvidenceFromRows, type ScopeEvidence } from '../security/context-scope.js'
-import { deriveContextFloor, DerivedScopeError } from '../security/derived-scope.js'
-import { provenanceSessionId } from '../tools/capability-gate.js'
-import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
-import { tolerantBoolean, tolerantEnumArray, tolerantInt } from '../tools/schema-tolerance.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import { ContextScopeAccumulator, createdRowEvidence, intersectScopeGrants, resolveWriteScope, scopeEvidenceFromRows, type ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
+import { deriveContextFloor, DerivedScopeError } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { provenanceSessionId } from '@use-brian/agent-runtime/tools/capability-gate.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { tolerantBoolean, tolerantEnumArray, tolerantInt } from '@use-brian/agent-runtime/tools/schema-tolerance.js'
 import { TASK_HOME_KINDS, TaskResponsibilityError, claimPrecondition, resolveTaskExecutor, taskExecutor, type TaskExecutor } from './responsibility.js'
 import {
   applyExplicitCloses,
