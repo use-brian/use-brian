@@ -73,15 +73,21 @@ export async function shippedMigrationSet({sourceRoot=defaultSourceRoot,migratio
  if(new Set(names).size!==names.length)throw refusal('portable_restore_shipped_migrations_duplicate')
  return names.sort()
 }
-// Released rename aliases recorded by the migration runner (src/migrations/renames.ts).
-async function ledgerAliases(sourceRoot){
- const source=await readFile(join(sourceRoot,'src/migrations/renames.ts'),'utf8')
- return new Map([...source.matchAll(/\['([\w.-]+\.sql)',\s*'([\w.-]+\.sql)'\]/g)].map(match=>[match[1],match[2]]))
-}
-function compatibleLedger(ledger,shipped,aliases){
+// An upgraded source can retain a historical receipt alongside the current
+// release. That receipt never stands in for the successor or an archive target.
+const legacyMemoryReceipt='8268_native_memory_query_write_lineage.sql'
+const memorySuccessor='8326_native_memory_query_write_contract.sql'
+async function compatibleLedger(ledger,shipped,sourceRoot){
  const set=new Set(shipped)
  if(!shipped.every(name=>ledger.includes(name)))return false
- return ledger.every(name=>set.has(name)||set.has(aliases.get(name)))
+ const source=await readFile(join(sourceRoot,'src/migrations/renames.ts'),'utf8')
+ const aliases=new Map([...source.matchAll(/\['([\w.-]+\.sql)',\s*'([\w.-]+\.sql)'\]/g)].map(match=>[match[1],match[2]]))
+ if(ledger.includes(legacyMemoryReceipt)){
+  if(!set.has(memorySuccessor))return false
+  const archive=await readFile(join(sourceRoot,'scripts/conversation-store/historical',legacyMemoryReceipt),'utf8')
+  if(sha(archive)!=='cfe2f1cb804b28ab5a79e0f7060f894c84d059b76eba96335881c58dc123b600')return false
+ }
+ return ledger.every(name=>set.has(name)||set.has(aliases.get(name))||name===legacyMemoryReceipt)
 }
 
 async function requireOrdinaryOwner(client){
@@ -373,7 +379,7 @@ export async function exportPortableBrain({ownerClient:client,destination,key,so
    await canonicalSession(client,{qualify:false})
    await verifyCatalogRoster(client,roster)
    const ledger=(await client.query('SELECT name FROM public._migrations ORDER BY name COLLATE "C"')).rows.map(row=>row.name)
-   if(!compatibleLedger(ledger,shipped,await ledgerAliases(sourceRoot)))throw refusal('portable_restore_source_not_at_shipped_head')
+   if(!await compatibleLedger(ledger,shipped,sourceRoot))throw refusal('portable_restore_source_not_at_shipped_head')
    const fingerprint=await schemaFingerprint(client)
    // Original proofs of installation-derived tables: retained, never imported.
    const derived={}
@@ -562,7 +568,7 @@ export async function importPortableBrain({ownerClient:client,archiveDirectory,k
   if(manifest.shipped.sha256!==sha(shipped.join('\n')))throw refusal('portable_restore_source_release_mismatch')
   const targetLedger=(await client.query('SELECT name FROM public._migrations ORDER BY name COLLATE "C"')).rows.map(row=>row.name)
   if(JSON.stringify(targetLedger)!==JSON.stringify(shipped))throw refusal('portable_restore_target_not_at_shipped_head')
-  if(!compatibleLedger(manifest.ledger,shipped,await ledgerAliases(sourceRoot)))throw refusal('portable_restore_source_release_mismatch')
+  if(!await compatibleLedger(manifest.ledger,shipped,sourceRoot))throw refusal('portable_restore_source_release_mismatch')
   // 3. Authenticate the installation against shipped source, not archive state.
   const verifyInstallation=authenticate??reviewedReleaseAuthentication(shipped.at(-1),sourceRoot)
   const firstAuthentication=await verifyInstallation(client)
