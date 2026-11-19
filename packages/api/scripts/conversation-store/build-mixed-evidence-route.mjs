@@ -31,7 +31,7 @@ export async function routeBodyDigest() {
   }))
 }
 
-export async function buildMixedEvidenceRouteMigration(options) {
+async function buildMixedEvidenceRouteMigration(options) {
   const [previous, source] = await Promise.all([previousSource(options), readDeclaration()])
   return `-- [COMP:api/caller-scope-evidence] Install the reviewed mixed-source topology route.
 BEGIN;
