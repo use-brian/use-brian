@@ -115,11 +115,10 @@ describe('[COMP:api/workflow-input-evidence] canonical causal inputs',()=>{
   })
   it.each([['before','user'],['after','user'],['after','author']] as const)('rolls back a file when retained workflow authority expires %s host renewal (%s)',async(timing,principal)=>{
     const f=await fixture(),run=await f.create(),store=createSandboxTaskStore(),id=randomUUID()
-    if(principal==='user')await pool.query("UPDATE department_edges SET expires_at=clock_timestamp()+interval '2 seconds' WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.member])
-    else{
-      const author=randomUUID()
+    const author=principal==='author'?randomUUID():null
+    if(author){
       await pool.query("INSERT INTO assistants(id,name,workspace_id,owner_user_id,kind,clearance,compartments) VALUES($1,'Fixture author',$2,$3,'standard','confidential',NULL)",[author,f.workspaceId,f.member])
-      await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,assistant_id,clearance,origin,expires_at) VALUES($1,$2,'assistant',$3,'internal','store',clock_timestamp()+interval '2 seconds')",[f.workspaceId,f.team.id,author])
+      await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,assistant_id,clearance,origin) VALUES($1,$2,'assistant',$3,'internal','store')",[f.workspaceId,f.team.id,author])
       const saved=await captureAuthoringAuthoritySystem({userId:f.member,workspaceId:f.workspaceId,assistantId:author})
       await pool.query('UPDATE workflows SET authoring_authority=$2::jsonb WHERE id=$1',[f.workflow.id,JSON.stringify(saved)])
     }
@@ -132,19 +131,33 @@ describe('[COMP:api/workflow-input-evidence] canonical causal inputs',()=>{
       sourceAuthority:scope.executionContext.security.authority.snapshotSource!(),inputScope:browserInputScope({},f.workspaceId)}
     await store.create(record)
     let inserted=false
+    let expiresAt:string
+    // Start the countdown on entry to publication. Leave time for the host to
+    // revalidate on shared runners before waiting on PostgreSQL's exact deadline.
+    const armExpiry:Parameters<typeof withFileTransactionAdmission>[0]=async()=>{
+      const armed=await pool.query<{expires_at:string}>(`UPDATE department_edges
+        SET expires_at=clock_timestamp()+interval '8 seconds'
+        WHERE workspace_id=$1 AND department_id=$2 AND (user_id=$3 OR assistant_id=$4)
+        RETURNING expires_at::text AS expires_at`,[f.workspaceId,f.team.id,author?null:f.member,author])
+      expect(armed.rowCount).toBe(1)
+      expiresAt=armed.rows[0].expires_at
+    }
     const delay:Parameters<typeof withFileTransactionAdmission>[0]=async client=>async()=>{
-      expect((await client.query('SELECT id FROM workspace_files WHERE id=$1',[id])).rows).toEqual([{id}])
+      expect((await client.query(`SELECT id,clock_timestamp()<$2::timestamptz AS before_expiry
+        FROM workspace_files WHERE id=$1`,[id,expiresAt])).rows).toEqual([{id,before_expiry:true}])
       inserted=true
-      await client.query('SELECT pg_sleep(2.1)')
+      await client.query('SELECT pg_sleep_until($1::timestamptz)',[expiresAt])
     }
     const write=()=>createWorkspaceFile(f.member,{id,workspaceId:f.workspaceId,
       path:`/${id}.txt`,parentPath:'/',name:'Fixture.txt',mime:'text/plain',sizeBytes:4,storageUri:`fixture://${id}`,
       createdByUserId:f.member,sensitivity:'public'})
-    const result=timing==='before'?withFileTransactionAdmission(delay,()=>store.withPublication!(record,write))
-      :store.withPublication!(record,()=>withFileTransactionAdmission(delay,write))
+    const result=withFileTransactionAdmission(armExpiry,()=>timing==='before'
+      ? withFileTransactionAdmission(delay,()=>store.withPublication!(record,write))
+      : store.withPublication!(record,()=>withFileTransactionAdmission(delay,write)))
     await expect(result).rejects.toMatchObject({code:'42501',message:timing==='before'?'workflow_authority_unavailable':'workflow_publication_expired'})
     expect(inserted).toBe(true)
     expect((await pool.query('SELECT id FROM workspace_files WHERE id=$1',[id])).rows).toEqual([])
+    expect((await pool.query('SELECT file_id FROM workspace_file_workflow_admissions WHERE file_id=$1',[id])).rows).toEqual([])
     expect((await store.getActiveBySession(run.id))?.taskId).toBe(record.taskId)
   })
   it('renews workflow authority on the caller transaction without owner-pool reads',async()=>{
