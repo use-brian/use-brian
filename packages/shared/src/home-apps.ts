@@ -54,8 +54,6 @@ export const BUILTIN_HOME_APP_KEYS = [
   // is noise. It ships discoverable in Studio → Mini apps "Hidden" and the page
   // itself explains what to connect. See docs/architecture/integrations/shopify.md.
   'shopify',
-  // Opt-in navigation; module enablement and assistant grants are separate.
-  'association',
 ] as const
 
 export type HomeAppKey = (typeof BUILTIN_HOME_APP_KEYS)[number]

@@ -3,7 +3,6 @@ import express from 'express'
 import request from 'supertest'
 import pg from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
-import type { AssociationServicePort } from '@use-brian/core/association/operations.js'
 import {
   CRM_INTEGRATION_OPERATIONS,
   CRM_INTEGRATION_RESOURCE_CATALOG,
@@ -76,7 +75,7 @@ async function fixture() {
     departmentBinding: { departmentIds: [], cap: 'internal', assistantId } })
   const app = express()
   app.use(express.json())
-  app.use('/api/crm/integration', crmIntegrationRoutes({ credentials: keys, service, association: {} as AssociationServicePort }))
+  app.use('/api/crm/integration', crmIntegrationRoutes({ credentials: keys, service,}))
   app.use((req, _res, next) => { (req as { userId?: string }).userId = req.get('x-test-user') ?? undefined; next() })
   app.use('/api/crm', crmOperationsRoutes({ service, readStore: {} as never,
     workspaceStore: { getRole: async (userId: string, ws: string) => (await pool.query('SELECT role FROM workspace_members WHERE user_id=$1 AND workspace_id=$2', [userId, ws])).rows[0]?.role ?? null } as never }))

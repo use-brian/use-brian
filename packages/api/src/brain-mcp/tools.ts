@@ -1,7 +1,6 @@
 import { readWorkspaceMcpConsent, workspaceMcpMaximum, type WorkspaceMcpConsent } from '../workspace-mcp/consent.js'
 import { ProgrammaticCaptureError } from '../ingest/programmatic-capture.js'
 import { EngineeringHistoryCommandSchema,type EngineeringHistoryCommand,type CaptureConfiguration } from '@use-brian/shared'
-import type { AssociationTools } from '@use-brian/core/association/tools.js'
 import { EngineeringHistoryError,ARCHIVE_TEXT_LIMIT } from '../engineering-history/contracts.js'
 import type { CrmCredentialParent } from '@use-brian/core/crm/integration-authority.js'
 /**
@@ -325,7 +324,6 @@ export type BrainTool = {
 const nativeBridgeSources = new WeakMap<BrainTool, Tool>()
 
 type BuildOpts = {
-  associationTools?: AssociationTools
   workspaceId: string
   scope: BrainKeyScope
   /** The authenticating key's id — recorded as provenance on writes. */
@@ -1775,18 +1773,6 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     ...[...filterToolsByCapabilities(new Map([opts.crmTools.sendCrmMessage,opts.crmTools.getCrmDelivery].map(tool=>[tool.name,tool])),opts.agentActiveCapabilities ?? new Set()).values()].map(tool=>bridgeCoreTool(tool,resolveCtx,workspaceId)),
   ]
 
-  const visibleAssociation = filterToolsByCapabilities(
-    new Map(Object.values(opts.associationTools ?? {}).map(tool => [tool.name, tool])),
-    opts.agentActiveCapabilities ?? new Set(),
-  )
-  const associationReads = new Set([...visibleAssociation.values()].filter(tool => tool.isReadOnly).map(tool => tool.name))
-  // The bridge runs execute() directly, so a tool that needs a person's confirmation in chat (publishing
-  // website content or a catalogue, confirming a free order) would run unconfirmed here. Association keeps
-  // those in chat and the console only; other brain-MCP tools are unchanged.
-  const associationBridges = [...visibleAssociation.values()]
-    .filter(tool => (opts.scope === 'read_write' || tool.isReadOnly) && !tool.requiresConfirmation)
-    .map(tool => bridgeCoreTool(tool, resolveCtx, workspaceId))
-
   // ── File bridges (workspace filesystem). Present only when a blob client is
   // configured (opts.fileTools set). Both byte-preserving saves are bridged:
   // `saveFileToBrain` references a cached upload by id (bytes entered via the
@@ -1983,7 +1969,6 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     }catch(error){return {...text('Engineering history unavailable.',true),structuredContent:{contractVersion:1,failureCode:error instanceof EngineeringHistoryError?error.code:'history_unavailable'}}}}})
   const all: BrainTool[] = [
     ...historyTools,
-    ...associationBridges,
     ...storeBridges,
     ...(askStoreAssistant ? [askStoreAssistant] : []),
     // Reads
@@ -2092,7 +2077,6 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     ? all.filter(
         (t) =>
           READ_TOOL_NAMES.has(t.name) ||
-          associationReads.has(t.name) ||
           agentReadNames.has(t.name) ||
           storeNames.has(t.name) ||
           t.name === 'askStoreAssistant',

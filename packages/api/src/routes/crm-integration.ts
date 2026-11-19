@@ -4,8 +4,6 @@
 import { sendCrmPrivacyExport } from '../crm-operations/privacy-export.js'
 import { Router, raw, type Request, type Response } from 'express'
 import { z } from 'zod'
-import { CrmOperationsError } from '@use-brian/core/application-platform/operation-contract.js'
-import type { AssociationServicePort } from '@use-brian/core/association/operations.js'
 import {
   CrmReferenceLookupQuerySchema,
   CrmReferencePreviewQuerySchema,
@@ -41,6 +39,7 @@ import {
 } from '@use-brian/core/crm/invoice-preparation.js'
 import {
   CrmOperationsCommandSchema,
+  CrmOperationsError,
   assertCrmOperationsAuthority,
   type CrmDeliveryServicePort,
   type CrmOperationsContext,
@@ -61,9 +60,8 @@ import type { CrmProductionImportService } from '../crm-operations/import-servic
 import { requireImportOperation } from '../crm-operations/import-authority.js'
 import { listCrmOperationsAudit, listCrmEventDelivery } from '../crm-operations/privacy.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
-import { associationErrorResponse } from './association.js'
-import { associationMemberContext, crmAssociationRoutes } from './crm-association.js'
-import { sendWebsiteMedia, type WebsiteMediaDeps } from './association-media.js'
+import { crmErrorResponse } from './crm-errors.js'
+import { crmMemberContext } from './workspace-modules.js'
 import { SubmissionQuery, SendabilityQuery, EntitlementPlansQuery, EntitlementsQuery, EventsQuery, ParticipationQuery, SegmentListQuery } from './crm-operations.js'
 import { runWithAgentAccess } from '../db/agent-access-context.js'
 import { CrmIntegrationBindingOptionsSchema } from '../crm-operations/integration-department-authority.js'
@@ -84,7 +82,6 @@ export function crmIntegrationContext(principal: CrmIntegrationPrincipal): CrmOp
 export function crmIntegrationRoutes(options: {
   credentials: Pick<CrmIntegrationStore, 'authenticate'>
   service: CrmOperationsServicePort
-  association: AssociationServicePort
   deliveries?: CrmDeliveryServicePort
   imports?: CrmProductionImportService
   importSources?: CrmImportSources
@@ -94,8 +91,6 @@ export function crmIntegrationRoutes(options: {
   documentReads?: CrmCommercialDocumentReadPort
   governedReads?: CrmGovernedReadPort
   erpReads?: ReturnType<typeof createCrmErpReadStore>
-  /** Website media library reads (`association.read`); absent → 404. */
-  websiteMedia?: Pick<WebsiteMediaDeps, 'store' | 'resolver'>
   memberProfiles?: (principal: CrmIntegrationPrincipal) => {
     getMemberProfile(id: unknown): Promise<CrmIntegrationMemberProfile | null>
     updateMemberProfile(id: unknown, update: unknown): Promise<CrmIntegrationMemberProfile | null>
@@ -123,7 +118,7 @@ export function crmIntegrationRoutes(options: {
         runWithAgentAccess({ workspaceId: principal.workspaceId, userId: principal.departmentRead.userId,
           clearance: 'confidential', compartments: null, ...principal.executionLimits, departmentRead: principal.departmentRead }, next)
       } else next()
-    } catch (error) { associationErrorResponse(error, res) }
+    } catch (error) { crmErrorResponse(error, res) }
   })
   const principal = (res: Response): CrmIntegrationPrincipal => res.locals.crmIntegration as CrmIntegrationPrincipal
   /** Command context: the credential itself, or the enrolled viewer under the credential's grants. */
@@ -138,19 +133,19 @@ export function crmIntegrationRoutes(options: {
   const reads = (res: Response) => (options.reads ?? createDbCrmIntakeReadStore)(principal(res))
   const memberProfiles = (res: Response) => (options.memberProfiles ?? createCrmIntegrationRecordReadStore)(principal(res))
   const endpoint = (fn: (req: Request, res: Response) => Promise<void>) => async (req: Request, res: Response) => {
-    try { await fn(req, res) } catch (error) { associationErrorResponse(error, res) }
+    try { await fn(req, res) } catch (error) { crmErrorResponse(error, res) }
   }
   router.get('/catalog', (_req, res) => res.set('Cache-Control', 'no-store').json({
     workspaceId: principal(res).workspaceId, credentialId: principal(res).credentialId,
-    operations: CRM_INTEGRATION_OPERATIONS,
-    selectors: CRM_INTEGRATION_RESOURCE_CATALOG, grants: principal(res).grants }))
+    operations: CRM_INTEGRATION_OPERATIONS.filter(operation => !operation.startsWith('association.')),
+    selectors: Object.fromEntries(Object.entries(CRM_INTEGRATION_RESOURCE_CATALOG).filter(([operation]) => !operation.startsWith('association.'))), grants: principal(res).grants }))
   router.post('/operations/import-sources', (req, res, next) => {
     try {
       requireImportOperation(crmIntegrationContext(principal(res)), 'crm.imports.write')
       if (!req.is('text/csv')) { res.status(415).json({ error: 'csv_required' }); return }
       UUID.parse(req.get('Idempotency-Key'))
       next()
-    } catch (error) { associationErrorResponse(error, res) }
+    } catch (error) { crmErrorResponse(error, res) }
   }, raw({ type: 'text/csv', limit: MAX_CRM_IMPORT_SOURCE_BYTES, inflate: false }), endpoint(async (req, res) => {
     if (!options.importSources) { res.status(503).json({ error: 'import_unavailable' }); return }
     if (!Buffer.isBuffer(req.body)) throw new CrmOperationsError('invalid_input', 'CSV bytes are required.')
@@ -488,18 +483,6 @@ export function crmIntegrationRoutes(options: {
     const query = SendabilityQuery.parse(req.query)
     res.json(await reads(res).checkSendability(principal(res).workspaceId, UUID.parse(req.params.id), query.channel, query.purposeKey))
   }))
-  // Website media: one staff-published image/PDF by id, for the website
-  // backend's image pipeline. Same grant as every other published website read.
-  router.get('/association/media/:id', endpoint(async (req, res) => {
-    const ctx = crmIntegrationContext(principal(res))
-    requireCrmIntegrationOperation(ctx.authority.integration!, 'association.read')
-    if (!options.websiteMedia) { res.status(404).json({ error: 'media_not_found' }); return }
-    await sendWebsiteMedia(res, options.websiteMedia, ctx.workspaceId, String(req.params.id))
-  }))
-  router.use('/association', crmAssociationRoutes({ service: options.association, context: async (_req, res) => {
-    const ctx = crmIntegrationContext(principal(res))
-    return { ...ctx, authority: { ...ctx.authority, canRead: true, canReconcileProvider: true } }
-  } }))
   // Terminate here. CRM keys must never fall through into member/admin routers.
   router.use((_req, res) => res.status(403).json({ error: 'integration_scope_denied' }))
   return router
@@ -507,7 +490,7 @@ export function crmIntegrationRoutes(options: {
 
 export function crmIntegrationCredentialRoutes(options: { workspaceStore: WorkspaceStore; credentials: CrmIntegrationStore }): Router {
   const router = Router()
-  const member = associationMemberContext(options.workspaceStore)
+  const member = crmMemberContext(options.workspaceStore)
   const endpoint = (fn: (req: Request, res: Response, workspaceId: string, userId: string) => Promise<void>) => async (req: Request, res: Response) => {
     try {
       const context = await member(req, res)
@@ -515,13 +498,13 @@ export function crmIntegrationCredentialRoutes(options: { workspaceStore: Worksp
       if (context.actor.kind !== 'user' || !context.authority.canConfigure) throw new CrmOperationsError('not_authorized', 'An owner or admin is required for integration credentials.')
       res.setHeader('Cache-Control', 'no-store')
       await fn(req, res, context.workspaceId, context.actor.userId)
-    } catch (error) { associationErrorResponse(error, res) }
+    } catch (error) { crmErrorResponse(error, res) }
   }
   const path = '/:workspaceId/operations/integration-credentials'
   router.get(`${path}/binding-options`, endpoint(async (req, res, workspaceId, userId) => {
     res.json(await options.credentials.bindingOptions(workspaceId, userId, CrmIntegrationBindingOptionsSchema.parse(req.query)))
   }))
-  router.get(`${path}/catalog`, endpoint(async (_req, res) => { res.json({ operations: CRM_INTEGRATION_OPERATIONS, selectors: CRM_INTEGRATION_RESOURCE_CATALOG }) }))
+  router.get(`${path}/catalog`, endpoint(async (_req, res) => { res.json({ operations: CRM_INTEGRATION_OPERATIONS.filter(operation => !operation.startsWith('association.')), selectors: Object.fromEntries(Object.entries(CRM_INTEGRATION_RESOURCE_CATALOG).filter(([operation]) => !operation.startsWith('association.'))) }) }))
   router.get(path, endpoint(async (req, res, workspaceId, userId) => { res.json(await options.credentials.listForMember(workspaceId, userId, CrmPageQuerySchema.parse(req.query))) }))
   router.post(path, endpoint(async (req, res, workspaceId, userId) => {
     res.status(201).json(await options.credentials.create(workspaceId, userId, CreateCrmIntegrationCredentialSchema.parse(req.body)))

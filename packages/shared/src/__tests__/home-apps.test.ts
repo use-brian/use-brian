@@ -12,6 +12,11 @@ import {
 } from '../home-apps.js'
 
 describe('[COMP:shared/home-apps] home-apps config vocabulary', () => {
+  it('drops retired Association from saved navigation and rejects re-enabling it', () => {
+    expect(normalizeHomeApps(['crm', 'association', 'page'])).toEqual(['crm', 'page'])
+    expect(normalizeHomeApps(['association'])).toEqual([...DEFAULT_HOME_APPS])
+    expect(validateHomeApps(['association'])).toEqual({ ok: false, reason: 'unknown-key' })
+  })
   it('holds the built-in apps in registry order', () => {
     expect(BUILTIN_HOME_APP_KEYS).toEqual([
       'page',
@@ -22,7 +27,6 @@ describe('[COMP:shared/home-apps] home-apps config vocabulary', () => {
       'browsers',
       'chat',
       'shopify',
-      'association',
     ])
   })
 

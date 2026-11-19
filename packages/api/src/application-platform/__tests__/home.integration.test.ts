@@ -100,7 +100,7 @@ describe('[COMP:api/application-auth] existing Home bridge application binding',
     expect(proof?.userId).toBe(viewerId)
     await expect(resolveApplicationExecutionContext({ home: { ...proof! } })).rejects.toMatchObject({ code: 'grant_revoked' })
     const list = await mcp(first.token, 'tools/list')
-    expect(list.status).toBe(200); expect(decode(list).result.tools.map((tool: { name: string }) => tool.name)).toEqual(['applicationCatalog', 'applicationQuery', 'applicationCommand', 'applicationReconcile'])
+    expect(list.status).toBe(200); expect(decode(list).result.tools.map((tool: { name: string }) => tool.name)).toEqual(['applicationCatalog', 'applicationCommand', 'applicationQuery', 'applicationReconcile'])
     const read = await mcp(first.token, 'tools/call', { name: 'applicationQuery', arguments: { queryKey: 'get', input: { type: 'request', id: recordId } } })
     expect(JSON.parse(decode(read).result.content[0].text).values).toEqual({ title: { kind: 'text', value: 'Visible Home request' } })
     const other = await mcp(first.token, 'tools/call', { name: 'applicationQuery', arguments: { queryKey: 'get', input: { type: 'request', id: otherId } } })
@@ -115,6 +115,7 @@ describe('[COMP:api/application-auth] existing Home bridge application binding',
     expect((await store.getEntity(workspaceId, recordId))?.data.cost).toEqual({ kind: 'number', value: 25 })
     expect((await pool.query('SELECT daily_used FROM workspace_home_apps WHERE id=$1', [homeId])).rows[0].daily_used).toBe(5)
   })
+
   it('Q08 admits opaque Home HTTP origins only with the exact signed binding and charges the existing budget once',async () => {
     const active = await binding(),before = (await pool.query('SELECT daily_used FROM workspace_home_apps WHERE id=$1',[homeId])).rows[0].daily_used
     const catalogPath = `/api/applications/${appId}/catalog`

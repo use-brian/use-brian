@@ -11,14 +11,13 @@
  * INVARIANT: never import `@use-brian/api-platform/*` or
  * `@use-brian/shared-server` (closed code arrives through OpenApiPorts).
  */
-import { associationMemberContext } from '../routes/crm-association.js'
-import { getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
 import { captureAuthoringAuthoritySystem } from '../context-scope/workflow-authority.js'
 import { BACKGROUND_MODEL } from '../model-resolution.js'
 import { assembleHomeSignals } from '../home/signals.js'
 import { runHomeRefresh } from '../home/refresh.js'
 import { isWorkspaceMember } from '../db/home-store.js'
 import { requireAuth } from '../auth/middleware.js'
+import { createWorkspaceModulesStore } from '../db/workspace-modules-store.js'
 import { lazyRoutes } from './lazy.js'
 import type { BrainRoutesScope } from './scope.js'
 
@@ -37,9 +36,7 @@ const workspaceKnowledgeRoutes = lazyRoutes(() => import('../routes/knowledge.js
 const brandRoutes = lazyRoutes(() => import('../routes/brand.js'), 'brandRoutes')
 const handleRoutes = lazyRoutes(() => import('../routes/handles.js'), 'handleRoutes')
 const chatLinkRoutes = lazyRoutes(() => import('../routes/chat-links.js'), 'chatLinkRoutes')
-const crmAssociationRoutes = lazyRoutes(() => import('../routes/crm-association.js'), 'crmAssociationRoutes')
-const workspaceModuleRoutes = lazyRoutes(() => import('../routes/crm-association.js'), 'workspaceModuleRoutes')
-const websiteMediaMemberRoutes = lazyRoutes(() => import('../routes/association-media.js'), 'websiteMediaMemberRoutes')
+const workspaceModuleRoutes = lazyRoutes(() => import('../routes/workspace-modules.js'), 'workspaceModuleRoutes')
 const crmIntegrationCredentialRoutes = lazyRoutes(() => import('../routes/crm-integration.js'), 'crmIntegrationCredentialRoutes')
 
 export function registerBrainRoutes(scope: BrainRoutesScope) {
@@ -50,7 +47,7 @@ export function registerBrainRoutes(scope: BrainRoutesScope) {
     resolveBackgroundRuntime, filesApi, retrievalStore, knowledgeRepoWriter, crmIntakeReadStore,
     entityKindClassifier, crmOperationsService, crmIntegrationStore, crmEmailDraftStore,
     knowledgeCaptureRuleStore, brainEntryMutator, crmProductionImports, workspaceRouter, chatLinkStore,
-    homeDockStore, kbMaintenanceStore, late, associationService, workspaceModulesStore, websiteMediaStore, filesResolver,
+    homeDockStore, kbMaintenanceStore, late,
   } = scope
   // (The public /api/brain/stream SSE mount lives ABOVE the bare `/api`
   // requireAuth guards — see the block next to workflowWebhookRoutes.)
@@ -63,26 +60,8 @@ export function registerBrainRoutes(scope: BrainRoutesScope) {
     emailDraftStore: crmEmailDraftStore,
     crmOperationsService,
   }))
-  if (filesApi && filesResolver) {
-    const mediaFilesApi = filesApi
-    app.use('/api/crm/:workspaceId/association/media', requireAuth(env.JWT_SECRET), websiteMediaMemberRoutes({
-      store: websiteMediaStore,
-      filesApi: mediaFilesApi,
-      resolver: filesResolver,
-      membership: async (userId, workspaceId) => {
-        const [role, member] = await Promise.all([
-          workspaceStore.getRole(userId, workspaceId),
-          getWorkspaceMembershipWithClearanceSystem(userId, workspaceId),
-        ])
-        return role && member ? { role, clearance: member.clearance } : null
-      },
-    }))
-  }
-  app.use('/api/crm/:workspaceId/association', requireAuth(env.JWT_SECRET), crmAssociationRoutes({
-    service: associationService, context: associationMemberContext(workspaceStore),
-  }))
   app.use('/api/workspaces', requireAuth(env.JWT_SECRET), workspaceModuleRoutes({
-    workspaceStore, modules: workspaceModulesStore,
+    workspaceStore, modules: createWorkspaceModulesStore(),
   }))
   app.use('/api/crm', requireAuth(env.JWT_SECRET), crmIntegrationCredentialRoutes({ workspaceStore, credentials: crmIntegrationStore }))
   app.use('/api/crm', requireAuth(env.JWT_SECRET), crmOperationsRoutes({

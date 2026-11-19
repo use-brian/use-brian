@@ -27,9 +27,9 @@ import { GOAL_REFRESH_EVENT } from "@/lib/goal-events";
 import { WORKSPACE_IDENTITY_REFRESH_EVENT } from "@/lib/workspace-identity-events";
 import { HOME_APPS_REFRESH_EVENT } from "@/lib/home-apps-events";
 
-describe("[COMP:app-web/surface-cache-invalidation] Association module signals", () => {
-  it("marks the viewer-scoped module state on workspace configuration changes", () => {
-    expect(staleMarksFor(HOME_APPS_REFRESH_EVENT, "w1")).toContain("association-module:w1");
+describe("[COMP:app-web/surface-cache-invalidation] Home app signals", () => {
+  it("marks the app configuration on workspace configuration changes", () => {
+    expect(staleMarksFor(HOME_APPS_REFRESH_EVENT, "w1")).toContain("home-apps:w1");
   });
 });
 import {

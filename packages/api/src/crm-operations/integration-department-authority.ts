@@ -228,3 +228,4 @@ export async function previewCrmIntegrationBindings(
   }
   return { mode: 'department-v2' as const, choices, assistants, validForMs: 30_000 }
 }
+

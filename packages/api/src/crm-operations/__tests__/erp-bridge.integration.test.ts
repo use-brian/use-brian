@@ -5,7 +5,6 @@ import { createServer, type Server } from 'node:http'
 import express from 'express'
 import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import type { AssociationServicePort } from '@use-brian/core/association/operations.js'
 import {
   CRM_INTEGRATION_OPERATIONS,
   CRM_INTEGRATION_RESOURCE_CATALOG,
@@ -39,7 +38,7 @@ let server: Server, baseUrl = ''
 beforeAll(async () => {
   const app = express()
   app.use(express.json())
-  app.use('/api/crm/integration', crmIntegrationRoutes({ credentials: keys, service, association: {} as AssociationServicePort }))
+  app.use('/api/crm/integration', crmIntegrationRoutes({ credentials: keys, service,}))
   server = createServer(app)
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   baseUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`

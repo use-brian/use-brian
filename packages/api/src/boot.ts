@@ -178,7 +178,6 @@ import type { RootScope } from './boot/scope.js'
  * absent — the open routes never read them, so they never travel here.
  */
 export interface OpenApiEnv {
-  ASSOCIATION_PROMOTION_HMAC_KEY?: string
   // Optional because the Gemini provider can be Vertex-backed instead (see
   // VERTEX_PROJECT_ID). A deployment in a region where Google blocks the AI
   // Studio developer API (e.g. Hong Kong) has no such key; the open entry

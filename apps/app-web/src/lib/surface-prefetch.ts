@@ -48,7 +48,6 @@ import { officeMetadataRemaining } from "@/lib/office/metadata";
 import type { CacheLifecycle } from "@/lib/surface-cache";
 import { listOfficeArtifacts } from "@/lib/office/api";
 import { listTools as listShopifyTools } from "@/lib/api/shopify";
-import { associationModuleRemaining } from "@/lib/api/association";
 import { fetchLiveRoster, liveRosterRemaining } from "@/lib/api/live";
 
 /**
@@ -60,7 +59,6 @@ export type WarmableSurface =
   | "projects"
   | "tasks"
   | "crm"
-  | "association"
   | "workflow"
   | "studio"
   | "chat"
@@ -139,23 +137,6 @@ export function surfaceDataKey(
  */
 export function crmConfigCacheKey(workspaceId: string): string {
   return `${surfaceDataKey("crm", workspaceId)}:config`;
-}
-
-export function associationModuleCacheKey(workspaceId: string): string {
-  return `association-module:${workspaceId}${viewerSuffix()}`;
-}
-
-export function associationPageCacheKey(workspaceId:string,resource:string,query:Record<string,unknown>={}):string {
-  return `crm:${workspaceId}${viewerSuffix()}:association:${resource}:${JSON.stringify(query)}`;
-}
-
-/** Browser-tab request references contain no form content. */
-export function associationIntentKey(workspaceId:string,operation:string,target:string):string {
-  return `association-intent:${workspaceId}${viewerSuffix()}:${operation}:${target}`;
-}
-
-export function associationOrdersCacheKey(workspaceId: string, cursor: string | null, filters = ""): string {
-  return `association-orders:${workspaceId}${viewerSuffix()}:${filters}:${cursor ?? "first"}`;
 }
 
 /**
@@ -906,12 +887,6 @@ export function warmTargetFor(
         fetch: () => leaseSurfaceContent(() => fetchWorkspaceTasks(workspaceId)),
         lifecycle: { expiresInMs: surfaceContentRemaining, keepInflightOnExpiry: true },
       };
-    case "association":
-      return {
-        key: associationModuleCacheKey(workspaceId),
-        fetch: () => import("@/lib/api/association").then(m => m.getAssociationModuleSnapshot(workspaceId)),
-        lifecycle: { expiresInMs: associationModuleRemaining },
-      };
     case "crm":
       return {
         key: crmConfigCacheKey(workspaceId),
@@ -987,7 +962,6 @@ const WARMABLE: ReadonlySet<string> = new Set<WarmableSurface>([
   "projects",
   "tasks",
   "crm",
-  "association",
   "workflow",
   "studio",
   "chat",

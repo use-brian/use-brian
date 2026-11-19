@@ -11,7 +11,6 @@
  * INVARIANT: never import `@use-brian/api-platform/*` or
  * `@use-brian/shared-server` (closed code arrives through OpenApiPorts).
  */
-import { createAssociationTools } from '@use-brian/core/association/tools.js'
 import { calculateCost } from '@use-brian/agent-runtime/billing/cost-tracker.js'
 import type { TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
 import { sanitize as sanitizeAnalytics } from '@use-brian/core/analytics/logger.js'
@@ -94,7 +93,6 @@ import type { PrimitivesScope } from './scope.js'
 
 export function registerPrimitives(scope: PrimitivesScope) {
   const {
-    associationService,
     configuredProviders, provider, analytics, goalStore, crmDeliveries, crmStore, entityLinksStore,
     usageStore, decisionRuntime, connectorInstanceStore, workflowStore, connectorGrantStore,
     resolveBackgroundRuntime, allTools, taskStore, workflowRunStore, workspaceDirectoryStore,
@@ -554,8 +552,6 @@ export function registerPrimitives(scope: PrimitivesScope) {
     revoke: async (input, authority, parent) => ({ revoked: await crmIntegrationStore.revoke(authority.ceiling.workspaceId, authority.ceiling.userId, input.credentialId, authority, parent) }),
   })
   for (const tool of Object.values(crmCredentialTools)) allTools.set(tool.name, tool)
-  const associationTools = createAssociationTools(associationService)
-  for (const tool of Object.values(associationTools)) allTools.set(tool.name, tool)
   const crmEmailDraftTools = createCrmEmailDraftTools(crmEmailDraftStore)
   allTools.set('saveEmailDraft', crmEmailDraftTools.saveEmailDraft)
   allTools.set('getEmailDraft', crmEmailDraftTools.getEmailDraft)
@@ -565,6 +561,6 @@ export function registerPrimitives(scope: PrimitivesScope) {
     taskTools, brandTools, goalClarityAssessor, executionControlEffects, taskExecutionTools,
     externalProgressTools, researchTools, approvalReviewTools, crmTools, crmOperationsTools,
     crmBusinessReferenceTools, crmCommercialContextTools, crmCommercialDocumentTools,
-    crmDeliveryOversightTools, crmGovernedRecordTools, crmCredentialTools, associationTools,
+    crmDeliveryOversightTools, crmGovernedRecordTools, crmCredentialTools,
   } as const
 }

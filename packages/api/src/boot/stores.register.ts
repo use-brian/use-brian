@@ -11,11 +11,6 @@
  * INVARIANT: never import `@use-brian/api-platform/*` or
  * `@use-brian/shared-server` (closed code arrives through OpenApiPorts).
  */
-import { createProviderEntitlementService } from '../association/provider-entitlement-service.js'
-import { createAssociationStore } from '../db/association-store.js'
-import { createAssociationWorkspaceModulesStore } from '../association/workspace-module.js'
-import { createAssociationService, type AssociationWebsiteMediaPort } from '../association/service.js'
-import { getPool } from '../db/client.js'
 import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { sanitize as sanitizeAnalytics, AnalyticsLogger } from '@use-brian/core/analytics/logger.js'
 import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
@@ -197,19 +192,6 @@ export function registerStores(scope: StoresScope) {
   // The Office binding is attached once Office storage and release are composed below.
   const crmDocumentRuntime: import('../crm-operations/commercial-preparations.js').CrmCommercialDocumentRuntime = { binding: null }
   const crmOperationsService = createCrmOperationsService(createDbCrmOperationsStore(), { deliveries: crmDeliveries, documents: crmDocumentRuntime })
-  const providerEntitlements = createProviderEntitlementService({
-    pool: getPool(),
-    operationsForTransaction: (client) => createCrmOperationsService(createDbCrmOperationsStore(getPool(), client)),
-  })
-  const associationStore = createAssociationStore(getPool(), undefined, {
-    promotionHmacKey: env.ASSOCIATION_PROMOTION_HMAC_KEY,
-    providerEntitlements,
-  })
-  const workspaceModulesStore = createAssociationWorkspaceModulesStore()
-  // Late-bound: the files API and media store are created further down.
-  const associationWebsiteMedia: { current: AssociationWebsiteMediaPort | null } = { current: null }
-  const associationService = createAssociationService({ store: associationStore, modules: workspaceModulesStore, crmService: crmOperationsService,
-    websiteMedia: () => associationWebsiteMedia.current })
   const crmIntegrationStore = createCrmIntegrationStore()
   const crmIntakeReadStore = createDbCrmIntakeReadStore()
   setGlobalMailboxContactImportDeps({ crm: crmStore })
@@ -292,7 +274,6 @@ export function registerStores(scope: StoresScope) {
     taskStore, workflowRunStore, pageTemplateStore, blueprintRecordStore, pendingApprovalsStore,
     sessionStateStore, retrievalStore, episodicStore, crmIntakeReadStore, brainCandidateStore,
     crmOperationsService, crmIntegrationStore, crmEmailDraftStore, workspaceFileUploadsStore, planStore,
-    associationStore, workspaceModulesStore, associationWebsiteMedia, associationService,
     connectorActionStore, memoryRecallEventsStore, pageGrantStore, pageDomainStore, domainProvisioner,
     workspaceGroupStore, docEntityStore, docThemesStore, homeDockStore,
   } as const
