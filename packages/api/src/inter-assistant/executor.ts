@@ -60,7 +60,6 @@ import {
   DEFAULT_STALL_IDLE_MS,
   isStalledError,
 } from '@use-brian/agent-runtime/engine/stall-watchdog.js'
-import { createTurnOutputCollector } from '@use-brian/agent-runtime/engine/turn-output.js'
 import { createConfirmationResolver } from '@use-brian/agent-runtime/mcp/types.js'
 import {
   intersectAccessCeilings,
@@ -114,7 +113,7 @@ import {
 } from '../context-scope/resolve-turn-scope.js'
 import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
 import { normalizeSessionVisibility, policyFor, sessionAuthorityDestinationMatches } from '../session-kind.js'
-import { openAssistantTurn, openTurnSqlScope, TurnRefusal, type TurnSqlScope } from '../turn/kernel.js'
+import { openAssistantTurn, openTurnSqlScope, TurnRefusal, type TurnLoopResult, type TurnSqlScope } from '../turn/kernel.js'
 import { waitForTurnSlot } from '../turn/lease.js'
 import { checkUsageBudget } from '../routes/route-helpers.js'
 import { getWorkspacePlan } from '../db/workspace-store.js'
@@ -941,7 +940,6 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     const budget = resolveResearchBudget(params.depth, ASSISTANT_CALL_DEFAULT_BUDGET)
     // Timeout diagnostics use the same finalized-turn selection as replies.
     // Unfinished deltas and narration alongside tool calls are not retained.
-    const turnOutput = createTurnOutputCollector({ format: 'compact' })
     // Liveness, not wall-clock (2026-08-19). The step is bounded by cost
     // (`budget.maxTurns` / `maxToolCalls`) and by the query loop's stall
     // watchdog (`stallIdleMs`: no provider chunk / tool activity / loop event
@@ -2254,6 +2252,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       // try/finally so the wall-clock timer is still cleared and any registered
       // confirmation resolvers are still released.
         await assertOperationCurrent()
+        let turnLoopResult: TurnLoopResult | undefined
         if (!synthesisHandled) {
           await owner.prepareRun({
             systemPrompt: loopSystemPrompt,
@@ -2263,7 +2262,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           })
           await assertOperationCurrent()
           let finalContent: import('@use-brian/agent-runtime/providers/types.js').ContentBlock[] | null = null
-          await owner.run({
+          turnLoopResult = await owner.run({
 
             // The callee lane had no budget gate: a workspace with no active
             // plan still ran workflow and A2A turns.
@@ -2329,7 +2328,6 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
             stallIdleMs,
             sink: { kind: 'return', onEvent: async (event) => {
             await assertOperationCurrent()
-            turnOutput.observe(event)
             if (params.onActivity) {
               for (const frame of goalActivityFramesFromQueryEvent(event)) {
                 try {
@@ -2526,16 +2524,14 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       // step completed → downstream steps + chat asserted the send happened).
       // The typed reason is hoisted by the workflow run-loop catch into the
       // step-run error, so the run records `failed`/`empty_response` honestly.
-      const selectedOutput = turnOutput.select()
-      const surfacedQuestion = selectedOutput.kind === 'question'
+      const selectedOutput = turnLoopResult?.selection
+      const surfacedQuestion = selectedOutput?.kind === 'question'
         ? selectedOutput.question
         : undefined
       const finalText = synthesisOutput ?? (
         surfacedQuestion
           ? formatAssistantQuestion(surfacedQuestion)
-          : selectedOutput.kind === 'text'
-            ? selectedOutput.text
-            : ''
+          : turnLoopResult?.finalText ?? ''
       )
       if (!finalText) {
         throw Object.assign(
@@ -2572,7 +2568,6 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       await assertOperationCurrent()
       if (surfacedQuestion) params.onQuestion?.(surfacedQuestion)
       params.onScopeEvidence?.(scopeAccumulator.evidence)
-      turnOutput.advanceDelivery()
       completed = true
       return finalText
     } catch (err) {
@@ -2587,7 +2582,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
       if (owner.abortKind === 'stop' || owner.abortKind === 'lease_lost') throw abortController.signal.reason
       await assertOriginalAuthority()
-      const selectedPartial = turnOutput.select()
+      const selectedPartial = owner.selectedOutput()
       const partialOutput = selectedPartial.kind === 'text'
         ? sanitizeDeliveryText(selectedPartial.text).trim() || undefined
         : undefined

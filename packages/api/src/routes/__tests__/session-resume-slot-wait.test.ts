@@ -14,7 +14,7 @@ vi.mock('../../db/sessions.js', async importOriginal => ({ ...await importOrigin
 vi.mock('../../turn/lease.js', async importOriginal => ({ ...await importOriginal<typeof import('../../turn/lease.js')>(),
   waitForTurnSlot: mocks.wait }))
 
-import { resumePredecessorSlotWait } from '../session-resume-replay.js'
+import { resumePredecessorSlotWait } from '../../turn/resume-recovery.js'
 
 const predecessor = 'a1a1a1a1-0000-4000-8000-000000000001'
 const recovered = { turnId: 'd'.repeat(64), reason: 'stalled_reclaimed' as const }

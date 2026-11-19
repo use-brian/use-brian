@@ -25,21 +25,34 @@ const list = (value: unknown): value is FencedList => !!value && typeof value ==
 export function createChatCachePersistence(storage: Storage = { read: idbReadEntries, update: idbUpdateEntries }) {
   const known = new Map<string, ChatCacheFence>();
   let epoch = 0, clock = 0;
-  const reads = new Map<string, number>();
-  const begin = (key: string) => { const request = ++clock; reads.delete(key); reads.set(key, request); while (reads.size > 128) reads.delete(reads.keys().next().value!); return { epoch, request }; };
-  const remember = (key: string, value: unknown, owner: { epoch: number; request: number }) => {
-    if (owner.epoch !== epoch || reads.get(key) !== owner.request) return valid(value) ? value : null;
+  const observations = new Map<string, { applied: number }>();
+  const begin = (key: string) => {
+    const scope = observations.get(key) ?? { applied: 0 };
+    observations.delete(key);
+    observations.set(key, scope);
+    while (observations.size > 128) observations.delete(observations.keys().next().value!);
+    return { epoch, request: ++clock, scope };
+  };
+  const apply = (key: string, owner: ReturnType<typeof begin>) => {
+    // A transaction already read the durable fence. Another observation in
+    // flight cannot hide it, but an already applied newer result takes priority.
+    if (owner.epoch !== epoch || observations.get(key) !== owner.scope || owner.request <= owner.scope.applied) return false;
+    owner.scope.applied = owner.request;
+    return true;
+  };
+  const remember = (key: string, value: unknown, owner: ReturnType<typeof begin>) => {
+    if (!apply(key, owner)) return valid(value) ? value : null;
     if (valid(value)) known.set(key, value); else known.delete(key);
     // A bounded mirror is not a permission store. Missing mirrors paint no copy.
     while (known.size > 128) known.delete(known.keys().next().value!);
     return valid(value) ? value : null;
   };
-  const forget = (key: string, owner: { epoch: number; request: number }) => {
-    if (owner.epoch === epoch && reads.get(key) === owner.request) known.delete(key);
+  const forget = (key: string, owner: ReturnType<typeof begin>) => {
+    if (apply(key, owner)) known.delete(key);
   };
   const source = (ticket: ChatCacheTicket, id: string): ChatCacheRowFence => ({ generation: ticket.generation, marker: ticket.denials[id] ?? null });
   return {
-    clearMemory: () => { epoch++; known.clear(); reads.clear(); },
+    clearMemory: () => { epoch++; known.clear(); observations.clear(); },
     source,
     current: (key: string) => known.get(key) ?? null,
     // A storage failure cannot erase an already observed denial or a newer mirror.

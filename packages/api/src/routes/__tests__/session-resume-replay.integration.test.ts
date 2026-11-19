@@ -45,11 +45,11 @@ const text = (row: { content: unknown }) => (row.content as Array<{ type: string
   .filter(block => block.type === 'text').map(block => block.text).join('')
 
 describe.sequential('[COMP:brain/session-resume-worker] question resume on the canonical owner', () => {
-  it.each([['personal', false], ['shared-room', false], ['personal', true]] as const)('resumes a %s web chat after the answer (provider failure: %s)', async (scenario, providerFails) => {
+  it.each([['personal', false], ['shared-room', false], ['shared-room-revoked', false], ['personal', true]] as const)('resumes a %s web chat after the answer (provider failure: %s)', async (scenario, providerFails) => {
     const f = await persistentContextFixture('confidential')
     try {
       const device = (await authSessionStore.create(f.ownerId, { deviceLabel: 'Fictional resume browser', userAgent: null, ipAddress: null }))!
-      const session = scenario === 'shared-room' ? f.session : await createPersonalWebSession({
+      const session = scenario !== 'personal' ? f.session : await createPersonalWebSession({
         assistantId: f.assistantId, userId: f.ownerId, workspaceId: f.workspaceId, channelType: 'web', channelId: randomUUID(), appOrigin: 'chat',
       }, { actorUserId: f.ownerId, authSessionId: device.id, authVersion: device.authVersion })
       await f.pool.query("UPDATE workspaces SET plan='pro' WHERE id=$1", [f.workspaceId])
@@ -67,16 +67,23 @@ describe.sequential('[COMP:brain/session-resume-worker] question resume on the c
       const stored = (await readSessionById(session.id))!
       const { turnScope } = await resolveExecutionContextSystem({ userId: f.ownerId, workspaceId: f.workspaceId,
         assistant: (await findAssistantById(f.assistantId))!, session: stored, sessionAuthority: stored,
-        sharedAudience: scenario === 'shared-room', memberMode: 'member',
+        sharedAudience: scenario !== 'personal', memberMode: 'member',
         identity: { kind: 'attended', principal: { kind: 'workspace_member', userId: f.ownerId, authenticationKind: 'native_session' } },
         ownership: { kind: 'workspace', workspaceId: f.workspaceId },
         lifecycle: { sessionId: session.id, channelType: 'web', channelId: stored.channelId, abortSignal: new AbortController().signal } })
       const events: Array<{ kind: string; payload: Record<string, unknown> }> = []
       // Production parity: the composition root passes connector stores, so the
       // owner prepares the `resume` capability profile for the suspended tool.
+      let providerRequests = 0
       const resumed = providerFails ? { ...provider(''), createSession() { return { send() { return (async function* () {
         throw new Error('Fictional provider outage') })() } } } } as LLMProvider : provider('Blue it is, a calm fictional choice.')
-      const replay = createSessionResumeReplay({ provider: resumed, tools: new Map(),
+      const observedProvider: LLMProvider = { ...resumed,
+        createSession(options) {
+          const modelSession = resumed.createSession!(options)
+          return { ...modelSession, send(...args) { providerRequests++; return modelSession.send(...args) } }
+        },
+      }
+      const replay = createSessionResumeReplay({ provider: observedProvider, tools: new Map(),
         capabilityStores: { connectorStore: createDbConnectorStore(null), settingsStore: createDbMcpSettingsStore(),
           assistantConnectorStore: createDbAssistantConnectorStore() },
         systemPrompt: 'Fictional fixture.', resolveWorkspaceCustomLlm: null, resolveWorkspaceByoGeminiKey: null, buildWorkspaceProvider: null,
@@ -91,6 +98,16 @@ describe.sequential('[COMP:brain/session-resume-worker] question resume on the c
         suspendedToolInput: { question: 'Which colour?', options: ['Blue', 'Green'] }, loopStepIndex: 1,
         startingAccessCeiling: pinAccessCeiling(turnScope.access), approvalStatus: 'approved', rejectReason: null,
         answerText: 'Blue', approvalKind: 'question' } as const
+      if (scenario === 'shared-room-revoked') {
+        const before = await getSessionMessages(session.id, { excludeHeld: true })
+        await f.pool.query("UPDATE assistants SET clearance='internal' WHERE id=$1", [f.assistantId])
+        await expect(replay(resumeParams)).rejects.toMatchObject({ code: 'session_resume_authority_unavailable' })
+        expect(providerRequests).toBe(0)
+        expect((await getSessionMessages(session.id, { excludeHeld: true })).map(row => row.id)).toEqual(before.map(row => row.id))
+        expect(await committedTurnCompletion({ workspaceId: f.workspaceId, sessionId: session.id,
+          input: { kind: 'approval', ref: approvalId } })).toBeNull()
+        return
+      }
       const outcome = replay(resumeParams)
       if (providerFails) {
         // The job is terminal: the conversation records that no reply follows, and it reopens.
@@ -102,6 +119,7 @@ describe.sequential('[COMP:brain/session-resume-worker] question resume on the c
         return
       }
       await expect(outcome).resolves.toBe('completed')
+      expect(providerRequests).toBe(1)
       const rows = await getSessionMessages(session.id, { excludeHeld: true })
       expect(rows.map(text).at(-1)).toBe('Blue it is, a calm fictional choice.')
       expect(events.map(event => event.kind)).toContain('turn_started')
@@ -114,6 +132,7 @@ describe.sequential('[COMP:brain/session-resume-worker] question resume on the c
       // the replayed job finds the committed continuation and writes nothing.
       const before = (await getSessionMessages(session.id, { excludeHeld: true })).length
       await expect(replay(resumeParams)).resolves.toBe('completed')
+      expect(providerRequests).toBe(1)
       expect((await getSessionMessages(session.id, { excludeHeld: true })).length).toBe(before)
     } finally { await f.cleanup() }
   }, 120_000)

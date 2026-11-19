@@ -64,6 +64,55 @@ describe("durable chat cache fences", () => {
     await one.writeList(guard, list, after, snapshot("Authorized title", 101), row => one.source(after, row.id));
     expect((await two.readList(guard, list))?.value.personal.map(row => row.id)).toEqual(["denied", "other"]);
   });
+  it("uses a completed list and history fence while a later local observation is pending", async () => {
+    const rows = [{ id: "denied" }, { id: "other" }];
+    const old = { version: 1 as const, generation: "current", denials: {} };
+    const newest = { ...old, denials: { denied: "revoked" } };
+    let finishRead!: () => void;
+    let finishCapture!: () => void;
+    const cache = createChatCachePersistence({
+      read: async () => {
+        await new Promise<void>(resolve => { finishRead = resolve; });
+        return { [guard]: newest };
+      },
+      update: async () => {
+        await new Promise<void>(resolve => { finishCapture = resolve; });
+        return { [guard]: newest };
+      },
+    });
+    // The General list has its post-response check pending alongside a second
+    // consumer's observation. Its successful transaction must be applied.
+    const completed = cache.refresh(guard);
+    const overlapping = cache.capture(guard);
+    finishRead();
+    await completed;
+    const oldSource = (row: { id: string }) => cache.source(old, row.id);
+    expect(cache.filter(guard, rows, oldSource)).toEqual([{ id: "other" }]);
+    expect(cache.matches(guard, "other", oldSource(rows[1]))).toBe(true);
+    expect(cache.matches(guard, "denied", oldSource(rows[0]))).toBe(false);
+    expect(cache.filter("other viewer or workspace", rows, oldSource)).toEqual([]);
+    finishCapture();
+    await overlapping;
+  });
+  it("cannot paint a withdrawn row from an older successful observation released after a newer one", async () => {
+    const rows = [{ id: "denied" }, { id: "other" }];
+    const old = { version: 1 as const, generation: "current", denials: {} };
+    const newest = { ...old, denials: { denied: "revoked" } };
+    let finishRead!: () => void;
+    const cache = createChatCachePersistence({
+      read: async () => {
+        await new Promise<void>(resolve => { finishRead = resolve; });
+        return { [guard]: old };
+      },
+      update: async () => ({ [guard]: newest }),
+    });
+    const delayed = cache.refresh(guard);
+    await cache.capture(guard);
+    finishRead();
+    await delayed;
+    expect(cache.filter(guard, rows, row => cache.source(old, row.id))).toEqual([{ id: "other" }]);
+    expect(cache.allowsUnfenced(guard, "denied")).toBe(false);
+  });
   it("an older storage failure cannot discard a newer successful mirror", async () => {
     const values = { version: 1 as const, generation: "current", denials: { denied: "revoked" } };
     let fail!: (error: Error) => void;

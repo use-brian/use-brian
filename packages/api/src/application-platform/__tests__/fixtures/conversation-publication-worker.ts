@@ -21,7 +21,7 @@ import {createPendingApprovalsStore} from '../../../db/pending-approvals-store.j
 const {assertLocalFixture}=await import(new URL('../../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 const command=z.object({mode:z.enum(['publish','kill_after_commit','receive','recover_sweep','follow_up','stop','stop_before_publication','kill_stopped_after_commit','kill_wait_after_commit']),sessionId:z.string().uuid(),assistantId:z.string().uuid(),
- workspaceId:z.string().uuid(),token:z.string(),secret:z.string(),turnId:z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(),counter:z.string().regex(/^publication_counter_[a-f0-9]+$/)}).strict().parse(JSON.parse(await readFile(process.argv[2],'utf8')))
+ workspaceId:z.string().uuid(),token:z.string(),secret:z.string(),staleAfterMs:z.number().int().positive().optional(),turnId:z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(),counter:z.string().regex(/^publication_counter_[a-f0-9]+$/)}).strict().parse(JSON.parse(await readFile(process.argv[2],'utf8')))
 const emit=(value:unknown)=>new Promise<void>((resolve,reject)=>{
  if(!process.send){reject(new Error('Publication worker requires its parent IPC channel'));return}
  process.send(value,error=>error?reject(error):resolve())
@@ -33,15 +33,15 @@ let submittedPublication:unknown[]|undefined
 const lifecycle:SessionEvent[]=[],publishSessionEvent=(event:SessionEvent)=>{lifecycle.push(event)}
 pg.Client.prototype.query=function(this:pg.Client,...args:unknown[]){
  const sql=typeof args[0]==='string'?args[0]:(args[0] as {text?:string})?.text??''
- if(sql.startsWith('SELECT publish_native_session_message_batch(')&&sql.includes('$7')){publishing.add(this);submittedPublication=structuredClone(args[1] as unknown[])}
+ if(sql.includes('SELECT publish_native_session_message_batch(')&&sql.includes('$7')){publishing.add(this);submittedPublication=structuredClone(args[1] as unknown[])}
  if(sql.startsWith('SELECT read_native_conversation_publications('))discoveries++
  if(!paused&&sends>=2&&['stop_before_publication','kill_stopped_after_commit','kill_wait_after_commit'].includes(command.mode)
-  &&sql.startsWith('SELECT lock_native_session_context_publication(')){
+  &&sql.includes('SELECT lock_native_session_context_publication(')){
   paused=true
   return(async()=>{await emit({event:'before_publication_lock',pid:process.pid});await once(process,'message');return Reflect.apply(originalQuery,this,args)})()
  }
  if(sql==='COMMIT'&&publishing.has(this)&&command.mode==='kill_wait_after_commit'){
-  return(async()=>{await emit({event:'before_publication_commit',pid:process.pid});await once(process,'message');
+  return(async()=>{await emit({event:'before_publication_commit',pid:process.pid,backendPid:(this as pg.Client & {processID:number}).processID});await once(process,'message');
    await Reflect.apply(originalQuery,this,args);await emit({event:'publication_committed',pid:process.pid});await new Promise(()=>{})})()
  }
  const result=Reflect.apply(originalQuery,this,args)
@@ -73,7 +73,7 @@ const server=app.listen(0,'127.0.0.1');await once(server,'listening')
 try{
  const url=`http://127.0.0.1:${(server.address() as AddressInfo).port}`
  const receiving=command.mode==='receive'||command.mode==='recover_sweep'
- if(command.mode==='recover_sweep')await createStuckSessionSweeper({publishDraftTurnCompleted:(sessionId,outcome)=>publishSessionEvent({kind:'turn_completed',sessionId,payload:{senderUserId:null,turnId:outcome.turnId,reason:outcome.reason}})}).tick()
+ if(command.mode==='recover_sweep')await createStuckSessionSweeper({staleAfterMs:command.staleAfterMs,publishDraftTurnCompleted:(sessionId,outcome)=>publishSessionEvent({kind:'turn_completed',sessionId,payload:{senderUserId:null,turnId:outcome.turnId,reason:outcome.reason}})}).tick()
  const response=await fetch(receiving?`${url}/sessions/${command.sessionId}/messages`:command.mode==='stop'?`${url}/chat/stop`:`${url}/chat`,{
   method:receiving?'GET':'POST',headers:{Authorization:`Bearer ${command.token}`,'Content-Type':'application/json'},
   ...(receiving?{}:{body:JSON.stringify(command.mode==='stop'?{sessionId:command.sessionId,...command.turnId!==undefined?{turnId:command.turnId}:{}}:{sessionId:command.sessionId,assistantId:command.assistantId,workspaceId:command.workspaceId,

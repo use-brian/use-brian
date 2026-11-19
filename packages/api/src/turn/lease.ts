@@ -57,6 +57,8 @@ export async function takeTurnLease(params: {
   sessionId: string
   admission: 'personal' | 'room'
   waitForSlot?: TurnSlotWait
+  /** Reclaim is handled separately and fenced to the known predecessor. */
+  idleOnly?: boolean
   signal?: AbortSignal
   /** The answering assistant when the runner re-addresses (see `claimTurnLease`). */
   assistantId?: string
@@ -67,7 +69,8 @@ export async function takeTurnLease(params: {
   // Waits remain transport-specific, and every wake attempts a fresh claim.
   for (;;) {
     params.signal?.throwIfAborted()
-    const claim=await claimTurnLeaseOutcome(params.sessionId,params.assistantId??null,params.startedAt??null)
+    const claim=await claimTurnLeaseOutcome(params.sessionId,params.assistantId??null,params.startedAt??null,
+      ...(params.idleOnly ? [{ idleOnly: true } as const] : []))
     if(claim)return{taken:true,...claim,...claim.recovered?{reclaimed:true as const}:{}}
     params.signal?.throwIfAborted()
     if (!params.waitForSlot) return { taken: false, code: 'turn_in_flight' }

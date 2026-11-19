@@ -67,9 +67,8 @@ function assemble(turns: { content: ContentBlock[] }[]): string {
 
 describe('[COMP:api/channel-delivery-assembly] shared collector output', () => {
   it('wires the canonical collector into the production channel adapter', () => {
-    expect(pipelineSource).toContain("createTurnOutputCollector({ format: 'channel' })")
-    expect(pipelineSource).toContain('turnOutput.observe(event)')
-    expect(pipelineSource).toContain('turnOutput.advanceDelivery()')
+    expect(pipelineSource).toContain("turnOwner.selectedOutput('channel')")
+    expect(pipelineSource).not.toContain('createTurnOutputCollector')
   })
 
   it('drops narration riding alongside a tool call and keeps the terminal reply', () => {
@@ -206,12 +205,10 @@ describe('[COMP:api/channel-delivery-assembly] empty-delivery wiring', () => {
     )
   })
 
-  it('routes the tools_only reason through composeRecoveryMessage', () => {
-    // "Try again" is wrong advice when a tool may already have shipped a side
-    // effect, and only that reason may spend a background model call.
-    expect(pipelineSource).toMatch(
-      /emptyReason === 'tools_only'\s*\?\s*await composeRecoveryMessage\(/,
-    )
+  it('requests empty delivery recovery through the original turn owner', () => {
+    expect(pipelineSource).toContain("const recovered = await recoverMessage('empty')")
+    expect(pipelineSource).toContain('turnOwner.recoverInteractiveReply({')
+    expect(pipelineSource).not.toMatch(/await composeRecoveryMessage/)
   })
 
   it('never labels an analytics event with the tier-resolved model', () => {

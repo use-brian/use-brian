@@ -50,11 +50,13 @@ export type RecoveryPendingTurn = {
 export type ComposeRecoveryMessageParams = {
   provider: LLMProvider
   /** The route's pending-turn buffer at the moment the loop bailed. */
-  pendingAssistantTurns: RecoveryPendingTurn[]
+  pendingAssistantTurns: readonly RecoveryPendingTurn[]
   /** What the user originally said. Drives language matching + framing. */
   userText: string
   /** Channel name for log lines — purely diagnostic. */
   channelType: string
+  beforeDispatch?: () => Promise<void>
+  signal?: AbortSignal
 }
 
 export type ComposeRecoveryMessageResult = {
@@ -104,7 +106,7 @@ const SYSTEM_PROMPT = [
  * narrate — the route should fall back to its generic error.
  */
 function collectSuccessfulActions(
-  turns: RecoveryPendingTurn[],
+  turns: readonly RecoveryPendingTurn[],
 ): Array<{ name: string; input: Record<string, unknown>; resultSnippet: string }> {
   const actions: Array<{ name: string; input: Record<string, unknown>; resultSnippet: string }> = []
   for (const turn of turns) {
@@ -159,6 +161,8 @@ export async function composeRecoveryMessage(
     2,
   )
 
+  await params.beforeDispatch?.()
+  params.signal?.throwIfAborted()
   try {
     const response = await collectStream(
       params.provider.stream({
@@ -167,6 +171,7 @@ export async function composeRecoveryMessage(
         messages: [{ role: 'user', content: payload }],
         maxTokens: 200,
         temperature: 0.3,
+        signal: params.signal,
       }),
     )
     const text = response.content

@@ -23,6 +23,7 @@
  */
 
 import { intersectAccessCeilings, type AccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import type { ConnectorResumeTarget } from '@use-brian/agent-runtime/tools/types.js'
 import { query } from './client.js'
 
 export type SessionResumePoint = {
@@ -30,6 +31,7 @@ export type SessionResumePoint = {
   approvalId: string
   suspendedToolName: string
   suspendedToolInput: unknown
+  connectorTarget?: ConnectorResumeTarget
   loopStepIndex: number
   selectedCustomModel?: string
   selectedTier?: string
@@ -47,6 +49,7 @@ export type CreateSessionResumePointParams = {
   approvalId: string
   suspendedToolName: string
   suspendedToolInput: unknown
+  connectorTarget?: ConnectorResumeTarget
   loopStepIndex: number
   selectedCustomModel?: string
   selectedTier?: string
@@ -97,6 +100,7 @@ function rowToPoint(row: Record<string, unknown>): SessionResumePoint {
   const envelope = envelopeVersion === 1 || envelopeVersion === 2 || envelopeVersion === 3
     ? storedInput as {
         toolInput?: unknown
+        connectorTarget?: Partial<ConnectorResumeTarget>
         selectedCustomModel?: unknown
         selectedTier?: unknown
         selectedLegacyByo?: unknown
@@ -122,6 +126,10 @@ function rowToPoint(row: Record<string, unknown>): SessionResumePoint {
     approvalId: row.approvalId as string,
     suspendedToolName: row.suspendedToolName as string,
     suspendedToolInput: envelope ? envelope.toolInput : storedInput,
+    ...(envelopeVersion === 3 && typeof envelope?.connectorTarget?.serverName === 'string'
+      && typeof envelope.connectorTarget.version === 'string'
+      ? { connectorTarget: { serverName: envelope.connectorTarget.serverName, version: envelope.connectorTarget.version } }
+      : {}),
     loopStepIndex: row.loopStepIndex as number,
     ...(typeof envelope?.selectedCustomModel === 'string'
       ? { selectedCustomModel: envelope.selectedCustomModel }
@@ -168,6 +176,7 @@ export function createDbSessionResumeStore(): SessionResumeStore {
           JSON.stringify({
             __useBrianResumeVersion: 3,
             toolInput: params.suspendedToolInput,
+            connectorTarget: params.connectorTarget,
             selectedCustomModel: params.selectedCustomModel,
             selectedTier: params.selectedTier,
             selectedLegacyByo: params.selectedLegacyByo,

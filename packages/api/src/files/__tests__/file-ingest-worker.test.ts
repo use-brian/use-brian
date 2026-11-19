@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
-import { MAX_INGEST_PARSE_BYTES, createFileIngestWorker, type FileIngestWorkerDeps } from '../file-ingest-worker.js'
+import { createFileIngestWorker, type FileIngestWorkerDeps } from '../file-ingest-worker.js'
+import { MAX_INGEST_PARSE_BYTES } from '../ingest-port.js'
 import type { FileIngestJob } from '../../db/file-ingest-jobs-store.js'
 
 function job(over: Partial<FileIngestJob> = {}): FileIngestJob {

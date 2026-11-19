@@ -78,7 +78,7 @@ export function registerLifecycle(scope: LifecycleScope) {
     externalSinkRelay.stop()
     chatArchiveEnrichmentWorker?.stop()
     stuckSessionSweeper.stop()
-    fileIngestWorker?.stop()
+    await fileIngestWorker?.stop()
     structuredDocumentRuntime?.stop()
     gdriveEnrichmentWorker?.stop()
     gdriveCatalogWorker?.stop()

@@ -161,13 +161,12 @@ async function collectWordPressTools(
 
 // ── Provider module ───────────────────────────────────────────
 
-/** One WordPress lane. `withCachedFileReader` as for Shopify (personal base lane only). */
+/** One WordPress lane. Attached bytes come from the executing surface and actor. */
 export type WordPressLane = BuiltinLane<{ connectorId: string; connected: boolean; url?: string | null }> & {
   credsOverride?: () => Promise<string | null>
   extraInstances?: ConnectorInstanceRef[]
   resolveInstanceCreds?: (instanceId: string) => Promise<string | null>
   healthProbe?: { report: HealthReporter; instanceId?: string | null }
-  withCachedFileReader?: boolean
 }
 
 export async function activateWordPressLane(ctx: ProviderActivationContext, lane: WordPressLane): Promise<Tool[]> {
@@ -176,7 +175,7 @@ export async function activateWordPressLane(ctx: ProviderActivationContext, lane
     lane.connectors, ctx.stores.connectorStore, lane.settingsStore, lane.userId, ctx.assistantId,
     ctx.stores.assistantConnectorStore, tools, laneUnavailable(ctx, lane), lane.credsOverride,
     lane.extraInstances, lane.resolveInstanceCreds, lane.healthProbe, ctx.stores.assistantConnectorGrantsStore,
-    ctx.attachments.filesApi, lane.withCachedFileReader ? ctx.attachments.readCachedFile : undefined,
+    ctx.attachments.filesApi, ctx.attachments.readCachedFile,
   )
   return [...tools.values()]
 }

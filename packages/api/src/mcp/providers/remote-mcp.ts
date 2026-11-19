@@ -81,6 +81,7 @@ export type RemoteMcpSessionPorts = {
   authority: RemoteMcpAuthority
   /** Descriptor lifecycle the session records into and reads `fresh` records from. Defaults to the shared one. */
   descriptorLifecycle?: DescriptorLifecycle
+  refreshDescriptors?: boolean
 }
 
 export type RemoteMcpSession = {
@@ -119,7 +120,7 @@ export function createRemoteMcpSession(ports: RemoteMcpSessionPorts): RemoteMcpS
   }
   /** A `fresh` lifecycle record as the server config the index needs (never for a protected source). */
   function freshServer(ref: DynamicSourceRef | null, name: string, url: string): McpServerConfig | null {
-    if (!ref || ref.protected) return null
+    if (!ref || ref.protected || ports.refreshDescriptors) return null
     const record = lifecycle.read(ref)
     if (record.availability !== 'fresh') return null
     // The catalog may treat this source as protected (and so never read the
@@ -374,12 +375,13 @@ export type RemoteMcpInstances = {
   authority: RemoteMcpAuthority
   /** The catalog plan's lifecycle; the shared one otherwise. */
   descriptorLifecycle?: DescriptorLifecycle
+  refreshDescriptors?: boolean
 }
 
 export const remoteMcpProvider: ProviderModule<RemoteMcpInstances> = {
   family: 'remote-mcp',
   describe: () => [],
-  async activate(ctx, { instances, granted = [], authority, descriptorLifecycle }) {
+  async activate(ctx, { instances, granted = [], authority, descriptorLifecycle, refreshDescriptors }) {
     const session = createRemoteMcpSession({
       userId: ctx.userId,
       assistantId: ctx.assistantId,
@@ -388,6 +390,7 @@ export const remoteMcpProvider: ProviderModule<RemoteMcpInstances> = {
       actorIdentity: ctx.hosted.actorIdentity,
       authority,
       descriptorLifecycle,
+      refreshDescriptors,
     })
     await session.discover(instances)
     for (const grant of granted) {

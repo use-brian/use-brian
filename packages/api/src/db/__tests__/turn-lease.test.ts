@@ -25,6 +25,17 @@ describe('[COMP:api/turn-lease] canonical owner protocol',()=>{
   expect(await claimTurnLeaseOutcome('session','assistant',started)).toEqual({token,turnId})
   expect(mock.mock.calls[0][1]).toEqual(['session','claim','assistant',started,String(TURN_LEASE_STALE_AFTER_MS),null,null,false])
  })
+ it('claims only an inactive row and fences the token to null for a resumed turn',async()=>{
+  mock.mockResolvedValueOnce({rows:[]} as never)
+  answers.push({state:'superseded'},{state:'claimed',token,turnId,recovered:null})
+  const options={idleOnly:true} as const
+  expect(await claimTurnLeaseOutcome('session','assistant',null,options)).toBeNull()
+  expect(await claimTurnLeaseOutcome('session','assistant',null,options)).toBeNull()
+  expect(await claimTurnLeaseOutcome('session','assistant',null,options)).toEqual({token,turnId})
+  expect(String(mock.mock.calls[0][0])).toContain("FROM sessions WHERE id=$1 AND status<>'running'")
+  const transitions=mock.mock.calls.filter(call=>String(call[0]).includes('native_session_turn_transition('))
+  expect(transitions.map(call=>(call[1] as unknown[]).slice(5))).toEqual([[null,null,true],[null,null,true],[null,null,true]])
+ })
  it('distinguishes busy/absent from malformed or unavailable owner results',async()=>{
   answers.push({state:'busy'},null,{state:'claimed',token,turnId:'invalid',recovered:null})
   expect(await claimTurnLeaseOutcome('session')).toBeNull();expect(await claimTurnLeaseOutcome('session')).toBeNull()
