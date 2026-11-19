@@ -136,7 +136,7 @@ export async function installCrmSummaryCredentials(client, rows) {
   await client.query('LOCK TABLE public.crm_summary_receipt_keys IN SHARE ROW EXCLUSIVE MODE')
   const { rows: [origin] } = await client.query(`SELECT count(*)=1 AND bool_and(issue_enabled)
     AND NOT EXISTS(SELECT 1 FROM public.crm_summary_source_descriptors) AS fresh FROM public.crm_summary_receipt_keys`)
-  if (origin?.fresh !== true) throw Error('portable_restore_crm_credential_target_not_fresh')
+  if (origin?.fresh !== true) return null
   await client.query('DELETE FROM public.crm_summary_receipt_keys')
   await client.query(`INSERT INTO public.crm_summary_receipt_keys(id,pad_inner,pad_outer,issue_enabled,created_at)
     SELECT id,decode(inner_pad,'hex'),decode(outer_pad,'hex'),issue_enabled,created_at FROM jsonb_to_recordset($1::jsonb)
