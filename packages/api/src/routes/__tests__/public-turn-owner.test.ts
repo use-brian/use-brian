@@ -37,7 +37,10 @@ vi.mock('../../context-scope/delivery-authority.js', async original => ({
 }))
 vi.mock('../route-helpers.js', () => ({checkUsageBudget:async () => ({status:'ok'}),applyMcpInjection:mocks.inject,
   buildUnavailableCapabilitiesPrompt:() => '',injectSkills:vi.fn()}))
-vi.mock('../../model-resolution.js', () => ({resolveChatModelSelection:() => ({logicalModel:'fixture',logicalTier:'standard',servingModel:'fixture'})}))
+vi.mock('../../model-resolution.js', async original => ({
+  ...await original<typeof import('../../model-resolution.js')>(),
+  resolveChatModelSelection:() => ({logicalModel:'fixture',logicalTier:'standard',servingModel:'fixture'}),
+}))
 vi.mock('../proactive-compaction.js', () => ({runProactiveCompaction:mocks.compact}))
 vi.mock('../../decision-learning/playbook-context.js', () => ({loadDecisionPlaybookContext:async () => ({playbookRules:[]})}))
 vi.mock('../../briefs/context.js', () => ({captureBriefRunPreparation:() => async (_execution:unknown,tools:unknown) => ({tools,contribution:null})}))
