@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { accessCeilingContains, type AccessCeiling } from '@use-brian/core'
+import { accessCeilingContains, type AccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { nativeInvocationReadCeiling } from '../native-invocation-ceiling.js'
 
 const original: AccessCeiling = {

@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { ContextScopeAccumulator, createExecutionContext, executionToolContext, type ToolContext } from '@use-brian/core'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { createExecutionContext, executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { buildWorkspaceMcpCatalog } from '../../workspace-mcp/catalog.js'
 import { createAuthorityLease } from '../../context-scope/authority-lease.js'
 import { currentAgentAccess, runWithAgentAccess } from '../../db/agent-access-context.js'

@@ -1,6 +1,7 @@
 /** Native read tools, also projected through the canonical MCP catalog/executor. */
 import { z } from 'zod'
-import { buildTool, estimateStringTokens, type Tool, type ToolContext } from '@use-brian/core'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { estimateStringTokens } from '@use-brian/agent-runtime/compaction/index.js'
 import { runWithAgentAccess } from '../db/agent-access-context.js'
 import { createProjectHarnessStore, readHarnessProjectSnapshot } from '../db/project-harness-store.js'
 import { createHarnessExecutionStore } from '../db/project-harness-execution-store.js'
@@ -39,9 +40,9 @@ type TargetInput = { projectId?: string; scope: HarnessScope }
 /** Identity comes only from authenticated host context, never the billed owner or arguments. */
 function actor(context: ToolContext, input: TargetInput) {
   const ec = context.executionContext
-  const userId = ec?.security.access.userId ?? context.workspaceActorUserId ?? context.programmaticPrincipal?.userId
+  const userId = ec?.security.access.userId
   const projectId = input.projectId ?? context.activeProjectId
-  if (context.systemRead || ec?.surface.systemRead || ec?.identity.kind === 'system' || !userId || !context.workspaceId) {
+  if (!ec || context.systemRead || ec?.surface.systemRead || ec?.identity.kind === 'system' || !userId || !context.workspaceId) {
     throw new WorkspaceAccessError('harness_actor_required', 403)
   }
   if (ec && (ec.identity.kind === 'attended' && ec.identity.principal.kind !== 'workspace_member'

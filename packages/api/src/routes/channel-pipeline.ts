@@ -1701,7 +1701,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     bindProviderConversationTurn(executionContext, turnOwner.token, recordEnvelope.version)
   }
 
-  turnOwner.bindModelPreparation({ kind: 'execution', toolProfile: 'channel', execution: executionContext, assertCurrent: assertDeliveryAudience },
+  turnOwner.bindModelPreparation({ kind: 'execution', toolProfile: 'channel', execution: executionContext, scopeAccumulator, assertCurrent: assertDeliveryAudience },
     { provider: provider, configuredProviders: params.configuredProviders,
           resolveWorkspaceCustomLlm: params.resolveWorkspaceCustomLlm?.bind(params) ?? null,
           resolveLegacyByoKey: null,

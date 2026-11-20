@@ -3685,7 +3685,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       const originalLegacyKeyStore = options.llmProviderSettingsStore?.getPlaintextKeySystem.bind(options.llmProviderSettingsStore)
       const resolveOriginalLegacyKey = options.buildWorkspaceProvider && (originalLegacyResolver || originalLegacyKeyStore)
         ? originalLegacyResolver ?? ((workspaceId: string) => originalLegacyKeyStore!({ workspaceId, provider: 'gemini' })) : null
-      ownedTurn.bindModelPreparation({ kind: 'execution', toolProfile: 'web', execution: executionContext, assertCurrent: assertDeliveryAudience },
+      ownedTurn.bindModelPreparation({ kind: 'execution', toolProfile: 'web', execution: executionContext, scopeAccumulator, assertCurrent: assertDeliveryAudience },
         { provider: options.provider, configuredProviders: turnOptions.configuredProviders,
           resolveWorkspaceCustomLlm: turnOptions.resolveWorkspaceCustomLlm?.bind(turnOptions) ?? null,
           resolveLegacyByoKey: resolveOriginalLegacyKey,

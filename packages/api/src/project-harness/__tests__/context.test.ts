@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { ContextScopeAccumulator } from '@use-brian/core'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import { loadHarnessContext, MAX_HARNESS_PROMPT_CHARS, renderHarnessContext } from '../context.js'
 import type { HarnessDefinition, HarnessRevision, HarnessScope } from '../contracts.js'
 import { currentAgentAccess, runWithAgentAccess } from '../../db/agent-access-context.js'

@@ -1,5 +1,7 @@
 /** Project-only automatic grounding in existing turns; never an agent runtime. */
-import type { ContextScopeAccumulator, ExecutionContext, Tool } from '@use-brian/core'
+import type { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { runWithAgentAccess } from '../db/agent-access-context.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { loadHarnessContext } from './context.js'
@@ -15,21 +17,25 @@ export function captureHarnessRunPreparation() {
   return Object.freeze({
     enabled: resolver !== null,
     canonical: resolver === null || resolver === resolveHarnessTurn,
+    appliesTo: (execution: ExecutionContext, tools: ReadonlyMap<string, Tool>) =>
+      resolver !== null && (resolver !== resolveHarnessTurn || harnessTurnEligible(execution, tools)),
     apply: (execution: ExecutionContext, tools: ReadonlyMap<string, Tool>, accumulator?: ContextScopeAccumulator) =>
       resolver ? resolver(execution, tools, accumulator) : Promise.resolve(null),
   })
 }
 
-export const resolveHarnessTurn: HarnessTurnResolver = async (execution, tools, accumulator) => {
-  // Tool admission includes credential consent. Automatic context must not become
-  // an alternate route around an unavailable/unconsented harness read operation.
+function harnessTurnEligible(execution: ExecutionContext, tools: ReadonlyMap<string, Tool>): boolean {
   if (!tools.has('getProjectHarnessContext') || execution.ownership.kind !== 'workspace'
-    || execution.surface.systemRead || execution.identity.kind === 'system') return null
+    || execution.surface.systemRead || execution.identity.kind === 'system') return false
   if (execution.identity.kind === 'programmatic' && (!execution.identity.principal.actorUserId
-    || !['brain_key', 'assistant_key', 'oauth_token', 'home_app'].includes(execution.identity.principal.kind))) return null
-  if (execution.identity.kind === 'attended' && execution.identity.principal.kind !== 'workspace_member') return null
+    || !['brain_key', 'assistant_key', 'oauth_token', 'home_app'].includes(execution.identity.principal.kind))) return false
+  if (execution.identity.kind === 'attended' && execution.identity.principal.kind !== 'workspace_member') return false
+  return execution.security.writeDefaults.projectIds.length === 1
+}
+
+export const resolveHarnessTurn: HarnessTurnResolver = async (execution, tools, accumulator) => {
+  if (!harnessTurnEligible(execution, tools) || execution.ownership.kind !== 'workspace') return null
   const ids = execution.security.writeDefaults.projectIds
-  if (ids.length !== 1) return null // Never infer selection from readable grants or prose.
   if (!accumulator) throw new WorkspaceAccessError('harness_scope_accumulator_required', 503)
   const { access, authority } = execution.security
   const workspaceId = execution.ownership.workspaceId

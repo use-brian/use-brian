@@ -1012,7 +1012,7 @@ async function executePublicTurnInScope(
     // settable independently of the owner's own bot: `api_model_alias`
     // (migration 416). Before that these turns rode `telegram_model_alias`,
     // which meant capping a public chat link also downgraded Telegram.
-    turnOwner.bindModelPreparation({ kind: 'execution', toolProfile: 'public', execution: executionContext, assertCurrent: assertTurnCurrent },
+    turnOwner.bindModelPreparation({ kind: 'execution', toolProfile: 'public', execution: executionContext, scopeAccumulator, assertCurrent: assertTurnCurrent },
       { provider: deps.provider, configuredProviders: deps.configuredProviders,
           resolveWorkspaceCustomLlm: deps.resolveWorkspaceCustomLlm?.bind(deps) ?? null,
           resolveLegacyByoKey: null,

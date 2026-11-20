@@ -1,5 +1,7 @@
+import { createExecutionContext, executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { describe, expect, it, vi } from 'vitest'
-import { ContextScopeAccumulator, type ToolContext } from '@use-brian/core'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { createProjectHarnessTools, type ProjectHarnessToolsOptions } from '../tools.js'
 import type { HarnessApproval, HarnessRun } from '../execution-contracts.js'
 import type { HarnessDefinition, HarnessRevision, HarnessScope, ProjectProduct } from '../contracts.js'
@@ -32,8 +34,12 @@ function fixture() {
   const options: ProjectHarnessToolsOptions = { store, execution, snapshot }
   const tools = createProjectHarnessTools(options)
   const authority = { assertCurrent: vi.fn().mockResolvedValue(undefined), execute: async <T>(work: () => Promise<T>) => work() }
-  const context: ToolContext = { userId: otherId, workspaceActorUserId: userId, workspaceId, activeProjectId: projectId,
-    assistantId: otherId, sessionId: otherId, appId: 'test', channelType: 'web', channelId: 'test', authority, abortSignal: new AbortController().signal,
+  const ec = createExecutionContext({ identity: { kind: 'attended', principal: { kind: 'workspace_member', userId, authenticationKind: 'native_session' } },
+    ownership: { kind: 'workspace', workspaceId }, access: { userId, workspaceId, assistantId: otherId, assistantKind: 'standard', clearance: 'internal',
+      compartments: [`project:${projectId}`, `project:${otherId}`], mutationCompartments: [], projectIds: [projectId, otherId], visibilityAssistantIds: [otherId] },
+    authority, writeDefaults: { compartments: [], projectIds: [projectId] },
+    lifecycle: { sessionId: otherId, channelType: 'web', channelId: 'fixture', abortSignal: new AbortController().signal } })
+  const context: ToolContext = { ...executionToolContext(ec, { appId: 'fixture' }), activeProjectId: projectId,
     scopeAccumulator: new ContextScopeAccumulator() }
   const invoke = (name: string, input: Record<string, unknown> = {}, ctx = context) => tools.find(t => t.name === name)!.execute(input, ctx)
   return { store, execution, snapshot, tools, authority, context, invoke }
@@ -75,7 +81,7 @@ describe('native/MCP harness read tools', () => {
     expect(f.store.tree).not.toHaveBeenCalled()
     expect(f.context.authority).toBe(before.authority)
     expect(f.context.activeProjectId).toBe(before.activeProjectId)
-    expect(f.context).not.toHaveProperty('projectIds')
+    expect(f.context.projectIds).toEqual(before.projectIds)
   })
   it('uses explicit project/scope or authenticated programmatic actor, never the billed owner', async () => {
     const f = fixture()
@@ -84,7 +90,7 @@ describe('native/MCP harness read tools', () => {
     await f.invoke(names[0], { projectId: otherId, scope: target }, { ...f.context, workspaceActorUserId: undefined,
       programmaticPrincipal: { kind: 'oauth_token', credentialId: otherId, userId } })
     expect(f.store.lineage).toHaveBeenCalledWith(userId, workspaceId, otherId, target)
-    for (const patch of [{ workspaceActorUserId: undefined }, { workspaceId: undefined }, { authority: undefined }, { systemRead: true }, { activeProjectId: null }]) {
+    for (const patch of [{ executionContext: undefined }, { workspaceId: undefined }, { authority: undefined }, { systemRead: true }, { activeProjectId: null }]) {
       expect(await f.invoke(names[0], {}, { ...f.context, ...patch })).toMatchObject({ isError: true })
     }
     expect(f.store.lineage).toHaveBeenCalledTimes(1)
@@ -131,7 +137,7 @@ describe('native/MCP harness read tools', () => {
     await runWithAgentAccess(access, async () => {
       const original = currentAgentAccess()
       f.snapshot.mockImplementation(async (u, w, p) => {
-        expect([u, w, p]).toEqual([userId, workspaceId, projectId]); expect(currentAgentAccess()).toEqual(original)
+        expect([u, w, p]).toEqual([userId, workspaceId, projectId]); expect(currentAgentAccess()).toMatchObject({ userId, workspaceId, clearance: 'internal', projectIds: [projectId], compartments: [`project:${projectId}`], mutationCompartments: [] })
         return { tree, revisions: [revision] }
       })
       expect(await f.invoke(names[2])).toMatchObject({ data: { impact: { status: 'ready', codeChecks: [{ command: 'COMMAND_NOT_TO_RUN' }] }, notice: expect.stringContaining('No commands executed') } })

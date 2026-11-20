@@ -1,6 +1,7 @@
 /** Canonical model-facing engineering contract, not source access or execution authority. */
 import { z } from 'zod'
-import { scopeGrantContains, type ScopeEvidence, type ToolContext } from '@use-brian/core'
+import { scopeGrantContains, type ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
+import { type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { currentAgentAccess } from '../db/agent-access-context.js'
 import { createProjectHarnessStore } from '../db/project-harness-store.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'

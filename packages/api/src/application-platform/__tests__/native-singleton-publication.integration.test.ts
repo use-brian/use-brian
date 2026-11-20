@@ -1,14 +1,16 @@
 import {randomUUID} from 'node:crypto'
 import express from 'express'
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
-import {boundScopeSources} from '@use-brian/core'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {requireAuth} from '../../auth/middleware.js'
 import {createTokens} from '../../auth/jwt.js'
 import {authSessionStore} from '../../db/auth-session-store.js'
 import {getAppPool,getPool} from '../../db/client.js'
-import {addSessionMessage} from '../../db/sessions.js'
-import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
-import {publishNativeSessionMessage,publishNativeSessionMessageBatch} from '../../db/session-message-publication.js'
+import type {SessionMessage} from '../../db/sessions.js'
+import {openAssistantTurn} from '../../turn/kernel.js'
+import {policyFor} from '../../session-kind.js'
+import {readAdmittedSessionQuery} from '../../db/conversation-store.js'
+import {publishNativeSessionMessage,publishNativeSessionMessageBatch} from '../../db/conversation-store.js'
 import {withSessionMessagePublication} from '../../db/session-context-revisions.js'
 import {closeProviderError} from '../../routes/chat-provider-error.js'
 import {sessionRoutes} from '../../routes/sessions.js'
@@ -47,16 +49,19 @@ describe.sequential('[COMP:api/application-persistence] singleton native-frame p
   expect(throughSequence).toBe(8)
   const authority=await f.modelContext(f.firstId)
   const input=await readAdmittedSessionQuery({sessionId:f.session.id,throughSequence,authority}),sources=boundScopeSources(input)
-  let saved:Awaited<ReturnType<typeof addSessionMessage>>|undefined,delivered:string|undefined
+  const owner=await openAssistantTurn({sessionId:f.session.id,assistantId:f.assistantId,policy:policyFor(f.session),abortController:new AbortController()})
+  let saved:SessionMessage|undefined,delivered:string|undefined
   const started=performance.now()
   const result=await closeProviderError({error:new Error('Stream idle for 90000ms (no deliverable chunk — prefill window)'),turns:[],hasDeliveredText:false,
    alreadyDelivered:false,signal:new AbortController().signal,canWrite:async()=>{await authority.execution.security.authority.assertCurrent();return true},
-   persist:async text=>{saved=await addSessionMessage({sessionId:f.session.id,role:'assistant',content:[{type:'text',text}],senderAssistantId:f.assistantId,
-    authority,derivationTarget:f.envelope,derivation:{producer:'fixture:singleton-provider-close',sources}})},deliver:text=>{delivered=text}})
-  console.info('singleton-provider-close-ms',Math.round(performance.now()-started))
+   persist:async text=>{[saved]=await owner.publish({disposition:'closing',native:authority,
+    rows:[{role:'assistant',content:[{type:'text',text}],senderAssistantId:f.assistantId}],
+    write:{derivationTarget:f.envelope,derivation:{producer:'fixture:singleton-provider-close',sources}},
+    execute:operation=>authority.execution.security.authority.execute(operation)})},deliver:text=>{delivered=text}}).finally(()=>owner.finish('failed'))
+  expect(performance.now()-started).toBeLessThan(15_000)
   expect(result).toBe(true);expect(saved).toMatchObject({sessionId:f.session.id,sequenceNum:9,role:'assistant'})
   expect(delivered).toBeTruthy();expect(boundScopeSources(saved!)).toMatchObject([{resourceKind:'session_message',resourceId:saved!.id}])
-  expect((await f.pool.query('SELECT count(*)::integer n FROM native_turn_frames WHERE workspace_id=$1',[f.workspaceId])).rows[0].n).toBe(6)
+  expect((await f.pool.query('SELECT count(*)::integer n FROM native_turn_completions WHERE session_id=$1',[f.session.id])).rows[0].n).toBe(0)
   const lineage=(await f.pool.query('SELECT kind,id,version FROM application_scope_lineage($1,$2,$3,$4)',[f.workspaceId,['session_message'],[saved!.id],['1']])).rows
   for(const source of sources)expect(lineage).toContainEqual({kind:source.resourceKind,id:source.resourceId,version:source.version})
   await assertNoDebt()
@@ -97,11 +102,13 @@ describe.sequential('[COMP:api/application-persistence] singleton native-frame p
    await assertNoDebt()
   }finally{await f.pool.query(`DROP TRIGGER IF EXISTS ${name} ON session_messages; DROP FUNCTION ${name}()`)}
  })
- it('retains canonical fallback when constraints are already immediate',async()=>{
+ it('retains the sealed canonical frame when constraints are already immediate',async()=>{
   const {f,command,authority,sources}=await setup()
   const stored=await withSessionMessagePublication(authority,sources,async db=>{await db.query('SET CONSTRAINTS ALL IMMEDIATE');return publishNativeSessionMessage(command,db)})
   expect(stored.sequenceNum).toBe(4)
-  expect((await f.pool.query('SELECT id FROM native_turn_frames WHERE workspace_id=$1',[f.workspaceId])).rows).toEqual([])
+  expect((await f.pool.query('SELECT session_id,format,manifest_digest FROM native_turn_frames WHERE workspace_id=$1',[f.workspaceId])).rows)
+   .toEqual([{session_id:f.session.id,format:2,manifest_digest:expect.stringMatching(/^[a-f0-9]{64}$/)}])
+  await assertNoDebt()
   const lineage=(await f.pool.query('SELECT kind,id,version FROM application_scope_lineage($1,$2,$3,$4)',[f.workspaceId,['session_message'],[stored.id],['1']])).rows
   for(const source of sources)expect(lineage).toContainEqual({kind:source.resourceKind,id:source.resourceId,version:source.version})
  })

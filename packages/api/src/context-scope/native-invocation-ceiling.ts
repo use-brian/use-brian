@@ -3,7 +3,7 @@
  * The original actor/grant remains authoritative; full destination validation
  * still runs separately on the unchanged recipient and complete source closure.
  */
-import { intersectAccessCeilings, type AccessCeiling } from '@use-brian/core'
+import { intersectAccessCeilings, type AccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
 
 export function nativeInvocationReadCeiling(original: AccessCeiling, recipient: AccessCeiling): AccessCeiling {
   if (original.workspaceId !== recipient.workspaceId || recipient.userId !== '' && original.userId !== recipient.userId) {

@@ -10,6 +10,8 @@ import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
 import { AuthorityChangedError } from '../context-scope/authority-lease.js'
 import { runWithAgentAccess, currentAgentAccess } from '../db/agent-access-context.js'
 import { attachUserVisibleContext, formatUserVisibleContext } from './user-visible-context.js'
+import { captureHarnessRunPreparation } from '../project-harness/turn-context.js'
+import type { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import { captureBriefRunPreparation } from '../briefs/context.js'
 
 export type PreparedModelSelection = {
@@ -92,7 +94,7 @@ export type PreparedTurnRun = Readonly<{
  * with the current one (turn-kernel.md "Model preparation under the original
  * turn owner"). There is no flat-context invocation. */
 export type TurnModelInvocation =
-  { kind: 'execution'; toolProfile: 'web' | 'channel' | 'public' | 'callee' | 'resume'; execution: ExecutionContext; assertCurrent: () => Promise<void> }
+  { kind: 'execution'; toolProfile: 'web' | 'channel' | 'public' | 'callee' | 'resume'; execution: ExecutionContext; scopeAccumulator?: ContextScopeAccumulator; assertCurrent: () => Promise<void> }
 
 export type TurnModelServices = {
   provider: LLMProvider
@@ -172,6 +174,8 @@ export function captureTurnModelPreparation(invocation: TurnModelInvocation, inp
   const originalAccessValue = JSON.stringify(originalAccess)
   const toolLane = invocation.toolProfile
   const boundTools = new WeakMap<Tool, Tool>()
+  let retainedRunAccumulator: ContextScopeAccumulator | undefined
+  let harnessRun = false
   if (owner.sessionId !== sessionId || owner.assistantId && owner.assistantId !== assistantId) throw modelInvocationChanged()
   const assertBinding = () => {
     if (authority.assertCurrent !== assertAuthority || authority.execute !== executeAuthority
@@ -256,7 +260,7 @@ export function captureTurnModelPreparation(invocation: TurnModelInvocation, inp
     tools: bindTools,
     /** Synchronous capture, then the returned operation performs admission,
      * Brief and final assembly. Nothing the adapter supplied is read after this call. */
-    captureRun(input: TurnRunPreparationInput, model: PreparedTurnModel): () => Promise<PreparedTurnRun> {
+    captureRun(input: TurnRunPreparationInput, model: PreparedTurnModel, accumulator?: ContextScopeAccumulator): () => Promise<PreparedTurnRun> {
       assertBinding(); owner.signal.throwIfAborted()
       const systemPrompt = String(input.systemPrompt)
       const messages = snapshotMessageData(input.messages)
@@ -268,6 +272,9 @@ export function captureTurnModelPreparation(invocation: TurnModelInvocation, inp
       const adopted = new Map([...bindTools(input.candidateTools)].map(([name, candidate]) =>
         [name, { candidate, snapshot: snapshotTool(candidate) }] as const))
       const briefPreparation = captureBriefRunPreparation()
+      const harnessPreparation = captureHarnessRunPreparation()
+      harnessRun = harnessPreparation.appliesTo(execution, input.candidateTools)
+      retainedRunAccumulator = accumulator
       const maxTokens = model.maxTokens, inputTokenLimit = model.inputTokenLimit
       return async () => {
         // Channel keeps its existing lease-only assembly boundary. Other
@@ -281,6 +288,12 @@ export function captureTurnModelPreparation(invocation: TurnModelInvocation, inp
         // under its approval job like any unattended run.
         const brief = await briefPreparation(execution, snapshots)
         assertBinding(); owner.signal.throwIfAborted()
+        const harness = harnessRun ? await harnessPreparation.apply(execution, brief.tools, accumulator) : null
+        if (harnessRun) {
+          await current()
+          await assertAuthority.call(authority)
+          assertBinding(); owner.signal.throwIfAborted()
+        }
         const userVisibleContext = assemble(visible)
         const attached = attachUserVisibleContext(messages, userVisibleContext)
         // The single fallback branch: no plain trailing user turn can carry it.
@@ -289,7 +302,7 @@ export function captureTurnModelPreparation(invocation: TurnModelInvocation, inp
         const runtime = primary?.content ?? ''
         const runtimeWithFallback = fallback ? `${runtime}\n\n${fallback}` : runtime
         const runtimeSystemContext = assemble([{ name: primary?.name ?? 'runtime', content: runtimeWithFallback }, ...supplementary,
-          ...(brief.contribution ? [brief.contribution] : [])])
+          ...(brief.contribution ? [brief.contribution] : []), ...(harness ? [harness] : [])])
         const tools = new Map<string, Tool>(), unwrapped = new Set<string>()
         for (const [name, tool] of brief.tools) {
           if (tool === adopted.get(name)?.snapshot) { tools.set(name, tool); unwrapped.add(name) }
@@ -311,7 +324,7 @@ export function captureTurnModelPreparation(invocation: TurnModelInvocation, inp
     },
     assertLoopContext(candidate: ToolContext) {
       assertBinding()
-      if (candidate.executionContext !== execution) throw modelInvocationChanged()
+      if (candidate.executionContext !== execution || harnessRun && candidate.scopeAccumulator !== retainedRunAccumulator) throw modelInvocationChanged()
     },
     async background(fallback: { model?: string; configuredDefault?: boolean }): Promise<PreparedBackgroundModel> {
       const original = { ...fallback }

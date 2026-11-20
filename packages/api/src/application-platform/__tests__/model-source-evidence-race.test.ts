@@ -1,16 +1,26 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { ContextScopeAccumulator, createExecutionContext, executionToolContext, buildTool, queryLoop, NOOP_TURN_LEDGER, type ScopeEvidence, type LLMProvider, type StreamChunk, type QueryEvent } from '@use-brian/core'
+import { ContextScopeAccumulator, type ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
+import { createExecutionContext, executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
+import { queryLoop, type QueryEvent } from '@use-brian/agent-runtime/engine/query-loop.js'
+import { NOOP_TURN_LEDGER } from '@use-brian/agent-runtime/engine/turn-ledger.js'
+import type { LLMProvider, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
 import { z } from 'zod'
 import { SourceProtocolError } from '@use-brian/brian-app/connector'
 import { tryNativeInvocationEvidence } from '../../context-scope/native-invocation-evidence.js'
-import { assertSourceModelInputAuthority, assertSourceModelOutputAuthority, createNativeAttendedOutputBoundary, tryAssertNativeCombinedOutput } from '../model-source-authority.js'
-import { createAttendedDeliveryAudienceAuthorizer, tryValidateNativePersonalOutput } from '../../context-scope/attended-audience.js'
-import { DeliveryAudienceUnverifiedError, type AuthorizeDeliveryAudience } from '../../context-scope/delivery-authority.js'
+import { admitModelSourceEvidence } from '../model-source-authority.js'
+const assertSourceModelInputAuthority = (context: Parameters<typeof admitModelSourceEvidence>[0]) => admitModelSourceEvidence(context, 'context')
+const assertSourceModelOutputAuthority = (context: Parameters<typeof admitModelSourceEvidence>[0]) => admitModelSourceEvidence(context, 'deliver')
 import { validateCallerScopeEvidence, validateAudienceScopeEvidence } from '../../context-scope/caller-evidence.js'
 import { readPersistentSessionContextAncestors } from '../../db/session-context-ancestry.js'
 import { readExternalSourceAncestors } from '../external-source-ancestry.js'
 import { readApplicationFieldAncestors } from '../field-evidence.js'
 
+import { admitTurnConversationRecords } from '../../context-scope/conversation-record-admission.js'
+vi.mock('../../context-scope/conversation-record-admission.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../context-scope/conversation-record-admission.js')>(),
+  admitTurnConversationRecords: vi.fn(),
+}))
 vi.mock('../../context-scope/native-invocation-evidence.js', () => ({ tryNativeInvocationEvidence: vi.fn() }))
 // None of these unrelated paths should be reached by a successful native proof.
 vi.mock('../../db/client.js', () => ({ getAppPool: () => { throw new Error('Unexpected DB access') },
@@ -38,7 +48,7 @@ function observe(promise: Promise<void>) {
 }
 const floor = { projectIds: ['project-added'], compartments: ['compartment-added'] }
 const native = vi.mocked(tryNativeInvocationEvidence)
-function fixture(canonicalLabelsAllowed = false) {
+function fixture(canonicalLabelsAllowed = false, independent = false) {
   const userId = 'user-race', workspaceId = 'workspace-race', assistantId = 'assistant-race'
   const assertCurrent = vi.fn(async () => {})
   const execution = createExecutionContext({
@@ -52,7 +62,7 @@ function fixture(canonicalLabelsAllowed = false) {
   })
   const accumulator = new ContextScopeAccumulator()
   accumulator.note({ sources: [{ workspaceId, userId, assistantId, sensitivity: 'internal', compartments: [], projectIds: [],
-    resourceKind: 'memory', resourceId: 'memory-race', version: '1' }] })
+    resourceKind: independent ? 'project_harness_revision' : 'memory', resourceId: 'memory-race', version: '1' }] })
   return { accumulator, assertCurrent, execution,
     context: { ...executionToolContext(execution, { appId: 'evidence-race-fixture' }), scopeAccumulator: accumulator } }
 }
@@ -104,7 +114,7 @@ for (const [boundary, guard, kind] of [
   it('never retries a real lease failure combined with evidence growth, and keeps denial sticky', async () => {
     const f = fixture(), entered = deferred<void>(), proof = deferred<ScopeEvidence>()
     const failure = new Error('lease revoked')
-    native.mockImplementationOnce(async () => { entered.resolve(); return proof.promise })
+    native.mockImplementationOnce(async () => { await f.assertCurrent(); entered.resolve(); const current = await proof.promise; await f.assertCurrent(); return current })
     f.assertCurrent.mockResolvedValueOnce(undefined).mockRejectedValueOnce(failure)
     const result = observe(guard(f.context))
     await entered.promise
@@ -208,8 +218,8 @@ it('freshly admits overlapping thinking with the early Project floor before the 
     name: 'fixture', models: ['fixture-model'], createSession: () => ({ send }),
     stream: () => { throw new Error('Unexpected stateless provider fallback') },
   }
-  const context = { ...f.context, assertModelInputAuthority: assertSourceModelInputAuthority,
-    assertModelOutputAuthority: assertSourceModelInputAuthority }
+  const context = { ...f.context, admitModelInput: assertSourceModelInputAuthority,
+    admitModelOutput: assertSourceModelInputAuthority }
   const running = (async () => {
     for await (const event of queryLoop({
       provider, model: 'fixture-model', systemPrompt: 'Fictional context',
@@ -259,12 +269,10 @@ it('freshly admits overlapping thinking with the early Project floor before the 
 })
 
 // Each adapter represents a fresh boundary operation, not a cached allow.
-const admissionKinds = ['input', 'output', 'ordinary input', 'ordinary output', 'attended', 'combined'] as const
+const admissionKinds = ['input', 'output', 'ordinary input', 'ordinary output'] as const
 function admissionFixture(kind: typeof admissionKinds[number], canonicalLabelsAllowed = false) {
-  const f = fixture(canonicalLabelsAllowed)
+  const f = fixture(canonicalLabelsAllowed, kind.startsWith('ordinary'))
   const prove = vi.fn<(evidence: ScopeEvidence) => Promise<ScopeEvidence | null>>()
-  const authorize = vi.fn<AuthorizeDeliveryAudience>(async input => ({ allowed: true, evidence: (await prove(input.scopeEvidence ?? {}))! }))
-  vi.mocked(createAttendedDeliveryAudienceAuthorizer).mockReturnValue(authorize)
   native.mockImplementation(async (_execution, evidence) => prove(evidence))
   if (kind.startsWith('ordinary')) {
     native.mockResolvedValue(null)
@@ -274,19 +282,11 @@ function admissionFixture(kind: typeof admissionKinds[number], canonicalLabelsAl
     vi.mocked(validateCallerScopeEvidence).mockImplementation(async evidence => (await prove(evidence))!)
     vi.mocked(validateAudienceScopeEvidence).mockImplementation(async evidence => (await prove(evidence))!)
   }
-  vi.mocked(tryValidateNativePersonalOutput).mockImplementation(async (_execution, input) => prove(input.scopeEvidence ?? {}))
-  const boundary = createNativeAttendedOutputBoundary(f.execution, f.accumulator, {
-    workspaceId: f.execution.security.access.workspaceId, userId: f.execution.security.access.userId,
-    assistantId: f.execution.assistant.id, sessionId: 'session-race', channelType: 'web', channelId: 'fixture', recipientType: 'individual',
-  })
   const admit = async () => {
     if (kind === 'input' || kind === 'ordinary input') return assertSourceModelInputAuthority(f.context)
     if (kind === 'output' || kind === 'ordinary output') return assertSourceModelOutputAuthority(f.context)
-    if (kind === 'attended') return boundary.assertOutputAuthority(f.context)
-    expect(await tryAssertNativeCombinedOutput(boundary, f.context, boundary.assertOutputAuthority, true))
-      .toEqual({ evidence: JSON.stringify(f.accumulator.evidence) })
   }
-  return { ...f, prove, authorize, boundary, admit }
+  return { ...f, prove, admit }
 }
 
 for (const kind of admissionKinds) describe(`${kind} admission liveness and security`, () => {
@@ -395,36 +395,35 @@ for (const kind of admissionKinds) describe(`${kind} admission liveness and secu
   })
 })
 
-describe('native recipient boundary negatives', () => {
-  it('does not retry an explicit recipient denial even with simultaneous evidence growth', async () => {
-    const f = admissionFixture('attended')
-    f.authorize.mockImplementationOnce(async () => {
-      f.accumulator.note(floor)
-      return { allowed: false, reason: 'delivery_audience_unverified', diagnostic: 'binding_expired' }
-    })
-    await expect(f.admit()).rejects.toBeInstanceOf(DeliveryAudienceUnverifiedError)
-    await expect(f.admit()).rejects.toMatchObject({ retrySafe: false })
-    expect(f.authorize).toHaveBeenCalledTimes(1)
-  })
 
-  it('rejects a substituted execution/accumulator before requesting recipient authority', async () => {
-    const f = admissionFixture('attended'), other = fixture()
-    await expect(f.boundary.assertOutputAuthority(other.context)).rejects.toMatchObject({ retrySafe: false })
-    expect(f.authorize).not.toHaveBeenCalled()
+describe('conversation frontier candidates retain their positive owner', () => {
+  it('re-admits records plus the complete newly raised fresh-source floor', async () => {
+    const f = fixture(), entered = deferred<void>(), proof = deferred<Awaited<ReturnType<typeof admitTurnConversationRecords>>>()
+    const record = { ...f.accumulator.evidence.sources![0], resourceKind: 'conversation_record', resourceId: 'record' }
+    f.accumulator.note({ sources: [record] })
+    native.mockImplementation(async (_execution, evidence) => evidence)
+    const destination = { sensitivity: 'confidential', compartments: ['raised'], projectIds: ['fresh'] } as Awaited<ReturnType<typeof admitTurnConversationRecords>>['destination']
+    vi.mocked(admitTurnConversationRecords).mockImplementationOnce(async () => { entered.resolve(); return proof.promise })
+      .mockResolvedValue({ sources: [record], destination })
+    const pending = assertSourceModelInputAuthority(f.context)
+    await entered.promise
+    f.accumulator.note({ projectIds: ['fresh'], compartments: ['raised'] })
+    proof.resolve({ sources: [record], destination })
+    await pending
+    expect(admitTurnConversationRecords).toHaveBeenCalledTimes(2)
+    expect(admitTurnConversationRecords).toHaveBeenLastCalledWith(f.execution, [record], 'dispatch')
+    expect(native.mock.calls[1][1]).toMatchObject({ projectIds: ['fresh'], compartments: ['raised'] })
+    expect(f.accumulator.evidence.sources).toContainEqual(record)
   })
-
-  it('does not accept a custom recipient callback as a combined operation', async () => {
-    const f = admissionFixture('combined'), custom = vi.fn(async () => {})
-    expect(await tryAssertNativeCombinedOutput(f.boundary, f.context, custom)).toBe(false)
-    expect(await tryAssertNativeCombinedOutput(f.boundary, f.context, custom, true)).toBeNull()
-    expect(f.prove).not.toHaveBeenCalled()
-    expect(custom).not.toHaveBeenCalled()
-  })
-
-  it('declines an unsupported combined operation without granting an evidence fence', async () => {
-    const f = admissionFixture('combined')
-    f.prove.mockResolvedValue(null)
-    expect(await tryAssertNativeCombinedOutput(f.boundary, f.context, f.boundary.assertOutputAuthority, true)).toBeNull()
-    expect(f.prove).toHaveBeenCalledTimes(1)
+  it('a rejected record destination floor is never retried or made deliverable', async () => {
+    const f = fixture()
+    const record = { ...f.accumulator.evidence.sources![0], resourceKind: 'conversation_record', resourceId: 'record' }
+    f.accumulator.note({ sources: [record], compartments: ['not-in-destination'] })
+    native.mockImplementation(async (_execution, evidence) => evidence)
+    vi.mocked(admitTurnConversationRecords).mockResolvedValue({ sources: [record], destination: {
+      generation: '1', sensitivity: 'internal', compartments: [], projectIds: [] } as Awaited<ReturnType<typeof admitTurnConversationRecords>>['destination'] })
+    await expect(assertSourceModelInputAuthority(f.context)).rejects.toMatchObject({ reason: 'authority_changed' })
+    await expect(assertSourceModelInputAuthority(f.context)).rejects.toThrow()
+    expect(admitTurnConversationRecords).toHaveBeenCalledTimes(1)
   })
 })

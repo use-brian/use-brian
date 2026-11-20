@@ -1,13 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { boundScopeSource, DerivedScopeError, type SessionContextAuthority } from '@use-brian/core'
-import type { NativeSessionMessageInput } from '../session-message-publication.js'
+import { boundScopeSource } from '@use-brian/agent-runtime/security/source-evidence.js'
+import { DerivedScopeError } from '@use-brian/agent-runtime/security/derived-scope.js'
+import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
+import type { NativeSessionMessageInput } from '../conversation-store.js'
 
 const boundary = vi.hoisted(() => ({ frame: vi.fn(), publication: vi.fn(), query: vi.fn() }))
 vi.mock('../session-context-revisions.js', () => ({
   assertSessionMessagePublicationFrame: boundary.frame,
   withSessionMessagePublication: boundary.publication,
 }))
-import { publishNativeSessionMessage } from '../session-message-publication.js'
+import { publishNativeSessionMessage } from '../conversation-store.js'
 
 const workspaceId = '11111111-1111-4111-8111-111111111111'
 const sessionId = '22222222-2222-4222-8222-222222222222'
@@ -56,7 +58,7 @@ describe('[COMP:api/application-persistence] native singleton batch boundary', (
     boundary.query.mockImplementation(async () => { order.push('sql'); return { rows: [{ value: [stored] }] } })
     const saved = await publishNativeSessionMessage(input)
     expect(boundary.publication).toHaveBeenCalledOnce()
-    expect(boundary.publication).toHaveBeenCalledWith(authority, input.derivation.sources, expect.any(Function))
+    expect(boundary.publication).toHaveBeenCalledWith(authority, input.derivation.sources, expect.any(Function), expect.objectContaining({ measure: expect.any(Function) }))
     expect(boundary.publication.mock.calls[0][0]).toBe(authority)
     expect(boundary.frame).toHaveBeenCalledWith(client, authority)
     expect(boundary.query).toHaveBeenCalledExactlyOnceWith(
@@ -68,7 +70,7 @@ describe('[COMP:api/application-persistence] native singleton batch boundary', (
         workspaceId, userId: null, assistantId: null, sensitivity: 'internal', compartments: [], projectIds: [],
       }],
     )
-    expect(order).toEqual(['frame', 'authority', 'sql', 'authority'])
+    expect(order).toEqual(['frame', 'sql'])
     expect(saved.createdAt).toEqual(new Date(stored.message.createdAt))
     expect(boundScopeSource(saved)).toEqual(stored.source)
     expect(boundScopeSource({ ...saved })).toBeUndefined()
@@ -81,17 +83,18 @@ describe('[COMP:api/application-persistence] native singleton batch boundary', (
     expect(boundary.frame).toHaveBeenCalledWith(client, authority)
   })
 
-  it('snapshots source evidence and target before the first asynchronous authority check', async () => {
+  it('snapshots source evidence and target before the asynchronous publication frame', async () => {
     const { input, assertCurrent } = setup()
     input.derivationTarget = {
       workspaceId, userId: null, assistantId: null, sensitivity: 'internal', compartments: [], projectIds: [],
     }
     const sources = structuredClone(input.derivation.sources)
     const target = structuredClone(input.derivationTarget)
-    assertCurrent.mockImplementationOnce(async () => {
+    boundary.publication.mockImplementationOnce(async (_authority, _sources, write) => {
       input.derivation.producer = 'mutated'
       input.derivation.sources[0].version = 'mutated'
       input.derivationTarget!.compartments.push('mutated')
+      return write(client)
     })
     await publishNativeSessionMessage(input)
     const args = boundary.query.mock.calls[0][1]
@@ -139,7 +142,7 @@ describe('[COMP:api/application-persistence] native singleton batch boundary', (
   })
 
   it.each(['object', 'empty', 'multiple', 'role', 'session', 'source', 'workspace', 'source-kind', 'extra-envelope', 'extra-message'] as const)(
-    'rejects a malformed or mismatched %s SQL result before the final authority check', async kind => {
+    'rejects a malformed or mismatched %s SQL result before returning a receipt', async kind => {
       const { input, stored, assertCurrent } = setup()
       let value: unknown = [stored]
       if (kind === 'object') value = stored
@@ -159,7 +162,7 @@ describe('[COMP:api/application-persistence] native singleton batch boundary', (
       } else {
         await expect(result).rejects.toThrow()
       }
-      expect(assertCurrent).toHaveBeenCalledOnce()
+      expect(assertCurrent).not.toHaveBeenCalled()
     },
   )
 
@@ -178,7 +181,7 @@ describe('[COMP:api/application-persistence] native singleton batch boundary', (
     const failure = await publishNativeSessionMessage(input).catch(error => error)
     expect(failure).toBeInstanceOf(DerivedScopeError)
     expect(failure).toMatchObject({ code: translated, cause })
-    expect(assertCurrent).toHaveBeenCalledOnce()
+    expect(assertCurrent).not.toHaveBeenCalled()
   })
 
   it('preserves unrelated SQL failures by identity', async () => {
@@ -188,14 +191,13 @@ describe('[COMP:api/application-persistence] native singleton batch boundary', (
     await expect(publishNativeSessionMessage(input)).rejects.toBe(error)
   })
 
-  it.each(['frame', 'before', 'after'] as const)('propagates %s authority refusal without returning a result', async phase => {
-    const { input, assertCurrent } = setup()
+  it.each(['frame', 'publication', 'after'] as const)('propagates %s authority refusal without returning a result', async phase => {
+    const { input } = setup()
     const error = new Error('authority revoked')
     if (phase === 'frame') boundary.frame.mockImplementation(() => { throw error })
-    if (phase === 'before') assertCurrent.mockRejectedValueOnce(error)
-    if (phase === 'after') assertCurrent.mockResolvedValueOnce(undefined).mockRejectedValueOnce(error)
-    await expect(publishNativeSessionMessage(input, client)).rejects.toBe(error)
+    else if (phase === 'publication') boundary.publication.mockRejectedValueOnce(error)
+    else boundary.publication.mockImplementationOnce(async (_authority, _sources, write) => { await write(client); throw error })
+    await expect(publishNativeSessionMessage(input)).rejects.toBe(error)
     expect(boundary.query).toHaveBeenCalledTimes(phase === 'after' ? 1 : 0)
-    expect(assertCurrent).toHaveBeenCalledTimes(phase === 'frame' ? 0 : phase === 'before' ? 1 : 2)
   })
 })

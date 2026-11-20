@@ -1,6 +1,8 @@
+import { createExecutionContext, executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { createHash } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
-import { ContextScopeAccumulator, type ToolContext } from '@use-brian/core'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import type { HarnessDefinition, HarnessProjectSnapshot, HarnessRevision, HarnessScope, ProjectProduct } from '../contracts.js'
 import type { HarnessCodingTestPlan, prepareHarnessTask } from '../handoff.js'
 import { createProjectHarnessTools } from '../tools.js'
@@ -46,9 +48,13 @@ function fixture() {
   const store = { lineage: vi.fn().mockRejectedValue(new Error('Do not mix separate lineage heads')), tree: vi.fn(), definition: vi.fn(), history: vi.fn() }
   const execution = { approvals: vi.fn(), runs: vi.fn() }
   const authority = { assertCurrent: vi.fn(async () => {}), execute: async <T>(work: () => Promise<T>) => work() }
-  const context: ToolContext = { userId, workspaceActorUserId: userId, workspaceId, activeProjectId: projectId, assistantId: id(9),
-    sessionId: id(10), appId: 'fixture', channelType: 'web', channelId: 'fixture', abortSignal: new AbortController().signal,
-    authority, scopeAccumulator: new ContextScopeAccumulator() }
+  const ec = createExecutionContext({ identity: { kind: 'attended', principal: { kind: 'workspace_member', userId, authenticationKind: 'native_session' } },
+    ownership: { kind: 'workspace', workspaceId }, access: { userId, workspaceId, assistantId: id(9), assistantKind: 'standard', clearance: 'internal',
+      compartments: [`project:${projectId}`, `project:${id(99)}`], mutationCompartments: [], projectIds: [projectId, id(99)], visibilityAssistantIds: [id(9)] },
+    authority, writeDefaults: { compartments: [], projectIds: [projectId] },
+    lifecycle: { sessionId: id(10), channelType: 'web', channelId: 'fixture', abortSignal: new AbortController().signal } })
+  const context: ToolContext = { ...executionToolContext(ec, { appId: 'fixture' }), activeProjectId: projectId,
+    scopeAccumulator: new ContextScopeAccumulator() }
   const tool = createProjectHarnessTools({ store, execution, snapshot: readSnapshot }).find(t => t.name === 'prepareProjectHarnessTask')!
   const input = { prompt: 'Update availability', runtimeProject: 'operator-checkout', scope: api }
   const invoke = (patch: Record<string, unknown> = {}) => tool.execute({ ...input, ...patch }, context)

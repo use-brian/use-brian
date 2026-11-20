@@ -1,14 +1,29 @@
+import {z} from 'zod'
+import {createMcpInputSchema,mcpArgumentError} from '@use-brian/agent-runtime/mcp/input-schema.js'
+import {buildTool,type ToolContext} from '@use-brian/agent-runtime/tools/types.js'
+import type {McpServerConfig,McpSettingsStore} from '@use-brian/agent-runtime/mcp/types.js'
+import {wrapMcpTools} from '@use-brian/core/mcp/connector.js'
+import {createMcpGateway} from '@use-brian/core/mcp/gateway.js'
 import express from 'express'
 import {afterAll,describe,expect,it,vi} from 'vitest'
-import {ContextScopeAccumulator,boundScopeSources,createConfirmationResolver,executionToolContext,queryLoop,NOOP_TURN_LEDGER,createMcpSearchTools,buildToolIndex,sanitize,
- type LLMProvider,type Message,type QueryEvent,type StreamChunk} from '@use-brian/core'
+import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
+import {createExecutionContext,executionToolContext} from '@use-brian/agent-runtime/security/execution-context.js'
+import {createConfirmationResolver} from '@use-brian/agent-runtime/mcp/types.js'
+import {queryLoop,type QueryEvent} from '@use-brian/agent-runtime/engine/query-loop.js'
+import {NOOP_TURN_LEDGER} from '@use-brian/agent-runtime/engine/turn-ledger.js'
+import {sanitize} from '@use-brian/core/analytics/logger.js'
+import type {LLMProvider,Message,StreamChunk} from '@use-brian/agent-runtime/providers/types.js'
+import {createMcpSearchTools,buildToolIndex} from '@use-brian/core/mcp/tool-search.js'
 import {requireAuth} from '../../auth/middleware.js'
 import {createTokens} from '../../auth/jwt.js'
 import {authSessionStore} from '../../db/auth-session-store.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {createDbAnalyticsStore} from '../../db/analytics-store.js'
-import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
-import {publishNativeSessionMessageBatch} from '../../db/session-message-publication.js'
+import {readAdmittedSessionQuery} from '../../db/conversation-store.js'
+import {openAssistantTurn,type AssistantTurn} from '../../turn/kernel.js'
+import {policyFor} from '../../session-kind.js'
+import {admitModelSourceEvidence} from '../model-source-authority.js'
 import {createProjectHarnessTools} from '../../project-harness/tools.js'
 import {sessionRoutes} from '../../routes/sessions.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
@@ -29,9 +44,15 @@ async function canonicalArguments(){
   {id:id(10),workspaceId,projectId,scope:{kind:'project' as const},revision:1,createdAt:now,createdBy:userId,
    definition:{schemaVersion:1 as const,rules:[],codeChecks:[{key:'unit',kind:'unit' as const,instructions:'Run synthetic checks',command:'node --test'}],acceptanceScenarios:[]}}]}
  const tool=createProjectHarnessTools({store:{} as never,execution:{} as never,snapshot:vi.fn().mockResolvedValue(snapshot)}).find(t=>t.name==='prepareProjectHarnessTask')!
- const context={userId,workspaceActorUserId:userId,workspaceId,activeProjectId:projectId,assistantId:id(6),sessionId:id(7),appId:'synthetic-preparation',
-  channelType:'web',channelId:'fixture',abortSignal:new AbortController().signal,scopeAccumulator:new ContextScopeAccumulator(),
-  authority:{assertCurrent:async()=>{},execute:async<T>(work:()=>Promise<T>)=>work()}}
+ const authority={assertCurrent:async()=>{},execute:async<T>(work:()=>Promise<T>)=>work()}
+ const execution=createExecutionContext({
+  identity:{kind:'attended',principal:{kind:'workspace_member',userId,authenticationKind:'native_session'}},
+  ownership:{kind:'workspace',workspaceId},
+  access:{userId,workspaceId,assistantId:id(6),assistantKind:'standard',clearance:'internal',
+   compartments:[`project:${projectId}`],mutationCompartments:[],projectIds:[projectId],visibilityAssistantIds:[id(6)]},
+  authority,writeDefaults:{compartments:[],projectIds:[projectId]},
+  lifecycle:{sessionId:id(7),channelType:'web',channelId:'fixture',abortSignal:new AbortController().signal}})
+ const context={...executionToolContext(execution,{appId:'synthetic-preparation'}),activeProjectId:projectId,scopeAccumulator:new ContextScopeAccumulator()}
  const result=await tool.execute({prompt:'Synthetic static page; no real coding task.',runtimeProject:'synthetic',scope,scopes:[scope]},context)
  expect(result.isError).not.toBe(true)
  const prepared=result.data as {status:string;arguments:Record<string,unknown>}
@@ -62,9 +83,11 @@ describe.sequential('[COMP:api/application-persistence] rejected inputs never be
   const f=await persistentContextFixture(),requests:unknown[]=[]
   const mcp=express();mcp.use(express.json());mcp.post('/synthetic', (req,res)=>{requests.push(req.body);res.json({synthetic:true,noCodingTask:true})})
   const transport=await listen(mcp)
-  let reader:Awaited<ReturnType<typeof listen>>|undefined
+  let reader:Awaited<ReturnType<typeof listen>>|undefined,owner:AssistantTurn|undefined
   try{
-   await f.history();const authority=await f.modelContext(f.firstId)
+   await f.history()
+   owner=await openAssistantTurn({sessionId:f.session.id,assistantId:f.assistantId,policy:policyFor(f.session),abortController:new AbortController()})
+   const authority=await f.modelContext(f.firstId)
    const captured=await readAdmittedSessionQuery({sessionId:f.session.id,throughSequence:3,authority}),sources=boundScopeSources(captured)
    expect((await getAppPool().query('SHOW statement_timeout')).rows[0].statement_timeout).toBe('15s')
    const canonical=await canonicalArguments(),invalid={...canonical,['\0unexpected']:null}
@@ -79,10 +102,12 @@ describe.sequential('[COMP:api/application-persistence] rejected inputs never be
    const first=call(invalid,'rejected-1')
    first[2]={type:'tool_use_delta',id:'rejected-1',input:raw}
    const scripted=provider([first,call(canonical,'valid-2'),terminal]),events:QueryEvent[]=[]
+   authority.accumulator.note({sources})
    const resolver=createConfirmationResolver(),evidenceBefore=structuredClone(authority.accumulator.evidence)
    let confirmations=0
    for await(const event of queryLoop({provider:scripted.driver,model:'fixture',systemPrompt:'Synthetic integration fixture only.',messages:[{role:'user',content:'Use fresh canonical arguments.'}],
-    tools:new Map(tools.map(t=>[t.name,t])),context:{...executionToolContext(authority.execution,{appId:'fixture:nul-history'}),scopeAccumulator:authority.accumulator},
+    tools:new Map(tools.map(t=>[t.name,t])),context:{...executionToolContext(authority.execution,{appId:'fixture:nul-history'}),scopeAccumulator:authority.accumulator,
+     admitModelInput:current=>admitModelSourceEvidence(current,'context'),admitModelOutput:current=>admitModelSourceEvidence(current,'context')},
     stateless:true,maxTurns:3,ledger:NOOP_TURN_LEDGER,confirmationResolver:resolver,confirmationTimeoutMs:2000})){
     events.push(event)
     if(event.type==='tool_confirmation_required'){
@@ -99,9 +124,12 @@ describe.sequential('[COMP:api/application-persistence] rejected inputs never be
    if(rejection?.type!=='text')throw new Error('Missing lossless rejected-call record')
    expect(JSON.parse(rejection.text.split('\n').slice(1).join('\n')).rawArgumentsJson).toBe(raw)
    const messages=turns.flatMap(turn=>[
-    {role:'assistant',content:turn.response.content},...(turn.toolResults.length?[{role:'user',content:turn.toolResults}]:[]),
+    {role:'assistant' as const,content:turn.response.content},...(turn.toolResults.length?[{role:'user' as const,content:turn.toolResults}]:[]),
    ])
-   const saved=await publishNativeSessionMessageBatch({sessionId:f.session.id,messages,authority,derivationTarget:f.envelope,derivation:{producer:'fixture:rejected-history',sources}})
+   const saved=await owner.publish({disposition:'reply',rows:messages,native:authority,
+    write:{derivationTarget:f.envelope,derivation:{producer:'fixture:rejected-history',sources}},
+    execute:operation=>authority.execution.security.authority.execute(operation)})
+   await owner.finish();owner=undefined
    expect(saved).toHaveLength(5)
    const analytics=createDbAnalyticsStore()
    await analytics.recordBatch(events.map(event=>({userId:f.firstId,actorUserId:f.firstId,assistantId:f.assistantId,sessionId:f.session.id,eventName:'fixture_nul_'+event.type,
@@ -125,6 +153,100 @@ describe.sequential('[COMP:api/application-persistence] rejected inputs never be
    expect(JSON.stringify(body)).toContain('rejected_tool_call')
    for(const table of ['native_turn_publication_work','native_turn_publication_events','native_turn_publication_seals','native_turn_publication_debt'])
     expect((await f.pool.query(`SELECT count(*)::integer n FROM ${table}`)).rows[0].n,table).toBe(0)
-  }finally{await reader?.close();await transport.close();await f.pool.query('DELETE FROM analytics_events WHERE session_id=$1',[f.session.id]);await f.cleanup()}
+  }finally{await owner?.finish('failed');await reader?.close();await transport.close();await f.pool.query('DELETE FROM analytics_events WHERE session_id=$1',[f.session.id]);await f.cleanup()}
  },60_000)
+})
+
+// Core adapters remain tested at the host layer, never a runtime-to-core dependency.
+describe('MCP adapter diagnostic parity', () => {
+const settingsStore: McpSettingsStore = {
+  getPolicy: async () => null,
+  setPolicy: async () => {},
+  recordUsage: async () => {},
+  recordUsageAndGetCount: async () => ({ timesAllowed: 0, timesDenied: 0 }),
+}
+const params = { settingsStore, assistantId: 'a1', userId: 'u1' }
+const context = {
+  assistantId: 'a1', userId: 'u1', sessionId: 's1', appId: 'Use Brian',
+  channelType: 'web', channelId: 'c1', abortSignal: new AbortController().signal,
+} as ToolContext
+const nestedKey = 'options\0/~'
+const missingKey = 'required\0'
+const extraKey = 'extra\0\udfff'
+const schema = {
+  type: 'object',
+  properties: {
+    [nestedKey]: {
+      type: 'object', properties: { [missingKey]: { type: 'string' } },
+      required: [missingKey], additionalProperties: false,
+    },
+  },
+  additionalProperties: false,
+}
+const args = Object.freeze({
+  [nestedKey]: Object.freeze({ [extraKey]: 'untouched\0\ud800', 'literal\\u0000': true }),
+  [extraKey]: Object.freeze(['value\0']),
+})
+function diagnostic(tool: string, inputSchema: z.ZodTypeAny = createMcpInputSchema(schema), input: unknown = args) {
+  const parsed = inputSchema.safeParse(input)
+  if (parsed.success) throw new Error('Expected validation failure')
+  return mcpArgumentError(tool, parsed.error)
+}
+
+function expectSafe(text: unknown) {
+  expect(typeof text).toBe('string')
+  expect(text).not.toMatch(/[\u0000-\u001f\u007f-\u009f\ud800-\udfff]/u)
+}
+
+  it('uses the same formatter for remote dispatch, direct wrappers and the gateway', async () => {
+    const dispatch = vi.fn(async () => ({}))
+    const server: McpServerConfig = {
+      name: 'external', url: 'https://example.invalid/mcp',
+      tools: [{ name: 'get_item', description: 'Get an item', inputSchema: schema }],
+    }
+    const before = JSON.stringify(args)
+    const [, call] = createMcpSearchTools({ ...params,
+      index: buildToolIndex([{ kind: 'remote', server, serverUrl: server.url, callMcpTool: dispatch }]),
+    })
+    const [direct] = wrapMcpTools({ ...params, server, callMcpTool: dispatch })
+    const gateway = createMcpGateway({ ...params, server, callMcpTool: dispatch })
+    const results = [
+      await call.execute({ server: server.name, tool: 'get_item', args }, context),
+      await direct.execute(args, context),
+      await gateway.execute({ action: 'call', tool_name: 'get_item', args }, context),
+    ]
+    for (const result of results) {
+      expect(result.isError).toBe(true)
+      expect(result.data).toBe(diagnostic('get_item'))
+      expectSafe(result.data)
+    }
+    expect(JSON.stringify(args)).toBe(before)
+    expect(dispatch).not.toHaveBeenCalled()
+  })
+
+  it('refuses local invalid arguments before resolving confirmation or executing transport', async () => {
+    const execute = vi.fn(async () => ({ data: 'should not run' }))
+    const resolveConfirmation = vi.fn(async () => true)
+    const describeConfirmation = vi.fn(async () => ['should not run'])
+    const notify = vi.fn()
+    const inputSchema = z.object({ value: z.string() }).superRefine((_, ctx) => {
+      ctx.addIssue({ code: 'custom', path: ['nested\0\ud800'], message: 'bad\0\n\udfff' })
+    })
+    const input = Object.freeze({ value: 'exact\0\ud800' })
+    const tool = buildTool({ name: 'create_item', description: 'Create item', inputSchema,
+      requiresConfirmation: true, resolveConfirmation, describeConfirmation, execute })
+    const [, call] = createMcpSearchTools({ ...params,
+      index: buildToolIndex([{ kind: 'local', serverName: 'local', tools: [tool] }]),
+    })
+    const result = await call.execute({ server: 'local', tool: tool.name, args: input },
+      { ...context, notifyConfirmationRequired: notify })
+    expect(result.isError).toBe(true)
+    expect(result.data).toBe(diagnostic(tool.name, inputSchema, input))
+    expectSafe(result.data)
+    expect(input).toEqual({ value: 'exact\0\ud800' })
+    expect(resolveConfirmation).not.toHaveBeenCalled()
+    expect(describeConfirmation).not.toHaveBeenCalled()
+    expect(notify).not.toHaveBeenCalled()
+    expect(execute).not.toHaveBeenCalled()
+  })
 })

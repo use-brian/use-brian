@@ -1,8 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ContextScopeAccumulator, createExecutionContext, type ExecutionContext, type LLMProvider, type Tool } from '@use-brian/core'
+import { z } from 'zod'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { createExecutionContext, type ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { type LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import { type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { currentAgentAccess, runWithAgentAccess } from '../../db/agent-access-context.js'
 import { configureBriefTurnContext, type BriefTurn } from '../../briefs/context.js'
-import { prepareAssistantRun } from '../../turn/prepare.js'
+import { captureTurnModelPreparation, type TurnRunPreparationInput } from '../../turn/prepare.js'
 import { WorkspaceAccessError } from '../../workspace-access/policy.js'
 import { configureHarnessTurnContext, resolveHarnessTurn } from '../turn-context.js'
 import type { HarnessRevision } from '../contracts.js'
@@ -18,7 +22,7 @@ const assistantId = '31000000-0000-4000-8000-000000000005'
 const revision: HarnessRevision = { id: otherId, workspaceId, projectId, scope: { kind: 'project' }, revision: 1,
   definition: { schemaVersion: 1, rules: [{ key: 'safety', kind: 'invariant', value: 'Preserve authorization', override: false }], codeChecks: [], acceptanceScenarios: [] },
   createdBy: userId, createdAt: '2026-01-01T00:00:00Z' }
-const readTool = { name: 'getProjectHarnessContext', isReadOnly: true } as Tool
+const readTool: Tool = { name: 'getProjectHarnessContext', description: 'Read the scoped harness', inputSchema: z.object({}), isReadOnly: true, isConcurrencySafe: true, requiresConfirmation: false, execute: async () => ({ data: {} }) }
 const tools = new Map([[readTool.name, readTool]])
 const provider = { name: 'fixture', models: ['fixture'] } as LLMProvider
 
@@ -32,9 +36,14 @@ function fixture(projectIds = [projectId], identity?: ExecutionContext['identity
     lifecycle: { sessionId: otherId, channelType: 'web', channelId: otherId, abortSignal: new AbortController().signal },
     attribution: { billingUserId: otherId } })
   const accumulator = new ContextScopeAccumulator()
-  const input = { executionContext: ec, scopeAccumulator: accumulator, model: { provider, model: 'fixture' }, candidateTools: tools,
-    bindTools: vi.fn((bound: Map<string, Tool>) => bound) }
-  return { ec, authority, accumulator, input }
+  const input: TurnRunPreparationInput = { systemPrompt: 'policy', messages: [{ role: 'user', content: 'Request' }], candidateTools: tools }
+  const prepare = (inputOverride: Partial<TurnRunPreparationInput> = {}) => {
+    const preparation = captureTurnModelPreparation({ kind: 'execution', toolProfile: 'web', execution: ec, assertCurrent: authority.assertCurrent },
+      { provider, configuredProviders: undefined, resolveWorkspaceCustomLlm: null, resolveLegacyByoKey: null, buildLegacyByoProvider: null },
+      { sessionId: otherId, assistantId, signal: ec.lifecycle.abortSignal, effect: operation => operation() })
+    return preparation.captureRun({ ...input, ...inputOverride }, { provider, model: 'fixture' } as never, accumulator)()
+  }
+  return { ec, authority, accumulator, input, prepare }
 }
 
 beforeEach(() => { vi.clearAllMocks(); storage.lineage.mockReset(); storage.lineage.mockResolvedValue([revision]) })
@@ -157,30 +166,16 @@ describe('Project-only automatic harness grounding', () => {
 })
 
 describe('harness contribution in shared run preparation', () => {
-  it('captures a custom resolver before the first await and tells beforeAssembly it is not canonical', async () => {
+  it('captures the resolver before the first admission await', async () => {
     const f = fixture()
     const custom = vi.fn(async () => ({ name: 'project_harness' as const, content: 'captured harness' }))
     const replacement = vi.fn(async () => null)
     configureHarnessTurnContext(custom)
-    const beforeAssembly = vi.fn(async () => { configureHarnessTurnContext(replacement) })
-    const result = await prepareAssistantRun({ ...f.input, beforeAssembly })
-    expect(beforeAssembly).toHaveBeenCalledExactlyOnceWith(false)
+    f.authority.assertCurrent.mockImplementationOnce(async () => { configureHarnessTurnContext(replacement) })
+    const result = await f.prepare()
     expect(custom).toHaveBeenCalledExactlyOnceWith(f.ec, expect.any(Map), f.accumulator)
     expect(replacement).not.toHaveBeenCalled()
-    expect(result.trustedContext).toBe('captured harness')
-  })
-
-  it('does not invoke a custom resolver installed while the initial authority check is awaiting', async () => {
-    const f = fixture()
-    const custom = vi.fn(async () => null)
-    f.authority.assertCurrent.mockImplementationOnce(async () => { configureHarnessTurnContext(custom) })
-    const beforeAssembly = vi.fn(async () => {})
-    await prepareAssistantRun({ ...f.input, beforeAssembly })
-    expect(beforeAssembly).toHaveBeenCalledWith(true)
-    expect(custom).not.toHaveBeenCalled()
-    await prepareAssistantRun({ ...f.input, beforeAssembly })
-    expect(beforeAssembly).toHaveBeenLastCalledWith(false)
-    expect(custom).toHaveBeenCalledOnce()
+    expect(result.runtimeSystemContext).toBe('captured harness')
   })
 
   it('keeps runtime then Brief then harness order, the Brief tool guard and user-visible contributions unchanged', async () => {
@@ -194,12 +189,11 @@ describe('harness contribution in shared run preparation', () => {
       return { name: 'project_harness', content: 'engineering contract' }
     })
     const execute = vi.fn()
-    const result = await prepareAssistantRun({ ...f.input, candidateTools: new Map([...tools, ['mutate', { ...readTool, name: 'mutate', isReadOnly: false, execute } as Tool]]),
+    const result = await f.prepare({ candidateTools: new Map([...tools, ['mutate', { ...readTool, name: 'mutate', isReadOnly: false, execute } as Tool]]),
       trustedContributions: [{ name: 'runtime', content: 'platform policy' }], userVisibleContributions: [{ name: 'attachment', content: 'visible attachment' }] })
     expect(order).toEqual(['brief', 'harness'])
-    expect(result.contributionNames).toEqual({ trusted: ['runtime', 'brief', 'project_harness'], userVisible: ['attachment'] })
-    expect(result.trustedContext).toBe('platform policy\n\naccepted direction\n\nengineering contract')
-    expect(result.userVisibleContext).toBe('visible attachment')
+    expect(result.runtimeSystemContext).toBe('platform policy\n\naccepted direction\n\nengineering contract')
+    expect(result.grounding.userVisibleContext).toBe('visible attachment')
     expect(execute).not.toHaveBeenCalled()
   })
 
@@ -208,7 +202,7 @@ describe('harness contribution in shared run preparation', () => {
     configureHarnessTurnContext(resolveHarnessTurn)
     // Initial preparation, pre-read, post-read pass; the final preparation check revokes.
     f.authority.assertCurrent.mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined).mockRejectedValue(new Error('revoked after read'))
-    await expect(prepareAssistantRun(f.input)).rejects.toThrow('revoked after read')
+    await expect(f.prepare()).rejects.toThrow('revoked after read')
     expect(storage.lineage).toHaveBeenCalledOnce()
     expect(f.accumulator.evidence.projectIds).toEqual([projectId])
   })
@@ -217,16 +211,16 @@ describe('harness contribution in shared run preparation', () => {
     const f = fixture()
     configureHarnessTurnContext(resolveHarnessTurn)
     storage.lineage.mockRejectedValue(new WorkspaceAccessError('harness_not_found', 404))
-    await expect(prepareAssistantRun(f.input)).rejects.toMatchObject({ code: 'harness_not_found' })
+    await expect(f.prepare()).rejects.toMatchObject({ code: 'harness_not_found' })
   })
 
-  it('rejects replacement of the authority method during the pre-assembly guard', async () => {
+  it('rejects authority method replacement during admission before reading the harness', async () => {
     const f = fixture()
     configureHarnessTurnContext(resolveHarnessTurn)
     const replacement = vi.fn(async () => {})
-    await expect(prepareAssistantRun({ ...f.input, beforeAssembly: async () => { f.authority.assertCurrent = replacement } })).rejects.toMatchObject({ reason: 'authority_changed' })
+    f.authority.assertCurrent.mockImplementationOnce(async () => { f.authority.assertCurrent = replacement })
+    await expect(f.prepare()).rejects.toMatchObject({ reason: 'authority_changed' })
     expect(replacement).not.toHaveBeenCalled()
-    expect(f.input.bindTools).not.toHaveBeenCalled()
     expect(storage.lineage).not.toHaveBeenCalled()
   })
 })
