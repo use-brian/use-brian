@@ -387,6 +387,16 @@ export function writeMemoryCreateFrame<T>(authority: SessionContextAuthority, so
   }, undefined, undefined, undefined, true)
 }
 
+async function needsIndividualExternalChecks(workspaceId: string, roots: readonly ScopeSource[]): Promise<boolean> {
+  if (roots.some(root => root.resourceKind === 'external_source')) return true
+  try {
+    return (await readExternalSourceAncestors(workspaceId, roots)).length > 0
+  } catch {
+    // Mixed or unavailable batches preserve the original per-root decisions.
+    return true
+  }
+}
+
 /** Current native query frame. Physical metadata grants nothing: only genuine
  * source denials exclude candidates, and one fresh operation pins the admitted
  * cohort after native lock waits. Original caller/lease validation brackets it.
@@ -399,7 +409,8 @@ export async function readRetainedQueryFrame<T>(authority:SessionContextAuthorit
  const wiring=getSharedRetainedSourceAuthority(),host=retainedHosts.get(execution)
  const prepare=host??(wiring?((e:ExecutionContext,s:readonly ScopeSource[],a:'context'|'retain')=>wiring.coordinator.prepare(e,s,a)):undefined)
  const admitted:ScopeSource[]=[]
- for(const root of roots){
+ const externalCandidates=await needsIndividualExternalChecks(execution.security.access.workspaceId,roots)?roots:[]
+ for(const root of externalCandidates){
   if(root.resourceKind!=='external_source'&&!(await readExternalSourceAncestors(root.workspaceId,[root])).length)continue
   if(!prepare)changed()
   try{await prepare(execution,[root],'context');admitted.push(root)}
@@ -480,14 +491,8 @@ async function sessionQueryFrame<T>(authority:SessionContextAuthority,rawRoots:r
  // floor transaction; their acquisition frame applies it before any payload.
  const externalRoots:ScopeSource[]=[]
  if(roots.some(root=>root.workspaceId!==execution.security.access.workspaceId))changed()
- let hasExternal=true
- if(!roots.some(root=>root.resourceKind==='external_source')){
-  try{hasExternal=(await readExternalSourceAncestors(execution.security.access.workspaceId,roots)).length>0}
-  // Conflicting historical observations across different roots, or an
-  // unavailable batch, keep the original independent per-root decisions.
-  catch{hasExternal=true}
- }
- if(hasExternal)for(const root of roots){
+ const externalCandidates=await needsIndividualExternalChecks(execution.security.access.workspaceId,roots)?roots:[]
+ for(const root of externalCandidates){
   if(root.resourceKind==='external_source'||(await readExternalSourceAncestors(root.workspaceId,[root])).length)externalRoots.push(root)
  }
  const floor=externalRoots.length?await transaction(authority,[],'context',client=>pinNativeSessionQueryFloor(authority,client)):null

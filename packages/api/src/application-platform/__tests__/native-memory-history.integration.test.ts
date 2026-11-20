@@ -1,11 +1,12 @@
 import {readCurrentScopeSources} from '../../db/derived-scope-store.js'
 /** Current audit history uses real native-session authority and current per-version rights. */
-import {describe,it,expect,beforeEach,afterEach,afterAll} from 'vitest'
+import {describe,it,expect,beforeEach,afterEach,afterAll,vi} from 'vitest'
 import type {PoolClient} from 'pg'
 import {createHash} from 'node:crypto'
 import {createCorrectionTools} from '@use-brian/core/corrections/tools.js'
 import type {AccessCeiling} from '@use-brian/agent-runtime/security/access-ceiling.js'
 import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
+import type {ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
 import {executionToolContext} from '@use-brian/agent-runtime/security/execution-context.js'
 import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {getAppPool,getPool} from '../../db/client.js'
@@ -247,6 +248,34 @@ describe.sequential('[COMP:corrections/row-history] current native Memory audit 
   const member=await authority()
   await pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[workspaceId,userId])
   await expect(history(crypto.randomUUID(),member)).rejects.toThrow()
+ })
+ it.each([false,true])('batches native Memory root discovery and preserves per-root fallback (batch fails: %s)',async failBatch=>{
+  const roots:ScopeSource[]=[]
+  for(const summary of ['Fictional first memory','Fictional second memory','Fictional third memory']){
+   const memory=await createMemory({assistantId,userId,summary,sensitivity:'internal',createdByUserId:userId})
+   const {scopeVersion,compartments,projectIds}=memory
+   if(!scopeVersion||!compartments||!projectIds)throw new Error('Fixture Memory source labels are incomplete')
+   roots.push({workspaceId,userId,assistantId,resourceKind:'memory',resourceId:memory.id,version:scopeVersion,
+    sensitivity:memory.sensitivity,compartments,projectIds})
+  }
+  const current=await authority()
+  const realQuery=pool.query.bind(pool) as (...args:unknown[])=>unknown
+  const isDiscovery=(statement:unknown)=>typeof statement==='string'&&statement.includes('FROM read_external_source_dependencies(')
+  const discovery=vi.spyOn(pool,'query')
+  try{
+   if(failBatch)discovery.mockImplementation(((...args:unknown[])=>{
+    const [statement,params]=args
+    if(isDiscovery(statement)&&Array.isArray(params)&&Array.isArray(params[1])&&params[1].length>1){
+     return Promise.reject(new Error('Fictional unavailable batched ancestry'))
+    }
+    return realQuery(...args)
+   }) as typeof pool.query)
+   const result=await readRetainedQueryFrame(current,roots,async()=>({value:roots.length,sources:roots}))
+   expect(result).toBe(roots.length)
+   const lookups=discovery.mock.calls.filter(([statement])=>isDiscovery(statement)).map(([,params])=>params)
+   const parameters=(sources:ScopeSource[])=>[workspaceId,sources.map(source=>source.resourceKind),sources.map(source=>source.resourceId),sources.map(source=>source.version)]
+   expect(lookups).toEqual([parameters(roots),...(failBatch?roots.map(root=>parameters([root])):[])])
+  }finally{discovery.mockRestore()}
  })
  it('refreshes genuine expired context authority after capture and refuses source withdrawal without replay',async()=>{
   const x=await sourceModeFixture('internal')

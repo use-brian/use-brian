@@ -24,12 +24,13 @@ import { persistentContextFixture } from './fixtures/persistent-context.js'
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
 const { promptMemorySignature } = await import(new URL('../../../scripts/conversation-store/build-conversation-prompt-memory.mjs', import.meta.url).href)
-const { currentReleaseSource } = await import(new URL('../../../scripts/conversation-store/installation-release.mjs', import.meta.url).href)
+const { authenticateConversationInstallation, currentReleaseSource } = await import(new URL('../../../scripts/conversation-store/installation-release.mjs', import.meta.url).href)
 
 const store = createDbMemoryStore()
 
-async function privateTurn() {
+async function privateTurn(departmentV2 = false) {
   const f = await persistentContextFixture()
+  if (departmentV2) await f.pool.query('UPDATE workspaces SET department_read_v2=true WHERE id=$1', [f.workspaceId])
   const auth = await authSessionStore.create(f.ownerId, { deviceLabel: 'Fictional prompt reader', userAgent: null, ipAddress: null })
   if (!auth) throw new Error('Missing test device')
   const session = await createPersonalWebSession({ assistantId: f.assistantId, userId: f.ownerId,
@@ -175,12 +176,39 @@ describe.sequential('reviewed native prompt Memory owner', () => {
     } finally { await f.cleanup() }
   }, 120_000)
 
+  it('ranks live Memory through the paired fallback after a large workspace’s retained history exceeds the packed bound', async () => {
+    const f = await privateTurn(true)
+    try {
+      await f.pool.query(`WITH generated AS MATERIALIZED (
+        SELECT n,gen_random_uuid() id FROM generate_series(1,208) n
+      )
+      INSERT INTO public.memories(id,workspace_id,user_id,assistant_id,created_by_user_id,source_session_id,
+        summary,sensitivity,valid_to,superseded_by)
+      SELECT a.id,$1,$2,$3,$2,CASE WHEN a.n<=204 THEN $4::uuid END,'Fictional retained Memory '||a.n,
+        'internal',CASE WHEN a.n<=200 THEN now() END,b.id
+      FROM generated a LEFT JOIN generated b ON b.n=a.n+1 AND a.n<=152 AND a.n%4<>0`,
+      [f.workspaceId,f.ownerId,f.assistantId,f.session.id])
+
+      expect(await f.read()).toBeNull()
+      const access = f.authority.execution.security.access
+      const paired = await store.getPairedPromptIndexes!(access, 5, f.authority)
+      if (paired.ranked.status !== 'fulfilled' || paired.workspace.status !== 'fulfilled') throw new Error('Missing current Memory index')
+      expect(paired.ranked.value.totalCount).toBe(8)
+      expect(paired.ranked.value.rows).toHaveLength(5)
+      expect(paired.workspace.value).toEqual([])
+      expect(boundScopeSources(paired.ranked.value)).toHaveLength(9)
+      expect(boundScopeSources(paired.workspace.value)).toHaveLength(9)
+      expect(boundScopeSources(paired.ranked.value)).not.toEqual(boundScopeSources(paired.workspace.value))
+    } finally { await f.cleanup() }
+  }, 60_000)
+
   it('refuses unreviewed executable metadata with the installed read-only profile', async () => {
     const installed=(await getPool().query<{name:string}>(
       'SELECT name FROM public._migrations ORDER BY name COLLATE "C" DESC LIMIT 1')).rows[0].name
     const { sql } = await currentReleaseSource(installed)
     const client = await getPool().connect()
     try {
+      expect(await authenticateConversationInstallation(client)).toMatchObject({witnessCurrent:true})
       await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ')
       await client.query(`ALTER FUNCTION public.${promptMemorySignature} COST 101`)
       await expect(client.query(sql)).rejects.toThrow('prompt_memory_executable_contract_changed')

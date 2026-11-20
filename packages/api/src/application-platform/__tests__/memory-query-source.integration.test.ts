@@ -118,6 +118,74 @@ describe.sequential('[COMP:api/application-persistence] actual retained Memory c
    await expect(admitModelInput(current.context)).rejects.toMatchObject({reason:'authority_changed'})
   }finally{configureConnectorSourceRuntimeFactory(undefined);await x.cleanup()}
  })
+ it('keeps retired Memory source ancestry only for the exact original query candidate',async()=>{
+  const x=await sourceModeFixture('internal')
+  const proofHelper=`memory_candidate_fixture_${crypto.randomUUID().replaceAll('-','')}`
+  const {workspaceId,pool}=x.f
+  try{
+   configureConnectorSourceRuntimeFactory(x.factory,{instances:x.instances})
+   const saved=await saveOriginalMemory(x,'governed',false)
+   // The public dispatcher can decline either input in its compiled precheck.
+   // Observe the generic owner's own verdict with the original app_user login.
+   await pool.query(`CREATE FUNCTION public.${proofHelper}(uuid,jsonb) RETURNS jsonb
+    LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $fixture$
+     SELECT public.capture_conversation_evidence_generic($1,$2,NULL,NULL)
+    $fixture$;
+    REVOKE ALL ON FUNCTION public.${proofHelper}(uuid,jsonb) FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION public.${proofHelper}(uuid,jsonb) TO app_user`)
+   const domainRoots=async(sources:ScopeSource[])=>{
+    const ids=(await pool.query<{id:string}>(
+     "SELECT id FROM application_field_resources WHERE workspace_id=$1 AND id=ANY($2::uuid[]) AND type_key='memory' AND selection='query_domain'",
+     [workspaceId,sources.map(source=>source.resourceId)])).rows.map(row=>row.id)
+    const selected=sources.filter(source=>source.resourceKind==='application_field'&&ids.includes(source.resourceId))
+    expect(selected).toHaveLength(1)
+    return selected.map(source=>({kind:source.resourceKind,id:source.resourceId,version:source.version}))
+   }
+   const before=await originalMemoryAuthority(x)
+   const found=await store.search(before.execution.security.access,{query:'source-backed'},before)
+   expect(found.map(row=>row.id)).toContain(saved.id)
+   const historical=await domainRoots(boundScopeSources(found))
+   await pool.query('UPDATE memories SET valid_to=now() WHERE workspace_id=$1 AND id=$2',[workspaceId,saved.id])
+   const after=await originalMemoryAuthority(x)
+   const current=await store.search(after.execution.security.access,{query:'source-backed'},after)
+   expect(current.map(row=>row.id)).not.toContain(saved.id)
+   const fresh=await domainRoots(boundScopeSources(current))
+   expect(fresh).not.toEqual(historical)
+   const prove=(roots:typeof fresh)=>readRetainedContextFrame(after,[],async client=>(await client.query(
+    `SELECT public.${proofHelper}($1,$2) AS value`,[workspaceId,JSON.stringify(roots)])).rows[0].value)
+   expect(await prove(historical)).toBeNull()
+   expect(await prove(fresh)).toMatchObject({admitted:true})
+
+   // The retired row is still locked before selection. If it becomes live
+   // while the reader waits, the exact old query must reconsider its ancestry.
+   const writer=await pool.connect()
+   let reader:Promise<unknown>|undefined
+   try{
+    await writer.query('BEGIN')
+    const {pid}=(await writer.query<{pid:number}>('SELECT pg_backend_pid() pid')).rows[0]
+    await writer.query('UPDATE memories SET valid_to=NULL WHERE workspace_id=$1 AND id=$2',[workspaceId,saved.id])
+    reader=prove(fresh)
+    void reader.catch(()=>{})
+    let waiting=false
+    for(let attempt=0;attempt<100&&!waiting;attempt++){
+     waiting=(await pool.query<{waiting:boolean}>(`SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+      WHERE datname=current_database() AND usename='app_user' AND $1=ANY(pg_blocking_pids(pid))) waiting`,[pid])).rows[0].waiting
+     if(!waiting)await new Promise(resolve=>setTimeout(resolve,10))
+    }
+    expect(waiting).toBe(true)
+    await writer.query('COMMIT')
+    expect(await reader).toBeNull()
+   }finally{
+    await writer.query('ROLLBACK')
+    writer.release()
+    await reader?.catch(()=>{})
+   }
+  }finally{
+   configureConnectorSourceRuntimeFactory(undefined)
+   try{await pool.query(`DROP FUNCTION IF EXISTS public.${proofHelper}(uuid,jsonb)`)}
+   finally{await x.cleanup()}
+  }
+ },60_000)
  it('holds a cached actual query on source contraction and preserves native audience denial for another source-authorized reader',async()=>{
   const x=await sourceModeFixture('internal')
   try{

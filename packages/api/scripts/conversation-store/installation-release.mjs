@@ -23,6 +23,7 @@ import * as release8325 from './installation-authentication-8325.mjs'
 import * as release8326 from './installation-authentication-8326.mjs'
 import * as release8327 from './installation-authentication-8327.mjs'
 import * as release8328 from './installation-authentication-8328.mjs'
+import * as release8329 from './installation-authentication-8329.mjs'
 
 const profiles=new Map([
  ['8294_fused_admission_plan_size.sql',release8294],
@@ -47,6 +48,7 @@ const profiles=new Map([
  ['8326_native_memory_query_write_contract.sql',release8326],
  ['8327_conversation_graph_set_verification.sql',release8327],
  ['8328_conversation_graph_frontier.sql',release8328],
+ ['8329_conversation_memory_query_candidates.sql',release8329],
 ])
 export const hasInstallationRelease=head=>profiles.has(head)
 function profileForRelease(head){
