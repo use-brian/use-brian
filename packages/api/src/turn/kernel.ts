@@ -604,7 +604,10 @@ class AssistantTurnOwner {
     this.publicationState = 'committed'
     // The 8277 header committed with these rows: the identity is now durable.
     if (request.completion && rows.length) this.completionRecorded = true
-    if (rows.length) await request.afterCommit?.(rows)
+    if (rows.length && request.afterCommit) {
+      if (request.measure) await request.measure('publication_after_commit_delivery', () => request.afterCommit!(rows))
+      else await request.afterCommit(rows)
+    }
     if (!this.bufferedPublicationBound) {
       let index = request.replyRowIndex
       if (index === undefined) { index = null; for (let i = request.rows.length - 1; i >= 0; i--) if (request.rows[i]!.role === 'assistant') { index = i; break } }
