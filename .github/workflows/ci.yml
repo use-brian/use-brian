@@ -333,7 +333,7 @@ jobs:
       matrix:
         include:
           # Full-chain replays need time for dependency compilation and migration.
-          - { group: owner-legacy, timeoutMinutes: 15 }
+          - { group: owner-legacy, timeoutMinutes: 25 }
           - { group: owner-fresh, timeoutMinutes: 15 }
           - { group: owner-cutover, timeoutMinutes: 15 }
           - { group: owner-successor, timeoutMinutes: 15 }
