@@ -119,6 +119,22 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
     for (const value of ['0/4', '5/4', '1/1', '1/99', '1/4junk', '1.5/4']) assert.throws(() => parseShard(value))
   })
 
+  it('benchmarks the same Calendar shard on ARM without adding a receipt to the acceptance merge', () => {
+    for (const profile of ['current', 'full']) {
+      const normal = acceptanceMatrix(profile).include
+      const [arm, ...canonical] = acceptanceMatrix(profile, { compareCalendarArm: true }).include
+      assert.deepEqual(canonical, normal)
+      assert.equal(arm.runner, 'ubuntu-24.04-arm')
+      assert.doesNotMatch(arm.artifactName, /^department-isolation-shard-/)
+      assert.deepEqual(suitesForShard({ index: arm.shard, total: normal.length }, profile)
+        .map(suite => suite.id), ['recovered-calendar-history'])
+      const baseline = normal.find(entry => entry.shard === arm.shard)
+      assert.equal(baseline.runner, 'ubuntu-latest')
+      assert.equal(arm.timeoutMinutes, baseline.timeoutMinutes)
+      assert.equal(baseline.artifactName, `department-isolation-shard-${arm.shard}`)
+    }
+  })
+
   it('isolates capacity and recovered-history workloads while covering every suite and file exactly once in both production profiles', () => {
     const capacityFile = 'packages/api/src/__tests__/native-query-capture-capacity.integration.test.ts'
     assert.deepEqual(acceptanceShards('full'), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])

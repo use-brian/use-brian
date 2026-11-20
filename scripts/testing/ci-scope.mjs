@@ -28,12 +28,13 @@ export function selectCiScope(eventName, event, git) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
-  const scope = selectCiScope(process.env.GITHUB_EVENT_NAME,
-    JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8')),
+  const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'))
+  const compareCalendarArm = process.env.GITHUB_EVENT_NAME === 'workflow_dispatch' && event.inputs?.compare_calendar_arm === 'true'
+  const scope = selectCiScope(process.env.GITHUB_EVENT_NAME, event,
     args => execFileSync('git', args, { encoding: 'utf8' }))
   console.log(JSON.stringify(scope))
   const profile = scope.historical ? 'full' : 'current'
   const shards = acceptanceShards(profile)
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT,
-    `historical=${scope.historical}\nprofile=${profile}\nshards=${JSON.stringify(shards)}\ntotal=${shards.length}\nmatrix=${JSON.stringify(acceptanceMatrix(profile))}\n`)
+    `historical=${scope.historical}\nprofile=${profile}\nshards=${JSON.stringify(shards)}\ntotal=${shards.length}\nmatrix=${JSON.stringify(acceptanceMatrix(profile, { compareCalendarArm }))}\n`)
 }
