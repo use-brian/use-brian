@@ -302,17 +302,36 @@ describe("[COMP:app-web/chat-sessions-cache] surface async ownership", () => {
     expect(evaluate(expression, { pendingInput: null, activeSessionId: "A", workspaceId: "w" })).toBeNull();
   });
 
-  it("keeps external confirmations on an indeterminate read and replaces them on a definitive one", async () => {
+  it.each(["omitted field", "503", "network"])("keeps external confirmations on an indeterminate read (%s) and replaces them on a definitive one", async outcome => {
     const t = pageConversation({ sessionId: "s-A" });
+    // Attachment starts a singleflight hydrate read. Finish it before changing
+    // the fake response, or refreshPendingInput merely joins that empty read.
+    await t.controller.refreshPendingInput();
+    expect(t.net.transport.fetchPending).toHaveBeenCalledTimes(1);
     t.net.pending.current = { pending: null, toolConfirmation: null, externalConfirmations: [{ approvalId: "ext-1" } as never] };
     await t.controller.refreshPendingInput();
-    expect(t.state().pendingInput).toEqual({ sessionId: "s-A", externalConfirmations: [{ approvalId: "ext-1" }] });
-    t.net.pending.current = { pending: null, toolConfirmation: null }; // transient: the field is omitted
+    expect(t.net.transport.fetchPending).toHaveBeenCalledTimes(2);
+    const mounted = { sessionId: "s-A", externalConfirmations: [{ approvalId: "ext-1" }] };
+    expect(t.state().pendingInput).toEqual(mounted);
+    if (outcome === "omitted field") {
+      // Optional controller transport field, not the SDK's failure response.
+      t.net.pending.current = { pending: null, toolConfirmation: null };
+    } else {
+      // The SDK rejects unavailable HTTP/network reads instead of returning empty.
+      t.net.transport.fetchPending.mockRejectedValueOnce(new Error(
+        outcome === "503" ? "Pending session input unavailable (503)" : "offline",
+      ));
+    }
     await t.controller.refreshPendingInput();
-    expect(t.state().pendingInput?.externalConfirmations).toEqual([{ approvalId: "ext-1" }]);
+    expect(t.net.transport.fetchPending).toHaveBeenCalledTimes(3);
+    expect(t.state().pendingInput).toEqual(mounted);
+    // A successful empty response, or an authoritative 401/403/404 from the
+    // SDK, supplies an explicit empty list and must retire the mounted cards.
     t.net.pending.current = { pending: null, toolConfirmation: null, externalConfirmations: [] };
     await t.controller.refreshPendingInput();
-    expect(t.state().pendingInput?.externalConfirmations).toEqual([]);
+    expect(t.net.transport.fetchPending).toHaveBeenCalledTimes(4);
+    expect(t.state().pendingInput).toEqual({ sessionId: "s-A", externalConfirmations: [] });
+    t.controller.dispose();
   });
 
   it("restores a pending question and confirmation, and a late probe after disposal changes nothing", async () => {
