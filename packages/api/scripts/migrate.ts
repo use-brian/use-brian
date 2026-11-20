@@ -131,9 +131,10 @@ export async function runMigrations({ databaseUrl, migrationDirs = [], beforeApp
       // none is implicitly transaction-wrapped. All other files keep the single
       // batched query (preserves dollar-quoted functions + explicit BEGIN/COMMIT).
       const bindLineageReceipt = file === memoryPublicationMigration || file === memoryWriteSuccessorMigration
+        || file === '8330_memory_prompt_candidates.sql'
       if (bindLineageReceipt) {
         // A lost COMMIT acknowledgement may safely resume using the same
-        // receipt. Do not leave an authenticated lineage change unrecorded.
+        // receipt. Do not leave an authenticated schema change unrecorded.
         const body = withoutOuterTransaction(sql, file)
         if (body === sql) throw new Error(`${file}: expected an explicit transaction`)
         await client.query('BEGIN')

@@ -71,7 +71,7 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     expect(remainingCommand).toContain('--concurrency=1');
     const embedded = workflow.jobs['embedded-database-tests'];
     expect(embedded.strategy.matrix.include).toEqual([
-      { group: 'owner-legacy', timeoutMinutes: 15 },
+      { group: 'owner-legacy', timeoutMinutes: 25 },
       { group: 'owner-fresh', timeoutMinutes: 15 },
       { group: 'owner-cutover', timeoutMinutes: 15 },
       { group: 'owner-successor', timeoutMinutes: 15 },

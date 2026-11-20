@@ -130,7 +130,7 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
     if (execution.lifecycle.abortSignal.aborted&&!finalizing&&!buffered || sources.some(source => source.workspaceId !== execution.security.access.workspaceId)) changed()
     const recordParts=recordEvidenceParts({...floor,sources:[...sources]})
     if(recordParts&&(action!=='retain'||writeSessionId!==execution.lifecycle.sessionId||!activeTurnToken&&!stoppedTurnToken))changed()
-    if(!recordParts)await execution.security.authority.assertCurrent()
+    if(!recordParts)await time('publication_opening_authority',()=>execution.security.authority.assertCurrent())
     const freshSources=recordParts?.fresh.sources??sources
     const hasDirectExternal=freshSources.some(source=>source.resourceKind==='external_source')
     // This admission's view of its turn's admission closure (one witness read).
@@ -158,7 +158,7 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
     const cohort = !fields.length ? { sources:freshSources, independent: false } : closure ? await closure.discover('session-context-cohort',[...freshSources],discoverCohort,
      value=>value.independent?null:[...freshSources,...value.sources]) : await discoverCohort()
     const lockRecord=recordParts && !external && !cohort.independent && !nativeMutation && !!writeSessionId
-    if(recordParts&&!lockRecord)await execution.security.authority.assertCurrent()
+    if(recordParts&&!lockRecord)await time('publication_opening_authority',()=>execution.security.authority.assertCurrent())
     if ((external || cohort.independent) && !prepare) changed()
     let contextProof: PreparedExternalSourceAuthority | undefined
     let prepared: PreparedExternalSourceAuthority | undefined
@@ -234,8 +234,10 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
         }
         // Source receipts are short-lived. Acquire each after native lock
         // waits and immediately before the boundary that consumes it.
-        contextProof = external || cohort.independent ? await prepare!(execution, cohort.sources, 'context') : undefined
-        if (contextProof) await pinPreparedExternalSourceAuthority(client, execution, contextProof)
+        if (external || cohort.independent) await time('publication_context_source_authority',async()=>{
+          contextProof = await prepare!(execution, cohort.sources, 'context')
+          if (contextProof) await pinPreparedExternalSourceAuthority(client, execution, contextProof)
+        })
         const validation=await time('publication_validate',async()=>{
           const evidence={...floor,sources:[...sources]}
           if(recordParts){
@@ -263,16 +265,18 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
           sensitivity:publicWriteFloor.cap,compartments:publicWriteFloor.compartments,projectIds:publicWriteFloor.projectIds,
           generation:publicWriteFloor.version,
         })
-        prepared = external && action==='retain' ? await prepare!(execution, freshSources, 'retain') : undefined
-        if (prepared) await pinPreparedExternalSourceAuthority(client, execution, prepared)
+        if (external && action==='retain') await time('publication_retain_source_authority',async()=>{
+          prepared = await prepare!(execution, freshSources, 'retain')
+          if (prepared) await pinPreparedExternalSourceAuthority(client, execution, prepared)
+        })
         const value = await time('publication_write',()=>run(client,checked,annotationChecked))
         // COMMIT's deferred-trigger phase can outlive statement_timeout while
         // retaining the session lock needed by heartbeat/Stop. Flush the exact
         // same checks as a bounded statement, then recheck live authority and
         // cancellation before allowing the transaction to commit.
         if (writeSessionId) await time('publication_constraints',()=>client.query('SET CONSTRAINTS ALL IMMEDIATE'))
-        await withLockedSourceEvidence({ assistantId: execution.assistant.id, ceiling: execution.security.ceiling, evidence: checked },
-          () => execution.security.authority.assertCurrent())
+        await time('publication_precommit_authority',()=>withLockedSourceEvidence({ assistantId: execution.assistant.id, ceiling: execution.security.ceiling, evidence: checked },
+          () => execution.security.authority.assertCurrent()))
         if (execution.lifecycle.abortSignal.aborted&&!finalizing || JSON.stringify(accumulator.evidence) !== before
           || host !== retainedHosts.get(execution) || !host && wiring !== getSharedRetainedSourceAuthority()) changed()
         if(action==='retain'){publicationAttempted=true;publicationState.outcome='unknown'}
@@ -297,9 +301,11 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
       releaseApplicationTransactionBinding(client)
       if(!released){if(committed)client.release();else await rollbackAndRelease(client)}
     }
-    if (contextProof) await assertPreparedExternalSourceAuthorityCurrent(execution, contextProof)
-    if (prepared) await assertPreparedExternalSourceAuthorityCurrent(execution, prepared)
-    await execution.security.authority.assertCurrent()
+    if (contextProof || prepared) await time('publication_postcommit_source_authority',async()=>{
+      if (contextProof) await assertPreparedExternalSourceAuthorityCurrent(execution, contextProof)
+      if (prepared) await assertPreparedExternalSourceAuthorityCurrent(execution, prepared)
+    })
+    await time('publication_postcommit_authority',()=>execution.security.authority.assertCurrent())
     return result
   } catch (error) {
     if(publicationAttempted&&publicationState.outcome==='rolled_back'){
@@ -387,6 +393,16 @@ export function writeMemoryCreateFrame<T>(authority: SessionContextAuthority, so
   }, undefined, undefined, undefined, true)
 }
 
+async function needsIndividualExternalChecks(workspaceId: string, roots: readonly ScopeSource[]): Promise<boolean> {
+  if (roots.some(root => root.resourceKind === 'external_source')) return true
+  try {
+    return (await readExternalSourceAncestors(workspaceId, roots)).length > 0
+  } catch {
+    // Mixed or unavailable batches preserve the original per-root decisions.
+    return true
+  }
+}
+
 /** Current native query frame. Physical metadata grants nothing: only genuine
  * source denials exclude candidates, and one fresh operation pins the admitted
  * cohort after native lock waits. Original caller/lease validation brackets it.
@@ -399,7 +415,8 @@ export async function readRetainedQueryFrame<T>(authority:SessionContextAuthorit
  const wiring=getSharedRetainedSourceAuthority(),host=retainedHosts.get(execution)
  const prepare=host??(wiring?((e:ExecutionContext,s:readonly ScopeSource[],a:'context'|'retain')=>wiring.coordinator.prepare(e,s,a)):undefined)
  const admitted:ScopeSource[]=[]
- for(const root of roots){
+ const externalCandidates=await needsIndividualExternalChecks(execution.security.access.workspaceId,roots)?roots:[]
+ for(const root of externalCandidates){
   if(root.resourceKind!=='external_source'&&!(await readExternalSourceAncestors(root.workspaceId,[root])).length)continue
   if(!prepare)changed()
   try{await prepare(execution,[root],'context');admitted.push(root)}
@@ -480,14 +497,8 @@ async function sessionQueryFrame<T>(authority:SessionContextAuthority,rawRoots:r
  // floor transaction; their acquisition frame applies it before any payload.
  const externalRoots:ScopeSource[]=[]
  if(roots.some(root=>root.workspaceId!==execution.security.access.workspaceId))changed()
- let hasExternal=true
- if(!roots.some(root=>root.resourceKind==='external_source')){
-  try{hasExternal=(await readExternalSourceAncestors(execution.security.access.workspaceId,roots)).length>0}
-  // Conflicting historical observations across different roots, or an
-  // unavailable batch, keep the original independent per-root decisions.
-  catch{hasExternal=true}
- }
- if(hasExternal)for(const root of roots){
+ const externalCandidates=await needsIndividualExternalChecks(execution.security.access.workspaceId,roots)?roots:[]
+ for(const root of externalCandidates){
   if(root.resourceKind==='external_source'||(await readExternalSourceAncestors(root.workspaceId,[root])).length)externalRoots.push(root)
  }
  const floor=externalRoots.length?await transaction(authority,[],'context',client=>pinNativeSessionQueryFloor(authority,client)):null

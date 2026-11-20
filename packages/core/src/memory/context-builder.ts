@@ -115,6 +115,8 @@ export function buildMemoryContext(params: {
   soul?: string | null
   identityMemories: IdentityMemory[]
   memoryIndex: MemoryEntry[]
+  /** Broad indexes were deferred; authorized Memory tools can still be used. */
+  memoryIndexDeferred?: boolean
   /** KB entry summaries — memories duplicating these are filtered from the index. */
   knowledgeSummaries?: Array<{ summary: string | null }>
   /** Team-scoped identity memories (visible to all team members). */
@@ -319,7 +321,9 @@ export function buildMemoryContext(params: {
       if (kbSummaries.length === 0) return true
       return !kbSummaries.some((kbs) => computeSimilarity(m.summary, kbs) >= 0.85)
     })
-  if (nonIdentity.length > 0) {
+  if (params.memoryIndexDeferred) {
+    sections.push('## Memory\nRetrieve background facts when your instructions or the current request need them. Use getMemory to read a known memory ID. If topical search is available, use it to find memories by topic.')
+  } else if (nonIdentity.length > 0) {
     // Q1 lock: flat by recency-of-recall, tags-as-chips per line.
     // Q2 lock: uniform silent-filter guidance for all memories.
     const lines = nonIdentity.map((m) => {

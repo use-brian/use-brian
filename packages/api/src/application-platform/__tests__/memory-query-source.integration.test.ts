@@ -9,12 +9,15 @@ import {memoryRoutes} from '../../routes/memories.js'
 import type {EntityLinksStore} from '@use-brian/core/entities/types.js'
 import type {MemoryRecallBuffer} from '@use-brian/core/memory/recall-buffer.js'
 import {createMemoryTools} from '@use-brian/core/memory/tools.js'
+import {createRetrievalTools} from '@use-brian/core/retrieval/tools.js'
 import type {ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
 import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
-import {getAppPool,getPool} from '../../db/client.js'
+import {getAppPool,getPool,runWithAgentAccess} from '../../db/client.js'
 import {initializeConversationVisibility} from '../../db/conversation-visibility.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
-import {createMemory} from '../../db/memories.js'
+import {createMemory,readMemorySearchHits} from '../../db/memories.js'
+import {createDbRetrievalStore} from '../../db/retrieval-store.js'
+import {publishNativeSessionMessageBatch,readAdmittedSessionQuery} from '../../db/conversation-store.js'
 import {readRetainedContextFrame} from '../../db/session-context-revisions.js'
 import {admitModelInput} from '../../context-scope/admission.js'
 import {configureConnectorSourceRuntimeFactory} from '../source-runtime.js'
@@ -26,6 +29,71 @@ await assertLocalFixture()
 const store=createDbMemoryStore()
 describe.sequential('[COMP:api/application-persistence] actual retained Memory collections',()=>{
  afterAll(async()=>{configureConnectorSourceRuntimeFactory(undefined);await getAppPool().end();await getPool().end()})
+ it('delivers bounded topical Memory hits with exact field evidence and keeps that evidence in the saved reply',async()=>{
+  const x=await sourceModeFixture('internal')
+  try{
+   const {f}=x
+   const first=await f.memory('Fictional lavender quasar first visible',f.ownerId)
+   const second=await f.memory('Fictional lavender quasar second visible',f.ownerId)
+   const hidden=await f.memory('Fictional lavender quasar private peer',f.firstId)
+   const held=await f.memory('Fictional lavender quasar held',f.ownerId)
+   await f.pool.query('UPDATE memories SET scope_held=true WHERE id=$1',[held.id])
+   await f.pool.query(`INSERT INTO public.memories(workspace_id,user_id,assistant_id,created_by_user_id,summary,sensitivity)
+    SELECT $1,$2,$3,$2,'Fictional unrelated Memory '||n,'internal' FROM generate_series(1,4100) n`,[f.workspaceId,f.ownerId,f.assistantId])
+   const current=await originalMemoryAuthority(x),access=current.execution.security.access
+   const unused=async():Promise<never>=>{throw new Error('Unexpected retrieval method')}
+   const embedding=[1,...Array<number>(767).fill(0)]
+   await f.pool.query('UPDATE memories SET embedding=$2::vector WHERE id=$1',[second.id,`[${embedding.join(',')}]`])
+   const retrieval=createRetrievalTools({...createDbRetrievalStore({embedder:{embed:async()=>[embedding]}}),
+    getEntity:unused,provenance:unused,aggregate:unused,
+    markUseful:unused,getRowHistory:unused})
+   const execute=(cursor?:string)=>runWithAgentAccess(access,()=>retrieval.search.execute({query:'lavender quasar',scope:'memory',limit:1,
+    ...(cursor?{cursor}:{}),semantic:false},current.context))
+   const result=await execute()
+   expect(result.isError,JSON.stringify(result.data)).not.toBe(true)
+   const page=result.data as {data:{row_id:string;summary:string}[];meta:{cursor:string|null;truncated:boolean}}
+   expect(page.data).toHaveLength(1)
+   expect(page.meta.truncated).toBe(true)
+   expect(page.meta.cursor).toBeTruthy()
+   const next=await execute(page.meta.cursor!)
+   expect(next.isError,JSON.stringify(next.data)).not.toBe(true)
+   const nextPage=next.data as typeof page
+   expect(nextPage.data).toHaveLength(1)
+   expect(nextPage.meta).toMatchObject({cursor:null,truncated:false})
+   expect(new Set([page.data[0].row_id,nextPage.data[0].row_id])).toEqual(new Set([first.id,second.id]))
+   expect(JSON.stringify([result.data,next.data])).not.toContain(hidden.summary)
+   expect(JSON.stringify([result.data,next.data])).not.toContain(held.summary)
+   const vector=await runWithAgentAccess(access,()=>retrieval.search.execute({query:'fictional vector-only topic',scope:'memory',limit:1},current.context))
+   expect(vector.isError,JSON.stringify(vector.data)).not.toBe(true)
+   expect((vector.data as typeof page).data).toMatchObject([{row_id:second.id,summary:second.summary}])
+   expect(vector.scopeEvidence?.sources).toContainEqual(expect.objectContaining({resourceKind:'memory',resourceId:second.id,version:'1'}))
+   const sources=result.scopeEvidence?.sources ?? []
+   const selected=sources.find(source=>source.resourceKind==='memory')
+   expect(selected).toMatchObject({resourceId:page.data[0].row_id,version:'1'})
+   const fields=sources.filter(source=>source.resourceKind==='application_field')
+   expect(fields).toHaveLength(1)
+   expect((await f.pool.query(`SELECT fields FROM application_field_resources WHERE workspace_id=$1
+    AND id=$2 AND type_key='memory' AND selection='read'`,[f.workspaceId,fields[0].resourceId])).rows).toEqual([
+    {fields:['compartments','id','project_ids','retracted_at','sensitivity','summary','tags','valid_from','valid_to']},
+   ])
+   current.accumulator.note(result.scopeEvidence!)
+   await expect(admitModelInput(current.context)).resolves.toBeUndefined()
+   const [reply]=await publishNativeSessionMessageBatch({sessionId:current.session.id,authority:current,
+    derivationTarget:{...f.envelope,userId:f.ownerId},derivation:{producer:'fixture:topical-memory-search-reply',sources},
+    messages:[{role:'assistant',senderAssistantId:f.assistantId,content:'Fictional published topical match'}]})
+   const stored=await readAdmittedSessionQuery({sessionId:current.session.id,throughSequence:reply.sequenceNum,authority:current})
+   expect(stored.history.at(-1)?.content).toBe('Fictional published topical match')
+   const declarations=await f.pool.query(`SELECT e.source_id,e.source_version FROM scope_derivation_sources e
+    JOIN scope_derivations d ON d.workspace_id=e.workspace_id AND d.id=e.derivation_id
+    WHERE e.workspace_id=$1 AND d.producer='fixture:topical-memory-search-reply'`,[f.workspaceId])
+   expect(declarations.rows).toContainEqual({source_id:fields[0].resourceId,source_version:fields[0].version})
+   await f.pool.query('UPDATE memories SET scope_held=true WHERE id=$1',[page.data[0].row_id])
+   await expect(admitModelInput(current.context)).rejects.toMatchObject({reason:'authority_changed'})
+   const fresh=await originalMemoryAuthority(x)
+   await expect(readMemorySearchHits(fresh.execution.security.access,fresh,[{id:page.data[0].row_id,version:'1'}]))
+    .rejects.toMatchObject({code:'scope_source_changed'})
+  }finally{await x.cleanup()}
+ },120000)
  it('admits actual text/prefix/index/ranked collections under the original private actor and excludes withdrawn sources before count and rank',async()=>{
   const x=await sourceModeFixture('internal')
   try{
@@ -118,6 +186,74 @@ describe.sequential('[COMP:api/application-persistence] actual retained Memory c
    await expect(admitModelInput(current.context)).rejects.toMatchObject({reason:'authority_changed'})
   }finally{configureConnectorSourceRuntimeFactory(undefined);await x.cleanup()}
  })
+ it('keeps retired Memory source ancestry only for the exact original query candidate',async()=>{
+  const x=await sourceModeFixture('internal')
+  const proofHelper=`memory_candidate_fixture_${crypto.randomUUID().replaceAll('-','')}`
+  const {workspaceId,pool}=x.f
+  try{
+   configureConnectorSourceRuntimeFactory(x.factory,{instances:x.instances})
+   const saved=await saveOriginalMemory(x,'governed',false)
+   // The public dispatcher can decline either input in its compiled precheck.
+   // Observe the generic owner's own verdict with the original app_user login.
+   await pool.query(`CREATE FUNCTION public.${proofHelper}(uuid,jsonb) RETURNS jsonb
+    LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $fixture$
+     SELECT public.capture_conversation_evidence_generic($1,$2,NULL,NULL)
+    $fixture$;
+    REVOKE ALL ON FUNCTION public.${proofHelper}(uuid,jsonb) FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION public.${proofHelper}(uuid,jsonb) TO app_user`)
+   const domainRoots=async(sources:ScopeSource[])=>{
+    const ids=(await pool.query<{id:string}>(
+     "SELECT id FROM application_field_resources WHERE workspace_id=$1 AND id=ANY($2::uuid[]) AND type_key='memory' AND selection='query_domain'",
+     [workspaceId,sources.map(source=>source.resourceId)])).rows.map(row=>row.id)
+    const selected=sources.filter(source=>source.resourceKind==='application_field'&&ids.includes(source.resourceId))
+    expect(selected).toHaveLength(1)
+    return selected.map(source=>({kind:source.resourceKind,id:source.resourceId,version:source.version}))
+   }
+   const before=await originalMemoryAuthority(x)
+   const found=await store.search(before.execution.security.access,{query:'source-backed'},before)
+   expect(found.map(row=>row.id)).toContain(saved.id)
+   const historical=await domainRoots(boundScopeSources(found))
+   await pool.query('UPDATE memories SET valid_to=now() WHERE workspace_id=$1 AND id=$2',[workspaceId,saved.id])
+   const after=await originalMemoryAuthority(x)
+   const current=await store.search(after.execution.security.access,{query:'source-backed'},after)
+   expect(current.map(row=>row.id)).not.toContain(saved.id)
+   const fresh=await domainRoots(boundScopeSources(current))
+   expect(fresh).not.toEqual(historical)
+   const prove=(roots:typeof fresh)=>readRetainedContextFrame(after,[],async client=>(await client.query(
+    `SELECT public.${proofHelper}($1,$2) AS value`,[workspaceId,JSON.stringify(roots)])).rows[0].value)
+   expect(await prove(historical)).toBeNull()
+   expect(await prove(fresh)).toMatchObject({admitted:true})
+
+   // The retired row is still locked before selection. If it becomes live
+   // while the reader waits, the exact old query must reconsider its ancestry.
+   const writer=await pool.connect()
+   let reader:Promise<unknown>|undefined
+   try{
+    await writer.query('BEGIN')
+    const {pid}=(await writer.query<{pid:number}>('SELECT pg_backend_pid() pid')).rows[0]
+    await writer.query('UPDATE memories SET valid_to=NULL WHERE workspace_id=$1 AND id=$2',[workspaceId,saved.id])
+    reader=prove(fresh)
+    void reader.catch(()=>{})
+    let waiting=false
+    for(let attempt=0;attempt<100&&!waiting;attempt++){
+     waiting=(await pool.query<{waiting:boolean}>(`SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+      WHERE datname=current_database() AND usename='app_user' AND $1=ANY(pg_blocking_pids(pid))) waiting`,[pid])).rows[0].waiting
+     if(!waiting)await new Promise(resolve=>setTimeout(resolve,10))
+    }
+    expect(waiting).toBe(true)
+    await writer.query('COMMIT')
+    expect(await reader).toBeNull()
+   }finally{
+    await writer.query('ROLLBACK')
+    writer.release()
+    await reader?.catch(()=>{})
+   }
+  }finally{
+   configureConnectorSourceRuntimeFactory(undefined)
+   try{await pool.query(`DROP FUNCTION IF EXISTS public.${proofHelper}(uuid,jsonb)`)}
+   finally{await x.cleanup()}
+  }
+ },60_000)
  it('holds a cached actual query on source contraction and preserves native audience denial for another source-authorized reader',async()=>{
   const x=await sourceModeFixture('internal')
   try{

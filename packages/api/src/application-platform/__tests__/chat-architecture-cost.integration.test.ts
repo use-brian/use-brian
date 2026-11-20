@@ -421,6 +421,10 @@ describe.sequential('[COMP:api/native-chat-read-cost] chat replacement baseline'
         }
       }
       expect(response.status).toBe(200); expect(body).not.toContain('event: error'); expect(firstTextMs).toBeDefined(); expect(metrics.outputEvents).toBeGreaterThan(0); expect(metrics.outputEvents).toBeLessThanOrEqual(fragments??reply.split(' ').length); if (fragments===undefined) expect(metrics.outputEvents).toBe(reply.split(' ').length); expect(turnTimings.loop_started_at_ms).toBeGreaterThanOrEqual(0); expect(turnTimings.client_done_at_ms).toBeGreaterThan(0)
+      for (const phase of ['publication_precommit_authority', 'publication_postcommit_authority', 'publication_after_commit_delivery']) {
+        expect(turnTimings[`${phase}_count`]).toBe(1)
+        expect(turnTimings[`${phase}_ms`]).toBeGreaterThanOrEqual(0)
+      }
       const receivedText = body.split(/\r?\n\r?\n/).filter(frame => /^event: text_delta\r?$/m.test(frame))
         .map(frame => JSON.parse(frame.split(/\r?\n/).filter(line => line.startsWith('data:'))
           .map(line => line.slice(5).trimStart()).join('\n')) as {text:string})

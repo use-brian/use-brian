@@ -75,6 +75,20 @@ describe('[COMP:memory/context-builder] Memory context builder', () => {
     expect(ctx).toContain('Do not keyword-search')
   })
 
+  it('preserves identity and on-demand retrieval with a deferred ambient index', () => {
+    const ctx = buildMemoryContext({
+      soul: 'Fictional voice preference.',
+      identityMemories: [{ id: 'fictional-identity', summary: 'Fictional user identity', detail: null }],
+      memoryIndex: [],
+      memoryIndexDeferred: true,
+    })
+    expect(ctx).toContain('Fictional voice preference.')
+    expect(ctx).toContain('Fictional user identity')
+    expect(ctx).toContain('Use getMemory to read a known memory ID')
+    expect(ctx).not.toContain('No memories yet')
+    expect(ctx).not.toContain('no other memories are stored')
+  })
+
   it('renders the self-entity UUID inline when selfEntityId is provided', () => {
     // The model needs the full entity UUID to anchor research findings
     // via saveMemory({ entityId }) or updateSelfProfile. Without it, the

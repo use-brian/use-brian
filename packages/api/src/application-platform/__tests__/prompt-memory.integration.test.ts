@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
+import { memoryLearningSchema } from '@use-brian/core/memory/learning.js'
 import { Pool, type PoolClient } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { bindSessionTurnAuthority } from '../../context-scope/authority-lease.js'
@@ -12,7 +13,7 @@ import { applyRLSGucs, getAppPool, getPool, rollbackAndRelease, runWithAgentAcce
 import { initializeConversationVisibility, promptMemorySectionsActive } from '../../db/conversation-visibility.js'
 import { updateSelfEntityAttributes } from '../../db/entities-store.js'
 import { createDbMemoryStore } from '../../db/memory-store.js'
-import { createMemory, getSelfEntityId, preparePromptIdentityRead, upsertSoul } from '../../db/memories.js'
+import { createMemory, getSelfEntityId, getWorkspacePromptMemories, preparePromptIdentityRead, updateMemory, upsertSoul } from '../../db/memories.js'
 import { claimTurnLease, createPersonalWebSession, findOrCreateSession, getPreferredChannel, releaseTurnLease } from '../../db/sessions.js'
 import { setTurnSqlRecording, takeTurnSqlLedger, withTurnFrame } from '../../db/turn-sql-accounting.js'
 import { findAssistantById } from '../../db/users.js'
@@ -24,12 +25,13 @@ import { persistentContextFixture } from './fixtures/persistent-context.js'
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
 const { promptMemorySignature } = await import(new URL('../../../scripts/conversation-store/build-conversation-prompt-memory.mjs', import.meta.url).href)
-const { currentReleaseSource } = await import(new URL('../../../scripts/conversation-store/installation-release.mjs', import.meta.url).href)
+const { authenticateConversationInstallation, currentReleaseSource } = await import(new URL('../../../scripts/conversation-store/installation-release.mjs', import.meta.url).href)
 
 const store = createDbMemoryStore()
 
-async function privateTurn() {
+async function privateTurn(departmentV2 = false) {
   const f = await persistentContextFixture()
+  if (departmentV2) await f.pool.query('UPDATE workspaces SET department_read_v2=true WHERE id=$1', [f.workspaceId])
   const auth = await authSessionStore.create(f.ownerId, { deviceLabel: 'Fictional prompt reader', userAgent: null, ipAddress: null })
   if (!auth) throw new Error('Missing test device')
   const session = await createPersonalWebSession({ assistantId: f.assistantId, userId: f.ownerId,
@@ -94,6 +96,37 @@ describe.sequential('reviewed native prompt Memory owner', () => {
       expect(result.indexes.workspace).toMatchObject({ status: 'fulfilled', value: [{ id: team.id }] })
       expect(result.team.identity.map(row => row.id)).toEqual([team.id])
       expect(result.team.tagged.map(row => row.id)).toEqual([team.id])
+    } finally { await f.cleanup() }
+  }, 120_000)
+
+  it('applies only authorized and currently applicable exceptions to prompt identity and voice', async () => {
+    const f = await privateTurn(true)
+    const actor = f.authority.execution.security.access
+    const viewer = { ...actor, clearance: 'internal' as const }
+    const scopedViewer = { ...viewer, memoryContext: { activity: 'client_report' as const } }
+    const put = (summary: string, tags: string[], sensitivity: 'internal' | 'confidential' = 'internal',
+      learning?: ReturnType<typeof memoryLearningSchema.parse>) => createMemory({
+      workspaceId: f.workspaceId, assistantId: f.assistantId, userId: null, createdByUserId: f.ownerId,
+      scope: 'workspace', summary, tags, sensitivity, learning,
+    })
+    const exceptionFor = (id: string, appliesUntil?: string) => memoryLearningSchema.parse({
+      version: 1, state: 'established', origin: 'explicit', confirmed: true,
+      applicability: { activity: 'client_report', exceptionTo: id }, appliesUntil,
+    })
+    try {
+      const voice = await put('Fictional workspace voice', ['voice'])
+      const identity = await put('Fictional workspace identity', ['self-profile'])
+      const active = await put('Fictional report voice', ['voice'], 'internal', exceptionFor(voice.id))
+      await put('Fictional restricted report identity', ['self-profile'], 'confidential', exceptionFor(identity.id))
+
+      expect((await getWorkspacePromptMemories(viewer, 'voice')).tagged.map(row => row.id)).toEqual([voice.id])
+      const scoped = await getWorkspacePromptMemories(scopedViewer, 'voice')
+      expect(scoped.tagged.map(row => row.id)).toEqual([active.id])
+      expect(scoped.identity.map(row => row.id)).toEqual([identity.id])
+
+      const expired = await updateMemory(active.id, { learning: exceptionFor(voice.id, '2001-01-01T00:00:00.000Z') }, actor)
+      expect(expired).toBeTruthy()
+      expect((await getWorkspacePromptMemories(scopedViewer, 'voice')).tagged.map(row => row.id)).toEqual([voice.id])
     } finally { await f.cleanup() }
   }, 120_000)
 
@@ -175,12 +208,46 @@ describe.sequential('reviewed native prompt Memory owner', () => {
     } finally { await f.cleanup() }
   }, 120_000)
 
+  it('ranks live Memory through the paired fallback after a large workspace’s retained history exceeds the packed bound', async () => {
+    const f = await privateTurn(true)
+    try {
+      await f.pool.query(`WITH generated AS MATERIALIZED (
+        SELECT n,gen_random_uuid() id FROM generate_series(1,208) n
+      )
+      INSERT INTO public.memories(id,workspace_id,user_id,assistant_id,created_by_user_id,source_session_id,
+        summary,sensitivity,valid_to,superseded_by)
+      SELECT a.id,$1,$2,$3,$2,CASE WHEN a.n<=204 THEN $4::uuid END,'Fictional retained Memory '||a.n,
+        'internal',CASE WHEN a.n<=200 THEN now() END,b.id
+      FROM generated a LEFT JOIN generated b ON b.n=a.n+1 AND a.n<=152 AND a.n%4<>0`,
+      [f.workspaceId,f.ownerId,f.assistantId,f.session.id])
+
+      expect(await f.read()).toBeNull()
+      const access = f.authority.execution.security.access
+      const paired = await store.getPairedPromptIndexes!(access, 5, f.authority)
+      if (paired.ranked.status !== 'fulfilled' || paired.workspace.status !== 'fulfilled') throw new Error('Missing current Memory index')
+      expect(paired.ranked.value.totalCount).toBe(8)
+      expect(paired.ranked.value.rows).toHaveLength(5)
+      expect(paired.workspace.value).toEqual([])
+      expect(boundScopeSources(paired.ranked.value)).toHaveLength(9)
+      expect(boundScopeSources(paired.workspace.value)).toHaveLength(9)
+      expect(boundScopeSources(paired.ranked.value)).not.toEqual(boundScopeSources(paired.workspace.value))
+    } finally { await f.cleanup() }
+  }, 60_000)
+
   it('refuses unreviewed executable metadata with the installed read-only profile', async () => {
     const installed=(await getPool().query<{name:string}>(
       'SELECT name FROM public._migrations ORDER BY name COLLATE "C" DESC LIMIT 1')).rows[0].name
     const { sql } = await currentReleaseSource(installed)
     const client = await getPool().connect()
     try {
+      expect(await authenticateConversationInstallation(client)).toMatchObject({witnessCurrent:true})
+      if (installed === '8330_memory_prompt_candidates.sql') {
+        await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ')
+        await client.query('DROP INDEX public.idx_memories_learning_exception')
+        await client.query('CREATE INDEX idx_memories_learning_exception ON public.memories (id)')
+        await expect(client.query(sql)).rejects.toThrow('memory_prompt_candidates_catalog_changed')
+        await client.query('ROLLBACK')
+      }
       await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ')
       await client.query(`ALTER FUNCTION public.${promptMemorySignature} COST 101`)
       await expect(client.query(sql)).rejects.toThrow('prompt_memory_executable_contract_changed')

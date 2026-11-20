@@ -486,3 +486,15 @@ The portable authenticator pins the unchanged canonical revision routine used
 to render these checks. Run
 `node packages/api/scripts/conversation-store/build-conversation-frontier.mjs --check`
 to verify the numbered SQL.
+
+### Current Memory query candidates
+
+The generic conversation evidence owner prechecks external ancestry for
+every live Memory and for the exact retained ID and version selected by
+each immutable query domain. Retired rows outside that domain cannot
+enter the canonical Memory selection when an external grant changes.
+The scan locks the same bounded workspace cohort, projects only scope
+metadata and uses the original complete ancestry reader for every
+eligible root. The canonical Memory evaluator still qualifies the
+historical selection, successors, held rows, current rights and
+independent source grants at each consuming boundary.

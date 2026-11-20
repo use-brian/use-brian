@@ -70,6 +70,7 @@ jobs:
           node packages/api/scripts/conversation-store/build.mjs --check
           node packages/api/scripts/conversation-store/build-conversation-graph-set.mjs --check
           node packages/api/scripts/conversation-store/build-conversation-frontier.mjs --check
+          node packages/api/scripts/conversation-store/build-conversation-memory-query-candidates.mjs --check
 
       # Clean API compilation can exceed 4 GiB; keep this a step-local build budget.
       - name: Build
@@ -332,7 +333,7 @@ jobs:
       matrix:
         include:
           # Full-chain replays need time for dependency compilation and migration.
-          - { group: owner-legacy, timeoutMinutes: 15 }
+          - { group: owner-legacy, timeoutMinutes: 25 }
           - { group: owner-fresh, timeoutMinutes: 15 }
           - { group: owner-cutover, timeoutMinutes: 15 }
           - { group: owner-successor, timeoutMinutes: 15 }
