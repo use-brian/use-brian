@@ -846,6 +846,53 @@ export async function getMemoryById(ctx: AccessContext, id: string, transactionC
   return result.rows[0] ?? null
 }
 
+const memorySearchFields = ['id','summary','tags','sensitivity','compartments','project_ids','valid_from','valid_to','retracted_at'] as const
+const memorySearchPoint = z.object({
+  values: z.object({id:z.string().uuid(),summary:z.string(),tags:z.array(z.string()),sensitivity:z.enum(['public','internal','confidential']),
+    compartments:z.array(z.string()),project_ids:z.array(z.string().uuid()),valid_from:z.string(),valid_to:z.null(),retracted_at:z.null()}).strict(),
+  sources:z.array(memoryQuerySource).min(1),policyVersion:z.string().min(1),
+}).strict()
+
+/** Admit the bounded, exact Memory hits through the existing native field owner. */
+export async function readMemorySearchHits(ctx:AccessContext,authority:SessionContextAuthority,
+  hits:readonly {id:string;version:string}[]) {
+  const {execution}=authority, access=execution.security.access
+  if(ctx.systemRead||ctx.userId!==access.userId||ctx.workspaceId!==access.workspaceId||ctx.assistantId!==execution.assistant.id)
+    throw new DerivedScopeError('scope_evidence_missing')
+  await execution.security.authority.assertCurrent()
+  const ids=hits.map(hit=>hit.id), versions=hits.map(hit=>hit.version)
+  // This owner-role projection discovers immutable obligations only. The
+  // application-role read below admits the original version and its fields.
+  const metadata=await query<{source:unknown}>(`SELECT jsonb_build_object(
+    'workspaceId',m.workspace_id,'userId',m.user_id,'assistantId',m.assistant_id,'sensitivity',m.sensitivity,
+    'compartments',m.compartments,'projectIds',m.project_ids,'resourceKind','memory','resourceId',m.id,'version',m.scope_version::text) AS source
+   FROM unnest($2::uuid[],$3::text[]) WITH ORDINALITY hit(id,version,position)
+   JOIN public.memories m ON m.workspace_id=$1 AND m.id=hit.id AND m.scope_version::text=hit.version
+   WHERE m.valid_to IS NULL AND m.retracted_at IS NULL AND NOT m.scope_held ORDER BY hit.position`,[ctx.workspaceId,ids,versions])
+  if(metadata.rows.length!==hits.length)throw new DerivedScopeError('scope_source_changed')
+  const roots=metadata.rows.map(row=>memoryQuerySource.parse(row.source))
+  const requested=pinAccessCeiling({...access,...Object.fromEntries(Object.entries(ctx).filter(([,value])=>value!==undefined))})
+  const ceiling=intersectAccessCeilings(execution.security.ceiling,requested)
+  return readRetainedQueryFrame(authority,roots,async client=>{
+    await runWithAgentAccess({...access,...ceiling},()=>applyRLSGucs(client,ctx.userId,execution.assistant.id))
+    const predicate=buildMemoryAccessPredicate(ctx,{startIdx:5,alias:'m'})
+    const {rows}=await client.query<{point:unknown}>(`WITH live AS MATERIALIZED (
+     SELECT hit.id,hit.version,hit.position FROM unnest($2::uuid[],$3::text[]) WITH ORDINALITY hit(id,version,position)
+     JOIN public.memories m ON m.workspace_id=$1 AND m.id=hit.id AND m.scope_version::text=hit.version
+     WHERE m.valid_to IS NULL AND m.retracted_at IS NULL AND ${predicate.sql}
+    ) SELECT observe_application_field_projection($1,'{"kind":"native","moduleKey":"native"}'::jsonb,
+       'memory',id,version,'read',NULL,$4) AS point FROM live ORDER BY position`,[ctx.workspaceId,ids,versions,[...memorySearchFields],...predicate.params])
+    if(rows.length!==hits.length)throw new DerivedScopeError('scope_source_changed')
+    const captured=rows.map(row=>memorySearchPoint.parse(row.point))
+    for(const [index,point] of captured.entries()){
+      if(point.values.id!==ids[index]||point.sources[0].resourceKind!=='application_field'
+       ||point.sources.some(source=>source.workspaceId!==ctx.workspaceId))throw new DerivedScopeError('scope_source_changed')
+    }
+    return {value:captured.map(({values,sources},index)=>bindScopeSources(values,[roots[index],...sources])),
+      sources:[...roots,...captured.flatMap(point=>point.sources)]}
+  })
+}
+
 /**
  * System-level read — bypasses per-viewer projection. Used by the
  * consolidation worker's dedup/REM/Deep loops, which operate across

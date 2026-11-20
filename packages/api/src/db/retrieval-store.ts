@@ -23,7 +23,9 @@ import type {
 import { DEFAULT_MMR_LAMBDA, mmrRerank } from '@use-brian/core/retrieval/mmr.js'
 import { RRF_METHOD, rrfFuse, vectorRankedList } from '@use-brian/core/retrieval/rrf.js'
 import { rowTrustWeight } from '@use-brian/core/retrieval/trust-signals.js'
+import { DerivedScopeError } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { SENSITIVITY_VALUES, isSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { buildAccessPredicate } from './access-predicate.js'
 import { query, queryWithRLS } from './client.js'
 
@@ -463,6 +465,8 @@ type FetchOpts = {
  */
 export type ScoredRow = {
   row: SearchResultRow
+  /** Original Memory candidate version for delivery admission, never serialized. */
+  memoryVersion?: string
   /** ISO 8601 — recency ranked-list key. */
   validFrom: string
   /** FTS `ts_rank` score, or null when the scope used ILIKE only. */
@@ -508,11 +512,13 @@ function scoredRow(args: {
   tags?: readonly string[]
   /** Set only by the vector arm; omitted ⇒ null. */
   vectorDistance?: number | null
+  memoryVersion?: string
   /** Set only by the chunked scopes (per-source-artifact fused-page cap). */
   groupKey?: string
 }): ScoredRow {
   return {
     row: args.row,
+    ...(args.memoryVersion === undefined ? {} : {memoryVersion:args.memoryVersion}),
     validFrom: args.validFrom.toISOString(),
     ftsRank: args.ftsRank,
     vectorDistance: args.vectorDistance ?? null,
@@ -549,6 +555,7 @@ async function searchMemoriesScope(
 
   type Row = TrustCols & {
     row_id: string
+    scope_version: string
     summary: string
     tags: string[]
     sensitivity: string
@@ -568,7 +575,7 @@ async function searchMemoriesScope(
     const offIdx = values.length
     const result = await queryWithRLS<Row>(
       actor.userId,
-      `SELECT id AS row_id, summary, tags, sensitivity, compartments, project_ids, valid_from,
+      `SELECT id AS row_id, scope_version::text AS scope_version, summary, tags, sensitivity, compartments, project_ids, valid_from,
               source, verified_by_user_id, retracted_at,
               ts_rank(search_vector, to_tsquery('simple', $${tsqIdx})) AS rank
          FROM memories
@@ -592,6 +599,7 @@ async function searchMemoriesScope(
             valid_from: r.valid_from.toISOString(),
           },
           validFrom: r.valid_from,
+          memoryVersion: r.scope_version,
           ftsRank: r.rank ?? null,
           trust: r,
           tags: r.tags,
@@ -610,7 +618,7 @@ async function searchMemoriesScope(
   const offIdx = values.length
   const result = await queryWithRLS<Row>(
     actor.userId,
-    `SELECT id AS row_id, summary, tags, sensitivity, compartments, project_ids, valid_from,
+    `SELECT id AS row_id, scope_version::text AS scope_version, summary, tags, sensitivity, compartments, project_ids, valid_from,
             source, verified_by_user_id, retracted_at
        FROM memories
       WHERE ${visibility}${filters}
@@ -632,6 +640,7 @@ async function searchMemoriesScope(
         valid_from: r.valid_from.toISOString(),
       },
       validFrom: r.valid_from,
+      memoryVersion: r.scope_version,
       ftsRank: null,
       trust: r,
       tags: r.tags,
@@ -1502,6 +1511,7 @@ function toVectorLiteral(embedding: readonly number[]): string {
 
 type VectorRow = TrustCols & {
   row_id: string
+  scope_version?: string
   sensitivity: string
   valid_from: Date
   distance: number
@@ -1696,11 +1706,12 @@ async function runVectorScope(
   values.push(opts.take)
   const limIdx = values.length
   const extra = config.extraWhere ? ` AND ${config.extraWhere}` : ''
+  const memoryVersion = memoryAccess ? ', scope_version::text AS scope_version' : ''
   // Chunked primitives wrap in a ROW_NUMBER window so one source (e.g. one
   // file's 40 segments) keeps at most `cap` nearest candidates in this arm.
   const sql = config.perGroupCap
     ? `SELECT * FROM (
-         SELECT id AS row_id, ${config.projection}, sensitivity, compartments, project_ids, valid_from,
+         SELECT id AS row_id, ${config.projection}, sensitivity, compartments, project_ids, valid_from${memoryVersion},
                 source, verified_by_user_id, retracted_at,
                 embedding <=> $${vecIdx}::vector AS distance,
                 ROW_NUMBER() OVER (
@@ -1714,7 +1725,7 @@ async function runVectorScope(
         WHERE sub.grp_rn <= ${config.perGroupCap.cap}
         ORDER BY sub.distance
         LIMIT $${limIdx}`
-    : `SELECT id AS row_id, ${config.projection}, sensitivity, compartments, project_ids, valid_from,
+    : `SELECT id AS row_id, ${config.projection}, sensitivity, compartments, project_ids, valid_from${memoryVersion},
             source, verified_by_user_id, retracted_at,
             embedding <=> $${vecIdx}::vector AS distance
        FROM ${config.table}
@@ -1730,6 +1741,7 @@ async function runVectorScope(
     return scoredRow({
       row,
       validFrom: r.valid_from,
+      memoryVersion: r.scope_version,
       ftsRank: null,
       trust: r,
       tags,
@@ -1801,7 +1813,7 @@ function mergeCandidates(
     const existing = byKey.get(key)
     if (!existing) {
       byKey.set(key, v)
-    } else if (existing.vectorDistance === null) {
+    } else if (existing.vectorDistance === null && existing.memoryVersion === v.memoryVersion) {
       // Keep the FTS row's ftsRank; adopt the vector distance.
       byKey.set(key, { ...existing, vectorDistance: v.vectorDistance })
     }
@@ -2031,6 +2043,30 @@ export function fuseAndDiversify(
 
 // ── search() ─────────────────────────────────────────────────────────
 
+async function admitSearchMemoryRows(actor: RetrievalActor, rows: SearchResultRow[], candidates: ScoredRow[]): Promise<SearchResultRow[]> {
+  const authority = actor.authority
+  const execution = authority?.execution
+  if (!authority || !execution || execution.identity.kind !== 'attended'
+    || execution.identity.principal.kind !== 'workspace_member' || execution.identity.principal.authenticationKind !== 'native_session'
+    || execution.ownership.kind !== 'workspace' || execution.security.access.systemRead) return rows
+  const memory = rows.filter(row => row.primitive === 'memory')
+  if (!memory.length) return rows
+  const versions = new Map(candidates.filter(candidate => candidate.row.primitive === 'memory')
+    .map(candidate => [candidate.row.row_id, candidate.memoryVersion]))
+  const hits = memory.map(row => {
+    const version = versions.get(row.row_id)
+    if (!version) throw new DerivedScopeError('scope_evidence_missing')
+    return {id:row.row_id,version}
+  })
+  const { readMemorySearchHits } = await import('./memories.js')
+  const points = await readMemorySearchHits({ ...execution.security.access, ...actor }, authority, hits)
+  const admitted = new Map(points.map(point => [point.id, bindScopeSources<SearchResultRow>({
+    primitive:'memory',row_id:point.id,summary:point.summary,tags:point.tags,sensitivity:point.sensitivity,
+    compartments:point.compartments,project_ids:point.project_ids,valid_from:new Date(point.valid_from).toISOString(),
+  }, boundScopeSources(point))]))
+  return rows.map(row => row.primitive === 'memory' ? admitted.get(row.row_id)! : row)
+}
+
 export async function search(
   actor: RetrievalActor,
   input: SearchInput,
@@ -2104,7 +2140,9 @@ export async function search(
   // 3"). MMR is asked for `fetchDepth` so the reranked list covers the
   // page window plus the +1 truncation probe.
   const ranked = fuseAndDiversify(candidates, fetchDepth)
-  const rows = ranked.slice(skip, skip + take)
+  // Include the look-ahead hit in the current proof because it controls the
+  // cursor. Only delivered rows contribute source evidence to the tool result.
+  const rows = await admitSearchMemoryRows(actor, ranked.slice(skip, skip + take), candidates)
 
   const truncated = rows.length > limit
   const data = truncated ? rows.slice(0, limit) : rows
