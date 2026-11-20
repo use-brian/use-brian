@@ -17,7 +17,7 @@ vi.mock('../client.js', () => ({
 }))
 const snapshotClient = { query: (sql: string, params?: unknown[]) => db.query(sql, params) }
 
-// Actual 8269 migration, real restricted app_user. Minimal FK prerequisites;
+// Actual 8329 migration, real restricted app_user. Minimal FK prerequisites;
 // canonical shared-Project/department predicate SQL is loaded, not stubbed true.
 let db: PGlite
 const owner = randomUUID(), participant = randomUUID(), oversight = randomUUID(), outsider = randomUUID()
@@ -67,7 +67,7 @@ beforeAll(async () => {
   await db.exec(source.slice(source.indexOf('CREATE FUNCTION public.project_member_live'), source.indexOf('-- ── Label integrity')))
   await db.exec(`CREATE OR REPLACE FUNCTION department_read_grants() RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path=public,pg_temp AS $$
     SELECT department_read_grants_for(nullif(current_setting('app.current_user_id',true),'')::uuid) $$;`)
-  await db.exec(migration('8269_project_harnesses.sql'))
+  await db.exec(migration('8329_project_harnesses.sql'))
   await db.query('INSERT INTO workspaces(id) VALUES($1)', [w])
   for (const [id, role] of [[owner, 'member'], [participant, 'member'], [oversight, 'owner'], [outsider, 'member'], [expired, 'member']]) {
     await db.query('INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,$3)', [w, id, role])

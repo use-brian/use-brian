@@ -37,11 +37,21 @@ DECLARE target regprocedure := 'public.require_session_creation_admission()'::re
     END IF;
 $addition$;
 BEGIN
+ -- The obsolete branch compiler is superseded by develop's complete portable
+ -- executable-record registry (8274/8276). This is not an upgrade path for an already compiled candidate.
+ IF NOT EXISTS(SELECT 1 FROM public._migrations WHERE name='8328_conversation_graph_frontier.sql')
+  OR to_regclass('public.native_turn_helper_attestations') IS NOT NULL
+  OR NOT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='public.native_turn_contract_helpers'::regclass
+    AND attname='contract' AND atttypid='public.native_executable_contract_v1'::regtype AND attnotnull AND NOT attisdropped)
+  OR EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='public.native_turn_contract_helpers'::regclass
+    AND attname='fingerprint' AND NOT attisdropped)
+ THEN RAISE EXCEPTION 'project_chat_creation_canonical_predecessor_required';END IF;
  -- These proofs must remain true: do not rebaseline any unrelated canonical
  -- helper, embedded reader pin, receipt registration or native contract table.
+ -- Current source-owned 8328 proof ports cover the complete canonical and
+ -- retained executable cohorts; do not call retired legacy batch shortcuts.
  FOREACH signature IN ARRAY ARRAY['native_turn_helpers_current()','native_turn_publication_contract()',
-  'application_native_worklist_helpers_current()','application_native_dependency_batch_helpers_current()',
-  'application_native_field_reference_helpers_current()','application_memory_statement_helpers_current()'] LOOP
+  'native_retained_helpers_current()'] LOOP
   EXECUTE 'SELECT public.'||signature INTO ok;
   IF ok IS NOT TRUE THEN RAISE EXCEPTION 'project_chat_creation_dependency_changed: %',signature; END IF;
  END LOOP;
@@ -83,8 +93,7 @@ BEGIN
     AND t.tgname='zzzz_session_creation_admission') IS DISTINCT FROM trigger_before
  THEN RAISE EXCEPTION 'project_chat_creation_registration_changed'; END IF;
  FOREACH signature IN ARRAY ARRAY['native_turn_helpers_current()','native_turn_publication_contract()',
-  'application_native_worklist_helpers_current()','application_native_dependency_batch_helpers_current()',
-  'application_native_field_reference_helpers_current()','application_memory_statement_helpers_current()'] LOOP
+  'native_retained_helpers_current()'] LOOP
   EXECUTE 'SELECT public.'||signature INTO ok;
   IF ok IS NOT TRUE THEN RAISE EXCEPTION 'project_chat_creation_successor_changed: %',signature; END IF;
  END LOOP;

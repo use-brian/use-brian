@@ -16,9 +16,9 @@ import { resolveTurnScopeSystem } from '../../context-scope/resolve-turn-scope.j
 import { createDeliveryAudienceAuthorizer } from '../../context-scope/delivery-authority.js'
 import { createAttendedDeliveryAudienceAuthorizer } from '../../context-scope/attended-audience.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
-import { readJointSessionQueryFrame } from '../../db/session-context-revisions.js'
-import { ContextScopeAccumulator } from '@use-brian/core'
-import { nativeSessionQueryCaptureSources } from '../../application-platform/native-session-query-evidence.js'
+import { readAdmittedSessionQuery } from '../../db/conversation-store.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { createConnectorRuntimeAuthority } from '../../application-platform/connector-runtime-authority.js'
 import { admitSessionCreate } from '../../workspace-access/session-create-admission.js'
 import { sessionRoutes } from '../sessions.js'
@@ -115,9 +115,10 @@ describe('shared Project room native HTTP creation admission', () => {
       lifecycle: { sessionId: response.body.id, sessionPersisted: true, channelType: 'web', channelId: response.body.channelId, abortSignal: new AbortController().signal },
     })
     const accumulator = new ContextScopeAccumulator(execution.security.provenance)
-    const captured = await readJointSessionQueryFrame({ execution, accumulator }, [], { sessionId: response.body.id, throughSequence: 0, topicThroughSequence: 0 })
-    accumulator.note({ sources: nativeSessionQueryCaptureSources(captured, f.workspaceId) })
-    expect(accumulator.evidence.sources?.some(source => source.resourceKind === 'application_field')).toBe(true)
+    const captured = await readAdmittedSessionQuery({ authority: { execution, accumulator }, sessionId: response.body.id, throughSequence: 0, topicThroughSequence: 0 })
+    accumulator.note({ sources: boundScopeSources(captured) })
+    expect(boundScopeSources(captured).length).toBeGreaterThan(0)
+    expect(accumulator.evidence.sources?.some(source => source.resourceKind === 'conversation_record' || source.resourceKind === 'application_field')).toBe(true)
     const before = JSON.stringify(execution.security.ceiling)
     expect(await createAttendedDeliveryAudienceAuthorizer(execution)({ ...input, scopeEvidence: accumulator.evidence })).toMatchObject({ allowed: true })
     expect(JSON.stringify(execution.security.ceiling)).toBe(before)
@@ -149,38 +150,25 @@ describe('shared Project room native HTTP creation admission', () => {
       await expect((await createConnectorRuntimeAuthority(facts)).assertCurrent()).resolves.toBeUndefined()
     }
   })
-  it('compiles the complete native helper cohort without losing catalog metadata or exposing the attestation rows', async () => {
-    const result = (await pool.query(`SELECT count(*)::int members,bool_and(c.expected_text=to_jsonb(p)::text
-      AND c.expected_body=p.prosrc AND c.expected_metadata=to_jsonb(p)-'prosrc'
-      AND c.original_fingerprint=h.fingerprint
-      AND h.fingerprint=encode(sha256(convert_to(to_jsonb(p)::text,'UTF8')),'hex')) exact
-      FROM native_turn_contract_helpers h FULL JOIN native_turn_helper_attestations c USING(signature)
-      LEFT JOIN pg_proc p ON p.oid=to_regprocedure('public.'||h.signature)`)).rows[0]
+  it('retains develop portable executable contracts without a historical attestation compiler', async () => {
+    expect((await pool.query("SELECT to_regclass('public.native_turn_helper_attestations') absent")).rows[0].absent).toBeNull()
+    const baseline = `SELECT count(*)::int members,bool_and(p.oid IS NOT NULL AND to_jsonb(p) IS NOT DISTINCT FROM to_jsonb(h.contract)) valid
+      FROM native_turn_contract_helpers h LEFT JOIN pg_proc p ON p.oid=(h.contract).oid`
+    const result = (await pool.query(baseline)).rows[0]
     expect(result.members).toBeGreaterThan(100)
-    expect(result.exact).toBe(true)
-    await expect(getAppPool().query('SELECT expected_body FROM native_turn_helper_attestations')).rejects.toMatchObject({code:'42501'})
-    const baseline = `SELECT bool_and(p.oid IS NOT NULL AND h.fingerprint=encode(sha256(convert_to(to_jsonb(p)::text,'UTF8')),'hex')) valid
-      FROM native_turn_contract_helpers h LEFT JOIN pg_proc p ON p.oid=to_regprocedure('public.'||h.signature)`
+    expect(result.valid).toBe(true)
+    await expect(getAppPool().query('SELECT contract FROM native_turn_contract_helpers')).rejects.toMatchObject({code:'42501'})
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
-      await client.query('ALTER FUNCTION native_turn_completed_point(uuid,text,uuid,text[],jsonb,jsonb) COST 101')
+      await client.query('ALTER FUNCTION public.agent_read_scope_allows(text,text[],uuid[]) COST 101')
       expect((await client.query(baseline)).rows[0].valid).toBe(false)
       expect((await client.query('SELECT native_turn_helpers_current() valid')).rows[0].valid).toBe(false)
     } finally { await client.query('ROLLBACK'); client.release() }
-    const timings = { serializedBaselineMs: [] as number[], exactCompiledMs: [] as number[] }
-    for (let round=0;round<5;round++) {
-      let start=performance.now()
-      expect((await pool.query(baseline)).rows[0].valid).toBe(true)
-      timings.serializedBaselineMs.push(performance.now()-start)
-      start=performance.now()
-      expect((await pool.query('SELECT native_turn_helpers_current() valid')).rows[0].valid).toBe(true)
-      timings.exactCompiledMs.push(performance.now()-start)
-    }
-    console.info('native-helper-attestation-cost',JSON.stringify(timings))
+    expect((await pool.query('SELECT native_turn_helpers_current() valid')).rows[0].valid).toBe(true)
   })
   it('retains all canonical executable contract proofs after the forward migration', async () => {
-    for (const helper of ['native_turn_helpers_current', 'native_turn_publication_contract', 'application_native_worklist_helpers_current', 'application_native_dependency_batch_helpers_current', 'application_native_field_reference_helpers_current', 'application_memory_statement_helpers_current']) {
+    for (const helper of ['native_turn_helpers_current', 'native_turn_publication_contract', 'native_retained_helpers_current']) {
       expect((await pool.query(`SELECT public.${helper}() AS current`)).rows[0].current, helper).toBe(true)
     }
   })

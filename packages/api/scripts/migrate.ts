@@ -8,6 +8,7 @@ import { findAppliedMigrationRenames } from '../src/migrations/renames.js'
 import { nativePageCompletionRecoverySql } from './migration-recovery.js'
 import { toMigrationExecutionSql } from '../src/migrations/execution-sql.js'
 import { memoryPublicationMigration, memoryWriteSuccessorMigration } from '../src/migrations/memory-lineage-publication-execution.js'
+import { bindsProjectHarnessReceipt, projectHarnessCandidateBoundarySql } from '../src/migrations/project-harness-candidate-boundary.js'
 import { withoutOuterTransaction } from '../src/migrations/transaction-sql.js'
 import { performance } from 'node:perf_hooks'
 import { MigrationDiagnostics } from './migration-diagnostics.js'
@@ -39,6 +40,7 @@ export async function runMigrations({ databaseUrl, migrationDirs = [], beforeApp
     diagnostics.start('migration_lock')
     await client.query("SELECT pg_advisory_lock(hashtextextended('use-brian:migrations', 0))")
     lockWaitMs = diagnostics.finish('acquired')
+    await client.query(projectHarnessCandidateBoundarySql)
     diagnostics.start('ledger')
     // Create migrations tracking table if it doesn't exist
     await client.query(`
@@ -130,7 +132,7 @@ export async function runMigrations({ databaseUrl, migrationDirs = [], beforeApp
       // index DDL, never dollar-quoted bodies), send each statement on its own so
       // none is implicitly transaction-wrapped. All other files keep the single
       // batched query (preserves dollar-quoted functions + explicit BEGIN/COMMIT).
-      const bindLineageReceipt = file === memoryPublicationMigration || file === memoryWriteSuccessorMigration
+      const bindLineageReceipt = file === memoryPublicationMigration || file === memoryWriteSuccessorMigration || bindsProjectHarnessReceipt(file)
       if (bindLineageReceipt) {
         // A lost COMMIT acknowledgement may safely resume using the same
         // receipt. Do not leave an authenticated lineage change unrecorded.

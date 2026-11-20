@@ -135,16 +135,17 @@ describe('Project harness real PostgreSQL authority and concurrency',()=>{
     expect(owner).toEqual({rolsuper:false,rolbypassrls:false})
     const appRole=(await getAppPool().query('SELECT current_user role,rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')).rows[0]
     expect(appRole).toEqual({role:'app_user',rolsuper:false,rolbypassrls:false})
-    for (const name of ['8269_project_harnesses.sql','8270_project_harness_verification.sql']) expect((await q('SELECT name FROM _migrations WHERE name=$1',[name])).rows).toHaveLength(1)
+    for (const name of ['8329_project_harnesses.sql','8330_project_harness_verification.sql']) expect((await q('SELECT name FROM _migrations WHERE name=$1',[name])).rows).toHaveLength(1)
     const seed=process.env.BRIAN_HARNESS_UPGRADE_SEED
     if (seed) {
+      expect(process.env.BRIAN_HARNESS_REPLAY_MODE).toBe('upgrade')
       const s=JSON.parse(seed) as {userId:string;workspaceId:string;projectId:string;productId:string;componentId:string;revisionIds:string[]}
       const history=await harness.history(s.userId,s.workspaceId,s.projectId,{kind:'component',productId:s.productId,componentId:s.componentId})
       expect(history.map(r=>r.id)).toEqual(s.revisionIds.slice().reverse())
       expect(history.map(r=>r.revision)).toEqual([2,1])
       expect(history.every(r=>r.definition.acceptanceScenarios[0]?.key==='upgrade')).toBe(true)
       cleanup.push({workspaceId:s.workspaceId,users:[s.userId]})
-    } else expect(process.env.BRIAN_HARNESS_REPLAY_MODE).toBe('fresh')
+    } else expect(['fresh','develop-tip']).toContain(process.env.BRIAN_HARNESS_REPLAY_MODE)
   })
   it('runs requireAuth JWT/session middleware through the actual human routes and rejects a revoked token',async()=>{
     const f=await fixture(), run=await f.create('human')

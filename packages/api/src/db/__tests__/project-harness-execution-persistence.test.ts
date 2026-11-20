@@ -51,8 +51,8 @@ beforeAll(async () => {
     CREATE TABLE auth_sessions(id uuid PRIMARY KEY,user_id uuid REFERENCES users(id) ON DELETE CASCADE,auth_version int DEFAULT 0,expires_at timestamptz DEFAULT now()+interval '1 day',revoked_at timestamptz);`)
   const principalSource = migration('8003_application_projection_authority.sql')
   await db.exec(principalSource.slice(principalSource.indexOf('CREATE FUNCTION department_principal_grant_snapshot'), principalSource.indexOf('-- The added generic family')))
-  await db.exec(migration('8269_project_harnesses.sql'))
-  await db.exec(migration('8270_project_harness_verification.sql'))
+  await db.exec(migration('8329_project_harnesses.sql'))
+  await db.exec(migration('8330_project_harness_verification.sql'))
   await db.query('INSERT INTO workspaces(id) VALUES($1)', [w])
   for (const [id, role] of [[reviewer, 'member'], [owner, 'member'], [participant, 'member'], [oversight, 'owner'], [outsider, 'member'], [expired, 'member']]) {
     await db.query('INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,$3)', [w, id, role])

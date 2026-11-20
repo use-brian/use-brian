@@ -6,8 +6,11 @@ import { readFile } from 'node:fs/promises'
 import { PGlite } from '@electric-sql/pglite'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 const migrations = new URL('../../../migrations/', import.meta.url)
-const migration = await readFile(new URL('8271_project_chat_creation_admission.sql', migrations), 'utf8')
+const migration = await readFile(new URL('8331_project_chat_creation_admission.sql', migrations), 'utf8')
 const previous = await readFile(new URL('8221_workspace_mcp_oauth.sql', migrations), 'utf8')
+const portableSource = await readFile(new URL('8274_inputtable_executable_contracts.sql', migrations), 'utf8')
+const executableType = portableSource.match(/CREATE TYPE public\.native_executable_contract_v1 AS\([\s\S]*?\n\);/)?.[0]
+if (!executableType) throw new Error('Missing reviewed portable executable type')
 const original = previous.slice(previous.indexOf('CREATE OR REPLACE FUNCTION public.require_session_creation_admission()'), previous.indexOf('END $function$;') + 'END $function$;'.length)
 const w = '11111111-1111-4111-8111-111111111111', u = '22222222-2222-4222-8222-222222222222'
 const a = '33333333-3333-4333-8333-333333333333', p = '44444444-4444-4444-8444-444444444444'
@@ -26,7 +29,10 @@ beforeEach(async () => {
     CREATE TABLE sessions(id uuid DEFAULT gen_random_uuid(),assistant_id uuid,user_id uuid,workspace_id uuid,visibility text,
       mode text,anchor_kind text DEFAULT 'none',anchor_ref text,channel_type text,channel_id text,app_id text,app_origin text,
       effective_clearance text,context_group_id uuid,context_project_id uuid,context_compartments text[]);
-    CREATE TABLE native_turn_contract_helpers(signature text,fingerprint text);
+    CREATE TABLE _migrations(name text);
+    INSERT INTO _migrations VALUES('8328_conversation_graph_frontier.sql');
+    ${executableType}
+    CREATE TABLE native_turn_contract_helpers(signature text,contract public.native_executable_contract_v1 NOT NULL);
     CREATE FUNCTION sensitivity_rank(t text) RETURNS integer LANGUAGE sql IMMUTABLE AS $$
       SELECT array_position(ARRAY['public','internal','confidential'],t) $$;
     CREATE FUNCTION project_member_live(p uuid,k text,i uuid) RETURNS boolean LANGUAGE sql AS $$
@@ -56,7 +62,7 @@ beforeEach(async () => {
     const sql = await readFile(new URL(file!, migrations), 'utf8')
     await db.exec(sql.slice(sql.indexOf(start!), sql.indexOf(end!)))
   }
-  for (const name of ['native_turn_helpers_current','native_turn_publication_contract','application_native_worklist_helpers_current','application_native_dependency_batch_helpers_current','application_native_field_reference_helpers_current','application_memory_statement_helpers_current']) {
+  for (const name of ['native_turn_helpers_current','native_turn_publication_contract','native_retained_helpers_current']) {
     await db.exec(`CREATE FUNCTION ${name}() RETURNS boolean LANGUAGE sql AS $$ SELECT true $$`)
   }
 })
@@ -121,6 +127,11 @@ describe.sequential('Project chat forward SQL admission', () => {
   it('refuses unreviewed source, metadata, registration, and pin consumers without rebaselining', async () => {
     await db.exec(`ALTER FUNCTION require_session_creation_admission() SECURITY INVOKER`)
     await expect(db.exec(migration)).rejects.toThrow('project_chat_creation_predecessor_changed')
+    await db.exec('ROLLBACK')
+  })
+  it('refuses the historical fingerprint registry instead of rebaselining it', async () => {
+    await db.exec('ALTER TABLE native_turn_contract_helpers ADD COLUMN fingerprint text')
+    await expect(db.exec(migration)).rejects.toThrow('project_chat_creation_canonical_predecessor_required')
     await db.exec('ROLLBACK')
   })
   it('refuses a disabled creation trigger', async () => {

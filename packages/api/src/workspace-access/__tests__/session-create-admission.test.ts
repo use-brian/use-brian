@@ -67,6 +67,16 @@ describe('shared chat creation provenance in ready v2', () => {
     await expect(admitSessionCreate(db as unknown as PoolClient, input, true)).rejects.toMatchObject({ code: 'context_not_available' })
     expect(receipt(db)).toBeUndefined()
   })
+  it.each([true, false])('uses v2 assistant context and only classic simple policy defaults (%s)', async departmentReadV2 => {
+    const db = database()
+    const policyGroup = '66666666-6666-4666-8666-666666666666'
+    vi.mocked(readAdmissionPolicy).mockResolvedValue({ workspaceId, revision: '9', mode: 'simple', setupState: 'ready', departmentReadV2, defaultDepartmentId: policyGroup } as never)
+    await admitSessionCreate(db as unknown as PoolClient, { ...input, contextProjectId: null, contextGroupId: undefined }, true)
+    expect(resolveTurnScopeSystem).toHaveBeenCalledWith(expect.objectContaining({
+      session: { contextGroupId: departmentReadV2 ? groupId : policyGroup, contextProjectId: null },
+    }), expect.anything())
+    expect(receipt(db)?.provenance).toBe('authenticated_chat_root')
+  })
   it('leaves legacy creation receipt-free', async () => {
     vi.mocked(readAdmissionPolicy).mockResolvedValue({ workspaceId, revision: '9', mode: 'departments', setupState: 'legacy', departmentReadV2: true } as never)
     const db = database()
