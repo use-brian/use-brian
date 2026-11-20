@@ -1,5 +1,11 @@
 # Brian Project-chat and recovery repair
 
+## Current source: rebased onto develop, live candidate left untouched
+
+The branch is now rebased onto develop `5e2087be9`. The former Git/migration conflicts are resolved through the current owner/conversation/agent-runtime ports and unique successors 8329/8330/8331; the incompatible old helper compiler is superseded, not renumbered. See [current integration and replay evidence](project-harness-develop-integration.md). Fresh/develop-tip/history-preservation native replay and current native HTTP/input-recovery regressions pass. Old candidate databases explicitly refuse automatic upgrade until an authenticated bridge exists.
+
+The owned Brian launcher was stopped before the rebase and is intentionally not restarted against the old 755-migration fixture. Gateway, coding services and databases were not stopped or migrated; credentials, browser drafts and the page fixture remain outside source publication. Earlier installed/live results below are historical checkpoints, not a new live acceptance claim for the rebased tree.
+
 Repairs in the existing `use-brian-project-harness` worktree are now grouped for user-authorized conventional-commit/PR publication on branch `use-brian-project-harness`. Integration with fetched develop is blocked by source conflicts and migration/catalog incompatibilities; see [develop integration check](project-harness-develop-integration.md). No external deployment or speculative live migration is authorized by that publication. The later live retry returned coding task `1bd66239014a02845cfff7a6466eb186` and page `site/` files now exist; tests, execution target, fresh review and acceptance remain separate gates. Historical no-commit/no-launch checkpoints below describe their original timing and are superseded by later publication/live outcomes. This is not independent acceptance.
 
 ## Creation and delivery

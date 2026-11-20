@@ -1,86 +1,67 @@
-# Project harness: develop integration check
+# Project harness: rebased develop integration
 
-Publication branch: `use-brian-project-harness`.
+Branch: `use-brian-project-harness`; PR: https://github.com/use-brian/use-brian/pull/497.
 
-Checked against fetched develop **`5e2087be93dfa24cb250cd504235b07dfd81eb98`** (`5e2087be9`, “chore(db): keep migration generator filenames private”). The common ancestor is `570d6bce9eb6263063e9d01d844ed21c418c76cb`; develop has 66 commits beyond it. This document records a blocked integration, not a successful merge/rebase, deployment or integrated test pass. Develop may advance after this check.
+Rebased onto **`5e2087be93dfa24cb250cd504235b07dfd81eb98`** (`develop`, checked again against origin after verification). The previously reported 22 Git conflicts are resolved. Develop's current conversation store, original turn owner, modular MCP activation and `packages/agent-runtime` layout are retained; deleted legacy publisher/injector files are not restored. The original published head `7860293c00dd415639869b9de078b642e1c879dc` is also preserved in a local backup branch.
 
-## Git conflicts
+## Migration resolution
 
-A non-checkout `git merge-tree --write-tree --name-only --messages` simulation returned conflict status 1. The working tree was not merged, stashed, reset or populated with conflict markers. The following 22 paths conflict:
+The new chain follows develop 8328 with unique filenames:
 
-```text
-apps/app-web/src/components/live/live-watch-pane.tsx
-apps/app-web/src/lib/i18n/dictionaries/en.ts
-apps/app-web/src/lib/i18n/dictionaries/ja.ts
-apps/app-web/src/lib/i18n/dictionaries/zh-cn.ts
-apps/app-web/src/lib/i18n/dictionaries/zh.ts
-packages/agent-runtime/src/engine/query-loop.ts
-packages/api/src/application-platform/__tests__/connector-runtime-authority.integration.test.ts
-packages/api/src/application-platform/__tests__/session-message-publication.integration.test.ts
-packages/api/src/application-platform/connector-runtime-authority.ts
-packages/api/src/application-platform/model-source-authority.ts
-packages/api/src/boot.ts
-packages/api/src/context-scope/__tests__/delivery-authority.test.ts
-packages/api/src/context-scope/native-invocation-evidence.ts
-packages/api/src/context-scope/resolve-turn-scope.ts
-packages/api/src/db/session-message-publication.ts
-packages/api/src/inter-assistant/executor.ts
-packages/api/src/mcp/inject.ts
-packages/api/src/routes/channel-pipeline.ts
-packages/api/src/routes/chat.ts
-packages/api/src/routes/public-turn.ts
-packages/api/src/turn/prepare.ts
-packages/api/src/workspace-access/session-create-admission.ts
+| Successor | Responsibility |
+|---|---|
+| `8329_project_harnesses.sql` | Harness hierarchy, revision history and scoped authoring. |
+| `8330_project_harness_verification.sql` | Independent approval, human evidence, verification history and audit. |
+| `8331_project_chat_creation_admission.sql` | Exact one-use admission for shared Project chat roots. |
+
+Foundation and verification SQL are byte-identical to the previous branch candidates; migration names and test/upgrade boundaries change. No published develop migration is rewritten.
+
+The old branch 8272 helper compiler is **superseded**, not blindly renumbered. Develop 8269 replaces fingerprint hashing with executable-record comparison, and 8274/8276 establish the portable **`native_executable_contract_v1`** registry. The incompatible compiler and its obsolete compiler-specific unit test are removed from the active source chain. New coverage instead verifies the current source-owned installation, metadata tamper refusal, private registry ACLs and unsupported candidate boundaries.
+
+8331 requires the 8328 receipt and current portable registry. It preserves the exact predecessor trigger body/metadata/private ACL, receipt equality/consumption, live person+assistant membership, Project-only audience, clearance, original actor, trigger identity and unknown-pin-consumer refusal. Its before/after proof ports are the complete current `native_turn_helpers_current`, `native_turn_publication_contract` and `native_retained_helpers_current` cohorts, not obsolete legacy batch helper names. It does not repin unrelated helpers or turn observed database hashes into authentication roots.
+
+Both native and embedded entry points check candidate compatibility **before ledger creation, recovery or rename aliasing**. The native runner binds each of these exact three successor SQL effects and its ledger receipt in one transaction; lost-acknowledgment continuation is tested. There is no generic numeric-range receipt rule or changed-DDL rename alias.
+
+## Previously applied candidate: explicitly unsupported
+
+An already-applied old harness/admission/compiler candidate is **not silently upgraded**. Old ledger names, compiler markers and unreceipted/partial effects fail with `project_harness_candidate_upgrade_unsupported`, preserving effects and ledger rows. Develop's existing 8268 Memory transition remains intact and is not misrepresented as authentication of the old harness/compiler candidate.
+
+This includes the earlier local 755-migration Brian fixture. A supported transition would require a separately pinned, authenticated bridge and dedicated replay. Do not delete its ledger rows, rename already-applied DDL, rebaseline fingerprints, reset its data or restart it expecting an automatic upgrade.
+
+## Runtime and UI ports
+
+- Harness grounding runs after Brief assembly through `captureTurnModelPreparation` under the original owner. The accumulator is adopted at model-invocation binding for all five lanes, including lanes without history; history and later loop input cannot replace it. Resolver capture precedes awaits. Canonical actor identity, tool adoption, source admission and final authority remain enforced.
+- Source candidate re-admission retains current conversation-record/frontier proofs and retries only successful superseded snapshots, with 32-candidate bounds and sticky genuine failures/cancellation.
+- Connector activation rechecks current audience exposure on invocation and return; canonical metadata ignores label projection but never ambient identity mismatch.
+- Singleton publication uses develop's canonical one-element batch path and format 2 sealed frames, including immediate-constraint mode. No obsolete writer is reintroduced.
+- Rejected-input recovery lives in agent-runtime, without a reverse runtime→core dependency. Exact valid calls still reach normal Ask; rejected history/diagnostics cannot become executable calls or approvals.
+- Live retains the shared conversation controller and one stream. Pending recovery is single-flight, preserves input on transient failure, retires only unchanged stale cards on authoritative readback and fences pre-completion responses. Removal is presentation state, not a fabricated approval/denial or consent replay.
+
+## Verification on the rebased implementation
+
+- **661 API harness/owner/migration units**, **86 source-race/activation/singleton units**, **125 connector/ceiling units** passed.
+- **84 runtime recovery units**, **90 Codex-provider units**, **15 core MCP-schema units** passed.
+- **247 shared-controller/Live/SDK units**, **44 harness frontend units**, **23 chat-reducer units** passed.
+- Guarded verifier argument/environment tests passed. API, runtime and web typechecks and API/dependency builds passed.
+- Actual guarded PostgreSQL 18 ordinary-owner verifier passed **fresh**, **develop-tip→successors**, and **pre8330 hierarchy/history preservation** runs: 16 native tests in each, **48 test executions**. Each independently authenticates the source-owned 8328 installation after the additions. The develop-tip run also proves unchanged native contracts across the additions. Committed synthetic historical-ledger/effect markers are refused by the actual runner without state changes; these are refusal tests, not a full candidate bridge.
+- A separate fresh ordinary-owner fixture with restricted non-owner `app_user` passed **24 native/real-loopback-HTTP tests in four files**: connector authority, canonical singleton/error closure/lineage/debt/rollback, Project admission/source proofs, and rejected-input/analytics/history/replay with exact synthetic allow/deny forwarding. No coding agent is launched by the test endpoint.
+
+Commands use the existing infrastructure:
+
+```sh
+node scripts/project-harness/verify-postgres.mjs --pg-bin "$PG_BIN"
+node scripts/crm/local-fixture.mjs --pg-bin "$PG_BIN" --ordinary-owner --runtime-role app_user -- \
+  pnpm --filter @use-brian/api exec vitest run --config vitest.integration.config.ts \
+  src/application-platform/__tests__/connector-runtime-authority.integration.test.ts \
+  src/application-platform/__tests__/native-singleton-publication.integration.test.ts \
+  src/application-platform/__tests__/rejected-tool-input.integration.test.ts \
+  src/routes/__tests__/sessions-workspace-project-admission.integration.test.ts --maxWorkers=1
 ```
 
-The singleton publication and MCP injector paths are **modify/delete** conflicts: develop deleted the older ports. Develop also moved engine code into `packages/agent-runtime`; simply choosing this branch's older files would discard the new runtime/conversation architecture. The remaining conflicts include source admission, connector authority, chat/delivery/turn integration, Live UI and four locale dictionaries.
+Initial replay failures exposed the portable registry type, retired helper names and stale test assumptions; these were corrected against published source, not bypassed. No SQL/provider/fixture deadlines, authority checks, source closure/CAS or application-role restrictions were relaxed. Full embedded-chain replay and broad all-profile/release acceptance are not claimed by these focused checks.
 
-## Migration conflicts not detected as duplicate Git filenames
+## Live and release limits
 
-The initial source audit pinned `5bbb8471a`. A final fetch advanced develop by two commits to `5e2087be9`: migration execution/fixture ACL-order handling and generator-local filenames changed, but no migration SQL files changed. The latest-tip merge simulation retains the same 22 conflict paths and the registry incompatibility below. Successor replay must include the updated migration execution path, not SQL files alone.
+Only the owned Brian dev launcher was stopped before checkout changes, to prevent hot reload against the incompatible old fixture. Its descendants are stopped; gateway/coding/database services were not stopped or migrated. Brian is intentionally **not restarted** on that old candidate database. Private runtime/credentials, page fixture and unrelated worktrees are excluded from publication.
 
-The migration runner sorts **complete filenames lexicographically** across its migration directories and rejects duplicate complete filenames, not duplicate numeric prefixes. Four branch prefixes are already used by develop:
-
-| Branch migration | Develop migration |
-|---|---|
-| `8269_project_harnesses.sql` | `8269_canonical_conversation_publication.sql` |
-| `8270_project_harness_verification.sql` | `8270_retire_association.sql` |
-| `8271_project_chat_creation_admission.sql` | `8271_refresh_recovery_capture.sql` |
-| `8272_native_helper_attestation_cost.sql` | `8272_durable_conversation_publications.sql` |
-
-These are different filenames, so Git alone does not report migration add/add conflicts. Their effects nevertheless interleave. The five-digit `82690_private_transcript_preparation_eligibility.sql` sorts before both `8269_*` files. Develop currently continues through `8328_conversation_graph_frontier.sql`.
-
-### Attestation is a semantic/catalog incompatibility
-
-The branch's 8272 cannot safely follow develop's canonical conversation publication unchanged:
-
-- Develop 8269 changes native/retained helper rosters and comparator bodies, changes the native registry to full `pg_proc` records, makes `native_turn_contract_helpers.contract` non-null and drops its `fingerprint` column.
-- Branch 8272 authenticates the historical root template/closed roster, constructs predecessor catalog snapshots, and reads/updates `native_turn_contract_helpers.fingerprint`.
-- Thus a predecessor-root refusal is expected before the later missing-column failure. Merely assigning a new number does not repair the contract. Moving the compiler before develop 8269 would change the exact predecessor pins develop authenticates, so that is not a safe shortcut either.
-- The branch compiler also deliberately requires UTF8/PostgreSQL 18 and an exact catalog shape. Do not weaken that check, enroll discovered functions dynamically, or replace expected hashes with observed database state to make replay pass.
-
-### Historical Memory migration boundary
-
-Develop removes `8268_native_memory_query_write_lineage.sql` from the source chain and adds `8326_native_memory_query_write_contract.sql`. A database that already applied 8268 retains its effects and ledger row. Develop 8326 recognizes that exact old ledger name when authenticating refresh-recovery state. Do not erase/rename its history or treat a renamed migration as already applied without an authenticated identical-effect transition.
-
-### Admission and foundation ordering
-
-Keep harness foundation before verification. The branch's 8271 authenticates the predecessor `require_session_creation_admission()` body, metadata, owner/private ACL and trigger registration before adding its narrow Project branch. The audit found no direct develop rewrite of that routine, but that is not a replay pass. Unique successor filenames and references in tests/upgrade boundaries/docs must be chosen only after the successor-contract design is settled.
-
-## Required integration gates
-
-The PR must remain **draft/not merge-ready** until the runtime/conversation integration and migration design are reconciled against the then-current develop:
-
-1. Preserve develop's canonical conversation/runtime architecture; transplant the scoped harness and repair behavior into its current ports rather than accepting obsolete files wholesale.
-2. Design the attestation optimization against the successor registry, or explicitly defer/supersede it with an authenticated upgrade plan. Do not silently drop already-applied effects or weaken any authority/source/CAS/private-ACL/closed-cohort/pin-consumer check.
-3. Assign globally unique migration filenames and update all test/document/upgrade-boundary references without pretending renamed DDL was already applied.
-4. Use owned **disposable** fixtures for separate fresh-chain, develop-tip→branch-additions, branch-applied 8268/harness-prefix→merged-chain, and any actually applied local candidate boundary replay. Preserve canonical separate non-owner application-role checks and existing deadlines. Do not apply the speculative chain to a live database.
-5. Rerun current typechecks/builds, source/metadata/ACL tamper rejection, receipt/CAS/concurrency, live authority/revocation, credential isolation, source provenance, UI recovery and actual coding/review gates on the integrated tree.
-
-The migration ledger is filename-based, not a content checksum, and SQL effects and ledger insertion have separate failure boundaries. Numeric renaming is not an upgrade strategy.
-
-## Existing evidence and limitations
-
-Fresh checks during PR packaging, on the unchanged branch implementation: **168 core tests/9 files, 244 API tests/13 files (serial `--maxWorkers=1`), 42 web tests/4 files** passed; API and web typechecks passed. The initial parallel API attempt hit the existing 10-second PGlite setup-hook limit and two subsequent duplicate-function cascades; the unchanged serial rerun passed 244/244. No fixture hook, production SQL or provider deadlines were increased. These 454 checks are focused branch regression evidence, not an all-suite or integrated-develop pass.
-
-The branch has focused pre-integration core/API/web and ordinary-owner native replay evidence documented in `docs/brian-chat-recovery-status.md`, including 168 core and 20 native/HTTP checks for the final input-recovery repair, API typecheck and core/API builds. These are **branch** results, not a successful replay or test run of the simulated merge. The broader elevated-owner suite differences, compaction timeout and independent page acceptance remain open. No live migration, policy/deadline change or repository-access expansion was made for this integration check.
+These source checks are not a new live UI/coding acceptance run. Historical compaction/provider/resume investigations, generic Ask recovery, broad release gates and independent acceptance of the separate introduction page remain distinct. Keep the PR draft until those applicable release/review gates are satisfied; a conflict-free rebase is not release acceptance.

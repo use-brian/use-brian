@@ -12,7 +12,7 @@ A Product is a managed engineering surface, such as Frontend or Backend. Compone
 
 ## Storage and authorization
 
-`8269_project_harnesses.sql` adds:
+`8329_project_harnesses.sql` adds:
 
 | Table | Responsibility |
 | --- | --- |
@@ -30,7 +30,7 @@ App-role direct DML/internal helper access is revoked. Definition history is imm
 
 ### Approval, runs and evidence
 
-`8270_project_harness_verification.sql` adds `project_harness_approvals`, `project_harness_runs`, `project_harness_evidence` and `project_harness_execution_audit`.
+`8330_project_harness_verification.sql` adds `project_harness_approvals`, `project_harness_runs`, `project_harness_evidence` and `project_harness_execution_audit`.
 
 - Approval pins an exact current definition revision, reviewer identity, authenticated session, reason and timestamp. A live human Project owner **other than the revision author** must approve. Client flags and agent/delegated contexts cannot assert approval. Account distinction enforces separate principals, not absence of collusion.
 - A live human participant creates a run from a stored approval/scenario. The server builds the preview and pins build/deployment/environment, requester/session, target, specification hashes and executor. Schema/storage retain `human` and `agent` records, but HTTP creation with `executor: "agent"` returns 503 before persisting a run. Request bodies cannot supply a preview, requester identity or runtime configuration.
@@ -99,7 +99,7 @@ Targets are canonical HTTPS without userinfo/query/fragment and exact permitted 
 | `selectProjectHarnessTests` | Impact plan from an authorized consistent snapshot; no commands or source fetches. |
 | `getProjectHarnessAcceptance` | Scenarios from a persisted approved revision, optionally run metadata; no implementation prompt, approval or evidence writes. Historical records do not establish current freshness. |
 
-`turn-context.ts` injects Project-level context through the existing shared `prepareAssistantRun` stage, after the Brief. The canonical callback is captured before asynchronous assembly and checked with the existing pre-assembly authority guard; final authority is checked again before returning provider-ready context. The exact retained turn accumulator receives scope evidence. Only a workspace turn with one explicit write-default Project and admitted `getProjectHarnessContext` qualifies; system, guest/public and unattributed programmatic identities do not auto-inject. Legacy Projects contribute nothing; unavailable/oversized shared-Project contracts stop preparation, not silently become empty. No Product or Component is guessed from task prose. Product/Component scope requires explicit selection. The read-only `prepareProjectHarnessTask` prepares exact `new_task_with_context` arguments; it does not launch a task, create a run, approve a specification or dispatch a connector. Its `runtimeProject` is an explicit sidanCode runtime/profile project name, **not** Brian's Project UUID. Canonical obligations/constraints cannot be replaced by caller-authored constraints. Do not infer durable selection binding or external resume refresh from prompt injection or preparation.
+`turn-context.ts` injects Project-level context through the original owner's run preparation in `captureTurnModelPreparation`, after the Brief. The canonical callback is captured before asynchronous assembly and checked with the existing pre-assembly authority guard; final authority is checked again before returning provider-ready context. The exact retained turn accumulator is adopted at original model-invocation binding, including lanes without history; history/run assembly cannot substitute it, and later loop context must retain its identity. It receives scope evidence. Only a workspace turn with one explicit write-default Project and admitted `getProjectHarnessContext` qualifies; system, guest/public and unattributed programmatic identities do not auto-inject. Legacy Projects contribute nothing; unavailable/oversized shared-Project contracts stop preparation, not silently become empty. No Product or Component is guessed from task prose. Product/Component scope requires explicit selection. The read-only `prepareProjectHarnessTask` prepares exact `new_task_with_context` arguments; it does not launch a task, create a run, approve a specification or dispatch a connector. Its `runtimeProject` is an explicit sidanCode runtime/profile project name, **not** Brian's Project UUID. Canonical obligations/constraints cannot be replaced by caller-authored constraints. Do not infer durable selection binding or external resume refresh from prompt injection or preparation.
 
 ### Impact-selected coding/review handoff
 
