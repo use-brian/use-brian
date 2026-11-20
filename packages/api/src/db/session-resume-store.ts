@@ -22,7 +22,8 @@
  * [COMP:api/session-resume-store]
  */
 
-import { intersectAccessCeilings, type AccessCeiling } from '@use-brian/core'
+import { intersectAccessCeilings, type AccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import type { ConnectorResumeTarget } from '@use-brian/agent-runtime/tools/types.js'
 import { query } from './client.js'
 
 export type SessionResumePoint = {
@@ -30,6 +31,7 @@ export type SessionResumePoint = {
   approvalId: string
   suspendedToolName: string
   suspendedToolInput: unknown
+  connectorTarget?: ConnectorResumeTarget
   loopStepIndex: number
   selectedCustomModel?: string
   selectedTier?: string
@@ -47,6 +49,7 @@ export type CreateSessionResumePointParams = {
   approvalId: string
   suspendedToolName: string
   suspendedToolInput: unknown
+  connectorTarget?: ConnectorResumeTarget
   loopStepIndex: number
   selectedCustomModel?: string
   selectedTier?: string
@@ -97,6 +100,7 @@ function rowToPoint(row: Record<string, unknown>): SessionResumePoint {
   const envelope = envelopeVersion === 1 || envelopeVersion === 2 || envelopeVersion === 3
     ? storedInput as {
         toolInput?: unknown
+        connectorTarget?: Partial<ConnectorResumeTarget>
         selectedCustomModel?: unknown
         selectedTier?: unknown
         selectedLegacyByo?: unknown
@@ -122,6 +126,10 @@ function rowToPoint(row: Record<string, unknown>): SessionResumePoint {
     approvalId: row.approvalId as string,
     suspendedToolName: row.suspendedToolName as string,
     suspendedToolInput: envelope ? envelope.toolInput : storedInput,
+    ...(envelopeVersion === 3 && typeof envelope?.connectorTarget?.serverName === 'string'
+      && typeof envelope.connectorTarget.version === 'string'
+      ? { connectorTarget: { serverName: envelope.connectorTarget.serverName, version: envelope.connectorTarget.version } }
+      : {}),
     loopStepIndex: row.loopStepIndex as number,
     ...(typeof envelope?.selectedCustomModel === 'string'
       ? { selectedCustomModel: envelope.selectedCustomModel }
@@ -168,6 +176,7 @@ export function createDbSessionResumeStore(): SessionResumeStore {
           JSON.stringify({
             __useBrianResumeVersion: 3,
             toolInput: params.suspendedToolInput,
+            connectorTarget: params.connectorTarget,
             selectedCustomModel: params.selectedCustomModel,
             selectedTier: params.selectedTier,
             selectedLegacyByo: params.selectedLegacyByo,
@@ -227,4 +236,44 @@ export function createDbSessionResumeStore(): SessionResumeStore {
       return (result.rowCount ?? 0) > 0
     },
   }
+}
+
+/** The session's lease as seen by a resume job continuing `approvalId`. */
+export type ResumePredecessorLease = {
+  running: boolean
+  /** The running lease token, only when it is the one this resume point names. */
+  predecessorToken: string | null
+  /** The running lease's heartbeat is older than the staleness window. */
+  stale: boolean
+}
+
+/**
+ * Read the session lease for the resume of `approvalId`: whether a turn is
+ * running, whether its token is the suspended turn's own lease (named by the
+ * approval of THIS session's resume point), and whether that lease is stale.
+ * The token stays server-side; see askquestion-suspend-resume.md → "Resumed turn
+ * execution (D9)", step 1.
+ *
+ * [COMP:api/session-resume-store]
+ */
+export async function readResumePredecessorLease(
+  sessionId: string,
+  approvalId: string,
+  staleAfterMs: number,
+): Promise<ResumePredecessorLease | null> {
+  const result = await query<{ status: string; predecessorToken: string | null; stale: boolean }>(
+    `SELECT s.status,
+            CASE WHEN s.turn_lease_token IS NOT NULL
+                  AND s.turn_lease_token::text = p.approval_payload->>'turnLeaseToken'
+                 THEN s.turn_lease_token::text END AS "predecessorToken",
+            coalesce(s.turn_heartbeat_at, s.last_active_at) < clock_timestamp() - ($3 || ' milliseconds')::interval AS stale
+       FROM sessions s
+       LEFT JOIN session_resume_points r ON r.session_id = s.id AND r.approval_id = $2
+       LEFT JOIN pending_approvals p ON p.id = r.approval_id
+      WHERE s.id = $1`,
+    [sessionId, approvalId, String(staleAfterMs)],
+  )
+  const row = result.rows[0]
+  if (!row) return null
+  return { running: row.status === 'running', predecessorToken: row.predecessorToken ?? null, stale: row.stale === true }
 }

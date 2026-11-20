@@ -1,10 +1,11 @@
 /** Real equivalence for the original native proof and fresh full cohorts. */
 import {readFileSync} from 'node:fs'
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
-import {boundScopeSources,type ScopeSource} from '@use-brian/core'
+import type {ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {getAppPool,getPool,applyRLSGucs,rollbackAndRelease,runWithAgentAccess} from '../../db/client.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
-import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
+import {readAdmittedSessionQuery} from '../../db/conversation-store.js'
 import {writeSessionContextRevision} from '../../db/session-context-revisions.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)

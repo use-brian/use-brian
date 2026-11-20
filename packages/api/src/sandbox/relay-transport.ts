@@ -1,10 +1,7 @@
 import { z } from 'zod'
-import type { ProtectedFillService } from '@use-brian/core'
-import type {
-  LocalBrowserControlMode,
-  RelayCommandResult,
-  RelayCommandTransport,
-} from '@use-brian/core'
+import type { ProtectedFillService } from '@use-brian/core/sandbox/protected-fill.js'
+import type { LocalBrowserControlMode } from '@use-brian/core/sandbox/profiles.js'
+import type { RelayCommandResult, RelayCommandTransport } from '@use-brian/core/sandbox/types.js'
 
 /**
  * The api-side half of the local-browser path (computer-use.md §4): a

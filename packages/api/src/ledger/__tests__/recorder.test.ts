@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import type { AssistantResponse } from '@use-brian/core'
+import type { AssistantResponse } from '@use-brian/agent-runtime/providers/types.js'
 
 const db = vi.hoisted(() => {
   const events: Array<Record<string, unknown>> = []
@@ -40,7 +40,7 @@ vi.mock('../../db/turn-ledger-store.js', async (importOriginal) => {
 
 import { createTurnLedger } from '../recorder.js'
 import { hashPayload } from '../payload-store.js'
-import type { LedgerPayloadStore } from '../payload-store.js'
+import type { LedgerPayloadInput, LedgerPayloadStore } from '../payload-store.js'
 
 function fakePayloads(): { store: LedgerPayloadStore; puts: string[] } {
   const puts: string[] = []
@@ -68,6 +68,34 @@ const textResponse = (text: string): AssistantResponse => ({
 
 describe('[COMP:api/turn-ledger-recorder] event shapes', () => {
   beforeEach(() => db.reset())
+
+  it('uses bulk message capture without changing ordered duplicate references', async () => {
+    const { store } = fakePayloads()
+    store.putMany = vi.fn(async (args: LedgerPayloadInput[]) => args.map((p) => hashPayload(p.content)))
+    const handle = createTurnLedger({ workspaceId: 'ws1', payloads: store })
+    const messages = [{ role: 'user' as const, content: 'a' }, { role: 'assistant' as const, content: 'b' }, { role: 'user' as const, content: 'a' }]
+    const trace = handle.ledger.startTrace({ actor: 'assistant_turn', model: 'm', systemPrompt: 's', messages })
+    trace.request({ turn: 0, messages, full: false })
+    trace.turn({ turn: 0, response: textResponse('ok'), toolResults: [] })
+    await handle.flush()
+    expect(store.putMany).toHaveBeenCalledTimes(1)
+    expect(db.events[0].payloadRefs).toEqual([hashPayload('s'), ...messages.map((m) => hashPayload(JSON.stringify(m))), hashPayload(JSON.stringify(textResponse('ok').content))])
+  })
+
+  it('a bulk failure keeps the recorder nonblocking and warns once', async () => {
+    const { store } = fakePayloads()
+    store.putMany = vi.fn(async () => { throw new Error('bulk bytes unavailable') })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const handle = createTurnLedger({ workspaceId: 'ws1', payloads: store })
+      const trace = handle.ledger.startTrace({ actor: 'assistant_turn', model: 'm', systemPrompt: 's', messages: [] })
+      trace.request({ turn: 0, messages: [], full: true })
+      trace.turn({ turn: 0, response: textResponse('ok'), toolResults: [] })
+      await expect(handle.flush()).resolves.toBeUndefined()
+      expect(db.events).toHaveLength(1)
+      expect(warn.mock.calls.filter((c) => String(c[0]).includes('[turn-ledger]'))).toHaveLength(1)
+    } finally { warn.mockRestore() }
+  })
 
   it('records a real host read without fabricating a provider call',async()=>{
     const {store,puts}=fakePayloads()

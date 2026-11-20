@@ -3,7 +3,7 @@ import { createEngineBaseTools } from '../base/ask-engines.js'
 import { createBaseTools } from '../base/index.js'
 import { decodeExternalCostMeta } from '../../billing/external-cost.js'
 import { flatEngineCostUsd } from '../../billing/engine-provider-rates.js'
-import type { ToolContext } from '../types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const ctx = {
   userId: 'u',

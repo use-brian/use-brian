@@ -22,7 +22,7 @@ describe.sequential('[COMP:api/native-chat-read-cost] canonical session parent a
     await fixture.pool.query(`CREATE FUNCTION public.${reader}(w uuid,i uuid) RETURNS jsonb
       LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $body$
       BEGIN IF w<>'${fixture.workspaceId}'::uuid THEN RAISE EXCEPTION 'wrong fixture';END IF;
-      RETURN native_turn_parent_scope(w,i);END $body$;
+      RETURN session_context_parent_snapshot(w,i);END $body$;
       REVOKE ALL ON FUNCTION public.${reader}(uuid,uuid) FROM PUBLIC;
       GRANT EXECUTE ON FUNCTION public.${reader}(uuid,uuid) TO app_user`)
   })

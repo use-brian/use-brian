@@ -2,12 +2,14 @@ import { workspaceMcpContextBinding } from './contexts.js'
 /** Durable native-operation receipts and retained sources. [COMP:api/workspace-mcp] */
 import { createHash, randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { buildTool, boundScopeSources, resolveWriteScope, type ScopeEvidence, type ToolContext } from '@use-brian/core'
+import { resolveWriteScope, type ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
+import { buildTool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { addSessionMessage } from '../db/sessions.js'
 import { bindWorkspaceMcpPublication } from '../db/session-context-revisions.js'
 import { getAppPool, queryWithRLS } from '../db/client.js'
-import { assertSourceModelInputAuthority, assertSourceModelOutputAuthority } from '../application-platform/model-source-authority.js'
+import { admitModelInput, admitModelOutput } from '../context-scope/admission.js'
 
 type Invocation = { context: ToolContext; name: string; input: unknown; operationId?: string; isReadOnly?: boolean; execute: () => Promise<CallToolResult>
   /** Host-only continuation, never populated from MCP input. */
@@ -57,7 +59,7 @@ export async function executeWorkspaceMcpOperation(invocation: Invocation): Prom
     contextId = state.id
     bindWorkspaceMcpPublication(context.executionContext!)
     context.scopeAccumulator!.note(state.evidence)
-    try { await assertSourceModelInputAuthority(context) }
+    try { await admitModelInput(context) }
     catch {
       await queryWithRLS(context.userId, 'UPDATE workspace_mcp_contexts SET invalidated=true WHERE id=$1', [contextId])
       return reply('context_unavailable', 'Previously accessed sources are no longer authorized for this connection.', operationId)
@@ -68,7 +70,7 @@ export async function executeWorkspaceMcpOperation(invocation: Invocation): Prom
       if (prior.operation_name !== name || (!invocation.resumeApprovalId && prior.argument_hash !== hash)
         || invocation.resumeApprovalId && prior.approval_id !== invocation.resumeApprovalId) return reply('operation_id_conflict', 'This operation-id already belongs to different arguments.', operationId)
       context.scopeAccumulator!.note(prior.evidence)
-      await assertSourceModelOutputAuthority(context)
+      await admitModelOutput(context)
       await context.authority!.assertCurrent()
       if (invocation.resumeApprovalId && prior.status === 'waiting_approval' && !prior.resumed_at) {
         const claimed = await queryWithRLS(context.userId,
@@ -107,7 +109,7 @@ export async function executeWorkspaceMcpOperation(invocation: Invocation): Prom
         [contextId, JSON.stringify(accumulator.evidence)])
     }
     const result = await execute()
-    await assertSourceModelOutputAuthority(context)
+    await admitModelOutput(context)
     await context.authority!.assertCurrent()
     const reported = result.structuredContent?.status
     const status = result.structuredContent?.code === 'operation_interrupted' ? 'uncertain'
@@ -152,7 +154,7 @@ export const getWorkspaceOperation = buildTool({
       [operationId, key.id, context.workspaceId, context.assistantId, key.selectionId])).rows[0]
     if (!row || row.invalidated) return { isError: true, data: { error: 'operation_unavailable' } }
     context.scopeAccumulator!.note(row.evidence)
-    await assertSourceModelOutputAuthority(context)
+    await admitModelOutput(context)
     return { data: { operationId, operation: row.operation_name,
       status: row.result ? row.status : 'uncertain', result: row.result, retrySafe: false }, scopeEvidence: row.evidence }
   },

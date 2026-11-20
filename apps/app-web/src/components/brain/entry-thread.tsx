@@ -1,7 +1,6 @@
 "use client";
 
 
-import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * EntryThread — the entry page's inline Q&A thread (the Notion "Comments"
  * analog for a brain entry). Renders as the last section of the
@@ -10,15 +9,15 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
  * markdown; user = quiet right-aligned bubble), and an always-visible
  * composer whose send button morphs into Stop while a turn streams.
  *
- * Transport is the product chat plumbing (`useMessageStream` from
- * @use-brian/chat-ui): named SSE events, aborts, and the full taxonomy —
- * `text_delta` grows the answer, `reasoning` feeds the live thinking line
- * (never the answer body), `tool_start`/`tool_input`/`tool_result`/
- * `tool_dropped` drive the activity chips (labels from
- * `t.chat.toolNarration`), `error` fails the turn in place. State commits
- * per event (React batches; the dock does the same — an rAF coalescer
- * freezes in backgrounded tabs), and the thread auto-follows the stream
- * only while its bottom sentinel is visible (scrolling up detaches).
+ * Transport is the shared conversation controller (M5 WP-E): the thread is a
+ * presentation of its inspection session's registry entry
+ * (`review-thread-conversation.ts`, dock transcript profile). The controller
+ * owns send, the mid-turn queue (queue + steer), the compare-and-set Stop,
+ * the re-attach after a dropped stream and the per-turn transcript; `text_delta`
+ * grows the answer, `reasoning` feeds the live thinking line (never the answer
+ * body), tool frames drive the activity chips (labels from
+ * `t.chat.toolNarration`). The thread auto-follows the stream only while its
+ * bottom sentinel is visible (scrolling up detaches).
  *
  * Tool activity stays compact: past `TOOL_CHIP_COLLAPSE_THRESHOLD` chips,
  * finished tools fold into one expandable "{count} steps" summary chip
@@ -46,25 +45,23 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
  * [COMP:app-web/brain-entry-thread]
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowUp, Check, ChevronDown, Loader2, Square } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
-import { authFetch } from "@/lib/auth-fetch";
 import { AssistantAvatar } from "@/components/assistant-avatar";
-import {
-  ChatMarkdown,
-  useMessageStream,
-  type ToolUsed,
-} from "@use-brian/chat-ui";
-import {
-  useMidTurnQueue,
-  joinQueuedInputs,
-} from "@/lib/use-mid-turn-queue";
+import { ChatMarkdown, type Message, type ToolUsed } from "@use-brian/chat-ui";
+import type { ConversationSendResult, ConversationState } from "@/lib/chat/conversation-controller";
 import { QueuedInputs } from "@/components/ui/queued-inputs";
 import { chatMarkdownCodeComponents } from "@/components/chrome/chat-code-block";
 import { originClue } from "./source-origin";
+import {
+  latestNotice,
+  reviewThreadView,
+  stripReviewPreamble,
+  useReviewConversation,
+} from "./review-thread-conversation";
 import {
   createInspectionSession,
   explainBrainRow,
@@ -73,7 +70,9 @@ import {
   type InspectionSession,
 } from "@/lib/api/brain-inbox";
 
-const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
+const CLIENT_TIMEZONE = (() => {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { return undefined; }
+})();
 
 /**
  * Model-facing context block prefixed to the thread's first message.
@@ -158,51 +157,42 @@ export function partitionToolChips(
   };
 }
 
+/** How a settled turn reads when it produced no reply of its own. */
+type EntryTurnOutcome = {
+  /** The user turn the outcome answers. */
+  afterMessageId: string;
+  kind: "stopped" | "failed" | "empty";
+  /** Server or transport text for a failed turn. */
+  detail?: string;
+};
+
 /**
- * Pure tool-timeline transition for the SSE tool events. Returns the next
- * array, or null when the event doesn't change the timeline (unknown event,
- * duplicate start, missing id).
+ * Pure outcome of one settled send: a stopped, failed or empty turn renders
+ * a stand-in reply under its question (the thread never shows a silent gap).
+ * A turn that committed a reply needs none, except that a failure is still
+ * stated under the partial reply.
  */
-export function reduceToolEvent(
-  tools: ToolUsed[],
-  eventName: string,
-  payload: Record<string, unknown>,
-): ToolUsed[] | null {
-  const id = typeof payload.id === "string" ? payload.id : "";
-  if (!id) return null;
-  if (eventName === "tool_start") {
-    const name = typeof payload.name === "string" ? payload.name : "";
-    if (!name) return null;
-    // Dedup — re-emits keep the existing row.
-    if (tools.some((tool) => tool.id === id)) return null;
-    return [...tools, { id, name, status: "running" }];
+export function entryTurnOutcome(
+  result: ConversationSendResult,
+  state: ConversationState | null,
+): EntryTurnOutcome | null {
+  if (!state || (result !== "stopped" && result !== "failed" && result !== "completed")) return null;
+  const messages = state.transcript.messages;
+  let userIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if (messages[index]!.role === "user") { userIndex = index; break; }
   }
-  if (eventName === "tool_dropped") {
-    if (!tools.some((tool) => tool.id === id)) return null;
-    return tools.filter((tool) => tool.id !== id);
+  if (userIndex < 0) return null;
+  const answered = messages.slice(userIndex + 1).some((message) => message.role === "assistant" && message.text.trim().length > 0);
+  const afterMessageId = messages[userIndex]!.id;
+  if (result === "failed") {
+    const notice = latestNotice(state, ["error"]);
+    const detail = notice?.code === "error" ? notice.message ?? notice.errorCode : undefined;
+    return { afterMessageId, kind: "failed", ...(detail ? { detail } : {}) };
   }
-  if (eventName === "tool_result") {
-    if (!tools.some((tool) => tool.id === id)) return null;
-    const isError = payload.isError === true;
-    return tools.map((tool) =>
-      tool.id === id
-        ? { ...tool, status: isError ? "retried" : "done" }
-        : tool,
-    );
-  }
-  return null;
+  if (answered) return null;
+  return { afterMessageId, kind: result === "stopped" ? "stopped" : "empty" };
 }
-
-/** Safe SSE payload coercion — the parser hands us parsed JSON when the
- *  data line was JSON, else the raw string. */
-function coercePayload(data: unknown): Record<string, unknown> {
-  if (data && typeof data === "object") return data as Record<string, unknown>;
-  return {};
-}
-
-type ThreadTurn =
-  | { role: "user"; text: string }
-  | { role: "assistant"; text: string; tools: ToolUsed[]; failed?: boolean };
 
 type Props = {
   workspaceId: string;
@@ -234,50 +224,35 @@ export function EntryThread({
   const review = t.memoriesReview;
   const tQueue = t.chat.queue;
 
-  const [turns, setTurns] = useState<ThreadTurn[]>([]);
   const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState(false);
   const [sessionError, setSessionError] = useState<string | null>(null);
-  // The latest reasoning line — the live thinking indicator before the
-  // first answer token lands. Never merged into the answer text.
-  const [reasoningTail, setReasoningTail] = useState("");
+  // The question shown while the inspection session is being minted, before
+  // the controller turn (and its optimistic user bubble) exists.
+  const [minting, setMinting] = useState<string | null>(null);
+  const [outcomes, setOutcomes] = useState<readonly EntryTurnOutcome[]>([]);
 
   // The session is identity for the whole thread — once created it sticks,
   // even if an inline edit re-anchors `rowId` to a superseded row's new id.
   const sessionRef = useRef<InspectionSession | null>(null);
+  const [boundSessionId, setBoundSessionId] = useState<string | null>(null);
   const [assistant, setAssistant] = useState<{ id: string; name: string } | null>(
     null,
   );
 
-  // Destructured because the hook returns a fresh object each render while
-  // the methods themselves are stable — effects must depend on the methods,
-  // or their cleanup aborts the in-flight stream on every re-render.
-  const stream = useMessageStream();
-  const { start: startStream, abort: abortStream } = stream;
-  const stoppedRef = useRef(false);
-  /**
-   * Mid-turn input (queue + steer) — asking a follow-up while the answer is
-   * still streaming hands it to the RUNNING turn instead of being blocked by
-   * the `busy` guard. See docs/architecture/engine/mid-turn-input.md.
-   */
-  const midTurn = useMidTurnQueue({
-    stream,
-    getSessionId: () => sessionRef.current?.sessionId,
+  const { controller, state, sendBound, currentController } = useReviewConversation({
     workspaceId,
+    sessionId: boundSessionId,
+    kind: "entry-thread",
+    // Uncertain queued text comes back to the composer; never resent.
+    onUnsent: (texts) => {
+      const restored = texts.join("\n\n");
+      setDraft((current) => (current.trim() ? `${current}\n\n${restored}` : restored));
+    },
   });
-  /** `send` is called from its own terminal `finally` (the mid-turn flush);
-   *  reading it through a ref is what makes that see the post-`setBusy(false)`
-   *  closure rather than the one that still thinks the turn is running. */
-  const sendRef = useRef<((raw: string) => Promise<void>) | null>(null);
-
-  // Per-turn accumulators. Refs so the streaming callbacks never close over
-  // stale state; `flush` commits them per event — React batches the setState
-  // calls (the dock dispatches per event the same way; an rAF coalescer
-  // would freeze updates in a backgrounded tab, where rAF stops firing).
-  const textRef = useRef("");
-  const toolsRef = useRef<ToolUsed[]>([]);
-  const reasoningRef = useRef("");
-  const failedRef = useRef<string | null>(null);
+  const view = reviewThreadView(state);
+  const busy = view.busy || minting !== null;
+  const stopFailed = latestNotice(state, ["stopTurnFailed"]) !== null;
+  const reconnectNotice = latestNotice(state, ["reconnecting", "reconnectFailed"]);
 
   const sectionRef = useRef<HTMLElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
@@ -306,32 +281,16 @@ export function EntryThread({
     composerRef.current?.focus();
   }, [focusTick]);
 
-  // Abort any in-flight stream when the thread unmounts (row swap / close).
+  // The controller's turn has begun: its own user bubble replaces the
+  // minting placeholder.
   useEffect(() => {
-    return () => abortStream();
-  }, [abortStream]);
+    if (minting !== null && view.busy) setMinting(null);
+  }, [minting, view.busy]);
 
-  function flush() {
-    setReasoningTail(() => {
-      const lines = reasoningRef.current.split("\n").filter(Boolean);
-      return (lines[lines.length - 1] ?? "").slice(-160);
-    });
-    setTurns((prev) => {
-      if (prev.length === 0) return prev;
-      const last = prev[prev.length - 1];
-      if (last.role !== "assistant") return prev;
-      const next: ThreadTurn = {
-        role: "assistant",
-        text: textRef.current,
-        tools: toolsRef.current,
-        ...(failedRef.current ? { failed: true } : {}),
-      };
-      return [...prev.slice(0, -1), next];
-    });
-    if (followRef.current) {
-      bottomRef.current?.scrollIntoView({ block: "nearest" });
-    }
-  }
+  // Follow the stream while pinned (each publication is one paint).
+  useEffect(() => {
+    if (followRef.current) bottomRef.current?.scrollIntoView({ block: "nearest" });
+  }, [view.messages.length, view.streamingText, view.liveTools.length, minting]);
 
   /** Create the inspection session on first use. */
   async function ensureSession(): Promise<InspectionSession | null> {
@@ -363,181 +322,74 @@ export function EntryThread({
     const text = raw.trim();
     if (text.length === 0) return;
     // A turn is already running: hand this to it rather than dropping it.
+    // See docs/architecture/engine/mid-turn-input.md.
     if (busy) {
-      if (midTurn.queue(text, steer)) setDraft("");
+      if (controller?.queue(text, steer, { bodyExtras: CLIENT_TIMEZONE ? { timezone: CLIENT_TIMEZONE } : {} })) setDraft("");
       return;
     }
     setDraft("");
-    setBusy(true);
     setSessionError(null);
-    stoppedRef.current = false;
-
-    const isFirst = turns.length === 0;
-    // Optimistic append — the user turn AND an empty assistant turn the
-    // stream grows into (the render path keys off the last turn).
-    setTurns((prev) => [
-      ...prev,
-      { role: "user", text },
-      { role: "assistant", text: "", tools: [] },
-    ]);
+    setMinting(text);
     followRef.current = true;
-    requestAnimationFrame(() =>
-      bottomRef.current?.scrollIntoView({ block: "nearest" }),
-    );
 
-    textRef.current = "";
-    toolsRef.current = [];
-    reasoningRef.current = "";
-    failedRef.current = null;
-
-    let owningSessionId = sessionRef.current?.sessionId;
-    try {
-      const [session, explain] = await Promise.all([
-        ensureSession(),
-        isFirst ? fetchExplainOnce() : Promise.resolve(null),
-      ]);
-      if (!session) {
-        // Session creation failed — withdraw the optimistic pair so the
-        // chips return, restore the draft, and let the error line explain.
-        setTurns((prev) => prev.slice(0, -2));
-        setDraft(text);
-        return;
-      }
-
-      owningSessionId = session.sessionId;
-      const messageBody = isFirst
-        ? buildEntryPreamble(entrySummary, entryDetail, {
-            createdAt: entryCreatedAt,
-            updatedAt: entryUpdatedAt,
-            // Fetch failed → undefined (silence); fetched → the Source
-            // section's clue, or null when no origin was ever recorded.
-            originLine: explain
-              ? originClue(
-                  explain.origin,
-                  review,
-                  explain.savedAt,
-                  explain.savedByAssistantName,
-                )
-              : undefined,
-          }) + text
-        : text;
-
-      await startStream({
-        url: `${API_URL}/api/chat`,
-        body: {
-          message: messageBody,
-          sessionId: session.sessionId,
-          assistantId: session.assistantId,
-          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-        },
-        authFetch: (url, init) => authFetch(String(url), init),
-        onEvent: (event) => {
-          const payload = coercePayload(event.data);
-          switch (event.event) {
-            case "text_delta": {
-              const delta =
-                typeof payload.text === "string" ? payload.text : "";
-              if (delta) {
-                textRef.current += delta;
-                flush();
-              }
-              break;
-            }
-            case "reasoning": {
-              // Live thinking — indicator only, never the answer body.
-              const delta =
-                typeof payload.text === "string" ? payload.text : "";
-              if (delta) {
-                reasoningRef.current += delta;
-                flush();
-              }
-              break;
-            }
-            case "tool_start":
-            case "tool_dropped":
-            case "tool_result": {
-              const next = reduceToolEvent(
-                toolsRef.current,
-                event.event,
-                payload,
-              );
-              if (next) {
-                toolsRef.current = next;
-                flush();
-              }
-              break;
-            }
-            // The running turn took a follow-up we queued mid-stream. Close
-            // the answer segment written before it arrived and open a new
-            // one, so the earlier text does not read as its answer.
-            // See docs/architecture/engine/mid-turn-input.md.
-            case "input_applied": {
-              const inputId =
-                typeof payload.inputId === "string" ? payload.inputId : null;
-              if (!inputId) break;
-              const queuedEntry = midTurn.take(inputId, session.sessionId);
-              if (!queuedEntry) break;
-              setTurns((prev) => [
-                ...prev,
-                { role: "user", text: queuedEntry.text },
-                { role: "assistant", text: "", tools: [] },
-              ]);
-              textRef.current = "";
-              toolsRef.current = [];
-              reasoningRef.current = "";
-              break;
-            }
-            case "error": {
-              const message =
-                typeof payload.message === "string"
-                  ? payload.message
-                  : typeof payload.error === "string"
-                    ? payload.error
-                    : review.askEmptyResponse;
-              failedRef.current = message;
-              flush();
-              break;
-            }
-            default:
-              // session / notice / citations / saved-markers: nothing to
-              // render in the inline thread.
-              break;
-          }
-        },
-        onError: (err) => {
-          failedRef.current = err instanceof Error ? err.message : String(err);
-        },
-      });
-    } finally {
-      // One terminal flush after the stream settles (done, error, or stop).
-      if (failedRef.current && textRef.current.length === 0) {
-        textRef.current = `${review.askError} ${failedRef.current}`;
-      }
-      if (!failedRef.current && textRef.current.length === 0) {
-        textRef.current = stoppedRef.current
-          ? labels.threadStopped
-          : review.askEmptyResponse;
-      }
-      flush();
-      setReasoningTail("");
-      setBusy(false);
-      // Anything still queued was never taken by this turn (it finished
-      // first, the user hit Stop, or the delivery was lost) — ask it as an
-      // ordinary follow-up. Deferred so `sendRef` picks up the closure where
-      // `busy` is already false.
-      setTimeout(() => {
-        if (!owningSessionId || sessionRef.current?.sessionId !== owningSessionId) return;
-        const stillWaiting = midTurn.drain(owningSessionId);
-        if (stillWaiting.length > 0) void sendRef.current?.(joinQueuedInputs(stillWaiting));
-      }, 0);
+    const isFirst = view.messages.length === 0;
+    const [session, explain] = await Promise.all([
+      ensureSession(),
+      isFirst ? fetchExplainOnce() : Promise.resolve(null),
+    ]);
+    if (!session) {
+      // Session creation failed — withdraw the placeholder so the chips
+      // return, restore the draft, and let the error line explain.
+      setMinting(null);
+      setDraft(text);
+      return;
+    }
+    setBoundSessionId(session.sessionId);
+    const messageBody = isFirst
+      ? buildEntryPreamble(entrySummary, entryDetail, {
+          createdAt: entryCreatedAt,
+          updatedAt: entryUpdatedAt,
+          // Fetch failed → undefined (silence); fetched → the Source
+          // section's clue, or null when no origin was ever recorded.
+          originLine: explain
+            ? originClue(
+                explain.origin,
+                review,
+                explain.savedAt,
+                explain.savedByAssistantName,
+              )
+            : undefined,
+        }) + text
+      : text;
+    const result = await sendBound(session.sessionId, {
+      text: messageBody,
+      assistantId: session.assistantId,
+      bodyExtras: CLIENT_TIMEZONE ? { timezone: CLIENT_TIMEZONE } : {},
+      // Failed before the server accepted it: the question returns to the
+      // composer; nothing is resent automatically.
+      onRejected: () => setDraft((current) => (current.trim() ? current : text)),
+    });
+    setMinting(null);
+    if (result === "busy" || result === "invalid") {
+      setDraft((current) => (current.trim() ? current : text));
+      return;
+    }
+    const bound = currentController();
+    const snapshot = bound?.getSessionId() === session.sessionId ? bound.getSnapshot() : null;
+    const outcome = entryTurnOutcome(result, snapshot);
+    if (outcome) {
+      setOutcomes((current) => [...current.filter((item) => item.afterMessageId !== outcome.afterMessageId), outcome]);
+    } else if (result === "failed") {
+      const notice = latestNotice(snapshot, ["error"]);
+      setSessionError(notice?.code === "error" ? notice.message ?? notice.errorCode : review.askEmptyResponse);
     }
   }
 
-  sendRef.current = send;
-
+  // One Stop entry point: the controller's compare-and-set Stop. The server
+  // turn ends, not just this renderer's stream (M5 WP-E fixed the former
+  // local-abort-only Stop).
   function stop() {
-    stoppedRef.current = true;
-    abortStream();
+    void controller?.stop();
   }
 
   const suggestions = [
@@ -546,6 +398,58 @@ export function EntryThread({
     labels.threadSuggestion3,
   ];
   const canSend = draft.trim().length > 0;
+  const hasTurns = view.messages.length > 0 || busy;
+  const outcomeText = (outcome: EntryTurnOutcome) =>
+    outcome.kind === "stopped"
+      ? labels.threadStopped
+      : outcome.kind === "empty"
+        ? review.askEmptyResponse
+        : `${review.askError} ${outcome.detail ?? ""}`.trim();
+
+  const renderAssistant = (
+    key: string,
+    body: ReactNode,
+    tools: ToolUsed[],
+    streaming: boolean,
+  ) => (
+    <div key={key} className="flex gap-2.5">
+      <div className="shrink-0 pt-0.5">
+        {assistant ? (
+          <AssistantAvatar id={assistant.id} name={assistant.name} size="sm" />
+        ) : (
+          <div className="size-7 rounded-full bg-muted" aria-hidden />
+        )}
+      </div>
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <div className="text-xs font-medium text-foreground/80">
+          {assistant?.name ?? review.connecting}
+        </div>
+        {tools.length > 0 && <ToolActivity tools={tools} streaming={streaming} />}
+        {body}
+      </div>
+    </div>
+  );
+
+  const renderMessage = (message: Message) => {
+    if (message.role === "user") {
+      return (
+        <div
+          key={message.id}
+          className="self-end max-w-[85%] rounded-lg bg-muted px-3 py-1.5 text-sm whitespace-pre-wrap break-words"
+        >
+          {stripReviewPreamble(message.text)}
+        </div>
+      );
+    }
+    return renderAssistant(
+      message.id,
+      <div className="chat-markdown text-sm leading-relaxed break-words">
+        <ChatMarkdown text={message.text} components={chatMarkdownCodeComponents} />
+      </div>,
+      message.toolsUsed ?? [],
+      false,
+    );
+  };
 
   return (
     <section
@@ -556,7 +460,7 @@ export function EntryThread({
         <h3 className="text-sm font-medium text-foreground/80">
           {labels.threadHeading}
         </h3>
-        {turns.length > 0 && (
+        {hasTurns && (
           <span className="text-[11px] text-muted-foreground/60">
             {labels.threadEphemeral}
           </span>
@@ -565,7 +469,7 @@ export function EntryThread({
 
       {/* Suggested starters — they teach what the thread is for better
           than instruction prose ever did. */}
-      {turns.length === 0 && (
+      {!hasTurns && (
         <div className="flex flex-wrap gap-1.5">
           {suggestions.map((s) => (
             <button
@@ -581,64 +485,47 @@ export function EntryThread({
         </div>
       )}
 
-      {turns.length > 0 && (
+      {hasTurns && (
         <div className="flex flex-col gap-3" aria-live="polite">
-          {turns.map((turn, i) => {
-            if (turn.role === "user") {
-              return (
-                <div
-                  key={i}
-                  className="self-end max-w-[85%] rounded-lg bg-muted px-3 py-1.5 text-sm whitespace-pre-wrap break-words"
-                >
-                  {turn.text}
-                </div>
-              );
+          {view.messages.flatMap((message, index) => {
+            const nodes = [renderMessage(message)];
+            // A stand-in reply closes its turn: after the turn's last row
+            // (a failure reads under the partial reply it ended).
+            const turnEnds = view.messages[index + 1]?.role !== "assistant";
+            if (!turnEnds) return nodes;
+            let question: Message | undefined;
+            for (let at = index; at >= 0; at--) {
+              if (view.messages[at]!.role === "user") { question = view.messages[at]; break; }
             }
-            const isLast = i === turns.length - 1;
-            const streamingThis = isLast && busy;
-            const awaitingText = streamingThis && turn.text.length === 0;
-            return (
-              <div key={i} className="flex gap-2.5">
-                <div className="shrink-0 pt-0.5">
-                  {assistant ? (
-                    <AssistantAvatar
-                      id={assistant.id}
-                      name={assistant.name}
-                      size="sm"
-                    />
-                  ) : (
-                    <div className="size-7 rounded-full bg-muted" aria-hidden />
-                  )}
-                </div>
-                <div className="flex min-w-0 flex-1 flex-col gap-1">
-                  <div className="text-xs font-medium text-foreground/80">
-                    {assistant?.name ?? review.connecting}
-                  </div>
-
-                  {turn.tools.length > 0 && (
-                    <ToolActivity tools={turn.tools} streaming={streamingThis} />
-                  )}
-
-                  {awaitingText ? (
-                    <div className="text-sm text-muted-foreground italic truncate">
-                      {reasoningTail || review.thinking}
-                    </div>
-                  ) : turn.failed ? (
-                    <p className="text-sm text-red-500 whitespace-pre-wrap break-words">
-                      {turn.text}
-                    </p>
-                  ) : (
-                    <div className="chat-markdown text-sm leading-relaxed break-words">
-                      <ChatMarkdown
-                        text={turn.text}
-                        components={chatMarkdownCodeComponents}
-                      />
-                    </div>
-                  )}
-                </div>
-              </div>
-            );
+            const outcome = question ? outcomes.find((item) => item.afterMessageId === question!.id) : undefined;
+            if (outcome) {
+              nodes.push(renderAssistant(`outcome-${outcome.afterMessageId}`, (
+                <p className={cn("text-sm whitespace-pre-wrap break-words", outcome.kind === "failed" ? "text-red-500" : "text-muted-foreground")}>
+                  {outcomeText(outcome)}
+                </p>
+              ), [], false));
+            }
+            return nodes;
           })}
+          {minting !== null && (
+            <div className="self-end max-w-[85%] rounded-lg bg-muted px-3 py-1.5 text-sm whitespace-pre-wrap break-words">
+              {minting}
+            </div>
+          )}
+          {busy && renderAssistant(
+            "live",
+            view.streamingText ? (
+              <div className="chat-markdown text-sm leading-relaxed break-words">
+                <ChatMarkdown text={view.streamingText} components={chatMarkdownCodeComponents} />
+              </div>
+            ) : (
+              <div className="text-sm text-muted-foreground italic truncate">
+                {view.reasoningTail || review.thinking}
+              </div>
+            ),
+            view.liveTools,
+            true,
+          )}
         </div>
       )}
 
@@ -647,13 +534,23 @@ export function EntryThread({
           {review.askError} {sessionError}
         </p>
       )}
+      {reconnectNotice ? (
+        <p className="text-xs text-muted-foreground" role="status">
+          {reconnectNotice.code === "reconnecting" ? t.chat.turnReconnecting : t.chat.turnReconnectFailed}
+        </p>
+      ) : null}
+      {stopFailed ? (
+        <p className="text-xs text-red-500" role="alert">
+          {t.chatApp.stopTurnFailed}
+        </p>
+      ) : null}
 
       {/* Follow-ups handed to the running turn, not yet taken by it.
           See docs/architecture/engine/mid-turn-input.md. */}
       <QueuedInputs
-        inputs={midTurn.queued}
+        inputs={state?.queued ? [...state.queued] : []}
         dict={tQueue}
-        onSteer={midTurn.steer}
+        onSteer={(inputId) => void controller?.steer(inputId)}
       />
 
       <div className="flex flex-col gap-1.5">
@@ -673,7 +570,8 @@ export function EntryThread({
                 !e.nativeEvent.isComposing
               ) {
                 e.preventDefault();
-                void send(draft);
+                // Cmd/Ctrl+Enter steers a running turn (mid-turn-input.md).
+                void send(draft, busy && (e.metaKey || e.ctrlKey));
               }
               if (e.key === "Escape") {
                 // Blur the composer without letting the drawer's global
@@ -687,13 +585,14 @@ export function EntryThread({
           />
           {/* The soft keyboard's return inserts a newline, so the tap target
               is the touch path: `size-11 sm:size-6` (C 16 / M3). */}
-          {busy && (
+          {view.busy && (
             <button
               type="button"
               onClick={stop}
+              disabled={state?.run.stopRequested === true}
               aria-label={labels.threadStop}
               title={labels.threadStop}
-              className="mb-0.5 inline-flex size-11 sm:size-6 shrink-0 items-center justify-center rounded-full bg-foreground/80 text-background transition-opacity hover:opacity-90"
+              className="mb-0.5 inline-flex size-11 sm:size-6 shrink-0 items-center justify-center rounded-full bg-foreground/80 text-background transition-opacity hover:opacity-90 disabled:opacity-60"
             >
               <Square className="size-2.5" fill="currentColor" aria-hidden />
             </button>

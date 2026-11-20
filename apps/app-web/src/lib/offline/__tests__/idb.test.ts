@@ -34,4 +34,17 @@ describe("[COMP:app-web/offline-idb] durable authored writes", () => {
     read.onsuccess!(); tx.error = new Error("quota"); tx.onabort();
     await rejected;
   });
+  it("commits the cache fence and bytes together, and rejects aborts", async () => {
+    const { read, tx } = storage();
+    const { idbUpdateEntries } = await import("../idb");
+    let complete = false;
+    const pending = idbUpdateEntries(["fence"], () => ({ fence: { generation: "new" } })).then(() => { complete = true; });
+    await vi.waitFor(() => expect(read.onsuccess).toBeTypeOf("function"));
+    read.onsuccess!(); await Promise.resolve(); expect(complete).toBe(false);
+    tx.oncomplete(); await pending; expect(complete).toBe(true);
+    const failed = idbUpdateEntries(["fence"], () => ({ fence: { generation: "later" } }));
+    const rejected = expect(failed).rejects.toThrow("quota");
+    await Promise.resolve(); read.onsuccess!(); tx.error = new Error("quota"); tx.onabort(); await rejected;
+  });
+
 });

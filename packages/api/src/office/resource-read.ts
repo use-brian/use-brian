@@ -1,6 +1,6 @@
 /** Current Office resource bytes and bounded display authority. [COMP:api/office-resources] */
 import {createHash} from 'node:crypto'
-import type {FilesApi} from '@use-brian/core'
+import type {FilesApi} from '@use-brian/core/workspace-files/api.js'
 import type {createOfficeTemplateStore} from '../db/office-templates.js'
 import type {getWorkspaceFileReadProjection} from '../db/workspace-files.js'
 import type {getWorkspaceMembershipWithClearanceSystem} from '../db/workspace-store.js'

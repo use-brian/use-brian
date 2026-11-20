@@ -1,7 +1,10 @@
 /** Canonical legacy CRM point admission, without DTO-specific ACLs. [COMP:api/application-records] */
 import { AsyncLocalStorage } from 'node:async_hooks'
-import type { AccessContext,ScopeSource } from '@use-brian/core'
-import { bindScopeSources,boundScopeSources,inheritScopeSources,RANK,decodeCrmAmount } from '@use-brian/core'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { decodeCrmAmount } from '@use-brian/core/application-platform/record-values.js'
+import { RANK } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { bindScopeSources, boundScopeSources, inheritScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { ApplicationPlatformError,applicationQuerySchema,type ApplicationQuery } from '@use-brian/shared'
 import { currentCanonicalPublicShare } from '../application-platform/public-share-context.js'
 import { canonicalNativeResourceDefinitions } from '../application-platform/native-resources.js'
@@ -275,7 +278,7 @@ export async function readLegacyCanonicalCrmConfiguration(access:AccessContext,i
 
 
 const nativeReadTransactions=new AsyncLocalStorage<{client:PoolClient;workspaceId:string;actorId:string;active:boolean}>()
-function currentCrmReadTransaction(access:AccessContext):{client:PoolClient;assertLive:()=>void;execution?:import('@use-brian/core').ExecutionContext}|undefined {
+function currentCrmReadTransaction(access:AccessContext):{client:PoolClient;assertLive:()=>void;execution?:import('@use-brian/agent-runtime/security/execution-context.js').ExecutionContext}|undefined {
  const application=currentApplicationReadTransaction(access),native=nativeReadTransactions.getStore()
  if(application)return application
  if(!native)return undefined

@@ -16,6 +16,14 @@ async function fixture() {
 }
 describe('[COMP:operations/crm-recovery] Transactional erasure effects',()=>{
   afterAll(async()=>{await pool.end();await app.end()})
+  it('passes recovery preflight for the complete migrated schema', async () => {
+    const {inspectDatabase}=await import(new URL('../../../../../scripts/operations/recovery-common.mjs',import.meta.url).href)
+    const client=await pool.connect()
+    try {
+      const inspected=await inspectDatabase(client)
+      expect(inspected.migrations).toContain('8271_refresh_recovery_capture.sql')
+    } finally {client.release()}
+  })
   it('registers durable workflow authority receipts and admission tables in fresh schema recovery', async () => {
     const tables = ['workspace_file_workflow_admissions','workflow_task_event_receipts','workflow_task_pause_admissions',
       'workflow_knowledge_event_receipts','workflow_page_event_receipts','workflow_page_event_observations']

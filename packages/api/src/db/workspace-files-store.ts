@@ -1,6 +1,8 @@
 import { readFileSessionBinding, type FileSessionBinding } from '../workspace-access/file-publication-admission.js'
 import { applyRLSGucs, getAppPool, rollbackAndRelease } from './client.js'
-import type { WorkspaceFilesStore, DerivedWriteEvidence, WorkspaceFileCreateInput, AccessContext, WorkspaceFile } from '@use-brian/core'
+import type { WorkspaceFilesStore, WorkspaceFileCreateInput, WorkspaceFile } from '@use-brian/core/workspace-files/types.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import type { DerivedWriteEvidence } from '@use-brian/agent-runtime/security/derived-scope.js'
 import {
   createWorkspaceFile,
   findReusableWorkspaceUpload,
@@ -32,7 +34,7 @@ import {
 export type DerivedWorkspaceFilesStore = WorkspaceFilesStore & {
   prepareSessionOwned(userId: string, workspaceId: string, path: string, access?: AccessContext): Promise<FileSessionBinding>
   createSessionOwned(userId: string, input: WorkspaceFileCreateInput, binding: FileSessionBinding, access?: AccessContext): Promise<WorkspaceFile>
-  finalizeUpload(userId: string, input: WorkspaceFileCreateInput, uploadId: string, access?: AccessContext, derivation?: import('@use-brian/core').DerivedWriteEvidence): Promise<WorkspaceFile>
+  finalizeUpload(userId: string, input: WorkspaceFileCreateInput, uploadId: string, access?: AccessContext, derivation?: import('@use-brian/agent-runtime/security/derived-scope.js').DerivedWriteEvidence): Promise<WorkspaceFile>
   createDerived(userId: string, input: WorkspaceFileCreateInput, evidence: DerivedWriteEvidence, access?: AccessContext): Promise<WorkspaceFile>
 }
 

@@ -1,10 +1,10 @@
+import { loadBuiltinSkills } from '@use-brian/core/skills/loader.js'
 import {
-  loadBuiltinSkills,
   prepareNativeSlashCommands,
   type NativeSlashCommandCatalog,
   type NativeSlashCommandTarget,
-  type WorkflowStore,
-} from '@use-brian/core'
+} from '@use-brian/core/skills/slash-command.js'
+import type { WorkflowStore } from '@use-brian/core/workflow/types.js'
 import type { SkillStore } from '../db/skill-store.js'
 import {
   createDiscordApi,

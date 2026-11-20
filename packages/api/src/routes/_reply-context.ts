@@ -1,4 +1,4 @@
-import { bindScopeSources, boundScopeSources } from '@use-brian/core'
+import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 /**
  * Shared reply-text resolver for the four channel routes.
  *

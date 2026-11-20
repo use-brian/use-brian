@@ -1,59 +1,96 @@
-import {tryNativeInvocationEvidence,tryNativeCombinedOutputEvidence} from './native-invocation-evidence.js'
+import {withCurrentReadAuthority} from './authority-lease.js'
+import {assertOutputOperationAuthority} from '@use-brian/agent-runtime/engine/query-loop.js'
+import {executionToolContext} from '@use-brian/agent-runtime/security/execution-context.js'
+import {tryNativeInvocationEvidence} from './native-invocation-evidence.js'
 import { nativeSessionQueryContextSources } from '../application-platform/session-query-context.js'
 /** Native attended recipient admission. [COMP:api/application-persistence] [COMP:api/delivery-authority] */
-import {ContextScopeAccumulator,intersectAccessCeilings,type AccessCeiling,type ExecutionContext,type ScopeEvidence,type ScopeSource} from '@use-brian/core'
+import {intersectAccessCeilings, type AccessCeiling} from '@use-brian/agent-runtime/security/access-ceiling.js'
+import {ContextScopeAccumulator, type ScopeEvidence} from '@use-brian/agent-runtime/security/context-scope.js'
+import type {ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
+import type {ExecutionContext} from '@use-brian/agent-runtime/security/execution-context.js'
 import type {ChannelIntegrationStore} from '../db/channel-integrations.js'
 import {getAppPool,getPool,applyRLSGucs,rollbackAndRelease,runWithAgentAccess} from '../db/client.js'
 import {applyApplicationRLSContext,releaseApplicationTransactionBinding,getApplicationExecutionBinding} from '../application-platform/execution-context.js'
 import {getSharedRetainedSourceAuthority} from '../application-platform/source-runtime.js'
+import {isConversationEvidenceRoot} from '../application-platform/conversation-evidence.js'
 import {readApplicationFieldAncestors} from '../application-platform/field-evidence.js'
 import {readExternalSourceAncestors} from '../application-platform/external-source-ancestry.js'
 import {readPersistentSessionContextAncestors} from '../db/session-context-ancestry.js'
 import {pinPreparedExternalSourceAuthority,assertPreparedExternalSourceAuthorityCurrent,type PreparedExternalSourceAuthority} from '../application-platform/retained-source-authority.js'
-import {validateAudienceScopeEvidence,validateCallerScopeEvidence,tryValidateNativeScopeEvidence,scopeEvidenceFailureOf} from './caller-evidence.js'
-import {createDeliveryAudienceAuthorizer,createDeliveryAudienceEnvelopeResolver,DeliveryAudienceUnverifiedError,type AuthorizeDeliveryAudience,type DeliveryAudienceInput} from './delivery-authority.js'
+import {assertScopeEvidenceFitsCeiling,validateAudienceScopeEvidence,validateCallerScopeEvidence,tryValidateNativeScopeEvidence,scopeEvidenceFailureOf} from './caller-evidence.js'
+import {createDeliveryAudienceAuthorizer,createDeliveryAudienceEnvelopeResolver,DeliveryAudienceUnverifiedError,type AuthorizeDeliveryAudience,type DeliveryAudienceInput,type DeliveryAudienceDecision} from './delivery-authority.js'
 import {classifySession,isWebTransport,policyFor} from '../session-kind.js'
 import {readSessionById} from '../db/sessions.js'
 import {hasWorkspaceMcpRetainedAuthority} from '../db/session-context-revisions.js'
 import {findAssistantById} from '../db/users.js'
 import {deliveryFailureMetadata,type DeliveryVerificationPhase} from './delivery-failure.js'
+import {yieldOptionalEvidence} from './optional-evidence.js'
+import {beginClosureAdmission} from './admission-closure.js'
+import {admitTurnConversationRecords,assertConversationFloor,recordEvidenceParts} from './conversation-record-admission.js'
 
 type Prepare=(execution:ExecutionContext,sources:readonly ScopeSource[],action:'context'|'deliver')=>Promise<PreparedExternalSourceAuthority>
 type Options={integrationStore?:ChannelIntegrationStore;prepareSource?:Prepare}
 function denied(phase?:DeliveryVerificationPhase):never{throw new DeliveryAudienceUnverifiedError(undefined,'source_unverifiable',deliveryFailureMetadata(undefined,phase))}
 /** A destination narrows data access, never the original invocation identity. */
-export async function validateAttendedAudienceEvidence(execution:ExecutionContext,rawEvidence:ScopeEvidence,rawRecipient:AccessCeiling,
- options:{prepareSource?:Prepare;directHumanSource?:boolean;pageThreadSessionId?:string}={}):Promise<ScopeEvidence>{
+export async function admitAttendedAudienceEvidence(execution:ExecutionContext,rawEvidence:ScopeEvidence,rawRecipient:AccessCeiling,
+ options:{prepareSource?:Prepare;directHumanSource?:boolean;pageThreadSessionId?:string;turnDestinationSessionId?:string}={}):Promise<ScopeEvidence>{
  try{
   const evidence=new ContextScopeAccumulator(execution.security.provenance);evidence.note(structuredClone(rawEvidence))
   const recipient=structuredClone(rawRecipient),workspaceId=execution.security.access.workspaceId,actor=execution.security.access.userId
   const pageAudience=options.pageThreadSessionId===execution.lifecycle.sessionId&&execution.security.access.sharedAudience
    ?{sessionId:options.pageThreadSessionId,actorUserId:actor}:undefined
+  // This admission's view of its turn's admission closure (one witness read).
+  const closure=beginClosureAdmission(execution)
   const validateAudience=(value:ScopeEvidence,ceiling:AccessCeiling,client?:import('pg').PoolClient)=>
-   validateAudienceScopeEvidence(value,ceiling,client,pageAudience)
+   validateAudienceScopeEvidence(value,ceiling,client,pageAudience,client?closure:undefined)
   const machine=hasWorkspaceMcpRetainedAuthority(execution)
   if(execution.ownership.kind!=='workspace'||!machine&&(execution.identity.kind!=='attended'||execution.identity.principal.kind!=='workspace_member'
    ||execution.identity.principal.userId!==actor)||recipient.workspaceId!==workspaceId||recipient.userId!==''&&recipient.userId!==actor)denied()
-  await execution.security.authority.assertCurrent()
   let sources=evidence.evidence.sources??[]
   if(sources.some(source=>source.workspaceId!==workspaceId))denied()
+  const recordParts=recordEvidenceParts(evidence.evidence)
+  if(recordParts){
+   // Only the receiving web turn's own sink may use its record as a leaf.
+   // Its freshly checked destination and the high-water labels govern this
+   // frame. Tool reads and publication keep their independent source checks.
+   if(!options.turnDestinationSessionId||options.turnDestinationSessionId!==execution.lifecycle.sessionId
+    ||execution.lifecycle.channelType!=='web'||execution.lifecycle.abortSignal.aborted)denied()
+   assertScopeEvidenceFitsCeiling(evidence.evidence,recipient,'audience')
+   const current=await admitTurnConversationRecords(execution,recordParts.records,'frame')
+   assertConversationFloor(evidence.evidence,current.destination)
+   if(execution.lifecycle.abortSignal.aborted)denied()
+   return evidence.evidence
+  }
   if(!sources.length){
-   const current=await validateAudience(evidence.evidence,recipient)
-   await execution.security.authority.assertCurrent();return current
+   const current=await withCurrentReadAuthority(execution.security.authority,()=>validateAudience(evidence.evidence,recipient))
+   return current
   }
   const native=await tryNativeInvocationEvidence(execution,evidence.evidence,recipient,'audience')
-  if(native){await execution.security.authority.assertCurrent();return native}
-  evidence.note({sources:await readPersistentSessionContextAncestors(workspaceId,sources)})
+  if(native){return native}
+  return await withCurrentReadAuthority(execution.security.authority,async()=>{
+  // Optional decoration defers before its ancestry discovery (no SQL otherwise).
+  await yieldOptionalEvidence()
+  // Ancestry discovery is metadata; the turn's closure may hold this exact
+  // input's result while every source it relies on is unchanged.
+  const roots=sources,discoverAncestry=async()=>{
+   const persistent=await readPersistentSessionContextAncestors(workspaceId,roots)
+   const expanded=new ContextScopeAccumulator(evidence.evidence);expanded.note({sources:persistent})
+   const reached=expanded.evidence.sources??[]
+   return {persistent,fields:await readApplicationFieldAncestors(workspaceId,reached),external:await readExternalSourceAncestors(workspaceId,reached)}
+  }
+  const ancestry=closure?await closure.discover('attended-audience',[...roots],discoverAncestry,
+   value=>value.external.length?null:[...roots,...value.persistent,...value.fields]):await discoverAncestry()
+  evidence.note({sources:ancestry.persistent})
   sources=evidence.evidence.sources??[]
-  const fields=await readApplicationFieldAncestors(workspaceId,sources),external=await readExternalSourceAncestors(workspaceId,sources)
+  const fields=ancestry.fields,external=ancestry.external
   evidence.note({sources:[...fields,...external]});sources=evidence.evidence.sources??[]
   const anonymous=recipient.userId==='',hasExternal=sources.some(source=>source.resourceKind==='external_source')
   // The existing native validator already checks current ordinary source
   // envelopes. Field, context and independent-source evidence requires the
   // bound non-owner transaction below; no admission result is cached.
-  if(!fields.length&&!external.length&&!sources.some(source=>['application_field','external_source','session_context_revision'].includes(source.resourceKind))){
+  if(!fields.length&&!hasExternal&&!sources.some(isConversationEvidenceRoot)){
    const current=await validateAudience(evidence.evidence,recipient)
-   await execution.security.authority.assertCurrent();return current
+   return current
   }
   let nativeFieldProof:ScopeSource[]=[]
   if(anonymous){
@@ -71,7 +108,9 @@ export async function validateAttendedAudienceEvidence(execution:ExecutionContex
   }
   if(hasExternal&&!options.directHumanSource)denied()
   const wiring=getSharedRetainedSourceAuthority(),prepare=options.prepareSource??(wiring?((e:ExecutionContext,s:readonly ScopeSource[],a:'context'|'deliver')=>wiring.coordinator.prepare(e,s,a)):undefined)
-  const cohort=fields.length?await nativeSessionQueryContextSources(execution,sources,prepare):{sources,independent:false}
+  const cohortRoots=sources,discoverCohort=()=>nativeSessionQueryContextSources(execution,cohortRoots,prepare)
+  const cohort=!fields.length?{sources,independent:false}:closure?await closure.discover('attended-cohort',[...cohortRoots],discoverCohort,
+   value=>value.independent?null:[...cohortRoots,...value.sources]):await discoverCohort()
   if((hasExternal||cohort.independent)&&!prepare)denied()
   const contextProof=cohort.independent?await prepare!(execution,cohort.sources,'context'):undefined
   const prepared=hasExternal?await prepare!(execution,sources,'deliver'):undefined
@@ -115,90 +154,74 @@ export async function validateAttendedAudienceEvidence(execution:ExecutionContex
   })}finally{releaseApplicationTransactionBinding(client);await rollbackAndRelease(client)}
   if(contextProof)await assertPreparedExternalSourceAuthorityCurrent(execution,contextProof)
   if(prepared)await assertPreparedExternalSourceAuthorityCurrent(execution,prepared)
-  await execution.security.authority.assertCurrent();assertWiring();return result
+  assertWiring();return result
+  })
  }catch(error){
   if(error instanceof DeliveryAudienceUnverifiedError)throw error
   throw Object.assign(new DeliveryAudienceUnverifiedError(undefined,scopeEvidenceFailureOf(error)??'verification_error',error),{cause:error})
  }
 }
-/** Existing destination resolution, with a current original-actor SQL validator. */
+/** One complete destination admission for kernel and standalone effects. */
 export function createAttendedDeliveryAudienceAuthorizer(execution:ExecutionContext,options:Options={}):AuthorizeDeliveryAudience{
  const dependencies={...options}
  const envelope=createDeliveryAudienceEnvelopeResolver({integrationStore:dependencies.integrationStore})
  return async input=>{
   const pinned=structuredClone(input),actor=execution.security.access.userId
-  const fallback=()=>createDeliveryAudienceAuthorizer({integrationStore:dependencies.integrationStore,
-   validateEvidence:(evidence,recipient)=>validateAttendedAudienceEvidence(execution,evidence,recipient,{
-    ...(dependencies.prepareSource?{prepareSource:dependencies.prepareSource}:{}),
-    directHumanSource:isWebTransport(pinned.channelType)||pinned.recipientType==='individual',
-    pageThreadSessionId:pinned.sessionId,
-   })})(pinned)
-  if(!isWebTransport(pinned.channelType)||pinned.sessionId!==execution.lifecycle.sessionId
-   ||execution.lifecycle.sessionPersisted===false||execution.security.access.sharedAudience
-   ||execution.identity.kind!=='attended'||execution.identity.principal.kind!=='workspace_member'
-   ||execution.identity.principal.userId!==actor||pinned.userId!==actor||pinned.workspaceId!==execution.security.access.workspaceId
-   ||pinned.assistantId!==execution.assistant.id||getApplicationExecutionBinding(execution)
-   ||pinned.recipientType==='group'||pinned.recipientMode&&pinned.recipientMode!=='member')return fallback()
-  try{
-   await execution.security.authority.assertCurrent()
+
+  const capture=admitAttendedAudienceEvidence
+  const resolve=async():Promise<DeliveryAudienceDecision>=>{
+   const fallback=()=>createDeliveryAudienceAuthorizer({integrationStore:dependencies.integrationStore,
+    validateEvidence:(evidence,recipient)=>capture(execution,evidence,recipient,{
+     ...(dependencies.prepareSource?{prepareSource:dependencies.prepareSource}:{}),
+     directHumanSource:isWebTransport(pinned.channelType)||pinned.recipientType==='individual',
+     pageThreadSessionId:pinned.sessionId,
+     ...(pinned.channelType==='web'&&pinned.channelId===execution.lifecycle.channelId&&pinned.userId===actor
+      &&pinned.assistantId===execution.assistant.id?{turnDestinationSessionId:pinned.sessionId}:{}),
+    })})(pinned)
+   if(!isWebTransport(pinned.channelType)||pinned.sessionId!==execution.lifecycle.sessionId
+    ||execution.lifecycle.sessionPersisted===false||execution.security.access.sharedAudience
+    ||execution.identity.kind!=='attended'||execution.identity.principal.kind!=='workspace_member'
+    ||execution.identity.principal.userId!==actor||pinned.userId!==actor||pinned.workspaceId!==execution.security.access.workspaceId
+    ||pinned.assistantId!==execution.assistant.id||getApplicationExecutionBinding(execution)
+    ||pinned.recipientType==='group'||pinned.recipientMode&&pinned.recipientMode!=='member')return fallback()
    const session=await readSessionById(pinned.sessionId!)
    if(!session)return{allowed:false,reason:'delivery_audience_unverified',diagnostic:'session_missing'}
-   if(policyFor(session).deliveryCeiling.ceiling!=='owner'||session.userId!==actor||classifySession(session).surface!=='chat'
-    ||session.channelType!==pinned.channelType||session.channelId!==pinned.channelId)return fallback()
+   if(session.channelType!==pinned.channelType||session.channelId!==pinned.channelId)
+    return{allowed:false,reason:'delivery_audience_unverified',diagnostic:'binding_recipient_conflict'}
+   if(policyFor(session).deliveryCeiling.ceiling!=='owner'||session.userId!==actor||classifySession(session).surface!=='chat')return fallback()
    const owner=await findAssistantById(session.assistantId)
    if(!owner||owner.workspaceId!==pinned.workspaceId)return{allowed:false,reason:'delivery_audience_unverified',diagnostic:'session_assistant_missing'}
-   // Resolve both actual constraints afresh. Their intersection admits only
-   // evidence that fits BOTH the original sink and the current recipient.
-   const sink=await envelope({...pinned,userId:session.userId}),recipient=await envelope(pinned)
-   if(!sink.allowed)return sink
+   // The stored owner and explicit recipient are the same original actor, in
+   // the same bound web destination and answering assistant. Resolve that one
+   // constraint once; distinct channel/room constraints use the owner above.
+   const recipient=await envelope(pinned)
    if(!recipient.allowed)return recipient
-   if(sink.ceiling.userId!==actor||recipient.ceiling.userId!==actor)return{allowed:false,reason:'delivery_audience_unverified',diagnostic:'binding_recipient_conflict'}
-   const ceiling=intersectAccessCeilings(sink.ceiling,recipient.ceiling)
-   const evidence=await validateAttendedAudienceEvidence(execution,pinned.scopeEvidence??{},ceiling,{
-    ...(dependencies.prepareSource?{prepareSource:dependencies.prepareSource}:{}),directHumanSource:true,
-   })
-   await execution.security.authority.assertCurrent()
-   return{allowed:true,evidence}
-  }catch(error){
-   return{allowed:false,reason:'delivery_audience_unverified',diagnostic:scopeEvidenceFailureOf(error)??'verification_error',...deliveryFailureMetadata(error)}
+   if(recipient.ceiling.userId!==actor)return{allowed:false,reason:'delivery_audience_unverified',diagnostic:'binding_recipient_conflict'}
+   return{allowed:true,evidence:await capture(execution,pinned.scopeEvidence??{},recipient.ceiling,{
+    ...(dependencies.prepareSource?{prepareSource:dependencies.prepareSource}:{}),directHumanSource:true,turnDestinationSessionId:session.id,
+   })}
   }
+  let decision:DeliveryAudienceDecision|undefined
+  const accumulator=new ContextScopeAccumulator(pinned.scopeEvidence)
+  try{
+   await assertOutputOperationAuthority({...executionToolContext(execution,{appId:'attended-delivery'}),scopeAccumulator:accumulator,
+    admitModelOutput:async()=>{decision=await resolve();if(decision.allowed)accumulator.note(decision.evidence)}})
+   return decision!
+  }catch(error){return{allowed:false,reason:'delivery_audience_unverified',diagnostic:scopeEvidenceFailureOf(error)??'verification_error',...deliveryFailureMetadata(error)}}
  }
 }
 
-/** Optional personal-web operation: both current caller and recipient obligations
- * are validated by one closed native proof. Unsupported destinations decline. */
-export async function tryValidateNativePersonalOutput(execution:ExecutionContext,input:DeliveryAudienceInput):Promise<ScopeEvidence|null>{
- const pinned=structuredClone(input)
- const ceiling=await tryResolveNativePersonalRecipient(execution,pinned)
- if(!ceiling)return null
- const result=await tryNativeCombinedOutputEvidence(execution,pinned.scopeEvidence??{},ceiling)
- await execution.security.authority.assertCurrent()
- return result
-}
-
-/** Fresh destination metadata only. It grants no source, retention or delivery
- * permission; callers must independently validate the complete evidence. */
-export async function tryResolveNativePersonalRecipient(execution:ExecutionContext,input:DeliveryAudienceInput):Promise<AccessCeiling|null>{
- const pinned=structuredClone(input),actor=execution.security.access.userId
- if(!isWebTransport(pinned.channelType)||pinned.sessionId!==execution.lifecycle.sessionId
-  ||execution.lifecycle.sessionPersisted===false||execution.security.access.sharedAudience
-  ||execution.identity.kind!=='attended'||execution.identity.principal.kind!=='workspace_member'
-  ||execution.identity.principal.authenticationKind!=='native_session'
-  ||execution.identity.principal.userId!==actor||pinned.userId!==actor
-  ||execution.ownership.kind!=='workspace'||pinned.workspaceId!==execution.security.access.workspaceId
-  ||pinned.assistantId!==execution.assistant.id||getApplicationExecutionBinding(execution)
-  ||pinned.recipientType==='group'||pinned.recipientMode&&pinned.recipientMode!=='member')return null
- await execution.security.authority.assertCurrent()
- const session=await readSessionById(pinned.sessionId!)
- if(!session)throw new DeliveryAudienceUnverifiedError(undefined,'session_missing')
- if(policyFor(session).deliveryCeiling.ceiling!=='owner'||session.userId!==actor||classifySession(session).surface!=='chat'
-  ||session.channelType!==pinned.channelType||session.channelId!==pinned.channelId)return null
- const owner=await findAssistantById(session.assistantId)
- if(!owner||owner.workspaceId!==pinned.workspaceId)throw new DeliveryAudienceUnverifiedError(undefined,'session_assistant_missing')
- const resolve=createDeliveryAudienceEnvelopeResolver()
- const sink=await resolve({...pinned,userId:session.userId}),recipient=await resolve(pinned)
- if(!sink.allowed)throw new DeliveryAudienceUnverifiedError(sink.detail,sink.diagnostic)
- if(!recipient.allowed)throw new DeliveryAudienceUnverifiedError(recipient.detail,recipient.diagnostic)
- if(sink.ceiling.userId!==actor||recipient.ceiling.userId!==actor)throw new DeliveryAudienceUnverifiedError(undefined,'binding_recipient_conflict')
- return intersectAccessCeilings(sink.ceiling,recipient.ceiling)
+/** Standalone recipient consumers enter the core effect owner too. */
+export async function validateAttendedAudienceEvidence(execution:ExecutionContext,rawEvidence:ScopeEvidence,rawRecipient:AccessCeiling,
+ options:Parameters<typeof admitAttendedAudienceEvidence>[3]={}):Promise<ScopeEvidence>{
+ let result:ScopeEvidence|undefined
+ try {
+  await assertOutputOperationAuthority({...executionToolContext(execution,{appId:'attended-delivery'}),
+   scopeAccumulator:new ContextScopeAccumulator(rawEvidence),
+   admitModelOutput:async()=>{result=await admitAttendedAudienceEvidence(execution,rawEvidence,rawRecipient,options)}})
+  return result!
+ }catch(error){
+  if(error instanceof DeliveryAudienceUnverifiedError)throw error
+  throw Object.assign(new DeliveryAudienceUnverifiedError(undefined,scopeEvidenceFailureOf(error)??'verification_error',error),{cause:error})
+ }
 }

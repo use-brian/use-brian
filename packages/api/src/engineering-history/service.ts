@@ -1,7 +1,9 @@
 import {notifyWorkspaceChange} from '../brain-stream/notify.js'
 /** One admitted history service for HTTP, MCP and UI. [COMP:api/engineering-history] */
 import {createHash,createHmac,randomUUID,timingSafeEqual} from 'node:crypto'
-import type {AccessContext,FilesApi,FilesContext,WorkspaceFile} from '@use-brian/core'
+import type {FilesApi, FilesContext} from '@use-brian/core/workspace-files/api.js'
+import type {WorkspaceFile} from '@use-brian/core/workspace-files/types.js'
+import type {AccessContext} from '@use-brian/agent-runtime/security/access-context.js'
 import {EngineeringHistoryCommandSchema,EngineeringHistoryQuerySchema,type EngineeringHistoryCommand,type EngineeringHistoryQuery} from '@use-brian/shared'
 import {buildAccessPredicate,buildCurrentMemberSourcePredicate} from '../db/access-predicate.js'
 import {applyRLSGucs,getAppPool,queryWithRLS,rollbackAndRelease} from '../db/client.js'

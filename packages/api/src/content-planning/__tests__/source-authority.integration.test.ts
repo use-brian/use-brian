@@ -116,7 +116,7 @@ describe('[COMP:feed/source-authority] exact selection, isolation, provenance an
     expect((await getFeedCollaboration(f.actor)).copy!.content.sourceSensitivity).toBe('confidential')
     await query('UPDATE memories SET retracted_at=now() WHERE id=$1', [id])
     await expect(getFeedCollaboration(f.actor)).rejects.toMatchObject({ code: 'draft_source_access_required' })
-    expect(await postWorkingCopiesStore.get(f.actor.assistantId, f.actor.sessionId)).toBeNull()
+    expect(await postWorkingCopiesStore.get(f.actor.assistantId, f.actor.sessionId, f.actor.userId)).toBeNull()
     await expect(executeFeedCommands(f.actor, { mutationId: randomUUID(), expectedRevision: 4, commands: [{ kind: 'release', audience: 'public' }] })).rejects.toMatchObject({ code: 'draft_source_access_required' })
   })
   it('requires all draft viewers to read selected resources and rechecks newly added members', async () => {

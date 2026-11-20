@@ -13,6 +13,8 @@ export function WorkspaceConsent() {
   const params = useSearchParams(), req = params?.get('req') ?? '', assistantId = params?.get('assistant') ?? undefined;
   const [state, setState] = useState<State>({ kind: 'loading' }), [workspaceId, setWorkspaceId] = useState('');
   const [scope, setScope] = useState<'read' | 'read_write'>('read'), [workspaceAccess, setWorkspaceAccess] = useState(true);
+  const selectedWorkspace = 'review' in state ? state.review.workspaces.find(w => w.id === workspaceId) : undefined;
+  const memoryOnly = selectedWorkspace?.memoryOnly === true;
   const generation = useRef(0);
   useEffect(() => {
     let controller: AbortController | undefined;
@@ -22,7 +24,8 @@ export function WorkspaceConsent() {
       controller = new AbortController(); const version = generation.current;
       fetchWorkspaceConsent(req, assistantId, controller.signal).then(review => {
         if (version !== generation.current) return;
-        setWorkspaceId(review.workspaces[0]?.id ?? ''); setScope(review.scope); setWorkspaceAccess(review.workspaceAccessAvailable);
+        setWorkspaceId(review.workspaces[0]?.id ?? ''); setScope(review.scope);
+        setWorkspaceAccess(review.workspaceAccessAvailable);
         setState({ kind: 'ready', review });
       }, error => {
         if (version !== generation.current) return;
@@ -40,7 +43,7 @@ export function WorkspaceConsent() {
     if (state.kind !== 'ready') return;
     const version = generation.current, review = state.review; setState({ kind: 'submitting', review });
     try {
-      const redirect = await decideWorkspaceConsent(req, assistantId, review, { workspaceId, decision, grantedScope: scope, workspaceAccess });
+      const redirect = await decideWorkspaceConsent(req, assistantId, review, { workspaceId, decision, grantedScope: scope, workspaceAccess: workspaceAccess && !memoryOnly });
       if (version === generation.current) window.location.assign(redirect);
     } catch { if (version === generation.current) setState({ kind: 'error' }); }
   }
@@ -52,14 +55,15 @@ export function WorkspaceConsent() {
       <p className="break-all font-medium">{state.review.clientName ?? t.unnamed}</p>
       <p>{copy.explanation}</p>
       <label className="block space-y-2"><span>{t.workspace}</span><Select value={workspaceId} onValueChange={value => setWorkspaceId(value ?? '')} disabled={state.kind === 'submitting'}>
-        <SelectTrigger className="max-sm:min-h-11 w-full text-base"><SelectValue>{state.review.workspaces.find(w => w.id === workspaceId)?.name ?? copy.noWorkspaces}</SelectValue></SelectTrigger>
+        <SelectTrigger className="max-sm:min-h-11 w-full text-base"><SelectValue>{selectedWorkspace?.name ?? copy.noWorkspaces}</SelectValue></SelectTrigger>
         <SelectContent>{state.review.workspaces.map(w => <SelectItem key={w.id} value={w.id}>{w.name}</SelectItem>)}</SelectContent>
       </Select></label>
       <label className="block space-y-2"><span>{t.scope}</span><Select value={scope} onValueChange={value => setScope(value === 'read_write' ? 'read_write' : 'read')} disabled={state.kind === 'submitting'}>
         <SelectTrigger className="max-sm:min-h-11 w-full text-base"><SelectValue>{scope === 'read' ? t.read : t.readWrite}</SelectValue></SelectTrigger>
         <SelectContent><SelectItem value="read">{t.read}</SelectItem>{state.review.scope === 'read_write' && <SelectItem value="read_write">{t.readWrite}</SelectItem>}</SelectContent>
       </Select></label>
-      {state.review.workspaceAccessAvailable && <label className="flex max-sm:min-h-11 items-start gap-3 py-2"><Checkbox checked={workspaceAccess} onCheckedChange={setWorkspaceAccess} disabled={state.kind === 'submitting' || state.review.workspaceAccessRequired} /><span><span className="block font-medium">{dictionary.apiKeys.workspaceAccessLabel}</span><span>{dictionary.apiKeys.workspaceAccessDescription}</span></span></label>}
+      {state.review.workspaceAccessAvailable && <label className="flex max-sm:min-h-11 items-start gap-3 py-2"><Checkbox checked={workspaceAccess && !memoryOnly} onCheckedChange={setWorkspaceAccess} disabled={state.kind === 'submitting' || state.review.workspaceAccessRequired || memoryOnly} /><span><span className="block font-medium">{dictionary.apiKeys.workspaceAccessLabel}</span><span>{memoryOnly ? copy.memoryOnly : dictionary.apiKeys.workspaceAccessDescription}</span></span></label>}
+      {memoryOnly && !state.review.workspaceAccessAvailable && <p>{copy.memoryOnly}</p>}
       <div className="flex gap-3"><Button className="max-sm:min-h-11 flex-1" disabled={state.kind === 'submitting' || !workspaceId} onClick={() => void decide('allow')}>{state.kind === 'submitting' ? t.submitting : t.allow}</Button><Button className="max-sm:min-h-11 flex-1" variant="outline" disabled={state.kind === 'submitting' || !workspaceId} onClick={() => void decide('deny')}>{t.deny}</Button></div>
     </>}
   </section></main>;

@@ -1,4 +1,4 @@
-import type { EdgeType, EntityLinksStore, EntitySource, LinkKind } from '@use-brian/core'
+import type { EdgeType, EntityLinksStore, EntitySource, LinkKind } from '@use-brian/core/entities/types.js'
 
 /**
  * Edge-write hooks for primitive save-sites (company-brain WU-1.7).

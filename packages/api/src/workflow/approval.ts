@@ -17,27 +17,26 @@
 import type { ApprovalDeliveryChannel } from '../db/pending-approvals-store.js'
 import { assertCurrentAuthority } from '../context-scope/authority-lease.js'
 import { query } from '../db/client.js'
+import type { JobStore } from '@use-brian/core/scheduling/types.js'
+import type { ExecutorDeps } from '@use-brian/core/workflow/executor.js'
 import type {
-  ExecutorDeps,
-  JobStore,
-  Tool,
-  ToolContext,
   WorkflowRecord,
   WorkflowRunRecord,
   WorkflowRunStore,
   WorkflowStepRunRecord,
   WorkflowStore,
-} from '@use-brian/core'
+} from '@use-brian/core/workflow/types.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { crmOperationsSha256 } from '@use-brian/core/crm/operations-types.js'
 import {
   advanceWorkflowRun,
-  executionToolContext,
   resolveExternalClientWorkflowPrincipal,
-  ContextScopeAccumulator,
-  stepSuccessors,
   WORKFLOW_SCOPE_EVIDENCE_VAR,
-  deliverToolCallNotification,
-  crmOperationsSha256,
-} from '@use-brian/core'
+} from '@use-brian/core/workflow/executor.js'
+import { stepSuccessors } from '@use-brian/core/workflow/graph.js'
+import { deliverToolCallNotification } from '@use-brian/core/workflow/tool-delivery.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import type { WorkspaceAuditStore } from '../db/workspace-audit-store.js'
 import type { PendingApprovalsStore, PendingApproval } from '../db/pending-approvals-store.js'
 import type { RecentApprovalResolver, RecentApprovalTarget } from './recent-approval-channel.js'

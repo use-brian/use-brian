@@ -5,7 +5,8 @@
  * Brian renders); this module owns only the Document-specific contract: the
  * canonical DOCX export in, the layout page-count gate out.
  */
-import { PDFDocument } from '@cantoo/pdf-lib'
+import type { PDFDocument } from '@cantoo/pdf-lib'
+import { lazyImplementation } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
 import { layoutOfficeArtifact } from '@use-brian/office-renderer'
 import type { DocumentSnapshot } from '@use-brian/office-model'
 import type { OfficeResourceResolver } from '../package.js'
@@ -17,6 +18,9 @@ import {
   renderedPdfPageCount,
   type LibreOfficeRun,
 } from '../../files/libreoffice.js'
+
+// The PDF engine loads on the first page-size repair, not with the Office modules (M4 step 5).
+const loadPdfLib = lazyImplementation('The PDF writer (pdf-lib)', () => import('@cantoo/pdf-lib'))
 
 export type DocumentPdfIssueCode = 'converter_unavailable' | 'timeout' | 'invalid_pdf' | 'page_count_mismatch'
 export type DocumentPdfIssue = { severity: 'error'; code: DocumentPdfIssueCode; message: string }
@@ -70,8 +74,9 @@ const MESSAGES: Record<DocumentPdfIssueCode, string> = {
  * Keep the authored canvas without moving text or link annotations relative to
  * its upper-left corner. This repairs sub-point rounding only, not reflow. */
 async function restoreDocumentPdfPageSizes(bytes: Uint8Array, pages: Array<{ widthPt: number; heightPt: number }>): Promise<Uint8Array> {
+  const { PDFDocument: PdfDocument } = await loadPdfLib()
   let pdf: PDFDocument
-  try { pdf = await PDFDocument.load(bytes, { updateMetadata: false }) }
+  try { pdf = await PdfDocument.load(bytes, { updateMetadata: false }) }
   catch (cause) { throw new DocumentPdfFailure('invalid_pdf', { cause }) }
   if (pdf.getPageCount() !== pages.length) throw new DocumentPdfFailure('invalid_pdf')
   let changed = false

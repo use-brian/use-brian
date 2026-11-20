@@ -42,6 +42,11 @@ export type NotifyTelegramLinked = (
 export type EmailAuthDeps = {
   /** Optional Outpost owner adoption, invoked only after native email verification. */
   resolveVerifiedEmailUser?: (email: string) => Promise<User | null>
+  /** An edition-owned account continuation. It runs only for a verified email. */
+  verifiedContinuation?: {
+    matches(nextPath: string): boolean
+    resolve(params: { email: string; nextPath: string; timezone?: string }): Promise<{ user: User; isNew: boolean } | null | undefined>
+  }
   magicLinkStore?: MagicLinkStore
   smtpClient?: SmtpClient
   /** Used to build the verify URL embedded in the email — e.g. `https://usebrian.ai`. */
@@ -455,7 +460,8 @@ export function authRoutes(
     }
 
     const nextPath =
-      typeof body.nextPath === 'string' && isAllowedNextPath(body.nextPath, emailAuth.allowedReturnOrigins)
+      typeof body.nextPath === 'string' && (isAllowedNextPath(body.nextPath, emailAuth.allowedReturnOrigins)
+        || emailAuth.verifiedContinuation?.matches(body.nextPath))
         ? body.nextPath
         : undefined
 
@@ -508,7 +514,7 @@ export function authRoutes(
       // magic-link flow".
       const link =
         `${appUrl.replace(/\/$/, '')}/login/verify?token=${encodeURIComponent(token)}&lang=${locale}` +
-        (nextPath ? `&next=${encodeURIComponent(nextPath)}` : '') +
+        (nextPath && !emailAuth.verifiedContinuation?.matches(nextPath) ? `&next=${encodeURIComponent(nextPath)}` : '') +
         (addAccount ? '&addAccount=1' : '')
 
       // Fire-and-forget: we don't block the response on SMTP. If sending
@@ -577,6 +583,7 @@ export function authRoutes(
       sessions,
       undefined,
       emailAuth.resolveVerifiedEmailUser,
+      emailAuth.verifiedContinuation,
     )
   })
 
@@ -653,6 +660,7 @@ export function authRoutes(
       sessions,
       tgLink,
       emailAuth.resolveVerifiedEmailUser,
+      emailAuth.verifiedContinuation,
     )
   })
 
@@ -1298,14 +1306,19 @@ async function respondWithEmailSession(
     notifyTelegramLinked: NotifyTelegramLinked | undefined
   },
   resolveVerifiedEmailUser?: (email: string) => Promise<User | null>,
+  verifiedContinuation?: EmailAuthDeps['verifiedContinuation'],
 ): Promise<void> {
   try {
     const onboarding = await applicationOnboardingFromNextPath(consumed.nextPath, jwtSecret)
     if (onboarding === 'invalid') { res.status(400).json({ error: 'application_signin_unavailable' }); return }
-    const adopted = onboarding === 'application' ? null : await resolveVerifiedEmailUser?.(consumed.email)
-    const { user, isNew } = adopted
+    const continuation = consumed.nextPath && verifiedContinuation?.matches(consumed.nextPath)
+      ? await verifiedContinuation.resolve({ email: consumed.email, nextPath: consumed.nextPath, timezone: captureTz })
+      : undefined
+    if (continuation === null) { res.status(410).json({ error: 'email_continuation_unavailable' }); return }
+    const adopted = continuation || onboarding === 'application' ? null : await resolveVerifiedEmailUser?.(consumed.email)
+    const { user, isNew } = continuation ?? (adopted
       ? { user: adopted, isNew: false }
-      : await findOrCreateEmailUser(consumed.email, captureTz, onboarding)
+      : await findOrCreateEmailUser(consumed.email, captureTz, onboarding))
 
     let linkWarning: string | undefined
     if (tgLink) {

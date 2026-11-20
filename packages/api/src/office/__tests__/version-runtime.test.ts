@@ -1,4 +1,4 @@
-import { bindScopeSource } from '@use-brian/core'
+import { bindScopeSource } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { createHash } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { documentSnapshot } from '../../../../core/src/office/__tests__/fixtures.js'

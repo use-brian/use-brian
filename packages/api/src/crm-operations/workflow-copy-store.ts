@@ -1,15 +1,17 @@
 /** Durable outcome reads before returning copied content. [COMP:crm/privacy-copies] */
-import { intersectAccessCeilings, type AccessCeiling, type ScopeEvidence, type WorkflowRunOutcome } from '@use-brian/core'
+import type { WorkflowRunOutcome } from '@use-brian/core/workflow/types.js'
+import { intersectAccessCeilings, type AccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import type { ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
 import type { PoolClient } from 'pg'
 import { getPool, applyRLSGucs } from '../db/client.js'
 import { acquireCrmPrivacyWriterAdmission } from './privacy-admission.js'
 import { parseWorkflowCopyEvidence } from '../context-scope/workflow-input-evidence.js'
-import { validateAudienceScopeEvidence } from '../context-scope/caller-evidence.js'
+import { validateWorkflowOutcomeAudience } from '../context-scope/caller-evidence.js'
 import { currentAgentAccess } from '../db/agent-access-context.js'
 import { resolveOperationCeilingsSystem } from '../db/workspace-store.js'
 import { loadDepartmentSnapshot, resolveDepartmentReadGrant } from '../context-scope/department-resolver.js'
 
-async function outcomeEvidenceAllowed(client: PoolClient, workspaceId: string, userId: string, evidence: ScopeEvidence): Promise<boolean> {
+async function outcomeEvidenceAllowed(client: PoolClient, workspaceId: string, userId: string, sourceRunId: string, evidence: ScopeEvidence): Promise<boolean> {
   try {
     const ambient = currentAgentAccess()
     if (ambient?.workspaceId !== undefined && ambient.workspaceId !== workspaceId
@@ -36,7 +38,7 @@ async function outcomeEvidenceAllowed(client: PoolClient, workspaceId: string, u
       mutationCompartments:ambient.mutationCompartments === undefined ? ambient.compartments === undefined ? [] : ambient.compartments : ambient.mutationCompartments,
       projectIds:ambient.projectIds ?? null,visibilityAssistantIds:ambient.visibilityAssistantIds ?? null,
       ...(ambient.departmentRead ? {departmentRead:ambient.departmentRead} : {})})
-    await validateAudienceScopeEvidence(evidence,ceiling,client)
+    await validateWorkflowOutcomeAudience(evidence,ceiling,client,sourceRunId)
     return true
   } catch { return false }
 }
@@ -67,7 +69,7 @@ export async function readWorkflowOutcomeWithLineage(workflowId:string,runId:str
     const admitted=async()=>(await client.query<{allowed:boolean}>(
       'SELECT workflow_run_department_visible($1) AND workflow_run_department_visible($2) AS allowed',
       [runId,source.id])).rows[0]?.allowed===true
-    if(!await admitted() || !await outcomeEvidenceAllowed(client,target.workspace_id,target.actor,evidence)){await client.query('COMMIT');return null}
+    if(!await admitted() || !await outcomeEvidenceAllowed(client,target.workspace_id,target.actor,source.id,evidence)){await client.query('COMMIT');return null}
     const record=(await client.query<{id:string;fields:Record<string,unknown>;status:string;allowed:boolean}>(`
       SELECT id,fields,status,crm_scope_snapshot_allows(read_scope_review_source(workspace_id,'blueprint_record',id),workspace_id,$3,NULL,NULL) AS allowed FROM blueprint_records WHERE workspace_id=$1
         AND source_kind IN ('workflow','research') AND source_id=$2
@@ -89,7 +91,7 @@ export async function readWorkflowOutcomeWithLineage(workflowId:string,runId:str
       workflow_crm_scope_visible($1) AND workflow_crm_scope_visible($2)
       AND ($3::uuid IS NULL OR crm_scope_snapshot_allows(read_scope_review_source($4,'blueprint_record',$3),$4,$5,NULL,NULL)) AS allowed`,
       [runId,source.id,record?.id??null,target.workspace_id,target.actor])).rows[0]?.allowed
-    if(!await admitted()||currentSources!==true || !await outcomeEvidenceAllowed(client,target.workspace_id,target.actor,evidence)){await client.query('ROLLBACK');return null}
+    if(!await admitted()||currentSources!==true || !await outcomeEvidenceAllowed(client,target.workspace_id,target.actor,source.id,evidence)){await client.query('ROLLBACK');return null}
     await client.query('COMMIT')
     return outcome as WorkflowRunOutcome
   } catch {

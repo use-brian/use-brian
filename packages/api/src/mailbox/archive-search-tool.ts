@@ -11,8 +11,8 @@
  * search cannot read this archive.
  *
  * The embedder reaches the injector through a late-bound global seam
- * (`setGlobalMailboxArchiveDeps`, the agentmail provider pattern) so every
- * `injectMcpTools` call site gets the tool without a params-chain change;
+ * (`setGlobalMailboxArchiveDeps`) used by the mailbox catalog provider.
+ * The underlying hybrid recall implementation loads on the first execution;
  * with no embedder wired the vector arm soft-fails to ILIKE inside the
  * store fn.
  *
@@ -20,13 +20,18 @@
  */
 
 import { z } from 'zod'
-import { buildTool, inferExactExternalEmail, type Tool } from '@use-brian/core'
-import { searchEmailArchive } from '../db/email-archive-store.js'
+import { inferExactExternalEmail } from '@use-brian/core/tools/base/mailbox.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
+import { lazyFunction } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
+import type { searchEmailArchive } from '../db/email-archive-search.js'
+
+const searchArchive = lazyFunction('Mailbox archive search', async () =>
+  (await import('../db/email-archive-search.js')).searchEmailArchive)
 
 export type MailboxArchiveDeps = {
   /** Query embedder for the vector arm; omit to run ILIKE-only. */
   embedder?: { embed(texts: string[]): Promise<number[][]> }
-  /** Store override (tests). Defaults to the email-archive-store fn. */
+  /** Store override (tests). Defaults to the hybrid archive reader. */
   search?: typeof searchEmailArchive
 }
 
@@ -94,7 +99,7 @@ export type CreateArchiveSearchToolOptions = {
 }
 
 export function createSearchEmailArchiveTool(opts: CreateArchiveSearchToolOptions): Tool {
-  const search = opts.deps.search ?? searchEmailArchive
+  const search = opts.deps.search ?? searchArchive
   const accountInputShape: z.ZodRawShape = opts.boundAccount ? {} : { account: archiveAccountField }
   return buildTool({
     name: 'searchEmailArchive',

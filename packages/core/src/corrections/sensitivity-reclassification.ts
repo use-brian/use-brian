@@ -44,8 +44,8 @@
  *    recursion is driven here in the orchestrator with a cycle guard.
  */
 
-import type { Sensitivity } from '../security/sensitivity.js'
-import { RANK } from '../security/sensitivity.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { RANK } from '@use-brian/agent-runtime/security/sensitivity.js'
 
 // ── Discriminators ──────────────────────────────────────────────────
 

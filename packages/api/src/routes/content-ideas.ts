@@ -267,7 +267,7 @@ export function contentIdeasRoutes(
         if (idea.sessionId) {
           // Already promoted to a draft — hand back the existing session so a
           // double-click or a stale tab never forks a second one.
-          const sessions = await planningStore.listSessions({ assistantId })
+          const sessions = await planningStore.listSessions({ assistantId, userId: ctx.userId })
           const existing = sessions.find((s) => s.id === idea.sessionId)
           if (existing) {
             res.json({

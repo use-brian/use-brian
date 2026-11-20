@@ -17,9 +17,11 @@
 // text) short-circuit to markDone without chunking or decomposition — see
 // docs/architecture/brain/file-artifacts.md §"Explicitly NOT in v1".
 
-import type { FilesContext, FilesReadBytesResult, FilesResult, WorkspaceFile } from '@use-brian/core'
-import { parseFileContent } from '@use-brian/core'
+import type { FilesContext, FilesReadBytesResult, FilesResult } from '@use-brian/core/workspace-files/api.js'
+import type { WorkspaceFile } from '@use-brian/core/workspace-files/types.js'
+import { parseFileContent } from '@use-brian/core/files/parsers.js'
 import { getPool } from '../db/client.js'
+import { MAX_INGEST_PARSE_BYTES } from './ingest-port.js'
 import type { FileIngestJob } from '../db/file-ingest-jobs-store.js'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'
 import {
@@ -33,17 +35,6 @@ const DEFAULT_INTERVAL_MS = 15_000
 /** Worker-side cap on the parsed text a single artifact contributes. Beyond it
  *  the tail is dropped and `metadata.indexing.truncated` records where. */
 export const MAX_PARSED_CHARS = 2_000_000
-/**
- * Ceiling on what is INTERPRETED, as opposed to stored. The worker reads a
- * stored file whole into memory before parsing, and the office parsers hold
- * their own expansions beside it; the hosted worker runs at 1 GiB and an
- * Outpost API shares 4 GiB with five sibling services, so a multi-gigabyte
- * document would take the process down rather than fail its own job. Same
- * figure as `MAX_OFFICE_ARCHIVE_ENTRY_BYTES`. Enforced here (stat before
- * read) and at `POST /api/files/:fileId/ingest`, which answers `stored_only`
- * instead of queueing. Spec: files.md -> "Stored is not the same as analyzed".
- */
-export const MAX_INGEST_PARSE_BYTES = 128 * 1024 * 1024
 
 /** Head of the parsed text stored inline on the episode `content_ref` (the same
  *  16 KB budget the closed manual-paste content_ref uses). */

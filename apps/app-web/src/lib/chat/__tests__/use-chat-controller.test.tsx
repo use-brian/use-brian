@@ -3,7 +3,7 @@
 import { act, StrictMode, useEffect, useRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ChatControllerIdentity } from "@use-brian/chat-ui";
+import { useMessageStream, type ChatControllerIdentity } from "@use-brian/chat-ui";
 import {
   createChatControllerCoordinator,
   useChatController,
@@ -133,6 +133,7 @@ describe("[COMP:app-web/chat-controller] mounted React lifecycle", () => {
   let container: HTMLDivElement;
   let mounted = false;
   let latest: MountedController | undefined;
+  let latestStream: ReturnType<typeof useMessageStream> | undefined;
   let previousActEnvironment: PropertyDescriptor | undefined;
 
   beforeEach(() => {
@@ -142,6 +143,7 @@ describe("[COMP:app-web/chat-controller] mounted React lifecycle", () => {
     document.body.appendChild(container);
     root = createRoot(container);
     latest = undefined;
+    latestStream = undefined;
     mounted = true;
   });
   afterEach(async () => {
@@ -161,6 +163,7 @@ describe("[COMP:app-web/chat-controller] mounted React lifecycle", () => {
     const selected = useRef(sessionId);
     selected.current = sessionId;
     const controller = useChatController(() => selected.current);
+    latestStream = useMessageStream();
     latest = controller;
     useEffect(() => { onSetup?.(controller); }, [controller, onSetup]);
     return <output data-testid="controller-snapshot">{JSON.stringify(controller.state)}</output>;
@@ -352,4 +355,136 @@ describe("[COMP:app-web/chat-controller] mounted React lifecycle", () => {
     expect(abortStream).toHaveBeenCalledTimes(1);
     expect(container.textContent).toBe("");
   });
+
+  it("the real stream hook rejects an old completion after a successor takes the transport", async () => {
+    await render();
+    let output!: ReadableStreamDefaultController<Uint8Array>;
+    let unblock!: () => void;
+    const blocked = new Promise<void>(resolve => { unblock = resolve; });
+    const oldDone = vi.fn(), newDone = vi.fn();
+    const old = latestStream!.start({
+      url: "https://api.example/chat", body: {},
+      authFetch: async () => new Response(new ReadableStream<Uint8Array>({ start(controller) { output = controller; } })),
+      onEvent: async () => { await blocked; }, onDone: oldDone,
+    });
+    await act(async () => {
+      output.enqueue(new TextEncoder().encode(`event: reply_complete\ndata: {"turnId":"${"a".repeat(64)}"}\n\n`));
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+    const successor = latestStream!.start({
+      url: "https://api.example/chat", body: {},
+      authFetch: async () => new Response(`event: done\ndata: {"turnId":"${"b".repeat(64)}"}\n\n`),
+      onEvent: () => undefined, onDone: newDone,
+    });
+    await act(async () => {
+      unblock(); output.close(); await Promise.all([old, successor]);
+    });
+    expect(oldDone).not.toHaveBeenCalled();
+    expect(newDone).toHaveBeenCalledExactlyOnceWith({ event: "done", turnId: "b".repeat(64) });
+    expect(latestStream!.inFlight()).toBe(false);
+  });
+
+});
+
+/** Actual coordinator ownership boundary used by full/floating/Doc/Office/watch. */
+describe("[COMP:app-web/chat-controller] public turn receiving", () => {
+  const first = "a".repeat(64), next = "b".repeat(64);
+  const unavailable = async (): Promise<never> => { throw new Error("unavailable"); };
+  const deferred = <T,>() => {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>(done => { resolve = done; });
+    return { promise, resolve };
+  };
+
+  it.each(["turn_completed", "done", "reply_complete"])("does not let old %s clear a pending successor or its approval", async event => {
+    const controller = createChatControllerCoordinator(() => "session-a");
+    const old = controller.begin();
+    controller.bindTurn(old, first);
+    const successor = controller.begin();
+    controller.presentInteraction(successor, { kind: "question", approvalId: "successor-question", source: "live", status: "pending", payload: {} });
+    const accepted = await controller.receiveTurnEvent(successor, event, { turnId: first }, async () => ({ status: "idle", turnId: first }));
+    if (accepted) controller.complete(successor);
+    expect(accepted).toBe(false);
+    expect(controller.getSnapshot()).toMatchObject({ run: { phase: "suspended" }, interaction: { pending: { approvalId: "successor-question" } } });
+    expect(controller.claimExit(old)).toBe(false);
+  });
+
+  it("invalidates a delayed idle status ticket before the successor starts", async () => {
+    const controller = createChatControllerCoordinator(() => "session-a");
+    const follow = controller.capture();
+    const pending = deferred<{ status: string; turnId: string | null }>();
+    const oldRead = controller.receiveTurnEvent(follow, "status", { status: "idle" }, () => pending.promise);
+    const successor = controller.begin();
+    controller.bindTurn(successor, next);
+    pending.resolve({ status: "idle", turnId: first });
+    expect(await oldRead).toBe(false);
+    expect(controller.getSnapshot().run.phase).toBe("running");
+    expect(controller.getTurnId()).toBe(next);
+  });
+
+  it("fences terminal catch-up across a session switch during its fresh status read", async () => {
+    let selected = "session-a";
+    const controller = createChatControllerCoordinator(() => selected);
+    const identity = controller.capture(); controller.bindTurn(identity, first);
+    const pending = deferred<{ status: string; turnId: string | null }>();
+    const caughtUp = controller.receiveTurnEvent(identity, "status", { status: "idle", turnId: next }, () => pending.promise, false, true);
+    selected = "session-b"; const successor = controller.begin(); controller.bindTurn(successor, first);
+    pending.resolve({ status: "idle", turnId: next });
+    expect(await caughtUp).toBe(false);
+    expect(controller.getSnapshot().run).toMatchObject({ phase: "running", identity: successor });
+    expect(controller.getTurnId()).toBe(first);
+  });
+
+  it("cannot use delayed old terminal catch-up to settle a newer followed owner", async () => {
+    const controller = createChatControllerCoordinator(() => "session-a");
+    const identity = controller.capture(); controller.bindTurn(identity, first);
+    const pending = deferred<{ status: string; turnId: string | null }>();
+    const old = controller.receiveTurnEvent(identity, "status", { status: "idle", turnId: first }, () => pending.promise, false, true);
+    expect(await controller.receiveTurnEvent(identity, "status", { status: "running", turnId: next }, async () => ({ status: "running", turnId: next }))).toBe(true);
+    pending.resolve({ status: "idle", turnId: first });
+    expect(await old).toBe(false);
+    expect(controller.getTurnId()).toBe(next);
+    expect(controller.getSnapshot().run.phase).toBe("running");
+  });
+
+  it("requires current status before adopting a different room start and ignores old activity", async () => {
+    const controller = createChatControllerCoordinator(() => "session-a");
+    const follow = controller.capture();
+    expect(await controller.receiveTurnEvent(follow, "turn_started", { turnId: first }, async () => ({ status: "running", turnId: next }))).toBe(false);
+    expect(controller.getTurnId()).toBe(next);
+    expect(await controller.receiveTurnEvent(follow, "snapshot", { turnId: first, text: "obsolete" }, async () => ({ status: "running", turnId: next }))).toBe(false);
+    expect(await controller.receiveTurnEvent(follow, "turn_completed", { turnId: first }, async () => ({ status: "running", turnId: next }))).toBe(false);
+    expect(await controller.receiveTurnEvent(follow, "activity", { turnId: next }, unavailable)).toBe(true);
+  });
+
+  it("reconciles unknown legacy terminal frames freshly without mistaking running for idle", async () => {
+    const controller = createChatControllerCoordinator(() => "session-a");
+    const run = controller.begin();
+    controller.bindTurn(run, first);
+    expect(await controller.receiveTurnEvent(run, "done", {}, unavailable)).toBe(false);
+    expect(await controller.receiveTurnEvent(run, "done", {}, async () => ({ status: "running", turnId: first }))).toBe(false);
+    expect(await controller.receiveTurnEvent(run, "done", {}, async () => ({ status: "idle", turnId: first }))).toBe(true);
+    expect(await controller.receiveTurnEvent(run, "done", { turnId: "invalid" }, async () => ({ status: "idle", turnId: first }))).toBe(false);
+  });
+
+  it("supports a legacy direct terminal only after its captured fresh idle read", async () => {
+    const controller = createChatControllerCoordinator(() => "session-a");
+    const run = controller.begin();
+    expect(await controller.receiveTurnEvent(run, "status", { status: "idle" }, async () => ({ status: "idle", turnId: null }))).toBe(false);
+    expect(await controller.receiveTurnEvent(run, "done", {}, async () => ({ status: "idle", turnId: null }), true)).toBe(true);
+    controller.complete(run);
+    expect(controller.getSnapshot().run.phase).toBe("completed");
+  });
+});
+
+it("[COMP:app-web/chat-controller] a completed owner's delayed start and snapshot cannot restart its spinner", async () => {
+  const controller = createChatControllerCoordinator(() => "session-a");
+  const run = controller.capture(), turnId = "a".repeat(64);
+  controller.bindTurn(run, turnId);
+  expect(await controller.receiveTurnEvent(run, "turn_completed", { turnId }, async () => ({ status: "idle", turnId }))).toBe(true);
+  expect(controller.getSnapshot().run.phase).toBe("completed");
+  for (const event of ["turn_started", "snapshot", "activity"]) {
+    expect(await controller.receiveTurnEvent(run, event, { turnId }, async () => ({ status: "idle", turnId }))).toBe(false);
+  }
+  expect(controller.getSnapshot().run.phase).toBe("completed");
 });

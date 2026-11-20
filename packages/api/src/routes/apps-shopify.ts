@@ -43,10 +43,10 @@
 
 import { Router, type RequestHandler } from 'express'
 import { z } from 'zod'
-import type { Tool } from '@use-brian/core'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 import type { AppStoreScope } from '@use-brian/brian-app'
 import { makeBrainContextResolver } from '../brain-mcp/tools.js'
-import { baseToolName } from '../mcp/inject.js'
+import { baseToolName } from '../mcp/tool-names.js'
 import { getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
 
 /**

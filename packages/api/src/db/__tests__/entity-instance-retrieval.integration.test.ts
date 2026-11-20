@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import pg from 'pg'
-import type { RetrievalActor } from '@use-brian/core'
+import type { RetrievalActor } from '@use-brian/core/retrieval/types.js'
 
 /**
  * Integration tests for the Doc v1 `entity_instance` retrieval path —

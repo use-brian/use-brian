@@ -3,7 +3,7 @@ import {afterAll,describe,it,expect} from 'vitest'
 import {getPool,getAppPool,queryWithRLS} from '../../db/client.js'
 import {resumeOfficeGeneration,readOfficeGenerationRecovery} from '../generation-recovery.js'
 import {createOfficeTemplateDiscovery} from '../template-discovery.js'
-import type {ToolContext} from '@use-brian/core'
+import type {ToolContext} from '@use-brian/agent-runtime/tools/types.js'
 
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()

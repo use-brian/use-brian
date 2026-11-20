@@ -2,7 +2,7 @@
 import { createHash } from 'node:crypto'
 import { applicationGrantMaximumSchema, applicationGrantSchema, ApplicationPlatformError,
   type ApplicationAccessGrant, type ApplicationGrantMaximum, type ApplicationPrincipal } from '@use-brian/shared'
-import type { ApplicationAuthorityLayers, ApplicationGrantPath } from '@use-brian/core'
+import type { ApplicationAuthorityLayers, ApplicationGrantPath } from '@use-brian/core/application-platform/access.js'
 import { query } from '../db/client.js'
 import { getAuthenticatedApplicationCredentialCurrent, type AuthenticatedApplicationCredential } from './credentials.js'
 import { getAuthenticatedApplicationOAuthCurrent, type AuthenticatedApplicationOAuth } from './oauth-auth.js'
@@ -22,7 +22,7 @@ export interface ApplicationAuthorityState {
   serviceUserId?: string
   layers: ApplicationAuthorityLayers
   fingerprint: string
-  clearanceCap?: import('@use-brian/core').Sensitivity
+  clearanceCap?: import('@use-brian/agent-runtime/security/sensitivity.js').Sensitivity
 }
 function denied(): never { throw new ApplicationPlatformError('grant_revoked', 'Application access is unavailable.') }
 

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { createMemoryTools, type MemoryToolEvent } from '../tools.js'
-import { jsonSchemaFromZod } from '../../engine/query-loop.js'
-import { ContextScopeAccumulator } from '../../security/context-scope.js'
+import { jsonSchemaFromZod } from '@use-brian/agent-runtime/engine/query-loop.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import type { MemoryStore } from '../types.js'
 import type {
   EntityKind,
@@ -149,7 +149,7 @@ describe('[COMP:memory/tools] saveMemory', () => {
     vi.spyOn(store, 'getById').mockResolvedValue({id,scope:'shared',summary:'Fictional original',detail:'Original detail',tags:[],confidence:0.8,
       sensitivity:'internal',scopeVersion:'7',workspaceId:'workspace_1',userId:ctx.userId,assistantId:ctx.assistantId,compartments:[],projectIds:[]})
     const update = vi.spyOn(store, 'update').mockResolvedValue({id:'22222222-2222-4222-8222-222222222222',scope:'shared',summary:'Fictional original',detail:'Refinement',tags:[],confidence:0.8,sensitivity:'internal'})
-    const execution = { security: { access: { sharedAudience: false } } } as NonNullable<import('../../tools/types.js').ToolContext['executionContext']>
+    const execution = { security: { access: { sharedAudience: false } } } as NonNullable<import('@use-brian/agent-runtime/tools/types.js').ToolContext['executionContext']>
     const accumulator = new ContextScopeAccumulator()
     const result = await createMemoryTools(store).saveMemory.execute({id,detail:'Refinement'},
       {...ctx,workspaceId:'workspace_1',executionContext:execution,scopeAccumulator:accumulator})
@@ -301,7 +301,7 @@ describe('[COMP:memory/tools] saveMemory', () => {
     // The reported bug: research mode reads internal brain rows (brain-first)
     // before web research, bumping the per-turn accumulator, so public web
     // findings landed `internal`. Research provenance is the public web.
-    const { SensitivityAccumulator } = await import('../../security/sensitivity.js')
+    const { SensitivityAccumulator } = await import('@use-brian/agent-runtime/security/sensitivity.js')
     const accumulator = new SensitivityAccumulator()
     accumulator.note('internal')
 
@@ -315,7 +315,7 @@ describe('[COMP:memory/tools] saveMemory', () => {
   })
 
   it('keeps confidential a hard floor in research mode (no laundering)', async () => {
-    const { SensitivityAccumulator } = await import('../../security/sensitivity.js')
+    const { SensitivityAccumulator } = await import('@use-brian/agent-runtime/security/sensitivity.js')
     const accumulator = new SensitivityAccumulator()
     accumulator.note('confidential')
 
@@ -348,7 +348,7 @@ describe('[COMP:memory/tools] saveMemory', () => {
   })
 
   it('inherits the accumulator max on a normal (non-research) turn', async () => {
-    const { SensitivityAccumulator } = await import('../../security/sensitivity.js')
+    const { SensitivityAccumulator } = await import('@use-brian/agent-runtime/security/sensitivity.js')
     const accumulator = new SensitivityAccumulator()
     accumulator.note('internal')
 

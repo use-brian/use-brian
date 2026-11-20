@@ -1,19 +1,20 @@
 /**
  * Accepted Brief grounding and live revision boundaries on a migration-replayed
  * database (project-briefs.md -> "Grounding a turn", "Revision boundaries";
- * plan §7). Execution contexts come from the production resolver and the
- * runs go through the real prepare stage. Runs only through
- * scripts/crm/local-fixture.mjs.
+ * plan §7). Execution contexts come from the production resolver and each
+ * run goes through the real Brief preparation stage that the original turn
+ * owner's `prepareRun` captures (runtime policy first, the Brief below it;
+ * owner placement is covered by turn/__tests__/prepare.test.ts). Runs only
+ * through scripts/crm/local-fixture.mjs.
  */
 import { randomUUID } from 'node:crypto'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
-import { buildTool, type LLMProvider, type Tool } from '@use-brian/core'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { z } from 'zod'
 import { getAppPool, getPool } from '../../db/client.js'
 import { createProjectSharedStore } from '../../db/project-shared-store.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
-import { prepareAssistantRun } from '../../turn/prepare.js'
-import { BriefDirectionChangedError, configureBriefTurnContext, createGoalBriefBoundary, resolveBriefTurn } from '../context.js'
+import { BriefDirectionChangedError, captureBriefRunPreparation, configureBriefTurnContext, createGoalBriefBoundary, resolveBriefTurn } from '../context.js'
 import { ensureBrief, inspectBrief, proposeChange, selectDepartmentBriefs } from '../service.js'
 import { applyDirection, setBriefSyncClientForTests } from '../publication.js'
 import { maintainBriefContext } from '../maintenance.js'
@@ -54,13 +55,10 @@ const readTool = buildTool({ name: 'lookUp', description: 'test read', inputSche
   async execute() { return { data: { ok: true } } } })
 
 async function prepare(f: BriefFixture, opts: RunOpts, tools: Tool[] = [writeTool, readTool]) {
-  return prepareAssistantRun({
-    executionContext: await executionFor(f, opts),
-    model: { provider: {} as LLMProvider, model: 'test' },
-    candidateTools: new Map(tools.map(t => [t.name, t])),
-    bindTools: candidates => candidates,
-    trustedContributions: [{ name: 'runtime', content: 'runtime policy' }],
-  })
+  const brief = await captureBriefRunPreparation()(await executionFor(f, opts), new Map(tools.map(t => [t.name, t])))
+  const trusted = [{ name: 'runtime', content: 'runtime policy' }, ...(brief.contribution ? [brief.contribution] : [])]
+  return { tools: brief.tools, trustedContext: trusted.map(({ content }) => content.trim()).filter(Boolean).join('\n\n'),
+    contributionNames: { trusted: trusted.map(({ name }) => name) } }
 }
 
 const call = (run: Awaited<ReturnType<typeof prepare>>, name: string) => run.tools.get(name)!.execute({} as never, {} as never) as Promise<{ isError?: boolean; data: { error?: string } }>

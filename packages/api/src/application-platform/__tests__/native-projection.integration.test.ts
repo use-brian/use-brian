@@ -1,12 +1,13 @@
 import {readFileSync} from 'node:fs'
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
-import {bindScopeSources,boundScopeSources,type TopicClassification} from '@use-brian/core'
+import type {TopicClassification} from '@use-brian/core/memory/topic-classifier.js'
+import {bindScopeSources, boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {getAppPool,getPool,applyRLSGucs,rollbackAndRelease,runWithAgentAccess} from '../../db/client.js'
 import {addSessionMessage} from '../../db/sessions.js'
-import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
+import {readAdmittedSessionQuery} from '../../db/conversation-store.js'
 import {writeSessionMessageAnnotation} from '../../db/session-message-annotations.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
-import {publishNativeSessionMessageBatch} from '../../db/session-message-publication.js'
+import {publishNativeSessionMessageBatch} from '../../db/conversation-store.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
 const{assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -26,7 +27,7 @@ describe.sequential('[COMP:api/application-persistence] native query capture equ
   try{return await runWithAgentAccess(execution.security.access,async()=>{
    await execution.security.authority.assertCurrent();await db.query('BEGIN');await applyRLSGucs(db,f.firstId)
    const args=[f.workspaceId,f.session.id,through,type]
-   const sql=type==='session_message'?'SELECT * FROM read_native_application_session_history($1,$2,$3)':'SELECT * FROM read_native_application_session_topics($1,$2,$3)'
+   const sql=type==='session_message'?'SELECT jsonb_array_elements(capture_conversation_query($1,$2,$3,NULL) #> ARRAY[\'history\']) AS value':'SELECT jsonb_array_elements(capture_conversation_query($1,$2,NULL,$3) #> ARRAY[\'annotations\']) AS value'
    const actual=(await db.query(sql,args.slice(0,3))).rows
    const expected=(await db.query('SELECT * FROM fixture_r3_original_projection($1,$2,$3,$4)',args)).rows
    expect(actual).toEqual(expected);await db.query('COMMIT');await execution.security.authority.assertCurrent();return actual
@@ -77,11 +78,11 @@ describe.sequential('[COMP:api/application-persistence] native query capture equ
   try{await expect(db.query('SELECT capture_native_session_projection_batch($1,$2,3,$3)',[f.workspaceId,f.session.id,'session_message'])).rejects.toMatchObject({code:'42501'})}finally{db.release()}
   expect(await compare(f,3)).toHaveLength(4)
  })
- it('falls back when the original canonical ancestry contract is extended',async()=>{
+ it('refuses capture when the canonical ancestry contract is extended',async()=>{
   const f=await setup(),original=(await f.pool.query<{definition:string;body:string}>("SELECT pg_get_functiondef(p.oid) AS definition,p.prosrc AS body FROM pg_proc p WHERE p.oid='public.application_canonical_ancestry_allowed(uuid,text,uuid,text,boolean)'::regprocedure")).rows[0]
   try{
    await f.pool.query(original.definition.replace(original.body,original.body.replace('BEGIN',"BEGIN\n IF k='session_message' THEN RETURN false;END IF;")))
-   await expect(readAdmittedSessionQuery({sessionId:f.session.id,throughSequence:3,authority:await f.modelContext(f.firstId)})).rejects.toMatchObject({message:'scope_operation_denied'})
+   await expect(readAdmittedSessionQuery({sessionId:f.session.id,throughSequence:3,authority:await f.modelContext(f.firstId)})).rejects.toMatchObject({message:'scope_source_changed'})
   }finally{await f.pool.query(original.definition)}
   expect(await compare(f,3)).toHaveLength(4)
  })
@@ -94,7 +95,7 @@ describe.sequential('[COMP:api/application-persistence] native query capture equ
   const original=(await f.pool.query<{definition:string}>("SELECT pg_get_functiondef('public.application_canonical_ancestry_allowed(uuid,text,uuid,text,boolean)'::regprocedure) AS definition")).rows[0]
   try{
    await f.pool.query("ALTER FUNCTION application_canonical_ancestry_allowed(uuid,text,uuid,text,boolean) SET app.agent_clearance='public'")
-   await expect(readAdmittedSessionQuery({sessionId:f.session.id,throughSequence:4,authority:await f.modelContext(f.firstId)})).rejects.toMatchObject({message:'scope_operation_denied'})
+   await expect(readAdmittedSessionQuery({sessionId:f.session.id,throughSequence:4,authority:await f.modelContext(f.firstId)})).rejects.toMatchObject({message:'scope_source_changed'})
   }finally{await f.pool.query(original.definition);await f.pool.query('ALTER FUNCTION application_canonical_ancestry_allowed(uuid,text,uuid,text,boolean) RESET app.agent_clearance')}
   expect(await compare(f,4)).toHaveLength(5)
  })

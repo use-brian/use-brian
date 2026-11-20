@@ -2,24 +2,33 @@ import {bindPrivateTranscriptCredential} from '../db/private-transcript.js'
 /** Trusted API construction for the core execution-context contract. */
 
 import {
-  createExecutionContext,
   intersectAccessCeilings,
   pinAccessCeiling,
-  scopeGrantContains,
   type AccessCeiling,
+} from '@use-brian/agent-runtime/security/access-ceiling.js'
+import {
+  scopeGrantContains,
+  type ScopeEvidence,
+} from '@use-brian/agent-runtime/security/context-scope.js'
+import {
+  createExecutionContext,
   type CreateExecutionContextInput,
-  type CurrentAuthorityBoundary,
   type ExecutionContext,
   type ResolvedExecutionAccess,
-  type ScopeEvidence,
-} from '@use-brian/core'
+} from '@use-brian/agent-runtime/security/execution-context.js'
+import type { CurrentAuthorityBoundary } from '@use-brian/agent-runtime/tools/types.js'
 import {
   createAuthorityLease,
   createSessionAuthorityLease,
   AuthorityChangedError,
+  sessionReadBindingCurrent,
+  sessionScopeDependencies,
   type SessionAuthoritySnapshot,
 } from './authority-lease.js'
-import { pinPolicyEpoch } from './policy-epoch.js'
+import { pinPolicyEpoch, policyEpochFromCurrentSnapshot } from './policy-epoch.js'
+import { readSessionAuthorityFacts } from './session-authority-facts.js'
+import { conversationReadersActive } from '../db/conversation-visibility.js'
+import { usesStoredPrivateChat } from '../session-kind.js'
 import { roomAudienceCeiling } from '../routes/_room-binding.js'
 import { findAssistantById } from '../db/users.js'
 import {authSessionStore} from '../db/auth-session-store.js'
@@ -45,6 +54,8 @@ export type ResolveExecutionContextInput = ResolveTurnScopeInput & {
   /** Required for attended/public session runs; absent for request-scoped MCP/system jobs. */
   sessionAuthority?: SessionAuthoritySnapshot
   nativeSessionCredential?:{userId:string;sessionId:string;authVersion:number}
+  /** The route resolved an existing attended session under the canonical read gate. */
+  existingAttendedSession?: boolean
   credentialCurrent?: () => Promise<boolean>
   /** Optional recipient/surface ceiling that may only narrow this execution. */
   maximumAccess?: AccessCeiling
@@ -131,6 +142,35 @@ function boundTurnScope(
   }
 }
 
+/** A finite native start snapshot supplies only scope construction facts;
+ * the existing authority lease freshly verifies later effects. */
+async function readPrivateSessionStart(input:ResolveExecutionContextInput, workspaceId:string|null,
+  deps:ResolveExecutionContextDeps) {
+  const session = input.sessionAuthority, credential = input.nativeSessionCredential
+  if (!input.existingAttendedSession || !conversationReadersActive() || Object.keys(deps).length
+    || !workspaceId || !session || !credential || !input.session || input.sharedAudience || input.ignoreSessionBinding
+    || input.credentialCurrent || input.maximumAccess || input.maximumAccessCurrent || input.pinnedWriteDefaults
+    || input.surface?.systemRead || (input.memberMode !== undefined && input.memberMode !== 'member' && input.memberMode !== 'enforce')
+    || input.identity.kind !== 'attended' || input.identity.principal.kind !== 'workspace_member'
+    || input.identity.principal.authenticationKind !== 'native_session' || input.identity.principal.userId !== input.userId
+    || input.ownership.kind !== 'workspace' || input.ownership.workspaceId !== workspaceId
+    || input.lifecycle.sessionId !== session.id || input.lifecycle.channelType !== 'web'
+    || !usesStoredPrivateChat(session) || session.anchorRef != null
+    || session.userId !== input.userId || session.assistantId !== input.assistant.id
+    || (input.session.contextGroupId ?? null) !== session.contextGroupId
+    || (input.session.contextProjectId ?? null) !== session.contextProjectId) return null
+
+  const identity = {workspaceId,principalId:input.userId,assistantId:input.assistant.id}
+  const facts = await readSessionAuthorityFacts({workspaceId,userId:input.userId,assistantId:input.assistant.id,
+    sessionId:session.id,credential,includeDepartments:true,includePolicy:true})
+  if (!facts.session || !facts.assistant || !facts.member || !facts.credentialCurrent
+    || !sessionReadBindingCurrent(session,facts.session) || facts.assistant.workspaceId !== workspaceId
+    || facts.assistant.id !== input.assistant.id
+    || (facts.member.departmentReadV2 === 'true' && !facts.department)) throw new AuthorityChangedError()
+  return { assistant:facts.assistant, policy:policyEpochFromCurrentSnapshot(identity,facts.policy),
+    scopeDependencies:sessionScopeDependencies(facts) }
+}
+
 /** Resolve current trusted scope and attach the existing sticky live lease. */
 export async function resolveExecutionContextSystem(
   input: ResolveExecutionContextInput,
@@ -141,17 +181,18 @@ export async function resolveExecutionContextSystem(
     input={...input,nativeSessionCredential:Object.freeze(structuredClone(input.nativeSessionCredential))}
   }
   const workspaceId = input.workspaceId ?? input.assistant.workspaceId
-  const policyCurrent = workspaceId ? await (deps.pinPolicyEpoch ?? pinPolicyEpoch)({
+  const nativeStart = await readPrivateSessionStart(input,workspaceId,deps)
+  const policyCurrent = nativeStart?.policy ?? (workspaceId ? await (deps.pinPolicyEpoch ?? pinPolicyEpoch)({
     workspaceId, principalId: input.userId, assistantId: input.assistant.id,
-  }) : undefined
+  }) : undefined)
   if (workspaceId) {
-    const assistant = await (deps.resolveAssistant ?? findAssistantById)(input.assistant.id)
+    const assistant = nativeStart?.assistant ?? await (deps.resolveAssistant ?? findAssistantById)(input.assistant.id)
     if (!assistant || assistant.workspaceId !== workspaceId) throw new AuthorityChangedError()
     input = { ...input, assistant }
   }
   const resolveScope = deps.resolveScope ?? resolveTurnScopeSystem
   const resolveLive = deps.resolveLive ?? resolveLiveAccessCeilingSystem
-  const scopeDeps: ResolveTurnScopeDeps = {
+  const scopeDeps: ResolveTurnScopeDeps = nativeStart?.scopeDependencies ?? {
     store: deps.store,
     resolveReadCeilings: deps.resolveReadCeilings,
     resolveWorkspaceRole: deps.resolveWorkspaceRole,
@@ -207,7 +248,7 @@ export async function resolveExecutionContextSystem(
     clientSelfMemory: input.surface?.clientSelfMemory,
   }
   const starting = boundedStartingCeiling(access, input.identity)
-  if (policyCurrent && !(await policyCurrent())) throw new AuthorityChangedError()
+  if (!nativeStart && policyCurrent && !(await policyCurrent.isCurrent())) throw new AuthorityChangedError()
   const authority = input.sessionAuthority
     ? (deps.createSessionLease ?? createSessionAuthorityLease)({
         starting,
@@ -223,7 +264,7 @@ export async function resolveExecutionContextSystem(
         nativeSessionCredential: input.nativeSessionCredential,
         credentialCurrent: input.credentialCurrent,
         maximumAccessCurrent: input.maximumAccessCurrent,
-        policyCurrent,
+        policy: policyCurrent,
       })
     : (deps.createLease ?? createAuthorityLease)(starting, async () => {
         if (input.credentialCurrent && !(await input.credentialCurrent())) return null
@@ -237,7 +278,7 @@ export async function resolveExecutionContextSystem(
         return maximum
           ? intersectAccessCeilings(current, { ...maximum, userId: current.userId })
           : null
-      }, policyCurrent)
+      }, policyCurrent ? () => policyCurrent.isCurrent() : undefined)
 
   const result = {
     turnScope,

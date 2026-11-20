@@ -26,11 +26,11 @@
 
 import type { AnalyticsLogger } from '../analytics/logger.js'
 import { sanitize } from '../analytics/logger.js'
-import { collectStream } from '../providers/accumulator.js'
-import type { LLMProvider, TokenUsage } from '../providers/types.js'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
+import type { LLMProvider, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
 import type { DecisionExecutionPort, DecisionResponse } from '../decisions/index.js'
-import type { Sensitivity } from '../security/sensitivity.js'
-import { RANK, isSensitivity } from '../security/sensitivity.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { RANK, isSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 
 import { SPOTLIGHT_RULE, spotlightContent } from './spotlight.js'
 

@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { CrmOperationsContext, FilesApi } from '@use-brian/core'
-import { CrmOperationsError } from '@use-brian/core'
+import type { CrmOperationsContext } from '@use-brian/core/crm/operations-types.js'
+import type { FilesApi } from '@use-brian/core/workspace-files/api.js'
+import { CrmOperationsError } from '@use-brian/core/crm/operations-types.js'
 
 const mocks = vi.hoisted(() => ({ query: vi.fn(), createContact: vi.fn(), updateContact: vi.fn(),
   transactionQuery: vi.fn(), connect: vi.fn(), release: vi.fn(), applyRLSGucs: vi.fn(), lockCredential: vi.fn(), readCredential: vi.fn() }))
@@ -18,7 +19,6 @@ vi.mock('../../db/client.js', () => {const pool={
     if(sql.includes('pg_catalog.pg_roles'))return Promise.resolve({rows:[{bypass:false}]})
     if(sql.includes("nullif(current_setting('app.current_user_id'"))return Promise.resolve({rows:[{userId:'22222222-2222-4222-8222-222222222222'}]})
     if (/^(BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE SAVEPOINT)/.test(sql) || sql.includes("set_config('app.system_bypass'") || sql.includes('pg_advisory_xact_lock')) return Promise.resolve({ rows: [] })
-    if (sql.startsWith('SELECT 1 FROM workspace_modules WHERE workspace_id=$1 AND module_key=$2 FOR SHARE')) return Promise.resolve({ rows: [] })
     if (sql.startsWith('SELECT id FROM workspaces WHERE id=$1 AND department_read_v2 FOR UPDATE')) return Promise.resolve({ rows: [] })
     if (sql.includes('SELECT role FROM workspace_members')) return Promise.resolve({ rows: [{ role: 'admin' }] })
     return mocks.query(sql, values)
@@ -114,16 +114,14 @@ describe('[COMP:crm/production-import] production CRM import', () => {
   const credentialPrecheckSql = 'SELECT id,created_by_user_id AS "userId",'
   const statementTimeout = () => Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' })
 
-  it.each(['module', 'workspace'])('retries one rolled-back %s admission wait with fresh job and member checks', async (gate) => {
+  it('retries one rolled-back workspace admission wait with fresh job and member checks', async () => {
     const service = cancellationService()
     const trace: string[] = []
     mocks.connect.mockImplementation((id: number) => trace.push(`connect:${id}`))
     mocks.release.mockImplementation((id: number) => trace.push(`release:${id}`))
-    const selectedGate = gate === 'workspace' ? admissionSql
-      : 'SELECT 1 FROM workspace_modules WHERE workspace_id=$1 AND module_key=$2 FOR SHARE'
     mocks.transactionQuery.mockImplementation(async (sql: string, _values: unknown[], connectionId: number) => {
       trace.push(`${connectionId}:${sql}`)
-      if (connectionId === 0 && sql === selectedGate) throw statementTimeout()
+      if (connectionId === 0 && sql === admissionSql) throw statementTimeout()
     })
     const originalContext = structuredClone(context)
     await expect(service.cancel(context, jobId)).resolves.toMatchObject({ id: jobId, status: 'cancelled' })

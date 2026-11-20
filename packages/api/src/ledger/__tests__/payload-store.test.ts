@@ -16,8 +16,12 @@ const db = vi.hoisted(() => {
   const payloads = new Map<string, { storageRef: string; erasedAt: Date | null; mediaType: string }>()
   return {
     payloads,
+    reads: [] as string[][],
+    inserts: [] as string[][],
     reset() {
       payloads.clear()
+      this.reads.length = 0
+      this.inserts.length = 0
     },
   }
 })
@@ -26,15 +30,23 @@ vi.mock('../../db/turn-ledger-store.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../../db/turn-ledger-store.js')>()
   return {
     ...orig,
-    payloadExists: vi.fn(async (ws: string | null | undefined, hash: string) =>
-      db.payloads.has(`${ws ?? 'global'}:${hash}`),
-    ),
-    insertPayloadIndex: vi.fn(async (p: { workspaceId?: string | null; hash: string; storageRef: string; mediaType: string }) => {
-      db.payloads.set(`${p.workspaceId ?? 'global'}:${p.hash}`, {
-        storageRef: p.storageRef,
-        erasedAt: null,
-        mediaType: p.mediaType,
+    getPayloadIndexStates: vi.fn(async (ws: string | null | undefined, hashes: string[]) => {
+      db.reads.push(hashes)
+      return hashes.flatMap((hash) => {
+        const row = db.payloads.get(`${ws ?? 'global'}:${hash}`)
+        return row ? [{ hash, erasedAt: row.erasedAt }] : []
       })
+    }),
+    insertPayloadIndexes: vi.fn(async (payloads: Array<{ workspaceId?: string | null; hash: string; storageRef: string; mediaType: string }>) => {
+      db.inserts.push(payloads.map((p) => p.hash))
+      const inserted: string[] = []
+      for (const p of payloads) {
+        const key = `${p.workspaceId ?? 'global'}:${p.hash}`
+        if (db.payloads.has(key)) continue
+        db.payloads.set(key, { storageRef: p.storageRef, erasedAt: null, mediaType: p.mediaType })
+        inserted.push(p.hash)
+      }
+      return inserted
     }),
     getPayloadIndexRow: vi.fn(async (ws: string | null | undefined, hash: string) => {
       const row = db.payloads.get(`${ws ?? 'global'}:${hash}`)
@@ -124,6 +136,63 @@ describe('[COMP:api/ledger-payload-store] content addressing', () => {
 
 describe('[COMP:api/ledger-payload-store] GCS-interface driver (fake)', () => {
   beforeEach(() => db.reset())
+
+  it('batches unique hashes while retaining duplicates, order, scope and tombstones', async () => {
+    const gcs = fakeGcsClient()
+    const store = createLedgerPayloadStore(gcs.client)
+    const old = await store.put({ workspaceId: 'ws1', content: 'erased' })
+    await store.erase('ws1', [old])
+    db.reads.length = 0
+    const refs = await store.putMany!([
+      { workspaceId: 'ws1', content: 'new' }, { workspaceId: 'ws1', content: 'erased' },
+      { workspaceId: 'ws1', content: 'new' }, { workspaceId: 'ws2', content: 'new' },
+    ])
+    expect(refs).toEqual(['new', 'erased', 'new', 'new'].map(hashPayload))
+    expect(gcs.writes).toBe(3)
+    expect(await store.get('ws1', old)).toEqual({ erased: true })
+    expect(gcs.objects.has(ledgerStorageKey('ws1', old))).toBe(false)
+    expect(db.reads.map((r) => r.length)).toEqual([2, 1])
+    await store.putMany!([{ workspaceId: 'ws1', content: 'new' }])
+    expect(gcs.writes).toBe(3)
+  })
+
+  it('indexes the confirmed prefix before reporting a later blob failure', async () => {
+    const gcs = fakeGcsClient()
+    const write = gcs.client.writeBlob.bind(gcs.client)
+    gcs.client.writeBlob = async (...args) => {
+      if (args[0].endsWith(hashPayload('fails'))) throw new Error('blob unavailable')
+      return write(...args)
+    }
+    const store = createLedgerPayloadStore(gcs.client)
+    await expect(store.putMany!(['first', 'fails', 'last'].map((content) => ({ workspaceId: 'ws1', content })))).rejects.toThrow('blob unavailable')
+    expect(await store.get('ws1', hashPayload('first'))).toMatchObject({ content: 'first' })
+    expect(await store.get('ws1', hashPayload('fails'))).toBeNull()
+    expect(await store.get('ws1', hashPayload('last'))).toBeNull()
+    expect(db.inserts).toEqual([[hashPayload('first')]])
+  })
+
+  it('does not resurrect bytes when a concurrent erased row wins the insert', async () => {
+    const gcs = fakeGcsClient()
+    const write = gcs.client.writeBlob.bind(gcs.client)
+    gcs.client.writeBlob = async (...args) => {
+      await write(...args)
+      db.payloads.set(`ws1:${hashPayload('raced')}`, { storageRef: args[0], erasedAt: new Date(), mediaType: 'application/json' })
+    }
+    const store = createLedgerPayloadStore(gcs.client)
+    await store.putMany!([{ workspaceId: 'ws1', content: 'raced' }])
+    expect(await store.get('ws1', hashPayload('raced'))).toEqual({ erased: true })
+    expect(gcs.objects.size).toBe(0)
+  })
+
+  it('bounds set-wise reads and inserts for a thousand distinct messages', async () => {
+    const gcs = fakeGcsClient()
+    const store = createLedgerPayloadStore(gcs.client)
+    const inputs = Array.from({ length: 1000 }, (_, n) => ({ workspaceId: 'ws1', content: `message ${n}` }))
+    expect(await store.putMany!(inputs)).toEqual(inputs.map((p) => hashPayload(p.content)))
+    expect(db.reads.map((r) => r.length)).toEqual([512, 488])
+    expect(db.inserts.map((r) => r.length)).toEqual([512, 488])
+    expect(gcs.writes).toBe(1000)
+  })
 
   it('put writes the object then the index row, and dedups by hash', async () => {
     const gcs = fakeGcsClient()

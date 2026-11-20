@@ -109,19 +109,73 @@ test('[COMP:api/migration-execution-sql] refuses unknown consumers outside publi
 })
 
 test('[COMP:api/migration-execution-sql] authenticates every adapted immutable source and leaves other migrations alone', async () => {
-  let count = 0
+  const adaptedFiles: number[] = []
   for (const name of await readdir(migrations)) {
     if (!name.endsWith('.sql')) continue
     const sql = await readFile(new URL(name, migrations), 'utf8')
-    if (!sql.includes('FOR caller IN SELECT p.oid,p.prosrc FROM pg_proc p')) continue
-    assert.notEqual(toMigrationExecutionSql(sql, name), sql)
+    const executable = toMigrationExecutionSql(sql, name)
+    if (executable === sql) {
+      // A matching loop in an unreviewed migration does not
+      // authorize an execution rewrite or enroll its bytes as historical SQL.
+      assert.equal(toMigrationExecutionSql(sql + '\n', name), sql + '\n')
+      continue
+    }
     assert.equal(sql.match(/^BEGIN;\s*$/gm)?.length, 1)
     assert.equal(sql.match(/^COMMIT;\s*$/gm)?.length, 1)
     assert.throws(() => toMigrationExecutionSql(sql + '\n', name), /content changed/)
-    count++
+    adaptedFiles.push(Number(name.split('_')[0]))
   }
-  assert.ok(count >= 13)
+  assert.deepEqual(adaptedFiles.sort((a,b)=>a-b), [8188,8196,8197,8198,8199,8200,8201,8204,8205,8229,
+    8234,8235,8236,8242,8243,8245,8246,8247,8248,8249,8250,8251,8272,8290,8296,8322,8326,82690])
   assert.equal(toMigrationExecutionSql('SELECT 1;', 'future.sql'), 'SELECT 1;')
+  assert.equal(toMigrationExecutionSql(source, 'future.sql'), source)
+})
+
+test('[COMP:api/migration-execution-sql] accepts either exact Memory writer grant order and refuses an additional grant', async () => {
+  const name = '8326_native_memory_query_write_contract.sql'
+  const sql = await readFile(new URL(name, migrations), 'utf8')
+  const { memoryWriteReleaseSource } = await import(new URL('../../../../packages/api/scripts/conversation-store/memory-query-write-contract.mjs', import.meta.url).href)
+  const aclChecks = (source: string) => [...source.matchAll(/^   OR (\(actual\.proacl IS DISTINCT FROM[^\n]+\n    AND [^\n]+\))$/gm)].map(match => match[1])
+  const [predicate, successor] = aclChecks(toMigrationExecutionSql(sql, name))
+  assert.ok(predicate)
+  assert.equal(successor, predicate)
+  const release = await memoryWriteReleaseSource()
+  assert.deepEqual(aclChecks(release.sql), [predicate])
+  assert.equal(release.sourceDigest, 'f15100de261ae871c9ddc1a21e8da5a7f1fae7c512922223ed03c7d53744ee19')
+  const db = new PGlite()
+  try {
+    await db.waitReady
+    await db.exec(`CREATE ROLE app_user NOLOGIN NOSUPERUSER NOBYPASSRLS;
+      CREATE ROLE migration_owner NOSUPERUSER NOBYPASSRLS;
+      CREATE ROLE grant_probe NOLOGIN;
+      GRANT USAGE,CREATE ON SCHEMA public TO migration_owner; SET ROLE migration_owner;
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO app_user;
+      CREATE FUNCTION legacy_writer() RETURNS uuid LANGUAGE sql AS 'SELECT NULL::uuid';
+      REVOKE ALL ON FUNCTION legacy_writer() FROM PUBLIC;
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM app_user;
+      CREATE FUNCTION current_writer() RETURNS uuid LANGUAGE sql AS 'SELECT NULL::uuid';
+      REVOKE ALL ON FUNCTION current_writer() FROM PUBLIC;
+      GRANT EXECUTE ON FUNCTION current_writer() TO app_user;`)
+    const check = async (routine: string) => (await db.query(`SELECT actual.proacl::text[] AS grants,
+      ${predicate} AS mismatch FROM pg_proc actual,
+      (SELECT 'record_admitted_application_field_derivation(uuid,text,uuid,text,text,jsonb)' AS signature) member,
+      (SELECT makeaclitem(current_user::regrole,current_user::regrole,'EXECUTE',false) AS owner_grant,
+        makeaclitem('app_user'::regrole,current_user::regrole,'EXECUTE',false) AS runtime_grant) grants
+      WHERE actual.oid=$1::regprocedure`, [routine])).rows[0]
+    const owner = 'migration_owner=X/migration_owner', runtime = 'app_user=X/migration_owner'
+    assert.deepEqual(await check('current_writer()'), { grants: [owner, runtime], mismatch: false })
+    assert.deepEqual(await check('legacy_writer()'), { grants: [runtime, owner], mismatch: false })
+    await db.exec('GRANT EXECUTE ON FUNCTION legacy_writer() TO grant_probe')
+    assert.deepEqual(await check('legacy_writer()'), { grants: [runtime, owner, 'grant_probe=X/migration_owner'], mismatch: true })
+  } finally { await db.close() }
+})
+
+test('[COMP:api/migration-execution-sql] stabilizes the private transcript registries inside the existing transaction', async () => {
+  const name = '82690_private_transcript_preparation_eligibility.sql'
+  const sql = await readFile(new URL(name, migrations), 'utf8')
+  const lock = 'LOCK TABLE public.native_turn_contract_helpers, public.native_retained_contract_helpers IN SHARE MODE;\n'
+  assert.equal(toMigrationExecutionSql(sql, name), sql.replace('\nBEGIN;\n', `\nBEGIN;\n${lock}`))
+  assert.equal(toMigrationExecutionSql(sql, 'future.sql'), sql)
 })
 
 const memoryFile = '8246_native_private_memory_empty_domain.sql'

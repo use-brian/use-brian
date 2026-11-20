@@ -1,10 +1,14 @@
 /** Canonical native tool projection for explicitly admitted MCP work. [COMP:api/workspace-mcp] */
 import type { executeWorkspaceMcpOperation } from './operations.js'
 import { randomUUID } from 'node:crypto'
+import { createLoopDetector } from '@use-brian/agent-runtime/engine/loop-detector.js'
 import {
-  createLoopDetector, createToolExecutor, filterToolsByCapabilities, formatToolError,
-  type ConfirmationResolver, type Tool, type ToolContext, type ToolResult,
-} from '@use-brian/core'
+  createToolExecutor,
+  formatToolError,
+} from '@use-brian/agent-runtime/engine/tool-executor.js'
+import type { ConfirmationResolver } from '@use-brian/agent-runtime/mcp/types.js'
+import { filterToolsByCapabilities } from '@use-brian/agent-runtime/tools/capability-gate.js'
+import type { Tool, ToolContext, ToolResult } from '@use-brian/agent-runtime/tools/types.js'
 import type { BrainTool } from '../brain-mcp/tools.js'
 import { runWithAgentAccess } from '../db/client.js'
 import { createWorkspaceDiscoveryTools, describeWorkspaceOperation, workspaceDiscoveryNames } from './discovery.js'

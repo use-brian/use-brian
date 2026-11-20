@@ -9,7 +9,12 @@
  *
  * Numbers only: the snapshot goes straight into the `turn_timings` analytics
  * event (docs/architecture/platform/analytics.md), which never carries content.
+ * An attached turn-owner SQL ledger adds its integer `sql_*` counters
+ * (docs/architecture/engine/turn-kernel.md "Per-turn SQL accounting phases");
+ * nothing is added while recording is off.
  */
+import { readTurnSqlLedger, turnSqlCounters } from '../db/turn-sql-accounting.js'
+
 export interface TurnTiming {
   /** Close the running phase under `phase` (`<phase>_ms`). */
   mark(phase: string): void
@@ -21,6 +26,8 @@ export interface TurnTiming {
   count(counter: string): void
   /** Run `fn`, charging its wall-clock to `counter` even when it throws. */
   time<T>(counter: string, fn: () => Promise<T>): Promise<T>
+  /** Merge the owner's per-turn SQL ledger counters into every later snapshot. */
+  attachSqlLedger(sqlTurnId: string): void
   /** Every phase, counter and `total_ms` so far, as integers. */
   snapshot(): Record<string, number>
 }
@@ -32,6 +39,7 @@ export function createTurnTiming(now: () => number = () => performance.now()): T
   const sums: Record<string, number> = {}
   const counts: Record<string, number> = {}
   const milestones: Record<string, number> = {}
+  let sqlTurnId: string | undefined
   const timing: TurnTiming = {
     mark(phase) {
       const at = now()
@@ -56,8 +64,13 @@ export function createTurnTiming(now: () => number = () => performance.now()): T
         timing.add(counter, now() - at)
       }
     },
+    attachSqlLedger(id) {
+      sqlTurnId = id
+    },
     snapshot() {
       const out: Record<string, number> = { total_ms: Math.round(now() - startedAt) }
+      const ledger = sqlTurnId ? readTurnSqlLedger(sqlTurnId) : undefined
+      if (ledger) Object.assign(out, turnSqlCounters(ledger))
       for (const [phase, ms] of Object.entries(phases)) out[`${phase}_ms`] = Math.round(ms)
       for (const [counter, ms] of Object.entries(sums)) out[`${counter}_ms`] = Math.round(ms)
       for (const [counter, n] of Object.entries(counts)) out[`${counter}_count`] = n

@@ -17,22 +17,20 @@
  * Spec: docs/architecture/features/goals.md -> "Formation, readiness and automatic entry".
  * [COMP:goals/execution-qualification]
  */
+import type { GoalClarityAssessor } from '@use-brian/core/goals/clarity.js'
 import {
   assessExecutionReadiness,
   isTrustedProvenance,
-  type AuthoringAuthority,
   type ExecutionDependency,
   type ExecutionPlan,
   type ExecutionPlanDraft,
   type ExecutionProvenance,
   type ExecutionSourceRef,
   type ExecutorManifest,
-  type GoalClarityAssessor,
-  type GoalDefaultBudget,
-  type GoalBudget,
-  type GoalRecord,
-  type TaskRecord,
-} from '@use-brian/core'
+} from '@use-brian/core/goals/execution.js'
+import type { GoalDefaultBudget, GoalBudget, GoalRecord } from '@use-brian/core/goals/types.js'
+import type { TaskRecord } from '@use-brian/core/tasks/types.js'
+import type { AuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { inspectBrief } from '../briefs/service.js'
 import { queryWithRLS } from '../db/client.js'
 import { runWithAgentAccess } from '../db/agent-access-context.js'

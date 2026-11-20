@@ -30,7 +30,7 @@
  */
 
 import { createHmac, timingSafeEqual } from 'node:crypto'
-import type { Sensitivity } from '@use-brian/core'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type { AppDataScope, AppStoreScope, AppAgentScope } from '@use-brian/brian-app'
 
 export const BUNDLE_TOKEN_AUD = 'home-app-bundle' as const

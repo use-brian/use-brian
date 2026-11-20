@@ -22,7 +22,7 @@
 
 import { CrmOperationsStableKeySchema, CrmOperationsError } from '../../crm/operations-types.js'
 import { z } from 'zod'
-import { buildTool, type Tool } from '../types.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { googleFailure } from './_google-error.js'
 import { type Json, str } from './_connector-result.js'
 import type { FilesApi } from '../../workspace-files/api.js'

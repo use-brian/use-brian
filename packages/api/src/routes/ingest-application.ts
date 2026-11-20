@@ -1,6 +1,6 @@
 import { Router, type Response } from 'express'
 import { z } from 'zod'
-import type { AccessContext } from '@use-brian/core'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import {
   IngestApplicationServiceError,
   type IngestApplicationService,

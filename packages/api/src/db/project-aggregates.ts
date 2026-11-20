@@ -1,6 +1,6 @@
 /** Project counts and records under canonical current-member policy. [COMP:api/project-aggregates] */
 import { queryWithRLS } from './client.js'
-import { PROJECT_COUNT_SOURCE_SQL, PROJECT_SEARCH_SOURCE_SQL } from '../workspace-search/adapters.js'
+import { currentProjectCountSource, currentProjectSearchSource } from '../workspace-search/adapters.js'
 import type { WorkspaceSearchFamily, WorkspaceSearchTarget } from '@use-brian/shared'
 
 // Reuse each resource's canonical authorized projection instead of applying a
@@ -20,7 +20,7 @@ const SOURCES: Array<{ label: string; family: WorkspaceSearchFamily; prefix: str
 
 const COUNTS_SQL = [
   ...SOURCES.map(source => `SELECT '${source.label}' AS label, count(*)::text AS count
-    FROM (${PROJECT_COUNT_SOURCE_SQL[source.family]}) visible
+    FROM (${currentProjectCountSource(source.family)}) visible
     WHERE visible.source = '${source.prefix}'`),
   `SELECT 'episodes' AS label, count(*)::text AS count FROM episodes e
     WHERE e.workspace_id=$1 AND $3::uuid = ANY(e.project_ids)
@@ -50,7 +50,7 @@ export async function projectContent(userId: string, workspaceId: string, projec
   const sources = CONTENT_SOURCES.filter(source => view === 'recent' ||
     (view === 'work' ? ['tasks','pages','office','files','workflows'] : ['memories','knowledge','recordings','entities']).includes(source.label))
   const sql = sources.map(source => `SELECT visible.*, '${source.label}' AS kind
-    FROM (${PROJECT_SEARCH_SOURCE_SQL[source.family]}) visible
+    FROM (${currentProjectSearchSource(source.family)}) visible
     WHERE visible.key LIKE '${source.prefix}:%'`).join(' UNION ALL ')
   const result = await queryWithRLS<{
     key: string; id: string; title: string; snippet: string; kind: string;

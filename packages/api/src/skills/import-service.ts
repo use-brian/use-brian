@@ -12,15 +12,16 @@
 
 import {
   parseSkillBundle,
-  parseImportedSkill,
   sha256,
   skillResourceKindFromPath,
-  type SkillBundleLink,
-  type SkillResourceKind,
+} from '@use-brian/core/skills/bundle.js'
+import {
+  parseImportedSkill,
   type ImportDialect,
   type ImportedSkillDraft,
   type ImportWarning,
-} from '@use-brian/core'
+} from '@use-brian/core/skills/import-format.js'
+import type { SkillBundleLink, SkillResourceKind } from '@use-brian/core/skills/types.js'
 import {
   fetchAllowlistedRaw,
   normalizeImportUrl,

@@ -50,6 +50,7 @@ function makeApp(options: {
   userId?: string | null
   withGenerate?: boolean
   withBilling?: boolean
+  contextOnly?: (workspaceId: string) => Promise<boolean>
 } = {}) {
   const app = express()
   app.use(express.json())
@@ -63,6 +64,7 @@ function makeApp(options: {
     generateSynthesize: options.withGenerate === false ? undefined : generateSynthesize as never,
     resolvePrimaryAssistantForWorkspace,
     pageTemplateStore: { getById: (...args: unknown[]) => getById(...args) } as never,
+    contextOnly: options.contextOnly,
     checkCreditBudget: options.withBilling === false ? undefined : checkCreditBudget,
     billing: options.withBilling === false ? undefined : { quoteCredits, charge },
   }))
@@ -154,6 +156,20 @@ describe('[COMP:api/generate-route] generate-from-brain route', () => {
     expect(response.body.error).toBe('credit_limit')
     expect(generateSynthesize).not.toHaveBeenCalled()
     expect(charge).not.toHaveBeenCalled()
+  })
+
+  it('blocks context-only workspaces on the mounted shared route without optional surcharge billing', async () => {
+    const contextOnly = vi.fn(async () => true)
+    const app = makeApp({ withBilling: false, contextOnly })
+    const generate = () => request(app).post('/api/workspaces/ws-1/blueprints/bp-1/generate').send({ subject: 'Fictional Atlas', requestId: 'r' })
+    const blocked = await generate()
+    expect(blocked.status).toBe(402)
+    expect(blocked.body).toEqual({ error: 'credit_limit', creditsUsed: 0, creditCap: 0, resetsAt: null })
+    expect(contextOnly).toHaveBeenCalledExactlyOnceWith('ws-1')
+    expect(generateSynthesize).not.toHaveBeenCalled()
+    contextOnly.mockResolvedValue(false)
+    expect((await generate()).status).toBe(200)
+    expect(generateSynthesize).toHaveBeenCalledOnce()
   })
 
   it('returns 409 when the workspace has no primary assistant', async () => {

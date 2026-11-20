@@ -1,27 +1,26 @@
+import { bindProviderConversationTurn, withProviderConversationEvidence } from '../context-scope/provider-conversation-evidence.js'
 import { assertTelegramConversationCurrent } from '../telegram-conversation-context.js'
 import { recordingInputScope, type RecordingAdmission } from '../channel-recording.js'
-import { publishNativeSessionMessageBatch } from '../db/session-message-publication.js'
-import { isInputAuthorityError } from '@use-brian/core'
-import { topicEvidenceFromHistory, captureAttendedSessionClassification, classifyAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory } from './attended-session-context.js'
-import { getPool } from '../db/client.js'
-import type { PoolClient } from 'pg'
-import { withSessionMessagePublication } from '../db/session-context-revisions.js'
+import { assembleTurnPublication } from '../turn/publication.js'
+import { isInputAuthorityError } from '@use-brian/agent-runtime/providers/input-authority.js'
+import { routeAttendedTurn } from './attended-turn-routing.js'
 import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/attended-audience.js'
-import { bindScopeSources } from '@use-brian/core'
+import { bindVerifiedTelegramEvidence, bindVerifiedThreadRoomEvidence } from '../context-scope/native-invocation-evidence.js'
+import { bindScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { runTurnSessionStateDiff } from '../turn/session-state.js'
 import { withTurnInference } from '../turn/runtime.js'
 import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
-import { policyFor } from '../session-kind.js'
+import { hasWorkspaceConversationAudience, policyFor } from '../session-kind.js'
 import { narrowConnectorTurnScope, resolveConnectorNativeTurnScopeSystem } from '../context-scope/connector-exposure.js'
 import { mayReadGroupContext, roomTurnShape } from '../channel-room/turn.js'
 import { appendChannelRoomMessage, claimChannelRoomTurn } from '../channel-room/messages.js'
 import { admitRoomInputScope, captureChannelRoomInput, claimRoomHydration, findOrCreateChannelRoom, resolveRoomBinding, roomInputScope, roomSpeakerLabel } from '../channel-room/room.js'
-import { releaseTurn, takeTurnLease, waitForTurnSlot } from '../turn/lease.js'
-import { runAssistantTurn } from '../turn/kernel.js'
+import { waitForTurnSlot } from '../turn/lease.js'
+import { openAssistantTurn, openTurnSqlScope, TurnRefusal, type AssistantTurn, type TurnSqlScope } from '../turn/kernel.js'
 
 /** The reply when a channel message waited out another turn on its session. */
 const CHANNEL_TURN_BUSY_NOTICE = "I'm still finishing your previous message. Send this one again once I've replied."
-import { renderSystemContext } from '@use-brian/core'
+import { renderSystemContext } from '@use-brian/agent-runtime/providers/system-context.js'
 // REBRAND-CUTOVER: this file contains sidan.ai runtime values that must flip to usebrian.ai when DNS + Vercel domains + OAuth consoles + webhooks are cut over. Grep REBRAND-CUTOVER.
 /**
  * Shared channel message processing pipeline.
@@ -41,31 +40,54 @@ import { renderSystemContext } from '@use-brian/core'
 
 import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
+import { sanitize as sanitizeAnalytics } from '@use-brian/core/analytics/logger.js'
 import {
-  buildMemoryContext, createMemoryTools, createSessionStateTools,
-  buildSessionStateBlock,
-  synthesizeMissingToolResults,
-  collectStream, calculateCost, runPreflight, buildPreflightPrompt,
-  runMemoryNudge, sanitize as sanitizeAnalytics, createConfirmationResolver,
-  classifyTopic, fetchEpisodicContext, filterToolsByCapabilities,
-  modelToCompactionTier, SensitivityAccumulator, CompartmentAccumulator,
+  buildEmailDraftAnchorPrompt,
+  formatActiveEmailDraftContext,
+} from '@use-brian/core/crm/email-drafts.js'
+import { buildMemoryContext } from '@use-brian/core/memory/context-builder.js'
+import { fetchEpisodicContext } from '@use-brian/core/memory/episodic-context.js'
+import { runMemoryNudge } from '@use-brian/core/memory/nudge.js'
+import { buildSessionStateBlock } from '@use-brian/core/memory/session-state-context.js'
+import { createSessionStateTools } from '@use-brian/core/memory/session-state-tools.js'
+import { createMemoryTools } from '@use-brian/core/memory/tools.js'
+import {
+  prepareSlashCommand,
+  resolveNativeSlashCommand,
+  buildSlashCommandBlock,
+  buildWorkflowSlashCommandBlock,
+} from '@use-brian/core/skills/slash-command.js'
+import { runPreflight, buildPreflightPrompt } from '@use-brian/core/workers/preflight.js'
+import { latestWorkflowProposalReceipt } from '@use-brian/core/workflow/tools.js'
+import { AttachmentCollector } from '@use-brian/core/workspace-files/attachments.js'
+import { buildWorkspaceFilesContext } from '@use-brian/core/workspace-files/context-builder.js'
+import { buildUploadPolicyBlock } from '@use-brian/core/workspace-files/upload-policy-block.js'
+import { calculateCost } from '@use-brian/agent-runtime/billing/cost-tracker.js'
+import { modelToCompactionTier } from '@use-brian/agent-runtime/compaction/compact.js'
+import {
+  matchesDisputedFigure,
+  buildDisputeContextNote,
+} from '@use-brian/agent-runtime/engine/grounding-gate.js'
+import { createConfirmationResolver } from '@use-brian/agent-runtime/mcp/types.js'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
+import { pinAccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import { CompartmentAccumulator } from '@use-brian/agent-runtime/security/compartments.js'
+import {
   ContextScopeAccumulator,
-  buildWorkspaceFilesContext, buildUploadPolicyBlock, AttachmentCollector,
-  EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote,
-  latestWorkflowProposalReceipt,
-  prepareSlashCommand, resolveNativeSlashCommand,
-  buildSlashCommandBlock, buildWorkflowSlashCommandBlock,
-  buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, formatAssistantQuestion,
-  createTurnOutputCollector,
-  executionToolContext,
-  boundScopeSources,
   scopeEvidenceFromRows,
-  pinAccessCeiling,
-} from '@use-brian/core'
-import type { FilesApi, OutboundAttachment, RealtimeThreadTarget } from '@use-brian/core'
+} from '@use-brian/agent-runtime/security/context-scope.js'
+import { EvidenceAccumulator } from '@use-brian/agent-runtime/security/evidence.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { SensitivityAccumulator } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
+import { formatAssistantQuestion } from '@use-brian/agent-runtime/tools/base/ask-question.js'
+import { filterToolsByCapabilities } from '@use-brian/agent-runtime/tools/capability-gate.js'
+import type { RealtimeThreadTarget } from '@use-brian/core/ingest/realtime-thread-targets.js'
+import type { FilesApi } from '@use-brian/core/workspace-files/api.js'
+import type { OutboundAttachment } from '@use-brian/core/workspace-files/attachments.js'
 import { resolveBrandContext } from '../brand/prompt-context.js'
 import type { IncomingMessage, OutgoingDocument, OutgoingAction } from '@use-brian/channels'
-import type { ChannelInteractionScope } from '@use-brian/core'
+import type { ChannelInteractionScope } from '@use-brian/core/mcp/channel-confirmations.js'
 import type { ChannelQuestionStore } from '../workflow/channel-questions.js'
 import { channelConfirmations, ROOM_INTERACTION_SENDER } from './channel-interactions.js'
 import { channelQuestionActions } from './channel-questions.js'
@@ -80,7 +102,6 @@ import {
   acceptedGoalIdsFromToolResults,
   GOAL_ACCEPTED_CHANNEL_MESSAGE,
 } from '../goals/acknowledgement.js'
-import { composeRecoveryMessage } from './_recovery-message.js'
 import {
   CONTEXT_NOT_AVAILABLE_MESSAGE,
   CUSTOM_MODEL_ENDPOINT_FALLBACK_NOTICE,
@@ -90,23 +111,33 @@ import {
 import { decideImageTurnRoute, turnHasInlineImage } from '../custom-llm-runtime.js'
 import { resolveReplyText } from './_reply-context.js'
 import {
-  attachUserVisibleContext,
   buildSplitSystemPrompt,
   formatPrivateRuntimeContext,
-  formatUserVisibleContext,
   speakerIdentityFromUser,
 } from './_prompt-builder.js'
 import { getEvolution as getWorkspaceMemoryEvolution } from '../db/workspace-memory-evolution-store.js'
 import { getBrainEvolution } from '../db/workspace-brain-evolution-store.js'
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
+import type { AnalyticsLogger } from '@use-brian/core/analytics/logger.js'
+import type { CapabilityStore } from '@use-brian/core/authorization/types.js'
+import type { CrmEmailDraftStore } from '@use-brian/core/crm/email-drafts.js'
+import type { KnowledgeStoreInterface } from '@use-brian/core/knowledge/types.js'
+import type { EpisodicStore } from '@use-brian/core/memory/episodic-types.js'
+import type { SessionStateStore } from '@use-brian/core/memory/session-state-types.js'
+import type { TopicClassification } from '@use-brian/core/memory/topic-classifier.js'
+import type { MemoryStore } from '@use-brian/core/memory/types.js'
+import type { GDriveFilesStore } from '@use-brian/core/tools/base/gdrive-files.js'
+import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
+import type { McpSettingsStore, ConfirmationResolver } from '@use-brian/agent-runtime/mcp/types.js'
 import type {
-  ContentBlock, LLMProvider, Tool, MemoryStore, UsageStore,
-  AnalyticsLogger, McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore,
-  ConfirmationResolver, Message, TopicClassification, ClassifierRecentTurn,
-  EpisodicStore, CapabilityStore, TokenUsage, ToolResultMeta,
-  SessionStateStore, CrmEmailDraftStore,
-  AccessCeiling, ScopeEvidence,
-} from '@use-brian/core'
+  ContentBlock,
+  LLMProvider,
+  Message,
+  TokenUsage,
+} from '@use-brian/agent-runtime/providers/types.js'
+import type { AccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import type { ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { Tool, ToolResultMeta } from '@use-brian/agent-runtime/tools/types.js'
 
 import { mintActorMediaToken } from '../media-token.js'
 import { findUserById, getUserProfilesByIds } from '../db/users.js'
@@ -126,7 +157,6 @@ import { resolveChatModelSelection, wouldBudgetDowngradeAffectModel, chatTierBud
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import type { SkillStore, WorkspaceSkillStore } from '../db/skill-store.js'
-import { injectMcpTools } from '../mcp/inject.js'
 import { createKnowledgeRepoWriter } from '../knowledge/repo-writer.js'
 import { createDbKnowledgeStore } from '../db/knowledge-store.js'
 import { createDbWorkspaceSkillStore } from '../db/skill-store.js'
@@ -147,9 +177,7 @@ import {
   automaticContextAccess,
 } from '../context-scope/resolve-turn-scope.js'
 import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
-import { prepareAssistantRun } from '../turn/prepare.js'
-import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
-import { isAuthorityChangedError } from '../context-scope/authority-lease.js'
+import { AuthorityChangedError, isAuthorityChangedError } from '../context-scope/authority-lease.js'
 import {
   createDeliveryAudienceAuthorizer,
   createDeliveryAudienceEnvelopeResolver,
@@ -159,6 +187,9 @@ import {
 import { validateAudienceScopeEvidence } from '../context-scope/caller-evidence.js'
 import { deliveryFailureAnalytics } from '../context-scope/delivery-failure.js'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
+import { conversationAnchorWriteAdmissionActive, verifiedChannelPublicationActive } from '../db/conversation-visibility.js'
+import { bindVerifiedChannelSelection, channelEvidenceFitsEnvelope, pinVerifiedChannelPublication, readVerifiedChannelEnvelope, readVerifiedChannelRecordIds, type ChannelRecordAddress } from '../db/verified-channel-record.js'
+import { commitTransaction, getPool, rollbackAndRelease } from '../db/client.js'
 import {
   buildChannelSessionKey,
   listPendingRecordingConfirmationsForSession,
@@ -386,7 +417,7 @@ export type ChannelPipelineParams = AdmittedChannelMessage & {
    */
   backgroundModel?: string
   /** Shared provider-neutral classifier cascade; absent preserves legacy calls. */
-  decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
+  decisionRuntime?: import('@use-brian/core/decisions/hydra.js').DecisionExecutionPort
   // ── Identity ──
   /** The user whose session this is (channel user or owner). */
   userId: string
@@ -501,7 +532,7 @@ export type ChannelPipelineParams = AdmittedChannelMessage & {
   /**
    * The acting user's channel-native id captured from the inbound webhook —
    * WhatsApp phone, Telegram `@handle`, Slack user id, or Feishu/Lark open id. Forwarded to
-   * `injectMcpTools` as the `X-Sidanclaw-Actor-Id` for opted-in connectors.
+   * the channel capability surface as the `X-Sidanclaw-Actor-Id` for opted-in connectors.
    * Optional: absent (or a Telegram user with no @username) ⇒ no native id is
    * sent (channel + email + userId still are). See tool-hooks.md.
    */
@@ -658,7 +689,7 @@ export type ChannelPipelineParams = AdmittedChannelMessage & {
   /** Workspace files store (Q3 §10). When set + the assistant has the
    *  `files` capability + `assistant.workspaceId` is bound, the
    *  `# Workspace Files` L1 block is injected. Optional. */
-  workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
+  workspaceFilesStore?: import('@use-brian/core/workspace-files/types.js').WorkspaceFilesStore
   /** Files orchestration API. When set, the pipeline wires a per-turn
    *  `AttachmentCollector` into the tool context (enabling `sendFile`) and
    *  resolves collected attachments to bytes (`readBytes`) at
@@ -667,7 +698,7 @@ export type ChannelPipelineParams = AdmittedChannelMessage & {
   filesApi?: FilesApi
   /** Upload-cache reader, so a photo just attached to this turn can be
    *  promoted on demand (Shopify product images). Chat/channel paths only. */
-  readCachedFile?: (id: string, ctx: import('@use-brian/core').AccessContext) => Promise<import('@use-brian/core').CachedFile | null>
+  readCachedFile?: (id: string, ctx: import('@use-brian/agent-runtime/security/access-context.js').AccessContext) => Promise<import('@use-brian/core/files/types.js').CachedFile | null>
   /**
    * Promotes an over-threshold paste to a durable workspace_files artifact
    * (large-content-artifacts §Phase 3.2, decision D6). Wired once at boot from
@@ -683,12 +714,12 @@ export type ChannelPipelineParams = AdmittedChannelMessage & {
    * allowlist, and never the `all_assistants` flag. A workspace skill that was
    * plainly enabled in the web app was simply not offered on Telegram.
    */
-  workflowStore?: import('@use-brian/core').WorkflowStore
+  workflowStore?: import('@use-brian/core/workflow/types.js').WorkflowStore
   workspaceSkillStore?: WorkspaceSkillStore
   workspaceSkillEnablementStore?: import('../db/workspace-skill-enablement-store.js').WorkspaceSkillEnablementStore
   workspaceSkillFilesStore?: import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore
-  invocationBuffer?: import('@use-brian/core').SkillInvocationBuffer
-  workerManager?: import('@use-brian/core').WorkerManager
+  invocationBuffer?: import('@use-brian/core/skills/invocation-buffer.js').SkillInvocationBuffer
+  workerManager?: import('@use-brian/core/workers/worker.js').WorkerManager
   episodicStore?: EpisodicStore
   sessionStateStore?: SessionStateStore
   /** Canonical CRM email drafts and per-conversation active anchor. */
@@ -1038,6 +1069,8 @@ export function recordChannelToolResults(input: {
   userPlan: string
   channelType: string
   workerId?: string
+  /** The current channel owner awaits these already-observed tool costs. */
+  pendingUsage?: Promise<void>[]
 }): void {
   for (const block of input.results) {
     if (block.type !== 'tool_result') continue
@@ -1072,7 +1105,7 @@ export function recordChannelToolResults(input: {
         } : {}),
       },
     })
-    void recordExternalCostFromMeta({
+    const externalUsage = recordExternalCostFromMeta({
       toolMeta,
       usageStore: input.usageStore,
       userId: input.billingUserId,
@@ -1083,6 +1116,7 @@ export function recordChannelToolResults(input: {
       channelType: input.channelType,
       analytics: input.analytics,
     })
+    input.pendingUsage?.push(externalUsage)
   }
 }
 
@@ -1097,6 +1131,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   const transportHooks = params.hooks
   let processingStarted = false
   let cleanupCalled = false
+  let channelStopRequested = false
   const hooks: ChannelHooks = {
     ...transportHooks,
     async onProcessingStart() {
@@ -1115,7 +1150,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   const unregister = params.interactionScope ? channelConfirmations.registerTurn(
     params.interactionScope, params.abortController, {
       messageId: messageId == null ? undefined : String(messageId),
-      onAbort: () => params.hooks.sendResponse('Stopped.'),
+      onAbort: () => { channelStopRequested = true; return params.hooks.sendResponse('Stopped.') },
       // A room's turn records who addressed it: they (or an admin) answer
       // its confirmations, while any reader may Stop it.
       ...(params.interactionScope.senderId === ROOM_INTERACTION_SENDER && params.actorChannelId
@@ -1123,8 +1158,27 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         : {}),
     },
   ) : undefined
+  // One SQL ledger spans this adapter and its owner (turn-kernel.md
+  // "Per-turn SQL accounting phases"); recording off, it enters no frame.
+  const sqlScope = openTurnSqlScope()
   try {
-    await processChannelMessageTurn({ ...params, hooks })
+    const run = () => sqlScope.run(() => processChannelMessageTurn({ ...params, hooks }, () => channelStopRequested, sqlScope))
+    const providerRoom = params.conversationContext
+    const identity = providerRoom?.providerContextIdentity
+    const providerSender = params.incomingMessage?.userId
+    const epoch = providerRoom?.providerContextGeneration
+    if (providerRoom?.workspaceId && identity && epoch != null &&
+      identity.integrationId === params.channelIntegrationId && providerSender && messageId != null &&
+      params.channelType === 'telegram' && params.isGroupChat && params.isIdentified && params.senderLinkedIdentity &&
+      providerRoom.channelId === params.channelId && providerRoom.assistantId === params.assistant.id &&
+      providerRoom.workspaceId === params.assistant.workspaceId) {
+      await withProviderConversationEvidence({
+        workspaceId: providerRoom.workspaceId, actorId: params.userId, sessionId: providerRoom.id,
+        assistantId: providerRoom.assistantId, address: providerRoom.channelId, integrationId: identity.integrationId,
+        botId: identity.botId, epoch, speakerId: String(providerSender), incomingId: String(messageId),
+        assertCurrent: () => assertTelegramConversationCurrent(providerRoom),
+      }, run)
+    } else await run()
   } finally {
     try {
       if (processingStarted) await hooks.onCleanup?.()
@@ -1134,7 +1188,8 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   }
 }
 
-async function processChannelMessageTurn(params: ChannelPipelineParams): Promise<void> {
+async function processChannelMessageTurn(params: ChannelPipelineParams, channelStopRequested: () => boolean, sqlScope?: TurnSqlScope): Promise<void> {
+  const turnStartedAt = new Date()
   const {
     userId, ownerId, assistant, isIdentified,
     channelType, channelId, actorChannelId, actorDisplayName, mediaEpisodeId, isGroupChat,
@@ -1232,6 +1287,21 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   const senderWorkspaceRole = assistant.workspaceId
     ? await getWorkspaceRoleSystem(userId, assistant.workspaceId, true)
     : null
+  const recordAddress: ChannelRecordAddress | null = assistant.workspaceId && !privateRecording && conversationAnchorWriteAdmissionActive()
+    ? {session:{id:session.id,channelType:session.channelType,channelId:session.channelId},
+        workspaceId:assistant.workspaceId,assistantId:assistant.id,userId,member:senderWorkspaceRole!==null,room:room!==null,
+        integrationId:params.channelIntegrationId}
+    : null
+  const recordEnvelope = recordAddress ? await readVerifiedChannelEnvelope(recordAddress) : null
+  if (recordAddress && !recordEnvelope) {
+    await hooks.sendError(new Error(CONTEXT_NOT_AVAILABLE_MESSAGE))
+    await hooks.onCleanup?.()
+    return
+  }
+  const recordCurrent = async () => !recordAddress || !recordEnvelope
+    || !!await readVerifiedChannelEnvelope(recordAddress,recordEnvelope.version)
+  const channelWrite = !params.recording && recordAddress && recordEnvelope && verifiedChannelPublicationActive()
+    ? {address:recordAddress,version:recordEnvelope.version} : undefined
   const memberMode = assistant.workspaceId === null
     ? undefined
     : senderWorkspaceRole === null
@@ -1343,10 +1413,10 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       },
       attribution: { billingUserId },
       sessionAuthority: privateRecording ? undefined : session,
-      credentialCurrent: params.conversationContext ? async () => {
+      credentialCurrent: params.conversationContext || recordAddress ? async () => {
         if(params.credentialCurrent && !await params.credentialCurrent())return false
-        await assertTelegramConversationCurrent(params.conversationContext!)
-        return true
+        if (params.conversationContext) await assertTelegramConversationCurrent(params.conversationContext)
+        return recordCurrent()
       } : params.credentialCurrent,
       ...(audienceEnvelope?.allowed
         ? {
@@ -1389,14 +1459,16 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     compartments: dataTurnScope.writeCompartments,
     projectIds: dataTurnScope.writeProjectIds,
   })
-  const inputMessageScope = params.recording ? recordingInputScope(params.recording) : room && assistant.workspaceId
+  const authoredScope = params.recording ? recordingInputScope(params.recording) : room && assistant.workspaceId
     ? roomInputScope(room, assistant.workspaceId, audienceEnvelope?.allowed ? audienceEnvelope.ceiling : undefined)
     : sessionMessageInputScope({
         scope: dataTurnScope,
         workspaceId: assistant.workspaceId,
         userId,
-        sharedAudience: !turnPolicy.context.personalMemory,
+        sharedAudience: hasWorkspaceConversationAudience(recordEnvelope?.visibility) || !turnPolicy.context.personalMemory,
       })
+  const inputMessageScope = recordAddress && !recordAddress.member && !room && authoredScope
+    ? {...authoredScope,userId:null,sensitivity:'public' as const,compartments:[],projectIds:[]} : authoredScope
   if (room && !params.recording && inputMessageScope) await admitRoomInputScope(room, inputMessageScope)
   // D16: a room is hydrated once from what the provider still shows.
   const roomHistory = !params.recording && room && audienceEnvelope?.allowed
@@ -1418,28 +1490,39 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     && executionContext.identity.principal.kind === 'workspace_member'
     && (session.workspaceId === undefined || session.workspaceId === executionContext.ownership.workspaceId)
     ? { execution: executionContext, accumulator: scopeAccumulator } : undefined
-  const currentTurnWrite = () => ({
-    ...turnOutputWrite({
-      producer: `turn:${channelType}`,
-      accumulator: scopeAccumulator,
-      envelope: inputMessageScope,
-    }),
-    ...(nativeTranscriptAuthority ? { authority: nativeTranscriptAuthority } : {}),
-  })
+  // The owner's publication takes the native authority separately from the write.
+  const publicationWrite = () => turnOutputWrite({ producer: `turn:${channelType}`, accumulator: scopeAccumulator, envelope: inputMessageScope })
   if (nativeTranscriptAuthority) {
+    if (recordAddress && recordEnvelope) bindVerifiedChannelSelection(executionContext,{address:recordAddress,version:recordEnvelope.version})
+    if (channelType === 'telegram' && room && isGroupChat && isIdentified && params.senderLinkedIdentity
+      && params.channelIntegrationId && audienceEnvelope?.allowed && audienceEnvelope.source === 'binding') {
+      bindVerifiedTelegramEvidence(executionContext)
+    }
+    if (recordEnvelope && room && isGroupChat && isIdentified && params.channelIntegrationId
+      && audienceEnvelope?.allowed && audienceEnvelope.source === 'binding') {
+      bindVerifiedThreadRoomEvidence(executionContext)
+    }
     authorizeDeliveryAudience = createAttendedDeliveryAudienceAuthorizer(executionContext, {
       integrationStore: params.channelIntegrationStore,
     })
   }
   const authority = executionContext.security.authority
+  const originalIdentity = executionContext.identity
+  const originalOwnership = executionContext.ownership
   const assertDeliveryAudience = async (): Promise<void> => {
     if (params.conversationContext) await assertTelegramConversationCurrent(params.conversationContext)
     // The native authorizer owns the same original lease at entry and return.
     if (!nativeTranscriptAuthority) await authority.assertCurrent()
+    if (recordEnvelope && !await recordCurrent()) throw new AuthorityChangedError(false)
+    if (recordEnvelope && !channelEvidenceFitsEnvelope(recordEnvelope,scopeAccumulator.evidence)) {
+      throw new DeliveryAudienceUnverifiedError(undefined,'source_unverifiable')
+    }
+    const evidenceBefore=JSON.stringify(scopeAccumulator.evidence)
     const decision = await authorizeDeliveryAudience({
       ...audienceInput,
       scopeEvidence: scopeAccumulator.evidence,
     })
+    if(JSON.stringify(scopeAccumulator.evidence)!==evidenceBefore)throw new DeliveryAudienceUnverifiedError(undefined,'source_unverifiable')
     if (!decision.allowed) throw new DeliveryAudienceUnverifiedError(decision.detail, decision.diagnostic, decision)
     // Current labels of a source that changed since it was read join the floor.
     scopeAccumulator.note({
@@ -1447,6 +1530,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       compartments: decision.evidence.compartments,
       projectIds: decision.evidence.projectIds,
     })
+    if (recordEnvelope && !channelEvidenceFitsEnvelope(recordEnvelope,scopeAccumulator.evidence)) {
+      throw new DeliveryAudienceUnverifiedError(undefined,'source_reclassified')
+    }
   }
   /**
    * Every pre-generation audience check refuses the same way: one analytics
@@ -1455,8 +1541,12 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
    * nothing at all (the compaction-time check did exactly that until
    * 2026-10-03). Returns false when the turn must stop.
    */
-  const deliveryAudienceAdmitsTurn = async (): Promise<boolean> => {
+  const deliveryAudienceAdmitsTurn = async (afterSlotWait = false): Promise<boolean> => {
     try {
+      if (afterSlotWait) {
+        if (executionContext.security.authority !== authority || executionContext.identity !== originalIdentity || executionContext.ownership !== originalOwnership) throw new AuthorityChangedError(false)
+        await authority.assertCurrent()
+      }
       await assertDeliveryAudience()
       return true
     } catch (err) {
@@ -1486,10 +1576,16 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     }
   }
 
+  const filterNativeRecord = async <T extends { id: string }>(rows: readonly T[]): Promise<T[]> => {
+    if (!recordAddress || !recordEnvelope) return [...rows]
+    const allowed = await readVerifiedChannelRecordIds(recordAddress,recordEnvelope.version,rows.map(row=>row.id))
+    if (!allowed) throw new AuthorityChangedError(false)
+    return rows.filter(row=>allowed.has(row.id))
+  }
   const filterHistoryForAudience = async <T extends {
-    channelMessageId: string | null
+    id: string; channelMessageId: string | null
   }>(rows: readonly T[]): Promise<T[]> => filterChannelHistoryForAudience({
-    rows,
+    rows:await filterNativeRecord(rows),
     group: turnPolicy.deliveryCeiling.recipientType === 'group',
     ceiling: audienceEnvelope?.allowed ? audienceEnvelope.ceiling : undefined,
     ...(room && audienceEnvelope?.allowed ? { readerCeiling: { ...pinAccessCeiling(dataTurnScope.access), userId: '',
@@ -1544,23 +1640,78 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   if (abortController.signal.aborted) return
   if (!(await deliveryAudienceAdmitsTurn())) return
   if (abortController.signal.aborted) return
+  // The original kernel owner covers setup as well as the main loop. A
+  // competing request must not perform auxiliary inference/tools while it waits.
+  let turnOwner: AssistantTurn
+  try {
+    turnOwner = await openAssistantTurn({ sessionId: session.id, policy: turnPolicy,
+      abortController, assistantId: assistant.id, startedAt: turnStartedAt, waitForSlot: waitForTurnSlot,
+      onReclaimed: outcome => publishTurnCompleted({ sessionId: session.id, senderUserId: null,
+        publishSessionEvent, turnId: outcome.turnId, reason: outcome.reason }),
+      sqlScope,
+    })
+  } catch (error) {
+    if (!(error instanceof TurnRefusal)) {
+      if (!abortController.signal.aborted) throw error
+      await hooks.onCleanup?.()
+      return
+    }
+    if (!abortController.signal.aborted) await hooks.sendResponse(CHANNEL_TURN_BUSY_NOTICE)
+    await hooks.onCleanup?.()
+    return
+  }
+  let turnFailed = true
+  const pendingUsage: Promise<void>[] = []
+  const pendingPreparation: Promise<unknown>[] = []
+  let userMessageIdForUsage: string | undefined
+  let classifierUsageAttribution: { modelTier: string; providerKeySource: 'user' | 'platform' } | undefined
+  // Turn-routing classifier usage, recorded once per completed call; a legacy
+  // turn's records wait for its authored row (research.md "Adapter switch").
+  const pendingRoutingUsage: import('@use-brian/core/workers/turn-routing.js').TurnRoutingUsageRecord[] = []
+  const flushRoutingUsage = async (force = false) => {
+    if (!userMessageIdForUsage && !force) return
+    for (const record of pendingRoutingUsage.splice(0)) await recordOverheadUsage({
+      usageStore, userId: billingUserId, actorUserId: userId,
+      assistantId: assistant.id, sessionId: session.id, userMessageId: userMessageIdForUsage,
+      model: record.model, usage: record.usage, source: record.source,
+      ...(record.triggerKey ? { triggerKey: record.triggerKey } : {}), ...classifierUsageAttribution,
+    })
+  }
+  let preparationUsageSettled = false
+  const settlePreparationUsage = async () => {
+    if (preparationUsageSettled) return
+    preparationUsageSettled = true
+    await flushRoutingUsage(true)
+    if (voiceTranscriptionUsage) await recordOverheadUsage({
+      usageStore, userId: billingUserId, actorUserId: userId,
+      assistantId: assistant.id, sessionId: session.id, userMessageId: userMessageIdForUsage,
+      model: voiceTranscriptionUsage.model, usage: voiceTranscriptionUsage.usage,
+      source: 'overhead:transcription', triggerKey: 'voice_message_transcription',
+      ...(voiceTranscriptionUsage.audioSeconds !== undefined ? { audioSeconds: voiceTranscriptionUsage.audioSeconds } : {}),
+    })
+  }
+  try {
+  // Preserve the original execution lease across a slot wait; claiming is not
+  // fresh permission and does not enroll facts read after a revocation.
+  if (abortController.signal.aborted || !(await deliveryAudienceAdmitsTurn(true))) return
+  if (abortController.signal.aborted) return
   await hooks.onProcessingStart?.()
   if (abortController.signal.aborted) return
-
-  const backgroundLlmRuntime = assistant.workspaceId && params.resolveWorkspaceCustomLlm
-    ? await params.resolveWorkspaceCustomLlm({
-        workspaceId: assistant.workspaceId,
-        requestedTier: 'standard',
-        allowDefault: true,
-        allowAnyDefault: true,
-      })
-    : null
-  const backgroundProvider = backgroundLlmRuntime?.provider ?? provider
-  const backgroundLaneModel = backgroundLlmRuntime?.selector ?? laneModel
-  const backgroundUsageAttribution = {
-    modelTier: 'standard',
-    providerKeySource: backgroundLlmRuntime?.providerKeySource ?? 'platform' as const,
+  if (recordEnvelope && nativeTranscriptAuthority && audienceEnvelope?.allowed && audienceEnvelope.source === 'binding') {
+    bindProviderConversationTurn(executionContext, turnOwner.token, recordEnvelope.version)
   }
+
+  turnOwner.bindModelPreparation({ kind: 'execution', toolProfile: 'channel', execution: executionContext, assertCurrent: assertDeliveryAudience },
+    { provider: provider, configuredProviders: params.configuredProviders,
+          resolveWorkspaceCustomLlm: params.resolveWorkspaceCustomLlm?.bind(params) ?? null,
+          resolveLegacyByoKey: null,
+          buildLegacyByoProvider: null })
+  const background = await turnOwner.prepareBackgroundModel({ model: laneModel })
+  const backgroundLlmRuntime = background.customLlm
+  const backgroundProvider = background.provider
+  const backgroundLaneModel = background.model!
+  const backgroundUsageAttribution = { modelTier: 'standard', providerKeySource: background.providerKeySource }
+  classifierUsageAttribution = backgroundUsageAttribution
   // ── Large-paste promotion (large-content-artifacts §Phase 3.2) ──
   // Runs before the message is classified, persisted, or fed to the model, so
   // a giant paste never reaches the classifier or the query loop as a blob.
@@ -1598,10 +1749,25 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       ...(params.conversationContext?.providerContextIdentity && params.conversationContext.providerContextGeneration != null
         ? { providerContext: { identity: params.conversationContext.providerContextIdentity, generation: params.conversationContext.providerContextGeneration } } : {}),
     }
-    if (!room) return addSessionMessage(input, client)
-    const result = await appendChannelRoomMessage(input, client)
-    createdUserMessage = result.created
-    return result.message
+    const write = async (db?: Parameters<typeof addSessionMessage>[1]) => {
+      if (channelWrite && db) {
+        const floor = await pinVerifiedChannelPublication(db,channelWrite,turnOwner.token)
+        if (!input.scope || !channelEvidenceFitsEnvelope(floor,input.scope)
+          || hasWorkspaceConversationAudience(floor.visibility) && input.scope.userId!==null) throw new AuthorityChangedError(false)
+      }
+      if (!room) return addSessionMessage(input,db)
+      const result = await appendChannelRoomMessage(input,db)
+      createdUserMessage = result.created
+      return result.message
+    }
+    if (!channelWrite || client) return write(client)
+    const tx = await getPool().connect()
+    try {
+      await tx.query('BEGIN')
+      const message = await write(tx)
+      await commitTransaction(tx)
+      return message
+    } finally { await rollbackAndRelease(tx) }
   }
   const persistInboundMessage = async () => params.archiveIncoming && !params.archiveInboundAlreadyPersisted
     ? await persistInboundChatArchive({
@@ -1622,122 +1788,55 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       }, persistUserMessage)
     : await persistUserMessage()
   const earlyUserMessageRow = nativeTranscriptAuthority ? await persistInboundMessage() : undefined
+  userMessageIdForUsage = earlyUserMessageRow?.id
 
-  // Native classifiers share admitted bytes, while each retains its fresh
-  // input-authority check. Legacy classifiers need their pre-turn dialogue.
+  // One turn route decides research, topic and split over one captured input
+  // (research.md "Adapter switch"): native lanes share admitted bytes while each
+  // retains its fresh input-authority check; a legacy transcript routes over its
+  // pre-turn dialogue, read once here. Channels have no manual research toggle:
+  // an adaptive verdict upgrades the alias to `research` (paid plans only; the
+  // downstream `resolveModel` still honors plan gating).
   if(params.conversationContext)await assertTelegramConversationCurrent(params.conversationContext)
-  const nativeClassificationCapture = nativeTranscriptAuthority && earlyUserMessageRow
-    ? await captureAttendedSessionClassification({ authority: nativeTranscriptAuthority, session, message: earlyUserMessageRow })
-    : undefined
-  const preExistingDbMessages = privateRecording || nativeClassificationCapture ? [] : nativeTranscriptAuthority
-    ? await readAttendedSessionHistory(nativeTranscriptAuthority, session.id, undefined, earlyUserMessageRow ? earlyUserMessageRow.sequenceNum - 1 : undefined)
-    : await filterHistoryForAudience(await getSessionMessages(session.id, { excludeHeld: true }))
+  const legacyHistory = nativeTranscriptAuthority ? undefined
+    : privateRecording ? [] : await filterHistoryForAudience(await getSessionMessages(session.id, { excludeHeld: true }))
+  const legacyReply = legacyHistory ? (privateRecording ? null : await resolveReplyText({
+    channelType,
+    replyToMessageId: replyToMessageId ?? null,
+    session,
+    raw: replyRaw,
+    ...(room ? { readableHistory: legacyHistory } : {}),
+  })) ?? (params.realtimeThreadTarget?.contextText
+    ? { text: params.realtimeThreadTarget.contextText, fromAssistant: true }
+    : null) : undefined
   if(params.conversationContext)await assertTelegramConversationCurrent(params.conversationContext)
-  const adaptiveRecentConversation = preExistingDbMessages
-    .filter((m) => m.role === 'user' || m.role === 'assistant')
-    .filter((m) => !(
-      m.role === 'assistant' &&
-      Array.isArray(m.content) &&
-      (m.content as Array<{ type?: string }>).some((block) => block.type === 'tool_use')
-    ))
-    .map((m) => {
-      const text = typeof m.content === 'string'
-        ? m.content
-        : Array.isArray(m.content)
-          ? (m.content as Array<{ type?: string; text?: string }>)
-            .filter((block) => block.type === 'text' && typeof block.text === 'string')
-            .map((block) => block.text as string)
-            .join(' ')
-          : ''
-      return { role: m.role as 'user' | 'assistant', text: text.trim() }
-    })
-    .filter((turn) => turn.text.length > 0)
-    .slice(-6)
-
-  // Adaptive research entry — channels have no manual toggle, so when the
-  // caller opts in we classify the message and upgrade the alias to
-  // `research` (paid plans only). The downstream `resolveModel` honors plan
-  // gating: free plans never reach research-tier regardless of classifier.
-  //
-  // Classifier overhead (~50 in / 20 out tokens via Flash Lite) is
-  // currently unattributed for channels — the chat route attributes the
-  // same call via `recordOverheadUsage`; channel cost-tracking is a
-  // follow-up.
-  let effectiveModelAlias = modelAlias
-  let adaptiveResearchActive = false
-  if (
-    !isolatedAudience &&
-    adaptiveResearchEnabled &&
-    messageText &&
-    assistant.workspaceId &&
-    workspacePlan !== 'free' &&
-    budgetStatus !== 'downgraded'
-  ) {
-    try {
-      const { classifyResearchIntent } = await import('@use-brian/core')
-      const adaptive = nativeTranscriptAuthority && earlyUserMessageRow
-        ? await classifyAttendedResearchMessage({
-            authority: nativeTranscriptAuthority, session, message: earlyUserMessageRow,
-            provider: backgroundProvider, model: backgroundLaneModel, decisionRuntime: params.decisionRuntime,
-            capture: nativeClassificationCapture,
-          })
-        : await classifyResearchIntent({
-        provider: backgroundProvider,
-        message: messageText,
-        model: backgroundLaneModel,
-        recentConversation: adaptiveRecentConversation,
-        decisionRuntime: params.decisionRuntime,
-        workspaceId: assistant.workspaceId ?? undefined,
-      })
-      if (adaptive.research) {
-        effectiveModelAlias = 'research'
-        adaptiveResearchActive = true
-      }
-    } catch (err) {
-      if (nativeTranscriptAuthority || isInputAuthorityError(err)) throw err
-      console.warn(`[${channelType}] adaptive-research classifier failed:`, err)
-    }
-  }
-  const { logicalModel, logicalTier, servingModel: model } = resolveChatModelSelection(
-    effectiveModelAlias,
-    workspacePlan,
-    budgetStatus,
-    params.configuredProviders,
-  )
-  const resolvedCustomLlm = assistant.workspaceId && params.resolveWorkspaceCustomLlm
-    ? await params.resolveWorkspaceCustomLlm({
-        workspaceId: assistant.workspaceId,
-        requestedTier: logicalTier,
-        allowDefault: true,
-        // The main user-facing channel turn, and every exit from it goes
-        // through `sendResponseAndStampChannelId`, which is what announces a
-        // fallback. The background lane above must NOT pass this - see the
-        // resolver's `allowFailureFallback` docs.
-        allowFailureFallback: true,
-      })
-    : null
-  // The same policy object the chat route uses, deliberately: one rule about
-  // images and a route that cannot read them, decided in one place. A channel
-  // user has even less recourse than a web one (no model picker at all), and
-  // a channel turn never carries an explicit `custom:<id>`, so the refusal
-  // here is only ever the nothing-to-fall-back-to case.
-  const imageRoute = decideImageTurnRoute({
-    route: resolvedCustomLlm,
-    turnHasImage: turnHasInlineImage(userContentBlocks),
-    explicitCustomSelection: false,
-    builtInServable: !params.configuredProviders
-      || (() => {
-        const row = registryRow(model)
-        return row ? isRegistryModelAvailable(row, params.configuredProviders) : false
-      })(),
+  const routing = await routeAttendedTurn({
+    facts: { profile: 'channel', adaptiveResearchEnabled: !!adaptiveResearchEnabled, workspaceId: assistant.workspaceId ?? null,
+      plan: workspacePlan, budgetStatus, isolatedAudience },
+    message: messageText,
+    ...(nativeTranscriptAuthority && earlyUserMessageRow ? { native: {
+      authority: nativeTranscriptAuthority, session, message: earlyUserMessageRow,
+      reply: { channelType, replyToMessageId: replyToMessageId ?? null },
+    } } : {}),
+    ...(legacyHistory ? { legacy: { history: legacyHistory, replyToText: legacyReply?.text ?? null, topicText: messageText, research: 'classify' as const } } : {}),
+    provider: backgroundProvider, model: backgroundLaneModel, decisionRuntime: params.decisionRuntime,
+    workspaceId: assistant.workspaceId ?? undefined, runId: earlyUserMessageRow?.id ?? crypto.randomUUID(),
+    // Channel preflight keeps its historical unbound splitter call shape.
+    split: { concurrent: 'preflight', late: 'preflight' },
+    recordUsage: async record => { pendingRoutingUsage.push(record); await flushRoutingUsage() },
+    attribution: backgroundUsageAttribution, signal: abortController.signal,
   })
+  const adaptiveResearchActive = routing.route.research.active
+  const effectiveModelAlias = adaptiveResearchActive ? 'research' : modelAlias
+  const preparedModel = await turnOwner.prepareMainModel({ kind: 'channel', requestedAlias: effectiveModelAlias,
+    plan: workspacePlan, budgetStatus, hasImage: turnHasInlineImage(userContentBlocks) })
+  const { logicalModel, logicalTier, model, imageRoute } = preparedModel
   // Announced, never silent - see CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE. The
   // ordinary path archives the inbound message a few lines below, so the
   // fallback needs no archive of its own.
   let imageFallbackNotice: string | null = imageRoute === 'fall_back_to_builtin'
     ? CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE
     : null
-  const customLlmRuntime = imageRoute === 'serve_on_route' ? resolvedCustomLlm : null
+  const customLlmRuntime = preparedModel.customLlm
   if (imageRoute === 'refuse') {
     // Archive BEFORE refusing. This return used to happen first, so an image
     // sent to a workspace on a custom endpoint left no message row and no
@@ -1775,7 +1874,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     await hooks.sendError(new Error(CUSTOM_MODEL_IMAGE_REJECTION))
     return
   }
-  const turnProvider = customLlmRuntime?.provider ?? provider
+  const turnProvider = preparedModel.provider
   // The model analytics must NAME, which is not the one the tier resolved.
   // `model` is the platform tier's serving model; on a workspace custom
   // endpoint `turnProvider` is swapped out and the provider pins its own wire
@@ -1797,14 +1896,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // justification. See Q9 of the design thread + the `chatEpisodeIngestor`
   // wiring in apps/api/src/index.ts.
 
-  const nativeClassification = nativeTranscriptAuthority && earlyUserMessageRow
-    ? await classifyAttendedSessionMessage({
-        authority: nativeTranscriptAuthority, session, message: earlyUserMessageRow,
-        provider: backgroundProvider, model: backgroundLaneModel, decisionRuntime: params.decisionRuntime,
-        capture: nativeClassificationCapture,
-        reply: { channelType, replyToMessageId: replyToMessageId ?? null },
-      })
-    : undefined
+  // The routed native topic publishes its annotation now, as the sequential
+  // classifier did; a legacy turn keeps the routed classification.
+  const nativeClassification = routing.topic ? await routing.topic.publish() : undefined
 
   const channelUser = await findUserById(userId)
   const speakerAccount = resolveChannelSpeakerAccount(channelUser)
@@ -1819,61 +1913,24 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   })
 
   if(params.conversationContext)await assertTelegramConversationCurrent(params.conversationContext)
-  const storedReply = privateRecording ? null : nativeClassification ? nativeClassification.reply : await resolveReplyText({
-    channelType,
-    replyToMessageId: replyToMessageId ?? null,
-    session,
-    raw: replyRaw,
-    ...(room ? { readableHistory: preExistingDbMessages } : {}),
-  })
-  replyResolved = nativeClassification ? nativeClassification.reply : storedReply ?? (
-    params.realtimeThreadTarget?.contextText
-      ? { text: params.realtimeThreadTarget.contextText, fromAssistant: true }
-      : null
-  )
-
-  const recentUserTurns: ClassifierRecentTurn[] = preExistingDbMessages
-    .filter((m) => m.role === 'user' && Array.isArray(m.content))
-    .slice(-8)
-    .map((m) => {
-      const blocks = m.content as Array<{ type?: string; text?: string }>
-      const text = blocks
-        .filter((b) => b?.type === 'text' && typeof b.text === 'string')
-        .map((b) => b.text as string)
-        .join(' ')
-        .trim()
-      return { text, topicLabel: m.topicLabel }
-    })
-    .filter((t) => t.text.length > 0)
-
-  const topicEvidence = topicEvidenceFromHistory(preExistingDbMessages)
-
-  classification = nativeClassification?.classification ?? null
-  if (!nativeClassification) {
-    try {
-      classification = await classifyTopic({
-        provider: backgroundProvider,
-        signal: abortController.signal,
-        // Background lane (see the chat.ts counterpart) — Flash Lite per
-        // cost-and-pricing.md → "Standard-tier routing", not the Flash 3
-        // chat alias this had drifted onto.
-        model: backgroundLaneModel,
-        recentUserTurns,
-        replyToText: replyResolved?.text ?? null,
-        currentMessage: messageText,
-        ...topicEvidence,
-        decisionRuntime: params.decisionRuntime,
-        workspaceId: assistant.workspaceId ?? undefined,
-        runId: `memory-topic-${earlyUserMessageRow?.id ?? crypto.randomUUID()}`,
-      })
-    } catch (err) {
-      console.error(`[${channelType}] topic classifier failed:`, err)
-    }
-  }
+  replyResolved = nativeClassification ? nativeClassification.reply : legacyReply ?? null
+  classification = nativeClassification?.classification ?? routing.legacyClassification
   if (abortController.signal.aborted) return
 
   // Reuse the native authored row; legacy profiles persist their input here.
   const userMessageRow = earlyUserMessageRow ?? await persistInboundMessage()
+  userMessageIdForUsage = userMessageRow.id
+  await flushRoutingUsage()
+  if (usageStore) turnOwner.registerUsageBilling({
+    metadata: {
+      userId: billingUserId, actorUserId: userId, assistantId: assistant.id, sessionId: session.id,
+      modelTier: logicalTier, userMessageId: userMessageRow.id,
+      source: workspacePlan === 'free' ? 'free' : 'included', triggerKey: 'main_response',
+      providerKeySource: customLlmRuntime?.providerKeySource ?? 'platform',
+    },
+    costPolicy: 'calculate', recordUsage: usageStore.recordUsage.bind(usageStore),
+    onError: error => console.error(`[${channelType}] Usage tracking failed:`, error),
+  })
   if (room && !params.recording && assistant.workspaceId && createdUserMessage) {
     await captureChannelRoomInput({
       room, inputScope: inputMessageScope, workspaceId: assistant.workspaceId,
@@ -1893,12 +1950,12 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   let researchActivity: ResearchActivity | null = null
   let researchObserver: ReturnType<typeof createResearchTurnObserver> | null = null
   if (assistant.workspaceId && !isolatedAudience) {
-    void captureResearchFollowupForMessage({
+    pendingPreparation.push(captureResearchFollowupForMessage({
       workspaceId: assistant.workspaceId, sessionId: session.id, assistantId: assistant.id,
       messageId: userMessageRow.id, actorUserId: userId ?? null, externalPrincipal: isolatedAudience,
       replyToChannelMessageId: replyToMessageId != null ? String(replyToMessageId) : null,
       onError: (error) => console.error(`[${channelType}] research follow-up capture failed`, { sessionId: session.id, error: error instanceof Error ? error.message : String(error) }),
-    })
+    }))
     if (adaptiveResearchActive && userId) {
       try {
         researchActivity = await beginResearchActivity({
@@ -1939,59 +1996,21 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     content: userContentBlocks,
   })
 
-  // Attribute classifier tokens as overhead against the billing party (channel
-  // users don't pay for auxiliary LLM calls). See
-  // docs/architecture/channels/channel-user-identity.md → "Billing split".
-  // `billingUserId`, never `ownerId` — see the resolution above.
-  await recordOverheadUsage({
-    usageStore,
-    userId: billingUserId,
-    actorUserId: userId,
-    assistantId: assistant.id,
-    sessionId: session.id,
-    userMessageId: userMessageRow.id,
-    model: classification?.model ?? null,
-    usage: classification?.usage,
-    source: 'overhead:classifier',
-    ...backgroundUsageAttribution,
-  })
-
-  // Voice transcription ran in the channel handler before the pipeline —
-  // usage is attributed here so it lands alongside the classifier row.
-  if (voiceTranscriptionUsage) {
-    await recordOverheadUsage({
-      usageStore,
-      userId: billingUserId,
-      actorUserId: userId,
-      assistantId: assistant.id,
-      sessionId: session.id,
-      userMessageId: userMessageRow.id,
-      model: voiceTranscriptionUsage.model,
-      usage: voiceTranscriptionUsage.usage,
-      source: 'overhead:transcription',
-      // Distinguishes an inbound voice message from a recording upload:
-      // both are `overhead:transcription`, but they have different volumes,
-      // different latency budgets, and would migrate to a new provider
-      // independently.
-      triggerKey: 'voice_message_transcription',
-      ...(voiceTranscriptionUsage.audioSeconds !== undefined
-        ? { audioSeconds: voiceTranscriptionUsage.audioSeconds }
-        : {}),
-    })
-  }
+  // Reported preparation spend is also settled on Stop/early failure, without
+  // requiring output authority or minting an input row after cancellation.
+  await settlePreparationUsage()
 
   // ── Load history ──
   // `fromSequence` skips rows already compacted into the most recent
   // boundary; null (never compacted) loads full history.
   if(params.conversationContext)await assertTelegramConversationCurrent(params.conversationContext)
-  let dbMessages = privateRecording ? [] : nativeTranscriptAuthority
-    ? await readAttendedSessionHistory(nativeTranscriptAuthority, session.id, isolatedAudience || room ? null : session.compactBoundarySequence)
-    : await filterHistoryForAudience(await getSessionMessages(session.id, {
-        excludeHeld: true,
-        // A public audience cannot trust the durable summary because it has no
-        // per-source audience evidence. Rebuild from filtered provider history.
-        fromSequence: isolatedAudience || room ? null : session.compactBoundarySequence,
-      }))
+  // The original turn owner selects and performs the main-turn history read;
+  // the channel declares only its stored-history audience projection.
+  let dbMessages = privateRecording ? [] : (await turnOwner.prepareHistory({ native: nativeTranscriptAuthority ?? null, classified: nativeClassification,
+    // A public audience cannot trust the durable summary because it has no
+    // per-source audience evidence. Rebuild from filtered provider history.
+    fromSequence: isolatedAudience || room ? null : session.compactBoundarySequence,
+    projectStored: rows => filterHistoryForAudience(rows) })).messages
   if(params.conversationContext)await assertTelegramConversationCurrent(params.conversationContext)
   if (room && !privateRecording) {
     const currentHistory = overlayCurrentRoomMessage(dbMessages, { id: userMessageRow.id, content: userContentBlocks })
@@ -2479,7 +2498,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         workspaceId: assistant.workspaceId,
         session,
       })
-      const injection = await injectMcpTools({
+      // Prepared by the original turn owner through the M3 capability surface
+      // (`channel` profile, catalog-only until a call), from the surface options.
+      const injection = await turnOwner.prepareCapabilities({ profile: 'channel', composition: { kind: 'surface-options', params: {
         userId: connectorUserId,
         executionContext,
         scopeAccumulator,
@@ -2528,7 +2549,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
             ttlMs: 5 * 60_000,
           }) ?? undefined,
         },
-      })
+      } } })
       unavailableCapabilities = injection.unavailable
       searchableSources = injection.searchableSources
       if (injection.knowledgeCapturePrompt) {
@@ -2664,7 +2685,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // The bus is LISTEN/NOTIFY cross-instance, so a watch relay on brian-api
   // receives turns running here or on brian-api-workers.
   const turnStream = createTurnStreamPublisher({
-    sessionId: session.id,
+    sessionId: session.id,turnId:()=>turnOwner.turnId,
     publishSessionEvent,
     shouldPublish: () => !params.recording,
     attribution: () => ({ senderUserId: userId, assistantId: assistant.id }),
@@ -2672,7 +2693,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   const publishChannelActivity = (event: string, data: Record<string, unknown>): void =>
     publishRoomTurnActivity({
       mirror: !params.recording,
-      sessionId: session.id,
+      sessionId: session.id,turnId:turnOwner.turnId,
       senderUserId: userId,
       event,
       data,
@@ -2688,7 +2709,16 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // ── Tool-pairing buffer ──
   type PendingTurn = { content: ContentBlock[]; toolResults: ContentBlock[] }
   const pendingAssistantTurns: PendingTurn[] = []
-  const turnOutput = createTurnOutputCollector({ format: 'channel' })
+  const recoverMessage = (reason: 'failed' | 'empty') => turnOwner.recoverInteractiveReply({
+    reason, pendingAssistantTurns, userText: messageText, channelType,
+    authorizeDestination: assertDeliveryAudience,
+    recordUsage: ({ model, usage }) => recordOverheadUsage({
+      usageStore, userId: billingUserId, actorUserId: userId, assistantId: assistant.id,
+      sessionId: session.id, userMessageId: userMessageRow.id, model, usage,
+      source: 'overhead:recovery-message', triggerKey: 'recovery_message', ...backgroundUsageAttribution,
+    }),
+  })
+
   let flushed = false
   // Track the most-recently-flushed assistant `session_messages` row id
   // so a `sendResponse` returning a channel-native message id (Slack
@@ -2698,98 +2728,37 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // reacted to. See `hooks.sendResponse` doc comment + corrections.md.
   let lastFlushedAssistantRowId: string | null = null
   const flushBufferedTurns = async (reason: string, attachments?: OutboundAttachment[]) => {
-    if (flushed) return
-    await assertDeliveryAudience()
-    flushed = true
     // A managed recorder is a transcript of the provider conversation. Its
     // only assistant writer is the successful-delivery receipt observer;
     // model/tool rounds are private execution state, not published messages.
-    if (params.recording || params.conversationContext) return
+    if (flushed || params.recording || params.conversationContext) return
+    await assertDeliveryAudience()
+    flushed = true
     // Attachments (sendFile) belong to the final reply — the last turn
-    // with content. Intermediate tool_use turns never carry them.
-    const lastContentIdx = (() => {
-      for (let i = pendingAssistantTurns.length - 1; i >= 0; i--) {
-        if (pendingAssistantTurns[i].content.length > 0) return i
+    // with content. Intermediate tool_use turns never carry them. One owner
+    // publication for every buffered row (turn-kernel.md "Reply publication").
+    const assembled = assembleTurnPublication(pendingAssistantTurns, { reason, sender: { senderUserId: senderUserId ?? null }, attachments })
+    await turnOwner.publish({ disposition: 'reply', rows: assembled.rows, write: publicationWrite(), native: nativeTranscriptAuthority,channelRecord:channelWrite,
+      // The durable completion header (8277): this turn's answer to its inbound row.
+      completion: { lane: 'channel', input: { kind: 'session_message', ref: userMessageRow.id }, assistantId: assistant.id },
+      execute: operation => authority.execute(operation), afterCommit: async (rows) => {
+      const savedTurns = [...assembled.assistantRows].flatMap(([index, turn]) => rows[index] ? [{ row: rows[index]!, content: turn.content }] : [])
+      if (savedTurns.length) await assertDeliveryAudience()
+      for (const saved of savedTurns) {
+        lastFlushedAssistantRowId = saved.row.id
+        // Streaming channels surface the persisted row so the client
+        // can attach actions (regenerate, copy, thumbs-up) and so
+        // collaborative channels can mirror the assistant turn to peer
+        // viewers. Multi-turn loops (tool_use → tool_result → assistant
+        // text) fire this once per buffered turn that has content.
+        // Final-only channels leave the hook unimplemented.
+        await hooks.onAssistantMessageSaved?.({
+          id: saved.row.id,
+          sequenceNum: saved.row.sequenceNum,
+          content: saved.content,
+        })
       }
-      return -1
-    })()
-    const batchWrite = currentTurnWrite()
-    const savedTurns: Array<{ row: Awaited<ReturnType<typeof addSessionMessage>>; content: ContentBlock[] }> = []
-    const publish = async (tx: PoolClient) => {
-      const nativeRows: Array<Parameters<typeof publishNativeSessionMessageBatch>[0]['messages'][number]> = []
-      const nativeSaved = new Map<number, ContentBlock[]>()
-      for (let turnIdx = 0; turnIdx < pendingAssistantTurns.length; turnIdx++) {
-        const turn = pendingAssistantTurns[turnIdx]
-        if (turn.content.length === 0) continue
-        if(nativeTranscriptAuthority && 'derivation' in batchWrite){
-          nativeSaved.set(nativeRows.length,turn.content)
-          nativeRows.push({role:'assistant',content:turn.content,senderUserId:senderUserId??null,
-            attachments:turnIdx===lastContentIdx&&attachments?.length?attachments:undefined})
-        } else {
-          const assistantRow = await addSessionMessage({
-            sessionId: session.id,
-            role: 'assistant',
-            content: turn.content,
-            // Stamp draft-session author so peer viewers see who drove
-            // the turn that produced this assistant message.
-            senderUserId: senderUserId ?? null,
-            attachments: turnIdx === lastContentIdx && attachments?.length ? attachments : undefined,
-            ...batchWrite,
-          }, tx)
-          savedTurns.push({ row: assistantRow, content: turn.content })
-        }
-        const missing = synthesizeMissingToolResults(turn.content, turn.toolResults, reason)
-        const allResults = [...turn.toolResults, ...missing]
-        if (allResults.length > 0) {
-          if(nativeTranscriptAuthority && 'derivation' in batchWrite)nativeRows.push({role:'user',content:allResults})
-          else await addSessionMessage({
-            sessionId: session.id,
-            role: 'user',
-            content: allResults,
-            ...batchWrite,
-          }, tx)
-        }
-      }
-      if(nativeRows.length&&nativeTranscriptAuthority&&'derivation' in batchWrite){
-        const rows=await publishNativeSessionMessageBatch({sessionId:session.id,messages:nativeRows,
-          derivation:batchWrite.derivation,derivationTarget:batchWrite.derivationTarget,authority:nativeTranscriptAuthority},tx)
-        for(const [index,row] of rows.entries()){
-          const content=nativeSaved.get(index)
-          if(content)savedTurns.push({row,content})
-        }
-      }
-    }
-    await authority.execute(async () => {
-      if (nativeTranscriptAuthority && 'derivation' in batchWrite) {
-        return withSessionMessagePublication(nativeTranscriptAuthority, batchWrite.derivation.sources, publish, { turnToken: turnLeaseToken })
-      }
-      const tx = await getPool().connect()
-      try {
-        await tx.query('BEGIN')
-        await publish(tx)
-        await tx.query('COMMIT')
-      } catch (error) {
-        await tx.query('ROLLBACK').catch(() => {})
-        throw error
-      } finally {
-        tx.release()
-      }
-    })
-    if (savedTurns.length) await assertDeliveryAudience()
-    for (const saved of savedTurns) {
-      lastFlushedAssistantRowId = saved.row.id
-      // Streaming channels surface the persisted row so the client
-      // can attach actions (regenerate, copy, thumbs-up) and so
-      // collaborative channels can mirror the assistant turn to peer
-      // viewers. Multi-turn loops (tool_use → tool_result → assistant
-      // text) fire this once per buffered turn that has content.
-      // Final-only channels leave the hook unimplemented.
-      await hooks.onAssistantMessageSaved?.({
-        id: saved.row.id,
-        sequenceNum: saved.row.sequenceNum,
-        content: saved.content,
-      })
-    }
+    } })
   }
 
   // Helper: invoke `sendResponse` and stamp the returned channel-native
@@ -2856,11 +2825,16 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   }
 
   // ── Preflight research ──
+  // The turn route made the split call (non-isolated messages over 40
+  // characters); preflight takes the routed tasks after a fresh split-lane
+  // proof and never classifies again.
   let preflightContext = ''
-  if (!isolatedAudience && messageText.length > 40) {
+  if (routing.route.split) {
     try {
+      const preflightTools = turnOwner.prepareTools(allTools)
       const preflight = await runPreflight({
-        provider: backgroundProvider, model: backgroundLaneModel, message: messageText, tools: allTools,
+        provider: backgroundProvider, model: backgroundLaneModel, message: messageText, tools: preflightTools,
+        classify: async () => ({ tasks: await routing.consumeSplit(), usage: null, model: null }),
         // Discovery, a read (and an optional detail read), then synthesis.
         maxWorkerTurns: 4,
         context: {
@@ -2870,8 +2844,11 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
           userMessageText: messageText,
           taskAuthority,
           userTimezone,
+          workerRuntime: { provider: backgroundProvider, model: backgroundLaneModel,
+            modelTier: backgroundUsageAttribution.modelTier,
+            providerKeySource: backgroundUsageAttribution.providerKeySource },
           abortSignal: abortController.signal,
-          requestTools: allTools,
+          requestTools: preflightTools,
           activeCapabilities,
           sensitivity: sensitivityAccumulator,
           compartmentAccumulator,
@@ -2885,6 +2862,18 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
             payloads: getLedgerPayloadStore(),
           }).ledger,
         },
+        onUsage: async event => {
+          if (!usageStore) return
+          const keySource = event.providerKeySource ?? backgroundUsageAttribution.providerKeySource
+          await usageStore.recordUsage({
+            userId: billingUserId, actorUserId: userId, assistantId: assistant.id, sessionId: session.id,
+            model: event.model, modelTier: event.modelTier ?? backgroundUsageAttribution.modelTier,
+            inputTokens: event.usage.inputTokens, outputTokens: event.usage.outputTokens,
+            cacheReadTokens: event.usage.cacheReadTokens, cacheWriteTokens: event.usage.cacheWriteTokens,
+            actualCostUsd: keySource === 'user' ? 0 : calculateCost(event.model, event.usage),
+            source: 'included', triggerKey: 'worker_run', providerKeySource: keySource,
+          }).catch(error => console.error(`[${channelType}] worker usage tracking failed:`, error))
+        },
         onStatus: () => hooks.onStatus?.('Researching...') ?? Promise.resolve(),
         onEvent: (event, workerId) => {
           if (event.type !== 'tool_result') return
@@ -2895,7 +2884,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
             assistantId: assistant.id, sessionId: session.id,
             workspaceId: assistant.workspaceId,
             userMessageId: userMessageRow.id, userPlan: workspacePlan,
-            channelType, workerId,
+            channelType, workerId, pendingUsage,
           })
         },
       })
@@ -2903,6 +2892,8 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         preflightContext = preflight.context
       }
     } catch (err) {
+      // A refused split-lane proof is an authority change, never a degraded turn.
+      if (isInputAuthorityError(err)) throw err
       console.error(`[${channelType}] pre-flight failed, continuing without:`, err)
     }
   }
@@ -2947,78 +2938,40 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // the previous reply must not launder itself into evidence for the next.
   // Accumulate-only here (no gatedTools): the identifier write-gate stays a
   // workflow-lane behavior.
+  // Seeded from the prepared run's grounding, which for channels is the
+  // runtime context before user-visible placement (the channel ordering).
   const replyEvidence = new EvidenceAccumulator()
-  replyEvidence.note(renderSystemContext({ systemPrompt: splitPrompt.stablePrompt, runtimeSystemContext }))
-  // The replied-to quote is represented on the user turn, so seed that
-  // visible material explicitly as evidence too.
-  replyEvidence.note(userVisibleContext)
-  replyEvidence.note(messageText)
 
-  // Attach only user-visible context to the newest user message. When the
-  // trailing message cannot carry it, retain the same provenance marker in
-  // the trusted prompt for this rare resume shape.
-  const envelopedMessages = attachUserVisibleContext(messages, userVisibleContext)
-  if (envelopedMessages) {
-    messages = envelopedMessages
-  } else if (userVisibleContext) {
-    runtimeSystemContext =
-      `${runtimeSystemContext}\n\n${formatUserVisibleContext(userVisibleContext)}`
-  }
+  // Only user-visible context may prefix the newest user message. The
+  // original turn owner's `prepareRun` places it exactly once, retaining the
+  // tagged trusted-prompt fallback when the trailing message cannot carry it.
 
   // Claim ledger stash — persisted after flushBufferedTurns (which creates
   // the assistant message row) and BEFORE sendResponse, so the linkage
   // exists before the user sees the reply.
   let pendingClaimLedger: Extract<
-    import('@use-brian/core').QueryEvent,
+    import('@use-brian/agent-runtime/engine/query-loop.js').QueryEvent,
     { type: 'claim_ledger' }
   >['claims'] | null = null
   const acknowledgedGoalIds = new Set<string>()
 
-  // The turn kernel's admission (D11, D14): a channel turn holds a real lease,
-  // so the sweeper can tell it is alive, Stop reaches it, and a second message
-  // waits for the first turn instead of running beside it on one history.
-  const slot = await takeTurnLease({
-    sessionId: session.id,
-    admission: turnPolicy.admission,
-    waitForSlot: waitForTurnSlot,
-  })
-  if (!slot.taken) {
-    // An attended channel never answers with silence.
-    await hooks.sendResponse(CHANNEL_TURN_BUSY_NOTICE)
-    await hooks.onCleanup?.()
-    return
-  }
-  // Taken here, directly before the `try` whose `finally` releases it, so no
-  // setup failure can strand it until the sweeper.
-  const turnLeaseToken = slot.token
-  let turnFailed = false
-
   // ── Query loop ──
+  if (abortController.signal.aborted) return
   try {
-    const preparedRun = await prepareAssistantRun({
-      executionContext,
-      model: {
-        provider: turnProvider,
-        model,
-        maxTokens: customLlmRuntime?.maxTokens,
-        inputTokenLimit: customLlmRuntime?.inputTokenLimit,
-      },
+    const preparedRun = await turnOwner.prepareRun({
+      systemPrompt: splitPrompt.stablePrompt,
+      messages,
       candidateTools: allTools,
-      bindTools: (candidateTools, execution) => bindToolsToAgentAccess(candidateTools, execution.security.access),
       trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
       userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
     })
-    const turnLoopResult = await runAssistantTurn({
-      sessionId: session.id,
-      policy: turnPolicy,
-      abortController,
-      lease: { mode: 'held', token: turnLeaseToken },
-      model: {
-        provider: preparedRun.model.provider,
-        model: preparedRun.model.model,
-        configuredProviders: params.configuredProviders,
-        customLlm: customLlmRuntime,
-      },
+    replyEvidence.note(renderSystemContext({ systemPrompt: splitPrompt.stablePrompt, runtimeSystemContext: preparedRun.grounding.runtimeContext }))
+    // The replied-to quote is represented on the user turn, so seed that
+    // visible material explicitly as evidence too.
+    replyEvidence.note(preparedRun.grounding.userVisibleContext)
+    replyEvidence.note(messageText)
+    const turnLoopResult = await turnOwner.run({
+
       loop: {
       ledger: createTurnLedger({
         workspaceId: assistant.workspaceId ?? null,
@@ -3026,11 +2979,6 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         sessionId: session.id,
         payloads: getLedgerPayloadStore(),
       }).ledger,
-      maxTokens: preparedRun.model.maxTokens,
-      inputTokenLimit: preparedRun.model.inputTokenLimit,
-      systemPrompt: splitPrompt.stablePrompt,
-      runtimeSystemContext: preparedRun.trustedContext,
-      messages, tools: preparedRun.tools,
       context: {
         ...executionToolContext(executionContext, { appId: 'Use Brian' }),
         channelSessionId: sessionChannelId,
@@ -3077,7 +3025,19 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         ? { maxTurns: tierBudget.maxTurns, maxToolCalls: tierBudget.maxToolCalls }
         : {}),
       },
-      sink: { kind: 'adapter', ...(nativeTranscriptAuthority ? { assertOutputAuthority: assertDeliveryAudience } : {}), afterLoop: async () => {
+      sink: { kind: 'adapter', ...(nativeTranscriptAuthority ? { admitOutput: async (_context, eventKind) => {
+        // The managed recorder suppresses the live mirror and keeps these
+        // events inside the turn. Status and tool hooks can still be outward
+        // effects. The terminal send always checks the complete audience
+        // again after reading any attachments and before provider I/O.
+        if (params.recording && !params.conversationContext && !researchObserver
+          && (eventKind === 'assistant_turn' || eventKind === 'question' || eventKind === 'thinking_delta'
+            || eventKind === 'turn_complete' || (eventKind === 'text_delta' && !hooks.onTextDelta))) {
+          await authority.assertCurrent()
+          return
+        }
+        await assertDeliveryAudience()
+      } } : {}), afterLoop: async () => {
         await flushBufferedTurns('[Tool did not return a result. Treat as failed and do not retry.]')
         if (!sessionStateStore || !isIdentified || isolatedAudience) return
         try {
@@ -3121,7 +3081,6 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         }
       }, onEvent: async (event) => {
       if (!nativeTranscriptAuthority) await assertDeliveryAudience()
-      turnOutput.observe(event)
       researchObserver?.observe(event)
       switch (event.type) {
         case 'question':
@@ -3192,7 +3151,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
             workspaceId: assistant.workspaceId,
             userMessageId: userMessageRow.id,
             userPlan: workspacePlan,
-            channelType,
+            channelType, pendingUsage,
           })
           await hooks.onToolResult?.(event.results)
           for (const block of event.results) {
@@ -3239,6 +3198,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
           })
           break
         case 'turn_complete': {
+          await turnOwner.settleUsage()
           // ── Outbound documents (sendFile) ──
           // Drain BEFORE flushing so the persisted attachment list
           // reflects only what actually resolves to bytes. A failed
@@ -3310,7 +3270,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
           // so the raw tag would leak into the message body. Web parses
           // it client-side and renders chips. See
           // docs/architecture/features/follow-up-questions.md.
-          const selectedOutput = turnOutput.select()
+          const selectedOutput = turnOwner.selectedOutput('channel')
           terminalQuestion = selectedOutput.kind === 'question'
             ? {
                 question: selectedOutput.question.question,
@@ -3365,42 +3325,8 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
                 model: sanitizeAnalytics(analyticsModel),
               },
             })
-            // `tools_only` is the one reason where "try again" is the wrong
-            // advice: a tool may already have shipped a side effect, so the
-            // user needs to CHECK, not resend. That is exactly what
-            // `composeRecoveryMessage` exists for on the catch path, and it
-            // matches the user's language while it is at it. It returns null
-            // when no tool actually succeeded (nothing to describe, and a
-            // retry is safe after all) and on any synthesis failure, both of
-            // which fall through to the fixed notice. It runs on the
-            // background provider on purpose: the endpoint that just produced
-            // nothing must not also decide whether the user hears about it.
-            // Never synthesize for a destination that is no longer authorized:
-            // a refusal here unwinds to the live-authority exit below.
-            if (emptyReason === 'tools_only') await assertDeliveryAudience()
-            const recovered = emptyReason === 'tools_only'
-              ? await composeRecoveryMessage({
-                  provider: backgroundProvider,
-                  pendingAssistantTurns,
-                  userText: messageText,
-                  channelType,
-                })
-              : null
-            if (recovered) {
-              await recordOverheadUsage({
-                usageStore,
-                userId: billingUserId,
-                actorUserId: userId,
-                assistantId: assistant.id,
-                sessionId: session.id,
-                userMessageId: userMessageRow.id,
-                model: recovered.model,
-                usage: recovered.usage,
-                source: 'overhead:recovery-message',
-                triggerKey: 'recovery_message',
-                ...backgroundUsageAttribution,
-              })
-            }
+            // The owner runs recovery only for admitted tool-only output.
+            const recovered = await recoverMessage('empty')
             // Not persisted as an assistant row. `flushBufferedTurns` has
             // already run and skips zero-content turns, so there is nothing to
             // append this to, and the catch path's recovery message has the
@@ -3413,7 +3339,6 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
               documents.length > 0 ? documents : undefined,
             )
           }
-          turnOutput.advanceDelivery()
           terminalQuestion = undefined
 
           // ── Cost tracking + analytics ──
@@ -3433,28 +3358,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
             const cost = turnKeySource === 'user'
               ? 0
               : calculateCost(event.response.model, usage)
-            if (usageStore) {
-              usageStore.recordUsage({
-                userId: billingUserId, actorUserId: userId, assistantId: assistant.id, sessionId: session.id,
-                model: event.response.model,
-                modelTier: logicalTier,
-                inputTokens: usage.inputTokens,
-                outputTokens: usage.outputTokens,
-                cacheReadTokens: usage.cacheReadTokens,
-                cacheWriteTokens: usage.cacheWriteTokens,
-                actualCostUsd: cost,
-                // This is the credit-bearing row. The credit derivation
-                // (getPeriodCredits → `user_message_id IS NOT NULL`) skips any
-                // main_response row missing this id, so omitting it makes every
-                // channel turn debit ZERO credits. The web route stamps it on its
-                // main_response too — keep parity. See cost-and-pricing.md →
-                // "Credit accounting".
-                userMessageId: userMessageRow.id,
-                source: workspacePlan === 'free' ? 'free' : 'included',
-                triggerKey: 'main_response',
-                providerKeySource: turnKeySource,
-              }).catch((err) => console.error(`[${channelType}] Usage tracking failed:`, err))
-            }
+
 
             if (customLlmRuntime?.fallback.used) {
               analytics?.logEvent({
@@ -3506,12 +3410,13 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
 
 
     // ── Memory nudge (identified users only) ──
-    // Records usage as `overhead:nudge` once the judge call returns. Fire-and-
-    // forget — errors are logged but never surface to the user.
-    if (isIdentified) {
+    // Finish its usage and state work before retiring this original owner.
+    if (isIdentified && !abortController.signal.aborted) {
+      await authority.assertCurrent()
+      if (abortController.signal.aborted) return
       // Standard tier per docs/architecture/platform/cost-and-pricing.md
       // → Model routing (extraction / classification / structured-output bucket).
-      runMemoryNudge({
+      await runMemoryNudge({
         turns: pendingAssistantTurns,
         callModel: async (prompt, llm) => {
           const nudgeProvider = llm?.provider ?? backgroundProvider
@@ -3552,8 +3457,13 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         }))
         .catch((err) => console.debug(`[${channelType}] memory nudge failed:`, err))
     }
+    turnFailed = abortController.signal.aborted
   } catch (err) {
     turnFailed = true
+    if (abortController.signal.aborted || turnOwner.abortKind) {
+      await settleResearch('', true)
+      return
+    }
     if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) {
       console.warn(`[${channelType}] channel turn stopped by live authority:`, (err as Error).name)
       analytics?.logEvent({
@@ -3603,29 +3513,8 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     // original instruction and duplicate side effects (e.g. two
     // calendar updates, two Threads replies). Falls back to the
     // generic `hooks.sendError` when no tools ran or Flash hiccups.
-    const recovered = await composeRecoveryMessage({
-      provider: backgroundProvider,
-      pendingAssistantTurns,
-      userText: messageText,
-      channelType,
-    })
+    const recovered = await recoverMessage('failed')
     if (recovered) {
-      // Cost attribution for the Flash call. The synthesiser is paid
-      // for by the billing party (same as every other overhead row),
-      // not by whichever channel user happened to trigger the bail.
-      await recordOverheadUsage({
-        usageStore,
-        userId: billingUserId,
-        actorUserId: userId,
-        assistantId: assistant.id,
-        sessionId: session.id,
-        userMessageId: userMessageRow.id,
-        model: recovered.model,
-        usage: recovered.usage,
-        source: 'overhead:recovery-message',
-        triggerKey: 'recovery_message',
-        ...backgroundUsageAttribution,
-      })
       // Surface the recovery text via the same channel-native path the
       // normal turn would have used. Kept on `sendResponse` rather than
       // `sendError` so the message renders as the assistant speaking
@@ -3637,10 +3526,21 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     }
   } finally {
     channelConfirmations.clear(confirmationResolver)
-    await hooks.onCleanup?.()
-    // Watch viewers clear their "Working" card on the terminal bus event —
-    // published in the finally, not on the paths we happened to think of.
-    publishTurnCompleted({ sessionId: session.id, senderUserId: userId, publishSessionEvent })
-    await releaseTurn(session.id, turnLeaseToken, turnFailed ? 'failed' : 'completed')
+  }
+  } finally {
+    try {
+      await settlePreparationUsage()
+      const completedWork = await Promise.allSettled([...pendingPreparation, ...pendingUsage])
+      for (const outcome of completedWork) if (outcome.status === 'rejected') console.error(`[${channelType}] turn follow-up failed:`, outcome.reason)
+    } finally {
+      try { await hooks.onCleanup?.() }
+      finally {
+        await turnOwner.finish(channelStopRequested() ? 'stopped_by_user' : turnFailed ? 'failed' : 'completed')
+        if (turnOwner.released) publishTurnCompleted({ sessionId: session.id, senderUserId: userId,
+          publishSessionEvent, turnId: turnOwner.turnId,
+          ...(turnOwner.completionReason && turnOwner.completionReason !== 'completed' ? { reason: turnOwner.completionReason } : {}),
+        })
+      }
+    }
   }
 }

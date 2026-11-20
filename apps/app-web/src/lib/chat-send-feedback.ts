@@ -8,7 +8,10 @@ const pending = new Map<string, readonly PendingSend[]>();
 const empty: readonly PendingSend[] = [];
 const listeners = new Set<() => void>();
 const recency = new Map<string, Map<string, { at: string; token: symbol }>>();
-const completed = new Map<string, Map<string, number>>();
+const completed = new Map<string, Map<string, { at: number; turnId: string | null }>>();
+const completionKey = (sessionId: string, turnId?: string | null) => JSON.stringify([sessionId, turnId ?? null]);
+const completedAfterRead = (value: { at: number; turnId: string | null } | undefined, row: { turnId?: string | null; statusReadStartedAt?: number }) =>
+  value !== undefined && value.turnId === (row.turnId ?? null) && value.at >= (row.statusReadStartedAt ?? 0);
 let revision = 0;
 function emit() { revision++; for (const listener of listeners) listener(); }
 function useRevision() { return useSyncExternalStore(subscribe, () => revision, () => 0); }
@@ -35,18 +38,18 @@ export function beginChatSendFeedback(workspaceId: string, sessionId: string | n
   const key = scope(workspaceId);
   const token = Symbol();
   let released = false;
-  if (sessionId) completed.get(key)?.delete(sessionId);
+  if (sessionId) completed.get(key)?.delete(completionKey(sessionId));
   publish(key, [...(pending.get(key) ?? empty), { token, sessionId }]);
   return {
     adopt(id: string) {
       if (released) return;
-      completed.get(key)?.delete(id);
+      completed.get(key)?.delete(completionKey(id));
       publish(key, (pending.get(key) ?? empty).map(row => row.token === token ? { ...row, sessionId: id } : row));
     },
-    complete() {
+    complete(turnId: string | null = null) {
       if (released) return;
       const id = pending.get(key)?.find(row => row.token === token)?.sessionId;
-      if (id) remember(completed, key, id, Date.now());
+      if (id) remember(completed, key, completionKey(id, turnId), { at: Date.now(), turnId });
       this.release();
     },
     release() {
@@ -63,7 +66,7 @@ export function useChatLiveCount(workspaceId: string, items: LiveWorkItem[]): nu
   useRevision();
   const sends = pending.get(key) ?? empty;
   const active = items.filter(item => item.state !== "settled" &&
-    (item.kind !== "session" || (completed.get(key)?.get(item.id) ?? -1) < (item.statusReadStartedAt ?? 0)));
+    (item.kind !== "session" || !completedAfterRead(completed.get(key)?.get(completionKey(item.id, item.turnId)), item)));
   const sessions = new Set(active.filter(item => item.kind === "session").map(item => item.id));
   let count = active.length;
   for (const send of sends) {
@@ -78,8 +81,9 @@ export function useChatLiveCount(workspaceId: string, items: LiveWorkItem[]): nu
 
 
 /** Observe a terminal session signal without granting a list or title lease. */
-export function settleChatSessionFeedback(workspaceId: string, sessionId: string): void {
-  remember(completed, scope(workspaceId), sessionId, Date.now());
+export function settleChatSessionFeedback(workspaceId: string, sessionId: string, turnId: string | null = null): void {
+  if (!turnId) return;
+  remember(completed, scope(workspaceId), completionKey(sessionId, turnId), { at: Date.now(), turnId });
   emit();
 }
 
@@ -97,7 +101,7 @@ export function recordChatSessionRecency(workspaceId: string, sessionId: string,
   };
 }
 
-type SessionRow = { id: string; lastActive: string; status?: string; statusReadStartedAt?: number };
+type SessionRow = { id: string; lastActive: string; status?: string; statusReadStartedAt?: number; turnId?: string | null };
 /** Only reorder/update rows the caller already has authority to display. */
 export function useChatSessionFeedback<T extends SessionRow>(workspaceId: string | null, rows: T[] | null | undefined): T[] | null | undefined {
   const version = useRevision();
@@ -108,9 +112,9 @@ export function useChatSessionFeedback<T extends SessionRow>(workspaceId: string
     let reordered = false;
     const presented = rows.map(row => {
       const at = recency.get(key)?.get(row.id)?.at;
-      const settled = completed.get(key)?.get(row.id);
+      const settled = completed.get(key)?.get(completionKey(row.id, row.turnId));
       const status = working.has(row.id) ? "running"
-        : settled !== undefined && settled >= (row.statusReadStartedAt ?? 0) ? "idle" : row.status;
+        : completedAfterRead(settled, row) ? "idle" : row.status;
       const promoted = at !== undefined && at > row.lastActive;
       reordered ||= promoted;
       return promoted || status !== row.status ? { ...row, ...(promoted ? { lastActive: at } : {}), status } : row;

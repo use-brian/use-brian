@@ -1,6 +1,6 @@
 import {readFileSync} from 'node:fs'
 import {expect,it,vi} from 'vitest'
-import type {ToolContext} from '@use-brian/core'
+import type {ToolContext} from '@use-brian/agent-runtime/tools/types.js'
 import {createWorkspaceMigrationTools} from '../migration-tools.js'
 import {migrationInventoryInput} from '../migration-inventory.js'
 const mocks=vi.hoisted(()=>({inspectMigrationInventory:vi.fn(),getMigrationInventory:vi.fn()}))

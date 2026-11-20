@@ -3,7 +3,7 @@ import {beforeEach,describe,it,expect,vi} from 'vitest'
 import JSZip from 'jszip'
 import {feedParagraph,projectFeedLinkedIn} from '@use-brian/doc-model'
 import type {StructuredFeedContent} from '../../db/feed-collaboration-store.js'
-import type {FilesApi} from '@use-brian/core'
+import type {FilesApi} from '@use-brian/core/workspace-files/api.js'
 const state=vi.hoisted(()=>({content:null as unknown,revision:3,authorized:true,release:3,receipt:null as unknown,query:vi.fn()}))
 vi.mock('../../db/feed-collaboration-store.js',async()=>{const actual=await vi.importActual<typeof import('../../db/feed-collaboration-store.js')>('../../db/feed-collaboration-store.js');return {...actual,withFeedTransaction:async(_actor:unknown,fn:Function)=>fn({query:state.query},{workspaceId:'fixture',memberClearance:'internal',memberCompartments:[]}),readFeedCopy:async()=>({content:state.content,revision:state.revision}),assertFeedFiles:vi.fn(async()=>{if(!state.authorized)throw new Error('file_unavailable')})}})
 vi.mock('../confirmation.js',()=>({readFeedConfirmation:async()=>({id:'confirmation',revision:3,content:state.content}),isFeedConfirmationRevoked:async()=>false}))

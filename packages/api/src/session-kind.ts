@@ -186,6 +186,18 @@ export function normalizeSessionVisibility(visibility: string | null | undefined
   return visibility === 'owner' ? 'personal' : visibility
 }
 
+/** Exact stored destination for live authority; omitted legacy fields stay unspecified. */
+export function sessionAuthorityDestinationMatches(
+  expected: Partial<Pick<SessionKindRow, 'channelType' | 'channelId' | 'appOrigin' | 'anchorKind' | 'anchorRef'>>,
+  current: Partial<Pick<SessionKindRow, 'channelType' | 'channelId' | 'appOrigin' | 'anchorKind' | 'anchorRef'>>,
+): boolean {
+  return (expected.channelType === undefined || current.channelType === expected.channelType)
+    && (expected.channelId === undefined || current.channelId === expected.channelId)
+    && (expected.appOrigin === undefined || current.appOrigin === expected.appOrigin)
+    && (expected.anchorKind === undefined || current.anchorKind === expected.anchorKind)
+    && (expected.anchorRef === undefined || current.anchorRef === expected.anchorRef)
+}
+
 // --- Classifier ------------------------------------------------------------
 
 /**
@@ -251,6 +263,50 @@ export function classifySession(row: SessionKindRow, turn: SessionTurnFacts = {}
   }
 }
 
+/** M7 durable privacy classification. Historical uncertainty always keeps the
+ * stronger private-by-kind protection: archive status or a removed membership
+ * cannot make a member's 1:1 admin-widenable. A replaced provider group needs
+ * positive same-conversation room evidence, not an archived timestamp alone.
+ * [COMP:api/conversation-visibility] */
+export type ConversationVisibility = 'private_by_kind' | 'configured_private' | 'workspace'
+
+/** Classify a stored envelope's explicit audience after the record has been resolved. */
+export function hasWorkspaceConversationAudience(visibility: ConversationVisibility | undefined): boolean {
+  return visibility === 'workspace'
+}
+export function classifyConversationVisibility(row: SessionKindRow & { guestSessionToken?: string | null }, facts: {
+  historical: boolean; workspace: boolean; provenLegacyGroup?: boolean; currentMember?: boolean
+}): ConversationVisibility {
+  // This mirror is for normalized persisted sessions only, not pre-row legacy
+  // or ephemeral turn descriptors. The migration checks the same prerequisite.
+  if (!row.anchorKind || !ANCHOR_KINDS.includes(row.anchorKind as AnchorKind)
+    || !['personal', 'workspace'].includes(row.visibility ?? '')) throw new Error('conversation_kind_not_normalized')
+  const kind = classifySession(row)
+  if (facts.workspace && kind.audience === 'workspace') return 'workspace'
+  if (facts.workspace && !facts.historical && row.channelType === 'api' && facts.currentMember === true)
+    return 'private_by_kind'
+  const publicLane = row.guestSessionToken != null || kind.machine === 'api'
+  if (facts.workspace && !facts.historical
+    && (publicLane || facts.currentMember === false && kind.lane === 'conversation' && isExternalTransport(kind.transport))) return 'workspace'
+  if (publicLane || facts.provenLegacyGroup || kind.lane === 'machine') return 'configured_private'
+  return 'private_by_kind'
+}
+
+/** Frozen SQL mirror of the 8295 classifier. Later source generators apply
+ * their reviewed differences without changing the foundation migration. */
+export function conversationVisibilityClassificationSql(alias: string, facts: {
+  historical: string; workspace: string; provenLegacyGroup: string; currentMember: string
+}): string {
+  const machine = Object.keys(MACHINE_CHANNEL_TYPES).map(value => `'${value}'`).join(',')
+  const external = EXTERNAL_TRANSPORTS.map(value => `'${value}'`).join(',')
+  const audience = `(${alias}.visibility='workspace' OR ${alias}.anchor_kind='feed_draft')`
+  const publicLane = `(${alias}.guest_session_token IS NOT NULL OR ${alias}.channel_type='api')`
+  return `CASE WHEN ${facts.workspace} IS NOT NULL AND ${audience} THEN 'workspace'
+  WHEN ${facts.workspace} IS NOT NULL AND NOT ${facts.historical} AND (${publicLane} OR (NOT ${facts.currentMember} AND ${alias}.channel_type IN (${external}) AND ${alias}.transient IS NOT TRUE)) THEN 'workspace'
+  WHEN ${publicLane} OR ${facts.provenLegacyGroup} OR ${alias}.channel_type IN (${machine}) OR ${alias}.transient IS TRUE THEN 'configured_private'
+  ELSE 'private_by_kind' END`
+}
+
 /** The settings-panel tuning conversation (sentinel `channel_id='tuning'`). */
 export function isTuningSession(row: Pick<SessionKindRow, 'channelId'>): boolean {
   return row.channelId === 'tuning'
@@ -308,6 +364,8 @@ export type SessionPolicy = {
   multiVoice: boolean
   /** Memory sources a turn loads (D3, L16). */
   context: { personalMemory: boolean }
+  /** Initial committed-outcome owner rollout; this never grants read/write authority. */
+  durableBufferedPublication: boolean
   /**
    * Delivery ceiling and recipient type, from the audience alone (L9): a
    * workspace session is delivered to its whole audience (a group), a
@@ -430,6 +488,19 @@ export function isPersonalChat(kind: SessionKind): boolean {
     && kind.lane === 'conversation' && kind.surface !== 'doc'
 }
 
+/** Stored Chat shape for private native startup and prompt reads. */
+type StoredPrivateChatShape = Partial<Pick<SessionKindRow, 'channelType' | 'appOrigin' | 'anchorKind' | 'visibility' | 'mode'>>
+export function usesStoredPrivateChat(row: StoredPrivateChatShape): boolean {
+  return row.channelType === 'web' && row.appOrigin === 'chat' && row.anchorKind === 'none'
+    && normalizeSessionVisibility(row.visibility) === 'personal' && row.mode !== 'draft'
+}
+
+/** Unanchored workspace Chat or a web turn with a verified Page binding. */
+export function usesWorkspacePromptIndexes(row: SessionKindRow, pageBoundTurn: boolean): boolean {
+  return row.channelType === 'web' && (row.appOrigin === 'chat' && row.anchorKind === 'none' || pageBoundTurn)
+    && row.visibility === 'workspace'
+}
+
 /** Closed native owner presentation purpose; SQL still authorizes the real row. */
 export function usesPrivateChatPresentation(row: SessionKindRow): boolean {
  return row.visibility==='personal' && row.channelType==='web' && row.anchorKind==='none'
@@ -468,6 +539,7 @@ export function sessionPolicy(kind: SessionKind, facts: SessionTurnFacts = {}): 
     attribution: workspace,
     multiVoice: workspace || kind.surface === 'doc' || personalChat,
     context: { personalMemory: !workspace },
+    durableBufferedPublication: room && conversation && kind.transport === 'web',
     deliveryCeiling: {
       ceiling: workspace ? 'audience' : 'owner',
       recipientType: workspace ? 'group' : 'individual',
@@ -587,6 +659,13 @@ export function transportPolicy(transport: Transport): TransportPolicy {
 const sqlList = (values: readonly string[]): string => values.map((v) => `'${v.replace(/'/g, "''")}'`).join(', ')
 
 export const sessionKindSql = {
+  /** Exact stored native prompt shape, including the legacy owner spelling. */
+  nativePrivatePromptChat: (alias: string): string =>
+    `${alias}.channel_type='web' AND ${alias}.app_origin='chat' AND ${alias}.anchor_kind='none' AND ${alias}.anchor_ref IS NULL
+        AND ${alias}.visibility IN('owner','personal') AND ${alias}.mode IS DISTINCT FROM 'draft'`,
+  /** Explicit envelope audience. SQL comparisons preserve NULL refusal. */
+  workspaceEnvelope: (alias: string): string => `${alias}.visibility='workspace'`,
+  privateEnvelope: (alias: string): string => `${alias}.visibility<>'workspace'`,
   /**
    * A human conversation (`lane='conversation'`): not one of the machine-lane
    * channel types and not transient. The ONE definition of human activity
@@ -631,6 +710,9 @@ export const sessionKindSql = {
   /** The Chat app's workspace room (web, workspace audience, opened from chat). */
   webRoom: (alias: string): string =>
     `${alias}.visibility = 'workspace' AND ${alias}.channel_type = 'web' AND ${alias}.anchor_kind = 'none' AND ${alias}.app_origin = 'chat'`,
+  /** Same initial human web-room rollout as sessionPolicy; never a grant. */
+  durableBufferedPublication: (alias: string): string =>
+    `(${sessionKindSql.webRoom(alias)} AND ${alias}.transient IS NOT TRUE)`,
   /** A personal, unanchored web conversation (the chat history a person owns). */
   personalConversation: (alias: string): string =>
     `${alias}.visibility = 'personal' AND ${alias}.channel_type = 'web' AND ${alias}.anchor_kind = 'none'`,
@@ -682,6 +764,9 @@ export const sessionKindSql = {
   /** Active room identity excludes retained quarantined and retired rooms. */
   activeChannelRoom: (alias: string): string =>
     `${alias}.visibility = 'workspace' AND ${alias}.anchor_kind = 'channel' AND ${alias}.recording_revision IS NULL AND NOT ${alias}.recording_privacy_held AND ${alias}.archived_at IS NULL`,
+  /** A held room can still identify a delivery address when no live room replaced it. */
+  channelRoomDeliveryAddress: (alias: string): string =>
+    `${alias}.visibility = 'workspace' AND ${alias}.anchor_kind = 'channel' AND ${alias}.recording_revision IS NULL AND ${alias}.archived_at IS NULL`,
   heldChannelRoom: (alias: string): string =>
     `${alias}.visibility = 'workspace' AND ${alias}.anchor_kind = 'channel' AND ${alias}.recording_revision IS NULL AND ${alias}.recording_privacy_held`,
   providerConversationContext: (alias: string): string => `${alias}.provider_conversation_context IS TRUE`,

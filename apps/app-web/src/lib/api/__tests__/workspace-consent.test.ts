@@ -26,6 +26,20 @@ describe('[COMP:app-web/workspace-consent] resource-bound native consent', () =>
     await expect(decideWorkspaceConsent('signed', assistantId, { ...review, assistantId, workspaceAccessRequired: true }, { ...input, workspaceAccess: false })).rejects.toThrow();
     expect(fetch).toHaveBeenCalledTimes(1);
   });
+  it('preserves memory-only consent for the selected free workspace and broader consent for a paid choice', async () => {
+    const paidId = '33333333-3333-4333-8333-333333333333';
+    const workspaces = [{ ...review.workspaces[0], memoryOnly: true }, { id: paidId, name: 'Paid workspace' }];
+    fetch.mockResolvedValueOnce(new Response(JSON.stringify({ ...review, workspaces })))
+      .mockImplementation(() => Promise.resolve(new Response(JSON.stringify({ redirectUrl: 'https://client.example/callback?code=fictional' }))));
+    const current = await fetchWorkspaceConsent('signed');
+    expect(current.workspaces).toEqual(workspaces);
+    const input = { workspaceId, decision: 'allow' as const, grantedScope: 'read' as const };
+    await expect(decideWorkspaceConsent('signed', undefined, current, { ...input, workspaceAccess: true })).rejects.toThrow();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await decideWorkspaceConsent('signed', undefined, current, { ...input, workspaceAccess: false });
+    await decideWorkspaceConsent('signed', undefined, current, { ...input, workspaceId: paidId, workspaceAccess: true });
+    expect(fetch.mock.calls.slice(1).map(([, init]) => JSON.parse(init.body).workspaceAccess)).toEqual([false, true]);
+  });
   it('preserves the resource through sign-in and retries no failed consent write', async () => {
     const login = new URL(workspaceConsentSignInUrl('signed?request', assistantId, 'http://localhost:3003/oauth/authorize?next=https://outside.example'));
     const next = new URL(login.searchParams.get('next')!);

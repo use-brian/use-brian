@@ -25,7 +25,7 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '../tools/types.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import type { CommentThreadStore } from './comment-types.js'
 
 export type CommentToolDeps = {

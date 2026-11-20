@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { app, dialog, type BrowserWindow } from "electron";
 import { join } from "node:path";
-import { BrowserApprovals } from "./browser-approvals.js";
+import { BrowserPreferences } from "./browser-preferences.js";
 import { TabExecutor, ExecutorError, type ExecutorPlatform, type ExecutorTabUpdatedListener } from "@use-brian/browser-control/executor.js";
 import { RelayClient, type WebSocketLike } from "@use-brian/browser-control/relay-client.js";
 import type { LocalControlMode } from "@use-brian/browser-control/protocol.js";
@@ -72,8 +72,8 @@ const text = (value: unknown): string => {
   return value;
 };
 
-/** One explicitly approved, profile-scoped session. Tokens live only in main-process memory.
- * Restart/sign-out/switch requires fresh pairing credentials, but native profile consent persists.
+/** One authenticated, profile-scoped session. Tokens live only in main-process memory.
+ * Restart/sign-out/switch requires fresh pairing credentials, but the device preference persists.
  */
 export class EmbeddedBrowser {
   private host: EmbeddedBrowserHost | null = null;
@@ -97,17 +97,23 @@ export class EmbeddedBrowser {
   /** The Chat side pane's slot and live-turn chat (T7), applied to every host. */
   private paneSlot: BrowserSlot | null = null;
   private paneTaskChat: string | null = null;
-  private readonly approvals: Pick<BrowserApprovals, "has" | "grant">;
+  private readonly preferences: Pick<BrowserPreferences, "enabled" | "setEnabled">;
 
   constructor(private readonly options: {
     getDockWindow?: () => BrowserWindow | null;
-    approvals?: Pick<BrowserApprovals, "has" | "grant">;
+    preferences?: Pick<BrowserPreferences, "enabled" | "setEnabled">;
   } = {}) {
-    this.approvals = options.approvals ?? new BrowserApprovals(() => join(app.getPath("userData"), "browser-approvals.json"));
+    this.preferences = options.preferences ?? new BrowserPreferences(() => join(app.getPath("userData"), "browser-preferences.json"));
+  }
+
+  setEnabled(value: unknown): void {
+    this.preferences.setEnabled(value);
+    if (!this.preferences.enabled()) this.releaseControl();
+    else this.automaticBlocked = false;
   }
 
   show(): void {
-    if (!this.host && this.partition && this.relay?.getState() === "ready") {
+    if (this.preferences.enabled() && !this.host && this.partition && this.relay?.getState() === "ready") {
       this.generation++;
       this.startHost(this.partition);
     } else this.host?.show();
@@ -133,15 +139,16 @@ export class EmbeddedBrowser {
     return true;
   }
 
-  status(): { connected: boolean; automaticBlocked: boolean; controlEpoch: number; workspaceId?: string; browserProfileId?: string } {
+  status(): { browserEnabled: boolean; connected: boolean; automaticBlocked: boolean; controlEpoch: number; workspaceId?: string; browserProfileId?: string } {
     // An armed relay (automatic pair, pane not opened yet) is connected: Brian can drive it.
-    const live = this.partition !== null && (this.active || !this.automaticBlocked);
-    return { connected: live && this.relay?.getState() === "ready",
-      automaticBlocked: this.automaticBlocked, controlEpoch: this.generation, ...this.identity };
+    const browserEnabled = this.preferences.enabled();
+    const live = browserEnabled && this.partition !== null && (this.active || !this.automaticBlocked);
+    return { browserEnabled, connected: live && this.relay?.getState() === "ready",
+      automaticBlocked: !browserEnabled || this.automaticBlocked, controlEpoch: this.generation, ...this.identity };
   }
 
   async pair(input: unknown, accountScope: string): Promise<boolean> {
-    if (this.pairing) return false;
+    if (!this.preferences.enabled() || this.pairing) return false;
     const pair = browserPairing(input, accountScope);
     const { automatic: auto, expectedControlEpoch } = input as { automatic?: unknown; expectedControlEpoch?: unknown };
     // An explicit Resume must not override a newer Stop while credentials were minted.
@@ -154,13 +161,6 @@ export class EmbeddedBrowser {
     this.profileName = pair.browserProfileName;
     const generation = this.generation;
     try {
-      if (!this.approvals.has(pair.partition)) {
-        const answer = await dialog.showMessageBox({ type: "question", title: "Set up Brian Browser", message: pair.browserProfileName ? `Allow browser profile "${pair.browserProfileName}" to start automatically?` : "Allow this browser profile to start automatically?",
-          detail: `${pair.browserProfileName ? `Browser profile: ${pair.browserProfileName}\n` : ""}Relay: ${new URL(pair.relayUrl).origin}\n\nBrian can read and interact with all in-app tabs, including tabs you open manually and sites you sign in to. This never grants access to your system browser or the Use Brian app. This browser has separate cookies from your normal browser. Approval is remembered for this account, relay and profile. Stop Brian hands every tab back to you without closing it; the browser closes when you close its last tab. The browser button or a new Brian navigation request can start it again. Webpage downloads (up to 32 MiB each) are held temporarily and can be read or saved to workspace files by Brian. Uploads use authorized workspace files (up to 4 MiB each) and require approval; websites may send them immediately upon selection. Temporary files are deleted when this browser closes. Protected credential filling is not supported. This replaces any browser already paired to this profile.`,
-          buttons: ["Not now", "Allow automatic sessions"], defaultId: 0, cancelId: 0 });
-        if (generation !== this.generation) return false;
-        if (answer.response !== 1) { this.automaticBlocked = true; return false; }
-      }
       let token = pair.token;
       let settle!: (ok: boolean) => void;
       const ready = new Promise<boolean>(resolve => { settle = resolve; });
@@ -201,7 +201,6 @@ export class EmbeddedBrowser {
       clearTimeout(timeout);
       this.cancelReady = null;
       if (!connected || generation !== this.generation) { if (generation === this.generation) this.dispose(); return false; }
-      this.approvals.grant(pair.partition);
       // A background pair only arms the relay. The pane opens on Brian's first
       // command or an explicit open, never just because the app loaded.
       if (automatic) { this.partition = pair.partition; this.automaticBlocked = false; }
@@ -324,7 +323,7 @@ export class EmbeddedBrowser {
   }
 
   private check(generation: number): void {
-    if (!this.active || generation !== this.generation) throw new ExecutorError("Browser is stopped. Open it from Browsers or start a new navigation.", "user_stopped");
+    if (!this.preferences.enabled() || !this.active || generation !== this.generation) throw new ExecutorError("Browser is stopped. Open it from Browsers or start a new navigation.", "user_stopped");
   }
 
   private platform(generation: number): ExecutorPlatform {
@@ -370,6 +369,10 @@ export class EmbeddedBrowser {
 
   private receive(cmd: Command, generation: number): void {
     const relay = this.relay;
+    if (!this.preferences.enabled()) {
+      relay?.sendResult({ id: cmd.id, ok: false, error: "In-app browser is turned off in General settings.", code: "user_stopped" });
+      return;
+    }
     if (this.commandEpoch !== undefined && cmd.controlEpoch !== this.commandEpoch) {
       relay?.sendResult({ id: cmd.id, ok: false, error: "Command predates browser shutdown. Start a new navigation with an updated browser relay.", code: "user_stopped" });
       return;

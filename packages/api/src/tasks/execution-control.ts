@@ -19,7 +19,7 @@
  */
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
-import { buildTool, type Tool, type ToolContext } from '@use-brian/core'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { query } from '../db/client.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import {

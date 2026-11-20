@@ -1,20 +1,31 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { bindScopeSources, boundScopeSources, ContextScopeAccumulator, type SessionContextAuthority, type LLMProvider, type SplitResult, type SplitOptions } from '@use-brian/core'
+import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
+import type { SplitResult, SplitOptions } from '@use-brian/core/workers/splitter.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import type { Session, SessionMessage } from '../../db/sessions.js'
-import { captureAttendedSessionClassification, forkAttendedSessionClassification, prepareAttendedSplitMessage } from '../attended-session-context.js'
+import { captureAttendedSessionClassification, forkAttendedSessionClassification, prepareAttendedSplitMessage } from '../attended-turn-routing.js'
 
 const spies = vi.hoisted(() => ({ query: vi.fn(), proof: vi.fn(), classify: vi.fn() }))
-vi.mock('@use-brian/core', async original => ({ ...await original<typeof import('@use-brian/core')>(),
-  classifySplit: spies.classify, executionToolContext: (execution: unknown, base: object) => ({ ...base, executionContext: execution }),
+vi.mock('@use-brian/core/workers/splitter.js', async original => ({ ...await original<typeof import('@use-brian/core/workers/splitter.js')>(),
+  classifySplit: spies.classify,
 }))
-vi.mock('../../db/session-query-reader.js', () => ({ readAdmittedSessionQuery: spies.query, captureSessionTopics: vi.fn(), sessionQueryRootMetadata: vi.fn() }))
-vi.mock('../../application-platform/model-source-authority.js', () => ({ assertSourceModelInputAuthority: spies.proof, ownsNativeAttendedAssembly: vi.fn() }))
+vi.mock('@use-brian/agent-runtime/security/execution-context.js', async original => ({ ...await original<typeof import('@use-brian/agent-runtime/security/execution-context.js')>(),
+  executionToolContext: (execution: unknown, base: object) => ({ ...base, executionContext: execution }),
+}))
+vi.mock('../../db/conversation-store.js', () => ({ readAdmittedSessionQuery: spies.query, captureSessionTopics: vi.fn(), sessionQueryRootMetadata: vi.fn() }))
+vi.mock('../../context-scope/admission.js', () => ({ admitModelInput: spies.proof }))
 
 const body = 'A fictional authored request requiring an independent splitter assessment.'
 const result: SplitResult = { tasks: ['Fictional lookup A', 'Fictional lookup B'], usage: { inputTokens: 8, outputTokens: 4 }, model: 'fixture-model' }
 async function fixture(content: unknown = [{ type: 'text', text: body }]) {
   const controller = new AbortController()
-  const authority = { execution: { security: { authority: { assertCurrent: vi.fn().mockResolvedValue(undefined) }, access: { workspaceId: 'workspace-fixture' } }, lifecycle: { abortSignal: controller.signal } }, accumulator: new ContextScopeAccumulator() } as unknown as SessionContextAuthority
+  const authority = { execution: {
+    identity: { kind: 'attended', principal: { kind: 'workspace_member', authenticationKind: 'verified_channel', userId: 'user-fixture' } },
+    security: { authority: { assertCurrent: vi.fn().mockResolvedValue(undefined) }, access: { workspaceId: 'workspace-fixture' } },
+    lifecycle: { abortSignal: controller.signal },
+  }, accumulator: new ContextScopeAccumulator() } as unknown as SessionContextAuthority
   const session = { id: 'session-fixture' } as Session
   const message = { id: 'message-fixture', sessionId: session.id, role: 'user', sequenceNum: 1, content } as SessionMessage
   const source = { workspaceId: 'workspace-fixture', userId: 'user-fixture', assistantId: null, sensitivity: 'public' as const, compartments: [], projectIds: [], resourceKind: 'session_message', resourceId: message.id, version: '1' }
@@ -71,14 +82,21 @@ describe('admitted early Standard splitter result', () => {
   it.each(['decisionRuntime', 'provider', 'rawMessage'] as const)('fences %s mutation during query admission before dispatch', async field => {
     const f = await fixture()
     const input = { ...f.input, capture: undefined, decisionRuntime: { run: vi.fn() } as unknown as SplitOptions['decisionRuntime'] }
-    let release!: () => void
-    spies.query.mockImplementationOnce(() => new Promise(resolve => { release = () => resolve(bindScopeSources({ history: [input.message] }, [f.source])) }))
+    let release!: (value: { history: SessionMessage[] }) => void
+    const blockedQuery = new Promise<{ history: SessionMessage[] }>(resolve => { release = resolve })
+    let enteredQuery!: () => void
+    const queryStarted = new Promise<void>(resolve => { enteredQuery = resolve })
+    spies.query.mockImplementationOnce(() => {
+      enteredQuery()
+      return blockedQuery
+    })
     // A standalone caller also pins the route before its first asynchronous query.
     const pending = prepareAttendedSplitMessage(input)
+    await queryStarted
     if (field === 'rawMessage') input.rawMessage += ' changed'
     else if (field === 'provider') input.provider = { ...input.provider }
     else input.decisionRuntime = { run: vi.fn() } as unknown as SplitOptions['decisionRuntime']
-    release()
+    release(bindScopeSources({ history: [input.message] }, [f.source]))
     await expect(pending).rejects.toThrow()
     expect(spies.classify).not.toHaveBeenCalled()
   })

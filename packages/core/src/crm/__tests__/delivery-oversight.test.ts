@@ -91,7 +91,7 @@ describe('[COMP:crm/delivery-oversight] evidence policy', () => {
 import { vi } from 'vitest'
 import { homeAppToolRequirements } from '@use-brian/shared'
 import { createCrmDeliveryOversightTools } from '../delivery-oversight-tools.js'
-import type { ToolContext } from '../../tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 describe('[COMP:crm/delivery-oversight] Brian adapter parity',()=>{
  function setup(){
   const reads={list:vi.fn(async()=>({commitments:[],nextCursor:null})),get:vi.fn(async()=>null),locateChatSource:vi.fn(async()=>ref)}

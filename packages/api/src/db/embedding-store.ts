@@ -70,9 +70,11 @@ import type {
   EmbeddingPrimitive,
   EmbeddingResult,
   EmbeddingStore,
-} from '@use-brian/core'
-import { resolveEmbedBudgetSegments, resolveEmbedRecencyWindowMonths } from '@use-brian/core'
+} from '@use-brian/core/embeddings/worker.js'
+import { resolveEmbedBudgetSegments, resolveEmbedRecencyWindowMonths } from '@use-brian/core/embeddings/worker.js'
 import { getPool } from './client.js'
+import { AGENT_MEMORY_GUEST_PRINCIPAL_NAMESPACE } from './external-principal.js'
+import { backgroundWorkspaceFilter } from '../background-inference-policy.js'
 
 type PrimitiveConfig = {
   table: string
@@ -107,6 +109,8 @@ const PRIMITIVE_CONFIGS: Partial<Record<EmbeddingPrimitive, PrimitiveConfig>> = 
     table: 'memories',
     textExpr: "summary || coalesce(E'\\n' || detail, '')",
     recencyExpr: 'created_at',
+    extraWhere: `NOT EXISTS (SELECT 1 FROM users principal WHERE principal.id = memories.user_id
+      AND principal.auth_provider = 'channel' AND principal.auth_provider_id LIKE '${AGENT_MEMORY_GUEST_PRINCIPAL_NAMESPACE}:%')`,
   },
   // entities — `display_name` only. The spec's `canonical_summary` was
   // never built as a column, and `entities` carries no alias/summary
@@ -275,7 +279,7 @@ async function inShortTransaction<T>(
   }
 }
 
-export function createDbEmbeddingStore(): EmbeddingStore {
+export function createDbEmbeddingStore(excludedBackgroundWorkspaceIdsSql?: string): EmbeddingStore {
   return {
     async withClaimedRows<T>(
       primitive: EmbeddingPrimitive,
@@ -296,6 +300,7 @@ export function createDbEmbeddingStore(): EmbeddingStore {
         )
       }
       const { table, textExpr, recencyExpr, extraWhere = 'TRUE' } = config
+      const allowedWorkspace = backgroundWorkspaceFilter(`${table}.workspace_id`, excludedBackgroundWorkspaceIdsSql)
 
       // ── Phase 1: budget check, claim, commit, release ────────────
       // System worker — runs on the system pool (owner), which bypasses RLS,
@@ -368,6 +373,7 @@ export function createDbEmbeddingStore(): EmbeddingStore {
             WHERE embedding IS NULL
               AND embedding_failed_at IS NULL
               AND ${extraWhere}
+              ${allowedWorkspace}
               AND ${recencyExpr} > now() - INTERVAL '${RECENCY_WINDOW_MONTHS} months'
               AND ${recencyExpr} ${bound} now() - INTERVAL '24 hours'
             ORDER BY ${recencyExpr} ASC
@@ -401,6 +407,7 @@ export function createDbEmbeddingStore(): EmbeddingStore {
                  FROM ${table}
                 WHERE embedding IS NULL
                   AND ${extraWhere}
+                  ${allowedWorkspace}
                   AND embedding_failed_at <= now() - INTERVAL '${EMBEDDING_FAILURE_RETRY_DELAY_HOURS} hour'
                   AND ${recencyExpr} > now() - INTERVAL '${RECENCY_WINDOW_MONTHS} months'
                 ORDER BY ${recencyExpr} DESC, embedding_failed_at ASC

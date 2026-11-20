@@ -22,6 +22,7 @@ vi.mock('../../brain-stream/notify.js', () => ({
 }))
 
 import {
+  claimTurnLeaseOutcome,
   updateSessionStatus,
   releaseTurnLease,
   reclaimStaleTurn,
@@ -36,6 +37,9 @@ const mockNotify = vi.mocked(notifyWorkspaceChange)
 
 const SID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
 const WS = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+const TURN = 'a'.repeat(64)
+let transitionResult: unknown
+let releaseResult: unknown
 
 /** Flush the fire-and-forget notify IIFE (query await + notify call). */
 async function flushSignals() {
@@ -46,17 +50,37 @@ async function flushSignals() {
 beforeEach(() => {
   mockQuery.mockReset()
   mockNotify.mockReset()
+  releaseResult = { turnId: TURN, reason: 'completed' }
+  transitionResult = { state: 'recovered', recovered: { turnId: TURN, reason: 'stalled_reclaimed' } }
   // Default: every write touches one row; the workspace-resolve SELECT
   // finds the owning assistant's workspace.
   mockQuery.mockImplementation(async (sql: string) => {
+    if (sql.includes('native_session_release_turn')) {
+      return { rows: [{ value: releaseResult, workspaceId: releaseResult ? WS : null }], rowCount: 1 } as never
+    }
     if (typeof sql === 'string' && sql.includes('JOIN assistants a')) {
       return { rows: [{ workspaceId: WS }], rowCount: 1 } as never
     }
+    if (sql.includes('native_session_turn_transition')) return { rows: [{ value: transitionResult }], rowCount: 1 } as never
     return { rows: [], rowCount: 1 } as never
   })
 })
 
 describe('[COMP:api/session-signal] store-seam emission', () => {
+  it('resolves the Live destination after a successful claim and isolates a notification failure', async () => {
+    const token = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+    transitionResult = { state: 'claimed', token, turnId: TURN, recovered: null }
+    mockNotify.mockImplementationOnce(() => { throw new Error('Fictional notification failure') })
+    expect(await claimTurnLeaseOutcome(SID)).toEqual({ token, turnId: TURN })
+    await flushSignals()
+    expect(mockQuery.mock.calls.map(([sql]) => String(sql))).toEqual([
+      expect.stringContaining('native_session_turn_transition'), expect.stringContaining('JOIN assistants a'),
+    ])
+    expect(mockNotify).toHaveBeenCalledWith(WS, 'session', 'update', SID)
+    transitionResult = { state: 'busy' }
+    expect(await claimTurnLeaseOutcome(SID)).toBeNull()
+    expect(mockNotify).toHaveBeenCalledTimes(1)
+  })
   it('updateSessionStatus emits one session signal', async () => {
     await updateSessionStatus(SID, 'running')
     await flushSignals()
@@ -64,19 +88,15 @@ describe('[COMP:api/session-signal] store-seam emission', () => {
   })
 
   it('releaseTurnLease emits when the lock was actually released', async () => {
-    await releaseTurnLease(SID, 'completed', 'token-1')
+    expect(await releaseTurnLease(SID, 'completed', 'token-1')).toBe(true)
+    expect(mockQuery).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('native_session_release_turn'), [SID, 'token-1', 'completed'])
     await flushSignals()
     expect(mockNotify).toHaveBeenCalledWith(WS, 'session', 'update', SID)
   })
 
   it('releaseTurnLease does NOT emit when the guard matched nothing', async () => {
-    mockQuery.mockImplementation(async (sql: string) => {
-      if (typeof sql === 'string' && sql.includes('JOIN assistants a')) {
-        return { rows: [{ workspaceId: WS }], rowCount: 1 } as never
-      }
-      return { rows: [], rowCount: 0 } as never
-    })
-    await releaseTurnLease(SID, 'completed', 'stale-token')
+    releaseResult = null
+    expect(await releaseTurnLease(SID, 'completed', 'stale-token')).toBe(false)
     await flushSignals()
     expect(mockNotify).not.toHaveBeenCalled()
   })
@@ -87,36 +107,40 @@ describe('[COMP:api/session-signal] store-seam emission', () => {
     expect(mockNotify).toHaveBeenCalledWith(WS, 'session', 'update', SID)
 
     mockNotify.mockReset()
-    mockQuery.mockImplementation(async (sql: string) => {
-      if (typeof sql === 'string' && sql.includes('JOIN assistants a')) {
-        return { rows: [{ workspaceId: WS }], rowCount: 1 } as never
-      }
-      return { rows: [], rowCount: 0 } as never
-    })
+    transitionResult = { state: 'superseded' }
     await reclaimStaleTurn(SID)
     await flushSignals()
     expect(mockNotify).not.toHaveBeenCalled()
   })
 
-  it('sweepStuckSessions emits per swept session (coalescer folds per workspace)', async () => {
+  it('sweepStuckSessions emits only for the captured owners actually recovered', async () => {
     const other = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
-    mockQuery.mockImplementation(async (sql: string) => {
-      if (typeof sql === 'string' && sql.includes('JOIN assistants a')) {
-        return { rows: [{ workspaceId: WS }], rowCount: 1 } as never
+    const candidates = [SID, other].map((id, i) => ({ id, token: `owner-${i}`, mode: null,
+      userId: `u${i}`, visibility: 'personal', channelType: 'web', anchorKind: 'none' }))
+    mockQuery.mockImplementation(async (sql: string, values?: unknown[]) => {
+      if (sql.includes('JOIN assistants a')) return { rows: [{ workspaceId: WS }], rowCount: 1 } as never
+      if (sql.includes('native_session_turn_transition')) {
+        // The second candidate acquired a successor after candidate discovery.
+        return { rows: [{ value: values?.[0] === SID ? transitionResult : { state: 'superseded' } }], rowCount: 1 } as never
       }
-      return {
-        rows: [
-          { id: SID, mode: null, user_id: 'u1', visibility: 'owner' },
-          { id: other, mode: null, user_id: 'u2', visibility: 'owner' },
-        ],
-        rowCount: 2,
-      } as never
+      return { rows: candidates, rowCount: 2 } as never
     })
-    await sweepStuckSessions(90_000)
+    const recovered = await sweepStuckSessions(90_000)
     await flushSignals()
-    expect(mockNotify).toHaveBeenCalledTimes(2)
+    expect(mockNotify).toHaveBeenCalledTimes(1)
     expect(mockNotify).toHaveBeenCalledWith(WS, 'session', 'update', SID)
-    expect(mockNotify).toHaveBeenCalledWith(WS, 'session', 'update', other)
+    expect(recovered).toEqual([{ id: SID, mode: null, userId: 'u0', visibility: 'personal',
+      channelType: 'web', anchorKind: 'none', turnId: TURN, reason: 'stalled_reclaimed' }])
+    for (const [i, id] of [SID, other].entries()) {
+      expect(mockQuery).toHaveBeenCalledWith(expect.any(String), [id, 'reclaim', null, null, '90000', `owner-${i}`, null, true])
+    }
+  })
+
+  it('rejects an invalid release result without announcing success', async () => {
+    releaseResult = { turnId: 'raw-private-token', reason: 'completed' }
+    await expect(releaseTurnLease(SID, 'completed', 'token-1')).rejects.toThrow()
+    await flushSignals()
+    expect(mockNotify).not.toHaveBeenCalled()
   })
 
   it('a READ never signals or refreshes recency', async () => {

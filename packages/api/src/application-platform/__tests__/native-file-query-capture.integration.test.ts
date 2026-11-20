@@ -1,14 +1,17 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { PoolClient } from 'pg'
-import { boundScopeSources, ContextScopeAccumulator, type ExecutionContext, type ScopeSource } from '@use-brian/core'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { applyRLSGucs, getAppPool, getPool, rollbackAndRelease, runWithAgentAccess } from '../../db/client.js'
 import { createDbMemoryStore } from '../../db/memory-store.js'
 import { createMemory } from '../../db/memories.js'
 import { listWorkspaceFilesIndexRanked } from '../../db/workspace-files.js'
-import { readAdmittedSessionQuery } from '../../db/session-query-reader.js'
+import { readAdmittedSessionQuery } from '../../db/conversation-store.js'
 import { withSessionMessagePublication } from '../../db/session-context-revisions.js'
-import { publishNativeSessionMessage } from '../../db/session-message-publication.js'
+import { publishNativeSessionMessage } from '../../db/conversation-store.js'
 import { findAssistantById } from '../../db/users.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
 import { createDbSavedViewStore } from '../../db/saved-views-store.js'
@@ -58,7 +61,7 @@ async function outcome<T>(client: PoolClient, read: () => Promise<T>): Promise<{
   finally { await client.query('ROLLBACK TO SAVEPOINT read_outcome') }
 }
 async function history(client: PoolClient) {
-  return (await client.query('SELECT value FROM read_native_application_session_history($1,$2,$3)', [modes.f.workspaceId, modes.f.session.id, through])).rows
+  return (await client.query('SELECT jsonb_array_elements(capture_conversation_query($1,$2,$3,NULL) #> ARRAY[\'history\']) AS value', [modes.f.workspaceId, modes.f.session.id, through])).rows
 }
 const capture = (client: PoolClient) => operation(client, 'capture', { session: modes.f.session.id, through })
 
@@ -147,7 +150,7 @@ describe.sequential('[COMP:api/application-persistence] private file query captu
         ELSIF action='drift_acl' THEN GRANT EXECUTE ON FUNCTION application_native_file_frame_current(uuid,text[],uuid[],text[],jsonb) TO app_user;
         ELSIF action IN('drift_frame','drift_snapshots','drift_original_guard') THEN
           signature:=CASE WHEN action='drift_frame' THEN 'read_native_file_session_cohort_frame(uuid,text[],uuid[],text[],boolean)'
-            WHEN action='drift_original_guard' THEN 'application_memory_statement_helpers_current()'
+            WHEN action='drift_original_guard' THEN 'native_turn_helpers_current()'
             ELSE 'read_native_file_session_field_snapshots(uuid,uuid[],text[])' END;
           SELECT pg_get_functiondef(oid),prosrc INTO definition,body FROM pg_proc WHERE oid=signature::regprocedure;
           EXECUTE replace(definition,body,CASE WHEN action='drift_original_guard' THEN 'BEGIN RETURN true;END'
@@ -201,13 +204,14 @@ describe.sequential('[COMP:api/application-persistence] private file query captu
     })
   }, 90_000)
 
-  for (const change of ['drift_body', 'drift_acl', 'drift_frame', 'drift_snapshots', 'drift_original_guard']) it(`keeps canonical fallback after ${change}`, async () => frame(async client => {
+  for (const change of ['drift_body', 'drift_acl', 'drift_frame', 'drift_snapshots', 'drift_original_guard']) it(`preserves the canonical reader contract after ${change}`, async () => frame(async client => {
     const candidate = await operation(client, 'frame', roots)
     expect(candidate).toMatchObject({ admitted: true })
     await operation(client, change)
     expect(await operation(client, 'guard')).toBe(false)
     if (change !== 'drift_frame') expect(await operation(client, 'frame', roots)).toBeNull()
-    expect(await history(client)).toEqual(await baseline(client, () => history(client)))
+    if(change==='drift_original_guard')expect(await outcome(client,()=>history(client))).toEqual({error:'42501'})
+    else expect(await history(client)).toEqual(await baseline(client, () => history(client)))
   }), 90_000)
 
   it('keeps all new helpers private and refuses no-file or unsupported roots', async () => frame(async client => {

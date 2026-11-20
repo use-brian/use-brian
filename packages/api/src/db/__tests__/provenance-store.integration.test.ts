@@ -1,6 +1,6 @@
 import { describe, it, expect, afterAll, beforeEach } from 'vitest'
 import pg from 'pg'
-import type { RetrievalActor } from '@use-brian/core'
+import type { RetrievalActor } from '@use-brian/core/retrieval/types.js'
 
 /**
  * Integration tests for WU-5.5 — the `provenance` derivation chain.

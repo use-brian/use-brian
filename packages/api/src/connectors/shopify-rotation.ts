@@ -6,7 +6,7 @@ import { getConnectorConfig } from '../connector-config.js'
 import { isManagedShopifyTokens, unpackShopifyTokens, packShopifyTokens, shopifyAppCredentialsFromTokens, refreshShopifyTokens, type ShopifyTokens } from '../shopify/client.js'
 import { connectorSetupProviders } from './setup-providers.js'
 import { ConnectorSetupLockRetry, lockConnectorSetupWorkspaces } from './setup-locks.js'
-import { ConnectorSetupError, type VerifiedAccount } from './setup-service.js'
+import { ConnectorSetupError, requireConnectorSetupOwner, type VerifiedAccount } from './setup-service.js'
 
 const digest = (a: VerifiedAccount) => createHash('sha256').update(JSON.stringify({ subject: a.subject, tenant: a.tenant,
   roots: [...a.roots].sort(), permissions: [...a.permissions].sort(), adapter: a.adapter, adapterVersion: a.adapterVersion })).digest('hex')
@@ -27,7 +27,7 @@ export async function refreshShopifyInstanceCredentials(pool: Pool, key: Buffer,
     for (let attempt = 0; ; attempt++) {
       try {
         await c.query('BEGIN')
-        await c.query("SELECT set_config('app.system_bypass','true',true)")
+        await requireConnectorSetupOwner(c)
         const result = await fn()
         await c.query('COMMIT')
         return result

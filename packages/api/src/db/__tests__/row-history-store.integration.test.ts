@@ -1,6 +1,12 @@
 import { describe, it, expect, afterAll, afterEach, beforeEach } from 'vitest'
 import type { PoolClient } from 'pg'
-import { ContextScopeAccumulator, boundScopeSources, createCorrectionTools, executionToolContext, mergeEntities, type AccessContext, type RetrievalActor } from '@use-brian/core'
+import { mergeEntities } from '@use-brian/core/corrections/entity-merge.js'
+import { createCorrectionTools } from '@use-brian/core/corrections/tools.js'
+import type { RetrievalActor } from '@use-brian/core/retrieval/types.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { applyRLSGucs, getAppPool, getPool, rollbackAndRelease, runWithAgentAccess } from '../client.js'
 import * as store from '../row-history-store.js'
 import * as tasksDb from '../tasks.js'
@@ -457,6 +463,18 @@ describe.sequential('[COMP:brain/row-history-store][COMP:corrections/retraction-
     expect(chain[1].status).toBe('active')
     expect(chain[1].display).toMatchObject({ title: 'Draft v2' })
     expect(result!.data.current_id).toBe(f2!.id)
+
+    const f3 = await withNativeAccess(access => files.supersedeWorkspaceFile(userId, workspaceId, f2!.id, {
+      editorUserId: userId,
+      storageUri: 'gs://bucket/draft.md-v3',
+      sizeBytes: 13,
+    }, access))
+    expect(f3).not.toBeNull()
+    const latest = await factory.getRowHistory(await actor(), { primitive: 'workspace_files', row_id: f2!.id })
+    expect(latest?.data.chain.map(row => ({id:row.id,status:row.status}))).toEqual([
+      {id:f1.id,status:'superseded'}, {id:f2!.id,status:'superseded'}, {id:f3!.id,status:'active'},
+    ])
+    expect(latest?.data.current_id).toBe(f3!.id)
   })
 
   it('entities: maintained supersession chain walks correctly', async () => {

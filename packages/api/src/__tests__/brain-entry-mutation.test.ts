@@ -44,7 +44,7 @@ import {
 } from '../db/memories.js'
 import { adjustMemoryDecision } from '../db/memory-verifications-store.js'
 import { updateTask } from '../db/tasks.js'
-import { TaskResponsibilityError } from '@use-brian/core'
+import { TaskResponsibilityError } from '@use-brian/core/tasks/responsibility.js'
 
 const workspaceStore = {
   getRole: vi.fn().mockResolvedValue('member'),

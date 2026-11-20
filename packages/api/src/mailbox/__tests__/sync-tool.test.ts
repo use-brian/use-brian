@@ -14,7 +14,7 @@ import {
   getGlobalMailboxSyncDeps,
 } from '../sync-tool.js'
 import type { MailboxSyncSummary } from '../sync-worker.js'
-import type { ToolContext } from '@use-brian/core'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const CTX = {} as unknown as ToolContext
 

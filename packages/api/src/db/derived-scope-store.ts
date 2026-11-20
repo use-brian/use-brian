@@ -1,7 +1,14 @@
 import {
-  DerivedScopeError, deriveContextFloor, deriveResourceScope, deriveWriteScope, isSensitivity, resourceScopeKey,
-  type DerivedWriteEvidence, type ResourceScope, type ScopeSource,
-} from '@use-brian/core'
+  DerivedScopeError,
+  deriveContextFloor,
+  deriveResourceScope,
+  deriveWriteScope,
+  resourceScopeKey,
+  type DerivedWriteEvidence,
+  type ResourceScope,
+  type ScopeSource,
+} from '@use-brian/agent-runtime/security/derived-scope.js'
+import { isSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type pg from 'pg'
 
 type CanonicalEvidenceRow = ResourceScope & {
@@ -12,13 +19,33 @@ type CanonicalEvidenceRow = ResourceScope & {
   causalEntityId?: string
 }
 
+const isCrmSummarySource=(kind:string)=>kind==='crm_summary_domain'||kind==='crm_summary_group'
+
 /** Keep the owner-only native snapshot function outside the app-role external statement. */
 async function scopeSnapshots(client: Pick<pg.ClientBase, 'query'>, workspaceId: string, sources: readonly ScopeSource[],
-  reader: 'read_scope_source' | 'read_entity_derivation_source' = 'read_scope_source', workflowRunId?: string, requiredExternalAction?: 'context' | 'deliver', admittedNative = false, recordedFields = false) {
+  reader: 'read_scope_source' | 'read_entity_derivation_source' = 'read_scope_source', workflowRunId?: string, requiredExternalAction?: 'context' | 'deliver',
+  admittedNative = false, recordedFields = false, recordWrite = false) {
   const result: Array<{ ord: number; snapshot: CanonicalEvidenceRow | null }> = []
+  const records = sources.map((source,index) => ({ source, index })).filter(({source}) => source.resourceKind === 'conversation_record')
+  if (recordWrite && records.length) {
+    const { rows } = await client.query<{ ord: number; snapshot: CanonicalEvidenceRow | null }>(
+      `SELECT t.ord::int AS ord,read_conversation_record_for_write($1,t.id) AS snapshot
+       FROM unnest($2::uuid[]) WITH ORDINALITY t(id,ord)`, [workspaceId,records.map(({source})=>source.resourceId)])
+    for (const row of rows) if (records[row.ord - 1]) result.push({ ord: records[row.ord - 1].index + 1, snapshot: row.snapshot })
+  }
+  const summaries=sources.map((source,index)=>({source,index})).filter(({source})=>isCrmSummarySource(source.resourceKind))
+  if(summaries.length){
+    const {rows}=await client.query<{ord:number;snapshot:CanonicalEvidenceRow|null}>(
+      'SELECT ord::int,snapshot FROM read_crm_summary_certificate_sources($1,$2,$3,$4,$5)',[workspaceId,
+        summaries.map(({source})=>source.resourceKind),summaries.map(({source})=>source.resourceId),summaries.map(({source})=>source.version),
+        summaries.map(({source})=>{const packet=(source as ScopeSource&{sourceProof?:unknown}).sourceProof
+          return typeof packet==='string'?packet:null})])
+    for(const row of rows)if(summaries[row.ord-1])result.push({ord:summaries[row.ord-1].index+1,snapshot:row.snapshot})
+  }
   for (const profile of ['native','field','external'] as const) {
     const group = sources.map((source,index) => ({ source,index })).filter(({ source }) =>
-      (source.resourceKind === 'external_source' ? 'external' : source.resourceKind === 'application_field' ? 'field' : 'native') === profile)
+      source.resourceKind !== 'conversation_record' && !isCrmSummarySource(source.resourceKind)
+       && (source.resourceKind === 'external_source' ? 'external' : source.resourceKind === 'application_field' ? 'field' : 'native') === profile)
     if (group.length === 0) continue
     const rows = profile === 'field' ? (await client.query<{ ord: number; snapshot: CanonicalEvidenceRow | null }>(
       recordedFields ? 'SELECT ord,snapshot FROM read_native_session_field_snapshots($1,$2,$3)'
@@ -117,7 +144,7 @@ async function revalidateScopeSources(
   const list=[...unique.values()].sort((a,b)=>`${a.resourceKind}:${a.resourceId}`.localeCompare(`${b.resourceKind}:${b.resourceId}`))
   for(const source of list)if(source.workspaceId!==workspaceId)throw new DerivedScopeError('scope_workspace_mismatch')
   if(list.length===0)return
-  const rows=await scopeSnapshots(client,workspaceId,list,reader,undefined,undefined,list.some(source=>source.resourceKind==='application_field'))
+  const rows=await scopeSnapshots(client,workspaceId,list,reader,undefined,undefined,list.some(source=>source.resourceKind==='application_field'),false,true)
   const byOrd=new Map(rows.map(row=>[row.ord,row.snapshot]))
   list.forEach((source,index)=>{
     const row=byOrd.get(index+1)
@@ -172,16 +199,16 @@ export async function readCurrentScopeSources(
     const row = byOrd.get(index + 1) ?? null
     // A CRM event snapshot is withheld (NULL) while held or retired, so its
     // absence is not proof of deletion.
-    if (!row) return source.resourceKind === 'external_source' || source.resourceKind === 'application_field' || source.resourceKind === 'session_context_revision' ? { state: 'unverifiable', source }
+    if (!row) return isCrmSummarySource(source.resourceKind) || source.resourceKind === 'external_source' || source.resourceKind === 'application_field' || source.resourceKind === 'session_context_revision' || source.resourceKind === 'private_transcript' ? { state: 'unverifiable', source }
       : source.resourceKind === 'crm_event' ? { state: 'held', source } : { state: 'gone', source }
     if (row.held) return { state: 'held', source }
     if (source.resourceKind === 'crm_event' && (!row.causalEntityId
       || !unique.has(`entity:${row.causalEntityId}`))) return { state: 'unverifiable', source }
-    if (row.retractedAt || row.validTo) return source.resourceKind === 'external_source' ? { state: 'unverifiable', source } : { state: 'gone', source }
+    if (row.retractedAt || row.validTo) return source.resourceKind === 'external_source' || source.resourceKind === 'private_transcript' ? { state: 'unverifiable', source } : { state: 'gone', source }
     if (row.version === source.version && resourceScopeKey(row) === resourceScopeKey(source)) {
       return { state: 'current', source }
     }
-    if (source.resourceKind === 'external_source') return { state: 'unverifiable', source }
+    if (isCrmSummarySource(source.resourceKind) || source.resourceKind === 'external_source') return { state: 'unverifiable', source }
     // An outbox event is immutable by nature and is the run's causal input:
     // a changed payload means the run would finish on stale input, so its
     // version must still match (scoped-context.md -> "CRM workflow input
@@ -198,6 +225,38 @@ export async function readCurrentScopeSources(
   })
 }
 
+/** Preserve the application-field lineage recognized by the existing output writers. */
+async function encloseCrmSummaryLineage(
+  client: Pick<pg.PoolClient, 'query'>,
+  evidence: DerivedWriteEvidence,
+  workspaceId: string,
+): Promise<DerivedWriteEvidence> {
+  const crm = evidence.sources.filter(source => isCrmSummarySource(source.resourceKind))
+  if (!crm.length) return evidence
+  const checked = await readCurrentScopeSources(client, workspaceId, crm)
+  if (checked.length !== crm.length || checked.some(source => source.state !== 'current')) {
+    throw new DerivedScopeError('scope_source_changed')
+  }
+  const packets = new Set<string>()
+  for (const source of crm) {
+    const packet = (source as ScopeSource & { sourceProof?: unknown }).sourceProof
+    if (typeof packet !== 'string') throw new DerivedScopeError('scope_evidence_missing')
+    packets.add(packet)
+  }
+  const canonical = evidence.sources.filter(source => !isCrmSummarySource(source.resourceKind))
+  for (const packet of packets) {
+    const { rows: [row] } = await client.query<{ evidence: ScopeSource[] | null }>(
+      'SELECT materialize_crm_summary_native_evidence($1,$2) AS evidence', [workspaceId, packet],
+    )
+    if (!row?.evidence?.length) throw new DerivedScopeError('scope_source_changed')
+    canonical.push(...row.evidence)
+  }
+  const sources = [...new Map(canonical.map(source => [
+    JSON.stringify([source.resourceKind, source.resourceId, source.version]), source,
+  ])).values()]
+  return { ...evidence, sources }
+}
+
 /** The database validates the output reference and envelope again. */
 export async function recordDerivedResource(
   client: Pick<pg.PoolClient, 'query'>,
@@ -206,6 +265,7 @@ export async function recordDerivedResource(
   /** The acting author, whose own private rows may feed a wider target (D3). */
   actorUserId?: string | null,
 ): Promise<void> {
+  evidence = await encloseCrmSummaryLineage(client, evidence, output.workspaceId)
   // The output must carry every label it was derived from and must not take
   // another person's private rows anywhere else; its assistant visibility is
   // the target's own (decision D3).
@@ -242,7 +302,17 @@ export async function recordDerivedResource(
       return
     }
   }
-  await client.query(`INSERT INTO workspace_access_policies(workspace_id) VALUES($1) ON CONFLICT DO NOTHING`, [output.workspaceId])
+  // Lock order (M5Q-14): canonical readers such as capture_conversation_evidence
+  // take the workspace row FOR SHARE, then the session row. A transcript INSERT
+  // already holds its session row FOR UPDATE (aaab_recording_privacy_message), and
+  // an INSERT ... ON CONFLICT DO NOTHING still fires the policy's BEFORE INSERT
+  // guard, which locks the workspace row FOR UPDATE: the inverse order, so the
+  // two deadlocked. The guard fires only when a row is proposed, so an existing
+  // policy row proposes none; the lineage inserts below keep their FOR KEY SHARE
+  // foreign-key lock, which still waits for every workspace FOR UPDATE writer.
+  await client.query(`INSERT INTO workspace_access_policies(workspace_id)
+     SELECT $1::uuid WHERE NOT EXISTS (SELECT 1 FROM workspace_access_policies WHERE workspace_id = $1::uuid)
+     ON CONFLICT DO NOTHING`, [output.workspaceId])
   const { rows } = await client.query<{ id: string }>(
     `INSERT INTO scope_derivations(workspace_id,resource_kind,resource_id,resource_version,producer,
        user_id,assistant_id,sensitivity,compartments,project_ids,source_policy_revision)

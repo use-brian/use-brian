@@ -10,7 +10,7 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import pg from 'pg'
-import type { SavedViewStore } from '@use-brian/core'
+import type { SavedViewStore } from '@use-brian/core/views/types.js'
 
 let pool: pg.Pool | undefined
 

@@ -10,7 +10,7 @@ import {
   turnHasInlineImage,
 } from '../custom-llm-runtime.js'
 import type { WorkspaceCustomLlmEndpointStore } from '../db/workspace-custom-llm-endpoints.js'
-import type { LLMProvider, ProviderRequest } from '@use-brian/core'
+import type { LLMProvider, ProviderRequest } from '@use-brian/agent-runtime/providers/types.js'
 import { MutableProviderAvailability } from '@use-brian/shared/model-registry'
 import { resolveChatModelSelection } from '../model-resolution.js'
 

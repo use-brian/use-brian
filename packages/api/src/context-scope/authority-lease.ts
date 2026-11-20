@@ -1,17 +1,20 @@
-import { normalizeSessionVisibility } from '../session-kind.js'
+import { normalizeSessionVisibility, sessionAuthorityDestinationMatches } from '../session-kind.js'
 import { randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import {
-  AuthoritySourceSchema,
   accessCeilingContains,
   intersectAccessCeilings,
   type AccessCeiling,
-  type CurrentAuthorityBoundary,
-} from '@use-brian/core'
-import { findSessionAuthorityById, type Session } from '../db/sessions.js'
-import { findAssistantById } from '../db/users.js'
-import {authSessionStore} from '../db/auth-session-store.js'
-import { resolveLiveAccessCeilingSystem } from './resolve-turn-scope.js'
+} from '@use-brian/agent-runtime/security/access-ceiling.js'
+import { AuthoritySourceSchema } from '@use-brian/agent-runtime/security/authority-source.js'
+import type { ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { CurrentAuthorityBoundary } from '@use-brian/agent-runtime/tools/types.js'
+import type { Session } from '../db/sessions.js'
+import { operationCeilingsFromMembership } from '../db/workspace-store.js'
+import { query } from '../db/client.js'
+import type { PolicyEpoch } from './policy-epoch.js'
+import { readSessionAuthorityFacts,decodeSessionAuthorityFacts,type SessionAuthorityFactsInput } from './session-authority-facts.js'
+import { resolveLiveAccessCeilingSystem, type ResolveTurnScopeDeps } from './resolve-turn-scope.js'
 
 /** A stale model context cannot be revived by granting access back later. */
 export class AuthorityChangedError extends Error {
@@ -30,24 +33,37 @@ export type AuthorityLease = CurrentAuthorityBoundary & {
 }
 const leases = new AsyncLocalStorage<readonly AuthorityLease[]>()
 
+type LockedSourceEvidence = { assistantId: string; ceiling: AccessCeiling; evidence: ScopeEvidence }
+const lockedSourceEvidence = new AsyncLocalStorage<LockedSourceEvidence>()
+
+/** Only the open publication transaction's final lease check consumes this proof. */
+export function withLockedSourceEvidence<T>(proof: LockedSourceEvidence, check: () => Promise<T>): Promise<T> {
+  return lockedSourceEvidence.run(proof, check)
+}
+
+export function currentLockedSourceEvidence(): LockedSourceEvidence | undefined {
+  return lockedSourceEvidence.getStore()
+}
+
 /** No TTL: each boundary observes live membership/grants, including timed expiry. */
 export function createAuthorityLease(
   starting: AccessCeiling,
   resolveCurrent: () => Promise<AccessCeiling | null>,
   policyCurrent?: () => Promise<boolean>,
 ): AuthorityLease {
+  return createAuthorityState(starting,resolveCurrent,policyCurrent).lease
+}
+function createAuthorityState(starting:AccessCeiling,resolveCurrent:()=>Promise<AccessCeiling|null>,policyCurrent?:()=>Promise<boolean>) {
   const invocationId = randomUUID()
   const pinned = intersectAccessCeilings(starting, starting)
   let invalid = false
   let operationMayHaveExecuted = false
-  const lease: AuthorityLease = {
-    snapshotSource: () => ({ version: 1, kind: 'invocation', invocationId }),
-    markOperationMayHaveExecuted() { operationMayHaveExecuted = true },
-    async assertCurrent() {
+  const assertValid=()=>{if(invalid)throw new AuthorityChangedError(operationMayHaveExecuted)}
+  const verify=async(resolve:()=>Promise<AccessCeiling|null>)=>{
       if (invalid) throw new AuthorityChangedError(operationMayHaveExecuted)
       try {
         if (policyCurrent && !(await policyCurrent())) throw new AuthorityChangedError()
-        const current = await resolveCurrent()
+        const current = await resolve()
         if (!current || !accessCeilingContains(current, pinned)) invalid = true
         if (policyCurrent && !(await policyCurrent())) invalid = true
       } catch {
@@ -58,7 +74,11 @@ export function createAuthorityLease(
       // A concurrent validator may have invalidated this same lease while
       // this one awaited the database. Success cannot erase that decision.
       if (invalid) throw new AuthorityChangedError(operationMayHaveExecuted)
-    },
+  }
+  const lease: AuthorityLease = {
+    snapshotSource: () => ({ version: 1, kind: 'invocation', invocationId }),
+    markOperationMayHaveExecuted() { operationMayHaveExecuted = true },
+    assertCurrent:()=>verify(resolveCurrent),
     async execute<T>(operation: () => Promise<T>): Promise<T> {
       await lease.assertCurrent()
       let result: T
@@ -72,12 +92,77 @@ export function createAuthorityLease(
       return result
     },
   }
-  return lease
+  return {lease,verify,assertValid}
+}
+
+type SessionReadOwner={assertCurrent:CurrentAuthorityBoundary['assertCurrent'];input:SessionAuthorityFactsInput;assertValid():void;verify(facts:unknown):Promise<void>}
+const sessionReadOwners=new WeakMap<CurrentAuthorityBoundary,SessionReadOwner>()
+const sessionTurnOwners=new WeakMap<CurrentAuthorityBoundary,Readonly<{token:string}>>()
+/** Only the original kernel adoption binds this value. SQL still checks the
+ * actual durable row and all principal/source facts at every record frame. */
+export function bindSessionTurnAuthority(lease:CurrentAuthorityBoundary,turn:{sessionId:string;assistantId:string;token:string}):()=>void{
+ const owner=sessionReadOwners.get(lease)
+ if(!owner)return()=>{}
+ if(owner.assertCurrent!==lease.assertCurrent||owner.input.sessionId!==turn.sessionId||owner.input.assistantId!==turn.assistantId
+  ||!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(turn.token)||sessionTurnOwners.has(lease))throw new AuthorityChangedError()
+ owner.assertValid()
+ const captured=Object.freeze({token:turn.token});sessionTurnOwners.set(lease,captured)
+ return()=>{if(sessionTurnOwners.get(lease)===captured)sessionTurnOwners.delete(lease)}
+}
+/** The lease consumes facts from this exact source-acquisition statement. This
+ * is an operation-owned read, never a receipt available to a later effect. */
+export async function captureSessionAuthority<T>(lease:CurrentAuthorityBoundary,
+ read:(input:SessionAuthorityFactsInput)=>Promise<{authority:unknown;value:T}|null>):Promise<{value:T}|null>{
+ const owner=sessionReadOwners.get(lease)
+ if(!owner||owner.assertCurrent!==lease.assertCurrent)return null
+ owner.assertValid()
+ const turn=sessionTurnOwners.get(lease)
+ const captured=await read(structuredClone({...owner.input,...(turn?{turn}:{})}))
+ if(owner.assertCurrent!==lease.assertCurrent||sessionTurnOwners.get(lease)!==turn)throw new AuthorityChangedError()
+ if(!captured)return null
+ await owner.verify(captured.authority)
+ if(owner.assertCurrent!==lease.assertCurrent||sessionTurnOwners.get(lease)!==turn)throw new AuthorityChangedError()
+ return{value:captured.value}
+}
+/** Opaque asynchronous work retains two fresh lease fences under one owner. */
+export async function withCurrentReadAuthority<T>(authority:CurrentAuthorityBoundary|undefined,read:()=>Promise<T>):Promise<T>{
+ await authority?.assertCurrent()
+ const value=await read()
+ await authority?.assertCurrent()
+ return value
 }
 
 export type SessionAuthoritySnapshot = Pick<Session,
   'id' | 'assistantId' | 'userId' | 'contextGroupId' | 'contextProjectId' | 'contextLockedAt'
-> & Partial<Pick<Session, 'visibility' | 'mode' | 'effectiveClearance' | 'contextCompartments'>>
+> & Partial<Pick<Session, 'visibility' | 'mode' | 'effectiveClearance' | 'contextCompartments' | 'channelType' | 'channelId' | 'appOrigin' | 'anchorKind' | 'anchorRef'>>
+
+type SessionFacts = Awaited<ReturnType<typeof readSessionAuthorityFacts>>
+
+/** Use one immutable binding comparison for startup and live owner checks. */
+export function sessionReadBindingCurrent(expected: SessionAuthoritySnapshot, actual: NonNullable<SessionFacts['session']>,
+  lock = expected.contextLockedAt?.toISOString() ?? null): boolean {
+  return actual.id === expected.id && sessionAuthorityDestinationMatches(expected,actual)
+    && (expected.mode === undefined || actual.mode === expected.mode)
+    && actual.assistantId === expected.assistantId && actual.userId === expected.userId
+    && actual.contextGroupId === expected.contextGroupId && actual.contextProjectId === expected.contextProjectId
+    && contextLockCurrent(lock, actual.contextLockedAt?.toISOString() ?? null)
+    && (expected.visibility === undefined || normalizeSessionVisibility(actual.visibility) === normalizeSessionVisibility(expected.visibility))
+    && (expected.effectiveClearance === undefined || actual.effectiveClearance === expected.effectiveClearance)
+    && (expected.contextCompartments == null
+      || JSON.stringify([...(actual.contextCompartments ?? [])].sort()) === JSON.stringify([...expected.contextCompartments].sort()))
+}
+
+/** Only pass facts captured for this operation; none carries effect authority. */
+export function sessionScopeDependencies(facts: SessionFacts): ResolveTurnScopeDeps {
+  const {scopeFacts,member,department} = facts
+  return {
+    scopeFacts,
+    resolveReadCeilings: async (_user, _workspace, clearance, compartments, requireMembership) =>
+      operationCeilingsFromMembership(member, clearance, compartments, requireMembership),
+    resolveWorkspaceRole: async () => member?.role ?? null,
+    ...(department ? {departmentRead:{query:query as NonNullable<ResolveTurnScopeDeps['departmentRead']>['query'],facts:department}} : {}),
+  }
+}
 
 /** Build the live lease used by web, public/API and messaging turns. */
 export function createSessionAuthorityLease(input: {
@@ -102,12 +187,14 @@ export function createSessionAuthorityLease(input: {
   /** Re-resolve a recipient/surface ceiling at every authority boundary. */
   maximumAccessCurrent?: () => Promise<AccessCeiling | null>
   /** Construction-pinned native/application field and configuration metadata. */
-  policyCurrent?: () => Promise<boolean>
+  policy?: PolicyEpoch
 }): AuthorityLease {
   const nativeCredential=input.nativeSessionCredential?Object.freeze(structuredClone(input.nativeSessionCredential)):undefined
   const sourceRead = { visibility: normalizeSessionVisibility(input.session.visibility), mode: input.session.mode,
     effectiveClearance: input.session.effectiveClearance,
     contextCompartments: input.session.contextCompartments ? [...input.session.contextCompartments] : undefined }
+  const destination={channelType:input.session.channelType,channelId:input.session.channelId,appOrigin:input.session.appOrigin,anchorKind:input.session.anchorKind,anchorRef:input.session.anchorRef}
+  const sessionBinding = {...input.session,contextCompartments:sourceRead.contextCompartments}
   const expected = {
     id: input.session.id,
     assistantId: input.session.assistantId,
@@ -119,25 +206,15 @@ export function createSessionAuthorityLease(input: {
     contextLockedAt: input.session.contextLockedAt?.toISOString() ?? null,
     workspaceId: input.starting.workspaceId,
   }
-  const lease = createAuthorityLease(input.starting, async () => {
-    const [session, assistant, credentialCurrent] = await Promise.all([
-      findSessionAuthorityById(expected.id),
-      findAssistantById(expected.executingAssistantId),
-      (async()=>{
-        if(input.credentialCurrent&&!await input.credentialCurrent())return false
-        return !nativeCredential||nativeCredential.userId===expected.authorityUserId&&await authSessionStore.validateAccess(nativeCredential,{touch:false})
-      })(),
-    ])
-    if (!session || !assistant || !credentialCurrent) return null
+  const factsInput:SessionAuthorityFactsInput={sessionId:expected.id,assistantId:expected.executingAssistantId,
+    workspaceId:expected.workspaceId,userId:expected.authorityUserId,credential:nativeCredential,
+    includePolicy:!!input.policy,includeDepartments:input.memberMode!=='assistant'&&input.memberMode!=='external'}
+  const resolveFacts=async(facts:SessionFacts)=>{
+    const {session,assistant,credentialCurrent,policy}=facts
+    if (!session || !assistant || !credentialCurrent || input.policy && !input.policy.matches(policy)) return null
     const currentLock = session.contextLockedAt?.toISOString() ?? null
-    if (
-      session.assistantId !== expected.assistantId
-      || session.userId !== expected.userId
-      || session.contextGroupId !== expected.contextGroupId
-      || session.contextProjectId !== expected.contextProjectId
-      || !contextLockCurrent(expected.contextLockedAt, currentLock)
-      || (assistant.workspaceId ?? '') !== expected.workspaceId
-    ) return null
+    if (!sessionReadBindingCurrent(sessionBinding,session,expected.contextLockedAt)
+      || (assistant.workspaceId ?? '') !== expected.workspaceId) return null
     // The first message takes the lock after the lease starts. Remember the
     // observed timestamp so a later lock rewrite in the same turn cannot pass
     // merely because the starting snapshot was null.
@@ -152,13 +229,22 @@ export function createSessionAuthorityLease(input: {
       memberMode: input.memberMode,
       ignoreSessionBinding: input.ignoreSessionBinding,
       systemRead: input.systemRead,
-    })
-    if (!input.maximumAccessCurrent) return current
-    const maximum = await input.maximumAccessCurrent()
-    return maximum
-      ? intersectAccessCeilings(current, { ...maximum, userId: current.userId })
-      : null
-  }, input.policyCurrent)
+    }, sessionScopeDependencies(facts))
+    const maximum = input.maximumAccessCurrent ? await input.maximumAccessCurrent() : current
+    // Scope evaluation consumes the complete statement snapshot. Only an opaque
+    // recipient callback opens an independent read interval requiring closure.
+    if (input.maximumAccessCurrent && input.policy && !await input.policy.isCurrent()) return null
+    return maximum ? intersectAccessCeilings(current, { ...maximum, userId: current.userId }) : null
+  }
+  const state=createAuthorityState(input.starting,async()=>{
+    if(input.credentialCurrent&&!await input.credentialCurrent())return null
+    return resolveFacts(await readSessionAuthorityFacts(factsInput))
+  })
+  const lease=state.lease
+  if(!input.credentialCurrent&&!input.maximumAccessCurrent)sessionReadOwners.set(lease,{
+    input:factsInput,assertCurrent:lease.assertCurrent,assertValid:state.assertValid,
+    verify:raw=>state.verify(()=>resolveFacts(decodeSessionAuthorityFacts(factsInput,raw))),
+  })
   const invocation = lease.snapshotSource!()
   lease.snapshotNativeSessionCredential = () => nativeCredential ? { ...nativeCredential } : null
   lease.snapshotSource = () => {
@@ -209,6 +295,13 @@ export async function executeWithCurrentAuthority<T>(fn: () => Promise<T>): Prom
 function uncertainOperation(): AuthorityChangedError {
   for (const lease of leases.getStore() ?? []) lease.markOperationMayHaveExecuted()
   return new AuthorityChangedError(true)
+}
+
+/** A domain transaction owns commit reconciliation and preserves the lease's
+ * uncertain-outcome marker without acquiring another permission bracket. */
+export function markAuthorityOperationUncertain(boundary:CurrentAuthorityBoundary):void{
+ const lease=boundary as Partial<AuthorityLease>
+ lease.markOperationMayHaveExecuted?.()
 }
 
 function uncertainLeaseOperation(lease: AuthorityLease): AuthorityChangedError {

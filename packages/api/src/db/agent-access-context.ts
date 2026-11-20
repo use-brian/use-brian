@@ -1,5 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { intersectDepartmentReadGrants,intersectScopeGrants,minSensitivity,type DepartmentReadGrant } from '@use-brian/core'
+import { intersectScopeGrants } from '@use-brian/agent-runtime/security/context-scope.js'
+import { intersectDepartmentReadGrants, type DepartmentReadGrant } from '@use-brian/agent-runtime/security/department-read.js'
+import { minSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 
 /**
  * Trusted execution ceiling propagated through awaits and nested tools.

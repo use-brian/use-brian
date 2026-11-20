@@ -1,7 +1,5 @@
 "use client";
 
-
-import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Inspection drawer — "Ask about this" surface in the brain inbox.
  *
@@ -12,26 +10,36 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
  * mutation path.
  *
  * The first user message is prefixed with a preamble that gives the
- * model the memory context. Subsequent messages flow normally through
- * the existing /api/chat endpoint with the inspection-session id.
+ * model the memory context; the bubble shows only the question.
+ * Subsequent messages flow normally with the inspection-session id.
  *
- * Non-streaming v1 — the drawer reads the full SSE response and
- * extracts the final assistant text. Streaming UX is a follow-up; for
- * the short-deliberation use case the 1-3s wait is acceptable.
+ * A presentation of the shared conversation controller (M5 WP-E) over the
+ * inspection session minted on open (`review-thread-conversation.ts`):
+ * the reply streams through the controller's direct stream (paint batched
+ * per frame, reasoning never in the answer), and a dropped stream
+ * re-attaches instead of reading as an empty reply.
  *
- * Spec: docs/architecture/brain/corrections.md.
+ * Spec: docs/architecture/brain/corrections.md → "Entry assistant threads on
+ * the shared controller (M5)". [COMP:app-web/brain-inspection-drawer]
  */
 
 import { useEffect, useState } from "react";
 import { useT } from "@/lib/i18n/client";
-import { authFetch } from "@/lib/auth-fetch";
 import {
   createInspectionSession,
   type BrainPrimitive,
   type InspectionSession,
 } from "@/lib/api/brain-inbox";
+import {
+  latestNotice,
+  reviewThreadView,
+  stripReviewPreamble,
+  useReviewConversation,
+} from "@/components/brain/review-thread-conversation";
 
-const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
+const CLIENT_TIMEZONE = (() => {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { return undefined; }
+})();
 
 type Props = {
   workspaceId: string;
@@ -43,7 +51,24 @@ type Props = {
   onClose: () => void;
 };
 
-type ChatTurn = { role: "user" | "assistant"; text: string };
+/** The model-facing memory context prefixed to the first question. */
+export function buildMemoryPreamble(savingAssistantName: string, memorySummary: string, memoryDetail: string | null): string {
+  // Threaded to the model as the leading block of the user's first
+  // message. Gives the model the memory body, source assistant,
+  // and the user's intent ("help me decide").
+  const detailLine = memoryDetail ? `\nDetail: ${memoryDetail}` : "";
+  return (
+    `[Memory review context]\n` +
+    `The user is reviewing a memory saved by their assistant "${savingAssistantName}":\n` +
+    `Summary: ${memorySummary}${detailLine}\n\n` +
+    `Help the user decide whether to confirm, adjust, or delete this memory. ` +
+    `You are read-only here — you cannot save, delete, or modify memories yourself; ` +
+    `the user will act on the card. Be brief and concrete.\n\n` +
+    `[User asks]\n`
+  );
+}
+
+type ChatTurn = { key: string; role: "user" | "assistant"; text: string };
 
 export function InspectionDrawer({
   workspaceId,
@@ -58,8 +83,8 @@ export function InspectionDrawer({
   const [session, setSession] = useState<InspectionSession | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [turns, setTurns] = useState<ChatTurn[]>([]);
+  // Turns that settled with no reply text, by their question's id.
+  const [settledEmpty, setSettledEmpty] = useState<ReadonlyMap<string, string>>(new Map());
 
   // Create the inspection session on mount.
   useEffect(() => {
@@ -78,6 +103,14 @@ export function InspectionDrawer({
     };
   }, [workspaceId, primitive, rowId]);
 
+  const { state, sendBound, currentController } = useReviewConversation({
+    workspaceId,
+    sessionId: session?.sessionId ?? null,
+    kind: "inspection-drawer",
+  });
+  const view = reviewThreadView(state);
+  const busy = view.busy;
+
   // Close on Escape.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -87,146 +120,47 @@ export function InspectionDrawer({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  function buildPreamble(): string {
-    // Threaded to the model as the leading block of the user's first
-    // message. Gives the model the memory body, source assistant,
-    // and the user's intent ("help me decide").
-    const detailLine = memoryDetail ? `\nDetail: ${memoryDetail}` : "";
-    return (
-      `[Memory review context]\n` +
-      `The user is reviewing a memory saved by their assistant "${savingAssistantName}":\n` +
-      `Summary: ${memorySummary}${detailLine}\n\n` +
-      `Help the user decide whether to confirm, adjust, or delete this memory. ` +
-      `You are read-only here — you cannot save, delete, or modify memories yourself; ` +
-      `the user will act on the card. Be brief and concrete.\n\n` +
-      `[User asks]\n`
-    );
-  }
-
   async function send() {
     if (!session || busy || draft.trim().length === 0) return;
     const userText = draft.trim();
     setDraft("");
-    setBusy(true);
 
     // First turn gets the preamble; subsequent turns send the raw text.
-    const isFirst = turns.length === 0;
-    const messageBody = isFirst ? buildPreamble() + userText : userText;
-
-    // Optimistic append — both the user turn AND an empty assistant
-    // turn that we'll grow as chunks arrive. The streaming render
-    // path keys off the last turn, so the empty assistant turn must
-    // exist before the first delta lands.
-    setTurns((prev) => [
-      ...prev,
-      { role: "user", text: userText },
-      { role: "assistant", text: "" },
-    ]);
-
-    try {
-      const res = await authFetch(`${API_URL}/api/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: messageBody,
-          sessionId: session.sessionId,
-          assistantId: session.assistantId,
-          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-        }),
-      });
-      if (!res.ok || !res.body) {
-        throw new Error(`Chat failed (${res.status})`);
-      }
-      // Stream the SSE response. Each parsed delta updates the last
-      // assistant turn in-place so the drawer reads as a live typing
-      // surface rather than a blocked spinner.
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let assistantText = "";
-      // The current SSE event name — only `text_delta` payloads are answer
-      // text. Appending every data line used to leak `reasoning` deltas
-      // (the model's thinking stream) into the visible reply.
-      let currentEvent = "";
-      let flushScheduled = false;
-      const flush = () => {
-        flushScheduled = false;
-        setTurns((prev) => {
-          if (prev.length === 0) return prev;
-          const last = prev[prev.length - 1];
-          if (last.role !== "assistant") return prev;
-          if (last.text === assistantText) return prev;
-          return [...prev.slice(0, -1), { ...last, text: assistantText }];
-        });
-      };
-      const scheduleFlush = () => {
-        // Coalesce updates to roughly one render per animation frame.
-        // Without this a chatty stream re-renders 50+ times per second.
-        if (flushScheduled) return;
-        flushScheduled = true;
-        if (typeof requestAnimationFrame === "function") {
-          requestAnimationFrame(flush);
-        } else {
-          setTimeout(flush, 16);
-        }
-      };
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (trimmed.startsWith("event:")) {
-            currentEvent = trimmed.slice(6).trim();
-            continue;
-          }
-          if (!trimmed.startsWith("data:")) continue;
-          if (currentEvent !== "text_delta") continue;
-          const json = trimmed.slice(5).trim();
-          if (!json) continue;
-          try {
-            const evt = JSON.parse(json) as { type?: string; text?: string; delta?: string };
-            // Two shapes observed across the codebase — accommodate both.
-            if (typeof evt.text === "string") assistantText += evt.text;
-            else if (typeof evt.delta === "string") assistantText += evt.delta;
-            scheduleFlush();
-          } catch {
-            // Non-JSON SSE line (heartbeat, comment) — skip.
-          }
-        }
-      }
-      // Final flush to commit any pending coalesced delta.
-      flush();
-      // Empty-response guard — if the stream closed without any text,
-      // surface a marker so the user isn't staring at a blank bubble.
-      if (assistantText.length === 0) {
-        setTurns((prev) => {
-          if (prev.length === 0) return prev;
-          const last = prev[prev.length - 1];
-          if (last.role !== "assistant" || last.text.length > 0) return prev;
-          return [
-            ...prev.slice(0, -1),
-            { ...last, text: t.memoriesReview.askEmptyResponse },
-          ];
-        });
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setTurns((prev) => {
-        if (prev.length === 0) return prev;
-        const last = prev[prev.length - 1];
-        if (last.role !== "assistant") return prev;
-        return [
-          ...prev.slice(0, -1),
-          { ...last, text: `${t.memoriesReview.askError} ${msg}` },
-        ];
-      });
-    } finally {
-      setBusy(false);
+    const isFirst = view.messages.length === 0;
+    const messageBody = isFirst
+      ? buildMemoryPreamble(savingAssistantName, memorySummary, memoryDetail) + userText
+      : userText;
+    const result = await sendBound(session.sessionId, {
+      text: messageBody,
+      assistantId: session.assistantId,
+      bodyExtras: CLIENT_TIMEZONE ? { timezone: CLIENT_TIMEZONE } : {},
+      onRejected: () => setDraft((current) => (current.trim() ? current : userText)),
+    });
+    if (result !== "completed" && result !== "failed") return;
+    // A settled turn without reply text gets a marker so the user isn't
+    // staring at a blank bubble; a failure says why.
+    const bound = currentController();
+    const snapshot = bound?.getSessionId() === session.sessionId ? bound.getSnapshot() : null;
+    const rows = snapshot?.transcript.messages ?? [];
+    const last = rows[rows.length - 1];
+    const notice = latestNotice(snapshot, ["error"]);
+    const failure = `${t.memoriesReview.askError} ${notice?.code === "error" ? notice.message ?? notice.errorCode : ""}`.trim();
+    if (last?.role !== "user") {
+      // Failed before the server accepted it: the question is back in the
+      // composer, and the error line says why.
+      if (result === "failed") setSessionError(failure);
+      return;
     }
+    const text = result === "failed" ? failure : t.memoriesReview.askEmptyResponse;
+    setSettledEmpty((current) => new Map(current).set(last.id, text));
   }
+
+  const turns: ChatTurn[] = view.messages.flatMap((message): ChatTurn[] => {
+    const turn: ChatTurn = { key: message.id, role: message.role === "user" ? "user" : "assistant", text: message.role === "user" ? stripReviewPreamble(message.text) : message.text };
+    const stub = settledEmpty.get(message.id);
+    return stub ? [turn, { key: `${message.id}-settled`, role: "assistant", text: stub }] : [turn];
+  });
+  if (busy && view.streamingText) turns.push({ key: "live", role: "assistant", text: view.streamingText });
 
   return (
     <div
@@ -288,37 +222,30 @@ export function InspectionDrawer({
               {t.memoriesReview.askPlaceholderBody}
             </div>
           )}
-          {turns.map((turn, i) => {
-            const isLastAssistantEmpty =
-              i === turns.length - 1 && turn.role === "assistant" && turn.text.length === 0;
-            // Hide empty assistant bubble before the first chunk
-            // lands — the standalone "Thinking…" line below covers it.
-            if (isLastAssistantEmpty && busy) return null;
-            return (
-              <div
-                key={i}
-                className={
-                  turn.role === "user"
-                    ? "self-end max-w-[85%] text-xs bg-secondary text-secondary-foreground rounded-md px-3 py-2 whitespace-pre-wrap"
-                    : "self-start max-w-[95%] text-xs bg-muted text-foreground rounded-md px-3 py-2 whitespace-pre-wrap"
-                }
-              >
-                {turn.text}
-              </div>
-            );
-          })}
-          {busy && (() => {
-            // Only show the indicator while we're awaiting the first
-            // chunk — once text streams in, the bubble itself is the
-            // signal that the model is responding.
-            const last = turns[turns.length - 1];
-            if (last && last.role === "assistant" && last.text.length > 0) return null;
-            return (
-              <div className="self-start text-xs text-muted-foreground italic">
-                {t.memoriesReview.thinking}
-              </div>
-            );
-          })()}
+          {turns.map((turn) => (
+            <div
+              key={turn.key}
+              className={
+                turn.role === "user"
+                  ? "self-end max-w-[85%] text-xs bg-secondary text-secondary-foreground rounded-md px-3 py-2 whitespace-pre-wrap"
+                  : "self-start max-w-[95%] text-xs bg-muted text-foreground rounded-md px-3 py-2 whitespace-pre-wrap"
+              }
+            >
+              {turn.text}
+            </div>
+          ))}
+          {/* Only while awaiting the first chunk — once text streams in,
+              the bubble itself is the signal that the model is responding. */}
+          {busy && !view.streamingText ? (
+            <div className="self-start text-xs text-muted-foreground italic">
+              {t.memoriesReview.thinking}
+            </div>
+          ) : null}
+          {latestNotice(state, ["reconnecting", "reconnectFailed"]) ? (
+            <div className="self-start text-xs text-muted-foreground" role="status">
+              {latestNotice(state, ["reconnecting"]) ? t.chat.turnReconnecting : t.chat.turnReconnectFailed}
+            </div>
+          ) : null}
         </div>
 
         {/* Composer */}

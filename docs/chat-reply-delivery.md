@@ -59,10 +59,10 @@ checks. Source holds, retention and canonical publication/write-lineage checks
 remain in place. A live permission change can still stop the current response.
 Full next-response-only permission semantics requires a separate database
 read-admission design; the JavaScript execution snapshot alone cannot provide it.
-The [request permission context](action-permission-snapshots.md) owns lazy event
-invalidation and the trusted-resolver adapter. Native chat delivery now uses that
-shared owner. Automatic action-start execution switching is still pending and
-does not change the live-input, writer or database guarantees above.
+The [action and delivery admission contract](action-permission-snapshots.md)
+keeps tool authority with the executor and native output with one destination-bound
+`TurnDeliveryAdmission`. The unused request selection cache and its invalidation
+subscriber are removed. Every output still receives fresh complete admission.
 
 ## Authenticated transcript reads
 

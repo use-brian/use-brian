@@ -28,7 +28,7 @@ import { randomUUID } from 'node:crypto'
 import type pg from 'pg'
 import { getPool, query } from './client.js'
 import { insertTurnEvent } from './turn-ledger-store.js'
-import type { TurnLedgerActor } from '@use-brian/core'
+import type { TurnLedgerActor } from '@use-brian/agent-runtime/engine/turn-ledger.js'
 
 export type CaptureOpts = {
   actor: TurnLedgerActor

@@ -20,10 +20,11 @@ import { createRoomIngestor, ROOM_DIGEST_CRON, type RoomPostInput } from '../roo
 import type { BrainEpisodeInput } from '../../ingest-port.js'
 import type { appendBatchEvent as AppendBatchEvent } from '../../db/pending-ingest-batches-store.js'
 import { buildEpisodeIngestors } from '../../build-episode-ingestors.js'
-import { processEpisode } from '@use-brian/core'
+import { processEpisode } from '@use-brian/core/ingest/pipeline-b.js'
 
-vi.mock('@use-brian/core', async importOriginal => ({
-  ...await importOriginal<typeof import('@use-brian/core')>(), processEpisode: vi.fn(),
+vi.mock('@use-brian/core/ingest/pipeline-b.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@use-brian/core/ingest/pipeline-b.js')>()),
+  processEpisode: vi.fn(),
 }))
 
 const NOW = new Date('2026-07-31T10:20:00Z')

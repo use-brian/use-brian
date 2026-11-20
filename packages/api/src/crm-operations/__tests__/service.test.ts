@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { CrmOperationsError, type CrmOperationsContext } from '@use-brian/core'
+import { CrmOperationsError, type CrmOperationsContext } from '@use-brian/core/crm/operations-types.js'
 import { createCrmOperationsService } from '../service.js'
 import type {
   CrmOperationsStore,

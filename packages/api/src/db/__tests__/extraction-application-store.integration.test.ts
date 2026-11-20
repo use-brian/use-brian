@@ -1,10 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
-import {
-  ExtractionApplicationError,
-  freezeExtractionPlan,
-  type AccessContext,
-} from '@use-brian/core'
+import { ExtractionApplicationError } from '@use-brian/core/ingest/application.js'
+import { freezeExtractionPlan } from '@use-brian/core/ingest/extraction-plan.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 
 import { getAppPool, getPool } from '../client.js'
 import { createExtractionApplicationStore } from '../extraction-application-store.js'

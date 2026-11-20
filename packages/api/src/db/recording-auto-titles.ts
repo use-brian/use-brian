@@ -1,5 +1,5 @@
 // [COMP:recordings/auto-title] - authority-preserving display-title publication.
-import { resourceScopeKey, type ScopeSource } from '@use-brian/core'
+import { resourceScopeKey, type ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import type { PoolClient } from 'pg'
 import { query } from './client.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'

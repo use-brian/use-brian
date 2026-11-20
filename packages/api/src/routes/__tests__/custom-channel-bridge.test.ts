@@ -38,10 +38,16 @@ vi.mock('../../chat-archive/live-writer.js', () => ({
   resolveChatArchiveInstanceId: vi.fn(async () => null),
 }))
 vi.mock('../channel-file-cache.js', () => ({ cacheInboundImageTag: vi.fn(async () => '') }))
-vi.mock('@use-brian/core', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@use-brian/core')>()),
+vi.mock('@use-brian/core/files/parsers.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@use-brian/core/files/parsers.js')>()),
   parseFileContent: vi.fn(async () => ({ text: '' })),
+}))
+vi.mock('@use-brian/core/analytics/logger.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@use-brian/core/analytics/logger.js')>()),
   sanitize: (v: string) => v,
+}))
+vi.mock('@use-brian/core/media/preflight.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@use-brian/core/media/preflight.js')>()),
   transcribeFirstAudio: vi.fn(),
 }))
 vi.mock('@use-brian/shared', async (importOriginal) => ({
@@ -59,7 +65,8 @@ import { resolveChannelUser } from '../../db/channel-user-store.js'
 import { archiveUnroutedInbound, appendOutboundChatArchive, resolveChatArchiveInstanceId } from '../../chat-archive/live-writer.js'
 import { hashBridgeToken } from '../../db/custom-channel-token.js'
 import type { CustomChannelStore, ClaimedOutboxItem, CustomChannelBridgeState } from '../../db/custom-channel-store.js'
-import { parseFileContent, transcribeFirstAudio } from '@use-brian/core'
+import { parseFileContent } from '@use-brian/core/files/parsers.js'
+import { transcribeFirstAudio } from '@use-brian/core/media/preflight.js'
 import {
   registerSchedulerResolver,
   unregisterSchedulerResolver,

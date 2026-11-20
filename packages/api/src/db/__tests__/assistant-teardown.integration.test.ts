@@ -341,9 +341,12 @@ describe('[COMP:api/assistant-teardown] assistant teardown against a real schema
     const primary = await newAssistant(ws, owner, 'primary')
     const demo = await newAssistant(ws, owner, 'standard')
     await q(`SELECT set_config('app.current_user_id', $1, true), set_config('app.system_bypass', 'true', true)`, [owner])
+    // Self-induced skills: their assistant-scoped revisions are written here.
+    // A foreground authored skill would receive its own workspace-scoped root
+    // revision 1 on insert (migration 8220), which is not this case.
     const skill = async (name: string) => (await one<{ id: string }>(
-      `INSERT INTO workspace_skills (slug, name, description, content, workspace_id)
-       VALUES (lower($1), $1, 'd', 'c', $2) RETURNING id`,
+      `INSERT INTO workspace_skills (slug, name, description, content, workspace_id, induction_source)
+       VALUES (lower($1), $1, 'd', 'c', $2, 'self') RETURNING id`,
       [name, ws],
     )).id
     const revision = async (skillId: string, n: number, assistant: string) => {

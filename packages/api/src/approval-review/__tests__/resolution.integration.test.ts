@@ -10,7 +10,7 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
-import type { ToolContext } from '@use-brian/core'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { getAppPool, getPool } from '../../db/client.js'
 import { createDbWorkflowRunStore, createDbWorkflowStore } from '../../db/workflow-store.js'
 import { createWorkspaceAuditStore } from '../../db/workspace-audit-store.js'

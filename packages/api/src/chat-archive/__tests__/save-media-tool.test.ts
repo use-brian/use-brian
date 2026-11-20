@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createSaveChatMediaTool, MAX_SAVE_CHAT_MEDIA_BYTES } from '../save-media-tool.js'
+import { createSaveChatMediaTool, MAX_SAVE_CHAT_MEDIA_BYTES } from '@use-brian/core/workspace-files/save-chat-media.js'
 import type { MessageStoreClient } from '../message-store-client.js'
-import type { FilesApi } from '@use-brian/core'
+import type { FilesApi } from '@use-brian/core/workspace-files/api.js'
 
 const SHA = 'a'.repeat(64)
 

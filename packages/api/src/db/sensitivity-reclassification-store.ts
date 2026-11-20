@@ -35,8 +35,8 @@ import type {
   ReclassifiablePrimitive,
   RowSensitivitySnapshot,
   SensitivityReclassificationRepository,
-  Sensitivity,
-} from '@use-brian/core'
+} from '@use-brian/core/corrections/sensitivity-reclassification.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { getPool, query } from './client.js'
 
 /**

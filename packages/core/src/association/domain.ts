@@ -1,19 +1,8 @@
-/**
- * Bounded contracts for the association-operations vertical.
- *
- * These schemas sit at the API/store boundary so a public-site adapter, a
- * migration job, and a future operator UI all submit the same records. Money
- * is always an integer in minor units; provider state is reconciled through a
- * named order transition; flexible source payloads are preserved only inside
- * bounded JSON objects.
- *
+/** Shared CRM plan/event, actor and historical import contracts.
+ * Retained physical names preserve compatibility with CRM storage.
  * [COMP:crm/association-domain]
  */
-
-import { createHash } from 'node:crypto'
 import { z } from 'zod'
-import { APP_LOCALES } from '@use-brian/shared'
-import { CrmPageQuerySchema } from '../crm/pagination.js'
 import { CrmIntegrationAuthoritySchema } from '../crm/integration-authority.js'
 
 const UUID = z.string().uuid()
@@ -39,57 +28,6 @@ export const AssociationActorSchema = z.object({
 })
 export type AssociationActor = z.infer<typeof AssociationActorSchema>
 
-export const AssociationExternalIdentityInputSchema = z.object({
-  contactId: UUID,
-  provider: ProviderKey,
-  providerSubject: z.string().trim().min(1).max(500),
-})
-export type AssociationExternalIdentityInput = z.infer<typeof AssociationExternalIdentityInputSchema>
-
-export const AssociationEnquiryCreateSchema = z.object({
-  contactId: UUID,
-  source: StableKey,
-  sourceSubmissionId: z.string().trim().min(1).max(500),
-  subject: z.string().trim().min(1).max(300),
-  message: z.string().trim().min(1).max(20_000),
-  queueKey: StableKey.default('general'),
-  submittedAt: Instant.optional(),
-  submittedData: boundedObject(32_000).default({}),
-})
-export type AssociationEnquiryCreateInput = z.infer<typeof AssociationEnquiryCreateSchema>
-
-export const AssociationEnquiryStatusSchema = z.enum(['new', 'in_progress', 'resolved', 'spam'])
-export type AssociationEnquiryStatus = z.infer<typeof AssociationEnquiryStatusSchema>
-
-export const AssociationEnquiryUpdateSchema = z.object({
-  status: AssociationEnquiryStatusSchema.optional(),
-  queueKey: StableKey.optional(),
-  ownerUserId: UUID.nullable().optional(),
-}).refine((value) => Object.keys(value).length > 0, 'at least one change is required')
-export type AssociationEnquiryUpdateInput = z.infer<typeof AssociationEnquiryUpdateSchema>
-
-export const AssociationEnquiryNoteInputSchema = z.object({
-  body: z.string().trim().min(1).max(20_000),
-})
-export type AssociationEnquiryNoteInput = z.infer<typeof AssociationEnquiryNoteInputSchema>
-
-export const AssociationConsentInputSchema = z.object({
-  contactId: UUID,
-  purpose: StableKey,
-  action: z.enum(['granted', 'withdrawn']),
-  wordingVersion: z.string().trim().min(1).max(100),
-  locale: z.enum(APP_LOCALES).optional(),
-  source: StableKey,
-  occurredAt: Instant.optional(),
-  provider: ProviderKey.optional(),
-  providerEventId: z.string().trim().min(1).max(500).optional(),
-  metadata: boundedObject(8_000).default({}),
-}).refine(
-  (value) => (value.provider === undefined) === (value.providerEventId === undefined),
-  'provider and providerEventId must be supplied together',
-)
-export type AssociationConsentInput = z.infer<typeof AssociationConsentInputSchema>
-
 export const AssociationPlanInputSchema = z.object({
   key: StableKey,
   name: z.string().trim().min(1).max(200),
@@ -111,112 +49,6 @@ export const AssociationPlanInputSchema = z.object({
   'provider and providerPlanId must be supplied together',
 )
 export type AssociationPlanInput = z.infer<typeof AssociationPlanInputSchema>
-
-export const AssociationMembershipInputSchema = z.object({
-  contactId: UUID,
-  planId: UUID,
-  idempotencyKey: z.string().trim().min(1).max(200),
-  status: z.enum(['pending', 'active', 'expired', 'cancelled']).default('pending'),
-  startsAt: Instant,
-  endsAt: Instant.nullable().optional(),
-  renewalMode: z.enum(['none', 'manual', 'auto']).default('none'),
-  provider: ProviderKey.optional(),
-  providerMembershipId: z.string().trim().min(1).max(500).optional(),
-  providerPeriodId: z.string().trim().min(1).max(500).optional(),
-  predecessorId: UUID.optional(),
-}).refine(
-  (value) => !value.endsAt || value.startsAt < value.endsAt,
-  'endsAt must be after startsAt',
-).refine(
-  (value) => (value.provider === undefined) === (value.providerMembershipId === undefined),
-  'provider and providerMembershipId must be supplied together',
-).refine(value => !value.providerPeriodId || (!!value.provider && !!value.endsAt), 'A provider period requires provider identity and a finite end').refine(value => !value.predecessorId || !!value.providerPeriodId, 'A predecessor requires a provider period')
-export type AssociationMembershipInput = z.infer<typeof AssociationMembershipInputSchema>
-
-export const AssociationMembershipUpdateSchema = z.object({
-  status: z.enum(['pending', 'active', 'expired', 'cancelled']).optional(),
-  endsAt: Instant.nullable().optional(),
-  renewalMode: z.enum(['none', 'manual', 'auto']).optional(),
-}).refine((value) => Object.keys(value).length > 0, 'at least one change is required')
-export type AssociationMembershipUpdateInput = z.infer<typeof AssociationMembershipUpdateSchema>
-
-export const AssociationSponsorshipAllocationStatusSchema = z.enum(['active', 'cancelled'])
-export type AssociationSponsorshipAllocationStatus = z.infer<typeof AssociationSponsorshipAllocationStatusSchema>
-
-export const AssociationSponsorshipAllocationCreateSchema = z.object({
-  sponsorContactId: UUID,
-  sponsorMembershipId: UUID,
-  beneficiaryPlanId: UUID,
-  idempotencyKey: z.string().trim().min(1).max(200),
-  seatLimit: z.number().int().positive().max(10_000),
-  startsAt: Instant,
-  endsAt: Instant,
-  invitationTtlHours: z.number().int().min(1).max(24 * 90).default(168),
-}).strict().refine(value => Date.parse(value.startsAt) < Date.parse(value.endsAt), 'endsAt must be after startsAt')
-export type AssociationSponsorshipAllocationCreateInput = z.infer<typeof AssociationSponsorshipAllocationCreateSchema>
-
-export const AssociationSponsorshipInvitationStatusSchema = z.enum(['pending', 'redeemed', 'revoked'])
-export type AssociationSponsorshipInvitationStatus = z.infer<typeof AssociationSponsorshipInvitationStatusSchema>
-
-export const AssociationSponsorshipInvitationCreateSchema = z.object({
-  allocationId: UUID,
-  nomineeContactId: UUID,
-  idempotencyKey: z.string().trim().min(1).max(200),
-}).strict()
-export type AssociationSponsorshipInvitationCreateInput = z.infer<typeof AssociationSponsorshipInvitationCreateSchema>
-
-export const AssociationSponsorshipReasonSchema = z.object({
-  requestId: z.string().trim().min(1).max(200),
-  reason: z.string().trim().min(1).max(2_000),
-}).strict()
-export type AssociationSponsorshipReasonInput = z.infer<typeof AssociationSponsorshipReasonSchema>
-
-export const AssociationSponsorshipRedemptionSchema = z.object({
-  token: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
-  contactId: UUID,
-}).strict()
-export type AssociationSponsorshipRedemptionInput = z.infer<typeof AssociationSponsorshipRedemptionSchema>
-
-export const AssociationMembershipRescueStatusSchema = z.enum(['outstanding', 'settled', 'reversed', 'cancelled'])
-export type AssociationMembershipRescueStatus = z.infer<typeof AssociationMembershipRescueStatusSchema>
-
-export const AssociationMembershipRescueCreateSchema = z.object({
-  contactId: UUID,
-  planId: UUID,
-  idempotencyKey: z.string().trim().min(1).max(200),
-  startsAt: Instant,
-  endsAt: Instant,
-  dueAt: Instant,
-  reason: z.string().trim().min(1).max(2_000),
-}).strict().refine((value) => Date.parse(value.startsAt) < Date.parse(value.endsAt), 'endsAt must be after startsAt')
-export type AssociationMembershipRescueCreateInput = z.infer<typeof AssociationMembershipRescueCreateSchema>
-
-export const AssociationMembershipRescueSettlementSchema = z.object({
-  requestId: z.string().trim().min(1).max(200),
-  method: z.enum(['bank_transfer', 'cash', 'cheque', 'other']),
-  evidenceReference: z.string().trim().min(1).max(500),
-  amountMinor: z.number().int().positive().safe(),
-  currency: Currency,
-  occurredAt: Instant,
-  note: z.string().trim().max(2_000).nullable().optional(),
-}).strict()
-export type AssociationMembershipRescueSettlementInput = z.infer<typeof AssociationMembershipRescueSettlementSchema>
-
-export const AssociationMembershipRescueReversalSchema = z.object({
-  requestId: z.string().trim().min(1).max(200),
-  evidenceReference: z.string().trim().min(1).max(500),
-  amountMinor: z.number().int().positive().safe(),
-  currency: Currency,
-  occurredAt: Instant,
-  reason: z.string().trim().min(1).max(2_000),
-}).strict()
-export type AssociationMembershipRescueReversalInput = z.infer<typeof AssociationMembershipRescueReversalSchema>
-
-export const AssociationMembershipRescueCancellationSchema = z.object({
-  requestId: z.string().trim().min(1).max(200),
-  reason: z.string().trim().min(1).max(2_000),
-}).strict()
-export type AssociationMembershipRescueCancellationInput = z.infer<typeof AssociationMembershipRescueCancellationSchema>
 
 function validIanaTimezone(value: string): boolean {
   try {
@@ -251,38 +83,6 @@ export const AssociationEventInputSchema = z.object({
     'registrationClosesAt must be after registrationOpensAt',
   )
 export type AssociationEventInput = z.infer<typeof AssociationEventInputSchema>
-
-export const AssociationTicketInputSchema = z.object({
-  key: StableKey,
-  name: z.string().trim().min(1).max(200),
-  currency: Currency,
-  priceMinor: NonNegativeMinor,
-  memberPriceMinor: NonNegativeMinor.nullable().optional(),
-  eligiblePlanKeys: z.array(StableKey).max(100).default([]),
-  eligibilityRequired: z.boolean().optional(),
-  eligibilityScope: z.enum(['buyer', 'attendees', 'buyer_and_attendees']).default('buyer'),
-  capacity: z.number().int().positive().max(1_000_000).nullable().optional(),
-  perOrderLimit: z.number().int().positive().max(1_000).default(10),
-  saleStartsAt: Instant.nullable().optional(),
-  saleEndsAt: Instant.nullable().optional(),
-  status: z.enum(['draft', 'on_sale', 'sold_out', 'closed']).default('draft'),
-}).refine(
-  (value) => !value.saleStartsAt || !value.saleEndsAt || value.saleStartsAt < value.saleEndsAt,
-  'saleEndsAt must be after saleStartsAt',
-).superRefine((value, ctx) => {
-  if (value.eligibilityRequired && value.eligiblePlanKeys.length === 0) {
-    ctx.addIssue({ code: 'custom', path: ['eligibilityRequired'], message: 'required eligibility needs eligible plan keys' })
-  }
-  if (value.eligibilityScope !== 'buyer' && value.eligiblePlanKeys.length === 0) {
-    ctx.addIssue({ code: 'custom', path: ['eligibilityScope'], message: 'attendee eligibility requires eligible plan keys' })
-  }
-}).transform((value) => ({
-  ...value,
-  // Older publishers already use eligiblePlanKeys for admission. Preserve
-  // their fail-closed behavior unless a newer operator explicitly opts out.
-  eligibilityRequired: value.eligibilityRequired ?? value.eligiblePlanKeys.length > 0,
-}))
-export type AssociationTicketInput = z.infer<typeof AssociationTicketInputSchema>
 
 const PromotionCode = z.string().trim().min(3).max(100)
 
@@ -354,7 +154,6 @@ export const AssociationPromotionInputSchema = z.object({
     ctx.addIssue({ code: 'custom', path: ['applyMode'], message: 'quantity discounts apply to each eligible item group' })
   }
 })
-export type AssociationPromotionInput = z.infer<typeof AssociationPromotionInputSchema>
 
 const AssociationPromotionSourceContactUseSchema = z.object({
   contactId: UUID,
@@ -443,62 +242,6 @@ export const AssociationSourceMembershipImportSchema = z.object({
   }
 })
 export type AssociationSourceMembershipImportInput = z.infer<typeof AssociationSourceMembershipImportSchema>
-
-export const AssociationMembershipCheckoutCreateSchema = z.object({
-  contactId: UUID,
-  planId: UUID,
-  idempotencyKey: z.string().trim().min(1).max(200),
-  reservationMinutes: z.number().int().min(1).max(120).default(30),
-  promotionCode: PromotionCode,
-}).strict()
-export type AssociationMembershipCheckoutCreateInput = z.infer<typeof AssociationMembershipCheckoutCreateSchema>
-
-export const AssociationMembershipCheckoutProviderBindingSchema = z.object({
-  provider: ProviderKey,
-  providerReference: z.string().trim().min(1).max(500),
-  providerCouponReference: z.string().trim().min(1).max(500),
-  amountMinor: NonNegativeMinor,
-  currency: Currency,
-}).strict()
-export type AssociationMembershipCheckoutProviderBindingInput = z.infer<typeof AssociationMembershipCheckoutProviderBindingSchema>
-
-export const AssociationOrderAttendeeSchema = z.object({
-  contactId: UUID.optional(),
-  name: z.string().trim().min(1).max(200),
-  email: z.string().trim().email().max(320).optional(),
-  metadata: boundedObject(4_000).default({}),
-})
-
-export const AssociationOrderLineInputSchema = z.object({
-  ticketId: UUID,
-  quantity: z.number().int().positive().max(1_000),
-  useMemberPrice: z.boolean().default(false),
-  attendees: z.array(AssociationOrderAttendeeSchema).min(1).max(1_000),
-}).refine((value) => value.quantity === value.attendees.length, {
-  message: 'quantity must equal attendees length',
-  path: ['attendees'],
-})
-
-export const AssociationDestinationPreviewSchema = z.object({
-  contactIds: z.array(UUID).min(1).max(501),
-}).strict()
-
-export const AssociationOrderCreateSchema = z.object({
-  destination: z.discriminatedUnion('kind', [
-    z.object({ kind: z.literal('department'), departmentId: UUID }).strict(),
-    z.object({ kind: z.literal('general') }).strict(),
-  ]).optional().describe('Optional explicit destination. Omission uses the current context/home. Source protection is always retained.'),
-  contactId: UUID,
-  idempotencyKey: z.string().trim().min(1).max(200),
-  reservationMinutes: z.number().int().min(1).max(120).default(20),
-  promotionCode: PromotionCode.optional(),
-  lines: z.array(AssociationOrderLineInputSchema).min(1).max(50),
-  metadata: boundedObject(16_000).default({}),
-}).refine(
-  (value) => new Set(value.lines.map((line) => line.ticketId)).size === value.lines.length,
-  'each ticket may appear only once per order',
-)
-export type AssociationOrderCreateInput = z.infer<typeof AssociationOrderCreateSchema>
 
 export const AssociationOrderStatusSchema = z.enum(['pending', 'paid', 'failed', 'cancelled', 'refunded'])
 export type AssociationOrderStatus = z.infer<typeof AssociationOrderStatusSchema>
@@ -602,146 +345,6 @@ export const AssociationSourceOrderImportSchema = z.object({
   }))
 })
 export type AssociationSourceOrderImportInput = z.infer<typeof AssociationSourceOrderImportSchema>
-
-const AggregateMinor = z.string().regex(/^(0|[1-9]\d*)$/)
-export const AssociationOrderFinancialSummarySchema = z.object({
-  currency: z.string().regex(/^[A-Z]{3}$/),
-  orderCount: z.number().int().nonnegative(),
-  settledOrderCount: z.number().int().nonnegative(),
-  subtotalMinor: AggregateMinor,
-  discountMinor: AggregateMinor,
-  grossMinor: AggregateMinor,
-  refundedMinor: AggregateMinor,
-  netMinor: AggregateMinor,
-  pendingMinor: AggregateMinor,
-}).strict()
-export type AssociationOrderFinancialSummary = z.infer<typeof AssociationOrderFinancialSummarySchema>
-
-export const AssociationProviderBindingInputSchema = z.object({
-  provider: ProviderKey,
-  providerReference: z.string().trim().min(1).max(500),
-  amountMinor: z.number().int().nonnegative().safe(),
-  currency: z.string().regex(/^[A-Z]{3}$/),
-}).strict()
-export type AssociationProviderBindingInput = z.infer<typeof AssociationProviderBindingInputSchema>
-
-export const AssociationProviderEventInputSchema = AssociationProviderBindingInputSchema.extend({
-  eventId: z.string().trim().min(1).max(500),
-  targetStatus: z.enum(['paid', 'failed', 'cancelled', 'refunded']),
-  occurredAt: Instant,
-  metadata: boundedObject(8_000).default({}),
-})
-export type AssociationProviderEventInput = z.infer<typeof AssociationProviderEventInputSchema>
-
-export const AssociationProviderFinancialEventInputSchema = z.object({
-  provider: ProviderKey,
-  providerReference: z.string().trim().min(1).max(500),
-  adjustmentReference: z.string().trim().min(1).max(500),
-  eventId: z.string().trim().min(1).max(500),
-  kind: z.enum(['refund', 'dispute']),
-  status: z.enum(['pending', 'succeeded', 'failed', 'cancelled', 'open', 'won', 'lost', 'prevented']),
-  amountMinor: z.number().int().positive().safe(),
-  currency: z.string().regex(/^[A-Z]{3}$/),
-  occurredAt: Instant,
-  metadata: boundedObject(8_000).default({}),
-}).strict().superRefine((value, ctx) => {
-  const allowed = value.kind === 'refund'
-    ? ['pending', 'succeeded', 'failed', 'cancelled']
-    : ['open', 'won', 'lost', 'prevented']
-  if (!allowed.includes(value.status)) ctx.addIssue({ code: 'custom', path: ['status'], message: 'Financial status does not match its kind.' })
-})
-export type AssociationProviderFinancialEventInput = z.infer<typeof AssociationProviderFinancialEventInputSchema>
-
-export const AssociationRegistrationStatusSchema = z.enum([
-  'reserved', 'confirmed', 'cancelled', 'refunded', 'checked_in',
-])
-export type AssociationRegistrationStatus = z.infer<typeof AssociationRegistrationStatusSchema>
-
-export const AssociationOperationalRosterRowSchema = z.object({
-  id: UUID,
-  eventId: UUID,
-  orderId: UUID.nullable(),
-  orderLineId: UUID.nullable(),
-  ticketId: UUID.nullable(),
-  ticketKey: z.string().nullable(),
-  ticketName: z.string().nullable(),
-  buyerContactId: UUID.nullable(),
-  attendeeContactId: UUID.nullable(),
-  attendeeName: z.string(),
-  attendeeEmail: z.string().nullable(),
-  phone: z.string().nullable(),
-  organisation: z.string().nullable(),
-  jobTitle: z.string().nullable(),
-  status: z.enum(['reserved', 'confirmed', 'cancelled', 'refunded', 'checked_in', 'registered', 'attended', 'no_show']),
-  checkedInAt: z.union([z.string(), z.date()]).nullable(),
-  sourceKind: z.string(),
-  sourceId: z.string().nullable(),
-  historicalImport: z.boolean(),
-  marketingConsent: z.boolean().nullable(),
-  ticketingConsent: z.boolean().nullable(),
-  policyVersion: z.string().nullable(),
-  policyAcceptedAt: z.string().nullable(),
-  questionResponses: z.unknown().nullable(),
-  createdAt: z.union([z.string(), z.date()]),
-  updatedAt: z.union([z.string(), z.date()]),
-}).strict()
-export type AssociationOperationalRosterRow = z.infer<typeof AssociationOperationalRosterRowSchema>
-
-export const AssociationRegistrationUpdateSchema = z.object({
-  status: z.enum(['cancelled', 'checked_in']),
-})
-export type AssociationRegistrationUpdateInput = z.infer<typeof AssociationRegistrationUpdateSchema>
-
-export const AssociationCheckInCorrectionSchema = z.object({
-  expectedStatus: z.enum(['checked_in', 'attended']),
-  reason: z.string().trim().min(5).max(500),
-}).strict()
-export type AssociationCheckInCorrectionInput = z.infer<typeof AssociationCheckInCorrectionSchema>
-
-export const AssociationListPageSchema = CrmPageQuerySchema.strip()
-
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalize)
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, item]) => [key, canonicalize(item)]),
-    )
-  }
-  return value
-}
-
-export function associationFingerprint(value: unknown): string {
-  return createHash('sha256').update(JSON.stringify(canonicalize(value))).digest('hex')
-}
-
-const ORDER_TRANSITIONS: Record<AssociationOrderStatus, ReadonlySet<AssociationOrderStatus>> = {
-  pending: new Set(['pending', 'paid', 'failed', 'cancelled']),
-  paid: new Set(['paid', 'refunded']),
-  failed: new Set(['failed']),
-  cancelled: new Set(['cancelled']),
-  refunded: new Set(['refunded']),
-}
-
-export function mayTransitionAssociationOrder(from: AssociationOrderStatus, to: AssociationOrderStatus): boolean {
-  return ORDER_TRANSITIONS[from].has(to)
-}
-
-const REGISTRATION_TRANSITIONS: Record<AssociationRegistrationStatus, ReadonlySet<AssociationRegistrationStatus>> = {
-  reserved: new Set(['reserved', 'confirmed', 'cancelled']),
-  confirmed: new Set(['confirmed', 'cancelled', 'refunded', 'checked_in']),
-  checked_in: new Set(['checked_in', 'refunded']),
-  cancelled: new Set(['cancelled']),
-  refunded: new Set(['refunded']),
-}
-
-export function mayTransitionAssociationRegistration(
-  from: AssociationRegistrationStatus,
-  to: AssociationRegistrationStatus,
-): boolean {
-  return REGISTRATION_TRANSITIONS[from].has(to)
-}
 
 export type AssociationErrorCode =
   | 'not_found'

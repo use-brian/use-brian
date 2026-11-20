@@ -1,11 +1,16 @@
+import {withCurrentReadAuthority} from '../context-scope/authority-lease.js'
 import { hasWorkspaceMcpRetainedAuthority } from '../db/session-context-revisions.js'
 import {tryNativeInvocationEvidence} from '../context-scope/native-invocation-evidence.js'
-import {createAttendedDeliveryAudienceAuthorizer,tryValidateNativePersonalOutput,tryResolveNativePersonalRecipient} from '../context-scope/attended-audience.js'
-import {DeliveryAudienceUnverifiedError,isDeliveryAudienceUnverifiedError,type DeliveryAudienceInput} from '../context-scope/delivery-authority.js'
+import {admitTurnConversationRecords,assertConversationFloor,recordEvidenceParts} from '../context-scope/conversation-record-admission.js'
 import { nativeSessionQueryContextSources } from './session-query-context.js'
 import { readPersistentSessionContextAncestors } from '../db/session-context-ancestry.js'
+import { beginClosureAdmission } from '../context-scope/admission-closure.js'
 /** Fresh source permission at model input/output boundaries. [COMP:api/external-source-access] */
-import { accessCeilingContains,intersectAccessCeilings,ContextScopeAccumulator, type ExecutionContext, type ScopeSource, type ToolContext } from '@use-brian/core'
+import { isConversationEvidenceRoot } from './conversation-evidence.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { SourceProtocolError } from '@use-brian/brian-app/connector'
 import { getAppPool, applyRLSGucs, rollbackAndRelease, runWithAgentAccess } from '../db/client.js'
 import { validateCallerScopeEvidence, validateAudienceScopeEvidence } from '../context-scope/caller-evidence.js'
@@ -15,7 +20,6 @@ import { getSharedRetainedSourceAuthority } from './source-runtime.js'
 import { readApplicationFieldAncestors } from './field-evidence.js'
 import { applyApplicationRLSContext, getApplicationExecutionBinding, releaseApplicationTransactionBinding } from './execution-context.js'
 
-const invalid = new WeakSet<ExecutionContext>()
 function denied(): never { throw new SourceProtocolError('source_access_denied') }
 
 /** Keep the private exception chain for server logs, never JSON/wire output. */
@@ -26,63 +30,78 @@ function sourceAuthorityError(error: unknown): SourceProtocolError {
   })
 }
 
-/** No proof/allow cache: every call prepares a new source operation. Native authority stays separate. */
-export async function assertSourceModelInputAuthority(context: ToolContext): Promise<void> {
-  return assertSourceModelAuthority(context, 'context')
-}
-
-/** Input permission never substitutes for the actual recipient's delivery decision.
- * A server-owned metadata guard may narrow admission inside the same SQL frame;
- * it must not open a nested source operation or perform a mutation there. */
-export async function assertSourceModelOutputAuthority(context: ToolContext, narrowingGuard?: () => Promise<void>): Promise<void> {
-  return assertSourceModelAuthority(context, 'deliver', narrowingGuard)
-}
-
-async function assertSourceModelAuthority(context: ToolContext, action: 'context' | 'deliver', narrowingGuard?: () => Promise<void>): Promise<void> {
+/** Complete model-effect admission. Native evidence and live lease facts share
+ * one statement; independent asynchronous work retains fresh surrounding checks. */
+export async function admitModelSourceEvidence(context: ToolContext, action: 'context' | 'deliver', narrowingGuard?: () => Promise<void>): Promise<void> {
   const validate = action === 'deliver' ? validateAudienceScopeEvidence : validateCallerScopeEvidence
   const execution = context.executionContext
   try {
-    if (execution && invalid.has(execution)) denied()
     const accumulated = context.scopeAccumulator?.evidence
-    const evidence = new ContextScopeAccumulator(execution?.security.provenance)
+    let evidence = new ContextScopeAccumulator(execution?.security.provenance)
     evidence.note(accumulated)
     let sources = evidence.evidence.sources ?? []
-    if (!sources.length) { if(narrowingGuard)denied();return }
+    if (!sources.length) {
+      if(narrowingGuard)denied()
+      const before=JSON.stringify(context.scopeAccumulator?.evidence)
+      await context.authority?.assertCurrent()
+      if(JSON.stringify(context.scopeAccumulator?.evidence)!==before)denied()
+      return
+    }
     const accumulator = context.scopeAccumulator
     if (!execution || !(accumulator instanceof ContextScopeAccumulator)) denied()
     const originalEvidence = JSON.stringify(accumulator.evidence)
-    await execution.security.authority.assertCurrent()
     const workspaceId = execution.security.access.workspaceId
     if (sources.some(source => source.workspaceId !== workspaceId)) denied()
+    const recordParts=recordEvidenceParts(evidence.evidence)
+    // Outward frames require a host-bound destination, supplied by the
+    // attended delivery owner. Dispatch validates every fresh source owner.
+    if(recordParts&&(action!=='context'||narrowingGuard))denied()
+    const note=async(current:import('@use-brian/agent-runtime/security/context-scope.js').ScopeEvidence)=>{
+      const recordFrame=recordParts
+        ?await admitTurnConversationRecords(execution,recordParts.records,'dispatch')
+        :undefined
+      if(JSON.stringify(accumulator.evidence)!==originalEvidence)denied()
+      if(!recordFrame){accumulator.note(current);return}
+      const combined=new ContextScopeAccumulator(current)
+      combined.note({sources:recordFrame.sources})
+      assertConversationFloor(combined.evidence,recordFrame.destination)
+      accumulator.note(combined.evidence)
+    }
+    if(recordParts){
+      evidence=new ContextScopeAccumulator(recordParts.fresh)
+      sources=evidence.evidence.sources??[]
+      if(!sources.length){await note(evidence.evidence);return}
+    }
     const native=await tryNativeInvocationEvidence(execution,evidence.evidence,execution.security.ceiling,action==='deliver'?'audience':'caller',narrowingGuard)
     if(native){
-      await execution.security.authority.assertCurrent()
-      if(JSON.stringify(accumulator.evidence)!==originalEvidence)denied()
-      accumulator.note(native);return
+      await note(native);return
     }
 
-    evidence.note({sources:await readPersistentSessionContextAncestors(workspaceId,sources)})
+    // This admission's view of its turn's admission closure (one witness read).
+    const closure = beginClosureAdmission(execution)
+    const admitted=await withCurrentReadAuthority(execution.security.authority,async()=>{
+    // Ancestry discovery is metadata; the turn's closure may hold this exact
+    // input's result while every source it relies on is unchanged.
+    const roots = sources, discoverAncestry = async () => {
+      const persistent = await readPersistentSessionContextAncestors(workspaceId, roots)
+      const expanded = new ContextScopeAccumulator(evidence.evidence); expanded.note({ sources: persistent })
+      const reached = expanded.evidence.sources ?? []
+      return { persistent, ancestors: await readExternalSourceAncestors(workspaceId, reached), fields: await readApplicationFieldAncestors(workspaceId, reached) }
+    }
+    const discovered = closure ? await closure.discover('model-source', [...roots], discoverAncestry,
+      value => value.ancestors.length ? null : [...roots, ...value.persistent, ...value.fields]) : await discoverAncestry()
+    evidence.note({sources:discovered.persistent})
     sources=evidence.evidence.sources ?? []
-    const ancestors = await readExternalSourceAncestors(workspaceId, sources)
-    const fields = await readApplicationFieldAncestors(workspaceId, sources)
+    const ancestors = discovered.ancestors
+    const fields = discovered.fields
     const external = ancestors.length > 0 || sources.some(source => source.resourceKind === 'external_source')
     const persistent = sources.some(source=>source.resourceKind==='session_context_revision')
     const wiring = getSharedRetainedSourceAuthority()
     const prepare = wiring ? ((e: ExecutionContext, roots: readonly ScopeSource[], requested: 'context' | 'deliver') => wiring.coordinator.prepare(e, roots, requested)) : undefined
-    const cohort = fields.length ? await nativeSessionQueryContextSources(execution, sources, prepare) : { sources, independent: false }
-    if (!external && !fields.length && !persistent && !cohort.independent) {
-      if(narrowingGuard)denied()
-      const current = await validate(evidence.evidence, execution.security.ceiling)
-      await execution.security.authority.assertCurrent()
-      if (JSON.stringify(accumulator.evidence) !== originalEvidence) denied()
-      accumulator.note(current)
-      return
-    }
+    const cohortRoots = sources, discoverCohort = () => nativeSessionQueryContextSources(execution, cohortRoots, prepare)
+    const cohort = !fields.length ? { sources, independent: false } : closure ? await closure.discover('model-source-cohort', [...cohortRoots], discoverCohort,
+      value => value.independent ? null : [...cohortRoots, ...value.sources]) : await discoverCohort()
     const application = getApplicationExecutionBinding(execution)
-    // Native delegated consumers keep their original host actor, assistant,
-    // current invocation lease and pinned parent ceiling through full canonical
-    // field/source admission below.
-    // Independent sources and application-bound profiles require their own proof.
     const nativeVerifiedAttended = !application && execution.identity.kind === 'attended' && execution.identity.principal.kind === 'workspace_member'
       && (execution.identity.principal.authenticationKind === 'native_session' || execution.identity.principal.authenticationKind === 'verified_channel') && execution.identity.principal.userId === execution.security.access.userId
       && execution.security.access.assistantId === execution.assistant.id && execution.ownership.kind === 'workspace'
@@ -96,6 +115,18 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
       && execution.ownership.kind === 'workspace' && execution.ownership.workspaceId === workspaceId
       && !execution.surface.systemRead && !execution.security.access.systemRead && !execution.surface.clientSelfMemory
     const nativeProgrammatic = !external && !cohort.independent && !application && hasWorkspaceMcpRetainedAuthority(execution)
+    const needsConversationProof = (nativeVerifiedAttended || nativeDelegated || nativeProgrammatic)
+      && sources.some(isConversationEvidenceRoot)
+    if (!external && !fields.length && !persistent && !cohort.independent && !needsConversationProof) {
+      if(narrowingGuard)denied()
+      const current = await validate(evidence.evidence, execution.security.ceiling)
+      if (JSON.stringify(accumulator.evidence) !== originalEvidence) denied()
+      return current
+    }
+    // Native delegated consumers keep their original host actor, assistant,
+    // current invocation lease and pinned parent ceiling through full canonical
+    // field/source admission below.
+    // Independent sources and application-bound profiles require their own proof.
     if (execution.ownership.kind !== 'workspace' || execution.security.access.sharedAudience && external
       || !nativeDelegated && !nativeProgrammatic && (!application || external) && (execution.identity.kind !== 'attended' || execution.identity.principal.kind !== 'workspace_member')) denied()
     if ((external || cohort.independent) && !prepare) denied()
@@ -119,10 +150,12 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
         await applyApplicationRLSContext(client, execution)
         if (contextProof) {
           await pinPreparedExternalSourceAuthority(client, execution, contextProof)
-          if (action === 'deliver') await validateCallerScopeEvidence(evidence.evidence, execution.security.ceiling, client)
+          if (action === 'deliver') await validateCallerScopeEvidence(evidence.evidence, execution.security.ceiling, client, undefined, closure)
         }
         if (prepared) await pinPreparedExternalSourceAuthority(client, execution, prepared)
-        const current = await validate(evidence.evidence, execution.security.ceiling, client)
+        const current = action === 'deliver'
+          ? await validateAudienceScopeEvidence(evidence.evidence, execution.security.ceiling, client, undefined, closure)
+          : await validateCallerScopeEvidence(evidence.evidence, execution.security.ceiling, client, undefined, closure)
         // A server-owned guard can only narrow the result. Keep it inside
         // these same native/source locks, never before their acquisition.
         await narrowingGuard?.()
@@ -134,154 +167,13 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
     } finally { releaseApplicationTransactionBinding(client); await rollbackAndRelease(client) }
     if (contextProof) await assertPreparedExternalSourceAuthorityCurrent(execution, contextProof)
     if (prepared) await assertPreparedExternalSourceAuthorityCurrent(execution, prepared)
-    await execution.security.authority.assertCurrent()
     if (wiring && getSharedRetainedSourceAuthority() !== wiring || JSON.stringify(accumulator.evidence) !== originalEvidence) denied()
-    accumulator.note(raised)
+    return raised
+    })
+    await note(admitted)
   } catch (error) {
-    if (execution) invalid.add(execution)
     throw Object.assign(sourceAuthorityError(error), {
       reason: 'authority_changed' as const,retrySafe: false,
     })
   }
-}
-
-
-const nativeOutputBrand:unique symbol=Symbol('native-attended-output')
-/** Created only by the canonical host factory; runtime identity is also checked. */
-export type NativeAttendedOutputBoundary={readonly [nativeOutputBrand]:true;readonly assertOutputAuthority:(context:ToolContext)=>Promise<void>}
-type NativeOutputBinding={execution:ExecutionContext;accumulator:ContextScopeAccumulator;input:Omit<DeliveryAudienceInput,'scopeEvidence'>;
- authority:ExecutionContext['security']['authority'];assertCurrent:ExecutionContext['security']['authority']['assertCurrent']}
-const nativeOutputBindings=new WeakMap<NativeAttendedOutputBoundary,NativeOutputBinding>()
-function assertNativeOutputBinding(binding:NativeOutputBinding,context:ToolContext):void{
- if(invalid.has(binding.execution)||context.executionContext!==binding.execution
-  ||context.authority!==binding.execution.security.authority||context.scopeAccumulator!==binding.accumulator)denied()
-}
-function nativeOutputFailure(execution:ExecutionContext,error:unknown):never{
- invalid.add(execution)
- if(isDeliveryAudienceUnverifiedError(error))throw error
- throw Object.assign(sourceAuthorityError(error),{
-  reason:'authority_changed' as const,retrySafe:false,
- })
-}
-/** The factory owns both the ordinary recipient callback and optional combined
- * operation; a custom callback cannot claim that it checked the same recipient. */
-export function createNativeAttendedOutputBoundary(execution:ExecutionContext,accumulator:ContextScopeAccumulator,
- input:Omit<DeliveryAudienceInput,'scopeEvidence'>):NativeAttendedOutputBoundary{
- const binding:NativeOutputBinding={execution,accumulator,input:structuredClone(input),
-  authority:execution.security.authority,assertCurrent:execution.security.authority.assertCurrent}
- const authorize=createAttendedDeliveryAudienceAuthorizer(execution)
- const boundary:NativeAttendedOutputBoundary=Object.freeze({[nativeOutputBrand]:true as const,
-  assertOutputAuthority:async(context:ToolContext)=>{
-   try{
-    assertNativeOutputBinding(binding,context)
-    const originalEvidence=JSON.stringify(accumulator.evidence)
-    const result=await authorize({...binding.input,scopeEvidence:accumulator.evidence})
-    assertNativeOutputBinding(binding,context)
-    if(!result.allowed)throw new DeliveryAudienceUnverifiedError(result.detail,result.diagnostic)
-    if(JSON.stringify(accumulator.evidence)!==originalEvidence)denied()
-    accumulator.note({sensitivity:result.evidence.sensitivity,compartments:result.evidence.compartments,projectIds:result.evidence.projectIds})
-   }catch(error){nativeOutputFailure(execution,error)}
-  },
- })
- nativeOutputBindings.set(boundary,binding)
- return boundary
-}
-/** Identity only for internal native assembly. This never proves source permission. */
-export function ownsNativeAttendedAssembly(boundary:NativeAttendedOutputBoundary,execution:ExecutionContext,accumulator:ContextScopeAccumulator):boolean{
- const binding=nativeOutputBindings.get(boundary)
- if(!binding||binding.execution!==execution||binding.accumulator!==accumulator)return false
- if(invalid.has(execution))nativeOutputFailure(execution,new Error('Native source authority was refused'))
- return execution.identity.kind==='attended'&&execution.identity.principal.kind==='workspace_member'
-  &&execution.identity.principal.authenticationKind==='native_session'&&execution.ownership.kind==='workspace'
-  &&!execution.security.access.sharedAudience&&binding.input.recipientType==='individual'
-  &&!execution.surface.systemRead&&!execution.surface.clientSelfMemory&&!getApplicationExecutionBinding(execution)
-}
-/** Lease-only internal preparation for an exact native sink owner. This must
- * never guard a model, tool, user callback or publication effect. */
-export async function tryAssertNativePreparationCurrent(boundary:NativeAttendedOutputBoundary,context:ToolContext):Promise<boolean>{
- const binding=nativeOutputBindings.get(boundary)
- if(!binding)return false
- try{
-  assertNativeOutputBinding(binding,context)
-  if(!ownsNativeAttendedAssembly(boundary,binding.execution,binding.accumulator))return false
-  const current=()=>{
-   assertNativeOutputBinding(binding,context)
-   if(binding.execution.security.authority!==binding.authority||binding.authority.assertCurrent!==binding.assertCurrent)denied()
-  }
-  current()
-  await binding.assertCurrent.call(binding.authority)
-  current()
-  return true
- }catch(error){nativeOutputFailure(binding.execution,error)}
-}
-/** An exact native pre-write guard, never a source/allow receipt for the writer.
- * Fresh native retention is sufficient only under the original caller ceiling,
- * a containing current recipient, and no independent delivery obligation. */
-type NativePublicationAssemblyFence=Readonly<{assertUnchanged:()=>void}>
-export async function tryAssertNativePublicationPreparationCurrent(boundary:NativeAttendedOutputBoundary,context:ToolContext):Promise<NativePublicationAssemblyFence|null>{
- const binding=nativeOutputBindings.get(boundary)
- if(!binding)return null
- const {execution,accumulator}=binding,ceiling=execution.security.ceiling
- const originalCeiling=JSON.stringify(ceiling),signal=context.abortSignal,lifecycleSignal=execution.lifecycle.abortSignal
- const originalEvidence=JSON.stringify(accumulator.evidence),originalProvenance=JSON.stringify(execution.security.provenance)
- try{
-  const caller=intersectAccessCeilings(ceiling,ceiling)
-  const current=()=>{
-   assertNativeOutputBinding(binding,context)
-   if(execution.security.authority!==binding.authority||binding.authority.assertCurrent!==binding.assertCurrent
-    ||execution.security.ceiling!==ceiling||JSON.stringify(ceiling)!==originalCeiling
-    ||context.abortSignal!==signal||execution.lifecycle.abortSignal!==lifecycleSignal||signal.aborted||lifecycleSignal.aborted
-    ||JSON.stringify(accumulator.evidence)!==originalEvidence
-    ||JSON.stringify(execution.security.provenance)!==originalProvenance)denied()
-  }
-  current()
-  if(!ownsNativeAttendedAssembly(boundary,execution,accumulator)||execution.lifecycle.abortSignal.aborted||context.abortSignal.aborted)return null
-  await binding.assertCurrent.call(binding.authority);current()
-  if(execution.security.provenance?.sources?.length)return null
-  const evidence=new ContextScopeAccumulator(execution.security.provenance)
-  evidence.note(structuredClone(accumulator.evidence))
-  const sources=evidence.evidence.sources??[]
-  if(!sources.length||sources.some(source=>source.workspaceId!==caller.workspaceId
-   ||!['application_field','session_context_revision','session_message','memory','workspace_file'].includes(source.resourceKind)
-   ||!source.resourceId||!source.version))return null
-  const recipient=await tryResolveNativePersonalRecipient(execution,binding.input);current()
-  if(!recipient||!accessCeilingContains(recipient,caller))return null
-  const {sensitivity,compartments,projectIds}=evidence.evidence
-  await validateAudienceScopeEvidence({sensitivity,compartments,projectIds},caller);current()
-  const external=await readExternalSourceAncestors(caller.workspaceId,sources);current()
-  await binding.assertCurrent.call(binding.authority);current()
-  if(external.length)return null
-  // The awaited caller must fence its synchronous assembly too: a microtask
-  // after this function resolves must not replace the roots it just inspected.
-  return Object.freeze({assertUnchanged:()=>{try{current()}catch(error){nativeOutputFailure(execution,error)}}})
- }catch(error){nativeOutputFailure(execution,error)}
-}
-/** False/null keeps the original caller and recipient boundaries. The optional
- * snapshot fences only this admission's awaited handoff; it is not a permission
- * receipt for another event or operation. No caller can supply proof or allow. */
-type NativeOutputEvidenceFence=Readonly<{evidence:string}>
-export function tryAssertNativeCombinedOutput(boundary:NativeAttendedOutputBoundary,context:ToolContext,
- recipientCallback:((context:ToolContext)=>Promise<void>)|undefined):Promise<boolean>
-export function tryAssertNativeCombinedOutput(boundary:NativeAttendedOutputBoundary,context:ToolContext,
- recipientCallback:((context:ToolContext)=>Promise<void>)|undefined,captureFence:true):Promise<NativeOutputEvidenceFence|null>
-export async function tryAssertNativeCombinedOutput(boundary:NativeAttendedOutputBoundary,context:ToolContext,
- recipientCallback:((context:ToolContext)=>Promise<void>)|undefined,captureFence=false):Promise<boolean|NativeOutputEvidenceFence|null>{
- const binding=nativeOutputBindings.get(boundary)
- if(!binding||recipientCallback!==boundary.assertOutputAuthority)return captureFence?null:false
- const {execution,accumulator}=binding
- try{
-  assertNativeOutputBinding(binding,context)
-  const originalEvidence=JSON.stringify(accumulator.evidence)
-  const detached=new ContextScopeAccumulator(execution.security.provenance)
-  detached.note(accumulator.evidence)
-  await execution.security.authority.assertCurrent()
-  const evidence=await tryValidateNativePersonalOutput(execution,{...binding.input,scopeEvidence:detached.evidence})
-  await execution.security.authority.assertCurrent()
-  assertNativeOutputBinding(binding,context)
-  if(JSON.stringify(accumulator.evidence)!==originalEvidence)denied()
-  if(!evidence)return captureFence?null:false
-  accumulator.note(evidence)
-  // Capture synchronously at admission, before resolving to an awaited caller.
-  return captureFence?Object.freeze({evidence:JSON.stringify(accumulator.evidence)}):true
- }catch(error){nativeOutputFailure(execution,error)}
 }

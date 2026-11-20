@@ -18,7 +18,7 @@ import { createExternalKey } from './external-key-admission.js'
  */
 
 import { randomBytes } from 'node:crypto'
-import type { Sensitivity } from '@use-brian/core'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { query, queryWithRLS } from './client.js'
 import { hashSecret } from './api-key-store.js'
 

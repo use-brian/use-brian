@@ -441,7 +441,9 @@ describe("[COMP:app-web/research-detail] truthful detail read recovery", () => {
     const recovery = button(en.chat.retry)!;
     expect(recovery.className).toContain("min-h-11");
     expect(recovery.classList.contains("min-h-11")).toBe(false);
-    expect(recovery.classList.contains("max-sm:min-h-11")).toBe(true);
+    for (const target of ["max-md:min-h-11", "max-md:min-w-11", "[@media(pointer:coarse)]:min-h-11", "[@media(pointer:coarse)]:min-w-11"]) {
+      expect(recovery.classList.contains(target), target).toBe(true);
+    }
     await click(recovery);
     expect(api.getResearchActivity).toHaveBeenCalledTimes(2);
     expect(host.querySelector('[aria-busy="true"]')).not.toBeNull();

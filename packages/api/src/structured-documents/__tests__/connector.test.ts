@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { FilesContext, McpSettingsStore } from '@use-brian/core'
+import type { FilesContext } from '@use-brian/core/workspace-files/api.js'
+import type { McpSettingsStore } from '@use-brian/agent-runtime/mcp/types.js'
 import { APP_LEVEL_ASSISTANT_ID } from '@use-brian/shared'
 import type { ConnectorInstance } from '../../db/connector-instance-store.js'
 import type { GrantWithInstance } from '../../db/connector-grant-store.js'

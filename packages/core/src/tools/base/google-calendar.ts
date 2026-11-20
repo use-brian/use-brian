@@ -8,7 +8,7 @@ import {registerCanonicalCalendarRead,assertRoutineCalendarDispatch} from '../..
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '../types.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { googleFailure } from './_google-error.js'
 import { type Json, str, asRows } from './_connector-result.js'
 

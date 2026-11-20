@@ -37,14 +37,14 @@ import {
   type ScoredTombstone,
   type TaskAdmissionPort,
   type TaskReadinessAssessment,
-  type TaskGuardrailStore,
   type TaskLane,
   type TaskRuleEffect,
   type TaskRulePredicate,
   type TaskRuleRecord,
   type TaskRuleStatus,
   type TaskTombstoneRecord,
-} from '@use-brian/core'
+} from '@use-brian/core/tasks/admission.js'
+import type { TaskGuardrailStore } from '@use-brian/core/tasks/guardrail-tools.js'
 import type pg from 'pg'
 import { applyRLSGucs, getAppPool, getPool, query, rollbackAndRelease } from './client.js'
 import { buildAccessPredicate, mutationActorAccess, type AccessContext } from './access-predicate.js'

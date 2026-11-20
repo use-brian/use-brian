@@ -15,10 +15,10 @@
  */
 
 import { z } from 'zod'
-import { NOOP_TURN_LEDGER } from '../src/engine/turn-ledger.js'
-import { queryLoop, type QueryEvent } from '../src/engine/query-loop.js'
-import { buildTool } from '../src/tools/types.js'
-import { createGeminiProvider } from '../src/providers/gemini.js'
+import { NOOP_TURN_LEDGER } from '@use-brian/agent-runtime/engine/turn-ledger.js'
+import { queryLoop, type QueryEvent } from '@use-brian/agent-runtime/engine/query-loop.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
+import { createGeminiProvider } from '@use-brian/agent-runtime/providers/gemini.js'
 
 // A 96x96 solid-red JPEG (generated with ffmpeg color=red). Small on purpose.
 const RED_JPEG_B64 =

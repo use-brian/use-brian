@@ -25,6 +25,8 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { readFileSync } from 'node:fs'
+import ts from 'typescript'
+import { recordOverheadUsage } from '../_overhead-usage.js'
 
 vi.mock('../../db/client.js', () => ({ query: vi.fn() }))
 
@@ -85,18 +87,36 @@ describe('[COMP:api/channel-billing-identity] Channel billing identity', () => {
     expect(pipelineCode).not.toMatch(/actorUserId: ownerId\b/)
   })
 
-  it('bills every overhead call to the resolved billing party and records the actor', () => {
-    const calls = pipelineCode.match(/recordOverheadUsage\(\{[\s\S]*?\n(\s*)\}\)/g) ?? []
-    // classifier, transcription, session-state diff, memory nudge, and the
-    // recovery message at BOTH its call sites — the catch handler, and the
-    // `turn_complete` branch where the loop ended cleanly but assembled
-    // nothing deliverable and a tool had already run. If a seventh is added,
-    // it has to opt into the same identities.
-    expect(calls.length).toBe(6)
-    for (const call of calls) {
-      expect(call).toContain('userId: billingUserId')
-      expect(call).toContain('actorUserId: userId')
+  it('executes every current overhead row through the resolved payer and actor', async () => {
+    const tree = ts.createSourceFile('channel-pipeline.ts', pipelineSource, ts.ScriptTarget.Latest, true)
+    const argumentsToRecord: string[] = []
+    function visit(node: ts.Node) {
+      if (ts.isCallExpression(node) && node.expression.getText(tree) === 'recordOverheadUsage') argumentsToRecord.push(node.arguments[0].getText(tree))
+      ts.forEachChild(node, visit)
     }
+    visit(tree)
+    // Both recovery outcomes share the one usage recording callback.
+    expect(pipelineCode).toContain("await recoverMessage('empty')")
+    expect(pipelineCode).toContain("await recoverMessage('failed')")
+    const recordUsage = vi.fn(async () => {}), usage = { inputTokens: 2, outputTokens: 3 }
+    const reported = { model: 'fixture-model', usage }
+    const scope = { usageStore: { recordUsage }, billingUserId: 'workspace-payer', userId: 'channel-actor',
+      assistant: { id: 'assistant' }, session: { id: 'session' }, userMessageIdForUsage: 'message', userMessageRow: { id: 'message' }, earlyUserMessageRow: { id: 'message' },
+      record: { ...reported, source: 'overhead:classifier' }, voiceTranscriptionUsage: reported, result: reported, ...reported,
+      classifierUsageAttribution: { providerKeySource: 'platform' }, backgroundUsageAttribution: { providerKeySource: 'platform' } }
+    const sources: string[] = []
+    for (const argument of argumentsToRecord) {
+      const row = new Function(...Object.keys(scope), ts.transpileModule(`return (${argument});`,
+        { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText)(...Object.values(scope))
+      sources.push(row.source)
+      await recordOverheadUsage(row)
+      expect(recordUsage).toHaveBeenLastCalledWith(expect.objectContaining({ userId: 'workspace-payer', actorUserId: 'channel-actor', inputTokens: 2, outputTokens: 3 }))
+    }
+    expect(sources.sort()).toEqual([
+      'overhead:classifier', 'overhead:nudge', 'overhead:recovery-message',
+      'overhead:session-state-diff', 'overhead:transcription',
+    ])
+    expect(recordUsage).toHaveBeenCalledTimes(sources.length)
   })
 
   it('hands the compaction lane the billing party, not the raw owner', () => {

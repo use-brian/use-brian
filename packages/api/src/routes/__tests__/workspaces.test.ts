@@ -47,7 +47,7 @@ import {
 } from '../../db/workspace-store.js'
 import { flushWorkspaceData, WorkspaceFlushNotOwnerError } from '../../db/workspace-flush.js'
 import {readWorkspaceMemberDirectory} from '../../db/workspace-member-directory.js'
-import { CrmOperationsError } from '@use-brian/core'
+import { CrmOperationsError } from '@use-brian/core/crm/operations-types.js'
 
 const mockQuery = vi.mocked(query)
 const mockRls = vi.mocked(queryWithRLS)

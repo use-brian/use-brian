@@ -14,10 +14,13 @@ import type { PROACTIVE_DELIVERY_TRANSPORTS } from '../session-kind.js'
 import type { PoolClient } from 'pg'
 import { createBrowserProfileStore, withBrowserProfileOwnerMutation } from './browser-profile-store.js'
 import { createBrowserSkillGrantInTransaction } from './browser-skill-grant-store.js'
-import { getPool, query, queryWithRLS } from './client.js'
+import { getAppPool, getPool, query, queryWithRLS, rlsGucSettings, rollbackAndRelease } from './client.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import { appendDecisionEvent } from './decision-event-store.js'
-import type { ApprovalResolutionOrigin, DerivedWriteEvidence, ExecutorDeps } from '@use-brian/core'
+import type { ApprovalResolutionOrigin } from '@use-brian/core/approval-review/contracts.js'
+import { askQuestionPayload, type AssistantQuestion } from '@use-brian/agent-runtime/tools/base/ask-question.js'
+import type { ExecutorDeps } from '@use-brian/core/workflow/executor.js'
+import type { DerivedWriteEvidence } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { readSessionById } from './sessions.js'
 import { gateSessionRead } from '../session-read-authority.js'
 import { captureHumanDecisionSupport } from '../approval-review/patterns.js'
@@ -481,6 +484,33 @@ export type CreateQuestionParams = {
   executionQuestion?: { executionId: string; controlRevision: number; sourceTaskId: string }
 }
 
+/** The askQuestion input fields of a question row, in schema order. */
+function questionInputFrom(params: CreateQuestionParams): AssistantQuestion {
+  return {
+    question: params.question,
+    ...(params.allowCustom !== undefined ? { allowCustom: params.allowCustom } : {}),
+    ...(params.actionId !== undefined ? { actionId: params.actionId } : {}),
+    ...(params.version !== undefined ? { version: params.version } : {}),
+    ...(params.context !== undefined ? { context: params.context } : {}),
+    ...(params.options !== undefined ? { options: params.options } : {}),
+  }
+}
+
+/**
+ * Read projection of a stored question for `GET /api/sessions/:id/pending`:
+ * every askQuestion schema field present in `approval_payload`, each validated
+ * on its own (a malformed stored field is omitted, never served). Returns
+ * `question: null` when the stored text is unusable, as the route always has.
+ * See askquestion-suspend-resume.md → "Question payload contract".
+ */
+export function pendingQuestionPayload(
+  approvalPayload: Record<string, unknown>,
+): Omit<AssistantQuestion, 'question'> & { question: string | null } {
+  const projected = askQuestionPayload(approvalPayload)
+  if (projected) return projected
+  return { question: null }
+}
+
 export type PendingApprovalsStore = {
   /** System-level write — caller is the workflow executor on pause. */
   create(params: CreateApprovalParams): Promise<PendingApproval>
@@ -591,7 +621,8 @@ export type PendingApprovalsStore = {
     answerText: string,
     responderUserId: string,
   ): Promise<PendingApproval | null>
-  /** Ordinary machine answer, never human approval or connector authorization. */
+  /** Ordinary machine answer, never human approval or connector authorization
+   *  (a `connector_authorization:*` question is refused; other action ids are inert). */
   recordExternalQuestionAnswer(id: string, answerText: string, runId: string): Promise<PendingApproval | null>
 
   /** RLS-gated — pending skill approvals (both kinds) for a workspace. */
@@ -619,8 +650,11 @@ export type PendingApprovalsStore = {
     slug: string,
   ): Promise<PendingApproval | null>
 
-  /** RLS-gated — workspace members only. Used by web UI and route. */
+  /** RLS-gated — workspace members only. Used by the approval queue. */
   listPendingForWorkspace(userId: string, workspaceId: string): Promise<PendingApproval[]>
+
+  /** Newest readable pending question for the session being resumed. */
+  findBlockingQuestion(userId: string, workspaceId: string, sessionId: string): Promise<PendingApproval | null>
 
   /** RLS-gated — used by the workspace-pending-count badge. */
   countPendingForUser(userId: string): Promise<number>
@@ -1252,20 +1286,17 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
     },
 
     async createQuestion(params) {
-      // Store the question in BOTH `arguments` (so the resume worker's
-      // synthesized tool_use carries the original input) and
+      // Store the full question payload (askquestion-suspend-resume.md →
+      // "Question payload contract") in BOTH `arguments` (so the resume
+      // worker's synthesized tool_use carries the original input) and
       // `approval_payload` (so the queue UI + answer route can read it
-      // without parsing arguments). `toolUseId` lives in payload only —
-      // it's an engine ident, not a user-visible argument.
+      // without parsing arguments). `toolUseId` and the server-owned links
+      // live in payload only — engine idents, not user-visible arguments.
+      const question = questionInputFrom(params)
       const payload = {
-        question: params.question,
+        ...question,
         toolUseId: params.toolUseId,
         ...(params.workspaceMcpRunId ? { workspaceMcpRunId: params.workspaceMcpRunId } : {}),
-        ...(params.actionId !== undefined ? { actionId: params.actionId } : {}),
-        ...(params.version !== undefined ? { version: params.version } : {}),
-        ...(params.context !== undefined ? { context: params.context } : {}),
-        ...(params.allowCustom !== undefined ? { allowCustom: params.allowCustom } : {}),
-        ...(params.options !== undefined ? { options: params.options } : {}),
         ...(params.executionQuestion ? { operation: 'routine_input', ...params.executionQuestion } : {}),
       }
       const result = await query(
@@ -1284,7 +1315,7 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
           params.blockingSessionId,
           params.originatingAssistantId,
           params.approverUserId,
-          JSON.stringify({ question: params.question }),
+          JSON.stringify(question),
           JSON.stringify(payload),
           params.deliveryChannelType,
           params.deliveryChannelId ?? null,
@@ -1306,7 +1337,8 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
       const result = await query(`UPDATE pending_approvals p SET status='approved',responded_at=now(),responded_by=NULL,
         answer_text=$2,resolution_origin='system'
         WHERE p.id=$1 AND p.kind='question' AND p.status='pending' AND (p.expires_at IS NULL OR p.expires_at>now())
-        AND p.approval_payload->>'workspaceMcpRunId'=$3 AND NOT(p.approval_payload ? 'actionId')
+        AND p.approval_payload->>'workspaceMcpRunId'=$3
+        AND NOT starts_with(coalesce(p.approval_payload->>'actionId',''),'connector_authorization:')
         AND EXISTS(SELECT 1 FROM workspace_mcp_runs r JOIN workspace_mcp_contexts c ON c.id=r.context_id
           WHERE r.id=$3::uuid AND r.session_id=p.blocking_session_id AND c.workspace_id=p.workspace_id
           AND c.user_id=p.approver_user_id AND NOT c.invalidated AND r.status='waiting_input' AND NOT r.cancel_requested)
@@ -1342,6 +1374,36 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
         [workspaceId],
       )
       return readableApprovalRows(userId, result.rows)
+    },
+
+    async findBlockingQuestion(userId, workspaceId, sessionId) {
+      const settings = rlsGucSettings(userId)
+      // The materialized settings yield the only workspace key for the RLS
+      // scan. OFFSET keeps that scan inside the correlated lateral boundary.
+      // These settings last only for the implicit statement transaction.
+      const client = await getAppPool().connect()
+      let rows: Record<string, unknown>[]
+      try {
+        rows = (await client.query(`
+          WITH actor_context AS MATERIALIZED (
+            SELECT CASE WHEN count(set_config(setting.name, setting.value, true)) = cardinality($1::text[])
+              THEN $3::uuid END AS workspace_id
+            FROM unnest($1::text[], $2::text[]) AS setting(name, value)
+          )
+          SELECT question.* FROM actor_context actor
+          CROSS JOIN LATERAL (
+            SELECT ${COLS} FROM pending_approvals
+            WHERE workspace_id = actor.workspace_id AND blocking_session_id = $4
+              AND status = 'pending' AND kind = 'question'
+            OFFSET 0
+          ) question ORDER BY question."createdAt" DESC`,
+          [settings.map(([name]) => name), settings.map(([, value]) => value), workspaceId, sessionId])).rows
+      } finally { await rollbackAndRelease(client) }
+      for (const row of rows) {
+        const question = rowToApproval(row)
+        if (await canReadApprovalSource(userId, question)) return question
+      }
+      return null
     },
 
     async countPendingForUser(userId) {

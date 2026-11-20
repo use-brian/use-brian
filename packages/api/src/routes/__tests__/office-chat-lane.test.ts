@@ -5,7 +5,8 @@
  */
 import { readFile } from 'node:fs/promises'
 import { describe, expect, it, vi } from 'vitest'
-import { createOfficeTools, type Tool, type ToolContext } from '@use-brian/core'
+import { createOfficeTools } from '@use-brian/core/office/tools.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import {
   bindOfficeLaneTools,
   officeLaneContextBlock,
@@ -107,7 +108,7 @@ async function laneContext(scope: ResolvedTurnScope) {
     lifecycle: { abortSignal: new AbortController().signal, sessionId: SESSION, channelType: 'office_thread', channelId: 'c' },
     ...officeLaneExecutionBounds(lane, 'sender', deps('edit')),
   }, { resolveScope: async () => scope, createLease: () => lease,
-    pinPolicyEpoch: async () => async () => true,
+    pinPolicyEpoch: async () => ({isCurrent: async () => true, matches: () => true}),
     resolveAssistant: async () => ({ id: 'assistant', workspaceId: WORKSPACE, kind: 'primary', clearance: 'confidential', compartments: [] }),
   })).executionContext
 }

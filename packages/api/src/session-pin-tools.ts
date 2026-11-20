@@ -25,7 +25,7 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '@use-brian/core'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import {
   addSessionPin,
   listSessionPins,

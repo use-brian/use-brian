@@ -3,7 +3,11 @@
  */
 import type { Pool, PoolClient } from 'pg'
 import { z } from 'zod'
-import { CrmOperationsError, CrmPageQuerySchema, requireCrmIntegrationOperation, departmentReadGrantJson, intersectDepartmentReadGrants, intersectScopeGrants } from '@use-brian/core'
+import { requireCrmIntegrationOperation } from '@use-brian/core/crm/integration-authority.js'
+import { CrmOperationsError } from '@use-brian/core/crm/operations-types.js'
+import { CrmPageQuerySchema } from '@use-brian/core/crm/pagination.js'
+import { intersectScopeGrants } from '@use-brian/agent-runtime/security/context-scope.js'
+import { departmentReadGrantJson, intersectDepartmentReadGrants } from '@use-brian/agent-runtime/security/department-read.js'
 import { getPool } from './client.js'
 import { intersectCrmIntegrationExecutionLimits, type CrmIntegrationExecutionLimits } from '../crm-operations/integration-department-authority.js'
 import { currentAgentAccess } from './agent-access-context.js'

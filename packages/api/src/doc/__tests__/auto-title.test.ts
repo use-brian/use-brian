@@ -1,12 +1,8 @@
 import { describe, it, expect, vi } from 'vitest'
-import type {
-  DocPageStore,
-  LLMProvider,
-  NameOrigin,
-  Page,
-  SavedViewStore,
-  StreamChunk,
-} from '@use-brian/core'
+import type { DocPageStore } from '@use-brian/core/doc/tools.js'
+import type { Page } from '@use-brian/core/views/blocks.js'
+import type { NameOrigin, SavedViewStore } from '@use-brian/core/views/types.js'
+import type { LLMProvider, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
 import { runDocAutoTitle } from '../auto-title.js'
 
 const USER_ID = 'user-1'

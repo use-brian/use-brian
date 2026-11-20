@@ -28,7 +28,8 @@
  * → "Reply-to-page safety net".
  */
 
-import type { DocPageStore, Tool, ToolContext } from '@use-brian/core'
+import type { DocPageStore } from '@use-brian/core/doc/tools.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 export type PlaceReplyOnEmptyPageParams = {
   /** The anchored doc page (the open "New draft"). */

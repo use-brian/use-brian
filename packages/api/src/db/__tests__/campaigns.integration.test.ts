@@ -1,6 +1,8 @@
 import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { createCampaignTools, type CampaignContext, type ToolContext } from '@use-brian/core'
+import { createCampaignTools } from '@use-brian/core/campaigns/tools.js'
+import type { CampaignContext } from '@use-brian/core/campaigns/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { createCampaignService } from '../../campaigns/service.js'
 import { createDbCampaignStore } from '../campaign-store.js'
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)

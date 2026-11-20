@@ -20,17 +20,19 @@
 
 import { randomUUID } from 'node:crypto'
 import type {
-  AssistantResponse,
-  ContentBlock,
-  Message,
   TurnLedger,
   TurnLedgerActor,
   TurnRetrievalProvenance,
   TurnTrace,
   TurnTraceStart,
-} from '@use-brian/core'
+} from '@use-brian/agent-runtime/engine/turn-ledger.js'
+import type {
+  AssistantResponse,
+  ContentBlock,
+  Message,
+} from '@use-brian/agent-runtime/providers/types.js'
 import { insertTurnEvent, rebindTraceId, type TurnEventKind } from '../db/turn-ledger-store.js'
-import type { LedgerPayloadStore } from './payload-store.js'
+import type { LedgerPayloadInput, LedgerPayloadStore } from './payload-store.js'
 
 export type TurnLedgerContext = {
   workspaceId?: string | null
@@ -88,7 +90,7 @@ export function createTurnLedger(ctx: TurnLedgerContext): TurnLedgerHandle {
     private systemRef: string | null = null
     /** Whether any `request` has landed yet (see `request`). */
     private requested = false
-    private startMessages: Message[]
+    private startMessageBytes: string[] = []
 
     get traceId(): string {
       return this._traceId
@@ -109,7 +111,6 @@ export function createTurnLedger(ctx: TurnLedgerContext): TurnLedgerHandle {
     constructor(start: TurnTraceStart, traceId: string) {
       this._traceId = traceId
       this.actor = ctx.actor ?? start.actor
-      this.startMessages = start.messages
       // Hash the system prompt + initial messages up front so even a trace
       // whose first provider call never happens (immediate abort) records
       // what the lane was going to send.
@@ -120,21 +121,19 @@ export function createTurnLedger(ctx: TurnLedgerContext): TurnLedgerHandle {
           mediaType: 'text/plain',
           sensitivity: ctx.sensitivity,
         })
-        this.messageRefs = await this.putMessages(this.startMessages)
+        this.startMessageBytes = start.messages.map(message => JSON.stringify(message))
+        this.messageRefs = await this.putPayloads(this.startMessageBytes.map(content => this.messagePayload(content)))
       })
     }
 
-    private async putMessages(messages: Message[]): Promise<string[]> {
+    private messagePayload(content: string): LedgerPayloadInput {
+      return { workspaceId: ctx.workspaceId, content, sensitivity: ctx.sensitivity }
+    }
+
+    private async putPayloads(payloads: LedgerPayloadInput[]): Promise<string[]> {
+      if (ctx.payloads.putMany) return ctx.payloads.putMany(payloads)
       const refs: string[] = []
-      for (const m of messages) {
-        refs.push(
-          await ctx.payloads.put({
-            workspaceId: ctx.workspaceId,
-            content: JSON.stringify(m),
-            sensitivity: ctx.sensitivity,
-          }),
-        )
-      }
+      for (const payload of payloads) refs.push(await ctx.payloads.put(payload))
       return refs
     }
 
@@ -159,7 +158,13 @@ export function createTurnLedger(ctx: TurnLedgerContext): TurnLedgerHandle {
     request(info: { turn: number; messages: Message[]; full: boolean }): void {
       const { messages, full } = info
       enqueue(async () => {
-        const refs = await this.putMessages(messages)
+        const messageBytes = messages.map(message => JSON.stringify(message))
+        // The regular first request repeats the initial bytes. The original
+        // success is enough to reuse those immutable refs, including a ref
+        // subsequently tombstoned by erasure. Never write that blob again.
+        const repeatsStart = !this.requested && this.systemRef !== null && this.messageRefs.length === messageBytes.length
+          && messageBytes.every((content,index) => content === this.startMessageBytes[index])
+        const refs = repeatsStart ? this.messageRefs : await this.putPayloads(messageBytes.map(content => this.messagePayload(content)))
         // A stateful session starts EMPTY, so its first "delta" is the whole
         // history - the same messages `startTrace` already recorded. The
         // first request therefore replaces the start messages in both modes;
@@ -214,19 +219,10 @@ export function createTurnLedger(ctx: TurnLedgerContext): TurnLedgerHandle {
         const result = resultsById.get(block.id)
         const toolOrdinal = this.ordinal++
         enqueue(async () => {
-          const inputRef = await ctx.payloads.put({
-            workspaceId: ctx.workspaceId,
-            content: JSON.stringify(block.input ?? {}),
-            sensitivity: ctx.sensitivity,
-          })
-          const resultRef = result
-            ? await ctx.payloads.put({
-                workspaceId: ctx.workspaceId,
-                content: result.content,
-                mediaType: 'text/plain',
-                sensitivity: ctx.sensitivity,
-              })
-            : null
+          const input = this.messagePayload(JSON.stringify(block.input ?? {}))
+          const [inputRef, resultRef] = await this.putPayloads(result
+            ? [input, { ...this.messagePayload(result.content), mediaType: 'text/plain' }]
+            : [input])
           const stepOrdinal = toolOrdinal
           await insertTurnEvent({
             workspaceId: ctx.workspaceId,
@@ -254,8 +250,8 @@ export function createTurnLedger(ctx: TurnLedgerContext): TurnLedgerHandle {
       for(const observation of structuredClone(info.observations)){
         const ordinal=this.ordinal++
         enqueue(async()=>{
-          const inputRef=await ctx.payloads.put({workspaceId:ctx.workspaceId,content:JSON.stringify(observation.input),sensitivity:ctx.sensitivity})
-          const resultRef=await ctx.payloads.put({workspaceId:ctx.workspaceId,content:observation.content,mediaType:'text/plain',sensitivity:ctx.sensitivity})
+          const [inputRef,resultRef]=await this.putPayloads([this.messagePayload(JSON.stringify(observation.input)),
+            {...this.messagePayload(observation.content),mediaType:'text/plain'}])
           await insertTurnEvent({workspaceId:ctx.workspaceId,assistantId:ctx.assistantId,sessionId:ctx.sessionId,assistantMessageId:this.traceId,
             stepOrdinal:ordinal,actor:this.actor,kind:'tool_call',metadata:{origin:'host',name:observation.name,toolUseId:observation.id,isError:observation.isError,hasResult:true},
             payloadRefs:[inputRef,resultRef],sensitivity:ctx.sensitivity})

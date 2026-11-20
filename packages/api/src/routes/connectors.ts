@@ -61,7 +61,8 @@ import { shopifySetupRoutes } from '../connectors/shopify-setup-routes.js'
 import type { TransactionalConnectorSetup } from '../connectors/transactional-setup.js'
 import { constants as fsConstants, promises as fs } from 'node:fs'
 import * as nodePath from 'node:path'
-import type { FilesApi, McpSettingsStore } from '@use-brian/core'
+import type { FilesApi } from '@use-brian/core/workspace-files/api.js'
+import type { McpSettingsStore } from '@use-brian/agent-runtime/mcp/types.js'
 import {
   CONFIGURABLE_APP_CREDENTIAL_CONNECTORS,
   connectorSupportsMultipleInstances,

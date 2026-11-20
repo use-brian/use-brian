@@ -20,11 +20,13 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import {
   brandLifecycleToDispatchEvent,
-  matchesEvent,
   type BrandLifecycleEvent,
+} from '@use-brian/core/workflow/brand-event-trigger.js'
+import {
+  matchesEvent,
   type DispatchEvent,
   type WorkflowEventDispatcher,
-} from '@use-brian/core'
+} from '@use-brian/core/workflow/event-trigger.js'
 import { setBrandEventDispatcher, publishBrandLifecycle } from '../brand-event-fanout.js'
 
 const EVENT: BrandLifecycleEvent = {

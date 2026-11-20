@@ -3,7 +3,11 @@ import {readCurrentScopeSources} from '../../db/derived-scope-store.js'
 import {describe,it,expect,beforeEach,afterEach,afterAll} from 'vitest'
 import type {PoolClient} from 'pg'
 import {createHash} from 'node:crypto'
-import {ContextScopeAccumulator,boundScopeSources,createCorrectionTools,executionToolContext,type AccessCeiling} from '@use-brian/core'
+import {createCorrectionTools} from '@use-brian/core/corrections/tools.js'
+import type {AccessCeiling} from '@use-brian/agent-runtime/security/access-ceiling.js'
+import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
+import {executionToolContext} from '@use-brian/agent-runtime/security/execution-context.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
 import {createMemoryRetractionStore} from '../../db/retraction-store.js'
@@ -18,7 +22,7 @@ import {persistentContextFixture} from './fixtures/persistent-context.js'
 import {sourceModeFixture} from './fixtures/source-modes.js'
 import {originalMemoryAuthority,saveOriginalMemory} from './fixtures/retained-memory.js'
 import {configureConnectorSourceRuntimeFactory} from '../source-runtime.js'
-import {assertSourceModelInputAuthority,assertSourceModelOutputAuthority} from '../model-source-authority.js'
+import {admitModelInput,admitModelOutput} from '../../context-scope/admission.js'
 import {createDbWorkspaceGroupStore} from '../../db/workspace-group-store.js'
 import {createDbContextScopeStore} from '../../db/context-scope-store.js'
 import {createDbSavedViewStore} from '../../db/saved-views-store.js'
@@ -102,6 +106,10 @@ describe.sequential('[COMP:corrections/row-history] current native Memory audit 
     'fields',(SELECT jsonb_agg(jsonb_build_object('key',key,'read',CASE WHEN key='summary' THEN CASE WHEN m.valid_to IS NOT NULL THEN '[["history_reader"],["past_reader"]]'::jsonb ELSE '[["history_reader"],["head_reader"]]'::jsonb END ELSE '[["history_reader"]]'::jsonb END,
       'write','[]'::jsonb,'releaseReadTo','[]'::jsonb,'releaseWriteTo','[]'::jsonb) ORDER BY key) FROM unnest(application_memory_field_keys()) key)) FROM memories m WHERE m.workspace_id=w AND m.id=i::uuid $$;
    REVOKE ALL ON FUNCTION fixture_history_catalog(uuid,jsonb,text),fixture_history_reader(uuid,jsonb,text,text) FROM PUBLIC;
+   DO $owner$ DECLARE migration_owner text:=(SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid='entity_instances'::regclass);BEGIN
+    EXECUTE format('ALTER FUNCTION public.fixture_history_catalog(uuid,jsonb,text) OWNER TO %I',migration_owner);
+    EXECUTE format('ALTER FUNCTION public.fixture_history_reader(uuid,jsonb,text,text) OWNER TO %I',migration_owner);
+   END $owner$;
    INSERT INTO application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader,catalog_reader)
     VALUES('native','1',ARRAY['history_reader','past_reader','head_reader'],'fixture_history_reader(uuid,jsonb,text,text)'::regprocedure,'fixture_history_catalog(uuid,jsonb,text)'::regprocedure)`)
   await pool.query(`INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key) VALUES($1,'{"kind":"native","moduleKey":"native"}','memory','native')`,[workspaceId])
@@ -345,16 +353,23 @@ describe.sequential('[COMP:corrections/row-history] current native Memory audit 
    const historyFields=(await x.f.pool.query("SELECT id FROM application_field_resources WHERE workspace_id=$1 AND resource_id=$2 AND selection='history'",[x.f.workspaceId,saved.id])).rows.map(row=>row.id)
    const roots=all.filter(source=>source.resourceKind==='application_field'&&historyFields.includes(source.resourceId))
    expect(roots).toHaveLength(1)
-   const full=await originalMemoryAuthority(x);full.accumulator.note({sources:all})
-   await expect(assertSourceModelInputAuthority(full.context)).resolves.toBeUndefined()
-   const tool=async()=>{const host=await originalMemoryAuthority(x);host.accumulator.note({sources:roots});return host.context}
-   await expect(assertSourceModelInputAuthority(await tool())).resolves.toBeUndefined()
-   await expect(assertSourceModelOutputAuthority(await tool())).resolves.toBeUndefined()
+   const ordinaryAuthority = await originalMemoryAuthority(x)
+   const ordinary = await memoryStore.create({ workspaceId: x.f.workspaceId, assistantId: x.f.assistantId,
+    userId: x.f.ownerId, createdByUserId: x.f.ownerId, summary: 'Fictional independent native point',
+    sensitivity: 'internal', authority: ordinaryAuthority })
+   const ordinaryCapture = await memoryStore.getById(ordinaryAuthority.execution.security.access, ordinary.id, ordinaryAuthority)
+   const ordinaryRoots = boundScopeSources(ordinaryCapture!)
+   expect(ordinaryRoots.some(source => source.resourceKind === 'application_field')).toBe(true)
+   const full=await originalMemoryAuthority(x);full.accumulator.note({sources:[...ordinaryRoots,...all]})
+   await expect(admitModelInput(full.context)).resolves.toBeUndefined()
+   const tool=async()=>{const host=await originalMemoryAuthority(x);host.accumulator.note({sources:[...ordinaryRoots,...roots]});return host.context}
+   await expect(admitModelInput(await tool())).resolves.toBeUndefined()
+   await expect(admitModelOutput(await tool())).resolves.toBeUndefined()
    await x.sourcePool.query("UPDATE grants SET actions=array_remove(actions,'deliver') WHERE kind='human' AND account_id=$1",[x.f.ownerId])
-   await expect(assertSourceModelInputAuthority(await tool())).resolves.toBeUndefined()
-   await expect(assertSourceModelOutputAuthority(await tool())).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
+   await expect(admitModelInput(await tool())).resolves.toBeUndefined()
+   await expect(admitModelOutput(await tool())).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
    await x.sourcePool.query("DELETE FROM grants WHERE kind='human' AND account_id=$1",[x.f.ownerId])
-   await expect(assertSourceModelInputAuthority(await tool())).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
+   await expect(admitModelInput(await tool())).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
   }finally{configureConnectorSourceRuntimeFactory(undefined);await x.cleanup()}
  })
  it('keeps a distinct independent parent path to the own field and raw anchor ordinary',async()=>{

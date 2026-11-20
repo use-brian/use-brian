@@ -8,7 +8,7 @@ import {resolveNativeApplicationModuleExecution} from '../native-module-runtime.
 import {recordFeedback} from '../../feedback/record.js'
 import {recordRecallBatch,listMemoriesByRecentOutcome} from '../../db/memory-recall-events-store.js'
 import {listUnverifiedByWorkspace} from '../../db/memories.js'
-import {assertSourceModelOutputAuthority} from '../model-source-authority.js'
+import {admitModelOutput} from '../../context-scope/admission.js'
 import { createAuthorityLease, runWithAuthorityLease } from '../../context-scope/authority-lease.js'
 import { executePublicTurn } from '../../routes/public-turn.js'
 import { updateSelfEntityAttributes } from '../../db/entities-store.js'
@@ -17,23 +17,33 @@ import { houseKeepEpisodic } from '../../routes/proactive-compaction.js'
 import { createCalleeExecutor } from '../../inter-assistant/executor.js'
 import { createDbMemoryStore } from '../../db/memory-store.js'
 import { createDbCapabilityStore } from '../../db/capability-store.js'
-import { buildDeliveryConversationStateBlock, ContextScopeAccumulator } from '@use-brian/core'
+import { buildDeliveryConversationStateBlock } from '@use-brian/core/memory/session-state-context.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import { runTurnSessionStateDiff } from '../../turn/session-state.js'
-import type { ContentBlock, LLMProvider, Message } from '@use-brian/core'
+import type { ContentBlock, LLMProvider, Message } from '@use-brian/agent-runtime/providers/types.js'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { z } from 'zod'
-import { classifyTopic, boundScopeSources, bindScopeSources, executionToolContext, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, type ScopeSource, type ScopeEvidence, type StreamFn } from '@use-brian/core'
+import { buildSessionStateBlock } from '@use-brian/core/memory/session-state-context.js'
+import { runSessionStateDiff } from '@use-brian/core/memory/session-state-diff.js'
+import { createSessionStateTools } from '@use-brian/core/memory/session-state-tools.js'
+import { classifyTopic } from '@use-brian/core/memory/topic-classifier.js'
+import type { StreamFn } from '@use-brian/agent-runtime/providers/types.js'
+import type { ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { boundScopeSources, bindScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { getAppPool, getPool, applyRLSGucs, runWithAgentAccess } from '../../db/client.js'
 import { applyApplicationRLSContext, releaseApplicationTransactionBinding } from '../execution-context.js'
 import { validateCallerScopeEvidence } from '../../context-scope/caller-evidence.js'
 import { createMemory } from '../../db/memories.js'
-import { createWorkspaceChatSession, addSessionMessage, getSessionMessages, toStampedMessages } from '../../db/sessions.js'
+import { resolveSessionTitleAuthority } from '../../routes/session-title-authority.js'
+import { createPersonalWebSession, createWorkspaceChatSession, addSessionMessage, getSessionMessages, toStampedMessages } from '../../db/sessions.js'
 import { createDbSessionStateStore } from '../../db/session-state-store.js'
 import { createDbEpisodicStore } from '../../db/episodic-store.js'
 import { writeSessionContextRevision, sessionContextGeneration, bindSessionContextRetainedAuthority, readSessionContextRevisions } from '../../db/session-context-revisions.js'
-import { assertSourceModelInputAuthority } from '../model-source-authority.js'
+import { admitModelInput } from '../../context-scope/admission.js'
 import { persistentContextFixture } from './fixtures/persistent-context.js'
 import { persistentSourceFixture } from './fixtures/persistent-source.js'
 
@@ -85,7 +95,7 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
     const domain=(await f.pool.query(`SELECT q.domain FROM application_field_resources r JOIN application_query_domains q ON q.workspace_id=r.workspace_id AND q.id=r.resource_id
       WHERE r.workspace_id=$1 AND r.id=ANY($2::uuid[]) AND r.type_key='feedback_event' AND r.selection='query_domain'`,[f.workspaceId,sources.map(source=>source.resourceId)])).rows[0].domain
     expect(domain.associations).toHaveLength(3);expect(domain.feedback).toHaveLength(2);expect(domain.memoryCandidates).toEqual([{id:memory.id,version:expect.any(String)}])
-    review.authority.accumulator.note({sources});await expect(assertSourceModelOutputAuthority(review.context)).resolves.toBeUndefined()
+    review.authority.accumulator.note({sources});await expect(admitModelOutput(review.context)).resolves.toBeUndefined()
     await recordFeedback({userId:f.secondId,messageId:messages[0].id,sessionId:f.session.id,kind:'positive',source:'web'})
     const unchanged=await review.read();expect(unchanged.status,JSON.stringify(unchanged.body)).toBe(200)
     expect(unchanged.body.memories.find((row:{id:string})=>row.id===memory.id)?.outcomeScore).toEqual({recallCount:3,negativeCount:2,correctionCount:1})
@@ -97,7 +107,7 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
     const review=await nativeOutcomeReview(f),scored=await review.score([memory.id]);expect(scored[0].negativeCount).toBe(1)
     review.authority.accumulator.note({sources:boundScopeSources(scored)})
     await f.pool.query("UPDATE sessions SET effective_clearance='confidential' WHERE id=$1",[f.session.id])
-    await expect(assertSourceModelOutputAuthority(review.context)).rejects.toMatchObject({reason:'authority_changed'})
+    await expect(admitModelOutput(review.context)).rejects.toMatchObject({reason:'authority_changed'})
     const held=await review.read();expect(held.status,JSON.stringify(held.body)).toBe(200);expect(held.body.memories).toEqual([])
     await f.pool.query("UPDATE sessions SET effective_clearance='internal' WHERE id=$1",[f.session.id])
     let registered=false
@@ -108,7 +118,14 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
           'scope',jsonb_build_object('workspaceId',w,'userId',NULL,'assistantId',NULL,'sensitivity','public','compartments','[]'::jsonb,'projectIds','[]'::jsonb)) FROM outcome_field_fixture p WHERE p.workspace_id=w $$;
         CREATE FUNCTION outcome_field_record(w uuid,o jsonb,t text,i text) RETURNS jsonb LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
         SELECT(outcome_field_catalog(w,o,t)-'scope')||jsonb_build_object('recordVersion',a.scope_version::text,'source',read_scope_source(w,'feedback_event',a.id)) FROM analytics_events a WHERE a.workspace_id=w AND a.id=i::uuid $$;
-        REVOKE ALL ON FUNCTION outcome_field_catalog(uuid,jsonb,text),outcome_field_record(uuid,jsonb,text,text) FROM PUBLIC`)
+        REVOKE ALL ON FUNCTION outcome_field_catalog(uuid,jsonb,text),outcome_field_record(uuid,jsonb,text,text) FROM PUBLIC,app_user;
+        DO $owner$ DECLARE schema_owner text; BEGIN
+          SELECT pg_get_userbyid(relowner) INTO schema_owner FROM pg_class WHERE oid='public.application_native_field_contracts'::regclass;
+          EXECUTE format('ALTER TABLE outcome_field_fixture OWNER TO %I',schema_owner);
+          EXECUTE format('ALTER FUNCTION outcome_field_catalog(uuid,jsonb,text) OWNER TO %I',schema_owner);
+          EXECUTE format('ALTER FUNCTION outcome_field_record(uuid,jsonb,text,text) OWNER TO %I',schema_owner);
+        END $owner$`)
+
       await f.pool.query(`INSERT INTO outcome_field_fixture SELECT $1,jsonb_agg(jsonb_build_object('key',key,'read',CASE WHEN key='details' THEN '[["outcome_reader"]]'::jsonb ELSE '[]'::jsonb END,
         'write','[]'::jsonb,'releaseReadTo','[]'::jsonb,'releaseWriteTo','[]'::jsonb)) FROM unnest(application_feedback_field_keys()) key`,[f.workspaceId])
       await f.pool.query(`INSERT INTO application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader,catalog_reader)
@@ -119,7 +136,7 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
       const fresh=await nativeOutcomeReview(f),value=await fresh.score([memory.id]);fresh.authority.accumulator.note({sources:boundScopeSources(value)})
       await f.pool.query("UPDATE application_native_role_assignments SET status='revoked' WHERE workspace_id=$1 AND user_id=$2 AND module_key='native'",[f.workspaceId,f.firstId])
       expect((await review.read()).status).toBe(404);expect((await review.read(false)).status).toBe(200)
-      await expect(assertSourceModelOutputAuthority(fresh.context)).rejects.toMatchObject({reason:'authority_changed'})
+      await expect(admitModelOutput(fresh.context)).rejects.toMatchObject({reason:'authority_changed'})
     }finally{
       await f.pool.query("DELETE FROM application_native_resource_owners WHERE workspace_id=$1 AND module_key='native'",[f.workspaceId])
       await f.pool.query("DELETE FROM application_native_role_assignments WHERE workspace_id=$1 AND module_key='native'",[f.workspaceId])
@@ -138,7 +155,7 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
     const none=await nativeOutcomeReview(f),noFeedback=await none.score([memory.id]);expect(noFeedback[0]).toMatchObject({recallCount:3,negativeCount:0,correctionCount:0})
     none.authority.accumulator.note({sources:boundScopeSources(noFeedback)})
     await f.pool.query("UPDATE memory_recall_events SET recall_kind='tool_call' WHERE workspace_id=$1 AND memory_id=$2",[f.workspaceId,memory.id])
-    await expect(assertSourceModelOutputAuthority(none.context)).rejects.toMatchObject({reason:'authority_changed'})
+    await expect(admitModelOutput(none.context)).rejects.toMatchObject({reason:'authority_changed'})
     await recordFeedback({userId:f.firstId,messageId:messages[0].id,sessionId:f.session.id,kind:'positive',source:'web'})
     const unsupported=await review.read();expect(unsupported.status,JSON.stringify(unsupported.body)).toBe(503);expect(unsupported.body.error).toContain('Outcome scoring unavailable')
     expect((await review.read(false)).status).toBe(200)
@@ -147,7 +164,7 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
     const isolated=await nativeOutcomeReview(f)
     isolated.authority.accumulator.note({sources:roots.filter(source=>source.resourceId===domains[0].id)})
     await f.pool.query("UPDATE memories SET sensitivity='confidential' WHERE id=$1",[empty.id])
-    await expect(assertSourceModelOutputAuthority(isolated.context)).rejects.toMatchObject({reason:'authority_changed'})
+    await expect(admitModelOutput(isolated.context)).rejects.toMatchObject({reason:'authority_changed'})
   })
 
   it('ignores caller temporary tables when admitting canonical context metadata and payload',async()=>{
@@ -163,10 +180,10 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
         WHERE pronamespace='public'::regnamespace AND (proname LIKE 'session_context_%' OR proname LIKE 'guard_session_context_%'
          OR proname=ANY($1::text[]))`,[['scope_source_table','hold_scope_descendants','read_scope_source','purge_session_context_parent',
           'session_personal_audience','session_workspace_audience','session_project_audience','read_admitted_native_scope_snapshot',
-          'read_entity_derivation_source','read_session_context_revision','read_session_context_file_revision','read_native_file_session_title_revision','validate_session_context_revision_pair','guard_episodic_promotion',
+          'read_entity_derivation_source','read_session_context_revision','validate_session_context_revision_pair','guard_episodic_promotion',
           'guard_session_message_annotation_head','purge_session_message_annotations','read_admitted_session_context_dependencies',
           'application_memory_field_ancestry_allows','application_memory_unproven_ancestry_allows']])).rows
-      expect(configurations).toHaveLength(28)
+      expect(configurations.map(row=>row.proname).sort()).toEqual(["application_memory_field_ancestry_allows", "application_memory_unproven_ancestry_allows", "guard_episodic_promotion", "guard_session_context_content", "guard_session_context_lineage", "guard_session_context_revision", "guard_session_message_annotation_head", "hold_scope_descendants", "purge_session_context_parent", "purge_session_message_annotations", "read_admitted_native_scope_snapshot", "read_admitted_session_context_dependencies", "read_entity_derivation_source", "read_scope_source", "read_session_context_revision", "scope_source_table", "session_context_parent_snapshot", "session_context_payload_shape", "session_context_revision_allowed", "session_context_revision_native", "session_context_revision_snapshot", "session_personal_audience", "session_project_audience", "session_workspace_audience", "validate_session_context_revision_pair"])
       for(const configuration of configurations)expect(configuration.proconfig,configuration.proname).toContain('search_path=pg_catalog, public, pg_temp')
       await client.query('CREATE TEMP TABLE session_context_scope_revisions AS SELECT * FROM public.session_context_scope_revisions WITH NO DATA')
       await client.query('CREATE TEMP TABLE session_context_revision_contents AS SELECT * FROM public.session_context_revision_contents WITH NO DATA')
@@ -233,16 +250,21 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
     const promoted=await episodes.promote!(episode.id,authority),memories=createDbMemoryStore(),first=await f.modelContext(f.firstId)
     const retained=(await readSessionContextRevisions(f.session.id,'episodic_memory',first,{includePromoted:true}))[0]
     expect(retained).toBeTruthy()
-    const writer=await f.pool.connect();let privateId:string
-    try{privateId=await runWithAgentAccess(first.execution.security.access,async()=>{
-      await writer.query('BEGIN');await applyRLSGucs(writer,f.firstId);await applyApplicationRLSContext(writer,first.execution)
-      await validateCallerScopeEvidence({sources:boundScopeSources(retained)},first.execution.security.ceiling,writer)
+    await f.pool.query("UPDATE assistants SET clearance='internal' WHERE id=$1",[f.assistantId])
+    const device=(await authSessionStore.create(f.firstId,{deviceLabel:'Fictional private consumer',userAgent:null,ipAddress:null}))!
+    const privateSession=await createPersonalWebSession({assistantId:f.assistantId,userId:f.firstId,workspaceId:f.workspaceId,channelType:'web',channelId:randomUUID(),appOrigin:'chat'},
+      {actorUserId:f.firstId,authSessionId:device.id,authVersion:device.authVersion})
+    const privateAuthority=await resolveSessionTitleAuthority({claims:{userId:f.firstId,sessionId:device.id,authVersion:device.authVersion},sessionId:privateSession.id,readOnly:false})
+    const writer=await getAppPool().connect();let privateId:string
+    try{privateId=await runWithAgentAccess(privateAuthority.execution.security.access,async()=>{
+      await writer.query('BEGIN');await applyRLSGucs(writer,f.firstId,f.assistantId);await applyApplicationRLSContext(writer,privateAuthority.execution)
+      await validateCallerScopeEvidence({sources:boundScopeSources(retained)},privateAuthority.execution.security.ceiling,writer)
       const memory=await createMemory({workspaceId:f.workspaceId,userId:f.firstId,assistantId:f.assistantId,createdByUserId:f.firstId,summary:'Fictional private protected context',sensitivity:'internal',
         derivationTarget:{userId:f.firstId,assistantId:null},derivation:{producer:'fixture:private-system-parent',sources:boundScopeSources(retained)}},undefined,writer)
       await writer.query('COMMIT');return memory.id
     })}finally{releaseApplicationTransactionBinding(writer);await writer.query('ROLLBACK');writer.release()}
     const nativeShared=await f.memory('Fictional native shared content'),nativePrivate=await createMemory({workspaceId:f.workspaceId,userId:f.firstId,assistantId:f.assistantId,createdByUserId:f.firstId,summary:'Fictional native private content',sensitivity:'internal'})
-    const ordinary={...executionToolContext(first.execution,{appId:'fixture'}),workspaceId:f.workspaceId,assistantKind:first.execution.assistant.kind},unproved={...ordinary,systemRead:true}
+    const ordinary={...executionToolContext(privateAuthority.execution,{appId:'fixture'}),workspaceId:f.workspaceId,assistantKind:privateAuthority.execution.assistant.kind},unproved={...ordinary,systemRead:true}
     expect(await memories.getById(ordinary,promoted.memoryId)).toMatchObject({id:promoted.memoryId})
     expect(await memories.getById(ordinary,privateId)).toMatchObject({id:privateId})
     for(const id of [promoted.memoryId,privateId]){
@@ -281,7 +303,7 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
       const context={...executionToolContext(authority.execution,{appId:'fixture'}),scopeAccumulator:authority.accumulator}
       return classifyTopic(bindScopeSources({provider,model:'fixture',recentUserTurns:[{text:'Fictional retained context',topicLabel:'fictional retained topic'}],
         currentMessage:'Fictional current request',knownTopicsThisSession:['fictional retained topic'],replyToText:null,authority,
-        assertInputAuthority:()=>assertSourceModelInputAuthority(context)},[source,...boundScopeSources(currentMessage)]))
+        assertInputAuthority:()=>admitModelInput(context)},[source,...boundScopeSources(currentMessage)]))
     }
     expect(await classify(await current(f.firstId,target))).toMatchObject({topic_label:'fictional retained topic'})
     expect(stream).toHaveBeenCalledOnce()
@@ -315,19 +337,26 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
       topicLabel:'fictional transaction topic',summary:'Fictional transaction context',messageSpan:{fromSequence:1,toSequence:3,turnCount:3},authority:await f.modelContext(),
       derivation:{producer:'fixture:transaction-parent',sources:history.flatMap(boundScopeSources)}})
     const target=await createWorkspaceChatSession({workspaceId:f.workspaceId,assistantId:f.assistantId,starterUserId:f.ownerId,effectiveClearance:'internal',authenticatedHuman:true})
-    const execution=await f.execution(f.firstId,target),writer=await f.pool.connect()
+    const execution=await f.execution(f.firstId,target),writer=await getAppPool().connect()
+    const contract=`consumer_contract_${randomUUID().replaceAll('-','')}`
+    // Fixed fixture mutation executes in the application transaction. Direct
+    // UPDATE is correctly filtered by RLS for this non-owner reader.
+    await f.pool.query(`CREATE FUNCTION ${contract}() RETURNS integer LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+      DECLARE changed integer; BEGIN UPDATE sessions SET effective_clearance='confidential' WHERE id='${f.session.id}'::uuid;
+      GET DIAGNOSTICS changed=ROW_COUNT;RETURN changed;END $$;
+      REVOKE ALL ON FUNCTION ${contract}() FROM PUBLIC;GRANT EXECUTE ON FUNCTION ${contract}() TO app_user`)
     try { await runWithAgentAccess(execution.security.access,async()=>{
       await writer.query('BEGIN')
-      await applyRLSGucs(writer,f.firstId);await applyApplicationRLSContext(writer,execution)
+      await applyRLSGucs(writer,f.firstId,f.assistantId);await applyApplicationRLSContext(writer,execution)
       const memory=await createMemory({workspaceId:f.workspaceId,userId:null,assistantId:f.assistantId,summary:'Fictional uncommitted derivative',sensitivity:'internal',createdByUserId:f.firstId,
         derivation:{producer:'fixture:uncommitted-native',sources:boundScopeSources(episode)}},undefined,writer)
-      const source=(await writer.query<{source:ScopeSource}>("SELECT read_scope_source($1,'memory',$2) AS source",[f.workspaceId,memory.id])).rows[0].source
+      const source={...(await writer.query<{source:ScopeSource}>("SELECT read_admitted_native_scope_snapshot($1,'memory',$2) AS source",[f.workspaceId,memory.id])).rows[0].source,resourceKind:'memory' as const,resourceId:memory.id}
       expect((await f.pool.query('SELECT id FROM memories WHERE id=$1',[memory.id])).rowCount).toBe(0)
       const admitted=await validateCallerScopeEvidence({sources:[source]},execution.security.ceiling,writer)
       expect(admitted.sources).toContainEqual(expect.objectContaining({resourceKind:'session_context_revision',resourceId:boundScopeSources(episode)[0].resourceId}))
-      await writer.query("UPDATE sessions SET effective_clearance='confidential' WHERE id=$1",[f.session.id])
+      expect((await writer.query(`SELECT ${contract}() AS changed`)).rows[0].changed).toBe(1)
       await expect(validateCallerScopeEvidence({sources:[source]},execution.security.ceiling,writer)).rejects.toMatchObject({reason:'caller_evidence_unavailable',retrySafe:false})
-    }) } finally {releaseApplicationTransactionBinding(writer);await writer.query('ROLLBACK');writer.release()}
+    }) } finally {releaseApplicationTransactionBinding(writer);await writer.query('ROLLBACK');writer.release();await f.pool.query(`DROP FUNCTION ${contract}()`)}
   })
 
   it('holds uncertified historical commitments before actual store retrieval and key computation', async () => {
@@ -419,6 +448,7 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
     expect(raw).toEqual({topic_label:'',summary:'',message_span:{},entity_refs:null})
     const original=(await f.pool.query('SELECT id,payload_sha256 FROM session_context_scope_revisions WHERE workspace_id=$1',[f.workspaceId])).rows
     await f.pool.query("UPDATE sessions SET effective_clearance='confidential' WHERE id=$1",[f.session.id])
+    f.session.effectiveClearance='confidential'
     expect(await store.listTopicsBySession({sessionId:f.session.id,authority:await f.modelContext(f.firstId)})).toEqual([])
     expect(await store.listTopicsBySession({sessionId:f.session.id,authority:await f.modelContext(f.secondId)})).toEqual(['Fictional admitted topic'])
     expect((await f.pool.query('SELECT id,payload_sha256 FROM session_context_scope_revisions WHERE workspace_id=$1',[f.workspaceId])).rows).toEqual(original)
@@ -554,18 +584,18 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
     expect(stream).not.toHaveBeenCalled()
     const context={...executionToolContext(authority.execution,{appId:'fixture'}),scopeAccumulator:authority.accumulator}
     const result=await runSessionStateDiff({provider,model:'fixture',sessionId:f.session.id,userId:f.firstId,assistantId:f.assistantId,
-      store,recentTurns,openCommitments:[],authority,assertInputAuthority:()=>assertSourceModelInputAuthority(context)})
+      store,recentTurns,openCommitments:[],authority,assertInputAuthority:()=>admitModelInput(context)})
     expect(result.upserts).toBe(1)
     const open=await store.listOpenBySession(f.session.id,authority)
     expect(open).toMatchObject([{key:'Fictional diff key'}])
     await f.pool.query("UPDATE workspace_members SET clearance='public' WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.firstId])
     await expect(runSessionStateDiff({provider,model:'fixture',sessionId:f.session.id,userId:f.firstId,assistantId:f.assistantId,
-      store,recentTurns,openCommitments:open,authority,assertInputAuthority:()=>assertSourceModelInputAuthority(context)})).rejects.toMatchObject({reason:'authority_changed'})
+      store,recentTurns,openCommitments:open,authority,assertInputAuthority:()=>admitModelInput(context)})).rejects.toMatchObject({reason:'authority_changed'})
     expect(stream).toHaveBeenCalledOnce()
     const other=await f.modelContext(f.secondId),otherContext={...executionToolContext(other.execution,{appId:'fixture'}),scopeAccumulator:other.accumulator}
     await runSessionStateDiff({provider,model:'fixture',sessionId:f.session.id,userId:f.secondId,assistantId:f.assistantId,
       store,recentTurns,openCommitments:await store.listOpenBySession(f.session.id,other),authority:other,
-      assertInputAuthority:()=>assertSourceModelInputAuthority(otherContext)})
+      assertInputAuthority:()=>admitModelInput(otherContext)})
     expect(stream).toHaveBeenCalledTimes(2)
   })
 
@@ -662,30 +692,42 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
     expect(current.execution.security.access.userId).not.toBe(f.session.userId)
     const block = await buildDeliveryConversationStateBlock({ store, authority: current, sessions: [{ sessionId: f.session.id }] })
     expect(block).toContain('Fictional delegated commitment')
-    await expect(assertSourceModelInputAuthority({ ...executionToolContext(current.execution, { appId: 'fixture' }),
+    await expect(admitModelInput({ ...executionToolContext(current.execution, { appId: 'fixture' }),
       scopeAccumulator: current.accumulator })).resolves.toBeUndefined()
     await f.pool.query("UPDATE workspace_members SET clearance='public' WHERE workspace_id=$1 AND user_id=$2", [f.workspaceId, f.firstId])
-    await expect(assertSourceModelInputAuthority({ ...executionToolContext(current.execution, { appId: 'fixture' }),
+    await expect(admitModelInput({ ...executionToolContext(current.execution, { appId: 'fixture' }),
       scopeAccumulator: current.accumulator })).rejects.toMatchObject({ reason: 'authority_changed' })
     const second = { execution: await f.delegatedExecution(f.secondId), accumulator: new ContextScopeAccumulator() }
     expect(await buildDeliveryConversationStateBlock({ store, authority: second, sessions: [{ sessionId: f.session.id }] })).toContain('Fictional delegated commitment')
-    await expect(assertSourceModelInputAuthority({ ...executionToolContext(second.execution, { appId: 'fixture' }),
+    await expect(admitModelInput({ ...executionToolContext(second.execution, { appId: 'fixture' }),
       scopeAccumulator: second.accumulator })).resolves.toBeUndefined()
+    await f.pool.query("UPDATE sessions SET effective_clearance='confidential' WHERE id=$1",[f.session.id])
+    f.session.effectiveClearance='confidential'
     independent = await persistentSourceFixture(f)
     const external = { execution: await f.delegatedExecution(), accumulator: new ContextScopeAccumulator() }
     external.accumulator.noteSource(independent.root)
-    await expect(assertSourceModelInputAuthority({ ...executionToolContext(external.execution, { appId: 'fixture' }),
+    await expect(admitModelInput({ ...executionToolContext(external.execution, { appId: 'fixture' }),
       scopeAccumulator: external.accumulator })).rejects.toMatchObject({ code: 'source_access_denied' })
     expect(await independent.independentlyAuthorized()).toBe(true)
   })
 
-  it('carries actual private caller evidence through a delegated consult accumulator, returned evidence and canonical transcript',async()=>{
+  it.each(['memory','session_context_revision'] as const)('carries actual caller %s through a delegated consult and canonical transcript',async(resourceKind)=>{
     fixture=await persistentContextFixture();const f=fixture,parent=await f.execution(f.firstId)
     const memory=await createMemory({workspaceId:f.workspaceId,userId:f.firstId,assistantId:f.assistantId,createdByUserId:f.firstId,summary:'Fictional private caller evidence',sensitivity:'internal'})
     const snapshot=(await f.pool.query<{source:ScopeSource & {held:boolean}}>("SELECT read_scope_source($1,'memory',$2) AS source",[f.workspaceId,memory.id])).rows[0].source
     expect(snapshot.held).toBe(false)
-    const source:ScopeSource={workspaceId:f.workspaceId,userId:f.firstId,assistantId:null,sensitivity:'internal',compartments:[],projectIds:[],resourceKind:'memory',resourceId:memory.id,version:memory.scopeVersion}
-    expect(snapshot).toMatchObject(source)
+    const privateMemory:ScopeSource={workspaceId:f.workspaceId,userId:f.firstId,assistantId:null,sensitivity:'internal',compartments:[],projectIds:[],resourceKind:'memory',resourceId:memory.id,version:memory.scopeVersion}
+    expect(snapshot).toMatchObject(privateMemory)
+    let source=privateMemory
+    if(resourceKind==='session_context_revision'){
+      const history=await f.history()
+      const commitment=await createDbSessionStateStore().upsert({sessionId:f.session.id,userId:f.ownerId,assistantId:f.assistantId,
+        key:'Fictional consult commitment',summary:'Fictional consult source',source:'tool',authority:await f.modelContext(),
+        derivation:{producer:'fixture:consult',sources:history.flatMap(boundScopeSources)}})
+      source=boundScopeSources(commitment)[0]
+      expect(source.resourceKind).toBe(resourceKind)
+      await expect(validateCallerScopeEvidence({sources:[source]},parent.security.ceiling)).rejects.toMatchObject({diagnostic:'source_unverifiable'})
+    }
     const answer:StreamFn=async function*(){yield{type:'message_start',model:'gemini-3.6-flash-pro'};yield{type:'text_delta',text:'Fictional private consult result'};yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:1,outputTokens:1}}}
     const provider:LLMProvider={name:'fixture',models:['gemini-3.6-flash-pro'],stream:answer,createSession(options){return{send:()=>answer({model:options.model,systemPrompt:options.systemPrompt,messages:[]})}}}
     const returned:ScopeEvidence[]=[],execute=createCalleeExecutor({provider,tools:new Map(),memoryStore:createDbMemoryStore(),capabilityStore:createDbCapabilityStore()})
@@ -696,8 +738,8 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
     expect(returned).toContainEqual(expect.objectContaining({sources:expect.arrayContaining([source])}))
     const rows=(await f.pool.query(`SELECT m.id,s.user_id,s.visibility FROM session_messages m JOIN sessions s ON s.id=m.session_id
       JOIN scope_derivations d ON d.resource_kind='session_message' AND d.resource_id=m.id AND d.workspace_id=$1
-      JOIN scope_derivation_sources edge ON edge.workspace_id=d.workspace_id AND edge.derivation_id=d.id
-      WHERE m.role='assistant' AND edge.source_kind='memory' AND edge.source_id=$2`,[f.workspaceId,memory.id])).rows
+      CROSS JOIN LATERAL application_scope_lineage(d.workspace_id,ARRAY[d.resource_kind],ARRAY[d.resource_id],ARRAY[d.resource_version]) edge
+      WHERE m.role='assistant' AND edge.kind=$2 AND edge.id=$3`,[f.workspaceId,source.resourceKind,source.resourceId])).rows
     expect(rows.length).toBeGreaterThan(0)
     for(const row of rows)expect(row).toMatchObject({user_id:f.firstId,visibility:'personal'})
     const before=(await f.pool.query('SELECT count(*)::int n FROM session_messages WHERE workspace_id=$1',[f.workspaceId])).rows[0].n
@@ -739,9 +781,9 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
     expect(prompts).toHaveLength(1);expect(prompts[0]).toContain('Fictional attributed identity');expect(prompts[0]).toContain('Fictional bounded planner')
     expect(identities[0].some(root=>root.resourceKind==='application_field')).toBe(true)
     if(surface==='delegated-consult')expect(returned.some(evidence=>evidence.sources?.some(root=>root.resourceKind==='application_field'))).toBe(true)
-    const retained=(await f.pool.query(`SELECT m.id,edge.source_kind,edge.source_id FROM session_messages m
+    const retained=(await f.pool.query(`SELECT m.id,edge.kind AS source_kind,edge.id AS source_id FROM session_messages m
       JOIN scope_derivations d ON d.resource_kind='session_message' AND d.resource_id=m.id AND d.workspace_id=m.workspace_id
-      JOIN scope_derivation_sources edge ON edge.workspace_id=d.workspace_id AND edge.derivation_id=d.id
+      CROSS JOIN LATERAL application_scope_lineage(d.workspace_id,ARRAY[d.resource_kind],ARRAY[d.resource_id],ARRAY[d.resource_version]) edge
       WHERE m.workspace_id=$1 AND m.role='assistant'`,[f.workspaceId])).rows
     expect(retained.some(row=>row.source_kind==='entity'&&row.source_id===self.id)).toBe(true)
     for(const field of identities[0].filter(root=>root.resourceKind==='application_field'))expect(retained.some(row=>row.source_kind==='application_field'&&row.source_id===field.resourceId)).toBe(true)
@@ -750,10 +792,10 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
     expect(await invoke()).toContain('Fictional attributed response')
     expect(prompts).toHaveLength(2);expect(prompts[1]).not.toContain('Fictional bounded planner')
     expect(identities[1].some(root=>root.resourceKind==='application_field')).toBe(true)
-    const emptyRetained=(await f.pool.query(`SELECT edge.source_id,edge.source_version FROM session_messages m
+    const emptyRetained=(await f.pool.query(`SELECT edge.id AS source_id,edge.version AS source_version FROM session_messages m
       JOIN scope_derivations d ON d.resource_kind='session_message' AND d.resource_id=m.id AND d.workspace_id=m.workspace_id
-      JOIN scope_derivation_sources edge ON edge.workspace_id=d.workspace_id AND edge.derivation_id=d.id
-      WHERE m.workspace_id=$1 AND m.role='assistant' AND edge.source_kind='application_field'`,[f.workspaceId])).rows
+      CROSS JOIN LATERAL application_scope_lineage(d.workspace_id,ARRAY[d.resource_kind],ARRAY[d.resource_id],ARRAY[d.resource_version]) edge
+      WHERE m.workspace_id=$1 AND m.role='assistant' AND edge.kind='application_field'`,[f.workspaceId])).rows
     for(const root of identities[1].filter(root=>root.resourceKind==='application_field'))expect(emptyRetained).toContainEqual({source_id:root.resourceId,source_version:root.version})
     const before=(await f.pool.query("SELECT count(*)::int n FROM session_messages WHERE workspace_id=$1 AND role='assistant'",[f.workspaceId])).rows[0].n
     contractAfterRead=true
@@ -827,11 +869,11 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
     expect(prompts[0]).toContain('# Open commitments (delivery conversation)')
     expect(prompts[0]).toContain('`Fictional delivery key`')
     expect(prompts[0]).toContain('Fictional delivery detail')
-    const consumed = (await f.pool.query(`SELECT d.resource_id,s.source_id FROM scope_derivations d
-      JOIN scope_derivation_sources s ON s.derivation_id=d.id AND s.workspace_id=d.workspace_id
+    const consumed = (await f.pool.query(`SELECT d.resource_id,s.id AS source_id FROM scope_derivations d
+      CROSS JOIN LATERAL application_scope_lineage(d.workspace_id,ARRAY[d.resource_kind],ARRAY[d.resource_id],ARRAY[d.resource_version]) s
       JOIN session_messages m ON m.id=d.resource_id JOIN sessions ss ON ss.id=m.session_id
       WHERE d.workspace_id=$1 AND d.resource_kind='session_message' AND ss.assistant_id=$2
-        AND s.source_kind='session_context_revision' AND s.source_id=$3`,
+        AND s.kind='session_context_revision' AND s.id=$3`,
     [f.workspaceId, calleeId, boundScopeSources(tracked)[0].resourceId])).rows
     expect(consumed.length).toBeGreaterThan(0)
   })
@@ -870,9 +912,9 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
     const reader=await f.modelContext(f.firstId)
     reader.accumulator.note({sources:boundScopeSources(row)})
     const context={...executionToolContext(reader.execution,{appId:'fixture'}),scopeAccumulator:reader.accumulator}
-    await expect(assertSourceModelInputAuthority(context)).resolves.toBeUndefined()
+    await expect(admitModelInput(context)).resolves.toBeUndefined()
     await f.pool.query("UPDATE sessions SET effective_clearance='confidential' WHERE id=$1",[f.session.id])
-    await expect(assertSourceModelInputAuthority(context)).rejects.toBeDefined()
+    await expect(admitModelInput(context)).rejects.toBeDefined()
   })
 
   it('rejects payload and lineage rewriting and plaintext reinsertion after certification', async () => {

@@ -14,13 +14,13 @@ import request from 'supertest'
 import { createHash, createHmac } from 'node:crypto'
 import { createTestApp } from './helpers.js'
 
-vi.mock('@use-brian/core', async (io) => ({
-  ...(await io<typeof import('@use-brian/core')>()),
+vi.mock('@use-brian/core/workflow/executor.js', async (io) => ({
+  ...(await io<typeof import('@use-brian/core/workflow/executor.js')>()),
   advanceWorkflowRun: vi.fn(),
 }))
 
 import { workflowWebhookRoutes } from '../workflow-webhooks.js'
-import { advanceWorkflowRun } from '@use-brian/core'
+import { advanceWorkflowRun } from '@use-brian/core/workflow/executor.js'
 
 const mockAdvance = vi.mocked(advanceWorkflowRun)
 

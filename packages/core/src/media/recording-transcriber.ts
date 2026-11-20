@@ -23,7 +23,7 @@ import {
   type RecordingTranscriptionResult,
   type TranscribeRecordingOptions,
 } from './transcribe-recording.js'
-import type { GoogleTransport } from '../providers/google-transport.js'
+import type { GoogleTransport } from '@use-brian/agent-runtime/providers/google-transport.js'
 
 export type RecordingTranscribeRequest = {
   /** The extracted small audio track (16 kHz mono AAC from the worker). */

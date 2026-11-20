@@ -46,6 +46,8 @@ async function world() {
     salesInternal: `SALES_INTERNAL_${w.slice(0, 8)}`,
     salesConfidential: `SALES_CONFIDENTIAL_${w.slice(0, 8)}`,
     financeInternal: `FINANCE_INTERNAL_${w.slice(0, 8)}`,
+    narrowSalesInternal: `NARROW_INTERNAL_SALES_${w.slice(0, 8)}`,
+    narrowSalesConfidential: `NARROW_CONFIDENTIAL_SALES_${w.slice(0, 8)}`,
   }
   for (const [u, name] of [[owner, 'Fixture owner'], [alice, 'Alice'], [carol, 'Carol'], [bob, 'Bob'], [admin, 'Admin']]) {
     await query(`INSERT INTO users(id, auth_provider, auth_provider_id, name, email) VALUES ($1::uuid, 'test', $1::text, $2, $1::text || '@example.com')`, [u, name])
@@ -75,6 +77,12 @@ async function world() {
     [secret.financeInternal, 'internal', [`team:${finance}`]],
   ] as const) {
     await createMemory({ workspaceId: w, assistantId: assistant, userId: null, createdByUserId: owner, summary, sensitivity, compartments: [...compartments] })
+  }
+  // A standard assistant reads its own partition. Seed both tiers there so
+  // the clearance assertion runs after, and independently of, that boundary.
+  for (const [summary, sensitivity] of [[secret.narrowSalesInternal, 'internal'], [secret.narrowSalesConfidential, 'confidential']] as const) {
+    await createMemory({ workspaceId: w, assistantId: narrow, userId: null, createdByUserId: owner,
+      summary, sensitivity, compartments: [`team:${sales}`] })
   }
   return { w, owner, alice, carol, bob, admin, assistant, narrow, sales, finance, secret }
 }
@@ -150,6 +158,7 @@ describe('[COMP:api/wechat-inbound] WeChat staff access on PostgreSQL (A6, A7, A
     const c = await (await turn(f, carol)).memories()
     expect(c).toContain(f.secret.salesConfidential) // a permitted department member
     expect(c).not.toContain(f.secret.financeInternal)
+    expect(c).not.toContain(f.secret.narrowSalesInternal)
 
     const b = await (await turn(f, bob)).memories()
     expect(b).toContain(f.secret.financeInternal)
@@ -159,8 +168,9 @@ describe('[COMP:api/wechat-inbound] WeChat staff access on PostgreSQL (A6, A7, A
     // The narrower assistant still caps a permitted member.
     const nt = await turn(f, carol, f.narrow)
     const narrowed = await nt.memories()
-    expect(narrowed).toContain(f.secret.salesInternal)
-    expect(narrowed).not.toContain(f.secret.salesConfidential)
+    expect(narrowed).toContain(f.secret.narrowSalesInternal)
+    expect(narrowed).not.toContain(f.secret.narrowSalesConfidential)
+    expect(narrowed).not.toContain(f.secret.salesInternal)
 
     // Persistence scope: a turn never writes into a department its actor lacks.
     const aliceTurn = await turn(f, alice)

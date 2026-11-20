@@ -1,7 +1,7 @@
 /** One thin transport over the canonical application dispatcher. [COMP:api/application-auth] */
 import express, { Router, type NextFunction, type Request, type RequestHandler, type Response } from 'express'
 import { z } from 'zod'
-import type { ExecutionContext } from '@use-brian/core'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { ApplicationPlatformError, applicationCommandSchema } from '@use-brian/shared'
 import { query } from '../db/client.js'
 import { AuthorityChangedError } from '../context-scope/authority-lease.js'

@@ -1,8 +1,8 @@
 import { assertBrowserTaskPublication, browserPublicationBusy, type BrowserTaskPublication } from './task-publication.js'
-import { AuthoritySourceSchema, type AuthoritySource } from '../security/authority-source.js'
+import { AuthoritySourceSchema, type AuthoritySource } from '@use-brian/agent-runtime/security/authority-source.js'
 import { parseBrowserInputScope, mergeBrowserInputScope, type BrowserInputScope } from './input-scope.js'
-import { accessCeilingContains, parseAuthoringAuthority, type AuthoringAuthority } from '../security/access-ceiling.js'
-import type { CurrentAuthorityBoundary } from '../tools/types.js'
+import { accessCeilingContains, parseAuthoringAuthority, type AuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import type { CurrentAuthorityBoundary } from '@use-brian/agent-runtime/tools/types.js'
 /**
  * The stateless sandbox orchestrator (spec §5): resolves a chat session's
  * active cloud task (creating one, budget-gated, with vault re-injection),

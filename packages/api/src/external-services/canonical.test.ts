@@ -3,7 +3,7 @@ import express from 'express'
 import request from 'supertest'
 import { externalServiceCanonicalRoutes } from './canonical.js'
 import type { ExternalServiceContext } from './context.js'
-import type { ExecutionContext } from '@use-brian/core'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { ApplicationPlatformError } from '@use-brian/shared'
 
 const serviceId = '10000000-0000-4000-8000-000000000001'

@@ -64,9 +64,9 @@ import { z } from 'zod'
 import { createDrawingTools } from './drawing-tools.js'
 import type { DrawingAction, DrawingEditResult } from '@use-brian/shared/drawing'
 import { stripFollowUps } from '@use-brian/shared'
-import type { Tool } from '../tools/types.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { buildDrawingAwareTool as buildTool } from './drawing-result.js'
-import { formatToolError } from '../engine/tool-executor.js'
+import { formatToolError } from '@use-brian/agent-runtime/engine/tool-executor.js'
 import type { CrmStore } from '../crm/types.js'
 import type { TaskStore } from '../tasks/types.js'
 import type { WorkflowRunStore } from '../workflow/types.js'
@@ -192,7 +192,7 @@ export type DocPageStore = {
   getVersionedPage(
     userId: string,
     pageId: string,
-    context?: import('../tools/types.js').ToolContext,
+    context?: import('@use-brian/agent-runtime/tools/types.js').ToolContext,
   ): Promise<DocPageRead | null>
 
   /**

@@ -20,7 +20,7 @@
  */
 
 import { z } from 'zod'
-import { formatToolError } from '@use-brian/core'
+import { formatToolError } from '@use-brian/agent-runtime/engine/tool-executor.js'
 
 /** What the SDK reads off a failed parse: `.message` first, `.issues` as fallback. */
 type FriendlyFailure = {

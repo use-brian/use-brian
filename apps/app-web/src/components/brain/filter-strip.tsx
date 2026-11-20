@@ -28,15 +28,12 @@ type Props = {
    * Chat-home flip: collapse the primitive chips + pending toggle behind a
    * single "Filter" popover so the Brain reads as a clean reading surface
    * (web-ui.md → Brain is a reading/trust surface). Search stays inline.
-   * Only the horizontal FilterStrip honors this — the vertical FilterRail
-   * is the flag-off rail and is left untouched.
    */
   collapsed?: boolean;
   /**
    * Hide the "Pending changes" toggle. The Brain's section IA replaced it
    * with the sidebar's Reviews row, so the strip mounted under the Entries
-   * section never shows it. Only the horizontal FilterStrip honors this —
-   * the vertical FilterRail is the flag-off rail and is left untouched.
+   * section never shows it.
    */
   hidePending?: boolean;
   /**
@@ -103,8 +100,7 @@ function isChipVisible(
 /**
  * The wrap of primitive-type chips. Extracted so the collapsed FilterStrip's
  * Filter popover can reuse the exact chip rendering. The expanded FilterStrip
- * and the vertical FilterRail keep their own inline chip loops verbatim so the
- * flag-off paths stay unchanged.
+ * retains its inline chip loop.
  */
 function PrimitiveChips({
   selectedPrimitives,
@@ -307,96 +303,6 @@ export function FilterStrip({
             {t.brainPage.filters.pendingOnly}
           </button>
         )}
-      </div>
-    </div>
-  );
-}
-
-/**
- * Vertical variant of the filter strip, mounted inside the brain data
- * card as a left rail (~180px wide). Search at top, primitive filters
- * as a stacked nav list, pending toggle pinned at the bottom of the
- * column. Same controlled-state contract as FilterStrip so the parent
- * (Brain page) keeps its URL-state / analytics handling.
- */
-export function FilterRail({
-  selectedPrimitives,
-  onTogglePrimitive,
-  search,
-  onSearch,
-  pendingOnly,
-  onTogglePending,
-  presentPrimitives,
-}: Props) {
-  const t = useT();
-  const allActive = selectedPrimitives.length === 0;
-  const loading = presentPrimitives == null;
-
-  return (
-    <div className="hidden lg:flex flex-col gap-3 px-3 py-3 border-r border-border bg-muted/20 w-[180px] shrink-0 min-h-0 overflow-y-auto">
-      <input
-        type="search"
-        value={search}
-        onChange={(e) => onSearch(e.target.value)}
-        placeholder={t.brainPage.search.placeholder}
-        className={cn(
-          "w-full px-2.5 py-1.5 text-[16px] md:text-[12px] bg-background border border-border rounded-md",
-          "outline-none focus:ring-2 focus:ring-ring/50 placeholder:text-muted-foreground/60",
-        )}
-      />
-      <div className="flex flex-col gap-0.5">
-        {loading
-          ? SKELETON_CHIP_WIDTHS.map((w, i) => (
-              <div key={i} aria-hidden className="px-2.5 py-1.5">
-                <div
-                  className="h-4 rounded bg-muted animate-pulse"
-                  style={{ width: w }}
-                />
-              </div>
-            ))
-          : ALL.filter(({ key }) =>
-              isChipVisible(key, presentPrimitives, selectedPrimitives),
-            ).map(({ key }) => {
-              const active =
-                key === "all" ? allActive : selectedPrimitives.includes(key);
-              const label =
-                t.brainPage.filters[key as keyof typeof t.brainPage.filters];
-              return (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => {
-                    if (key === "all") {
-                      selectedPrimitives.forEach(onTogglePrimitive);
-                    } else {
-                      onTogglePrimitive(key);
-                    }
-                  }}
-                  className={cn(
-                    "w-full text-left px-2.5 py-1.5 text-[12px] rounded-md transition-colors",
-                    active
-                      ? "bg-primary/10 text-primary font-medium"
-                      : "text-muted-foreground hover:text-foreground hover:bg-muted",
-                  )}
-                >
-                  {label}
-                </button>
-              );
-            })}
-      </div>
-      <div className="mt-auto pt-2 border-t border-border">
-        <button
-          type="button"
-          onClick={onTogglePending}
-          className={cn(
-            "w-full text-left px-2.5 py-1.5 text-[12px] rounded-md transition-colors",
-            pendingOnly
-              ? "bg-amber-500/10 text-amber-700 dark:text-amber-400 font-medium"
-              : "text-muted-foreground hover:text-foreground hover:bg-muted",
-          )}
-        >
-          {t.brainPage.filters.pendingOnly}
-        </button>
       </div>
     </div>
   );

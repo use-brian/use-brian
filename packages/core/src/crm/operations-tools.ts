@@ -7,11 +7,11 @@
  */
 
 import { z } from 'zod'
-import type { AuthoringAuthority } from '../security/access-ceiling.js'
+import type { AuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { CrmIntegrationGrantsSchema, CrmCredentialDepartmentSelectionSchema, CrmCredentialParentSchema, type CrmCredentialParent } from './integration-authority.js'
 import { pinToolAuthoringAuthority } from '../security/tool-authority.js'
-import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
-import { missingToolCapability, isAttendedTurn } from '../tools/capability-gate.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { missingToolCapability, isAttendedTurn } from '@use-brian/agent-runtime/tools/capability-gate.js'
 import { AssociationPlanInputSchema, AssociationEventInputSchema } from '../association/domain.js'
 import {
   CrmDeliveryChannelSchema,

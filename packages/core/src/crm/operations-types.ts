@@ -1,3 +1,5 @@
+import { CrmOperationsStableKeySchema, CrmDomainEventTypeSchema, CrmOperationsError, canonicalCrmRequest, crmOperationsSha256 } from '../application-platform/operation-contract.js'
+import type { CrmOperationsErrorCode } from '../application-platform/operation-contract.js'
 /**
  * Pure, closed-world contracts for agent-native CRM operations.
  *
@@ -8,10 +10,9 @@
  * [COMP:crm/operations-contract]
  */
 
-import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import { DeliveryCommandSchema } from './delivery-oversight.js'
-import { parseAuthoringAuthority, type AuthoringAuthority } from '../security/access-ceiling.js'
+import { parseAuthoringAuthority, type AuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { APP_LOCALES } from '@use-brian/shared'
 import { campaignAttributionContextSchema } from '@use-brian/shared/campaigns'
 import { CrmCredentialParentSchema, CrmCredentialDepartmentSelectionSchema, CrmIntegrationAuthoritySchema, requireCrmIntegrationOperation, type CrmIntegrationOperation } from './integration-authority.js'
@@ -67,8 +68,6 @@ import {
 } from './erp-bridge.js'
 
 export const CrmOperationsUuidSchema = z.string().uuid()
-export const CrmOperationsStableKeySchema = z.string().trim().toLowerCase()
-  .regex(/^[a-z][a-z0-9_-]{0,62}$/)
 export const CrmOperationsInstantSchema = z.string().datetime({ offset: true })
 export const CrmWordingLocaleSchema = z.enum(APP_LOCALES)
 export const CrmLocaleWordingsSchema = z.record(CrmWordingLocaleSchema, z.string().trim().min(1).max(20_000))
@@ -773,25 +772,6 @@ export const CrmOperationsCommandSchema = z.union([
 ])
 export type CrmOperationsCommand = z.infer<typeof CrmOperationsCommandSchema>
 
-export const CrmDomainEventTypeSchema = z.enum([
-  'crm.delivery_projection.changed',
-  'crm.submission.received',
-  'crm.submission.updated',
-  'crm.consent.changed',
-  'crm.suppression.changed',
-  'crm.entitlement.changed',
-  'crm.participation.changed',
-  'crm.deal.stage_changed',
-  'association.inventory.sold_out',
-  'association.inventory.available',
-  'crm.reference.assigned',
-  'crm.reference.replaced',
-  'crm.reference.retired',
-  'crm.change_request.submitted',
-  'crm.change_request.decided',
-])
-export type CrmDomainEventType = z.infer<typeof CrmDomainEventTypeSchema>
-
 export type CrmOperationsCommandResult = {
   command: CrmOperationsCommand['kind']
   record: Record<string, unknown>
@@ -814,50 +794,6 @@ export interface CrmHistoricalSubmissionImportPort {
     context: CrmOperationsContext,
     input: ImportHistoricalCrmSubmission,
   ): Promise<ImportHistoricalCrmSubmissionResult>
-}
-
-export type CrmOperationsErrorCode =
-  | 'invalid_input'
-  | 'not_authorized'
-  | 'not_found'
-  | 'catalog_key_invalid'
-  | 'conflict'
-  | 'idempotency_conflict'
-  | 'identity_conflict'
-  | 'invalid_transition'
-  | 'payload_too_large'
-  | 'credential_revoked'
-  | 'empty_import'
-
-export class CrmOperationsError extends Error {
-  constructor(
-    readonly code: CrmOperationsErrorCode,
-    message: string,
-    readonly details: Record<string, unknown> = {},
-  ) {
-    super(message)
-    this.name = 'CrmOperationsError'
-  }
-}
-
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalize)
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, item]) => [key, canonicalize(item)]),
-    )
-  }
-  return value
-}
-
-export function canonicalCrmRequest(value: unknown): string {
-  return JSON.stringify(canonicalize(value))
-}
-
-export function crmOperationsSha256(value: unknown): string {
-  return createHash('sha256').update(canonicalCrmRequest(value)).digest('hex')
 }
 
 export function actorAuditIdentity(actor: CrmOperationsActor): {
@@ -1028,3 +964,6 @@ export function boundedCatalogDetails(
 export function assertBoundedArray(value: unknown): void {
   boundedArray(1_000, 131_072).parse(value)
 }
+
+export { CrmOperationsStableKeySchema, CrmDomainEventTypeSchema, CrmOperationsError, canonicalCrmRequest, crmOperationsSha256 } from '../application-platform/operation-contract.js'
+export type { CrmDomainEventType, CrmOperationsErrorCode } from '../application-platform/operation-contract.js'

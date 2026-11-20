@@ -78,7 +78,7 @@ describe('[COMP:api/session-turn-reconnect] reconnect relay frames', () => {
     expect(reconnectRelayFrames({ kind: 'turn_completed', sessionId: 'sess-1', payload })).toEqual({
       frames: [
         { event: 'turn_completed', data: payload },
-        { event: 'done', data: {} },
+        { event: 'done', data: { turnId: null } },
       ],
       finalize: true,
     })
@@ -93,22 +93,42 @@ describe('[COMP:api/session-turn-reconnect] reconnect relay frames', () => {
     const relay = reconnectRelayFrames({ kind: 'turn_completed', sessionId: 'sess-1', payload })
     expect(relay.finalize).toBe(true)
     expect(relay.frames[0]).toEqual({ event: 'turn_completed', data: payload })
-    expect(relay.frames[1]).toEqual({ event: 'done', data: {} })
+    expect(relay.frames[1]).toEqual({ event: 'done', data: { turnId: null } })
   })
 
   it('relays a sanitized failed outcome to a returning viewer', () => {
     const payload = { senderUserId: 'user-1', reason: 'failed' as const }
     expect(reconnectRelayFrames({ kind: 'turn_completed', sessionId: 'sess-1', payload })).toEqual({
-      frames: [{ event: 'turn_completed', data: payload }, { event: 'done', data: {} }],
+      frames: [{ event: 'turn_completed', data: payload }, { event: 'done', data: { turnId: null } }],
       finalize: true,
     })
   })
 
   it.each(['timeout', 'failed'])('backstop preserves abnormal %s status after a missed event', status => {
     expect(reconnectBackstopFrames(status)).toEqual([
-      { event: 'turn_completed', data: { reason: status } }, { event: 'done', data: {} },
+      { event: 'turn_completed', data: { turnId: null, reason: status } }, { event: 'done', data: { turnId: null } },
     ])
     expect(reconnectBackstopFrames('idle')).toEqual(reconnectBackstopFrames())
+  })
+
+  it('only closes the claimed turn and carries its public identity through done', () => {
+    const original = 'a'.repeat(64)
+    const successor = 'b'.repeat(64)
+    const payload = { senderUserId: 'user-1', turnId: original, reason: 'publication_recovered' as const }
+    const event = { kind: 'turn_completed' as const, sessionId: 'sess-1', payload }
+    for (const current of [null, successor]) {
+      expect(reconnectRelayFrames(event, current)).toEqual({
+        frames: [{ event: 'turn_completed', data: payload }], finalize: false,
+      })
+    }
+    expect(reconnectRelayFrames(event, original)).toEqual({
+      frames: [{ event: 'turn_completed', data: payload }, { event: 'done', data: { turnId: original } }],
+      finalize: true,
+    })
+    expect(reconnectBackstopFrames('idle', original, 'stopped_by_user')).toEqual([
+      { event: 'turn_completed', data: { turnId: original, reason: 'stopped_by_user' } },
+      { event: 'done', data: { turnId: original } },
+    ])
   })
 
   it('ignores bus kinds that are not part of a personal turn', () => {
@@ -145,8 +165,8 @@ describe('[COMP:api/session-turn-reconnect] reconnect relay frames', () => {
 
   it('backstop: the DB-status poll sends the same terminal pair with an empty completion', () => {
     expect(reconnectBackstopFrames()).toEqual([
-      { event: 'turn_completed', data: {} },
-      { event: 'done', data: {} },
+      { event: 'turn_completed', data: { turnId: null } },
+      { event: 'done', data: { turnId: null } },
     ])
     // Same terminal shape as the bus path, so a client has one `done` to wait on.
     const viaBus = reconnectRelayFrames({

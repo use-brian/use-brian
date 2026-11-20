@@ -11,7 +11,7 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool, type ToolContext } from '../types.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { type Json, asRows, str, num, bool, obj, projectList, connectorError } from './_connector-result.js'
 import {
   SHOPIFYQL_CATALOG,

@@ -1,21 +1,27 @@
 import { afterAll,beforeEach,describe,expect,it } from 'vitest'
 import { createSessionTitleWorker,restrictTitleJobAuthority } from '../../workers/session-title-worker.js'
 import { readSessionTitle,publishSessionTitle } from '../session-title-store.js'
-import { readAdmittedSessionQuery } from '../session-query-reader.js'
-import { boundScopeSources,type LLMProvider } from '@use-brian/core'
+import { readAdmittedSessionQuery } from '../conversation-store.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { ContextScopeAccumulator } from '@use-brian/core'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import { getAppPool,getPool } from '../client.js'
 import { enqueueNativeSessionTitleJob,claimSessionTitleJob,finishSessionTitleJob,sessionTitleJobCurrent } from '../session-title-jobs.js'
 import { persistentContextFixture } from '../../application-platform/__tests__/fixtures/persistent-context.js'
+import pg from 'pg'
+import { bootstrapConnectionString } from '../../__tests__/fixtures/bootstrap-role.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
+// Barrier observation only: the ordinary owner cannot read the app_user publication's
+// state or query in pg_stat_activity.
+const observer=new pg.Pool({connectionString:await bootstrapConnectionString(),max:1})
 const f=await persistentContextFixture()
 const authority={execution:await f.execution(),accumulator:new ContextScopeAccumulator()}
 const input={authority,claims:{userId:f.ownerId},userMessageId:randomUUID()}
 beforeEach(async()=>{await f.pool.query('DELETE FROM session_title_jobs WHERE session_id=$1',[f.session.id]);await f.pool.query("UPDATE sessions SET status='idle' WHERE id=$1",[f.session.id])})
-afterAll(async()=>{try{await f.cleanup()}finally{await getAppPool().end();await getPool().end()}})
+afterAll(async()=>{try{await f.cleanup()}finally{await getAppPool().end();await getPool().end();await observer.end()}})
 const ready=()=>f.pool.query("UPDATE session_title_jobs SET available_at=now()-interval '1 second' WHERE session_id=$1",[f.session.id])
 describe.sequential('[COMP:api/session-title-jobs] durable queue ownership',()=>{
  it('revokes inherited table grants when the application role already exists',async()=>{
@@ -104,8 +110,8 @@ describe.sequential('[COMP:api/session-title-jobs] durable queue ownership',()=>
    guarded.execution.security.authority.assertCurrent=async()=>{
     await current()
     // Detect the real final boundary rather than counting nested admission checks.
-    const afterPublication=(await race.pool.query(`SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
-     AND state='idle in transaction' AND query LIKE 'SELECT publish_native_session_context_revision(%'`)).rowCount!==0
+    const afterPublication=(await observer.query(`SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
+     AND state='idle in transaction' AND query='SET CONSTRAINTS ALL IMMEDIATE'`)).rowCount!==0
     if(afterPublication&&!paused){paused=true;reached();await resume}
    }
    publication=publishSessionTitle({sessionId:race.session.id,title:'Fictional serialized title',manual:false,expectedRevision:null,

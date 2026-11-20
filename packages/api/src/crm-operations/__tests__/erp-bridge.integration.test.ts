@@ -5,8 +5,15 @@ import { createServer, type Server } from 'node:http'
 import express from 'express'
 import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { CRM_INTEGRATION_OPERATIONS, CRM_INTEGRATION_RESOURCE_CATALOG, type AssociationServicePort, type CrmIntegrationGrant,
-  type CrmOperationsCommand, type CrmOperationsContext } from '@use-brian/core'
+import {
+  CRM_INTEGRATION_OPERATIONS,
+  CRM_INTEGRATION_RESOURCE_CATALOG,
+  type CrmIntegrationGrant
+} from '@use-brian/core/crm/integration-authority.js'
+import type {
+  CrmOperationsCommand,
+  CrmOperationsContext
+} from '@use-brian/core/crm/operations-types.js'
 import { createCrmOperationsService } from '../service.js'
 import { createDbCrmOperationsStore } from '../../db/crm-operations-store.js'
 import { createCrmIntegrationStore } from '../../db/crm-integration-store.js'
@@ -31,7 +38,7 @@ let server: Server, baseUrl = ''
 beforeAll(async () => {
   const app = express()
   app.use(express.json())
-  app.use('/api/crm/integration', crmIntegrationRoutes({ credentials: keys, service, association: {} as AssociationServicePort }))
+  app.use('/api/crm/integration', crmIntegrationRoutes({ credentials: keys, service,}))
   server = createServer(app)
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   baseUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`

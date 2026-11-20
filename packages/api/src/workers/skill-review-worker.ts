@@ -50,14 +50,13 @@
 
 import { classifySession, sessionKindSql } from '../session-kind.js'
 import { query } from '../db/client.js'
+import { sanitize, type AnalyticsStore } from '@use-brian/core/analytics/logger.js'
 import {
-  boundScopeSource,
   resourceScopeKey,
-  sanitize,
-  type AnalyticsStore,
   type DerivedWriteEvidence,
   type ScopeSource,
-} from '@use-brian/core'
+} from '@use-brian/agent-runtime/security/derived-scope.js'
+import { boundScopeSource } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { getRecentSessionMessages, type SessionMessage } from '../db/sessions.js'
 import {
   applyDerivedSkillPatch,
@@ -1070,7 +1069,7 @@ async function applyAction(
   //
   // We import the tool factory lazily inside the function so the worker
   // module doesn't pull in zod at boot before it's needed.
-  const { createSkillManageTool } = await import('@use-brian/core')
+  const { createSkillManageTool } = await import('@use-brian/core/skills/manage-tool.js')
   const tool = createSkillManageTool({
     workspaceId: deps.workspaceId,
     originatingAssistantId: deps.originatingAssistantId,

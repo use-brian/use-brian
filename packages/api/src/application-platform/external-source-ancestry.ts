@@ -1,6 +1,6 @@
 /** Immutable external obligations behind native inputs. [COMP:api/external-source-access] */
 import { z } from 'zod'
-import { resourceScopeKey, type ScopeSource } from '@use-brian/core'
+import { resourceScopeKey, type ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { SourceProtocolError } from '@use-brian/brian-app/connector'
 import type { PoolClient } from 'pg'
 import { getPool } from '../db/client.js'
@@ -16,7 +16,10 @@ export async function readExternalSourceAncestors(workspaceId: string, rawRoots:
   if (roots.some(source => source.workspaceId !== workspaceId)) denied()
   const ancestors: ScopeSource[] = []
   for (let offset = 0; offset < roots.length; offset += 100) {
-    const part = roots.slice(offset, offset + 100).filter(source => source.resourceKind !== 'external_source')
+    // A transcript certifies prior utterances, not continued access to their
+    // upstream connectors. Independently consumed sources remain in this cohort.
+    const part = roots.slice(offset, offset + 100).filter(source => source.resourceKind !== 'external_source'
+      && source.resourceKind !== 'private_transcript')
     if (!part.length) continue
     let rows: Array<{ nodeVersion: string; source: ScopeSource | null }>
     try {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { CustomPageTemplate } from '@use-brian/core'
+import type { CustomPageTemplate } from '@use-brian/core/doc/custom-template-types.js'
 import { InvalidRecordingBlueprintError, resolveRecordingBlueprint } from '../resolve-blueprint.js'
 
 const id = '00000000-0000-4000-8000-000000000001'

@@ -50,7 +50,7 @@
 
 import { OFFICIAL_CONNECTOR_TOOLS } from '@use-brian/shared'
 import type { AppStoreScope } from '@use-brian/brian-app'
-import { baseToolName } from '../mcp/inject.js'
+import { baseToolName } from '../mcp/tool-names.js'
 
 /** The minimum tier that may reach each classification. `destructive` is absent
  *  on purpose: there is no tier that reaches it. */

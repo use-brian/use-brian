@@ -18,7 +18,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import type { RetrievalActor } from '@use-brian/core'
+import type { RetrievalActor } from '@use-brian/core/retrieval/types.js'
 
 vi.mock('../client.js', () => ({
   queryWithRLS: vi.fn(),

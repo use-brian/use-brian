@@ -29,8 +29,9 @@
  * Component tag: [COMP:api/client-accrual].
  */
 
-import type { AnalyticsLogger } from '@use-brian/core'
-import { clientCompartment, sanitize as sanitizeAnalytics } from '@use-brian/core'
+import type { AnalyticsLogger } from '@use-brian/core/analytics/logger.js'
+import { sanitize as sanitizeAnalytics } from '@use-brian/core/analytics/logger.js'
+import { clientCompartment } from '@use-brian/agent-runtime/security/compartments.js'
 import {
   getOrCreateClientContactAndLeadEntities,
   getOrCreateClientContactEntity,

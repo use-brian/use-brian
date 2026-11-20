@@ -1,5 +1,6 @@
 import type { PoolClient } from 'pg'
-import { deriveResourceScope, type EntityLinkCreateParams, type ScopeSource } from '@use-brian/core'
+import type { EntityLinkCreateParams } from '@use-brian/core/entities/types.js'
+import { deriveResourceScope, type ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { assertExecutionResourceScope } from '../db/access-predicate.js'
 import { beginBrainAdmission, admitBrainCreate } from './brain-create-admission.js'
 import { validateEntityAssistant } from './entity-create-admission.js'

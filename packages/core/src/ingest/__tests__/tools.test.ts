@@ -24,8 +24,8 @@ import {
   type IngestRuleSummary,
   type UpdateIngestRuleInput,
 } from '../tools.js'
-import type { ToolContext } from '../../tools/types.js'
-import { ContextScopeAccumulator } from '../../security/context-scope.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 
 // ── Fixtures ─────────────────────────────────────────────────────────
 

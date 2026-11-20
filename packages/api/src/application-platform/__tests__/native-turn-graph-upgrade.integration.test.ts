@@ -7,6 +7,7 @@ import {getAppPool,getPool} from '../../db/client.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 const pool=getPool()
+const canonical=(await pool.query("SELECT to_regprocedure('conversation_prepare_publications(uuid,uuid,jsonb)') IS NOT NULL current")).rows[0].current===true
 const migration=(await readFile(new URL('../../../migrations/8198_native_turn_graph_representation.sql',import.meta.url),'utf8'))
  .replace(/^BEGIN;\n/m,'').replace(/\nCOMMIT;\s*$/,'')
 const predecessor=await readFile(new URL('../../../migrations/8183_native_turn_requirements.sql',import.meta.url),'utf8')
@@ -16,7 +17,7 @@ const originalTopology=predecessor.slice(bodyStart,predecessor.indexOf('$$;',bod
 const originalHash=createHash('sha256').update(originalTopology).digest('hex')
 const boundary=process.env.BRIAN_NATIVE_GRAPH_UPGRADE_BOUNDARY==='8197'
  ||(await pool.query(`SELECT encode(sha256(convert_to(prosrc,'UTF8')),'hex')=$1 predecessor
-  FROM pg_proc WHERE oid='native_turn_topology(jsonb,jsonb)'::regprocedure`,[originalHash])).rows[0]?.predecessor===true
+  FROM pg_proc WHERE oid=to_regprocedure('native_turn_topology(jsonb,jsonb)')`,[originalHash])).rows[0]?.predecessor===true
 const guards=`SELECT native_turn_helpers_current() reader,native_turn_publication_contract() publication,
  application_native_worklist_helpers_current() worklist,application_native_dependency_batch_helpers_current() dependency,
  application_native_field_reference_helpers_current() reference,application_memory_statement_helpers_current() memory`
@@ -34,7 +35,12 @@ async function replaceBody(client:PoolClient,signature:string,body:string){
 }
 describe.sequential('[COMP:api/native-turn-frame] graph compiler guard canary',()=>{
  it('keeps current authority guards and private graph helpers intact',async()=>{
-  expect((await pool.query(guards)).rows[0]).toEqual(healthy)
+  if(canonical){
+   expect((await pool.query('SELECT native_turn_helpers_current() reader,native_turn_publication_contract() publication')).rows[0]).toEqual({reader:true,publication:true})
+   for(const signature of ['application_memory_statement_helpers_current()','application_native_dependency_batch_helpers_current()','application_native_field_reference_helpers_current()'])
+    expect((await pool.query('SELECT to_regprocedure($1) retired',[signature])).rows[0].retired).toBeNull()
+  }else expect((await pool.query(guards)).rows[0]).toEqual(healthy)
+  if(canonical){for(const signature of changed)expect((await pool.query('SELECT to_regprocedure($1) retired',[signature])).rows[0].retired).toBeNull();return}
   expect((await pool.query(`SELECT bool_and(NOT has_function_privilege('app_user',signature,'EXECUTE')) private
    FROM unnest($1::text[]) signature`,[changed])).rows[0].private).toBe(true)
  })
@@ -50,7 +56,7 @@ describe.skipIf(!boundary).sequential('[COMP:api/native-turn-frame] graph compil
  }),180_000)
  it('rejects an unrecognized static consumer of a changed graph pin',async()=>rollback(async client=>{
   await client.query(`DO $fixture$ DECLARE pin text;BEGIN
-   SELECT encode(sha256(convert_to(to_jsonb(p)::text,'UTF8')),'hex') INTO pin FROM pg_proc p WHERE oid='native_turn_topology(jsonb,jsonb)'::regprocedure;
+   SELECT encode(sha256(convert_to(to_jsonb(p)::text,'UTF8')),'hex') INTO pin FROM pg_proc p WHERE oid=to_regprocedure('native_turn_topology(jsonb,jsonb)');
    EXECUTE format('CREATE FUNCTION public.fictional_graph_pin_consumer() RETURNS text LANGUAGE sql AS %L','SELECT '||quote_literal(pin)||'::text');
   END $fixture$`)
   await expect(client.query(migration)).rejects.toThrow('native_graph_unauthenticated_pin_consumer')

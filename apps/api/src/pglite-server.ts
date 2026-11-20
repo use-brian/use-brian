@@ -45,7 +45,22 @@ const migrationsDir = resolve(here, '../../../packages/api/migrations')
 const db = new PGlite(dataDir, { extensions: { vector, pg_trgm } })
 await db.waitReady
 await preparePgliteRuntimeRole(db)
-const applied = await migratePglite(db, migrationsDir)
+// Embedded boot migrates as the PGlite bootstrap superuser. Migration 8274 admits
+// only an ordinary owner and refuses this profile inside its own transaction, so
+// earlier files stay applied and 8274 onward are not. Surface that as an explicit,
+// actionable refusal instead of a bare catalog exception (behavior is unchanged).
+const applied = await migratePglite(db, migrationsDir).catch((error: unknown) => {
+  if (error instanceof Error && error.message.includes('installation_runtime_role_unsafe')) {
+    throw new Error(
+      `Embedded brain at ${dataDir} cannot apply migration 8274: it requires an ordinary (non-superuser, ` +
+      'non-BYPASSRLS) migration owner, and embedded PGlite boot migrates as its superuser. ' +
+      'No data was changed by 8274; earlier migrations remain applied. Preserve this data directory: ' +
+      'retrying this embedded boot cannot upgrade it, and it needs an ordinary-owner migration path.',
+      { cause: error },
+    )
+  }
+  throw error
+})
 console.log(`[pglite] migrated ${applied} new migration(s); brain at ${dataDir}`)
 
 const server = new PGLiteSocketServer({ db, port, host: '127.0.0.1', maxConnections: 20 })

@@ -1,4 +1,4 @@
-import type { AccessCeiling } from '@use-brian/core'
+import type { AccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { validateAudienceScopeEvidence } from '../context-scope/caller-evidence.js'
 // [COMP:api/channel-room] How a turn in a converged room differs from a
 // per-user group turn (unified-sessions §4.4, D1, D3). Pure, so every

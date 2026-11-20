@@ -94,6 +94,8 @@ describe("[COMP:app-web/site-route] Custom-domain host classification", () => {
       expect(isGuardedPath("/teams")).toBe(true);
       expect(isGuardedPath("/redeem")).toBe(true);
       expect(isGuardedPath("/oauth/authorize")).toBe(true);
+      expect(isGuardedPath("/memory-context")).toBe(true);
+      expect(isGuardedPath("/w/ws-1/brain/context")).toBe(true);
       expect(isGuardedPath("/w")).toBe(true);
       expect(isGuardedPath("/w/ws-1/p/abc")).toBe(true);
       expect(isGuardedPath("/settings/profile")).toBe(true);

@@ -7,7 +7,7 @@
  *
  * [COMP:brain/extraction-application]
  */
-import type { Sensitivity } from '../security/sensitivity.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type { StableExternalIdentity } from '../decision-learning/types.js'
 import type { TaskReadinessAssessment } from '../tasks/admission.js'
 import type { ExtractionApplicationRun } from './application.js'
@@ -15,7 +15,7 @@ import type { FrozenExtractionPlan } from './extraction-plan.js'
 
 export type PipelineBSourceEnvelope = {
   /** Captured before extraction; replay must never refresh this evidence. */
-  derivation?: import('../security/derived-scope.js').DerivedWriteEvidence
+  derivation?: import('@use-brian/agent-runtime/security/derived-scope.js').DerivedWriteEvidence
   workspaceId: string
   episodeId: string
   userId: string | null

@@ -1,7 +1,6 @@
 "use client";
 
 
-import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Comment thread body — the expanded thread content shared by the two shells
  * that can host it: the on-content overlay (`comment-thread-popover.tsx`, used
@@ -21,8 +20,17 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 
 import * as React from "react";
 import { ArrowUp, Paperclip, Check, X } from "lucide-react";
-import { parseSSEStream, createSSEBuffer, ChatMarkdown } from "@use-brian/chat-ui";
-import { authFetch } from "@/lib/auth-fetch";
+import { ChatMarkdown } from "@use-brian/chat-ui";
+import type {
+  ConversationNotice,
+  ConversationSendInput,
+  ConversationSendResult,
+  ConversationState,
+  PresentationCapabilities,
+} from "@/lib/chat/conversation-controller";
+import { provisionalConversationKey } from "@/lib/chat/conversation-registry";
+import type { ClassifiedTurnFrame } from "@/lib/chat/turn-frames";
+import { useConversation } from "@/lib/chat/use-conversation";
 import { useDurableDraft } from "@/lib/offline/use-durable-draft";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
@@ -44,7 +52,6 @@ import { recordDocMention } from "@/lib/api/inbox";
 import { type WorkspaceAssistantSummary, type AssistantIdentity } from "@/lib/api/views";
 import { AttachmentChips, FileDropOverlay } from "@/components/doc/attachment-chips";
 import { pinnedToBottom } from "@/components/doc/comment-scroll";
-import { shouldReconnectToTurn } from "@/components/doc/comment-reconnect";
 import { CommentQuoteReply } from "@/components/doc/comment-quote-reply";
 import { composeQuotedBody, quoteForRow } from "@/components/doc/comment-quote";
 import { useFileAttachments } from "@/lib/use-file-attachments";
@@ -53,12 +60,6 @@ import { RecordingUploadStatus } from "@/components/recordings/recording-upload-
 import { dispatchRecordingParticipantsUpdated } from "@/lib/recordings/recording-events";
 import { useFileDrop } from "@/lib/use-file-drop";
 
-const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
-
-/** A terminal server decision must never enter transport-interruption recovery. */
-class CommentTurnFailed extends Error {
-  constructor(readonly code?: string) { super("comment turn failed"); }
-}
 
 // The presentational atoms (`Avatar`, `AuthorAvatar`, `ThreadGutter`,
 // `relativeTime`, and the `CommentAuthor` type) now live in
@@ -207,6 +208,109 @@ export function hasPersistedInterruptedComment(
   );
 }
 
+/** The live turn this thread shows: its own direct stream, else a followed one. */
+export function commentLiveTurn(state: ConversationState | null): { text: string; toolName: string | null; mirrored: boolean } | null {
+  if (!state) return null;
+  const direct = state.transcript.isStreaming;
+  if (!direct && !state.mirror.active) return null;
+  const tools = direct ? state.activity.tools : state.mirror.activity.tools;
+  return {
+    text: direct ? state.transcript.streamingText : state.mirror.text,
+    toolName: tools.length ? tools[tools.length - 1]!.name : null,
+    mirrored: !direct,
+  };
+}
+
+const FAILED_ENDS = new Set(["failed", "timeout", "error", "stalled_reclaimed"]);
+
+/** A followed turn that ended badly, or a re-attach that gave up (a Stop is not a failure). */
+export function latestCommentEndNotice(state: ConversationState | null): ConversationNotice | null {
+  if (!state) return null;
+  for (let index = state.notices.length - 1; index >= 0; index--) {
+    const notice = state.notices[index]!;
+    if (notice.code === "reconnectFailed") return notice;
+    if (notice.code === "turnEnd" && FAILED_ENDS.has(notice.reason)) return notice;
+  }
+  return null;
+}
+
+function latestErrorNotice(state: ConversationState): Extract<ConversationNotice, { code: "error" }> | null {
+  for (let index = state.notices.length - 1; index >= 0; index--) {
+    const notice = state.notices[index]!;
+    if (notice.code === "error") return notice;
+  }
+  return null;
+}
+
+/**
+ * The copy for a reply turn that ended in an error. Server text never reaches
+ * the thread. `persisted`: the comment row is known to be saved; `historyRead`:
+ * the canonical rows could be read after the failure.
+ */
+export function commentTurnErrorCopy(
+  code: string,
+  persisted: boolean,
+  historyRead: boolean,
+  t: { replyAccessUnavailable: string; replyPageUnavailable: string; replyFailed: string; sendUnconfirmed: string; loadError: string },
+): string | null {
+  // Another copy of this turn already runs; the controller follows it.
+  if (code === "turn_in_flight") return null;
+  if (code === "delivery_audience_unverified" || code === "authority_changed") return t.replyAccessUnavailable;
+  if (code === "page_context_unavailable") return t.replyPageUnavailable;
+  // A transport failure is an ambiguous commit: quiet when the row landed.
+  if (code === "stream_failed") return persisted && historyRead ? null : t.loadError;
+  return persisted ? t.replyFailed : t.sendUnconfirmed;
+}
+
+/**
+ * Surface effects of this thread's own reply turn, dispatched once by the
+ * controller: a page the AI minted reloads the sidebar (never navigates away),
+ * title / icon commits and recording speaker updates reach the shell's
+ * same-tab buses, and research quota frames keep the composer toggle in sync.
+ */
+export function applyCommentSurfaceEffect(
+  frame: ClassifiedTurnFrame,
+  applyResearchQuotaEvent: (event: { type: "research_quota" | "research_quota_exhausted"; used?: number; quota?: number; isPaid?: boolean }) => void,
+): void {
+  const d = frame.payload;
+  if (frame.event === "research_quota" || frame.event === "research_quota_exhausted") {
+    applyResearchQuotaEvent({
+      type: frame.event,
+      used: typeof d.used === "number" ? d.used : undefined,
+      quota: typeof d.quota === "number" ? d.quota : undefined,
+      isPaid: typeof d.isPaid === "boolean" ? d.isPaid : undefined,
+    });
+    return;
+  }
+  if (typeof window === "undefined") return;
+  if (frame.event === "page_created") {
+    // The prompt steers the AI to edit THIS page; if it minted another one
+    // anyway, make the draft reachable instead of orphaned.
+    if (typeof d.pageId === "string" && d.pageId) {
+      window.dispatchEvent(new CustomEvent("doc:draft-created", { detail: { viewId: d.pageId, action: "created" } }));
+    }
+  } else if (frame.event === "doc_title_update") {
+    // Bridged exactly like floating-chat: `doc:title-updated` → `applyAutoTitle`.
+    const pageIdOf = typeof d.pageId === "string" ? d.pageId : "";
+    const title = typeof d.title === "string" ? d.title : "";
+    const icon = typeof d.icon === "string" ? d.icon : null;
+    const nameOrigin = d.nameOrigin === "user" || d.nameOrigin === "auto" || d.nameOrigin === "placeholder" ? d.nameOrigin : undefined;
+    if (pageIdOf && title) {
+      window.dispatchEvent(new CustomEvent("doc:title-updated", {
+        detail: { pageId: pageIdOf, title, icon, nameOrigin, overwrite: d.overwrite === true },
+      }));
+    }
+  } else if (frame.event === "recording_participants_updated") {
+    // Speaker assignments mutate recording chrome, not Doc blocks.
+    if (typeof d.recordingId === "string") {
+      dispatchRecordingParticipantsUpdated({
+        recordingId: d.recordingId,
+        ...(typeof d.pageId === "string" ? { pageId: d.pageId } : {}),
+      });
+    }
+  }
+}
+
 type Props = {
   thread: CommentThread;
   pageId: string;
@@ -327,12 +431,10 @@ export function CommentThreadBody({
   // Workspace-member ids @-mentioned in the current draft reply, tracked by the
   // mention-aware composer and posted to the Inbox once the reply commits.
   const [mentionIds, setMentionIds] = React.useState<string[]>([]);
-  const [streaming, setStreaming] = React.useState<string | null>(null);
-  // While streaming, the assistant's current tool activity (e.g. "Saving to
-  // memory") — shown before any reply text lands so a tool-heavy turn doesn't
-  // sit on a static placeholder. Cleared once text starts.
-  const [streamActivity, setStreamActivity] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState(false);
+  const sendSeqRef = React.useRef(0);
+  const mountedRef = React.useRef(true);
+  React.useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
   // Per-turn AI-reply toggle for a manual reply: on → the assistant answers
   // (the /api/chat stream); off → the reply is a plain teammate comment posted
   // straight to the thread with no AI turn. Manual replies default off;
@@ -367,6 +469,100 @@ export function CommentThreadBody({
   };
 
   const sessionId = thread.sessionId;
+  // The thread is a presentation of its session's conversation-controller
+  // entry (M5 WP-E). It binds that entry only while it has a turn to show: a
+  // thread that opens running (a refresh mid-reply) or starts a turn here. An
+  // idle thread opened to read binds nothing, so a page of comment threads
+  // opens no follow streams. See doc-comments.md → "Live turn reconnect".
+  const [bound, setBound] = React.useState(() => thread.sessionStatus === "running");
+  const effectRef = React.useRef<(frame: ClassifiedTurnFrame) => void>(() => {});
+  const frameRef = React.useRef<(frame: ClassifiedTurnFrame) => void>(() => {});
+  const capabilities = React.useMemo<PresentationCapabilities>(() => ({
+    profile: "dock",
+    onSurfaceEffect: (frame) => effectRef.current(frame),
+    onFrame: (frame) => frameRef.current(frame),
+    // The thread renders no approval or question cards; nothing to restore.
+    pendingProbe: false,
+  }), []);
+  const presentationId = React.useId();
+  const clientId = React.useId();
+  const { controller, value: conversation } = useConversation(
+    {
+      workspaceId,
+      sessionId: bound ? sessionId : null,
+      provisionalKey: provisionalConversationKey("comment", clientId),
+      presentationId,
+      capabilities,
+    },
+    (state) => state,
+  );
+  const controllerRef = React.useRef(controller);
+  controllerRef.current = controller;
+  // The raw tool name a followed turn's snapshot carries, mapped to copy.
+  const [snapshotActivity, setSnapshotActivity] = React.useState<string | null>(null);
+  effectRef.current = (frame) => applyCommentSurfaceEffect(frame, controls.applyResearchQuotaEvent);
+  frameRef.current = (frame) => {
+    if (frame.stream === "follow" && frame.event === "snapshot") {
+      setSnapshotActivity(typeof frame.payload.activity === "string" ? frame.payload.activity : null);
+    }
+  };
+  const live = commentLiveTurn(conversation);
+  // A turn this body started shows the working bubble from the send until its
+  // persisted rows are re-read, so the reply never blinks out in between.
+  const [awaitingTurn, setAwaitingTurn] = React.useState(false);
+  const lastLiveTextRef = React.useRef("");
+  if (live) lastLiveTextRef.current = live.text;
+  const streaming = live ? live.text : awaitingTurn ? lastLiveTextRef.current : null;
+  const activityName = live?.toolName ?? (live?.mirrored ? snapshotActivity : null);
+  const streamActivity = streaming === "" && activityName ? narrationFor(activityName) : null;
+
+  // A send waits until this body is attached to the session's entry, so the
+  // turn runs with this presentation's profile and effect handler.
+  const pendingTurnRef = React.useRef<{ input: Omit<ConversationSendInput, "presentationId">; resolve: (result: ConversationSendResult) => void } | null>(null);
+  const flushTurn = React.useCallback((current: typeof controller) => {
+    const pending = pendingTurnRef.current;
+    if (!pending || !current || current.getSessionId() !== sessionId) return;
+    pendingTurnRef.current = null;
+    void current.send({ ...pending.input, presentationId }).then(pending.resolve, () => pending.resolve("failed"));
+  }, [presentationId, sessionId]);
+  React.useEffect(() => { flushTurn(controller); }, [controller, flushTurn]);
+  React.useEffect(() => () => { pendingTurnRef.current?.resolve("disposed"); pendingTurnRef.current = null; }, []);
+  function startTurn(input: Omit<ConversationSendInput, "presentationId">): Promise<ConversationSendResult> {
+    return new Promise((resolve) => {
+      pendingTurnRef.current?.resolve("superseded");
+      pendingTurnRef.current = { input, resolve };
+      setBound(true);
+      flushTurn(controllerRef.current);
+    });
+  }
+
+  // A turn that starts on this thread while it is open (a teammate's reply,
+  // seen through the page-level status poll) is followed live.
+  React.useEffect(() => {
+    if (thread.sessionStatus !== "running") return;
+    if (!bound) { setBound(true); return; }
+    controller?.followTurn();
+  }, [thread.sessionStatus, bound, controller]);
+
+  // The controller says authorized history changed (a followed turn landed, a
+  // re-attached reply finished): re-read the thread's rows.
+  const historyEpoch = conversation?.historyEpoch ?? 0;
+  React.useEffect(() => {
+    if (!historyEpoch || !controller) return;
+    const abort = new AbortController();
+    void fetchSessionMessages(sessionId, { signal: abort.signal, strict: true })
+      .then((rows) => { if (!abort.signal.aborted && rows.length > 0) setMessages(rows); })
+      .catch(() => { if (!abort.signal.aborted) setError(current => current ?? t.loadError); });
+    onChanged();
+    return () => abort.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [historyEpoch, controller]);
+
+  // A followed turn that ended badly, or a re-attach that gave up, says so.
+  const endNotice = latestCommentEndNotice(conversation);
+  React.useEffect(() => {
+    if (endNotice) setError(t.replyFailed);
+  }, [endNotice, t.replyFailed]);
 
   React.useEffect(() => {
     if (!sessionId) return;
@@ -380,9 +576,6 @@ export function CommentThreadBody({
     // we already have content to show). Otherwise load + show the loader.
     if (!hadInitial.current) setLoading(true);
     if (thread.sessionStatus !== "failed" && thread.sessionStatus !== "timeout") setError(null);
-    // A thread whose turn is still running (a refresh mid-reply) reconnects to
-    // the live turn below and owns the streaming bubble — don't clear it here.
-    if (thread.sessionStatus !== "running") setStreaming(null);
     void fetchSessionMessages(sessionId, { signal: controller.signal, strict: true })
       .then((rows) => {
         // If this fetch was aborted (effect re-run / StrictMode's mount→unmount→
@@ -424,98 +617,6 @@ export function CommentThreadBody({
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Live-turn reconnect: a thread whose backing turn is still running (a page
-  // refresh mid-reply — the `doc_thread` background carve-out in the chat route)
-  // arrives with `sessionStatus==='running'`. Re-attach to that turn via
-  // `GET /api/sessions/:id/stream`, show the "working…" indicator immediately,
-  // stream the reply in from each snapshot, and refetch the persisted rows on
-  // completion. The seed hand-off (a fresh thread sending its own turn) and an
-  // in-progress local send own the bubble themselves, so they're excluded.
-  // See docs/architecture/features/doc-comments.md → "Live turn reconnect".
-  React.useEffect(() => {
-    if (!sessionId) return;
-    if (
-      !shouldReconnectToTurn({
-        sessionStatus: thread.sessionStatus,
-        seeded: !!seedRef.current,
-        busy,
-      })
-    )
-      return;
-    const controller = new AbortController();
-    setStreaming((cur) => cur ?? "");
-    setStreamActivity(null);
-    let cancelled = false;
-    const finish = () => {
-      if (cancelled) return;
-      void fetchSessionMessages(sessionId, { strict: true }).then((rows) => {
-        if (cancelled) return;
-        if (rows.length > 0) setMessages(rows);
-        setStreaming(null);
-        setStreamActivity(null);
-      }).catch(() => {
-        if (!cancelled) {
-          setError(current => current ?? t.loadError);
-          setStreaming(null);
-          setStreamActivity(null);
-        }
-      });
-      onChanged();
-    };
-    void (async () => {
-      try {
-        const res = await authFetch(`${API_URL}/api/sessions/${sessionId}/stream`, {
-          signal: controller.signal,
-        });
-        if (!res.ok || !res.body) throw new Error("reconnect failed");
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        const buf = createSSEBuffer();
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          for (const ev of parseSSEStream(decoder.decode(value, { stream: true }), buf)) {
-            if (ev.event === "status") {
-              const status = (ev.data as { status?: string }).status;
-              if (status === "failed" || status === "timeout") setError(t.replyFailed);
-              if (status !== "running") {
-                finish();
-                return;
-              }
-            } else if (ev.event === "snapshot") {
-              const d = ev.data as { text?: string; activity?: string | null };
-              setStreaming(d.text ?? "");
-              setStreamActivity(d.text ? null : d.activity ? narrationFor(d.activity) : null);
-            } else if (ev.event === "turn_completed") {
-              const reason = (ev.data as { reason?: string }).reason;
-              if (reason === "failed" || reason === "timeout" || reason === "error") setError(t.replyFailed);
-            } else if (ev.event === "error") {
-              setError(t.replyFailed);
-              finish();
-              return;
-            } else if (ev.event === "done") {
-              finish();
-              return;
-            }
-          }
-        }
-        // Stream ended without an explicit `done` (server closed) — settle from
-        // the persisted state so the bubble never strands on "working…".
-        finish();
-      } catch {
-        if (!cancelled) {
-          setStreaming(null);
-          setStreamActivity(null);
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-      controller.abort();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, thread.sessionStatus]);
 
   // Land on the newest comment when a long thread first expands.
   React.useEffect(() => {
@@ -608,6 +709,8 @@ export function CommentThreadBody({
     // needs a body.
     const replyWithoutAi = override ? override.aiReply === false : !aiReply;
     if (replyWithoutAi && !body) return;
+    const sendSeq = ++sendSeqRef.current;
+    const current = () => mountedRef.current && sendSeqRef.current === sendSeq;
     setBusy(true);
     setError(null);
     // Mentions belong to a user-typed reply; the seed `override` (a new
@@ -654,196 +757,84 @@ export function CommentThreadBody({
             preview: body,
           });
         }
-        setMessages(await fetchSessionMessages(thread.sessionId));
+        const rows = await fetchSessionMessages(thread.sessionId);
+        if (!current()) return;
+        setMessages(rows);
         onChanged();
       } catch {
         setError(t.loadError);
       } finally {
-        setBusy(false);
+        if (current()) setBusy(false);
       }
       return;
     }
 
-    setStreaming("");
-    setStreamActivity(null);
+    // AI reply on → one turn through the shared conversation controller.
     let commentWasSaved = false;
-    try {
-      const res = await authFetch(`${API_URL}/api/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: effectiveBody,
-          sessionId: thread.sessionId,
-          assistantId,
-          workspaceId,
-          appOrigin: "doc",
-          docViewId: pageId,
-          replyTarget: { threadId: thread.id },
-          ...(model ? { model } : {}),
-          ...(researchMode ? { mode: "research" as const } : {}),
-          ...(hasFiles ? { fileIds } : {}),
-          ...(hasRecordings ? { attachedRecordingIds } : {}),
-        }),
-      });
-      if (!res.ok) {
-        const payload = await res.json().catch(() => null) as { code?: unknown } | null;
-        throw new CommentTurnFailed(typeof payload?.code === "string" ? payload.code : undefined);
+    lastLiveTextRef.current = "";
+    setSnapshotActivity(null);
+    setAwaitingTurn(true);
+    const result = await startTurn({
+      text: effectiveBody,
+      ...(hasFiles ? { fileIds } : {}),
+      ...(hasRecordings ? { recordingIds: attachedRecordingIds } : {}),
+      assistantId,
+      bodyExtras: {
+        appOrigin: "doc",
+        docViewId: pageId,
+        ...(model ? { model } : {}),
+        ...(researchMode ? { mode: "research" as const } : {}),
+      },
+      // Saved by the server (`session` / `user_message_saved`).
+      onAccepted: () => { commentWasSaved = true; seedRef.current = null; accepted(); },
+      // Refused before acceptance: the optimistic row goes; the draft never left.
+      onRejected: () => setMessages((prev) => prev.filter((message) => message.id !== optimistic.id)),
+    });
+    if (!current()) return;
+    const snapshot = controllerRef.current?.getSessionId() === sessionId ? controllerRef.current.getSnapshot() : null;
+    const notice = snapshot ? latestErrorNotice(snapshot) : null;
+    if (result === "disconnected") {
+      // Still running server-side: the controller follows it and re-reads the
+      // rows when it lands. The comment itself was accepted.
+      if (commentWasSaved && mentions.length > 0) {
+        void recordDocMention({ workspaceId, pageId, threadId: thread.id, mentionedUserIds: mentions, preview: body });
       }
-      if (!res.body) throw new Error("stream failed");
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      const buf = createSSEBuffer();
-      let acc = "";
-      let duplicateInFlight = false;
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        for (const ev of parseSSEStream(decoder.decode(value, { stream: true }), buf)) {
-          if (ev.event === "user_message_saved") {
-            commentWasSaved = true;
-            accepted();
-            seedRef.current = null;
-          } else if (ev.event === "text_delta") {
-            acc += (ev.data as { text?: string }).text ?? "";
-            setStreaming(acc);
-            setStreamActivity(null);
-          } else if (ev.event === "error") {
-            const code = (ev.data as { code?: string }).code;
-            if (code === "turn_in_flight") {
-              duplicateInFlight = true;
-            } else {
-              throw new CommentTurnFailed(code);
-            }
-          } else if (ev.event === "tool_start" && !acc) {
-            // Reflect the assistant's work before any reply text lands.
-            const name = (ev.data as { name?: string }).name;
-            const label = name ? narrationFor(name) : null;
-            if (label) setStreamActivity(label);
-          } else if (
-            ev.event === "research_quota" ||
-            ev.event === "research_quota_exhausted"
-          ) {
-            // Keep the composer's research toggle in sync with the server's
-            // free-research counter (same handling as the floating chat).
-            const d = ev.data as { used?: number; quota?: number; isPaid?: boolean };
-            controls.applyResearchQuotaEvent({
-              type: ev.event,
-              used: d.used,
-              quota: d.quota,
-              isPaid: d.isPaid,
-            });
-          } else if (ev.event === "page_created") {
-            // The AI authored a brand-new page (renderPage) during a thread
-            // reply. The prompt steers it to edit THIS page instead, but if it
-            // does mint a separate page anyway, reload the sidebar so the draft
-            // is reachable rather than orphaned. Reload only — never navigate
-            // away from the thread the user is reading.
-            const newPageId = (ev.data as { pageId?: string }).pageId;
-            if (newPageId && typeof window !== "undefined") {
-              window.dispatchEvent(
-                new CustomEvent("doc:draft-created", {
-                  detail: { viewId: newPageId, action: "created" },
-                }),
-              );
-            }
-          } else if (ev.event === "doc_title_update") {
-            // The assistant committed a title/icon change (`setTitle`/`setIcon`
-            // via patchPage, or the post-turn auto-title). Bridge it to the
-            // shell exactly like floating-chat does — `doc:title-updated` →
-            // `applyAutoTitle` updates `activeView` (page header + active tab)
-            // and reloads the sidebar. Without this, an icon/title set from a
-            // comment thread lands in `saved_views` but every surface stays
-            // stale until a full remount.
-            const d = ev.data as {
-              pageId?: string;
-              title?: string;
-              icon?: string | null;
-              nameOrigin?: string;
-              overwrite?: boolean;
-            };
-            const pageIdOf = typeof d.pageId === "string" ? d.pageId : "";
-            const title = typeof d.title === "string" ? d.title : "";
-            const icon = typeof d.icon === "string" ? d.icon : null;
-            const nameOrigin =
-              d.nameOrigin === "user" ||
-              d.nameOrigin === "auto" ||
-              d.nameOrigin === "placeholder"
-                ? d.nameOrigin
-                : undefined;
-            if (pageIdOf && title && typeof window !== "undefined") {
-              window.dispatchEvent(
-                new CustomEvent("doc:title-updated", {
-                  detail: {
-                    pageId: pageIdOf,
-                    title,
-                    icon,
-                    nameOrigin,
-                    overwrite: d.overwrite === true,
-                  },
-                }),
-              );
-            }
-          } else if (ev.event === "recording_participants_updated") {
-            // Speaker assignments mutate recording chrome, not Doc blocks.
-            // Bridge the narrow server receipt to the mounted recording
-            // surface; it re-fetches canonical participant metadata.
-            const d = ev.data as { recordingId?: string; pageId?: string };
-            if (typeof d.recordingId === "string") {
-              dispatchRecordingParticipantsUpdated({
-                recordingId: d.recordingId,
-                ...(typeof d.pageId === "string" ? { pageId: d.pageId } : {}),
-              });
-            }
-          }
-        }
-      }
-      const rows = await fetchSessionMessages(thread.sessionId, { strict: true });
-      setMessages(rows);
-      if (hasPersistedInterruptedComment(rows, knownMessageIds, effectiveBody)) accepted();
-      if (duplicateInFlight) {
-        // This renderer lost the exactly-once race to an already-running copy.
-        // Retire the seed, refresh `sessionStatus`, then let the existing live
-        // reconnect effect attach to the winning turn instead of showing an
-        // error or trying the seed again.
-        seedRef.current = null;
-      }
-      if (mentions.length > 0) {
-        void recordDocMention({
-          workspaceId,
-          pageId,
-          threadId: thread.id,
-          mentionedUserIds: mentions,
-          preview: body,
-        });
-      }
-      onChanged();
-    } catch (failure) {
-      // A network/SSE failure does not prove the send failed. `doc_thread`
-      // turns deliberately survive a disconnected client, so first reconcile
-      // the exact optimistic row from the canonical transcript. If it landed,
-      // retire the seed and refresh the thread status so the reconnect effect
-      // can attach to the background turn. Only a genuinely absent row gets
-      // the load error.
-      const rows = await fetchSessionMessages(thread.sessionId, { strict: true }).catch(() => null);
-      if (commentWasSaved || rows && hasPersistedInterruptedComment(rows, knownMessageIds, effectiveBody)) {
-        accepted();
-        if (rows) setMessages(rows);
-        seedRef.current = null;
-        onChanged();
-        if (failure instanceof CommentTurnFailed) {
-          setError(failure.code === "delivery_audience_unverified" || failure.code === "authority_changed"
-            ? t.replyAccessUnavailable : failure.code === "page_context_unavailable" ? t.replyPageUnavailable : t.replyFailed);
-        } else if (!rows) {
-          setError(t.loadError);
-        }
-      } else {
-        setError(failure instanceof CommentTurnFailed ? t.sendUnconfirmed : t.loadError);
-      }
-    } finally {
-      setStreaming(null);
-      setStreamActivity(null);
+      setAwaitingTurn(false);
       setBusy(false);
+      onChanged();
+      return;
     }
+    if (result === "busy" || result === "disposed" || result === "superseded") {
+      setMessages((prev) => prev.filter((message) => message.id !== optimistic.id));
+      setAwaitingTurn(false);
+      setBusy(false);
+      return;
+    }
+    // Completed, stopped or failed: the thread's persisted rows are canonical.
+    // A failure before acceptance is an ambiguous commit; reconcile only an
+    // exact new row, never an older identical comment.
+    const rows = await fetchSessionMessages(sessionId, { strict: true }).catch(() => null);
+    if (!current()) return;
+    if (rows) setMessages(rows);
+    const persisted = commentWasSaved || (rows !== null && hasPersistedInterruptedComment(rows, knownMessageIds, effectiveBody));
+    if (persisted && !commentWasSaved) {
+      accepted();
+      seedRef.current = null;
+    }
+    if (persisted && mentions.length > 0) {
+      void recordDocMention({ workspaceId, pageId, threadId: thread.id, mentionedUserIds: mentions, preview: body });
+    }
+    if (result === "failed" && notice) {
+      // A pre-acceptance network failure that persisted may still be running
+      // in the background: watch it like any running turn.
+      if (persisted && notice.errorCode === "stream_failed") controllerRef.current?.followTurn();
+      if (notice.errorCode === "turn_in_flight") seedRef.current = null;
+      const copy = commentTurnErrorCopy(notice.errorCode, persisted, rows !== null, t);
+      if (copy) setError(copy);
+    }
+    setAwaitingTurn(false);
+    setBusy(false);
+    onChanged();
   }
 
   async function resolve() {

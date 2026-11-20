@@ -22,7 +22,8 @@
 
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { SensitivityAccumulator, isSensitivity, type Tool, type ToolContext } from '@use-brian/core'
+import { SensitivityAccumulator, isSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { query } from '../db/client.js'
 import type { PendingApproval } from '../db/pending-approvals-store.js'
 

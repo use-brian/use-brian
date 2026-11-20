@@ -17,7 +17,6 @@
 
 import type { Block } from '../doc/page-types.js'
 import { markdownToBlocks, type MarkdownToBlocksOptions } from '../doc/markdown.js'
-import { parseDocxToMarkdown } from './parsers.js'
 
 /**
  * Convert a `.docx` byte buffer into canonical doc blocks. Throws on a corrupt
@@ -27,6 +26,8 @@ export async function docxToBlocks(
   buffer: Buffer,
   opts: MarkdownToBlocksOptions = {},
 ): Promise<Block[]> {
+  // The AnyDoc parser loads at first import, never at module evaluation (M4 step 5).
+  const { parseDocxToMarkdown } = await import('./parsers.js')
   const markdown = await parseDocxToMarkdown(buffer)
   return markdownToBlocks(markdown, opts)
 }

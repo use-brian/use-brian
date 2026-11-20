@@ -3,7 +3,7 @@ import pg from 'pg'
 import os from 'node:os'
 import path from 'node:path'
 import { mkdtempSync } from 'node:fs'
-import type { RetrievalActor } from '@use-brian/core'
+import type { RetrievalActor } from '@use-brian/core/retrieval/types.js'
 
 /**
  * END-TO-END integration for the large-content-artifacts chain (goal
@@ -67,7 +67,7 @@ describeIf('[COMP:files/artifact-e2e] promote → job → worker → retrieval (
   let workspaceId: string
   let assistantId: string
   let actor: RetrievalActor
-  let filesApi: import('@use-brian/core').FilesApi
+  let filesApi: import('@use-brian/core/workspace-files/api.js').FilesApi
   let promote: import('../artifact-promote.js').ArtifactPromoter
   let jobsStore: typeof import('../../db/file-ingest-jobs-store.js')
   let retrieval: typeof import('../../db/retrieval-store.js')

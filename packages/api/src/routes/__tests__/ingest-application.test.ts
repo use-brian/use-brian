@@ -1,7 +1,7 @@
 import express from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { AccessContext } from '@use-brian/core'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import {
   IngestApplicationServiceError,
   type IngestApplicationService,

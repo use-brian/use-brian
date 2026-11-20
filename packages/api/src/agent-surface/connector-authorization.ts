@@ -4,7 +4,7 @@
  *
  * [COMP:agent-surface/connector-authorization]
  */
-import type { ControlPlaneConnector } from '@use-brian/core'
+import type { ControlPlaneConnector } from '@use-brian/core/control-plane/types.js'
 import { OFFICIAL_CONNECTORS, type ConnectorEntry } from '@use-brian/shared'
 
 export const CONNECTOR_AUTHORIZATION_ACTION_PREFIX = 'connector_authorization:'

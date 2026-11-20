@@ -7,7 +7,6 @@ import { HOME_APP_TOOL_CONFIG, homeAppToolSetCapability } from "@use-brian/share
 import { authFetch } from "@/lib/auth-fetch";
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 import { useT } from "@/lib/i18n/client";
-import { AssociationModuleNote } from "@/components/association/module-controls";
 
 type Grant = { capability: string; enabled: boolean };
 
@@ -94,7 +93,6 @@ export function HomeAppToolSettings({ assistantId, workspaceId }: { assistantId:
           </div>;
         })}
         {!enabled(app.capability) && <p className="text-xs text-muted-foreground">{t.disabled}</p>}
-        {app.id === "association" && workspaceId && <AssociationModuleNote workspaceId={workspaceId} />}
         {saveError === app.capability && <p role="alert" className="text-xs text-destructive">{t.save}</p>}
       </div>
     </div>)}

@@ -21,12 +21,13 @@
  * [COMP:evals/capability-probes]
  */
 
-import { NOOP_TURN_LEDGER } from '@use-brian/core'
+import { NOOP_TURN_LEDGER } from '@use-brian/agent-runtime/engine/turn-ledger.js'
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { createGeminiProvider, queryLoop } from '@use-brian/core'
+import { queryLoop } from '@use-brian/core/engine/query-loop-defaults.js'
+import { createGeminiProvider } from '@use-brian/agent-runtime/providers/gemini.js'
 import { z } from 'zod'
 
 import { runHardChecks } from '../src/evals/assertions.js'

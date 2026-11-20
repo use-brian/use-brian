@@ -165,7 +165,7 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
       'src/__tests__/native-retained-conversation.integration.test.ts',
       'src/application-platform/__tests__/native-retained-acquisition.integration.test.ts',
       'src/application-platform/__tests__/native-retained-edge-parity.integration.test.ts',
-      'src/application-platform/__tests__/native-retained-graph.integration.test.ts',
+      'src/application-platform/__tests__/native-turn-graph.integration.test.ts',
       'src/__tests__/session-annotation-scan.integration.test.ts',
       'src/__tests__/native-recording-ancestry-migration.integration.test.ts',
       'src/application-platform/__tests__/native-recording-file-ancestry.integration.test.ts',

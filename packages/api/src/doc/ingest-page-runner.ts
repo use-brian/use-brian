@@ -31,10 +31,10 @@ import {
   type DistillPageResult,
   type PageSourceChunk,
   type RunSectionEpisode,
-  type SavedViewStore,
   type UpsertPageSource,
-} from '@use-brian/core'
-import type { DocPageStore } from '@use-brian/core'
+} from '@use-brian/core/ingest/ingest-page.js'
+import type { SavedViewStore } from '@use-brian/core/views/types.js'
+import type { DocPageStore } from '@use-brian/core/doc/tools.js'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'
 import { query } from '../db/client.js'
 import type { EpisodeSensitivity } from '../db/episodes-store.js'

@@ -6,7 +6,7 @@
  * DB-first: always persists to session, then pushes to channel adapter.
  */
 
-import { ContextScopeAccumulator } from '@use-brian/core'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import { findOrCreateSession, addSessionMessage, findSessionById } from '../db/sessions.js'
 import { policyFor } from '../session-kind.js'
 import { turnOutputWrite } from '../context-scope/resolve-turn-scope.js'
@@ -42,7 +42,7 @@ export type DeliveryParams = {
   channelId?: string
   channelIntegrationId?: string
   /** Trusted high-water evidence for the content being delivered. */
-  scopeEvidence?: import('@use-brian/core').ScopeEvidence
+  scopeEvidence?: import('@use-brian/agent-runtime/security/context-scope.js').ScopeEvidence
   authorizeDeliveryAudience?: AuthorizeDeliveryAudience
   integrationStore?: ChannelIntegrationStore
   /**

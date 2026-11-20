@@ -13,13 +13,25 @@ vi.mock('../synthesize.js', async (orig) => ({
   ...(await orig<typeof import('../synthesize.js')>()),
   synthesizeFromSource: synthesizeMock,
 }))
-vi.mock('@use-brian/core', async (orig) => ({
-  ...(await orig<typeof import('@use-brian/core')>()),
-  loadBuiltinSkills: loadBuiltinSkillsMock,
-  createDocTools: createDocToolsMock,
+vi.mock('@use-brian/core/crm/tools.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@use-brian/core/crm/tools.js')>()),
   createCrmTools: createCrmToolsMock,
-  createTaskTools: createTaskToolsMock,
+}))
+vi.mock('@use-brian/core/doc/tools.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@use-brian/core/doc/tools.js')>()),
+  createDocTools: createDocToolsMock,
+}))
+vi.mock('@use-brian/core/memory/tools.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@use-brian/core/memory/tools.js')>()),
   createMemoryTools: createMemoryToolsMock,
+}))
+vi.mock('@use-brian/core/skills/loader.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@use-brian/core/skills/loader.js')>()),
+  loadBuiltinSkills: loadBuiltinSkillsMock,
+}))
+vi.mock('@use-brian/core/tasks/tools.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@use-brian/core/tasks/tools.js')>()),
+  createTaskTools: createTaskToolsMock,
 }))
 vi.mock('../../recordings/recording-search-tool.js', () => ({
   createSearchRecordingTool: vi.fn(() => ({ name: 'searchRecording' })),

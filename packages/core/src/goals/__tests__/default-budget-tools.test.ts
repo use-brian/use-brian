@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { ToolContext } from '../../tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import {
   createGoalDefaultBudgetTools,
   type GoalDefaultBudgetStorePort,

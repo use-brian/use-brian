@@ -2,7 +2,10 @@
  * [COMP:api/routine-proposals]
  */
 import { z } from 'zod'
-import { buildTool, provenanceSessionId, CONFIGURE_CAPABILITY, ContextScopeAccumulator, type ScopeEvidence, type Tool, type ToolContext } from '@use-brian/core'
+import { CONFIGURE_CAPABILITY } from '@use-brian/core/authorization/types.js'
+import { ContextScopeAccumulator, type ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
+import { provenanceSessionId } from '@use-brian/agent-runtime/tools/capability-gate.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { createDbCapabilityStore } from '../db/capability-store.js'
 import { getPool } from '../db/client.js'
 import { applyRoutineProposal, inspectRoutineConfiguration, inspectRoutineProposal, listRoutineProposals,

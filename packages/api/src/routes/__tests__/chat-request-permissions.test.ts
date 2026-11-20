@@ -4,19 +4,18 @@ import { describe, expect, it } from 'vitest'
 const source = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8')
 
 describe('chat request permission ownership', () => {
-  it('shares the trusted input between initial resolution and lazy action selection', () => {
+  it('binds delivery to the original resolved execution without a snapshot provider', () => {
     expect(source).toContain('const executionInput: ResolveExecutionContextInput = {')
     expect(source).toContain('resolveExecutionContextSystem(executionInput)')
-    expect(source).toContain('createRequestPermissionContext(resolvedExecution, scopeAccumulator, session, {')
-    expect(source).toContain('createActionSnapshots: () => createExecutionPermissionSnapshots(executionInput)')
-    expect(source).not.toContain('createWebResponsePermissionSnapshot')
+    expect(source).toMatch(/createTurnDeliveryAdmission\(executionContext, scopeAccumulator, session,\s*pageBoundTurn && conversationWriteFloor \? readLegacyDeliveryAudience : undefined\)/)
+    expect(source).not.toContain('createExecutionPermissionSnapshots')
   })
 
-  it('uses only the request owner for native cached delivery, retaining fallback boundaries', () => {
-    expect(source).toContain('permissionContext, assertOutputAuthority: permissionContext.authorizeDelivery')
+  it('uses only the request owner for fresh native delivery, retaining fallback boundaries', () => {
+    expect(source).toContain('permissionContext, admitOutput: permissionContext.authorizeDelivery')
     expect(source).not.toContain('responsePermissionSnapshot')
-    expect(source).toContain('const nativeOutputBoundary=!programmatic&&!permissionContext&&nativeTranscriptAuthority')
-    expect(source).toContain('assertOutputAuthority:assertDeliveryAudience')
+    expect(source).not.toContain('nativeOutputBoundary')
+    expect(source).toContain('admitOutput:() => assertDeliveryAudience()')
   })
 
   it('registers the owner for cleanup immediately and disposes before awaited finalization', () => {
@@ -28,8 +27,8 @@ describe('chat request permission ownership', () => {
     expect(handoff).not.toMatch(/\bawait\b|\breturn\b/)
     const cleanup = source.indexOf('} finally {\n      requestPermissions?.dispose()')
     expect(cleanup).toBeGreaterThan(capture)
-    expect(source.slice(cleanup).indexOf('requestPermissions?.dispose()')).toBeLessThan(
-      source.slice(cleanup).indexOf('await releaseTurn('),
-    )
+    const finalization = source.indexOf('await turnOwner?.finish()', cleanup)
+    expect(finalization).toBeGreaterThan(cleanup)
+    expect(source.indexOf('requestPermissions?.dispose()', cleanup)).toBeLessThan(finalization)
   })
 })

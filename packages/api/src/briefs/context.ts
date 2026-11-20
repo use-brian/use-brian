@@ -21,8 +21,9 @@
  *
  * [COMP:api/brief-context]
  */
-import type { ExecutionContext, Tool } from '@use-brian/core'
-import { directionSections, extractDirectionRegion, renderBriefContext, renderBriefDirection, contextSections, isDirectionEmpty } from '@use-brian/core'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
+import { directionSections, extractDirectionRegion, renderBriefContext, renderBriefDirection, contextSections, isDirectionEmpty } from '@use-brian/core/doc/brief-types.js'
 import { runWithAgentAccess } from '../db/agent-access-context.js'
 import {
   departmentFitsAudienceSystem,
@@ -235,14 +236,10 @@ export function configureBriefTurnContext(resolver: BriefTurnResolver | null): v
   registered = resolver
 }
 
-/** Freeze the preparation implementation before its caller awaits authority.
- * The canonical flag describes this exact captured callback, never a grant. */
+/** Capture the preparation implementation before its caller awaits authority. */
 export function captureBriefRunPreparation() {
   const resolver = registered
-  return Object.freeze({
-    canonical: resolver === null || resolver === resolveBriefTurn,
-    apply: (ec: ExecutionContext, tools: Map<string, Tool>) => applyResolvedBriefToRun(ec, tools, resolver),
-  })
+  return (ec: ExecutionContext, tools: Map<string, Tool>) => applyResolvedBriefToRun(ec, tools, resolver)
 }
 
 /**
@@ -250,7 +247,7 @@ export function captureBriefRunPreparation() {
  * unattended (system) execution, the frozen-basis check before provider work.
  */
 export async function applyBriefToRun(ec: ExecutionContext, tools: Map<string, Tool>): Promise<{ contribution: { name: string; content: string } | null; tools: Map<string, Tool>; turn: BriefTurn | null }> {
-  return captureBriefRunPreparation().apply(ec, tools)
+  return captureBriefRunPreparation()(ec, tools)
 }
 
 async function applyResolvedBriefToRun(ec: ExecutionContext, tools: Map<string, Tool>, resolver: BriefTurnResolver | null): Promise<{ contribution: { name: string; content: string } | null; tools: Map<string, Tool>; turn: BriefTurn | null }> {

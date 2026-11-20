@@ -1,15 +1,29 @@
 import { readFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
+import { Client } from 'pg'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
-import { boundScopeSources } from '@use-brian/core'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { getAppPool, getPool } from '../../db/client.js'
-import { readAdmittedSessionQuery } from '../../db/session-query-reader.js'
-import { publishNativeSessionMessageBatch } from '../../db/session-message-publication.js'
+import { readAdmittedSessionQuery } from '../../db/conversation-store.js'
+import { publishNativeSessionMessageBatch } from '../../db/conversation-store.js'
 import { withSessionMessagePublication } from '../../db/session-context-revisions.js'
 import { persistentContextFixture } from './fixtures/persistent-context.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
+
+/** Bootstrap only provisions observer permissions and inert ACL grantees.
+ * All publication, authentication and policy assertions keep the ordinary owner
+ * and genuine app_user connections used by the maintained fixture. */
+async function fixtureBootstrap() {
+  const marker = await assertLocalFixture()
+  const url = new URL(process.env.DATABASE_URL!)
+  if (marker.bootstrapRole) url.username = marker.bootstrapRole
+  const client = new Client({ connectionString: url.href })
+  await client.connect()
+  return client
+}
+const quoteIdentifier = (name: string) => `"${name.replaceAll('"', '""')}"`
 
 describe.sequential('[COMP:api/native-turn-frame] shared publication dependencies', () => {
   let fixture: Awaited<ReturnType<typeof persistentContextFixture>> | undefined
@@ -32,7 +46,9 @@ describe.sequential('[COMP:api/native-turn-frame] shared publication dependencie
     const rows = await publishNativeSessionMessageBatch({ ...command, measure: async (counter, run) => {
       try { return await run() } finally { measurements.push(counter) }
     } })
-    expect(measurements).toEqual(['publication_batch_lease_before', 'publication_batch_sql', 'publication_batch_lease_after'])
+    expect(measurements).toEqual(['publication_external_ancestry', 'publication_field_ancestry', 'publication_query_context',
+      'publication_pool_wait', 'publication_lock', 'publication_validate', 'publication_batch_sql', 'publication_write',
+      'publication_constraints', 'publication_commit'])
     expect(rows).toHaveLength(count)
     const frames = (await f.pool.query('SELECT id FROM native_turn_frames WHERE workspace_id=$1', [f.workspaceId])).rows
     expect(frames).toHaveLength(1)
@@ -59,21 +75,22 @@ describe.sequential('[COMP:api/native-turn-frame] shared publication dependencie
     expect(rows).toHaveLength(3)
     expect((await f.pool.query('SELECT count(*)::int count FROM native_turn_frames WHERE workspace_id=$1', [f.workspaceId])).rows[0].count).toBe(1)
   })
-  it('falls back before payload writes when constraints are already immediate', async () => {
+  it('commits a complete canonical frame when constraints are already immediate', async () => {
     const { f, command, sources, authority } = await setup()
     const rows = await withSessionMessagePublication(authority, sources, async db => {
       await db.query('SET CONSTRAINTS ALL IMMEDIATE')
       return publishNativeSessionMessageBatch(command, db)
     })
     expect(rows).toHaveLength(3)
-    expect((await f.pool.query('SELECT id FROM native_turn_frames WHERE workspace_id=$1', [f.workspaceId])).rows).toEqual([])
+    expect((await f.pool.query('SELECT id FROM native_turn_frames WHERE workspace_id=$1', [f.workspaceId])).rows).toHaveLength(1)
   })
   it('keeps frame metadata and construction helpers inaccessible to the application role', async () => {
     const { f } = await setup()
     for (const table of ['native_turn_frames', 'native_turn_publication_work', 'native_turn_publication_events', 'native_turn_publication_seals', 'native_turn_publication_debt']) {
       expect((await f.pool.query('SELECT has_table_privilege($1,$2,$3) allowed', ['app_user', table, 'SELECT,INSERT,UPDATE,DELETE'])).rows[0].allowed).toBe(false)
     }
-    expect((await f.pool.query("SELECT has_function_privilege('app_user','publish_native_turn_message_batch(uuid,uuid,jsonb,text,jsonb,jsonb)','EXECUTE') allowed")).rows[0].allowed).toBe(false)
+    expect((await f.pool.query("SELECT to_regprocedure('publish_native_turn_message_batch(uuid,uuid,jsonb,text,jsonb,jsonb)') routine")).rows[0].routine).toBeNull()
+    expect((await f.pool.query("SELECT has_function_privilege('app_user','conversation_prepare_publications(uuid,uuid,jsonb)','EXECUTE') allowed")).rows[0].allowed).toBe(false)
   })
   it.each(['hold', 'body', 'frame-hold'] as const)('rolls the frame and all outputs back after an actual %s mutation during writing', async change => {
     const { f, command, firstMessageId } = await setup()
@@ -117,25 +134,38 @@ describe.sequential('[COMP:api/native-turn-frame] shared publication dependencie
   it('performs two native proofs for a complete batch, including the fresh deferred proof', async () => {
     const { f, command, sources, authority } = await setup(7)
     const name = `turn_publication_${randomUUID().replaceAll('-', '')}`
-    await f.pool.query(`CREATE FUNCTION ${name}(enable boolean) RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $fixture$
-      BEGIN IF enable THEN PERFORM set_config('track_functions','all',true);END IF;
-      RETURN coalesce((SELECT calls FROM pg_stat_xact_user_functions WHERE funcid='read_native_turn_compact_requirements(uuid,jsonb,jsonb)'::regprocedure),0);END $fixture$`)
+    const bootstrap = await fixtureBootstrap()
+    const ownerRole = (await f.pool.query('SELECT current_user AS role')).rows[0].role as string
+    const alreadyAllowed = (await bootstrap.query("SELECT has_parameter_privilege($1,'track_functions','SET') AS allowed", [ownerRole])).rows[0].allowed
     try {
-      await withSessionMessagePublication(authority, sources, async db => {
-        const before = Number((await db.query(`SELECT ${name}(true) count`)).rows[0].count)
-        await publishNativeSessionMessageBatch(command, db)
-        await db.query('SET CONSTRAINTS application_field_derivation_dependencies IMMEDIATE')
-        const after = Number((await db.query(`SELECT ${name}(false) count`)).rows[0].count)
-        expect(after - before).toBe(2)
-      })
-    } finally { await f.pool.query(`DROP FUNCTION ${name}(boolean)`) }
+      if (!alreadyAllowed) await bootstrap.query(`GRANT SET ON PARAMETER track_functions TO ${quoteIdentifier(ownerRole)}`)
+      await f.pool.query(`CREATE FUNCTION ${name}(enable boolean) RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $fixture$
+        BEGIN IF enable THEN PERFORM set_config('track_functions','all',true);END IF;
+        RETURN coalesce((SELECT calls FROM pg_stat_xact_user_functions WHERE funcid='conversation_prepare_publications(uuid,uuid,jsonb)'::regprocedure),0);END $fixture$`)
+      try {
+        await withSessionMessagePublication(authority, sources, async db => {
+          const before = Number((await db.query(`SELECT ${name}(true) count`)).rows[0].count)
+          await publishNativeSessionMessageBatch(command, db)
+          await db.query('SET CONSTRAINTS application_field_derivation_dependencies IMMEDIATE')
+          const after = Number((await db.query(`SELECT ${name}(false) count`)).rows[0].count)
+          expect(after - before).toBe(2)
+        })
+      } finally { await f.pool.query(`DROP FUNCTION ${name}(boolean)`) }
+    } finally {
+      try { if (!alreadyAllowed) await bootstrap.query(`REVOKE SET ON PARAMETER track_functions FROM ${quoteIdentifier(ownerRole)}`) }
+      finally { await bootstrap.end() }
+    }
   })
-  it('keeps all predecessor helper guards intact', async () => {
+  it('keeps surviving helper guards intact and removes the displaced writer', async () => {
     const { f } = await setup()
-    for (const name of ['application_native_worklist_helpers_current', 'application_memory_statement_helpers_current',
-      'application_native_dependency_batch_helpers_current', 'application_native_covered_queue_current',
-      'application_native_covered_evidence_helpers_current', 'application_native_file_capture_helpers_current',
-      'application_native_transcript_prepare_helpers_current', 'application_native_field_reference_helpers_current', 'native_turn_helpers_current']) {
+    for (const signature of ['application_native_transcript_prepare_helpers_current()', 'prepare_native_session_message_covered(uuid,uuid,text,jsonb,jsonb)',
+      'application_memory_statement_helpers_current()', 'application_native_dependency_batch_helpers_current()',
+      'application_native_covered_queue_current()', 'application_native_covered_evidence_helpers_current()',
+      'application_native_field_reference_helpers_current()']) {
+      expect((await f.pool.query('SELECT to_regprocedure($1) AS routine', [signature])).rows[0].routine).toBeNull()
+    }
+    for (const name of ['application_native_worklist_helpers_current', 'application_native_file_capture_helpers_current',
+      'native_turn_helpers_current']) {
       expect((await f.pool.query(`SELECT ${name}() current`)).rows[0].current, name).toBe(true)
     }
   })
@@ -167,20 +197,25 @@ describe.sequential('[COMP:api/native-turn-frame] shared publication dependencie
   it.each(['completion', 'contract'] as const)('rejects a replaced %s executable after the writer returns', async changed => {
     const { f, command, sources, authority } = await setup()
     const name = `turn_publication_${randomUUID().replaceAll('-', '')}`
-    const replacement = changed === 'completion' ? `CREATE OR REPLACE FUNCTION native_turn_complete_publication() RETURNS trigger
+    // The fixture's SECURITY DEFINER search path starts with pg_catalog.
+    // Target the installed public routine, rather than creating a shadow there.
+    const replacement = changed === 'completion' ? `CREATE OR REPLACE FUNCTION public.native_turn_complete_publication() RETURNS trigger
       LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $replacement$
       BEGIN DELETE FROM native_turn_publication_debt WHERE transaction_id=txid_current();
        DELETE FROM native_turn_publication_work WHERE transaction_id=txid_current();RETURN NULL;END $replacement$`
-      : `CREATE OR REPLACE FUNCTION native_turn_publication_contract() RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER
+      : `CREATE OR REPLACE FUNCTION public.native_turn_publication_contract() RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER
        SET search_path=pg_catalog,public,pg_temp AS $replacement$ SELECT true $replacement$`
     await f.pool.query(`CREATE FUNCTION ${name}() RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $fixture$
       BEGIN EXECUTE $attack$${replacement}$attack$;END $fixture$`)
+    let injected=false
     try {
       await expect(withSessionMessagePublication(authority, sources, async db => {
         await publishNativeSessionMessageBatch(command, db)
         await db.query(`SELECT ${name}()`)
+        injected=true
         await db.query('SET CONSTRAINTS application_field_derivation_dependencies IMMEDIATE')
       })).rejects.toThrow()
+      expect(injected).toBe(true)
       expect((await f.pool.query('SELECT id FROM native_turn_frames WHERE workspace_id=$1', [f.workspaceId])).rows).toEqual([])
     } finally { await f.pool.query(`DROP FUNCTION ${name}()`) }
   })
@@ -192,7 +227,7 @@ describe.sequential('[COMP:api/native-turn-frame] shared publication dependencie
       BEGIN IF NEW.source_kind='session_context_revision' AND EXISTS(SELECT 1 FROM scope_derivations d JOIN session_messages m ON m.id=d.resource_id
         WHERE d.id=NEW.derivation_id AND d.workspace_id='${f.workspaceId}'::uuid AND d.resource_kind='session_message'
          AND m.sequence_num=(SELECT max(sequence_num) FROM session_messages WHERE session_id='${f.session.id}'::uuid)) THEN
-       EXECUTE $attack$CREATE OR REPLACE FUNCTION native_turn_complete_publication() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
+       EXECUTE $attack$CREATE OR REPLACE FUNCTION public.native_turn_complete_publication() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
         SET search_path=pg_catalog,public,pg_temp AS $replacement$ BEGIN
          UPDATE native_turn_publication_work SET completion_ready=true WHERE transaction_id=txid_current();
          DELETE FROM native_turn_publication_debt WHERE transaction_id=txid_current();RETURN NULL;END $replacement$$attack$;
@@ -229,10 +264,11 @@ describe.sequential('[COMP:api/native-turn-frame] shared publication dependencie
     const { f } = await setup()
     const sql = await readFile(new URL('../../../migrations/8188_native_turn_shared_publication.sql', import.meta.url), 'utf8')
     const name = `turn_acl_${randomUUID().replaceAll('-', '')}`, probe = `turn_probe_${randomUUID().replaceAll('-', '')}`
+    const bootstrap = await fixtureBootstrap()
     const owner = await f.pool.connect()
     try {
+      await bootstrap.query(`CREATE ROLE ${name} NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE`)
       await owner.query('BEGIN')
-      await owner.query(`CREATE ROLE ${name}`)
       if (kind === 'function') {
         await owner.query(`ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO ${name}`)
         await owner.query(`CREATE FUNCTION ${probe}() RETURNS boolean LANGUAGE sql AS 'SELECT true'`)
@@ -245,7 +281,10 @@ describe.sequential('[COMP:api/native-turn-frame] shared publication dependencie
         const sweep = sql.match(/DO \$private_tables\$[\s\S]*?END \$private_tables\$;/)![0].replace("'native_turn_frames'::regclass", `'${probe}'::regclass`)
         await expect(owner.query(sweep)).rejects.toThrow(/native_turn_publication_private_table_acl/)
       }
-    } finally { await owner.query('ROLLBACK'); owner.release() }
+    } finally {
+      try { await owner.query('ROLLBACK') } finally { owner.release() }
+      try { await bootstrap.query(`DROP ROLE IF EXISTS ${name}`) } finally { await bootstrap.end() }
+    }
   })
 
   it('refuses a cleanup rewrite rule introduced after publication', async () => {

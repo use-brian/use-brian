@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
-import { WORKSPACE_MODULES, WORKSPACE_MODULE_OPERATION_CLASSES } from '@use-brian/shared'
+import { WORKSPACE_MODULE_OPERATION_CLASSES } from '@use-brian/shared'
 import { defineApplicationModules, validateApplicationResourceCatalog, type ApplicationModuleDefinition } from '../contracts.js'
+
+const WORKSPACE_MODULES = { legacy: { key: 'legacy', defaultState: 'disabled' as const, blockingCountCompatibility: { field: 'pendingOrders', blockerKey: 'pending_orders' } } }
 
 function module(key: string, dependencies: string[] = []): ApplicationModuleDefinition<unknown> {
   return { key, defaultState: 'disabled', application: { version: '1', dependencies, resources: [],
@@ -12,20 +14,20 @@ function module(key: string, dependencies: string[] = []): ApplicationModuleDefi
 describe('[COMP:security/application-access] deployed application module registration', () => {
   it('registers two independent modules through the existing lifecycle catalog', () => {
     const result = defineApplicationModules([module('purchasing'), module('stock', ['purchasing'])], WORKSPACE_MODULES)
-    expect(result.workspaceModules.association).toEqual(WORKSPACE_MODULES.association)
-    expect(result.workspaceModules.association).not.toBe(WORKSPACE_MODULES.association)
+    expect(result.workspaceModules.legacy).toEqual(WORKSPACE_MODULES.legacy)
+    expect(result.workspaceModules.legacy).not.toBe(WORKSPACE_MODULES.legacy)
     expect(result.workspaceModules.stock.defaultState).toBe('disabled')
     expect(result.applications.get('stock')?.application.dependencies).toEqual(['purchasing'])
   })
   it('enriches an existing lifecycle identity without replacing its default or blocker mapping', () => {
-    const definition = module('association')
+    const definition = module('legacy')
     const result = defineApplicationModules([definition], WORKSPACE_MODULES)
     expect(Object.keys(result.workspaceModules)).toEqual(Object.keys(WORKSPACE_MODULES))
-    expect(result.workspaceModules.association).toMatchObject(WORKSPACE_MODULES.association)
-    expect(result.applications.get('association')?.commands.create.execute).toBe(definition.commands.create.execute)
-    expect(result.applications.get('association')?.blockingCountCompatibility).toEqual(WORKSPACE_MODULES.association.blockingCountCompatibility)
+    expect(result.workspaceModules.legacy).toMatchObject(WORKSPACE_MODULES.legacy)
+    expect(result.applications.get('legacy')?.commands.create.execute).toBe(definition.commands.create.execute)
+    expect(result.applications.get('legacy')?.blockingCountCompatibility).toEqual(WORKSPACE_MODULES.legacy.blockingCountCompatibility)
     expect(definition.blockingCountCompatibility).toBeUndefined()
-    expect(WORKSPACE_MODULES.association).not.toHaveProperty('application')
+    expect(WORKSPACE_MODULES.legacy).not.toHaveProperty('application')
   })
   it('uses the same composition rules for any supplied lifecycle key', () => {
     const existing = { warehouse: { key: 'warehouse', defaultState: 'disabled' as const,
@@ -39,15 +41,15 @@ describe('[COMP:security/application-access] deployed application module registr
     expect(() => Object.assign(result.applications.get('warehouse')!.blockingCountCompatibility!, { field: 'changed' })).toThrow(TypeError)
   })
   it('refuses lifecycle metadata mismatches and replacing an already registered application', () => {
-    const changedDefault = { ...module('association'), defaultState: 'enabled' as const }
-    const changedBlocker = { ...module('association'), blockingCountCompatibility: { field: 'pendingOrders', blockerKey: 'different' } }
-    const changedProjection = { ...module('association'), blockingCountCompatibility: { field: 'different', blockerKey: 'pending_orders' } }
+    const changedDefault = { ...module('legacy'), defaultState: 'enabled' as const }
+    const changedBlocker = { ...module('legacy'), blockingCountCompatibility: { field: 'pendingOrders', blockerKey: 'different' } }
+    const changedProjection = { ...module('legacy'), blockingCountCompatibility: { field: 'different', blockerKey: 'pending_orders' } }
     for (const definition of [changedDefault, changedBlocker, changedProjection]) {
       expect(() => defineApplicationModules([definition], WORKSPACE_MODULES)).toThrow()
     }
-    const first = defineApplicationModules([module('association')], WORKSPACE_MODULES)
-    expect(() => defineApplicationModules([module('association')], first.workspaceModules)).toThrow()
-    expect(() => defineApplicationModules([module('association'), module('association')], WORKSPACE_MODULES)).toThrow()
+    const first = defineApplicationModules([module('legacy')], WORKSPACE_MODULES)
+    expect(() => defineApplicationModules([module('legacy')], first.workspaceModules)).toThrow()
+    expect(() => defineApplicationModules([module('legacy'), module('legacy')], WORKSPACE_MODULES)).toThrow()
   })
   it('refuses duplicate modules, missing/cyclic dependencies and catalog-only handlers', () => {
     for (const definitions of [[module('one'), module('one')], [module('one', ['missing'])],
@@ -148,13 +150,13 @@ describe('[COMP:security/application-access] deployed application module registr
     const definition = module('owned')
     definition.blockingCountCompatibility = { field: 'pendingItems', blockerKey: 'pending_items' }
     const registered = defineApplicationModules([definition], existing)
-    Object.assign(existing.association.blockingCountCompatibility, { field: 'changed' })
+    Object.assign(existing.legacy.blockingCountCompatibility, { field: 'changed' })
     definition.blockingCountCompatibility.field = 'changed'
 
-    expect(registered.workspaceModules.association.blockingCountCompatibility?.field).toBe('pendingOrders')
+    expect(registered.workspaceModules.legacy.blockingCountCompatibility?.field).toBe('pendingOrders')
     expect(registered.workspaceModules.owned.blockingCountCompatibility?.field).toBe('pendingItems')
     expect(registered.applications.get('owned')?.blockingCountCompatibility?.field).toBe('pendingItems')
-    expect(() => Object.assign(registered.workspaceModules.association, { defaultState: 'enabled' })).toThrow(TypeError)
+    expect(() => Object.assign(registered.workspaceModules.legacy, { defaultState: 'enabled' })).toThrow(TypeError)
     expect(() => Object.assign(registered.applications.get('owned')!.blockingCountCompatibility!, { field: 'changed' })).toThrow(TypeError)
   })
 

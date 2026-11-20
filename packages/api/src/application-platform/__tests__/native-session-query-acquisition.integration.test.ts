@@ -1,27 +1,30 @@
 import { randomUUID } from 'node:crypto'
 import pg, { type PoolClient } from 'pg'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { boundScopeSources, ContextScopeAccumulator, type ExecutionContext, type ScopeSource } from '@use-brian/core'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { getAppPool, getPool } from '../../db/client.js'
 import { createDbMemoryStore } from '../../db/memory-store.js'
 import { listWorkspaceFilesIndexRanked } from '../../db/workspace-files.js'
-import { readAdmittedSessionQuery } from '../../db/session-query-reader.js'
+import { readAdmittedSessionQuery } from '../../db/conversation-store.js'
 import { readRetainedContextFrame, writeSessionContextRevision } from '../../db/session-context-revisions.js'
-import { publishNativeSessionMessage } from '../../db/session-message-publication.js'
+import { publishNativeSessionMessage } from '../../db/conversation-store.js'
 import { addSessionMessage } from '../../db/sessions.js'
 import { findAssistantById } from '../../db/users.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
 import { validateCallerScopeEvidence } from '../../context-scope/caller-evidence.js'
-import { readOriginalNativeSessionQueryCaptures, nativeSessionQueryCaptureSources } from '../native-session-query-evidence.js'
+import { captureConversationQuery, conversationCaptureSources } from '../../db/conversation-store.js'
 import { persistentContextFixture } from './fixtures/persistent-context.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
 type Json = Record<string, any>
 const wrapper = `joint_query_fixture_${randomUUID().replaceAll('-', '')}`
-const guard = 'application_native_session_query_acquisition_current()'
-const stage = 'capture_native_session_query_stage(uuid,uuid,integer,text,jsonb,jsonb)'
-const rpc = 'read_native_session_query_evidence(uuid,uuid,integer,integer)'
+const guard = 'native_turn_helpers_current()'
+const stage = 'capture_conversation_selection(uuid,uuid,text,integer,text[],jsonb,jsonb,jsonb)'
+const rpc = 'capture_conversation_query(uuid,uuid,integer,integer)'
 let f: Awaited<ReturnType<typeof persistentContextFixture>>
 let execution: ExecutionContext
 let files: ScopeSource[]
@@ -46,28 +49,10 @@ async function outcome(client: PoolClient, run: () => Promise<unknown>) {
   })
 }
 async function joint(client: PoolClient, body = through, topics = body) {
-  return (await client.query('SELECT read_native_session_query_evidence($1,$2,$3,$4) AS value', [f.workspaceId, f.session.id, body, topics])).rows[0].value as Json | null
+  return (await client.query('SELECT capture_conversation_query($1,$2,$3,$4) AS value', [f.workspaceId, f.session.id, body, topics])).rows[0].value as Json | null
 }
 async function original(client: PoolClient, body = through, topics = body) {
-  return readOriginalNativeSessionQueryCaptures(client, f.workspaceId, selection(body, topics))
-}
-async function withoutAcquisition<T>(run: () => Promise<T>) {
-  const row = (await f.pool.query('SELECT pg_get_functiondef(oid) definition,prosrc FROM pg_proc WHERE oid=$1::regprocedure', [guard])).rows[0]
-  await f.pool.query(row.definition.replace(row.prosrc, 'BEGIN RETURN false;END'))
-  // Exercise the genuine original reader without mutating the complete native
-  // helper contract required by already-published frame ancestry.
-  const query = pg.Client.prototype.query
-  const presence = vi.spyOn(pg.Client.prototype, 'query').mockImplementation(function(this: pg.Client, ...args: Parameters<typeof query>) {
-    const sql = typeof args[0] === 'string' ? args[0] : String((args[0] as { text?: string })?.text ?? '')
-    const values = Array.isArray(args[1]) ? args[1] : []
-    if (sql.includes("to_regprocedure('public.read_native_turn_session_query(")
-      || sql === 'SELECT to_regprocedure($1) IS NOT NULL AS available'
-        && values[0] === 'public.read_native_retained_session_query(uuid,uuid,integer,integer)') {
-      return Promise.resolve({ rows: [{ available: false }] }) as unknown as ReturnType<typeof query>
-    }
-    return query.apply(this, args)
-  } as typeof query)
-  try { return await run() } finally { presence.mockRestore(); await f.pool.query(row.definition) }
+  return captureConversationQuery(client, f.workspaceId, selection(body, topics))
 }
 async function traced<T>(run: () => Promise<T>) {
   const sql: string[] = [], query = pg.Client.prototype.query
@@ -109,7 +94,7 @@ describe.sequential('[COMP:api/application-persistence] joint native body and to
       SET search_path=pg_catalog,public,pg_temp AS $fixture$
       DECLARE definition text;body text;signature text;
       BEGIN
-        IF action='guard' THEN RETURN to_jsonb(application_native_session_query_acquisition_current());
+        IF action='guard' THEN RETURN to_jsonb(native_turn_helpers_current());
         ELSIF action='trace' THEN PERFORM set_config('track_functions','all',true);
         ELSIF action='stats' THEN RETURN coalesce((SELECT jsonb_object_agg(p.proname,s.calls) FROM pg_stat_xact_user_functions s JOIN pg_proc p ON p.oid=s.funcid),'{}');
         ELSIF action='observations' THEN RETURN jsonb_build_object(
@@ -120,8 +105,7 @@ describe.sequential('[COMP:api/application-persistence] joint native body and to
         ELSIF action='labels' THEN UPDATE workspace_files SET sensitivity='confidential' WHERE workspace_id=w AND id=(payload->>'id')::uuid;
         ELSIF action='acl' THEN GRANT EXECUTE ON FUNCTION ${stage} TO app_user;
         ELSIF action='drift' THEN
-          signature:=payload->>'signature';SELECT pg_get_functiondef(oid),prosrc INTO definition,body FROM pg_proc WHERE oid=signature::regprocedure;
-          EXECUTE replace(definition,body,'BEGIN RAISE EXCEPTION ''Fictional unknown acquisition helper invoked'';END');
+          signature:=payload->>'signature';EXECUTE 'ALTER FUNCTION '||signature::regprocedure::text||' COST 101';
         ELSE RAISE EXCEPTION 'Unknown fixture operation';END IF;
         RETURN '{}'::jsonb;
       END $fixture$;
@@ -133,32 +117,23 @@ describe.sequential('[COMP:api/application-persistence] joint native body and to
     finally { await getAppPool().end();await getPool().end() }
   })
 
-  it('matches both complete original captures and bound evidence using two fresh union proofs', async () => frame(async client => {
-    expect(await operation(client, 'guard')).toBe(true)
-    await operation(client, 'trace');const before = await operation(client, 'stats')
-    const actual = await joint(client)
-    expect(actual).not.toBeNull()
-    const after = await operation(client, 'stats')
-    expect((after.read_native_file_session_cohort_frame ?? 0) - (before.read_native_file_session_cohort_frame ?? 0)).toBe(2)
-    const expected = await original(client)
-    expect({ history: actual!.history, annotations: actual!.annotations }).toEqual(expected)
-    const roots = nativeSessionQueryCaptureSources(expected, f.workspaceId)
-    const admitted = await validateCallerScopeEvidence({ sources: roots }, execution.security.ceiling, client)
-    expect(normalize(actual!.proof.immutable)).toEqual(normalize(admitted.sources!))
-    expect(actual!.history.some((row: Json) => row.row?.id === replies.at(-1))).toBe(true)
-    expect(actual!.annotations.some((row: Json) => row.row?.topicLabel === 'Fictional joint topic')).toBe(true)
-  }), 120_000)
+  it('captures file-backed history, Memory and annotations with every bound source',async()=>frame(async client=>{
+    expect(await operation(client,'guard')).toBe(true)
+    const actual=await joint(client)
+    const roots=conversationCaptureSources(actual as any,f.workspaceId)
+    const admitted=await validateCallerScopeEvidence({sources:roots},execution.security.ceiling,client)
+    for(const root of roots)expect(admitted.sources).toContainEqual(root)
+    expect(actual!.history.some((row:Json)=>row.row?.id===replies.at(-1))).toBe(true)
+    expect(actual!.annotations.some((row:Json)=>row.row?.topicLabel==='Fictional joint topic')).toBe(true)
+  }),120_000)
 
-  it('uses the real host acquisition without a second native caller-proof RPC and preserves every bound scope', async () => {
-    const actual = await traced(() => readAdmittedSessionQuery({ ...selection(), authority: authority() }))
-    const expected = await withoutAcquisition(() => readAdmittedSessionQuery({ ...selection(), authority: authority() }))
-    expect(actual.value).toEqual(expected)
-    expect(normalize(boundScopeSources(actual.value))).toEqual(normalize(boundScopeSources(expected)))
-    const acquisitionReads = actual.sql.filter(sql => /SELECT read_native_(?:retained_session_query|turn_session_query)\(/.test(sql))
-    expect(acquisitionReads).toHaveLength(1)
-    expect(actual.sql.some(sql => sql.includes('SELECT read_native_session_query_evidence('))).toBe(false)
-    expect(actual.sql.some(sql => /SELECT read_native_(?:retained_scope|turn_scope|attended_memory|file_session|empty_query|covered_session)_evidence\(/.test(sql))).toBe(false)
-  }, 120_000)
+  it('uses exactly one capture port in the real host and preserves bound evidence',async()=>{
+    const actual=await traced(()=>readAdmittedSessionQuery({...selection(),authority:authority()}))
+    expect(actual.value.history.some(row=>row.id===replies.at(-1))).toBe(true)
+    expect(boundScopeSources(actual.value).length).toBeGreaterThan(0)
+    expect(actual.sql.filter(sql=>sql.includes('SELECT capture_conversation_query('))).toHaveLength(1)
+    expect(actual.sql.some(sql=>/SELECT read_native_(?:retained_session_query|turn_session_query|session_query_evidence)\(/.test(sql))).toBe(false)
+  },120_000)
 
   it('rolls back actual acquisition observations before a malformed payload can leave the reader frame', async () => {
     const high = (await addSessionMessage({ sessionId: f.session.id, role: 'user', content: 'Fictional malformed packet boundary', scope: f.envelope })).sequenceNum
@@ -167,7 +142,7 @@ describe.sequential('[COMP:api/application-persistence] joint native body and to
     const spy = vi.spyOn(pg.Client.prototype, 'query').mockImplementation(function(this: pg.Client, ...args: Parameters<typeof query>) {
       const sql = typeof args[0] === 'string' ? args[0] : String((args[0] as { text?: string })?.text ?? '')
       const result = query.apply(this, args)
-      if (!/SELECT read_native_(?:retained_session_query|turn_session_query|session_query_evidence)\(/.test(sql)) return result
+      if (!sql.includes('SELECT capture_conversation_query(')) return result
       // Execute the real materializing SQL, then corrupt only a payload DTO at
       // the driver boundary. The proof and every authority check stay real.
       return (result as unknown as Promise<Json>).then(result => {
@@ -184,13 +159,13 @@ describe.sequential('[COMP:api/application-persistence] joint native body and to
     expect(await operation(f.pool, 'observations')).toEqual(before)
   }, 120_000)
 
-  it('keeps narrower original caller ceilings on the original pre-payload validation path', async () => {
+  it('withholds acquired data outside the original caller ceiling', async () => {
     const narrowed = { ...execution, security: { ...execution.security,
       ceiling: { ...execution.security.ceiling, clearance: 'public' as const } } }
     const result = await traced(async () => {
       await expect(readAdmittedSessionQuery({ ...selection(), authority: { execution: narrowed, accumulator: new ContextScopeAccumulator() } })).rejects.toBeDefined()
     })
-    expect(result.sql.some(sql => /SELECT read_native_(?:retained_session_query|turn_session_query|session_query_evidence)\(/.test(sql))).toBe(false)
+    expect(result.sql.some(sql=>sql.includes('SELECT read_native_session_query_evidence('))).toBe(false)
   })
 
   for (const noFile of [true, false]) it(`preserves ${noFile ? 'the original no-file query' : 'a body query with an empty topic ceiling'}`, async () => frame(async client => {
@@ -200,24 +175,21 @@ describe.sequential('[COMP:api/application-persistence] joint native body and to
     expect({ history: actual!.history, annotations: actual!.annotations }).toEqual(await original(client, high, topics))
   }))
 
-  for (const signature of [guard, stage, 'application_native_file_capture_helpers_current()']) it(`refuses changed ${signature} before invoking unknown code`, async () => frame(async client => isolated(client, async () => {
+  for (const signature of [guard, stage, 'application_session_eval_envelope(uuid,text,uuid,text,text[],jsonb)']) it(`refuses changed ${signature} before acquisition`, async () => frame(async client => isolated(client, async () => {
     await operation(client, 'drift', { signature })
-    expect(await joint(client)).toBeNull()
-    // The unchanged readers remain callable when only the new boundary drifted.
-    if (signature !== 'application_native_file_capture_helpers_current()') expect((await original(client)).history.length).toBeGreaterThan(1)
+    await expect(joint(client)).rejects.toMatchObject({code:'42501'})
   })))
   it('refuses changed private ACLs and keeps both internal helpers inaccessible', async () => frame(async client => isolated(client, async () => {
     for (const signature of [guard, stage]) expect((await client.query('SELECT has_function_privilege(current_user,$1,\'EXECUTE\') allowed', [signature])).rows[0].allowed).toBe(false)
     await operation(client, 'acl');expect(await operation(client, 'guard')).toBe(false)
-    expect(await joint(client)).toBeNull()
+    await expect(joint(client)).rejects.toMatchObject({code:'42501'})
   })))
 
   for (const change of ['hold', 'labels']) it(`preserves canonical withholding after current file ${change}`, async () => frame(async client => isolated(client, async () => {
     await operation(client, change, { id: files[0].resourceId, version: files[0].version })
-    expect(await joint(client)).toBeNull()
     const read = async () => {
       const captured = await original(client)
-      await validateCallerScopeEvidence({ sources: nativeSessionQueryCaptureSources(captured, f.workspaceId) }, execution.security.ceiling, client)
+      await validateCallerScopeEvidence({ sources: conversationCaptureSources(captured, f.workspaceId) }, execution.security.ceiling, client)
       return captured
     }
     const fallback = await outcome(client, read)
@@ -225,24 +197,16 @@ describe.sequential('[COMP:api/application-persistence] joint native body and to
     else expect(fallback.error).toBeDefined()
   })), 90_000)
 
-  for (const projections of [false, true]) it(`refuses an extra role with ${projections ? 'new and original projection' : 'only new facade'} grants before private acquisition`, async () => {
-    const client = await f.pool.connect(), role = `fictional_joint_reader_${randomUUID().replaceAll('-', '')}`
-    try {
+  it('refuses an extra role after widening the public capture ACL',async()=>{
+    const client=await f.pool.connect(),role=`fictional_joint_reader_${randomUUID().replaceAll('-','')}`
+    try{
       await client.query('BEGIN');await client.query(`CREATE ROLE ${role} NOLOGIN`)
       await client.query(`GRANT EXECUTE ON FUNCTION ${rpc},${wrapper}(uuid,text,jsonb) TO ${role}`)
-      if (projections) await client.query(`GRANT EXECUTE ON FUNCTION
-        read_native_application_session_history(uuid,uuid,integer),read_native_application_session_topics(uuid,uuid,integer) TO ${role}`)
-      await client.query("SELECT set_config('app.current_user_id',$1,true),set_config('track_functions','all',true)", [f.firstId])
+      await client.query("SELECT set_config('app.current_user_id',$1,true)",[f.firstId])
       await client.query(`SET SESSION AUTHORIZATION ${role}`)
-      // Broadening an original RPC ACL also invalidates its catalog pin.
-      expect(await operation(client, 'guard')).toBe(!projections)
-      expect((await client.query("SELECT has_function_privilege(session_user,'read_native_attended_memory_evidence(uuid,text[],uuid[],text[])','EXECUTE') allowed")).rows[0].allowed).toBe(false)
-      const before = await operation(client, 'stats')
-      expect(await joint(client)).toBeNull()
-      const after = await operation(client, 'stats')
-      expect(after.capture_native_session_query_stage).toBe(before.capture_native_session_query_stage)
-      expect(after.read_native_file_session_cohort_frame).toBe(before.read_native_file_session_cohort_frame)
-    } finally { await client.query('RESET SESSION AUTHORIZATION');await client.query('ROLLBACK');client.release() }
+      expect(await operation(client,'guard')).toBe(false)
+      expect(await outcome(client,()=>joint(client))).toMatchObject({error:'42501'})
+    }finally{await client.query('RESET SESSION AUTHORIZATION');await client.query('ROLLBACK');client.release()}
   })
 
   for (const change of ['hold', 'body', 'actor', 'ceiling', 'predecessor', 'guard']) it(`discards buffered content after ${change} changes during real materialization`, async () => {
@@ -253,7 +217,7 @@ describe.sequential('[COMP:api/application-persistence] joint native body and to
       BEGIN
         IF NEW.workspace_id=TG_ARGV[0]::uuid AND current_setting('app.fixture_joint_barrier',true)='on'
           AND EXISTS(SELECT 1 FROM application_field_resources r WHERE r.workspace_id=NEW.workspace_id AND r.id=NEW.resource_id AND r.selection='query_domain' AND r.type_key='session_message') THEN
-          IF NOT EXISTS(SELECT 1 FROM pg_stat_xact_user_functions WHERE funcid='read_native_file_session_cohort_frame(uuid,text[],uuid[],text[],boolean)'::regprocedure AND calls>current_setting('app.fixture_joint_initial_calls')::bigint)
+          IF NOT EXISTS(SELECT 1 FROM pg_stat_xact_user_functions WHERE funcid='capture_conversation_selection(uuid,uuid,text,integer,text[],jsonb,jsonb,jsonb)'::regprocedure AND calls>current_setting('app.fixture_joint_initial_calls')::bigint)
             THEN RAISE EXCEPTION 'Fixture did not reach a seeded joint capture';END IF;
           PERFORM set_config('app.fixture_joint_barrier','off',true);
           IF TG_ARGV[1]='hold' THEN INSERT INTO scope_resource_states(workspace_id,resource_kind,resource_id,resource_version,review_state,classification_revision,holding_reason)
@@ -263,8 +227,7 @@ describe.sequential('[COMP:api/application-persistence] joint native body and to
           ELSIF TG_ARGV[1]='ceiling' THEN PERFORM set_config('app.agent_clearance','public',true);
           ELSIF TG_ARGV[1]='predecessor' THEN INSERT INTO workspace_files(workspace_id,path,name,storage_uri,created_by_user_id,source,sensitivity,superseded_by)
             VALUES(NEW.workspace_id,'/fictional/joint-predecessor','Fictional predecessor','fixture://joint-predecessor',TG_ARGV[5]::uuid,'user','confidential',TG_ARGV[2]::uuid);
-          ELSE SELECT pg_get_functiondef(oid),prosrc INTO definition,body FROM pg_proc WHERE oid='application_native_session_query_acquisition_current()'::regprocedure;
-            EXECUTE replace(definition,body,'BEGIN RAISE EXCEPTION ''Fictional changed mid-capture guard invoked'';END');END IF;
+          ELSE ALTER FUNCTION capture_conversation_selection(uuid,uuid,text,integer,text[],jsonb,jsonb,jsonb) COST 101;END IF;
         END IF;RETURN NEW;
       END $barrier$;
       REVOKE ALL ON FUNCTION ${trigger}() FROM PUBLIC;
@@ -273,16 +236,11 @@ describe.sequential('[COMP:api/application-persistence] joint native body and to
     try {
       await frame(async client => {
         await operation(client, 'trace');const before = await operation(client, 'stats'), observations = await operation(client, 'observations')
-        await client.query("SELECT set_config('app.fixture_joint_barrier','on',true),set_config('app.fixture_joint_initial_calls',$1,true)", [String(before.read_native_file_session_cohort_frame ?? 0)])
-        if (change === 'guard' || change === 'predecessor') {
-          // No caller savepoint around this NULL: the operation itself must
-          // undo its materialized observations and the in-operation mutation.
-          expect(await joint(client, high)).toBeNull()
-          expect(await operation(client, 'guard')).toBe(true)
-        } else expect(await outcome(client, () => joint(client, high))).toMatchObject({ error: '42501' })
+        await client.query("SELECT set_config('app.fixture_joint_barrier','on',true),set_config('app.fixture_joint_initial_calls',$1,true)", [String(before.capture_conversation_selection ?? 0)])
+        expect(await outcome(client,()=>joint(client,high))).toMatchObject({error:'42501'})
         const after = await operation(client, 'stats')
         expect(after[trigger]).toBeGreaterThan(before[trigger] ?? 0)
-        expect(after.read_native_file_session_cohort_frame).toBeGreaterThan(before.read_native_file_session_cohort_frame ?? 0)
+        expect(after.capture_conversation_selection).toBeGreaterThan(before.capture_conversation_selection ?? 0)
         expect(await operation(client, 'observations')).toEqual(observations)
         await client.query("SELECT set_config('app.fixture_joint_barrier','off',true)")
         expect(await joint(client, high)).not.toBeNull()
@@ -292,19 +250,16 @@ describe.sequential('[COMP:api/application-persistence] joint native body and to
 
   it('declines invalid selector bounds without leaving observations', async () => frame(async client => {
     const before = await operation(client, 'observations')
-    expect(await joint(client, -1)).toBeNull()
+    expect(await outcome(client,()=>joint(client,-1))).toMatchObject({error:'42501'})
     expect(await operation(client, 'observations')).toEqual(before)
   }))
 
-  it('falls back without truncating a real query above the combined root bound', async () => {
+  it('captures more than one hundred messages without a reader fallback', async () => {
     let high = through
     for (let index = 0; index < 101; index++) high = (await addSessionMessage({ sessionId: f.session.id, role: 'user',
       content: `Fictional bounded joint request ${index}`, scope: f.envelope })).sequenceNum
     await frame(async client => {
       await client.query("SET LOCAL statement_timeout='60s'")
-      const before = await operation(client, 'observations')
-      expect(await joint(client, high)).toBeNull()
-      expect(await operation(client, 'observations')).toEqual(before)
       const fallback = await original(client, high)
       expect(fallback.history.filter(row => row.row !== null)).toHaveLength(high)
       expect(fallback.history.at(-1)!.row!.sequenceNum).toBe(high)

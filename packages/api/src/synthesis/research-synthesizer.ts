@@ -19,25 +19,21 @@
 // research path stays a single call. See
 // docs/architecture/brain/structural-synthesis.md → "The three fill modes" (Research).
 
-import {
-  createCrmTools,
-  createMemoryTools,
-  createDocTools,
-  createTaskTools,
-  loadBuiltinSkills,
-  type CrmStore,
-  type DocPageStore,
-  type LLMProvider,
-  type MemoryStore,
-  type SavedViewStore,
-  type Sensitivity,
-  type TaskStore,
-  type TokenUsage,
-  type Tool,
-  type UsageStore,
-  type WorkflowRunStore,
-  type WorkspaceDirectoryStore,
-} from '@use-brian/core'
+import { createCrmTools } from '@use-brian/core/crm/tools.js'
+import type { CrmStore } from '@use-brian/core/crm/types.js'
+import { createDocTools, type DocPageStore } from '@use-brian/core/doc/tools.js'
+import { createMemoryTools } from '@use-brian/core/memory/tools.js'
+import type { MemoryStore } from '@use-brian/core/memory/types.js'
+import { loadBuiltinSkills } from '@use-brian/core/skills/loader.js'
+import { createTaskTools } from '@use-brian/core/tasks/tools.js'
+import type { TaskStore } from '@use-brian/core/tasks/types.js'
+import type { SavedViewStore } from '@use-brian/core/views/types.js'
+import type { WorkflowRunStore } from '@use-brian/core/workflow/types.js'
+import type { WorkspaceDirectoryStore } from '@use-brian/core/workspace/types.js'
+import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
+import type { LLMProvider, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { createFindingsSourceTool } from './findings-source-tool.js'
 import { synthesizeFromSource, type SynthesisBlueprint } from './synthesize.js'
 import { extractionToBlueprintBody } from './blueprint-from-template.js'

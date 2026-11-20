@@ -216,7 +216,7 @@ describeIf('[COMP:memory/bi-temporal-reads] reads filter valid_to IS NULL', () =
     }
   })
 
-  function ctx(): import('@use-brian/core').AccessContext {
+  function ctx(): import('@use-brian/agent-runtime/security/access-context.js').AccessContext {
     return { workspaceId, userId, assistantId, assistantKind: 'standard', clearance: 'confidential' }
   }
 
@@ -427,7 +427,7 @@ describe('[COMP:memory/learning] PostgreSQL eligibility and compatibility',()=>{
     expect(await allowed({...learned,evidenceGroups:[['00000000-0000-4000-8000-000000000001']]},{activity:'status_update'})).toBe(false)
   })
   it('includes metadata in native projections without weakening pinned dependencies',async()=>{
-    const row=(await pool.query('SELECT application_memory_field_keys() AS fields, application_memory_statement_helpers_current() AS intact')).rows[0]
+    const row=(await pool.query('SELECT application_memory_field_keys() AS fields, native_turn_helpers_current() AS intact')).rows[0]
     expect(row.fields).toContain('learning')
     expect(row.intact).toBe(true)
   })
@@ -439,7 +439,7 @@ describe('[COMP:memory/learning] source-backed evidence lifecycle',()=>{
   const client=await pool.connect()
   try{
    const user=await makeUser(client),workspace=await makeWorkspace(client,user),assistant=await makeAssistant(client,user,workspace)
-   const memories=await import('../memories.js'),{memoryLearningSchema}=await import('@use-brian/core')
+   const memories=await import('../memories.js'),{memoryLearningSchema}=await import('@use-brian/core/memory/learning.js')
    const common={assistantId:assistant,userId:user,createdByUserId:user,sensitivity:'internal' as const,source:'user'}
    const broad=await memories.createMemory({...common,summary:'Prefers concise writing'})
    const narrow=await memories.createMemory({...common,summary:'Prefers detailed client reports',learning:memoryLearningSchema.parse({version:1,state:'established',origin:'explicit',confirmed:true,applicability:{activity:'client_report',exceptionTo:broad.id}})})

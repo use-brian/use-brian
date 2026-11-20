@@ -6,13 +6,10 @@ vi.mock('../../db/client.js', () => ({
   getPool: vi.fn(),
 }))
 
-import {
-  charterNeedsIntake,
-  createSaveCharterTool,
-  CHARTER_INTAKE_ADDENDUM,
-} from '../charter-intake.js'
+import { createSaveCharterTool } from '../charter-intake.js'
+import { charterNeedsIntake, CHARTER_INTAKE_ADDENDUM } from '../../charter-intake-contract.js'
 import { query } from '../../db/client.js'
-import type { ToolContext } from '@use-brian/core'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const mockQuery = vi.mocked(query)
 const ctx = {} as ToolContext

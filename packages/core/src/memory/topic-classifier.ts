@@ -26,13 +26,13 @@ import { randomUUID } from 'node:crypto'
 import { createTopicIdentity, isTopicIdentity } from './topic-identity.js'
 import { decisionUsageModelId } from '../decisions/usage.js'
 import { registryRow } from '@use-brian/shared/model-registry'
-import { bindScopeSources, boundScopeSources } from '../security/source-evidence.js'
+import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { isTrivialChatMessage } from '../classification/trivial-chat.js'
-import { DerivedScopeError } from '../security/derived-scope.js'
-import { assertInputAuthority, assertProviderInputPreparation, captureInputAdmissionProvider, isInputAuthorityError } from '../providers/input-authority.js'
+import { DerivedScopeError } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { assertInputAuthority, assertProviderInputPreparation, captureInputAdmissionProvider, isInputAuthorityError } from '@use-brian/agent-runtime/providers/input-authority.js'
 import type { SessionContextAuthority } from './session-state-types.js'
-import type { LLMProvider, TokenUsage } from '../providers/types.js'
-import { collectStream } from '../providers/accumulator.js'
+import type { LLMProvider, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
 import type { DecisionAnswer, DecisionExecutionPort, DecisionResponse } from '../decisions/index.js'
 import { DecisionProviderError } from '../decisions/types.js'
 import { decisionCompletionInput } from '../decisions/invocation.js'
@@ -98,6 +98,22 @@ export type TopicClassifierOptions = {
   signal?: AbortSignal
   /** Optional absolute host deadline; can only narrow the classifier budget. */
   deadlineAt?: number
+}
+
+const recordTopicAdmissions = new WeakMap<TopicClassifierOptions, {
+  authority: SessionContextAuthority;
+  execution: SessionContextAuthority['execution'];
+  accumulator: SessionContextAuthority['accumulator'];
+  check: NonNullable<TopicClassifierOptions['assertInputAuthority']>;
+}>()
+
+/** Host-only binding for an exact callback that admits both the live turn and
+ * its complete current conversation-record cohort. */
+export function bindRecordTopicAdmission(options: TopicClassifierOptions): TopicClassifierOptions {
+  const {authority,assertInputAuthority:check}=options
+  if (!authority || !check) throw new DerivedScopeError('scope_evidence_missing')
+  recordTopicAdmissions.set(options,{authority,execution:authority.execution,accumulator:authority.accumulator,check})
+  return options
 }
 
 type BoundedTopicClassifierOptions = TopicClassifierOptions & {
@@ -555,6 +571,10 @@ export async function classifyTopic(incoming: TopicClassifierOptions): Promise<T
   const input = structuredClone({ recentUserTurns: opts.recentUserTurns, replyToText: opts.replyToText,
     currentMessage: opts.currentMessage, knownTopicsThisSession: opts.knownTopicsThisSession, topicAnchors: opts.topicAnchors })
   const observed = accumulator ? structuredClone(accumulator.evidence.sources ?? []) : inputs
+  const owner = recordTopicAdmissions.get(incoming)
+  const completeRecordCheck = owner?.authority===authority && owner?.execution===execution
+    && owner?.accumulator===accumulator && owner?.check===opts.assertInputAuthority
+    && observed.length>0 && observed.every(source=>source.resourceKind==='conversation_record')
   // Recovery may not turn an earlier refusal into success if a later probe
   // happens to pass. One invocation has one continuous authority window.
   let refusal: unknown
@@ -570,12 +590,15 @@ export async function classifyTopic(incoming: TopicClassifierOptions): Promise<T
     if (pending) return pending
     pending = (async () => {
       if (assertCurrent) {
-        await assertInputAuthority(assertCurrent)
+        if (!completeRecordCheck) await assertInputAuthority(assertCurrent)
         if (lifecycleSignal!.aborted) {
           throw Object.assign(new Error('The model context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
         }
       }
       await assertInputAuthority(opts.assertInputAuthority)
+      if (completeRecordCheck && lifecycleSignal?.aborted) {
+        throw Object.assign(new Error('The model context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
+      }
     })().catch(error => { refusal = error; throw error })
     try { await pending } finally { pending = undefined }
   }

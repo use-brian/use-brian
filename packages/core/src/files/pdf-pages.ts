@@ -8,8 +8,12 @@
  * [COMP:files/pdf-pages]
  */
 
-import sharp from 'sharp'
-import { definePDFJSModule, getDocumentProxy, renderPageAsImage } from 'unpdf'
+import { lazyImplementation } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
+
+// The PDF.js bridge and the image encoder load on the first PDF, not when
+// the file pipeline is imported (M4 step 5, D13).
+const loadUnpdf = lazyImplementation('The PDF page reader (unpdf)', () => import('unpdf'))
+const loadSharp = lazyImplementation('The image encoder (sharp)', () => import('sharp').then((m) => m.default))
 
 export type RenderedPdfPage = {
   pageNumber: number
@@ -29,7 +33,7 @@ const DEFAULT_JPEG_QUALITY = 82
 
 let pdfJsReady: Promise<void> | undefined
 
-function ensureRenderPdfJs(): Promise<void> {
+function ensureRenderPdfJs(definePDFJSModule: typeof import('unpdf').definePDFJSModule): Promise<void> {
   pdfJsReady ??= definePDFJSModule(() => import('pdfjs-dist/legacy/build/pdf.mjs'))
   return pdfJsReady
 }
@@ -44,9 +48,22 @@ function ensureRenderPdfJs(): Promise<void> {
  * BE the expensive operation.
  *
  * Returns null when the bytes are not a readable PDF — the caller decides
- * whether that is a failure or simply "no estimate available".
+ * whether that is a failure or simply "no estimate available". When the PDF
+ * reader itself cannot be loaded, an estimate caller gets null as well ("no
+ * estimate available", logged by the loader); a caller that must tell an
+ * unreadable document from an unavailable reader passes `strict: true` and
+ * gets the `ImplementationUnavailableError` instead.
  */
-export async function probePdfPageCount(buffer: Buffer): Promise<number | null> {
+export async function probePdfPageCount(buffer: Buffer, options: { strict?: boolean } = {}): Promise<number | null> {
+  // Loaded outside the parse catch: an unavailable reader is not "not a readable PDF".
+  let reader: Awaited<ReturnType<typeof loadUnpdf>>
+  try {
+    reader = await loadUnpdf()
+  } catch (error) {
+    if (options.strict) throw error
+    return null
+  }
+  const { getDocumentProxy } = reader
   try {
     const pdf = await getDocumentProxy(new Uint8Array(buffer))
     try {
@@ -64,7 +81,8 @@ export async function renderPdfPages(
   buffer: Buffer,
   options: { maxPages?: number; width?: number; jpegQuality?: number } = {},
 ): Promise<RenderPdfPagesResult> {
-  await ensureRenderPdfJs()
+  const [{ definePDFJSModule, getDocumentProxy, renderPageAsImage }, sharp] = await Promise.all([loadUnpdf(), loadSharp()])
+  await ensureRenderPdfJs(definePDFJSModule)
 
   const maxPages = Math.max(1, Math.floor(options.maxPages ?? DEFAULT_MAX_PAGES))
   const width = Math.max(1, Math.floor(options.width ?? DEFAULT_WIDTH))

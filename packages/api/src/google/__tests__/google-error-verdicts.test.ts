@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { GoogleApiError, describeGoogleError, googleFailure } from '@use-brian/core'
+import { GoogleApiError, describeGoogleError, googleFailure } from '@use-brian/core/tools/base/_google-error.js'
 import { classifyConnectorAuthError } from '../../mcp/connector-health.js'
 import { googleApiError } from '../client.js'
 

@@ -46,11 +46,16 @@ vi.mock("@/lib/api/crm", () => ({ fetchCrmConfig: vi.fn() }));
 vi.mock("@/lib/api/tasks", () => ({ fetchWorkspaceTasks: vi.fn() }));
 vi.mock("@/lib/api/workflow", () => ({ listWorkflows: vi.fn() }));
 vi.mock("@/lib/api/connectors", () => ({ fetchConnectorsList: vi.fn() }));
-vi.mock("@/lib/api/association", () => ({ fetchAssociationModules: vi.fn() }));
 
 /** In-memory stand-in for the offline KV store. */
 const idb = vi.hoisted(() => ({ store: new Map<string, unknown>() }));
 vi.mock("@/lib/offline/idb", () => ({
+  idbReadEntries: async (keys: readonly string[]) => JSON.parse(JSON.stringify(Object.fromEntries(keys.map(key => [key, idb.store.get(key) ?? null])))),
+  idbUpdateEntries: async (keys: readonly string[], update: (values: Record<string, unknown>) => Record<string, unknown>) => {
+    const values = JSON.parse(JSON.stringify(Object.fromEntries(keys.map(key => [key, idb.store.get(key) ?? null]))));
+    for (const [key, value] of Object.entries(update(values))) { if (value === undefined) idb.store.delete(key); else idb.store.set(key, JSON.parse(JSON.stringify(value))); values[key] = value ?? null; }
+    return values;
+  },
   idbGet: async (key: string) => idb.store.get(key) ?? null,
   idbSet: async (key: string, value: unknown) => {
     idb.store.set(key, value);
@@ -58,12 +63,16 @@ vi.mock("@/lib/offline/idb", () => ({
   idbDelete: async (key: string) => {
     idb.store.delete(key);
   },
+  idbUpdate: async (key: string, update: (value: unknown) => unknown) => {
+    const next = update(idb.store.get(key) ?? null); idb.store.set(key, next); return next;
+  },
 }));
 
 import {
   chatRosterCacheKey,
   chatSessionsCacheKey,
   chatSharedSessionsCacheKey,
+  chatArchivedSessionsCacheKey,
   chatTranscriptCacheKey,
 } from "@/lib/surface-prefetch";
 import {
@@ -76,6 +85,7 @@ import {
 import { LIVE_REFRESH_EVENT } from "@/lib/workspace-events";
 import { applySpineEventToSurfaceCache } from "@/lib/surface-cache-invalidation";
 import { dispatchChatSessionsRefresh } from "@/lib/chat-session-events";
+import { captureChatListRead, chatHistoryScope, evictChatHistory, prepareChatHistoryRead } from "@/lib/offline/chat-history-cache";
 import {
   cacheCreatedChatSession,
   warmChatTranscript,
@@ -149,19 +159,24 @@ function mount(ui: React.ReactElement) {
 const text = (id: string) =>
   container?.querySelector(`[data-testid="${id}"]`)?.textContent ?? "";
 
-beforeEach(() => {
+beforeEach(async () => {
   resetSurfaceCache();
+  window.history.replaceState({}, "", "/");
+  window.dispatchEvent(new Event("brian:local-data-cleared"));
   idb.store.clear();
   user.id = "u1";
   api.fetchSessionMessages.mockReset();
   api.listWorkspaceAssistants.mockReset();
   api.listPersonalSessions.mockReset();
   api.listWorkspaceSessions.mockReset();
+  await captureChatListRead("w1");
 });
 
-afterEach(() => {
-  act(() => {
+afterEach(async () => {
+  await act(async () => {
     root?.unmount();
+    if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(0);
+    else await settle();
   });
   resetSurfaceCache();
   vi.useRealTimers();
@@ -172,12 +187,15 @@ afterEach(() => {
 
 describe("[COMP:app-web/chat-sessions-cache] keys", () => {
   it("builds workspace-first, viewer-suffixed list keys and a per-session transcript key", () => {
-    expect(chatRosterCacheKey("w1")).toBe("chat-roster:w1:u1");
-    expect(chatSessionsCacheKey("w1")).toBe("chat-sessions:w1:u1");
-    expect(chatSharedSessionsCacheKey("w1")).toBe("chat-shared:w1:u1");
-    expect(chatTranscriptCacheKey("s1")).toBe("chat-transcript:s1");
+    expect(chatRosterCacheKey("w1")).toMatch(/^chat-roster:w1:u1:/);
+    expect(chatSessionsCacheKey("w1")).toMatch(/^chat-sessions:w1:u1:/);
+    expect(chatSharedSessionsCacheKey("w1")).toMatch(/^chat-shared:w1:u1:/);
+    const transcriptKey = chatTranscriptCacheKey("s1");
+    expect(transcriptKey).toContain(":u1:");
+    expect(transcriptKey).toMatch(/:s1$/);
     user.id = "u2";
     expect(chatSessionsCacheKey("w1")).not.toBe("chat-sessions:w1:u1");
+    expect(chatTranscriptCacheKey("s1")).not.toBe(transcriptKey);
   });
 
   it("the sidebar panel and the surface both read the hook, and the hook builds its keys from the prefetch module", () => {
@@ -294,8 +312,8 @@ describe("[COMP:app-web/chat-sessions-cache] first paint and stale marks", () =>
     expect(readSurfaceCache(chatSessionsCacheKey("w1")).data).toBeUndefined();
     expect(text("personal")).toBe("Quarterly plan");
     expect(text("shared")).toBe("Launch room");
-    // A presentation fallback never extends the one-hour offline boundary.
-    await act(async () => { await vi.advanceTimersByTimeAsync(3_600_001); });
+    // A presentation fallback never extends the 24-hour offline boundary.
+    await act(async () => { await vi.advanceTimersByTimeAsync(86_400_001); });
     expect(text("personal")).toBe("SKELETON");
     expect(text("shared")).toBe("SKELETON");
     // A known denial still removes the snapshot immediately.
@@ -314,7 +332,7 @@ describe("[COMP:app-web/chat-sessions-cache] first paint and stale marks", () =>
     let finish!: (rows: typeof PERSONAL) => void;
     api.listPersonalSessions.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
     const pending = loadSurfaceCache(chatSessionsCacheKey("w1"), () => fetchPersonalChatSessions("w1"));
-    await Promise.resolve();
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
     const created = { ...PERSONAL[0], id: "s-new", title: "Newly submitted work" };
     cacheCreatedChatSession("w1", created, "personal");
     expect(readSurfaceCache<typeof PERSONAL>(chatSessionsCacheKey("w1")).data?.[0]).toEqual(created);
@@ -331,7 +349,7 @@ describe("[COMP:app-web/chat-sessions-cache] first paint and stale marks", () =>
     let finish!: (rows: typeof PERSONAL) => void;
     api.listPersonalSessions.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
     const pending = loadSurfaceCache(chatSessionsCacheKey("w1"), () => fetchPersonalChatSessions("w1"));
-    await Promise.resolve();
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
     const created = { ...PERSONAL[0], id: "s-new" };
     cacheCreatedChatSession("w1", created, "personal");
     expect(readSurfaceCache<typeof PERSONAL>(chatSessionsCacheKey("w1")).data).toEqual([created]);
@@ -351,9 +369,11 @@ describe("[COMP:app-web/chat-sessions-cache] first paint and stale marks", () =>
     api.listPersonalSessions.mockResolvedValue(PERSONAL);
     await fetchPersonalChatSessions("w1");
     expect(api.listWorkspaceAssistants).not.toHaveBeenCalled();
+    // The read carries the abort signal its last mounted holder can fire.
     expect(api.listPersonalSessions).toHaveBeenCalledWith({
       workspaceId: "w1",
       strict: true,
+      signal: expect.any(AbortSignal),
     });
   });
 
@@ -380,9 +400,11 @@ describe("[COMP:app-web/chat-sessions-cache] first paint and stale marks", () =>
       await settle();
     });
     expect(api.listWorkspaceAssistants).toHaveBeenCalledTimes(1);
+    // The read carries the abort signal its last mounted holder can fire.
     expect(api.listPersonalSessions).toHaveBeenCalledWith({
       workspaceId: "w1",
       strict: true,
+      signal: expect.any(AbortSignal),
     });
     expect(text("personal")).toBe("Quarterly plan");
   });
@@ -464,7 +486,7 @@ describe("[COMP:app-web/chat-sessions-cache] list failures", () => {
   it("does not hydrate history outside the existing offline authority window", async () => {
     await writeChatSessionsSnapshot("u1", "w1", { personal: PERSONAL, shared: SHARED });
     const stored = idb.store.get(chatSessionsSnapshotKey("u1", "w1")) as { updatedAt: number };
-    stored.updatedAt = Date.now() - 60 * 60_000 - 1;
+    stored.updatedAt = Date.now() - 24 * 60 * 60_000 - 1;
     api.listWorkspaceAssistants.mockImplementation(never);
     api.listPersonalSessions.mockImplementation(never);
     api.listWorkspaceSessions.mockImplementation(never);
@@ -495,7 +517,7 @@ describe("[COMP:app-web/chat-sessions-cache] transcripts", () => {
       "utf8",
     );
     expect(surface).toMatch(
-      /readCachedTranscript<SurfaceMessage>\(activeSessionId\);\s*chat\.loadMessages\(cached \?\? \[\]\);\s*setTranscriptCold\(!cached\);/,
+      /readCachedTranscript<SurfaceMessage>\(activeSessionId\);\s*if \(!holding\) chat\.loadMessages\(cached \?\? \[\]\);\s*setTranscriptCold\(!holding && !cached\);/,
     );
   });
 
@@ -517,6 +539,53 @@ describe("[COMP:app-web/chat-sessions-cache] transcripts", () => {
 });
 
 describe("[COMP:app-web/chat-sessions-cache] IndexedDB tier", () => {
+  it("persists a committed denial for the original workspace without clearing the newly open transcript", async () => {
+    const originalWorkspace = "11111111-1111-4111-8111-111111111111";
+    const nextWorkspace = "22222222-2222-4222-8222-222222222222";
+    window.history.replaceState({}, "", `/w/${originalWorkspace}/chat`);
+    await writeChatSessionsSnapshot("u1", originalWorkspace, { personal: PERSONAL, shared: SHARED });
+    const owner = chatHistoryScope("s1");
+    await prepareChatHistoryRead(owner);
+    window.history.replaceState({}, "", `/w/${nextWorkspace}/chat`);
+    const next = [{ id: "new", role: "assistant", text: "Current transcript" }];
+    writeTranscriptCache("s2", next);
+    await evictChatHistory(owner, "s1", true);
+    expect(readCachedTranscript("s2")).toEqual(next);
+    const stored = idb.store.get(chatSessionsSnapshotKey("u1", originalWorkspace)) as { value: { personal: typeof PERSONAL; shared: typeof SHARED } };
+    expect(stored.value.personal.map(row => row.id)).not.toContain("s1");
+    expect(stored.value.shared.map(row => row.id)).toEqual(SHARED.map(row => row.id));
+  });
+
+  it("evicts only a denied session's retained title across list variants and fences an older success", async () => {
+    window.history.replaceState({}, "", "/w/11111111-1111-4111-8111-111111111111/chat");
+    const other = { ...PERSONAL[0], id: "s2", title: "Still authorized" };
+    const shared = { ...SHARED[0], id: "s1", title: PERSONAL[0].title };
+    const keys = [chatSessionsCacheKey("11111111-1111-4111-8111-111111111111"), chatSharedSessionsCacheKey("11111111-1111-4111-8111-111111111111"),
+      chatSharedSessionsCacheKey("11111111-1111-4111-8111-111111111111", "project"), chatArchivedSessionsCacheKey("11111111-1111-4111-8111-111111111111", "personal")];
+    for (const key of keys) await loadSurfaceCache(key, async () => [PERSONAL[0], other]);
+    const before = readSurfaceCache(chatSessionsCacheKey("11111111-1111-4111-8111-111111111111")).updatedAt;
+    const syncedAt = Date.now() - 1000;
+    await writeChatSessionsSnapshot("u1", "11111111-1111-4111-8111-111111111111", { personal: [PERSONAL[0], other], shared: [shared, SHARED[0]] }, syncedAt);
+    let release!: (rows: typeof PERSONAL) => void;
+    api.listPersonalSessions.mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
+    const older = fetchPersonalChatSessions("11111111-1111-4111-8111-111111111111");
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    await evictChatHistory(chatHistoryScope("s1"), "s1");
+    for (const key of keys) expect(readSurfaceCache<Array<{ id: string }>>(key).data?.map(row => row.id)).toEqual(["s2"]);
+    expect(readSurfaceCache(chatSessionsCacheKey("11111111-1111-4111-8111-111111111111")).updatedAt).toBe(before);
+    const stored = idb.store.get(chatSessionsSnapshotKey("u1", "11111111-1111-4111-8111-111111111111")) as { updatedAt: number; value: { personal: typeof PERSONAL; shared: typeof SHARED } };
+    expect(stored.updatedAt).toBe(syncedAt);
+    expect(stored.value.personal.map(row => row.id)).toEqual(["s2"]);
+    expect(stored.value.shared.map(row => row.id)).toEqual(["r1"]);
+    release([PERSONAL[0], other]);
+    expect((await older).map(row => row.id)).toEqual(["s2"]);
+    // An old state snapshot being flushed to disk is not a new admission.
+    await writeChatSessionsSnapshot("u1", "11111111-1111-4111-8111-111111111111", { personal: [PERSONAL[0], other], shared: SHARED }, syncedAt);
+    expect((idb.store.get(chatSessionsSnapshotKey("u1", "11111111-1111-4111-8111-111111111111")) as typeof stored).value.personal.map(row => row.id)).toEqual(["s2"]);
+    api.listPersonalSessions.mockResolvedValue([{ ...PERSONAL[0], title: "Freshly admitted" }, other]);
+    expect((await fetchPersonalChatSessions("11111111-1111-4111-8111-111111111111")).map(row => row.title)).toEqual(["Freshly admitted", "Still authorized"]);
+  });
+
   it("(d) hydrates the rail from the viewer's own snapshot while the network is pending, and never another viewer's", async () => {
     expect(chatSessionsSnapshotKey("u1", "w1")).not.toBe(chatSessionsSnapshotKey("u2", "w1"));
     await writeChatSessionsSnapshot("u1", "w1", { personal: PERSONAL, shared: SHARED });
@@ -607,6 +676,7 @@ describe("[COMP:app-web/chat-sessions-cache] immediate send recency", () => {
     let rollback!: () => void;
     act(() => { rollback = promoteChatSession("w1", "older"); });
     expect(text("personal")).toBe("Older,Newer");
+    await vi.waitFor(() => expect(resolveRead).toBeTypeOf("function"));
     resolveRead([newer, older]);
     expect((await staleRead).map(row => row.id)).toEqual(["older", "newer"]);
     act(() => rollback());

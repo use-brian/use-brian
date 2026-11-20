@@ -42,7 +42,8 @@ import {
   type AppType,
   type AssistantCharter,
 } from '@use-brian/shared'
-import { MAX_INBOX_RETENTION_DAYS, MIN_INBOX_RETENTION_DAYS, CrmOperationsError } from '@use-brian/core'
+import { CrmOperationsError } from '@use-brian/core/crm/operations-types.js'
+import { MAX_INBOX_RETENTION_DAYS, MIN_INBOX_RETENTION_DAYS } from '@use-brian/core/doc/inbox-types.js'
 import { query, queryWithRLS } from '../db/client.js'
 import { findUserById } from '../db/users.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'

@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
-import { compileOfficeTemplate, inferOfficeTemplateRouting } from '@use-brian/core'
+import { compileOfficeTemplate } from '@use-brian/core/office/templates/compiler.js'
+import { inferOfficeTemplateRouting } from '@use-brian/core/office/templates/routing.js'
 import { spreadsheetFixture } from '../../../../office-model/src/__tests__/fixtures.js'
 import { templateBundle } from '../../../../core/src/office/__tests__/fixtures.js'
-import { exportOfficeSpreadsheet, importOfficeSpreadsheet } from '../../../../core/src/office/xlsx/index.js'
+import { exportOfficeSpreadsheet, importOfficeSpreadsheet } from '@use-brian/core/office/xlsx/index.js'
 import { generateSpreadsheetFromTemplate } from '../spreadsheet-generation.js'
 import { recalculateSpreadsheet, type SpreadsheetCell } from '@use-brian/office-model'
 

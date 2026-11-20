@@ -12,7 +12,7 @@ import { createSandboxOrchestrator, createInMemorySandboxTaskStore, type Sandbox
 import { createCloudBrowserProvider } from '../cloud-browser-provider.js'
 import { StubSandboxProvider } from '../providers/stub.js'
 import { createComputerTools } from '../tools.js'
-import type { UsageStore } from '../../billing/cost-tracker.js'
+import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
 
 type RecordedRow = {
   model: string

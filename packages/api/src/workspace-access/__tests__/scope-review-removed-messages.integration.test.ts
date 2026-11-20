@@ -1,6 +1,6 @@
 import {randomUUID} from 'node:crypto'
 import {afterAll,describe,expect,it} from 'vitest'
-import {boundScopeSources} from '@use-brian/core'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {createMemory} from '../../db/memories.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'

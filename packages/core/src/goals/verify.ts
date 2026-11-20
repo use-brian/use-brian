@@ -12,8 +12,8 @@
  * (refuted -> continue). A goal must never be falsely completed; an
  * unverifiable claim simply keeps the goal working until budget.
  */
-import type { LLMProvider, TokenUsage } from '../providers/types.js'
-import { collectStream } from '../providers/accumulator.js'
+import type { LLMProvider, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
 import type { GoalLlmRuntime, GoalLlmUsageContext } from './clarity.js'
 
 export type GoalVerifyVerdict = {

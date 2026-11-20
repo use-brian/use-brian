@@ -1,5 +1,7 @@
 import { z } from 'zod'
-import { buildTool, type FilesContext, type Tool, type ToolContext, type ScopeEvidence } from '@use-brian/core'
+import type { FilesContext } from '@use-brian/core/workspace-files/api.js'
+import type { ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { PrepareExtractionSchema, StartExtractionSchema, ReadExtractionSchema, ProposeEvidenceFillSchema,
   StructuredDocumentServiceError, type StructuredDocumentService } from './service.js'
 

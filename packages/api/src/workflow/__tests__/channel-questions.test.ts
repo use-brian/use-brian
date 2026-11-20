@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { z } from 'zod'
-import { buildTool, type ToolContext } from '@use-brian/core'
+import { buildTool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { handleChannelQuestionReply, workflowQuestionActions, type ChannelQuestion, type ChannelQuestionStore } from '../channel-questions.js'
 import { dispatchQuestionResponse } from '../question-response.js'
 

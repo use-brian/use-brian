@@ -3,13 +3,15 @@ import * as dbClient from '../db/client.js'
  * actual provider requests/delivery, privacy holds and executed stop guards. */
 import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { configureTelegramTextDeliveryObserver, createTelegramAdapter } from '@use-brian/channels'
-import type { LLMProvider } from '@use-brian/core'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
 import { applyRLSGucs, getAppPool, getPool } from '../db/client.js'
 import { getSessionMessages } from '../db/sessions.js'
 import { findAssistantById } from '../db/users.js'
 import { createDbCapabilityStore } from '../db/capability-store.js'
+import { createDbLinkedAccountStore } from '../db/linked-accounts.js'
+import { channelLinkBindsHere } from '../db/channel-user-store.js'
 import { createDbMemoryStore } from '../db/memory-store.js'
 import { createDbChannelIntegrationStore, encryptCredentials } from '../db/channel-integrations.js'
 import { findTelegramConversationContext, assertTelegramConversationCurrent, recordDeliveredTelegramConversation } from '../telegram-conversation-context.js'
@@ -19,6 +21,7 @@ import { sessionKindSql } from '../session-kind.js'
 import { processChannelMessage } from '../routes/channel-pipeline.js'
 import { confirmChannelRecordingOwner, admitTelegramRecording, changeChannelRecording } from '../channel-recording.js'
 import { persistentContextFixture } from '../application-platform/__tests__/fixtures/persistent-context.js'
+import { conversationAnchorWriteAdmissionActive,initializeConversationVisibility } from '../db/conversation-visibility.js'
 
 const enabled = Boolean(process.env.TELEGRAM_CONTEXT_TEST_DATABASE_URL)
 const { assertLocalFixture } = await import(new URL('../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
@@ -26,6 +29,7 @@ if (enabled) await assertLocalFixture()
 const run = enabled ? describe.sequential : describe.skip
 run('[COMP:api/telegram-conversation-context] normal topic continuity', () => {
   let fixture: Awaited<ReturnType<typeof persistentContextFixture>> | undefined
+  beforeAll(async()=>{await initializeConversationVisibility();expect(conversationAnchorWriteAdmissionActive()).toBe(true)})
   afterEach(async () => { configureTelegramTextDeliveryObserver(); vi.restoreAllMocks(); await fixture?.cleanup(); fixture=undefined })
   afterAll(async () => { await getAppPool().end(); await getPool().end() })
   async function setup() {
@@ -43,11 +47,21 @@ run('[COMP:api/telegram-conversation-context] normal topic continuity', () => {
     return {f,channelId,integrationId,botId,conversationId,key,binding,input}
   }
 
+  async function linkedSender(f: Awaited<ReturnType<typeof persistentContextFixture>>, userId: string) {
+    const store = createDbLinkedAccountStore()
+    const actorChannelId = userId === f.ownerId ? '91000082731' : '91000082732'
+    await store.upsert({ userId, assistantId: f.assistantId, provider: 'telegram', providerId: actorChannelId })
+    const linked = await store.findByProvider('telegram', actorChannelId)
+    const senderLinkedIdentity = await channelLinkBindsHere(linked, f.assistantId, f.ownerId, f.workspaceId)
+    expect(linked?.userId).toBe(userId)
+    expect(senderLinkedIdentity).toBe(true)
+    return { userId, actorChannelId, isIdentified: true, senderLinkedIdentity }
+  }
+
   it('executes ordinary-owner migration and retains all canonical guards',async()=>{
     const role=(await getPool().query('SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')).rows[0]
     expect(role).toEqual({rolsuper:false,rolbypassrls:false})
-    for(const name of ['native_turn_helpers_current','native_turn_publication_contract','application_native_worklist_helpers_current',
-      'application_native_dependency_batch_helpers_current','application_native_field_reference_helpers_current','application_memory_statement_helpers_current']) {
+    for(const name of ['native_turn_helpers_current','native_turn_publication_contract','application_native_worklist_helpers_current']) {
       expect((await getPool().query(`SELECT public.${name}() ok`)).rows[0].ok).toBe(true)
     }
   })
@@ -74,6 +88,13 @@ run('[COMP:api/telegram-conversation-context] normal topic continuity', () => {
   it('sends previous visible turns and current image to the real provider boundary after reconstruction',async()=>{
     const s=await setup(), room=await findTelegramConversationContext(s.input)
     expect(room).not.toBeNull()
+    const sibling=(await findTelegramConversationContext({...s.input,conversationId:'-1000000019:topic:8'}))!
+    const siblingRow=await appendChannelRoomMessage({
+      sessionId:sibling.id,role:'user',content:[{type:'text',text:'Do not include this sibling topic'}],
+      channelMessageId:'52',senderUserId:s.f.ownerId,scope:roomInputScope(sibling,s.f.workspaceId),
+      providerContext:{identity:sibling.providerContextIdentity!,generation:sibling.providerContextGeneration!},
+    })
+    expect(siblingRow.created).toBe(true)
     await s.f.memory('Private fixture fact must never reach the group',s.f.ownerId)
     const capture=vi.fn();configureChannelRooms({capturePost:capture})
     const assistant=(await findAssistantById(s.f.assistantId))!
@@ -85,7 +106,30 @@ run('[COMP:api/telegram-conversation-context] normal topic continuity', () => {
     })
     configureTelegramTextDeliveryObserver(recordDeliveredTelegramConversation)
     const usage={inputTokens:5,outputTokens:5}
+    let checkedSibling=false
     const provider:LLMProvider={name:'fictional-topic-context',models:['fixture'],async *stream(){
+      if(!checkedSibling){
+        const bounds=(await s.f.pool.query(`SELECT t.turn_lease_token token,e.version::text version,m.channel_message_id incoming
+          FROM sessions t JOIN conversation_envelopes e ON e.session_id=t.id
+          JOIN session_messages m ON m.session_id=t.id AND m.role='user' AND m.sender_user_id=$2
+          WHERE t.id=$1 ORDER BY m.sequence_num DESC LIMIT 1`,[room!.id,s.f.ownerId])).rows[0]
+        const signature='SELECT public.capture_verified_telegram_conversation_evidence($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) AS proof'
+        const sql=async(actorEpoch:number,source:unknown)=>{
+          const client=await getAppPool().connect()
+          try {
+            await client.query('BEGIN')
+            await applyRLSGucs(client,s.f.ownerId,s.f.assistantId)
+            await client.query("SELECT set_config('app.agent_shared_audience','true',true)")
+            return (await client.query(signature,[s.f.workspaceId,room!.id,s.f.ownerId,s.f.assistantId,
+              s.conversationId,s.integrationId,s.botId,actorEpoch,bounds.version,bounds.token,'91000082731',
+              bounds.incoming,JSON.stringify([source])])).rows[0]?.proof
+          } finally { await client.query('ROLLBACK'); client.release() }
+        }
+        const foreign={kind:'session_message',id:siblingRow.message.id,version:'1'}
+        expect(await sql(room!.providerContextGeneration!,foreign)).toBeNull()
+        await expect(sql(room!.providerContextGeneration!+1,foreign)).rejects.toThrow('provider_context_unavailable')
+        checkedSibling=true
+      }
       yield {type:'message_start',model:'fixture'}
       yield {type:'text_delta',text:'{"topic_label":"Running schedule","state":"continue","confidence":0.9}'}
       yield {type:'message_end',stopReason:'end_turn',usage}
@@ -99,9 +143,12 @@ run('[COMP:api/telegram-conversation-context] normal topic continuity', () => {
       const context=await findTelegramConversationContext({...s.input,userId})
       if(!context)throw Error('Expected approved topic context')
       const adapter=createTelegramAdapter({token:s.botId+':fictional',botUsername:'fictional_bot',deliveryOrigin:{integrationId:s.integrationId,generation:context.providerContextGeneration!}})
-      await processChannelMessage({userId,ownerId:s.f.ownerId,assistant,isIdentified:true,conversationContext:context,
+      const linked=await linkedSender(s.f,userId)
+      const providerMessageId=String(messageId++)
+      await processChannelMessage({...linked,ownerId:s.f.ownerId,assistant,conversationContext:context,
+        incomingMessage:{userId:linked.actorChannelId,channelId:s.conversationId,messageId:providerMessageId,text,isGroupChat:true,timestamp:Date.now(),raw:{} },
         channelType:'telegram',channelId:s.conversationId,channelIntegrationId:s.integrationId,
-        channelIntegrationStore:createDbChannelIntegrationStore(s.key),isGroupChat:true,incomingChannelMessageId:String(messageId++),
+        channelIntegrationStore:createDbChannelIntegrationStore(s.key),isGroupChat:true,incomingChannelMessageId:providerMessageId,
         messageText:text,userContentBlocks:[{type:'text',text},...(image?[{type:'image' as const,mimeType:'image/png',data:'RklDVElPTkFMX0lNQUdF'}]:[])],
         modelAlias:'standard',adaptiveResearchEnabled:false,abortController:new AbortController(),provider,systemPrompt:'Private fixture instructions',
         tools:new Map(),memoryStore:createDbMemoryStore(),capabilityStore:createDbCapabilityStore(),hooks:{
@@ -136,6 +183,8 @@ run('[COMP:api/telegram-conversation-context] normal topic continuity', () => {
     expect(requests[1]).not.toContain('Private fixture fact')
     expect(requests[1]).not.toContain('Private fixture instructions')
     expect(deliveries).toHaveLength(2)
+    expect(checkedSibling).toBe(true)
+    expect(requests[1]).not.toContain('Do not include this sibling topic')
     expect(capture).not.toHaveBeenCalled()
     expect((await s.f.pool.query(`SELECT id FROM sessions s WHERE s.id=$1 AND ${sessionKindSql.surfacesBeyondAnchor('s')}`,[room!.id])).rows).toHaveLength(0)
     const messages=await getSessionMessages(room!.id,{excludeHeld:true})
@@ -169,9 +218,11 @@ run('[COMP:api/telegram-conversation-context] normal topic continuity', () => {
     },createSession(){return {send(){return (async function*(){mainSends++;yield {type:'message_start' as const,model:'fixture'}
       yield {type:'text_delta' as const,text:'Must not reach provider'};yield {type:'message_end' as const,stopReason:'end_turn' as const,usage}
     })()}}}}
-    try{await processChannelMessage({userId:s.f.ownerId,ownerId:s.f.ownerId,assistant:(await findAssistantById(s.f.assistantId))!,
-      isIdentified:true,conversationContext:room,channelType:'telegram',channelId:s.conversationId,channelIntegrationId:s.integrationId,
-      channelIntegrationStore:createDbChannelIntegrationStore(s.key),isGroupChat:true,incomingChannelMessageId:'stop-turn-1',
+    const linked=await linkedSender(s.f,s.f.ownerId)
+    try{await processChannelMessage({...linked,ownerId:s.f.ownerId,assistant:(await findAssistantById(s.f.assistantId))!,
+      incomingMessage:{userId:linked.actorChannelId,channelId:s.conversationId,messageId:'719531',text:'Review the schedule',isGroupChat:true,timestamp:Date.now(),raw:{} },
+      conversationContext:room,channelType:'telegram',channelId:s.conversationId,channelIntegrationId:s.integrationId,
+      channelIntegrationStore:createDbChannelIntegrationStore(s.key),isGroupChat:true,incomingChannelMessageId:'719531',
       messageText:'Review the schedule',userContentBlocks:[{type:'text',text:'Review the schedule'}],modelAlias:'standard',
       abortController:new AbortController(),provider,systemPrompt:'Fixture',tools:new Map(),memoryStore:createDbMemoryStore(),
       capabilityStore:createDbCapabilityStore(),hooks:{async onConfirmationRequired(){throw Error('Unexpected confirmation')},

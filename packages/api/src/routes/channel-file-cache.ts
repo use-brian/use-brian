@@ -8,7 +8,7 @@
 // do not, per the 2026-07-06 product decision). See
 // docs/architecture/engine/file-handling.md → "Save-on-request".
 
-import type { FileStore } from '@use-brian/core'
+import type { FileStore } from '@use-brian/core/files/types.js'
 import { findOrCreateSession } from '../db/sessions.js'
 
 export type CacheInboundImageInput = {

@@ -1,15 +1,26 @@
 /** Owner-reviewed or explicitly scheduled retention. [COMP:crm/retention] */
 import {createHash,randomUUID} from 'node:crypto'
 import type {PoolClient} from 'pg'
-import {CrmOperationsContextSchema,CrmOperationsError,PreviewCrmRetentionCommandSchema,ExecuteCrmRetentionCommandSchema,
-  assertCrmOperationsAuthority,canonicalCrmRequest,type CrmOperationsContext,type CrmRetentionServicePort,type ResourceScope} from '@use-brian/core'
+import {
+  CrmOperationsContextSchema,
+  CrmOperationsError,
+  assertCrmOperationsAuthority,
+  canonicalCrmRequest,
+  type CrmOperationsContext
+} from '@use-brian/core/crm/operations-types.js'
+import {
+  PreviewCrmRetentionCommandSchema,
+  ExecuteCrmRetentionCommandSchema,
+  type CrmRetentionServicePort
+} from '@use-brian/core/crm/retention-types.js'
+import type { ResourceScope } from '@use-brian/agent-runtime/security/derived-scope.js'
 import {getPool,query,queryWithRLS} from '../db/client.js'
 import {acquireCrmPrivacyAdmission} from './privacy-admission.js'
 import {readCrmPrivacyPolicy} from './privacy-policy.js'
 import {inspectCrmRetention,applyCrmRetention,type CrmRetentionPlan} from './retention-store.js'
 import {assertCrmRetentionScope,renewCrmRetentionScope,emptyCrmRetentionScope} from './retention-authority.js'
 import {queryCrmPage} from './pagination.js'
-import type {CrmPageQuery} from '@use-brian/core'
+import type {CrmPageQuery} from '@use-brian/core/crm/pagination.js'
 
 const conflict=(reason:string)=>new CrmOperationsError('conflict','Review the current retention policy and affected data before proceeding.',{reason})
 const hash=(input:unknown)=>createHash('sha256').update(canonicalCrmRequest(input)).digest('hex')

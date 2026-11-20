@@ -33,7 +33,7 @@ import {
   createMemoryRetractionStore,
   createEpisodeReExtractionStore,
 } from '../retraction-store.js'
-import type { MemoryRetractionSnapshot } from '@use-brian/core'
+import type { MemoryRetractionSnapshot } from '@use-brian/core/corrections/retraction.js'
 
 const memoryRepo = createMemoryRetractionStore()
 const episodeRepo = createEpisodeReExtractionStore()

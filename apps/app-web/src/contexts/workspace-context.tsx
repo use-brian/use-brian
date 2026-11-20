@@ -132,9 +132,6 @@ export function setActiveWorkspaceId(_id: string | null): void {
   // imports resolve; navigation goes through `useWorkspaces().setActive`.
 }
 
-/** Compatibility no-op — the route hydrates the active workspace in app-web. */
-export function useWorkspaceHydrate(): void {}
-
 /**
  * Hook returning the workspace list + the route-derived active id, matching
  * `apps/web`'s `useWorkspaces()` shape. `setActive` navigates to the target

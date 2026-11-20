@@ -1,5 +1,5 @@
 /** Current module roles at the canonical transaction, never a client role claim. [COMP:api/application-management] */
-import type { ApplicationOperationContext } from '@use-brian/core'
+import type { ApplicationOperationContext } from '@use-brian/core/application-platform/contracts.js'
 import { ApplicationPlatformError } from '@use-brian/shared'
 import type { PoolClient } from 'pg'
 export async function assertApplicationModuleRole(context:ApplicationOperationContext<PoolClient>,moduleKey:string,roleKey:string):Promise<void> {

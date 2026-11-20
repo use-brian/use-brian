@@ -24,7 +24,11 @@ vi.mock('../../db/recordings-store.js', () => ({
 
 import { viewsRoutes } from '../views.js'
 import { readWorkspacePageDirectory } from '../../db/page-directory.js'
-import type { CrmStore, SavedView, SavedViewStore, SoftDeleteRepository, TaskStore, WorkflowRunStore } from '@use-brian/core'
+import type { SoftDeleteRepository } from '@use-brian/core/corrections/soft-delete.js'
+import type { CrmStore } from '@use-brian/core/crm/types.js'
+import type { TaskStore } from '@use-brian/core/tasks/types.js'
+import type { SavedView, SavedViewStore } from '@use-brian/core/views/types.js'
+import type { WorkflowRunStore } from '@use-brian/core/workflow/types.js'
 import type { WorkspaceStore } from '../../db/workspace-store.js'
 import { query as mockedClientQuery } from '../../db/client.js'
 

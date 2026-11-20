@@ -6,20 +6,31 @@
  * [COMP:api/crm-intake-route]
  */
 
+import type { AssociationActor } from '@use-brian/core/association/domain.js'
 import {
-  CrmOperationsError, CrmEffectiveEntitlementQuerySchema, actorAuditIdentity, type AssociationActor,
-  type CrmPage, type CrmPageQuery,
   CrmIntegrationScopeError,
-  crmIntegrationResourceSelection, requireCrmIntegrationOperation, requireCrmIntegrationResources,
+  crmIntegrationResourceSelection,
+  requireCrmIntegrationOperation,
+  requireCrmIntegrationResources,
   intersectCrmIntegrationAuthorities,
-  intersectDepartmentReadGrants, CrmIntegrationAuthoritySchema,
-  type CrmIntegrationAuthority, type CrmIntegrationOperation, type CrmIntegrationSelector,
-  type DepartmentReadGrant,
+  CrmIntegrationAuthoritySchema,
+  type CrmIntegrationAuthority,
+  type CrmIntegrationOperation,
+  type CrmIntegrationSelector,
+} from '@use-brian/core/crm/integration-authority.js'
+import type { CrmOperationsReadPort } from '@use-brian/core/crm/operations-tools.js'
+import {
+  CrmOperationsError,
+  CrmEffectiveEntitlementQuerySchema,
+  actorAuditIdentity,
   type CrmOperationsActor,
-  evaluateCrmSendability,
-  type CrmDeliveryChannel,
-  type CrmOperationsReadPort,
-} from '@use-brian/core'
+} from '@use-brian/core/crm/operations-types.js'
+import type { CrmPage, CrmPageQuery } from '@use-brian/core/crm/pagination.js'
+import { evaluateCrmSendability, type CrmDeliveryChannel } from '@use-brian/core/crm/sendability.js'
+import {
+  intersectDepartmentReadGrants,
+  type DepartmentReadGrant,
+} from '@use-brian/agent-runtime/security/department-read.js'
 import { getPool, query } from './client.js'
 import { readCrmIntegrationCredential, type CrmIntegrationPrincipal } from './crm-integration-store.js'
 import { intersectCrmIntegrationExecutionLimits, type CrmIntegrationExecutionLimits } from '../crm-operations/integration-department-authority.js'

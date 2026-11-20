@@ -11,7 +11,7 @@
  * leaves it unset and connector actions run un-audited. See oss §12.5.
  */
 
-import type { Sensitivity, SensitivityAccumulator } from '@use-brian/core'
+import type { Sensitivity, SensitivityAccumulator } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type { ConnectorActionStore, ConnectorActionStatus } from './db/connector-actions-store.js'
 import type { DbEpisodesStore } from './db/episodes-store.js'
 

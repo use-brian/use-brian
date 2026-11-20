@@ -1,7 +1,11 @@
 /** Native proposal/decision/configuration services and app-role source floors. */
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
-import { CONFIGURE_CAPABILITY, ContextScopeAccumulator, createTaskTools, scopeEvidenceFromRows, type ToolContext, type WorkflowDefinition } from '@use-brian/core'
+import { CONFIGURE_CAPABILITY } from '@use-brian/core/authorization/types.js'
+import { createTaskTools } from '@use-brian/core/tasks/tools.js'
+import type { WorkflowDefinition } from '@use-brian/core/workflow/types.js'
+import { ContextScopeAccumulator, scopeEvidenceFromRows } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { getPool, getAppPool, queryWithRLS, applyRLSGucs } from '../../db/client.js'
 import { createTask } from '../../db/tasks.js'
 import { applyRoutineProposal, inspectRoutineProposal, listRoutineProposals, prepareNewRoutineProposal,

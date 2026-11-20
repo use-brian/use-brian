@@ -1,6 +1,6 @@
 /** Canonical stored-file adoption. No byte copy and no Episode/creator inference. */
 import { randomUUID } from 'node:crypto'
-import type { WorkspaceFile } from '@use-brian/core'
+import type { WorkspaceFile } from '@use-brian/core/workspace-files/types.js'
 import { createRecording } from '../db/recordings-store.js'
 import { captureRecordingIntakeParent } from '../db/recording-intake-admission.js'
 

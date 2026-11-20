@@ -28,7 +28,9 @@ import {createChatOfficeGeneration} from '../chat-generation.js'
 import {createPersonalWebSession} from '../../db/sessions.js'
 import {resolveExecutionContextSystem} from '../../context-scope/execution-context.js'
 import {findAssistantById} from '../../db/users.js'
-import {createOfficeTools,executionToolContext,type ToolContext} from '@use-brian/core'
+import {createOfficeTools} from '@use-brian/core/office/tools.js'
+import {executionToolContext} from '@use-brian/agent-runtime/security/execution-context.js'
+import type {ToolContext} from '@use-brian/agent-runtime/tools/types.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 const pool=getPool(),secret=randomUUID()

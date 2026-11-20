@@ -13,8 +13,10 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import { z } from 'zod'
-import { advanceWorkflowRun, createExecutionContext, WORKFLOW_SCOPE_EVIDENCE_VAR, type ExecutorDeps, type ScopeEvidence } from '@use-brian/core'
-import { buildTool, type Tool } from '@use-brian/core'
+import { advanceWorkflowRun, WORKFLOW_SCOPE_EVIDENCE_VAR, type ExecutorDeps } from '@use-brian/core/workflow/executor.js'
+import type { ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
+import { createExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import type {
   WorkflowDefinition,
   WorkflowRecord,
@@ -22,8 +24,8 @@ import type {
   WorkflowRunStore,
   WorkflowStepRunRecord,
   WorkflowStore,
-} from '@use-brian/core'
-import type { ConsultRequest, ConsultResponse, ConsultTransport } from '@use-brian/core'
+} from '@use-brian/core/workflow/types.js'
+import type { ConsultRequest, ConsultResponse, ConsultTransport } from '@use-brian/core/a2a/types.js'
 import {
   makeRequestApproval,
   resumeFromApproval,
@@ -235,6 +237,10 @@ function fakeApprovalsStore(): PendingApprovalsStore & { rows: PendingApproval[]
     },
     async listPendingForWorkspace(_u, workspaceId) {
       return rows.filter((r) => r.workspaceId === workspaceId && r.status === 'pending')
+    },
+    async findBlockingQuestion(_u, workspaceId, sessionId) {
+      return rows.slice().reverse().find((r) => r.workspaceId === workspaceId && r.status === 'pending'
+        && r.kind === 'question' && r.blockingSessionId === sessionId) ?? null
     },
     async countPendingForUser(userId) {
       return rows.filter((r) => r.approverUserId === userId && r.status === 'pending').length
@@ -534,7 +540,7 @@ it.each(['none', 'stop', 'lifecycle'] as const)('projects live execution authori
   f.deps.executorDeps.resolveRunScope = async () => scope
   expect(await resumeFromApproval(f.deps, f.approval.id, 'approved', USER_ID, undefined,
     source === 'none' ? undefined : stop.signal)).toMatchObject({ status: 'completed' })
-  const context = f.execute.mock.calls[0][1] as import('@use-brian/core').ToolContext
+  const context = f.execute.mock.calls[0][1] as import('@use-brian/agent-runtime/tools/types.js').ToolContext
   expect(context.authority).toBe(scope.executionContext.security.authority)
   expect(context.mutationCompartments).toEqual(['product'])
   expect(context.executionContext?.lifecycle.abortSignal).toBe(context.abortSignal)

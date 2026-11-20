@@ -18,7 +18,6 @@ vi.mock("next/navigation", () => ({
 vi.mock("@/lib/auth-fetch", () => ({ authFetch: vi.fn() }));
 vi.mock("@/lib/api/home-apps", () => ({ listCustomHomeApps: async () => [] }));
 vi.mock("@/components/studio/custom-apps-section", () => ({ CustomAppsSection: () => null }));
-vi.mock("@/components/association/module-controls", () => ({ AssociationModuleControls: () => null }));
 vi.mock("@/components/doc/operator-app-bar", async () => {
   const { Puzzle } = await import("lucide-react");
   return { APP_ICON: new Proxy({}, { get: () => Puzzle }) };

@@ -1,4 +1,6 @@
-import {ContextScopeAccumulator,executionToolContext,type ScopeSource} from '@use-brian/core'
+import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
+import type {ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
+import {executionToolContext} from '@use-brian/agent-runtime/security/execution-context.js'
 import {applyRLSGucs,runWithAgentAccess} from '../../../db/client.js'
 import {createDbKnowledgeStore} from '../../../db/knowledge-store.js'
 import {recordDerivedResource,validateDerivedEntityInputs} from '../../../db/derived-scope-store.js'

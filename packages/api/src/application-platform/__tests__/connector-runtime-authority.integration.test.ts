@@ -5,7 +5,8 @@ import { afterAll, describe, expect, it } from 'vitest'
 import express from 'express'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
-import { executionToolContext, type Tool } from '@use-brian/core'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { getAppPool, getPool } from '../../db/client.js'
 import { createConnectorInstanceStore } from '../../db/connector-instance-store.js'
 import { createDbConnectorStore } from '../../db/connector-store.js'
@@ -14,7 +15,7 @@ import { createDbMcpSettingsStore } from '../../db/mcp-settings-store.js'
 import { findAssistantById } from '../../db/users.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
 import { createConnectorSourceRuntimeFactory, configureConnectorSourceRuntimeFactory } from '../source-runtime.js'
-import { injectMcpTools } from '../../mcp/inject.js'
+import { composeSurfaceCapabilities } from '../../mcp/surface.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -72,7 +73,7 @@ describe('[COMP:api/connector-context] real common injector native admission', (
           identity: { kind: 'attended', principal: { kind: 'workspace_member', userId: actor } }, ownership: { kind: 'workspace', workspaceId: workspace },
           lifecycle: { sessionId: randomUUID(), sessionPersisted: false, channelType: 'test', channelId: 'fixture', abortSignal: abort.signal } })
         const tools = new Map<string, Tool>()
-        const result = await injectMcpTools({ userId: owner, assistantId: assistant, assistantTeamId: workspace, tools,
+        const result = await composeSurfaceCapabilities('callee', { userId: owner, assistantId: assistant, assistantTeamId: workspace, tools,
           connectorStore: createDbConnectorStore(encryptionKey), connectorInstanceStore: instances, connectorGrantStore: grants, settingsStore: createDbMcpSettingsStore(),
           contextScope: resolved.turnScope, actorIdentity: { channel: 'test', userId: actor }, keepDynamicToolsDirect: true })
         return { tools, result, abort, context: executionToolContext(resolved.executionContext, { appId: 'Fixture' }) }

@@ -1,5 +1,5 @@
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
-import { parseHostObservation } from "@use-brian/shared";
+import { parseHostObservation, type ConversationSettingsResult as SettingsResult, type ConversationVisibilityMetadata, type ConversationVisibilityMutation } from "@use-brian/shared";
 /**
  * Typed fetchers for the app-web session-resume flow.
  *
@@ -35,6 +35,9 @@ import { parseHostObservation } from "@use-brian/shared";
  */
 
 import { authFetch } from "@/lib/auth-fetch";
+import { requestSessionList } from "@/lib/chat/session-list-requests";
+import { captureChatListRead, chatHistoryScope, prepareChatHistoryRead, evictChatHistory, filterRetainedChatSessions, isChatHistoryReadCurrent, markRetainedChatHistory, readChatHistory, refreshChatCacheFence, writeChatHistory, tagChatListResponse } from "@/lib/offline/chat-history-cache";
+import { currentOfflineWriteAuthority } from "@/lib/offline/application-write-authority";
 import { z } from "zod";
 import type { DocumentAttachment } from "@use-brian/chat-ui";
 import {
@@ -46,8 +49,60 @@ import {
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
+const visibilityMetadataSchema = z.object({
+  conversationVisibility: z.enum(["private_by_kind", "configured_private", "workspace"]),
+  conversationVisibilityVersion: z.number().int().nonnegative(),
+  conversationCap: z.enum(["public", "internal", "confidential"]),
+  conversationCompartments: z.array(z.string()), conversationProjectIds: z.array(z.string()),
+  contextProjectId: z.string().nullable().optional(),
+  participantUserIds: z.array(z.string()),
+  capabilities: z.object({ canNarrow: z.boolean(), canWiden: z.boolean(), canManageParticipants: z.boolean(), canRaiseCap: z.boolean(), canMoveProject: z.boolean() }),
+});
+function parseConversationVisibility(value: unknown): Partial<ConversationVisibilityMetadata> {
+  const parsed = visibilityMetadataSchema.safeParse(value);
+  return parsed.success ? parsed.data : {};
+}
+const settingsUnreadableSchema = z.object({
+  committed: z.literal(true), readable: z.literal(false), sessionId: z.string().uuid(),
+  version: z.number().int().nonnegative(), code: z.literal("conversation_access_denied"),
+}).strict();
+export type ConversationSettingsResult = SettingsResult<{ contextProjectId?: string | null }>;
+export async function updateConversationVisibility(sessionId: string, change: ConversationVisibilityMutation): Promise<ConversationSettingsResult> {
+  return updateConversationEnvelope(sessionId, "visibility", change);
+}
+export function raiseConversationCap(sessionId: string, change: { expectedVersion: number; cap: ConversationVisibilityMetadata["conversationCap"] }): Promise<ConversationSettingsResult> {
+  return updateConversationEnvelope(sessionId, "cap", change);
+}
+export function moveConversationProject(sessionId: string, change: { expectedVersion: number; projectId: string | null }): Promise<ConversationSettingsResult> {
+  return updateConversationEnvelope(sessionId, "project", change);
+}
+async function updateConversationEnvelope(sessionId: string, operation: "visibility" | "cap" | "project", change: object): Promise<ConversationSettingsResult> {
+  const owner = chatHistoryScope(sessionId);
+  await prepareChatHistoryRead(owner);
+  if (owner && !isChatHistoryReadCurrent(owner, "", false)) throw new DOMException("Conversation changed", "AbortError");
+  const response = await authFetch(`${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/${operation}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(change),
+  });
+  if (!response.ok) {
+    throw Object.assign(new Error(`conversation_visibility_failed: ${response.status}`), { status: response.status });
+  }
+  const value: unknown = await response.json();
+  if (value && typeof value === "object" && ("committed" in value || "readable" in value)) {
+    const unreadable = settingsUnreadableSchema.parse(value);
+    if (response.status !== 200 || unreadable.sessionId !== sessionId) throw new Error("conversation_visibility_invalid_response");
+    await evictChatHistory(owner, sessionId, true);
+    return unreadable;
+  }
+  const result = visibilityMetadataSchema.parse(value);
+  if (owner && !isChatHistoryReadCurrent(owner, sessionId)) throw new DOMException("Conversation changed", "AbortError");
+  // A known readership change invalidates retained history before its next read.
+  await evictChatHistory(owner, sessionId);
+  return result;
+}
+
+
 /** Sidebar list row — mirrors what /api/sessions returns. */
-export type DocSession = {
+export type DocSession = Partial<ConversationVisibilityMetadata> & {
   /** Browser request start, only for reconciling transient activity; never content authority. */
   statusReadStartedAt?: number;
   /** Metadata link only; opening it still requires current history admission. */
@@ -86,6 +141,8 @@ export type DocSession = {
   /** The turn slot (`running` while a turn is live), for the rail's working
    *  pulse on every row (chat-parity T4). */
   status?: string;
+  turnId?: string | null;
+  turnEndReason?: string | null;
   /** How this conversation behaves (chat-parity T1): the Chat app reads these
    *  flags, never which list the row came from. */
   policy?: ChatSessionPolicy;
@@ -152,7 +209,7 @@ export type DocSessionMessage = {
  * but we type it loosely (string | Date) so a hypothetical SSR consumer
  * passing the already-parsed object through doesn't need to re-coerce.
  */
-type RawListRow = {
+type RawListRow = Partial<ConversationVisibilityMetadata> & {
   recoveredFromSessionId?: string;
   id: string;
   title: string;
@@ -172,6 +229,8 @@ type RawListRow = {
   contextGroupId?: string | null;
   contextProjectId?: string | null;
   status?: string;
+  turnId?: string | null;
+  turnEndReason?: string | null;
   policy?: unknown;
   humanCount?: number | null;
 };
@@ -236,16 +295,18 @@ export async function fetchLatestSession(opts: {
   qs.set("appOrigin", opts.appOrigin);
 
   try {
-    const res = await authFetch(
-      `${API_URL}/api/sessions?${qs.toString()}`,
-      opts.signal ? { signal: opts.signal } : {},
-    );
+    // One in-flight request per distinct list query (session-list-requests).
+    const res = await requestSessionList(`${API_URL}/api/sessions?${qs.toString()}`, opts.signal);
     if (!res.ok) return null;
-    const data = (await res.json()) as RawListRow[];
+    const data = res.data as RawListRow[];
     if (!Array.isArray(data) || data.length === 0) return null;
     const first = data[0];
     return {
+      ...parseConversationVisibility(first),
       id: first.id,
+      status: first.status,
+      turnId: parseTurnId(first.turnId),
+      turnEndReason: first.turnEndReason ?? null,
       title: first.title,
       ...(first.titleRevisionId !== undefined ? {titleRevisionId: first.titleRevisionId} : {}),
       channelId: first.channelId,
@@ -288,20 +349,18 @@ export async function listPersonalSessions(opts: {
   if (opts.archived) qs.set("archived", "true");
   if (opts.before) { qs.set("before", opts.before.lastActive); qs.set("beforeId", opts.before.id); }
   try {
-    const res = await authFetch(
-      `${API_URL}/api/sessions?${qs.toString()}`,
-      opts.signal ? { signal: opts.signal } : {},
-    );
+    const res = await requestSessionList(`${API_URL}/api/sessions?${qs.toString()}`, opts.signal);
     if (!res.ok) {
       if (opts.strict) throw new Error(`chat_list_failed: ${res.status}`);
       return [];
     }
-    const data = (await res.json()) as RawListRow[];
+    const data = res.data as RawListRow[];
     if (!Array.isArray(data)) {
       if (opts.strict) throw new Error("chat_list_invalid_response");
       return [];
     }
-    return data.map((r) => ({
+    return tagChatListResponse(data.map((r) => ({
+      ...parseConversationVisibility(r),
       id: r.id,
       ...(r.recoveredFromSessionId ? { recoveredFromSessionId: r.recoveredFromSessionId } : {}),
       title: r.title,
@@ -315,11 +374,13 @@ export async function listPersonalSessions(opts: {
       contextGroupId: r.contextGroupId ?? null,
       contextProjectId: r.contextProjectId ?? null,
       ...(r.status ? { status: r.status } : {}),
+      turnId: parseTurnId(r.turnId),
+      turnEndReason: r.turnEndReason ?? null,
       // An older server sends no policy: every row on this list is a
       // personal chat, a room with one human (chat-parity D1).
       policy: parseChatSessionPolicy(r.policy) ?? PERSONAL_CHAT_POLICY,
       humanCount: typeof r.humanCount === "number" ? r.humanCount : 1,
-    }));
+    })), res.authorityRead);
   } catch (error) {
     if (opts.strict) throw error;
     return [];
@@ -348,6 +409,8 @@ export type WorkspaceSession = DocSession & {
 
 type RawWorkspaceRow = RawListRow & {
   status?: string;
+  turnId?: string | null;
+  turnEndReason?: string | null;
   startedByUserId?: string;
   startedByName?: string | null;
   startedByAvatarUrl?: string | null;
@@ -359,6 +422,7 @@ type RawWorkspaceRow = RawListRow & {
 
 function toWorkspaceSession(r: RawWorkspaceRow): WorkspaceSession {
   return {
+    ...parseConversationVisibility(r),
     id: r.id,
     title: r.title,
       ...(r.titleRevisionId !== undefined ? {titleRevisionId: r.titleRevisionId} : {}),
@@ -368,6 +432,8 @@ function toWorkspaceSession(r: RawWorkspaceRow): WorkspaceSession {
     // predicate) — the server list doesn't bother echoing it.
     appOrigin: r.appOrigin ?? "chat",
     status: r.status ?? "idle",
+    turnId: parseTurnId(r.turnId),
+    turnEndReason: r.turnEndReason ?? null,
     startedByUserId: r.startedByUserId ?? "",
     startedByName: r.startedByName ?? null,
     startedByAvatarUrl: r.startedByAvatarUrl ?? null,
@@ -395,12 +461,30 @@ export type ChatSessionSummary = DocSession & {
   policy: ChatSessionPolicy;
 };
 
+/** Strict lifecycle read: a failed read is unavailable, never idle. */
+export async function readChatTurnStatus(sessionId: string) {
+  const res = await authFetch(`${API_URL}/api/sessions/${encodeURIComponent(sessionId)}`);
+  if (!res.ok) throw new Error(`chat_status_unavailable: ${res.status}`);
+  return z.object({
+    status: z.string(),
+    turnId: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional().transform(value => value ?? null),
+    turnEndReason: z.string().nullable().optional(),
+  }).parse(await res.json());
+}
+
+function parseTurnId(value: unknown): string | null {
+  return value == null ? null : z.string().regex(/^[a-f0-9]{64}$/).parse(value);
+}
+
 /** Read one conversation's summary; `null` when absent, unreadable or on failure. */
 export async function getChatSessionSummary(
   sessionId: string,
   signal?: AbortSignal,
 ): Promise<ChatSessionSummary | null> {
   try {
+    const scope = currentOfflineWriteAuthority();
+    const authority = scope ? await captureChatListRead(scope.workspaceId) : null;
+    if (signal?.aborted || scope && !authority) return null;
     const res = await authFetch(
       `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}`,
       signal ? { signal } : {},
@@ -411,8 +495,9 @@ export async function getChatSessionSummary(
       transport?: string;
     };
     const policy = parseChatSessionPolicy(r.policy);
-    if (!r?.id || !policy) return null;
-    return {
+    if (r?.id !== sessionId || !policy) return null;
+    const summary: ChatSessionSummary = {
+      ...parseConversationVisibility(r),
       id: r.id,
       ...(r.recoveredFromSessionId ? { recoveredFromSessionId: r.recoveredFromSessionId } : {}),
       title: r.title,
@@ -424,6 +509,8 @@ export async function getChatSessionSummary(
       contextGroupId: r.contextGroupId ?? null,
       contextProjectId: r.contextProjectId ?? null,
       ...(r.status ? { status: r.status } : {}),
+      turnId: parseTurnId(r.turnId),
+      turnEndReason: r.turnEndReason ?? null,
       audience: r.audience === "workspace" ? "workspace" : "personal",
       transport: r.transport ?? "web",
       ...(r.startedByUserId ? { startedByUserId: r.startedByUserId } : {}),
@@ -432,6 +519,10 @@ export async function getChatSessionSummary(
       policy,
       humanCount: typeof r.humanCount === "number" ? r.humanCount : null,
     };
+    if (!authority) return summary;
+    await refreshChatCacheFence(authority.scope);
+    const rows = tagChatListResponse([summary], authority);
+    return filterRetainedChatSessions(authority.scope, rows, authority)[0] ?? null;
   } catch {
     return null;
   }
@@ -485,20 +576,17 @@ export async function listWorkspaceSessions(opts: {
     if (opts.archived) query.set("archived", "true");
     if (opts.contextProjectId !== undefined) query.set("contextProjectId", opts.contextProjectId ?? "general");
     if (opts.before) { query.set("before", opts.before.lastActive); query.set("beforeId", opts.before.id); }
-    const res = await authFetch(
-      `${API_URL}/api/sessions/workspace?${query}`,
-      opts.signal ? { signal: opts.signal } : {},
-    );
+    const res = await requestSessionList(`${API_URL}/api/sessions/workspace?${query}`, opts.signal);
     if (!res.ok) {
       if (opts.strict) throw new Error(`chat_list_failed: ${res.status}`);
       return [];
     }
-    const data = (await res.json()) as RawWorkspaceRow[];
+    const data = res.data as RawWorkspaceRow[];
     if (!Array.isArray(data)) {
       if (opts.strict) throw new Error("chat_list_invalid_response");
       return [];
     }
-    return data.map(toWorkspaceSession);
+    return tagChatListResponse(data.map(toWorkspaceSession), res.authorityRead);
   } catch (error) {
     if (opts.strict) throw error;
     return [];
@@ -540,15 +628,13 @@ export async function listAuditSessions(opts: {
   const [own, shared] = await Promise.all([
     (async () => {
       try {
-        const res = await authFetch(
-          `${API_URL}/api/sessions?${qs.toString()}`,
-          opts.signal ? { signal: opts.signal } : {},
-        );
+        const res = await requestSessionList(`${API_URL}/api/sessions?${qs.toString()}`, opts.signal);
         if (!res.ok) return [] as AuditSession[];
-        const data = (await res.json()) as RawListRow[];
+        const data = res.data as RawListRow[];
         if (!Array.isArray(data)) return [] as AuditSession[];
         return data.map<AuditSession>((r) => ({
-          id: r.id,
+          ...parseConversationVisibility(r),
+      id: r.id,
           title: r.title,
       ...(r.titleRevisionId !== undefined ? {titleRevisionId: r.titleRevisionId} : {}),
           channelId: r.channelId,
@@ -729,17 +815,23 @@ export async function fetchMentionableRoster(
  */
 export async function stopTurn(
   sessionId: string,
-): Promise<{ stopped: boolean; via?: string; reason?: string }> {
+  turnId?: string | null,
+): Promise<{ stopped: boolean; via?: string; reason?: string | null; turnId?: string | null; outcome?: string }> {
+  const expectedTurnId = turnId == null ? turnId : z.string().regex(/^[a-f0-9]{64}$/).parse(turnId);
   const res = await authFetch(`${API_URL}/api/chat/stop`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sessionId }),
+    body: JSON.stringify({ sessionId, ...(expectedTurnId !== undefined ? { turnId: expectedTurnId } : {}) }),
   });
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(body.error ?? `Stop failed: ${res.status}`);
   }
-  return (await res.json()) as { stopped: boolean; via?: string; reason?: string };
+  return z.object({
+    stopped: z.boolean(), via: z.string().optional(), reason: z.string().nullable().optional(),
+    turnId: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(), outcome: z.string().optional(),
+    stoppedByName: z.string().nullable().optional(),
+  }).passthrough().parse(await res.json());
 }
 
 /**
@@ -835,8 +927,14 @@ export async function deleteSession(sessionId: string): Promise<void> {
  */
 export async function fetchSessionMessages(
   sessionId: string,
-  opts?: { signal?: AbortSignal; strict?: boolean },
+  opts?: { signal?: AbortSignal; strict?: boolean; onCached?: (rows: DocSessionMessage[]) => void },
 ): Promise<DocSessionMessage[]> {
+  const scope = chatHistoryScope(sessionId);
+  const retained = await readChatHistory(scope, sessionId);
+  if (retained && typeof navigator !== "undefined" && !navigator.onLine && !opts?.signal?.aborted && opts?.onCached) {
+    markRetainedChatHistory(scope, sessionId, retained.syncedAt, false);
+    opts.onCached(retained.rows);
+  }
   try {
     const res = await authFetch(
       `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/messages`,
@@ -848,7 +946,7 @@ export async function fetchSessionMessages(
     }
     const data = (await res.json()) as RawMessageRow[];
     if (!Array.isArray(data)) throw new Error("chat_history_invalid_response");
-    return data.map((m) => ({
+    const rows: DocSessionMessage[] = data.map((m) => ({
       id: m.id,
       ...(m.available === false ? { available: false } : {}),
       role: (m.role as DocSessionMessage["role"]) ?? "assistant",
@@ -862,7 +960,20 @@ export async function fetchSessionMessages(
       senderAvatarUrl: m.senderAvatarUrl ?? null,
       replyToText: m.replyToText ?? null,
     }));
+    if (scope && !isChatHistoryReadCurrent(scope, sessionId)) throw new DOMException("History read superseded", "AbortError");
+    if (!opts?.signal?.aborted) await writeChatHistory(scope, sessionId, rows, Date.now());
+    if (scope && !isChatHistoryReadCurrent(scope, sessionId)) throw new DOMException("History read superseded", "AbortError");
+    return rows;
   } catch (error) {
+    const status = error instanceof SessionHistoryError ? error.status : null;
+    if (status === 401 || status === 403 || status === 404) await evictChatHistory(scope, sessionId);
+    else if (!opts?.signal?.aborted && (status === 408 || status === 429 || status !== null && status >= 500 || error instanceof TypeError)) {
+      const cached = await readChatHistory(scope, sessionId);
+      if (cached) {
+        markRetainedChatHistory(scope, sessionId, cached.syncedAt);
+        return cached.rows;
+      }
+    }
     if (opts?.strict) throw error;
     return [];
   }
@@ -922,6 +1033,7 @@ const recoveryPreview = z.object({
 const recoveryResult = z.object({
   sessionId: z.string().uuid(), assistantId: z.string().uuid(), workspaceId: z.string().uuid(), replayed: z.boolean(),
   channelId: z.string(), lastActive: z.string().datetime({ offset: true }), status: z.string(),
+  turnId: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(), turnEndReason: z.string().nullable().optional(),
   contextGroupId: z.string().uuid().nullable(), contextProjectId: z.string().uuid().nullable(),
   policy: z.unknown().transform((value, context) => {
     const parsed = parseChatSessionPolicy(value);

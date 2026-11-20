@@ -20,11 +20,11 @@ vi.mock('../../db/client.js', () => ({
 import {
   segmentEmailBody,
   insertEmailArchiveMessage,
-  searchEmailArchive,
   countEmailArchiveMessages,
   findArchivedEmailUids,
   searchLiteralEmailArchiveMessages,
 } from '../../db/email-archive-store.js'
+import { searchEmailArchive } from '../../db/email-archive-search.js'
 import { query, queryWithRLS, getPool } from '../../db/client.js'
 import { MAX_CHARS } from '../../db/text-chunking.js'
 

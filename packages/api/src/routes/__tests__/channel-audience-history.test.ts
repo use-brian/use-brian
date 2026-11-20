@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { bindScopeSource, bindScopeSources, boundScopeSource, boundScopeSources, type AccessCeiling, type ScopeEvidence } from '@use-brian/core'
+import type { AccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import type { ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
+import { bindScopeSource, bindScopeSources, boundScopeSource, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { countsAsGroupAudienceEvidence, filterChannelHistoryForAudience, overlayCurrentRoomMessage } from '../channel-pipeline.js'
 
 const ceiling: AccessCeiling = {

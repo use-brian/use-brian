@@ -1,4 +1,4 @@
-import type { BatchStore, PendingBatch } from '@use-brian/core'
+import type { BatchStore, PendingBatch } from '@use-brian/core/scheduling/types.js'
 import { getPool } from './client.js'
 import { programmaticIntakeClient, programmaticIntakeClaims } from './programmatic-intake-context.js'
 

@@ -4,6 +4,7 @@ import type { PoolClient } from 'pg'
 import { getPool } from '../db/client.js'
 import { sessionKindSql } from '../session-kind.js'
 import { addSessionMessage, type Session, type SessionMessage } from '../db/sessions.js'
+import { conversationAnchorWriteAdmissionActive } from '../db/conversation-visibility.js'
 
 export type ProviderConversationExpectation = { identity: NonNullable<Session['providerContextIdentity']>; generation: number }
 type RoomMessageInput = Omit<Parameters<typeof addSessionMessage>[0], 'role' | 'derivation'> & { role: 'user' | 'assistant'; providerContext?: ProviderConversationExpectation }
@@ -17,7 +18,11 @@ export async function assertChannelConversationCurrent(db: Client, sessionId: st
   await db.query("SELECT set_config('app.provider_conversation_context_check',$1,true)",[sessionId])
   const result=await db.query(`UPDATE sessions s SET last_active_at=last_active_at WHERE s.id=$1
     AND s.provider_context_identity=$2::jsonb AND s.provider_context_generation=$3
-    AND ${sessionKindSql.providerConversationContext('s')} AND ${sessionKindSql.activeChannelRoom('s')} RETURNING id`,
+    AND ${sessionKindSql.providerConversationContext('s')} AND ${sessionKindSql.activeChannelRoom('s')}
+    ${conversationAnchorWriteAdmissionActive() ? `AND EXISTS(SELECT 1 FROM public.conversation_envelopes e WHERE e.session_id=s.id
+      AND e.workspace_id=s.workspace_id AND ${sessionKindSql.workspaceEnvelope('e')}
+      AND public.scope_review_state_held('session',s.id) IS NOT TRUE FOR SHARE OF e)` : ''}
+    RETURNING id`,
   [sessionId,expected.identity,expected.generation])
   if(!result.rows.length)throw new Error('provider_context_unavailable')
   await db.query("SELECT set_config('app.provider_conversation_context_check',$1,true)",[previous??''])
@@ -54,6 +59,9 @@ export async function appendChannelRoomMessage(
     const previous=input.providerContext ? (await db.query<{value:string|null}>("SELECT current_setting('app.provider_conversation_expected',true) AS value")).rows[0]?.value : null
     if(input.providerContext)await db.query("SELECT set_config('app.provider_conversation_expected',$1,true)",[JSON.stringify(input.providerContext)])
     const message=await addSessionMessage(input,db)
+    if(input.providerContext&&conversationAnchorWriteAdmissionActive()
+      &&(await db.query('SELECT 1 FROM public.conversation_message_quarantine WHERE message_id=$1',[message.id])).rows.length)
+      throw new Error('provider_context_unavailable')
     if(input.providerContext)await db.query("SELECT set_config('app.provider_conversation_expected',$1,true)",[previous??''])
     return {message,created:true}
   }

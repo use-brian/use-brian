@@ -10,6 +10,104 @@ import pg from 'pg'
 import { runtimeRoleSql } from '../runtime-role.mjs'
 import { assertLocalFixture, cleanRuntimeEnvironment, runCommand, createLocalFixture } from '../local-fixture.mjs'
 
+test('[COMP:api/private-transcript] private transcript preparation migration refuses predecessor drift atomically', { timeout: 300_000 }, async () => {
+  await assertLocalFixture()
+  const env = cleanRuntimeEnvironment(process.env)
+  const pgBin = (await runCommand('pg_config', ['--bindir'], { env })).trim()
+  const filename = '82690_private_transcript_preparation_eligibility.sql'
+  const sql = await readFile(new URL('../../../packages/api/migrations/' + filename, import.meta.url), 'utf8')
+  const target = 'prepare_native_session_message_covered(uuid,uuid,text,jsonb,jsonb)'
+  const observed = []
+  const fixture = await createLocalFixture({ pgBin, env, ordinaryOwner: true, beforeApplyFile: filename,
+    beforeApply: async ({ adminUrl }) => {
+      const owner = new pg.Client({ connectionString: adminUrl })
+      await owner.connect()
+      try {
+        assert.deepEqual((await owner.query('SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')).rows,
+          [{ rolsuper: false, rolbypassrls: false }])
+        await owner.query(`CREATE FUNCTION fixture_private_plan_canary() RETURNS boolean LANGUAGE plpgsql AS
+          $canary$ BEGIN RAISE EXCEPTION 'unreviewed_private_plan_guard_executed'; END $canary$`)
+        await owner.query('REVOKE ALL ON FUNCTION fixture_private_plan_canary() FROM PUBLIC')
+        const snapshot = async () => ({
+          functions: (await owner.query("SELECT oid,to_jsonb(p) AS metadata FROM pg_proc p WHERE pronamespace='public'::regnamespace ORDER BY oid")).rows,
+          turn: (await owner.query('SELECT to_jsonb(h) AS metadata FROM native_turn_contract_helpers h ORDER BY to_jsonb(h)::text')).rows,
+          retained: (await owner.query('SELECT to_jsonb(h) AS metadata FROM native_retained_contract_helpers h ORDER BY to_jsonb(h)::text')).rows,
+        })
+        const before = await snapshot()
+        const replaceBody = async (signature, body) => {
+          const original = (await owner.query('SELECT pg_get_functiondef($1::regprocedure) AS definition,prosrc AS body FROM pg_proc WHERE oid=$1::regprocedure', [signature])).rows[0]
+          assert.equal(original.definition.split(original.body).length, 2)
+          await owner.query(original.definition.replace(original.body, body))
+        }
+        const fingerprint = async signature => (await owner.query("SELECT encode(sha256(convert_to(to_jsonb(p)::text,'UTF8')),'hex') AS value FROM pg_proc p WHERE oid=$1::regprocedure", [signature])).rows[0].value
+        const cases = [
+          ['target body', () => replaceBody(target, 'BEGIN RETURN NULL; END')],
+          ['target cost', () => owner.query(`ALTER FUNCTION ${target} COST 2`)],
+          ['target search path', () => owner.query(`ALTER FUNCTION ${target} SET search_path=pg_catalog,public`)],
+          ['target public execution', () => owner.query(`GRANT EXECUTE ON FUNCTION ${target} TO PUBLIC`)],
+          ['root cover body', () => replaceBody('application_native_root_cover(uuid,jsonb)', 'BEGIN RETURN NULL; END')],
+          ['covered frame body', () => replaceBody('read_native_covered_session_frame(uuid,text[],uuid[],text[])', 'BEGIN RETURN NULL; END')],
+          ['turn guard canary', () => replaceBody('native_turn_helpers_current()', 'SELECT public.fixture_private_plan_canary()')],
+          ['retained guard canary', () => replaceBody('native_retained_helpers_current()', 'SELECT public.fixture_private_plan_canary()')],
+          ['coherently changed nested guard and caller pins', async () => {
+            const nested = 'application_native_covered_evidence_helpers_current()'
+            const guard = 'application_native_transcript_prepare_helpers_current()'
+            const batch = 'prepare_native_session_message_batch(uuid,uuid,text,jsonb,jsonb)'
+            const oldNested = await fingerprint(nested),oldGuard = await fingerprint(guard)
+            await replaceBody(nested, 'BEGIN RETURN public.fixture_private_plan_canary(); END')
+            const guardBody = (await owner.query('SELECT prosrc FROM pg_proc WHERE oid=$1::regprocedure', [guard])).rows[0].prosrc
+            assert.equal(guardBody.split(oldNested).length, 2)
+            await replaceBody(guard, guardBody.replace(oldNested, await fingerprint(nested)))
+            const batchBody = (await owner.query('SELECT prosrc FROM pg_proc WHERE oid=$1::regprocedure', [batch])).rows[0].prosrc
+            assert.equal(batchBody.split(oldGuard).length, 3)
+            await replaceBody(batch, batchBody.replaceAll(oldGuard, await fingerprint(guard)))
+          }],
+          ['turn registry fingerprint', () => owner.query("UPDATE native_turn_contract_helpers SET fingerprint=repeat('0',64) WHERE signature=(SELECT signature FROM native_turn_contract_helpers ORDER BY signature LIMIT 1)")],
+          ['unknown function consumer', async () => {
+            await owner.query(`CREATE FUNCTION fixture_private_plan_consumer() RETURNS text LANGUAGE sql AS $consumer$ SELECT '${await fingerprint(target)}'::text $consumer$`)
+          }],
+          ['unknown procedure consumer', async () => {
+            await owner.query(`CREATE PROCEDURE fixture_private_plan_consumer() LANGUAGE plpgsql AS $consumer$ BEGIN PERFORM '${await fingerprint(target)}'::text; END $consumer$`)
+          }],
+        ]
+        for (const [label, mutate] of cases) {
+          await owner.query('BEGIN')
+          try {
+            await mutate()
+            await assert.rejects(owner.query(sql), error => {
+              assert.match(error.message, /private_transcript_preparation_/)
+              assert.doesNotMatch(error.message, /unreviewed_private_plan_guard_executed/)
+              return true
+            }, label)
+          } finally { await owner.query('ROLLBACK') }
+          assert.deepEqual(await snapshot(), before, label + ' must not partially repin helpers')
+          observed.push(label)
+        }
+        await owner.query('DROP FUNCTION fixture_private_plan_canary()')
+      } finally { await owner.end() }
+    },
+  })
+  try {
+    assert.equal(observed.length, 12)
+    const owner = new pg.Client({ connectionString: fixture.adminUrl })
+    const app = new pg.Client({ connectionString: fixture.appUrl })
+    await owner.connect()
+    await app.connect()
+    try {
+      assert.equal((await owner.query('SELECT 1 FROM _migrations WHERE name=$1', [filename])).rowCount, 1)
+      assert.deepEqual((await owner.query('SELECT native_turn_helpers_current() AS turn,native_retained_helpers_current() AS retained')).rows,
+        [{ turn: true, retained: true }])
+      for (const signature of [
+        'application_native_transcript_prepare_helpers_current()', 'application_native_covered_evidence_helpers_current()',
+        'native_turn_publication_contract()', 'application_native_worklist_helpers_current()',
+        'application_native_dependency_batch_helpers_current()', 'application_native_field_reference_helpers_current()',
+        'application_memory_statement_helpers_current()',
+      ]) assert.equal((await owner.query(`SELECT ${signature} AS current`)).rows[0].current, true, signature)
+      assert.equal((await app.query('SELECT has_function_privilege(current_user,$1,\'EXECUTE\') AS allowed', [target])).rows[0].allowed, false)
+    } finally { await app.end(); await owner.end() }
+  } finally { await fixture.dispose() }
+})
+
 test('[COMP:crm/assurance-fixture] Default PostgreSQL clients remain inside the disposable cluster', async () => {
   const marker = await assertLocalFixture()
   const defaults = new pg.Client()
@@ -114,6 +212,56 @@ test('[COMP:crm/assurance-fixture] Group interruption disposes only the owned Po
     }
     await rm(directory, { recursive: true })
   }
+})
+
+test('[COMP:crm/assurance-fixture] Owned restart empties shared buffers and keeps the cluster, port and data', { timeout: 300_000 }, async () => {
+  await assertLocalFixture()
+  const env = cleanRuntimeEnvironment(process.env)
+  const pgBin = (await runCommand('pg_config', ['--bindir'], { env })).trim()
+  const fixture = await createLocalFixture({ pgBin, env, statementStatistics: true })
+  try {
+    const owner = async (run) => { const client = new pg.Client({ connectionString: fixture.adminUrl }); await client.connect(); try { return await run(client) } finally { await client.end() } }
+    const state = () => owner(async client => (await client.query(`SELECT pg_postmaster_start_time()::text AS started, inet_server_port() AS port,
+      (SELECT count(*)::int FROM _migrations) AS migrations,
+      -- Fails unless pg_stat_statements is still preloaded after the restart.
+      (SELECT count(*) FROM pg_stat_statements) >= 0 AS statements`)).rows[0])
+    // Blocks of _migrations read from outside shared buffers by one scan.
+    const reads = () => owner(async client => (await client.query('EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT count(*) FROM _migrations')).rows[0]['QUERY PLAN'][0].Plan['Shared Read Blocks'])
+    await reads()
+    assert.equal(await reads(), 0)
+    const held = new pg.Client({ connectionString: fixture.appUrl })
+    held.on('error', () => {})
+    await held.connect()
+    const before = await state()
+    await fixture.restart()
+    // First scan after the restart, before anything else touches _migrations.
+    assert.ok(await reads() > 0, 'a restarted cluster serves the first scan from outside shared buffers')
+    const after = await state()
+    assert.notEqual(after.started, before.started)
+    assert.equal(after.port, before.port)
+    assert.equal(after.migrations, before.migrations)
+    assert.equal(after.statements, true)
+    // Existing connections end; callers reconnect with a fresh pool.
+    await assert.rejects(held.query('SELECT 1'))
+    await held.end().catch(() => {})
+    assert.equal(JSON.parse(await readFile(fixture.env.BRIAN_ASSURANCE_FIXTURE, 'utf8')).port, before.port)
+  } finally { await fixture.dispose() }
+  await assert.rejects(fixture.restart(), /not running/)
+})
+
+test('[COMP:crm/assurance-fixture] CLI forwards harness controls without database selectors and enables statement statistics', { timeout: 300_000 }, async () => {
+  await assertLocalFixture()
+  const env = { ...cleanRuntimeEnvironment(process.env), BRIAN_CHAT_COST_OUTPUT: '/nonexistent/fictional-cost.json',
+    TEST_DATABASE_URL: 'postgres://127.0.0.1:1/never', PGHOSTADDR: '192.0.2.1' }
+  const pgBin = (await runCommand('pg_config', ['--bindir'], { env })).trim()
+  const report = "const e=process.env;console.log('fixture-env '+JSON.stringify({output:e.BRIAN_CHAT_COST_OUTPUT,test:e.TEST_DATABASE_URL??null,hostaddr:e.PGHOSTADDR??null,stats:e.BRIAN_ASSURANCE_STATEMENT_STATS??null,port:new URL(e.DATABASE_URL).port,pgport:e.PGPORT}))"
+  const output = await runCommand(process.execPath, ['scripts/crm/local-fixture.mjs', '--statement-statistics', '--pg-bin', pgBin, '--', process.execPath, '-e', report], { env })
+  const seen = JSON.parse(output.split('\n').find(text => text.startsWith('fixture-env ')).slice('fixture-env '.length))
+  assert.equal(seen.output, '/nonexistent/fictional-cost.json')
+  assert.equal(seen.test, null)
+  assert.equal(seen.hostaddr, null)
+  assert.equal(seen.stats, 'true')
+  assert.equal(seen.port, seen.pgport)
 })
 
 test('[COMP:crm/assurance-fixture] Fixed stopped alias transition restores exact pins and suffix ACLs atomically', async () => {

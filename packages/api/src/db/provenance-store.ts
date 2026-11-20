@@ -6,9 +6,9 @@ import type {
   RetrievalActor,
   RetrievalEnvelope,
   RetrievalStore,
-  Sensitivity,
-} from '@use-brian/core'
-import { canRead } from '@use-brian/core'
+} from '@use-brian/core/retrieval/types.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { canRead } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { queryWithRLS } from './client.js'
 import { buildAccessPredicate } from './access-predicate.js'
 

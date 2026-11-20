@@ -1,8 +1,21 @@
 import { classifySession } from '../session-kind.js'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { createKnowledgeTools, calculateCost, scopeGrantContains, type UsageStore, type TokenUsage, ContextScopeAccumulator, SensitivityAccumulator, CompartmentAccumulator, maxSensitivity,
-  type LLMProvider, type Tool, type Embedder, type SavedViewStore, type ScopeEvidence,
-  type ToolContext } from '@use-brian/core'
+import type { Embedder } from '@use-brian/core/embeddings/embedder.js'
+import { createKnowledgeTools } from '@use-brian/core/tools/base/knowledge.js'
+import type { SavedViewStore } from '@use-brian/core/views/types.js'
+import { calculateCost, type UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
+import type { TokenUsage, LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import { CompartmentAccumulator } from '@use-brian/agent-runtime/security/compartments.js'
+import {
+  scopeGrantContains,
+  ContextScopeAccumulator,
+  type ScopeEvidence
+} from '@use-brian/agent-runtime/security/context-scope.js'
+import {
+  SensitivityAccumulator,
+  maxSensitivity
+} from '@use-brian/agent-runtime/security/sensitivity.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { getPool } from '../db/client.js'
 import { readSessionById, addSessionMessage } from '../db/sessions.js'
 import { findAssistantById } from '../db/users.js'

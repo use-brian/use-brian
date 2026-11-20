@@ -1,6 +1,6 @@
 import {randomUUID} from 'node:crypto'
 import {afterAll,describe,expect,it,vi} from 'vitest'
-import type {ToolContext} from '@use-brian/core'
+import type {ToolContext} from '@use-brian/agent-runtime/tools/types.js'
 import {runWithAgentAccess} from '../../db/agent-access-context.js'
 import {executeOrganizationCommand} from '../../db/org-chart-store.js'
 import {getPool,getAppPool} from '../../db/client.js'

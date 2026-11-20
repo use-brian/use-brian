@@ -8,8 +8,11 @@ import {
   type PdfSnapshot,
   type PdfWidget,
 } from '@use-brian/office-model'
-import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs'
+import { lazyImplementation } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
 import { PdfEngineError } from './errors.js'
+
+// PDF.js loads on first use, not with the Office modules (M4 step 5).
+const loadPdfJs = lazyImplementation('The PDF reader (PDF.js)', () => import('pdfjs-dist/legacy/build/pdf.mjs'))
 
 export const PDF_SESSION_MAX_BYTES = 15 * 1024 * 1024
 export const PDF_SESSION_MAX_PAGES = 100
@@ -162,6 +165,7 @@ export async function parsePdfSession(input: ParsePdfSessionInput): Promise<PdfS
   const sha256 = input.sha256 ?? bytesSha256(input.bytes)
   if (sha256 !== bytesSha256(input.bytes)) throw new PdfEngineError('pdf_malformed', 'The PDF source hash does not match its bytes')
 
+  const { getDocument } = await loadPdfJs()
   const loadingTask = getDocument({
     data: new Uint8Array(input.bytes),
     isEvalSupported: false,

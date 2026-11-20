@@ -27,6 +27,7 @@ describe('[COMP:api/application-auth] existing Home bridge application binding',
   const appId = randomUUID(), homeId = randomUUID(), grantId = randomUUID(), secret = 'fictional-home-application-signing-secret'
   const store = createDbDocEntityStore({ actorUserId: ownerId }), service = new ApplicationPlatformService([createCanonicalGenericApplicationModule()])
   let typeId: string, recordId: string, otherId: string, nativeToken: string
+  let contextOnly = false
   const parsed = parseManifest({ manifestVersion: 1, name: 'Example request viewer', entry: 'index.html', scopes: { data: 'none', application: {
     moduleKey: 'records', resources: [{ typeKey: 'request', actions: ['read', 'query', 'history', 'patch', 'command:record_patch'], readFields: ['title'], writeFields: ['title'] }],
   } } })
@@ -37,6 +38,7 @@ describe('[COMP:api/application-auth] existing Home bridge application binding',
   http.use('/api/home-apps', homeAppRoutes({ requireAuth: requireAuth(secret), filesApi: {} as never, signingSecret: secret,
     apiOrigin: 'https://api.example', appOrigin: 'https://host.example', applicationBinding: captureApplicationHomeBinding }))
   http.use('/api/brain/mcp', brainMcpRoutes({ brainKeyStore: {} as never, memoryTools: {} as never, taskTools: {} as never,
+    memoryAllowance: { contextOnly: async id => id === workspaceId && contextOnly, consume: async () => 'allowed', recordRead: async () => {} },
     crmTools: {} as never, retrievalTools: {} as never, homeApps: { secret, getApp: getHomeApp, consumeBudget: consumeHomeAppBudget,
       applicationProfile: req => buildHomeApplicationMcpProfile(req, secret, service) } }))
   beforeAll(async () => {
@@ -100,7 +102,7 @@ describe('[COMP:api/application-auth] existing Home bridge application binding',
     expect(proof?.userId).toBe(viewerId)
     await expect(resolveApplicationExecutionContext({ home: { ...proof! } })).rejects.toMatchObject({ code: 'grant_revoked' })
     const list = await mcp(first.token, 'tools/list')
-    expect(list.status).toBe(200); expect(decode(list).result.tools.map((tool: { name: string }) => tool.name)).toEqual(['applicationCatalog', 'applicationQuery', 'applicationCommand', 'applicationReconcile'])
+    expect(list.status).toBe(200); expect(decode(list).result.tools.map((tool: { name: string }) => tool.name)).toEqual(['applicationCatalog', 'applicationCommand', 'applicationQuery', 'applicationReconcile'])
     const read = await mcp(first.token, 'tools/call', { name: 'applicationQuery', arguments: { queryKey: 'get', input: { type: 'request', id: recordId } } })
     expect(JSON.parse(decode(read).result.content[0].text).values).toEqual({ title: { kind: 'text', value: 'Visible Home request' } })
     const other = await mcp(first.token, 'tools/call', { name: 'applicationQuery', arguments: { queryKey: 'get', input: { type: 'request', id: otherId } } })
@@ -114,6 +116,17 @@ describe('[COMP:api/application-auth] existing Home bridge application binding',
     expect((await store.getEntity(workspaceId, recordId))?.recordVersion).toBe('2')
     expect((await store.getEntity(workspaceId, recordId))?.data.cost).toEqual({ kind: 'number', value: 25 })
     expect((await pool.query('SELECT daily_used FROM workspace_home_apps WHERE id=$1', [homeId])).rows[0].daily_used).toBe(5)
+  })
+  it('refuses the signed application-only credential while its workspace is context only', async () => {
+    const granted = await binding()
+    const before = (await pool.query('SELECT daily_used FROM workspace_home_apps WHERE id=$1', [homeId])).rows[0].daily_used
+    contextOnly = true
+    try {
+      const denied = await mcp(granted.token, 'tools/list')
+      expect(denied.status).toBe(403)
+      expect(denied.body.error).toBe('memory_connection_required')
+      expect((await pool.query('SELECT daily_used FROM workspace_home_apps WHERE id=$1', [homeId])).rows[0].daily_used).toBe(before)
+    } finally { contextOnly = false }
   })
   it('Q08 admits opaque Home HTTP origins only with the exact signed binding and charges the existing budget once',async () => {
     const active = await binding(),before = (await pool.query('SELECT daily_used FROM workspace_home_apps WHERE id=$1',[homeId])).rows[0].daily_used

@@ -2,7 +2,7 @@
 import {captureCrmErasure} from './erasure-journal.js'
 import {createHash} from 'node:crypto'
 import type {PoolClient} from 'pg'
-import {canonicalCrmRequest,type CrmPrivacyBlocker,type CrmPrivacyDomainReview} from '@use-brian/core'
+import {canonicalCrmRequest, type CrmPrivacyBlocker, type CrmPrivacyDomainReview} from '@use-brian/core/crm/operations-types.js'
 import {readCrmPrivacyPolicy} from './privacy-policy.js'
 import {parseStorageKey} from '../files/gcs-client.js'
 import {localDirectoryMetadata} from '../files/local-directory-import.js'

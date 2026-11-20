@@ -1,4 +1,6 @@
-import { ChannelConfirmations, buildConfirmationActions, type ChannelInteractionScope, type ToolConfirmationRequest } from '@use-brian/core'
+import { ChannelConfirmations, type ChannelInteractionScope } from '@use-brian/core/mcp/channel-confirmations.js'
+import { buildConfirmationActions } from '@use-brian/core/mcp/confirmation-events.js'
+import type { ToolConfirmationRequest } from '@use-brian/agent-runtime/mcp/types.js'
 import type { OutgoingMessage } from '@use-brian/channels'
 import { formatConfirmationInput, getToolDisplayName } from '@use-brian/shared'
 

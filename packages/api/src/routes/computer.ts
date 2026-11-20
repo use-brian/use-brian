@@ -1,31 +1,42 @@
-import { assertBrowserTaskPublication, browserPublicationBusy, type BrowserTaskPublication } from '@use-brian/core'
+import { assertBrowserTaskPublication, browserPublicationBusy, type BrowserTaskPublication } from '@use-brian/core/sandbox/task-publication.js'
 import { assertLocalTaskExecutionAuthority } from '../sandbox/local-task-authority.js'
-import { parseBrowserInputScope, mergeBrowserInputScope, type BrowserInputScope } from '@use-brian/core'
+import { parseBrowserInputScope, mergeBrowserInputScope, type BrowserInputScope } from '@use-brian/core/sandbox/input-scope.js'
 import type { BrowserTaskDiscard } from '../sandbox/task-discard.js'
 import { humanCanReadBrowserProfile } from '../sandbox/profile-authority.js'
 import { randomUUID } from 'node:crypto'
 import { Router } from 'express'
 import { z } from 'zod'
-import { AuthoritySourceSchema, parseAuthoringAuthority, BrowserBackendError, BrowserProfileAuthoritySchema, createCloudBrowserProvider, registrableSiteOf } from '@use-brian/core'
+import { createCloudBrowserProvider } from '@use-brian/core/sandbox/cloud-browser-provider.js'
+import { registrableSiteOf } from '@use-brian/core/sandbox/orchestrator.js'
+import { BrowserProfileAuthoritySchema } from '@use-brian/core/sandbox/profiles.js'
+import { BrowserBackendError } from '@use-brian/core/sandbox/types.js'
+import { parseAuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import { AuthoritySourceSchema } from '@use-brian/agent-runtime/security/authority-source.js'
+import type { BrowserAuthBroker } from '@use-brian/core/sandbox/browser-auth-broker.js'
+import type { BrowserCredentialAdminStore } from '@use-brian/core/sandbox/browser-credentials.js'
 import type {
-  AuthoringAuthority,
-  AuthoritySource,
-  CurrentAuthorityBoundary,
-  BrowserBackendErrorCode,
-  BrowserProfile,
-  BrowserProfileAuthority,
-  DepartmentReadGrant,
-  BrowserAuthBroker,
-  BrowserCredentialAdminStore,
-  BrowserProfileStore,
-  BrowserProvider,
   BrowserSkillGrantStore,
   BrowserSkillStore,
+} from '@use-brian/core/sandbox/browser-skills.js'
+import type {
   SandboxOrchestrator,
+  SandboxTaskRecord,
+} from '@use-brian/core/sandbox/orchestrator.js'
+import type {
+  BrowserProfile,
+  BrowserProfileAuthority,
+  BrowserProfileStore,
+} from '@use-brian/core/sandbox/profiles.js'
+import type {
+  BrowserBackendErrorCode,
+  BrowserProvider,
   SandboxProvider,
   SessionVault,
-  SandboxTaskRecord,
-} from '@use-brian/core'
+} from '@use-brian/core/sandbox/types.js'
+import type { AuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import type { AuthoritySource } from '@use-brian/agent-runtime/security/authority-source.js'
+import type { DepartmentReadGrant } from '@use-brian/agent-runtime/security/department-read.js'
+import type { CurrentAuthorityBoundary } from '@use-brian/agent-runtime/tools/types.js'
 
 /**
  * Computer-use web surface (computer-use.md §5, §7):

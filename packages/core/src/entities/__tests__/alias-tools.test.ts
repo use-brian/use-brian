@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createEntityAliasTools } from '../alias-tools.js'
 import type { EntityRecord } from '../types.js'
-import type { ToolContext } from '../../tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 
 const context: ToolContext = {
   userId: 'user-1', assistantId: 'assistant-1', workspaceId: 'workspace-1',

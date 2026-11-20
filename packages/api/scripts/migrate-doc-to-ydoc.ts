@@ -19,7 +19,7 @@ import { resolve } from 'node:path'
 dotenv.config({ path: resolve(import.meta.dirname, '..', '..', '..', '.env') })
 
 import pg from 'pg'
-import type { Page } from '@use-brian/core/dist/views/blocks.js'
+import type { Page } from '@use-brian/core/views/blocks.js'
 import { snapshotFromUpdate, canonicalizePage } from '@use-brian/doc-model'
 import { convertPageToDocRow, runSelfTest } from '../src/db/doc-migration.js'
 

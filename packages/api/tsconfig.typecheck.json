@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "exclude": ["node_modules", "dist"],
+  "references": [
+    { "path": "../shared" },
+    { "path": "../agent-runtime" },
+    { "path": "../core" },
+    { "path": "../channels" },
+    { "path": "../office-model" }
+  ]
+}

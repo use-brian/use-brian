@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { classifyTopic, createTopicIdentity, registerDecisionMetadataSink, type LLMProvider, type TopicClassifierOptions } from '@use-brian/core'
+import { registerDecisionMetadataSink } from '@use-brian/core/decisions/authority-ownership.js'
+import { classifyTopic, type TopicClassifierOptions } from '@use-brian/core/memory/topic-classifier.js'
+import { createTopicIdentity } from '@use-brian/core/memory/topic-identity.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
 import { createDecisionAttemptUsageRecorder, createDecisionRuntime, type DecisionRuntimeAttempt } from '../decision-runtime.js'
 import { createWorkspaceDecisionRouteResolver } from '../workspace-decision-routing.js'
 

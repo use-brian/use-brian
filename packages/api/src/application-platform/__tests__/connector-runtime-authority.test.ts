@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import type { ResolvedTurnScope } from '../../context-scope/resolve-turn-scope.js'
 import { createConnectorRuntimeAuthority } from '../connector-runtime-authority.js'
+import { runWithAgentAccess } from '../../db/agent-access-context.js'
 
 describe('[COMP:api/connector-context] common native runtime admission', () => {
   const workspaceId = randomUUID(), userId = randomUUID(), assistantId = randomUUID(), department = randomUUID()
@@ -53,6 +54,20 @@ describe('[COMP:api/connector-context] common native runtime admission', () => {
     const authority = await createConnectorRuntimeAuthority(facts, async () => { if (unavailable) throw new Error('metadata unavailable'); return { scope: scope() } })
     unavailable = true
     await expect(authority.assertCurrent()).rejects.toMatchObject({ reason: 'authority_changed' })
+  })
+  it('pins the native floor so a narrower call-site audience is not revocation, and keeps the admission projection for exposure', async () => {
+    // A shared room's General-only audience around the call (sharedAudience, no labels).
+    const room = { workspaceId, userId, clearance: 'internal', compartments: [], mutationCompartments: [], projectIds: [], sharedAudience: true }
+    let current = scope(), effects = 0
+    const authority = await createConnectorRuntimeAuthority(facts, async () => ({ scope: current }))
+    expect(authority.allows(binding)).toBe(true)
+    expect(await runWithAgentAccess(room, () => authority.execute(async () => ++effects))).toBe(1)
+    current = scope({})
+    await expect(runWithAgentAccess(room, () => authority.execute(async () => ++effects))).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(effects).toBe(1)
+    // Created inside the room projection, exposure stays within that audience.
+    const inRoom = await runWithAgentAccess(room, () => createConnectorRuntimeAuthority(facts, async () => ({ scope: scope() })))
+    expect(inRoom.allows(binding)).toBe(false); expect(inRoom.allows(general)).toBe(true)
   })
   it('keys cached metadata by actual actor, executing assistant, workspace and native floor', async () => {
     const first = await createConnectorRuntimeAuthority(facts, async () => ({ scope: scope() }))

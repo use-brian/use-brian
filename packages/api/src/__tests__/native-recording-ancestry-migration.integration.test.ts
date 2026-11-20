@@ -1,12 +1,36 @@
 /** [COMP:api/native-chat-read-cost] Actual forward migration and drift refusal on an owned local database. */
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import type { PoolClient } from 'pg'
-import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { getPool } from '../db/client.js'
+import pg, { type PoolClient } from 'pg'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
-const { assertLocalFixture } = await import(new URL('../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
+const { assertLocalFixture, createLocalFixture, cleanRuntimeEnvironment } = await import(new URL('../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
+// Migration 8269 replaces native_turn_contract_helpers.fingerprint with the
+// complete catalog record (database-schema.md). The immutable 8261 to 8263 SQL
+// reads and advances the retired column, so their forward replay is qualified
+// on its own predecessor chain: a fresh ordinary-owner fixture held at the
+// 8269 boundary, every earlier migration applied and 8269 never run.
+const predecessorBoundary = '8269_canonical_conversation_publication.sql'
+const boundaryReleased = new Error('native_recording_ancestry_boundary_released')
+let pool: pg.Pool | undefined
+let releaseBoundary: (() => void) | undefined
+let boundaryFixture: Promise<void> | undefined
+beforeAll(async () => {
+  const held = new Promise<void>(resolve => { releaseBoundary = resolve })
+  const owner = await new Promise<string>((resolve, reject) => {
+    boundaryFixture = createLocalFixture({
+      pgBin: process.env.PG_BIN, env: cleanRuntimeEnvironment(process.env), ordinaryOwner: true,
+      beforeApplyFile: predecessorBoundary,
+      beforeApply: async ({ adminUrl }: { adminUrl: string }) => { resolve(adminUrl); await held; throw boundaryReleased },
+    }).then(() => { throw new Error('Predecessor boundary was not held') }, (error: Error & { cause?: unknown }) => {
+      if (error === boundaryReleased || error.cause === boundaryReleased) return
+      reject(error)
+      throw error
+    })
+  })
+  pool = new pg.Pool({ connectionString: owner, max: 1 })
+}, 600_000)
 const migration = await readFile(new URL('../../migrations/8261_native_recording_file_ancestry.sql', import.meta.url), 'utf8')
 const changes = JSON.parse(migration.split('$media_changes$')[1]) as Array<{ sig: string; sha: string; edits: Array<{ before: string; after: string }> }>
 const actualMigration = migration.replace(/^BEGIN;$/m, '').replace(/^COMMIT;$/m, '')
@@ -52,7 +76,7 @@ async function refuses(reason: string) {
 }
 
 async function setup(predecessor: '8261' | '8262' | '8263') {
-  client = await getPool().connect()
+  client = await pool!.connect()
   await client.query('BEGIN')
   original = await state()
   originalDependencies = await dependencyState()
@@ -112,7 +136,11 @@ afterEach(async () => {
     expect(await dependencyState()).toEqual(originalDependencies)
   } finally { client.release() }
 })
-afterAll(async () => { await getPool().end() })
+afterAll(async () => {
+  await pool?.end()
+  releaseBoundary?.()
+  await boundaryFixture
+}, 120_000)
 
 describe.sequential('[COMP:api/native-chat-read-cost] recording ancestry forward migration', () => {
   beforeEach(() => setup('8261'))

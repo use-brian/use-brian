@@ -7,6 +7,8 @@ import { orderMigrationFiles } from './migration-order.js'
 import { findAppliedMigrationRenames } from '../src/migrations/renames.js'
 import { nativePageCompletionRecoverySql } from './migration-recovery.js'
 import { toMigrationExecutionSql } from '../src/migrations/execution-sql.js'
+import { memoryPublicationMigration, memoryWriteSuccessorMigration } from '../src/migrations/memory-lineage-publication-execution.js'
+import { withoutOuterTransaction } from '../src/migrations/transaction-sql.js'
 import { performance } from 'node:perf_hooks'
 import { MigrationDiagnostics } from './migration-diagnostics.js'
 
@@ -128,7 +130,17 @@ export async function runMigrations({ databaseUrl, migrationDirs = [], beforeApp
       // index DDL, never dollar-quoted bodies), send each statement on its own so
       // none is implicitly transaction-wrapped. All other files keep the single
       // batched query (preserves dollar-quoted functions + explicit BEGIN/COMMIT).
-      if (/concurrently/i.test(sql) && !/^\s*BEGIN/im.test(sql)) {
+      const bindLineageReceipt = file === memoryPublicationMigration || file === memoryWriteSuccessorMigration
+      if (bindLineageReceipt) {
+        // A lost COMMIT acknowledgement may safely resume using the same
+        // receipt. Do not leave an authenticated lineage change unrecorded.
+        const body = withoutOuterTransaction(sql, file)
+        if (body === sql) throw new Error(`${file}: expected an explicit transaction`)
+        await client.query('BEGIN')
+        await client.query(body)
+        await client.query('INSERT INTO public._migrations (name) VALUES ($1)', [file])
+        await client.query('COMMIT')
+      } else if (/concurrently/i.test(sql) && !/^\s*BEGIN/im.test(sql)) {
         // Strip comments BEFORE splitting on `;` — a `--` comment can itself
         // contain a literal `;` (139's "...no embedding column; episode..."),
         // which a naive split would slice into invalid SQL. These CONCURRENTLY
@@ -146,7 +158,7 @@ export async function runMigrations({ databaseUrl, migrationDirs = [], beforeApp
       } else {
         await client.query(sql)
       }
-      await client.query('INSERT INTO public._migrations (name) VALUES ($1)', [file])
+      if (!bindLineageReceipt) await client.query('INSERT INTO public._migrations (name) VALUES ($1)', [file])
       diagnostics.finish('applied')
       appliedSet.add(file)
       count++

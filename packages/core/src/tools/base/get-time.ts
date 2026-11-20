@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { buildTool } from '../types.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
 
 /**
  * getTime tool — returns the current date and time.

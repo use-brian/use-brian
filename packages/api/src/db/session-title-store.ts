@@ -1,9 +1,11 @@
 /** Canonical native titles. [COMP:api/application-persistence] */
 import {z} from 'zod'
 import {isDeepStrictEqual} from 'node:util'
-import {bindScopeSources,boundScopeSources,DerivedScopeError,type DerivedWriteEvidence,type SessionContextAuthority} from '@use-brian/core'
+import type {SessionContextAuthority} from '@use-brian/core/memory/session-state-types.js'
+import {DerivedScopeError, type DerivedWriteEvidence} from '@use-brian/agent-runtime/security/derived-scope.js'
+import {bindScopeSources, boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {readExternalSourceAncestors} from '../application-platform/external-source-ancestry.js'
-import type {ScopeSource} from '@use-brian/core'
+import type {ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
 import {getPool} from './client.js'
 import {readSessionContextRevisions,writeSessionContextRevision,readRetainedContextFrame,readNativeTitleGroupFrame} from './session-context-revisions.js'
 const payload=z.object({title:z.string().trim().min(1).max(200),manual:z.boolean()}).strict()

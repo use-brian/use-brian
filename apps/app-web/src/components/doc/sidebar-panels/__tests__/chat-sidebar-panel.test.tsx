@@ -29,6 +29,11 @@ const navigation = vi.hoisted(() => ({
 const projectsApi = vi.hoisted(() => ({ listContextProjects: vi.fn() }));
 vi.mock("@/lib/api/context-scopes", () => projectsApi);
 const viewer = vi.hoisted(() => ({ id: "viewer-1" }));
+const chatEntries = vi.hoisted(() => new Map<string, unknown>());
+vi.mock("@/lib/offline/idb", async importOriginal => {
+  const { chatIdbEntries } = await import("@/lib/offline/__tests__/fixtures/chat-idb");
+  return { ...await importOriginal<typeof import("@/lib/offline/idb")>(), ...chatIdbEntries(chatEntries) };
+});
 vi.mock("@/lib/user", () => ({ getUserInfo: () => ({ id: viewer.id }) }));
 
 vi.mock("next/navigation", () => ({
@@ -64,6 +69,7 @@ const sessionApi = vi.hoisted(() => ({
   listPersonalSessions: vi.fn(),
   listWorkspaceSessions: vi.fn(),
   renameSessionTitle: vi.fn(),
+  readChatTurnStatus: vi.fn(),
   setSessionArchived: vi.fn(),
 }));
 
@@ -132,6 +138,7 @@ function buttonNamed(name: string): HTMLButtonElement {
 }
 
 beforeEach(() => {
+  chatEntries.clear();
   localStorage.clear();
   viewer.id = "viewer-1";
   resetSurfaceCache();
@@ -147,6 +154,7 @@ beforeEach(() => {
       iconSeed: null,
     },
   ]);
+  sessionApi.readChatTurnStatus.mockResolvedValue({ status: "idle", turnId: null });
   sessionApi.listPersonalSessions.mockResolvedValue([]);
   sessionApi.listWorkspaceSessions.mockResolvedValue([
     {
@@ -317,11 +325,11 @@ describe("[COMP:app-web/sidebar-panel-chat] live room activity", () => {
   it("clears a completed spinner from stale cached status and keeps it clear after remount", async () => {
     navigation.search = "s=terminal-chat";
     sessionApi.listWorkspaceSessions.mockResolvedValue([]);
-    sessionApi.listPersonalSessions.mockResolvedValue([{ id: "terminal-chat", title: "Terminal chat", channelId: "web-terminal", lastActive: "2026-10-01", appOrigin: "chat", status: "running" }]);
+    sessionApi.listPersonalSessions.mockResolvedValue([{ id: "terminal-chat", title: "Terminal chat", channelId: "web-terminal", lastActive: "2026-10-01", appOrigin: "chat", status: "running", turnId: "a".repeat(64) }]);
     await renderPanel();
     expect(container!.querySelector('[data-chat-working="true"]')).not.toBeNull();
     sessionApi.listPersonalSessions.mockImplementation(() => new Promise(() => {}));
-    await act(async () => settleChatSessionFeedback("workspace-1", "terminal-chat"));
+    await act(async () => settleChatSessionFeedback("workspace-1", "terminal-chat", "a".repeat(64)));
     expect(container!.querySelector('[data-chat-working="true"]')).toBeNull();
     await act(async () => root!.render(<></>));
     await act(async () => root!.render(<I18nProvider locale="en" dict={en}><ChatSidebarPanel workspaceId="workspace-1" /></I18nProvider>));
@@ -348,6 +356,86 @@ describe("[COMP:app-web/sidebar-panel-chat] live room activity", () => {
     expect(container!.querySelector('[data-chat-working="true"]')).not.toBeNull();
     clock.mockRestore();
   });
+  it.each(["unavailable", "unknown"])("keeps legacy activity pending when fresh status is %s", async outcome => {
+    navigation.search = "v=workspace&s=room-1";
+    sessionApi.listWorkspaceSessions.mockResolvedValue([{ id: "room-1", title: "Fictional room", channelId: "web-1", lastActive: "2026-10-01", appOrigin: "chat", status: "running", turnId: "a".repeat(64) }]);
+    if (outcome === "unavailable") sessionApi.readChatTurnStatus.mockRejectedValue(new Error("status unavailable"));
+    else sessionApi.readChatTurnStatus.mockResolvedValue({ status: "unknown", turnId: null });
+    await renderPanel();
+    await act(async () => window.dispatchEvent(new CustomEvent("chat:session-activity", {
+      detail: { workspaceId: "workspace-1", sessionId: "room-1", working: false, turnId: null },
+    })));
+    expect(sessionApi.readChatTurnStatus).toHaveBeenCalledExactlyOnceWith("room-1");
+    expect(container!.querySelector('[data-chat-working="true"]')).not.toBeNull();
+  });
+
+  it("does not let delayed legacy idle clear a newer same-tab start", async () => {
+    navigation.search = "v=workspace&s=room-1";
+    sessionApi.listWorkspaceSessions.mockResolvedValue([{ id: "room-1", title: "Fictional room", channelId: "web-1", lastActive: "2026-10-01", appOrigin: "chat", status: "running", turnId: "a".repeat(64) }]);
+    let resolve!: (value: { status: string; turnId: string }) => void;
+    sessionApi.readChatTurnStatus.mockReturnValue(new Promise(done => { resolve = done; }));
+    await renderPanel();
+    const activity = (detail: Record<string, unknown>) => window.dispatchEvent(new CustomEvent("chat:session-activity", {
+      detail: { workspaceId: "workspace-1", sessionId: "room-1", ...detail },
+    }));
+    await act(async () => { activity({ working: false }); });
+    await act(async () => { activity({ working: true, turnId: "b".repeat(64) }); });
+    await act(async () => { resolve({ status: "idle", turnId: "a".repeat(64) }); });
+    expect(container!.querySelector('[data-chat-working="true"]')).not.toBeNull();
+    await act(async () => { activity({ working: false, turnId: "a".repeat(64) }); });
+    expect(container!.querySelector('[data-chat-working="true"]')).not.toBeNull();
+    await act(async () => { activity({ working: false, turnId: "b".repeat(64) }); });
+    expect(container!.querySelector('[data-chat-working="true"]')).toBeNull();
+  });
+
+  it("fences delayed legacy status against a newer list owner", async () => {
+    navigation.search = "v=workspace&s=room-1";
+    sessionApi.listWorkspaceSessions.mockResolvedValue([{ id: "room-1", title: "Fictional room", channelId: "web-1", lastActive: "2026-10-01", appOrigin: "chat", status: "running", turnId: "a".repeat(64) }]);
+    let resolve!: (value: { status: string; turnId: string }) => void;
+    sessionApi.readChatTurnStatus.mockReturnValue(new Promise(done => { resolve = done; }));
+    await renderPanel();
+    await act(async () => window.dispatchEvent(new CustomEvent("chat:session-activity", {
+      detail: { workspaceId: "workspace-1", sessionId: "room-1", working: false },
+    })));
+    await act(async () => mutateSurfaceCache(chatSharedSessionsCacheKey("workspace-1"), (rows: import("@/lib/api/sessions").WorkspaceSession[]) =>
+      rows.map(row => ({ ...row, turnId: "b".repeat(64), status: "running", statusReadStartedAt: Date.now() }))));
+    await act(async () => { resolve({ status: "idle", turnId: "a".repeat(64) }); });
+    expect(container!.querySelector('[data-chat-working="true"]')).not.toBeNull();
+  });
+
+  it("preserves a freshly observed tokenless owner over a stale cached public ID", async () => {
+    navigation.search = "v=workspace&s=room-1";
+    sessionApi.listWorkspaceSessions.mockResolvedValue([{ id: "room-1", title: "Fictional room", channelId: "web-1", lastActive: "2026-10-01", appOrigin: "chat", status: "running", turnId: "a".repeat(64) }]);
+    sessionApi.readChatTurnStatus.mockResolvedValue({ status: "running", turnId: null });
+    await renderPanel();
+    const activity = (turnId?: string | null) => window.dispatchEvent(new CustomEvent("chat:session-activity", {
+      detail: { workspaceId: "workspace-1", sessionId: "room-1", working: false, turnId },
+    }));
+    await act(async () => { activity(null); });
+    await act(async () => { activity("a".repeat(64)); });
+    expect(sessionApi.readChatTurnStatus).toHaveBeenCalledTimes(2);
+    expect(container!.querySelector('[data-chat-working="true"]')).not.toBeNull();
+    sessionApi.readChatTurnStatus.mockResolvedValue({ status: "idle", turnId: null });
+    await act(async () => { activity(null); });
+    expect(container!.querySelector('[data-chat-working="true"]')).toBeNull();
+  });
+
+  it.each(["workspace", "remount"])("revokes a pending legacy status after %s changes", async change => {
+    navigation.search = "v=workspace&s=room-1";
+    sessionApi.listWorkspaceSessions.mockResolvedValue([{ id: "room-1", title: "Fictional room", channelId: "web-1", lastActive: "2026-10-01", appOrigin: "chat", status: "running", turnId: "a".repeat(64) }]);
+    let resolve!: (value: { status: string; turnId: string }) => void;
+    sessionApi.readChatTurnStatus.mockReturnValue(new Promise(done => { resolve = done; }));
+    await renderPanel();
+    await act(async () => window.dispatchEvent(new CustomEvent("chat:session-activity", {
+      detail: { workspaceId: "workspace-1", sessionId: "room-1", working: false },
+    })));
+    if (change === "remount") await act(async () => root!.render(<></>));
+    await act(async () => root!.render(<I18nProvider locale="en" dict={en}><ChatSidebarPanel workspaceId={change === "workspace" ? "workspace-2" : "workspace-1"} /></I18nProvider>));
+    await flushEffects();
+    await act(async () => { resolve({ status: "idle", turnId: "a".repeat(64) }); });
+    expect(container!.querySelector('[data-chat-working="true"]')).not.toBeNull();
+  });
+
   it("shows a running-room spinner and settles from the same-tab activity signal", async () => {
     sessionApi.listWorkspaceSessions.mockResolvedValueOnce([
       {

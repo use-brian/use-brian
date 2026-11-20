@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { createWorkerManager } from '../worker.js'
 import type { WorkerResult, WorkerUsageEvent } from '../worker.js'
-import type { LLMProvider, ProviderSession, SessionOptions, StreamChunk, Message, ProviderRequest } from '../../providers/types.js'
+import type { LLMProvider, ProviderSession, SessionOptions, StreamChunk, Message, ProviderRequest } from '@use-brian/agent-runtime/providers/types.js'
 
 /** Minimal fake provider that yields a single text message. */
 function makeFakeProvider(responseText: string): LLMProvider {
@@ -943,4 +943,140 @@ describe('[COMP:workers/manager] createWorkerManager', () => {
       expect(manager.getResult(workerId)).toContain('real findings')
     })
   })
+})
+
+
+/** Real worker + real canonical producer; only provider/storage transport is a fixture. */
+describe('[COMP:workers/manager] original usage settlement lifetime', () => {
+  const deferred = <T,>() => {
+    let resolve!: (value: T) => void
+    const promise = new Promise<T>(done => { resolve = done })
+    return { promise, resolve }
+  }
+
+  it('waits for one cumulative accounting callback before result or waitAll completion', async () => {
+    const billing = deferred<void>(), observed = deferred<void>()
+    const calls: WorkerUsageEvent[] = []
+    const manager = createWorkerManager({
+      provider: makeFakeProvider('done'), model: 'gemini-flash', tools: new Map(),
+      onUsage: async event => { calls.push(event); observed.resolve(); await billing.promise },
+    })
+    const { workerId } = manager.spawn('original task', { ...ctx })!
+    await observed.promise
+    let completed = false
+    const waiting = manager.waitAll().then(result => { completed = true; return result })
+    await Promise.resolve()
+    expect(completed).toBe(false)
+    expect(manager.getStatus(workerId)).toBe('running')
+    expect(manager.drainNotifications()).toEqual([])
+    billing.resolve()
+    const result = await waiting
+    expect(result[0].status).toBe('completed')
+    expect(calls).toHaveLength(1)
+    expect(calls[0].usage).toMatchObject({ inputTokens: 10, outputTokens: 4 })
+    expect(manager.drainNotifications()).toHaveLength(1)
+  })
+
+  it.each(['stop', 'reset', 'cancel'] as const)('retains the unsettled original worker through %s', async action => {
+    const billing = deferred<void>(), observed = deferred<void>()
+    const calls: WorkerUsageEvent[] = []
+    const manager = createWorkerManager({
+      provider: makeFakeProvider('done'), model: 'gemini-flash', tools: new Map(),
+      onUsage: async event => { calls.push(event); observed.resolve(); await billing.promise },
+    })
+    const { workerId } = manager.spawn('original task', { ...ctx })!
+    await observed.promise
+    if (action === 'stop') expect(manager.stop(workerId, 's1')).toBe(true)
+    else if (action === 'reset') { manager.reset(); manager.reset() }
+    else expect(manager.cancelForSession('s1')).toBe(1)
+    let completed = false
+    const waiting = manager.waitAll().then(result => { completed = true; return result })
+    await Promise.resolve()
+    expect(completed).toBe(false)
+    expect(calls).toHaveLength(1)
+    billing.resolve()
+    const result = await waiting
+    expect(result).toHaveLength(1)
+    expect(result[0].status).toBe('stopped')
+    expect(calls).toHaveLength(1)
+    if (action !== 'stop') expect(manager.drainNotifications()).toEqual([])
+  })
+
+  it('retains original spawn identity when another session mutates shared configuration', async () => {
+    const resume = deferred<void>(), started = deferred<void>()
+    const source = { ...ctx, workspaceId: 'workspace-original', workerRuntime: { model: 'gemini-flash', modelTier: 'pro', providerKeySource: 'user' as const, provider: makeFakeProvider('done') } }
+    source.workerRuntime.provider = { ...source.workerRuntime.provider, async *stream() {
+      started.resolve(); await resume.promise
+      yield { type: 'message_start' as const, model: 'gemini-flash' }
+      yield { type: 'text_delta' as const, text: 'done' }
+      yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 10, outputTokens: 4 } }
+    } }
+    const calls: WorkerUsageEvent[] = []
+    const manager = createWorkerManager({ provider: makeFakeProvider('unused'), model: 'gemini-flash', tools: new Map(), onUsage: event => calls.push(event) })
+    manager.spawn('original task', source)
+    await started.promise
+    source.userId = 'successor-user'; source.assistantId = 'successor-assistant'; source.sessionId = 'successor-session'; source.workspaceId = 'successor-workspace'
+    source.workerRuntime.modelTier = 'max'
+    resume.resolve(); await manager.waitAll()
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({ userId: 'u1', assistantId: 'a1', sessionId: 's1', workspaceId: 'workspace-original', modelTier: 'pro', providerKeySource: 'user' })
+  })
+
+  it('records observed producer usage when output authority refuses delivery', async () => {
+    const calls: WorkerUsageEvent[] = []
+    const manager = createWorkerManager({ provider: makeFakeProvider('withheld'), model: 'gemini-flash', tools: new Map(), onUsage: event => calls.push(event) })
+    manager.spawn('original task', { ...ctx, admitModelOutput: async () => { throw new Error('Synthetic output refusal') } })
+    const result = await manager.waitAll()
+    expect(result[0].status).toBe('failed')
+    expect(calls).toHaveLength(1)
+    expect(calls[0].usage).toMatchObject({ inputTokens: 10, outputTokens: 8 })
+    expect(result[0].result).not.toContain('withheld')
+  })
+})
+
+
+it('[COMP:workers/manager] settles producer usage already observed before parent Stop', async () => {
+  const stop = new AbortController()
+  const calls: WorkerUsageEvent[] = []
+  const provider: LLMProvider = { ...makeFakeProvider('unused'), async *stream() {
+    yield { type: 'message_start', model: 'gemini-flash' }
+    yield { type: 'text_delta', text: 'not a completed result' }
+    yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 13, outputTokens: 2 } }
+    stop.abort(new Error('Synthetic parent Stop'))
+  } }
+  const manager = createWorkerManager({ provider, model: 'gemini-flash', tools: new Map(), onUsage: async event => { calls.push(event) } })
+  manager.spawn('original task', { ...ctx, abortSignal: stop.signal })
+  const results = await manager.waitAll()
+  expect(results[0].status).toBe('stopped')
+  expect(calls).toHaveLength(1)
+  expect(calls[0].usage).toMatchObject({ inputTokens: 13, outputTokens: 2 })
+})
+
+it.each([false, true])('[COMP:workers/manager] charges only observed usage when provider fails (observed=%s)', async observed => {
+  const calls: WorkerUsageEvent[] = []
+  const provider: LLMProvider = { ...makeFakeProvider('unused'), async *stream() {
+    if (observed) {
+      yield { type: 'message_start', model: 'gemini-flash' }
+      yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 7, outputTokens: 1 } }
+    }
+    throw new Error('Synthetic provider failure')
+  } }
+  const manager = createWorkerManager({ provider, model: 'gemini-flash', tools: new Map(), onUsage: event => calls.push(event) })
+  manager.spawn('original task', { ...ctx })
+  const results = await manager.waitAll()
+  expect(results[0].status).toBe('failed')
+  expect(calls).toHaveLength(observed ? 1 : 0)
+  if (observed) expect(calls[0].usage).toMatchObject({ inputTokens: 7, outputTokens: 1 })
+})
+
+
+it('[COMP:workers/manager] awaits a failed accounting callback once without replaying the worker', async () => {
+  let calls = 0
+  const manager = createWorkerManager({ provider: makeFakeProvider('done'), model: 'gemini-flash', tools: new Map(),
+    onUsage: async () => { calls++; throw new Error('Synthetic accounting unavailable') },
+  })
+  manager.spawn('original task', { ...ctx })
+  const result = await manager.waitAll()
+  expect(calls).toBe(1)
+  expect(result[0]).toMatchObject({ status: 'failed', result: 'Error: Synthetic accounting unavailable' })
 })

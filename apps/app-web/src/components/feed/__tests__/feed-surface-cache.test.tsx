@@ -42,7 +42,8 @@ vi.mock("@/lib/feed-surface-cache", async (importOriginal) => ({
 
 /** An in-memory IndexedDB for the disk-tier tests. */
 const idb = vi.hoisted(() => ({ store: new Map<string, unknown>() }));
-vi.mock("@/lib/offline/idb", () => ({
+vi.mock("@/lib/offline/idb", async importOriginal => ({
+  ...await importOriginal<typeof import("@/lib/offline/idb")>(),
   idbGet: async (key: string) => idb.store.get(key) ?? null,
   idbSet: async (key: string, value: unknown) => {
     idb.store.set(key, value);

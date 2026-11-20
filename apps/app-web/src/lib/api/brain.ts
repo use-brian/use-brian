@@ -28,6 +28,27 @@ import type {
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
+export async function fetchMemoryExport(
+  workspaceId: string,
+  format: "markdown" | "csv",
+  signal: AbortSignal,
+): Promise<{ kind: "file"; file: Blob } | { kind: "upgrade"; canManageBilling: boolean } | { kind: "denied" }> {
+  const response = await authFetch(`${API_URL}/api/brain/memories/export`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspaceId, format }),
+    cache: "no-store",
+    signal,
+  });
+  if (response.status === 402) {
+    const data = await response.json() as { canManageBilling?: boolean };
+    return { kind: "upgrade", canManageBilling: data.canManageBilling === true };
+  }
+  if ([401, 403, 404].includes(response.status)) return { kind: "denied" };
+  if (!response.ok) throw new Error("memory_export_failed");
+  return { kind: "file", file: await response.blob() };
+}
+
 export type EntityKind =
   | "person"
   | "company"

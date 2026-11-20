@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import express from 'express'
 import request from 'supertest'
 import { describe, expect, it, vi } from 'vitest'
-import type { NormalizedOfficeImage } from '@use-brian/core'
+import type { NormalizedOfficeImage } from '@use-brian/core/office/image-resource.js'
 import { officeResourceRoutes, type OfficeResourceRouteDeps } from '../office-resources.js'
 
 const USER = '20000000-0000-4000-8000-000000000001'

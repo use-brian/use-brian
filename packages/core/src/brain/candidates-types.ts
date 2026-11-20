@@ -19,7 +19,7 @@
  *   - `packages/api/migrations/198_brain_candidates.sql` (DDL)
  */
 
-import type { AccessContext } from '../security/access-context.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 
 export type BrainCandidateAction = 'drop' | 'task' | 'edge' | 'attribute' | 'extract'
 

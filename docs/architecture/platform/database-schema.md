@@ -21,3 +21,26 @@ Application roles remain ordinary non-owner roles, with no superuser or BYPASSRL
 privileges. The owner-access regression executes the actual repair and verifies
 that application reads still filter rows and direct receipt writes remain denied.
 Trigger restoration and migration replay/idempotency checks stay required.
+
+## Memory lineage upgrade
+
+The published `8268_native_memory_query_write_lineage.sql` remains available
+byte-for-byte in `packages/api/scripts/conversation-store/historical/`. An
+installation that previously ran it keeps its original ledger row and timestamp.
+Fresh installations record the composed `8326_native_memory_query_write_contract.sql`
+when it runs. The archived file never stands in for the new migration.
+
+On the upstream upgrade path, the reviewed 8272 execution adapter authenticates
+the installed 8268 Memory routines, their comparator owners and the registry
+before reconciling them inside 8272's transaction. The unchanged publication
+installer then authenticates its canonical predecessor. 8326 installs the current
+Memory writer and both frozen-query comparators. It preserves the staged-source
+checks and requires an empty, owner-only intent table outside an active write.
+The native runner commits each of these migrations with its own ledger row.
+
+The managed launcher holds its exclusive native lease through migration,
+installation authentication and application-role activation. For manual
+PostgreSQL upgrades, stop application processes that use the database before
+running the owner migration, then restart them after the migration succeeds.
+The earlier frozen-reader semantics can reject a write using its own newly
+derived output until 8326 is installed.

@@ -9,14 +9,13 @@
  * [COMP:api/mailbox-connect-routes]
  */
 
-import { ImapFlow } from 'imapflow'
 import {
   MAILBOX_UNREACHABLE_CODES,
   classifyMailboxAuthFailure,
   mailboxErrorCode,
   mailboxErrorText,
-} from '@use-brian/core'
-import { attachSessionErrorSink, type ImapClientLike } from './imap-session.js'
+} from '@use-brian/core/tools/base/_mailbox-error.js'
+import { attachSessionErrorSink, imapFlowClass, type ImapClientLike } from './imap-session.js'
 import { verifySmtpLogin } from './smtp.js'
 import type { MailboxAccountSettings, MailboxVerifyResult } from './types.js'
 
@@ -36,6 +35,7 @@ export type VerifyMailboxDeps = {
 }
 
 async function defaultVerifyImap(settings: MailboxAccountSettings): Promise<void> {
+  const ImapFlow = imapFlowClass()
   const client = new ImapFlow({
     host: settings.imapHost,
     port: settings.imapPort,

@@ -10,7 +10,7 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '../types.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 
 export const MAX_PRESENTED_DOCUMENT_CHARS = 250_000
 

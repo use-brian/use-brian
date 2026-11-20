@@ -1,7 +1,10 @@
 /** Native attachment parsing with exact workspace-file ancestry. [COMP:api/workspace-mcp] */
-import { documentMimeType, parseFileContent, scopeEvidenceFromRows, type FilesApi, type ToolContext } from '@use-brian/core'
+import { documentMimeType } from '@use-brian/core/files/document-formats.js'
+import type { FilesApi } from '@use-brian/core/workspace-files/api.js'
+import { scopeEvidenceFromRows } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { writeRetainedContextFrame } from '../db/session-context-revisions.js'
-import { assertSourceModelInputAuthority } from '../application-platform/model-source-authority.js'
+import { admitModelInput } from '../context-scope/admission.js'
 
 const MAX_WORKSPACE_ATTACHMENT_BYTES = 20 * 1024 * 1024
 
@@ -22,7 +25,8 @@ export async function attachWorkspaceFiles(files: FilesApi, context: ToolContext
     const evidence = scopeEvidenceFromRows([file])
     if (evidence.sources?.length !== 1 || !file.scopeVersion) throw new Error('attachment_source_unavailable')
     accumulator.note(evidence)
-    await assertSourceModelInputAuthority(context)
+    await admitModelInput(context)
+    const { parseFileContent } = await import('@use-brian/core/files/parsers.js')
     const parsed = await parseFileContent(Buffer.from(bytes), file.mime, file.name)
     const mime = parsed.mediaMimeType ?? (parsed.detectedFormat ? documentMimeType(parsed.detectedFormat) : file.mime)
     const dataUrl = `data:${mime};base64,${Buffer.from(bytes).toString('base64')}`

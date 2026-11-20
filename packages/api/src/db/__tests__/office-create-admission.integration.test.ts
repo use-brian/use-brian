@@ -5,12 +5,17 @@ import { createOfficeArtifactStore } from '../office-artifacts.js'
 import { createDbWorkspaceGroupStore } from '../workspace-group-store.js'
 import { runWithAgentAccess } from '../agent-access-context.js'
 import type { OfficeCreateOptions } from '../../workspace-access/office-create-admission.js'
+import pg from 'pg'
+import { bootstrapConnectionString } from '../../__tests__/fixtures/bootstrap-role.js'
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 // This suite asserts the legacy (pre-v2) model, which workspaces.department_read_v2=false still
 // serves as the cutover's rollback path (migration 650, decision D22); its workspaces are pinned to it.
 await assertLocalFixture()
 const pool = getPool(), store = createOfficeArtifactStore()
-afterAll(async () => { await getAppPool().end(); await pool.end() })
+// Lock-wait observation only, outside the lock holder's transaction (whose activity
+// snapshot is frozen) and able to read the app_user waiter, which the ordinary owner cannot.
+const observer = new pg.Pool({ connectionString: await bootstrapConnectionString(), max: 1 })
+afterAll(async () => { await getAppPool().end(); await pool.end(); await observer.end() })
 type Input = Parameters<typeof store.createShell>[0]
 async function fixture(mode = 'simple', ready = true) {
   const userId = randomUUID(), workspaceId = randomUUID()
@@ -101,7 +106,7 @@ describe('Office authored-root admission (actual app-role PG)', () => {
       // than relying on a timing delay to establish transaction ordering.
       let waiting = false
       for (let i=0; i<100; i++) {
-        const state = await lock.query("SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'SELECT id FROM workspaces WHERE id=$1 FOR UPDATE%'")
+        const state = await observer.query("SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'SELECT id FROM workspaces WHERE id=$1 FOR UPDATE%'")
         if (state.rows.length) { waiting = true; break }
         await new Promise(resolve => setTimeout(resolve,10))
       }

@@ -22,7 +22,7 @@
  * persists as provenance.
  */
 
-import type { Sensitivity } from '../security/sensitivity.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 
 // ── Port: read slice of the source memory ────────────────────────────
 

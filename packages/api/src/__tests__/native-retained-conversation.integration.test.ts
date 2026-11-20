@@ -1,13 +1,14 @@
 /** [COMP:api/native-chat-read-cost] Genuine retained native turns exceed the legacy expanded edge budget without losing conversation. */
-import {ContextScopeAccumulator,type SessionContextAuthority} from '@use-brian/core'
+import type {SessionContextAuthority} from '@use-brian/core/memory/session-state-types.js'
+import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
 import {afterAll,beforeAll,describe,expect,it} from 'vitest'
 import {getAppPool,getPool} from '../db/client.js'
 import {addSessionMessage,readSessionById} from '../db/sessions.js'
-import {readAdmittedSessionQuery} from '../db/session-query-reader.js'
+import {readAdmittedSessionQuery} from '../db/conversation-store.js'
 import {withSessionMessagePublication,writeSessionContextRevision} from '../db/session-context-revisions.js'
-import {publishNativeSessionMessageBatch} from '../db/session-message-publication.js'
+import {publishNativeSessionMessageBatch} from '../db/conversation-store.js'
 import {persistentContextFixture} from '../application-platform/__tests__/fixtures/persistent-context.js'
-import {countRetainedNativeExpandedGraph} from './fixtures/native-session-capacity.js'
+import {countConversationExpandedGraph} from './fixtures/native-session-capacity.js'
 
 const {assertLocalFixture}=await import(new URL('../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -46,7 +47,7 @@ describe.sequential('[COMP:api/native-chat-read-cost] complete retained native c
    content:[{type:'text',text:`Fictional native capacity request ${index}.`}],scope:fixture.envelope})
   expect(input.sequenceNum).toBe(retainedRows+index*2-1)
   const current=await authority()
-  await readAdmittedSessionQuery({sessionId:fixture.session.id,throughSequence:input.sequenceNum,
+  const captured=await readAdmittedSessionQuery({sessionId:fixture.session.id,throughSequence:input.sequenceNum,
    topicThroughSequence:input.sequenceNum-1,currentMessageId:input.id,currentMessageSequence:input.sequenceNum,authority:current})
   const annotation=await writeSessionContextRevision({sessionId:fixture.session.id,parentId:input.id,kind:'message_annotation',
    content:{topicLabel:'Fictional native capacity',topicConfidence:1,replyToText:null},authority:current,
@@ -60,8 +61,8 @@ describe.sequential('[COMP:api/native-chat-read-cost] complete retained native c
   expect(parents).toEqual([{source_kind:'session_context_revision',frame:expect.any(String)}])
   // The answer reads the newly retained annotation under its current query
   // domain, retaining both earlier and current immutable capture versions.
-  await readAdmittedSessionQuery({sessionId:fixture.session.id,throughSequence:input.sequenceNum,
-   topicThroughSequence:input.sequenceNum,currentMessageId:input.id,currentMessageSequence:input.sequenceNum,authority:current})
+  const refreshed=await captured.current(current,input.sequenceNum,{id:input.id,sequence:input.sequenceNum,annotationRevisionId:annotation!.id})
+  expect(refreshed.annotations.at(-1)?.id).toBe(input.id)
   const [reply]=await publishNativeSessionMessageBatch({sessionId:fixture.session.id,
    messages:[{role:'assistant',senderAssistantId:fixture.assistantId,content:[{type:'text',text:`Fictional native capacity answer ${index}.`}]}],
    authority:current,derivationTarget:fixture.envelope,
@@ -95,7 +96,7 @@ describe.sequential('[COMP:api/native-chat-read-cost] complete retained native c
   expect(result.history.map(message=>message.sequenceNum)).toEqual(Array.from({length:input.sequenceNum},(_,index)=>index+1))
   for(let index=1;index<=retainedRows;index++)expect(result.history[index-1].content)
    .toEqual([{type:'text',text:`Fictional retained capacity turn ${index}`}])
-  const expanded=await countRetainedNativeExpandedGraph(current)
+  const expanded=await countConversationExpandedGraph(current)
   console.info('[genuine retained expanded graph]',expanded)
   expect(expanded.edges).toBeGreaterThan(16_384)
   const [reply]=await publishNativeSessionMessageBatch({sessionId:fixture.session.id,

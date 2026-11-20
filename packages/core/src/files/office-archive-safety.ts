@@ -5,7 +5,7 @@
  *
  * [COMP:files/document-formats]
  */
-import JSZip from 'jszip'
+import type JSZip from 'jszip'
 
 export const MAX_OFFICE_ARCHIVE_ENTRIES = 100_000
 export const MAX_OFFICE_ARCHIVE_ENTRY_BYTES = 128 * 1024 * 1024
@@ -49,6 +49,8 @@ type ZipObjectWithSize = JSZip.JSZipObject & {
 }
 
 export async function assertSafeOfficeArchive(buffer: Buffer): Promise<void> {
+  // jszip loads at first use, never at module evaluation (M4 step 5).
+  const { default: JSZip } = await import('jszip')
   const archive = await JSZip.loadAsync(buffer)
   const entries = Object.values(archive.files)
     .filter((entry) => !entry.dir)

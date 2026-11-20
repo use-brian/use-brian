@@ -30,8 +30,8 @@
  * degenerates to plain recency ordering of inputs).
  */
 
-import type { LLMProvider, TokenUsage } from '../providers/types.js'
-import { collectStream } from '../providers/accumulator.js'
+import type { LLMProvider, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
+import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
 import type { MemoryEntry } from '../memory/context-builder.js'
 
 // ── Types ────────────────────────────────────────────────────────────

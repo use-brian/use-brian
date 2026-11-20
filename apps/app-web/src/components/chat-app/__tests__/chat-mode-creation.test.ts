@@ -1,6 +1,7 @@
 import {readFileSync} from 'node:fs';
 import {describe,it,expect} from 'vitest';
 const source=readFileSync(new URL('../chat-surface.tsx',import.meta.url),'utf8');
+const controller=readFileSync(new URL('../../../lib/chat/conversation-controller.ts',import.meta.url),'utf8');
 describe('[COMP:app-web/mode-aware-context] shared chat creation hosts',()=>{
  it('routes new shared work through explicit intent and preview before both create calls',()=>{
  expect(source).toContain('activeSessionId?"existing":view==="workspace"?"new-shared":"private"');
@@ -10,9 +11,11 @@ describe('[COMP:app-web/mode-aware-context] shared chat creation hosts',()=>{
  expect(source).toContain('!creationContext.snapshot()');
  });
  it('leaves existing session and private explicit-null stream context unchanged',()=>{
- expect(source).toContain('...(!sessionIdRef.current');
+ // A send into an existing session carries no creation context; the
+ // conversation adds the session it owns to the request.
+ expect(source).toContain('...(!owningSessionId');
  expect(source).toContain('contextGroupId: pickedContextGroupId');
- expect(source).toContain('sessionId: sessionIdRef.current');
+ expect(controller).toContain('...(sessionId ? { sessionId } : {})');
  expect(source).toContain('creationContext.fail()');
  });
 });

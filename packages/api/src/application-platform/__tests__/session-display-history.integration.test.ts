@@ -3,17 +3,19 @@ import {afterAll,afterEach,describe,expect,it} from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import type {PoolClient} from 'pg'
-import {boundScopeSources,executionToolContext,type SessionContextAuthority} from '@use-brian/core'
+import type {SessionContextAuthority} from '@use-brian/core/memory/session-state-types.js'
+import {executionToolContext} from '@use-brian/agent-runtime/security/execution-context.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {applyRLSGucs,getAppPool,getPool,rollbackAndRelease,runWithAgentAccess} from '../../db/client.js'
 import {authSessionStore} from '../../db/auth-session-store.js'
 import {addSessionMessage,createPersonalWebSession} from '../../db/sessions.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
 import {listWorkspaceFilesIndexRanked} from '../../db/workspace-files.js'
-import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
-import {publishNativeSessionMessageBatch} from '../../db/session-message-publication.js'
+import {readAdmittedSessionQuery} from '../../db/conversation-store.js'
+import {publishNativeSessionMessageBatch} from '../../db/conversation-store.js'
 import {resolveSessionTitleAuthority} from '../../routes/session-title-authority.js'
 import {readAttendedSessionHistory} from '../../routes/attended-session-context.js'
-import {assertSourceModelInputAuthority} from '../model-source-authority.js'
+import {admitModelInput} from '../../context-scope/admission.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
 import {createTokens} from '../../auth/jwt.js'
 import {requireAuth} from '../../auth/middleware.js'
@@ -73,7 +75,7 @@ describe.sequential('[COMP:api/session-display-history] durable personal transcr
 
  it.each([0,1])('keeps published replies after an original %s-memory cohort grows while fresh source evidence stays current',async count=>{
   const c=await setup(count)
-  expect((await readAttendedSessionHistory(await c.fresh(),c.session.id)).map(row=>row.id)).toContain(c.reply.id)
+  expect(((await readAttendedSessionHistory(await c.fresh(),c.session.id)).messages).map(row=>row.id)).toContain(c.reply.id)
   const before=await c.display({authority:await c.fresh()})
   expect(before).toMatchObject({sessionId:c.session.id,workspaceId:c.f.workspaceId,mode:'personal_transcript_display',
    rows:[{id:c.input.id,available:true},{id:c.reply.id,available:true}]})
@@ -82,9 +84,9 @@ describe.sequential('[COMP:api/session-display-history] durable personal transcr
   expect(after?.rows).toEqual(before?.rows)
   expect(after?.rows[1].content).toEqual([{type:'text',text:'Fictional published reply'}])
   // Display is a separate purpose. A cached absence cannot authorize a new model turn.
-  await expect(assertSourceModelInputAuthority({...executionToolContext(c.authority.execution,{appId:'fictional-current-model'}),
+  await expect(admitModelInput({...executionToolContext(c.authority.execution,{appId:'fictional-current-model'}),
    scopeAccumulator:c.authority.accumulator})).rejects.toMatchObject({reason:'authority_changed'})
-  const modelHistory=await readAttendedSessionHistory(await c.fresh(),c.session.id)
+  const modelHistory=(await readAttendedSessionHistory(await c.fresh(),c.session.id)).messages
   expect(modelHistory.map(row=>row.id)).toContain(c.reply.id)
   expect(JSON.stringify(after)).not.toContain('resourceKind')
  })
@@ -121,7 +123,7 @@ describe.sequential('[COMP:api/session-display-history] durable personal transcr
   expect(display?.rows.map(row=>row.id)).toEqual([c.input.id,c.reply.id,laterInput.id,laterReply.id])
   expect(display?.rows.every(row=>row.available)).toBe(true)
   expect(display?.rows.at(-1)?.content).toEqual([{type:'text',text:'Fictional later published reply'}])
-  const modelHistory=await readAttendedSessionHistory(await c.fresh(),c.session.id)
+  const modelHistory=(await readAttendedSessionHistory(await c.fresh(),c.session.id)).messages
   expect(modelHistory.map(row=>row.id)).toEqual([c.input.id,c.reply.id,laterInput.id,laterReply.id])
  })
 
@@ -160,7 +162,7 @@ describe.sequential('[COMP:api/session-display-history] durable personal transcr
   expect((await c.display())?.rows.find(row=>row.id===c.reply.id)?.available).toBe(true)
   await c.f.pool.query('DELETE FROM memories WHERE id=$1',[c.memories[0].id])
   const display=await c.display()
-  const modelHistory=await readAttendedSessionHistory(await c.fresh(),c.session.id)
+  const modelHistory=(await readAttendedSessionHistory(await c.fresh(),c.session.id)).messages
   expect(modelHistory.map(row=>row.id)).toContain(c.reply.id)
   expect(display?.rows.find(row=>row.id===c.input.id)?.available).toBe(true)
   expect(display?.rows.find(row=>row.id===c.reply.id)).toMatchObject({available:true})
@@ -187,6 +189,11 @@ describe.sequential('[COMP:api/session-display-history] durable personal transcr
     await f.pool.query(`INSERT INTO display_memory_policy_fixture(workspace_id,fields)
      SELECT $1,jsonb_agg(jsonb_build_object('key',key,'read',CASE WHEN key='summary' THEN '[["summary_reader"]]'::jsonb ELSE '[]'::jsonb END,
       'write','[]'::jsonb,'releaseReadTo','[]'::jsonb,'releaseWriteTo','[]'::jsonb)) FROM unnest(application_memory_field_keys()) key`,[f.workspaceId])
+    await f.pool.query(`DO $owner$ DECLARE migration_owner text:=(SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid='entity_instances'::regclass);BEGIN
+     EXECUTE format('ALTER TABLE public.display_memory_policy_fixture OWNER TO %I',migration_owner);
+     EXECUTE format('ALTER FUNCTION public.display_memory_policy_catalog(uuid,jsonb,text) OWNER TO %I',migration_owner);
+     EXECUTE format('ALTER FUNCTION public.display_memory_policy_record(uuid,jsonb,text,text) OWNER TO %I',migration_owner);
+    END $owner$`)
     await f.pool.query(`INSERT INTO application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader,catalog_reader)
      VALUES('native','1',ARRAY['summary_reader'],'display_memory_policy_record(uuid,jsonb,text,text)'::regprocedure,'display_memory_policy_catalog(uuid,jsonb,text)'::regprocedure)`)
     registered=true

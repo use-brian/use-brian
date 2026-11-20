@@ -9,7 +9,7 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import { SlackApiError } from '@use-brian/channels'
-import type { ToolContext } from '@use-brian/core'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import {
   createSlackReadCurrentThreadTool,
   formatSlackThreadSnapshot,

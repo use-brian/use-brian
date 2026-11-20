@@ -8,7 +8,7 @@ const profiles = ["b", "a"].map(id => ({ id, defaultBackend: "local", canManage:
 const token = { relayUrl: "wss://relay.test", pairingToken: "secret", browserProfileId: "a", expiresInSeconds: 600 };
 const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
 function setup() {
-  let status = { ok: true, controlEpoch: 0, connected: false, automaticBlocked: false, workspaceId: "w", browserProfileId: "a" };
+  let status = { ok: true, browserEnabled: true, controlEpoch: 0, connected: false, automaticBlocked: false, workspaceId: "w", browserProfileId: "a" };
   const control = vi.fn(async (m: DesktopBrowserControlMessage) => {
     if (m.type === "pair") {
       if (m.expectedControlEpoch !== undefined && m.expectedControlEpoch !== status.controlEpoch) return { ...status, ok: false };
@@ -129,7 +129,7 @@ describe("[COMP:app-web/automatic-desktop-browser] lifecycle", () => {
     browser.configure("w", profiles); await flush();
     browser.configure("w", []); await flush();
     expect(control).toHaveBeenCalledWith({ type: "cancel" });
-    resolve({ ok: true, controlEpoch: 0, connected: true, automaticBlocked: false, workspaceId: nativeWorkspace, browserProfileId: "a" });
+    resolve({ ok: true, browserEnabled: true, controlEpoch: 0, connected: true, automaticBlocked: false, workspaceId: nativeWorkspace, browserProfileId: "a" });
     await flush();
     if (nativeWorkspace === "w") expect(control).toHaveBeenCalledWith({ type: "disconnect" });
     else expect(control).not.toHaveBeenCalledWith({ type: "disconnect" });
@@ -175,4 +175,20 @@ describe("[COMP:app-web/automatic-desktop-browser] lifecycle", () => {
     expect(await control({ type: "status" })).toMatchObject({ connected: false, automaticBlocked: true });
   });
 
+});
+
+it("[COMP:app-web/automatic-desktop-browser] respects device opt-out even on Retry and pairs when re-enabled", async () => {
+  const { browser, mint, status } = setup();
+  status({ browserEnabled: false }); browser.configure("w", profiles); await flush();
+  await browser.retry();
+  expect(mint).not.toHaveBeenCalled(); expect(browser.snapshot().phase).toBe("disabled");
+  status({ browserEnabled: true }); browser.preferencesChanged(); await flush();
+  expect(mint).toHaveBeenCalledOnce(); expect(browser.snapshot().phase).toBe("connected");
+});
+it("[COMP:app-web/automatic-desktop-browser] rechecks opt-out after credential minting", async () => {
+  const { browser, mint, status, control } = setup();
+  mint.mockImplementationOnce(async () => { status({ browserEnabled: false }); return token; });
+  browser.configure("w", profiles); await flush();
+  expect(control.mock.calls.some(([message]) => message.type === "pair")).toBe(false);
+  expect(browser.snapshot().phase).toBe("disabled");
 });

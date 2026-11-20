@@ -70,8 +70,16 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     // the root unit command's limit so sibling builds cannot starve them.
     expect(remainingCommand).toContain('--concurrency=1');
     const embedded = workflow.jobs['embedded-database-tests'];
-    expect(embedded.strategy.matrix.group).toEqual(['owner-legacy', 'owner-fresh', 'owner-cutover', 'owner-successor', 'owner-prerequisites', 'session', 'remaining']);
-    expect(embedded['timeout-minutes']).toBe(10);
+    expect(embedded.strategy.matrix.include).toEqual([
+      { group: 'owner-legacy', timeoutMinutes: 15 },
+      { group: 'owner-fresh', timeoutMinutes: 15 },
+      { group: 'owner-cutover', timeoutMinutes: 15 },
+      { group: 'owner-successor', timeoutMinutes: 15 },
+      { group: 'owner-prerequisites', timeoutMinutes: 10 },
+      { group: 'session', timeoutMinutes: 15 },
+      { group: 'remaining', timeoutMinutes: 10 },
+    ]);
+    expect(embedded['timeout-minutes']).toBe('${{ matrix.timeoutMinutes }}');
     expect(embedded.strategy['fail-fast']).toBe(false);
     const nodeTests = embedded.steps.find((step: { name?: string }) => step.name === 'Embedded database tests');
     expect(nodeTests.run).toContain('scripts/testing/embedded-database-tests.mjs ${{ matrix.group }}');
@@ -80,6 +88,7 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     expect(acceptance.strategy.matrix).toContain('fromJSON(needs.ci-scope.outputs.matrix)');
     expect(workflow.jobs['ci-scope'].outputs.matrix).toBe('${{ steps.scope.outputs.matrix }}');
     expect(workflow.jobs['embedded-current-tests'].if).toBe("needs.ci-scope.outputs.historical == 'false'");
+    expect(workflow.jobs['embedded-current-tests']['timeout-minutes']).toBe(20);
     expect(embedded.if).toBe("needs.ci-scope.outputs.historical == 'true'");
     expect(workflow.on.schedule).toHaveLength(1);
     expect(workflow.on).toHaveProperty('workflow_dispatch');
@@ -109,9 +118,15 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     expect(workflow.jobs['build-test'].if).toContain('always()');
   });
 
-  it('keeps offline regressions mandatory and executable in the focused lane', () => {
+  it('keeps offline regressions mandatory and executable in the focused lane', async () => {
+    const { OFFLINE_CONTINUITY_FILES, unitTestExclusions } = await import(new URL('../../../../scripts/testing/unit-partition.mjs', import.meta.url).href);
     const workflow = yaml.load(readFileSync(join(sourceRoot, '.github/workflows/ci.yml'), 'utf8'));
     const lane = workflow.jobs['offline-continuity'];
+    expect(lane.env?.BRIAN_TEST_PARTITION).toBeUndefined();
+    expect(workflow.jobs['department-isolation-shards'].env?.BRIAN_TEST_PARTITION).toBeUndefined();
+    for (const job of ['api-tests', 'app-web-tests', 'heavyweight-tests']) {
+      expect(workflow.jobs[job].steps.find((step: { name?: string }) => step.name === 'Unit tests').env.BRIAN_TEST_PARTITION).toBe('ordinary');
+    }
     expect(lane['continue-on-error']).not.toBe(true);
     const commands = lane.steps.filter((step: { run?: string }) => step.run?.includes('vitest run'));
     expect(commands).toHaveLength(2);
@@ -122,6 +137,9 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
       const directory = step.run.includes('--filter app-web ') ? 'apps/app-web' : 'apps/app-desktop';
       const files = step.run.match(/(?:src|desktop)\/[^\s]+\.test\.tsx?/g) ?? [];
       expect(files.length).toBeGreaterThan(0);
+      expect([...files].sort()).toEqual([...OFFLINE_CONTINUITY_FILES[directory]].sort());
+      expect(unitTestExclusions(directory, 'ordinary')).toEqual(expect.arrayContaining(files));
+      expect(unitTestExclusions(directory, '')).toEqual([]);
       for (const file of files) expect(readFileSync(join(sourceRoot, directory, file), 'utf8')).toContain('[COMP:');
     }
     const app = commands[0].run;
@@ -133,6 +151,10 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     }
     expect(workflow.jobs['build-test'].steps[0].env.OFFLINE_CONTINUITY_RESULT)
       .toBe('${{ needs.offline-continuity.result }}');
+    const turbo = JSON.parse(readFileSync(join(sourceRoot, 'turbo.json'), 'utf8'));
+    expect(turbo.tasks.test.env).toContain('BRIAN_TEST_PARTITION');
+    expect(turbo.tasks.test.inputs).toContain('$TURBO_ROOT$/scripts/testing/unit-partition.mjs');
+    expect(turbo.tasks.test.inputs).toContain('$TURBO_ROOT$/packages/shared/src/department-isolation-coverage.ts');
   });
 
   it('restores same-run dependencies without spending acceptance time recompiling', () => {

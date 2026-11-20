@@ -1,6 +1,6 @@
-import type { ExecutionContext } from '../security/execution-context.js'
-import type { ContextScopeAccumulator } from '../security/context-scope.js'
-import type { DerivedWriteEvidence } from '../security/derived-scope.js'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import type { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { DerivedWriteEvidence } from '@use-brian/agent-runtime/security/derived-scope.js'
 
 /** Existing canonical host objects, never serialized tool/model input. */
 export type SessionContextAuthority = Readonly<{
@@ -109,4 +109,13 @@ export type SessionStateStore = {
     olderThan: Date,
     authority?: SessionContextAuthority,
   ): Promise<number>
+}
+
+// Core-owned ToolContext field (docs/architecture/engine/tool-hooks.md →
+// "Runtime ports and core-owned context extensions").
+declare module '@use-brian/agent-runtime/tools/types.js' {
+  interface ToolContextExtensions {
+    /** Session-state store for `trackCommitment` / `resolveCommitment`. See `docs/architecture/context-engine/session-state.md`. */
+    sessionStateStore?: SessionStateStore
+  }
 }

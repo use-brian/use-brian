@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createRelayCommandTransport, relayExtensionStatus, supportsProtectedFill } from '../relay-transport.js'
-import type { LocalBrowserControlMode } from '@use-brian/core'
+import type { LocalBrowserControlMode } from '@use-brian/core/sandbox/profiles.js'
 
 describe('[COMP:sandbox/local-browser] Relay command profile policy', () => {
   it('resolves local-control mode on every command instead of trusting assistant input', async () => {

@@ -1,4 +1,4 @@
-import { askQuestionSchema } from '../tools/base/ask-question.js'
+import { askQuestionSchema } from '@use-brian/agent-runtime/tools/base/ask-question.js'
 /**
  * Zod schemas for workflow definitions. These are the runtime source of
  * truth — validation gates both the authoring tool (`proposeWorkflow`) and
@@ -11,7 +11,7 @@ import { askQuestionSchema } from '../tools/base/ask-question.js'
 
 import { z } from 'zod'
 import { RoutineTaskIntakeSchema } from '../tasks/routine-intake.js'
-import { CrmDomainEventTypeSchema } from '../crm/operations-types.js'
+import { CrmDomainEventTypeSchema } from '../application-platform/operation-contract.js'
 import { WORKFLOW_STEP_TYPES } from './types.js'
 import type { ToolCallStep, WorkflowDefinition } from './types.js'
 import { buildReachability, findCycle, parallelRegionSteps } from './graph.js'

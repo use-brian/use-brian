@@ -13,7 +13,10 @@
 // in-process tool".
 
 import { z } from 'zod'
-import { buildTool, scopeEvidenceFromRows, type Embedder, type RetrievalActor, type Tool } from '@use-brian/core'
+import type { Embedder } from '@use-brian/core/embeddings/embedder.js'
+import type { RetrievalActor } from '@use-brian/core/retrieval/types.js'
+import { scopeEvidenceFromRows } from '@use-brian/agent-runtime/security/context-scope.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import {
   searchRecording as searchRecordingFn,
   readRecordingRange,

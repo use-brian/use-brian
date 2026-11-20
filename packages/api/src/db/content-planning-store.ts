@@ -1,6 +1,7 @@
 import { readFeedSaveProjection, assertFeedSavedReady, type FeedSavedCanonical } from '../content-planning/projection.js'
-import { FeedCollaborationError, withFeedTransaction } from './feed-collaboration-store.js'
+import { FeedCollaborationError, feedVisibleMessageSql, insertFeedDraftSeed, withFeedTransaction } from './feed-collaboration-store.js'
 import { confirmFeedPost } from '../content-planning/confirmation.js'
+import { conversationAnchorWriteAdmissionActive } from './conversation-visibility.js'
 /**
  * Open, provider-independent content-planning persistence.
  *
@@ -10,7 +11,6 @@ import { confirmFeedPost } from '../content-planning/confirmation.js'
 import { randomUUID } from 'node:crypto'
 import { getPool, query } from './client.js'
 import { admitAnchoredSession } from '../workspace-access/session-create-admission.js'
-import { addSessionMessage } from './sessions.js'
 import { sessionKindSql } from '../session-kind.js'
 
 /**
@@ -272,6 +272,7 @@ export interface ContentPlanningStore {
   }): Promise<ContentDraftSessionSummary>
   listSessions(params: {
     assistantId: string
+    userId: string
     platform?: ContentPlanningPlatform
   }): Promise<ContentDraftSessionSummary[]>
   renameSession(params: {
@@ -370,6 +371,7 @@ export function createContentPlanningStore(): ContentPlanningStore {
       // by its anchor (unified-sessions L12) in the same transaction as the
       // insert, which is why the id is minted here.
       const draftId = randomUUID()
+      const seededMessage = params.seed ? seedFirstContentDraftMessage(params.seed) : null
       const client = await getPool().connect()
       let result: { rows: Array<{ id: string; createdAt: Date; lastActiveAt: Date; starterId: string; starterName: string | null }> }
       try {
@@ -384,7 +386,7 @@ export function createContentPlanningStore(): ContentPlanningStore {
                id, assistant_id, user_id, channel_type, channel_id, title, mode,
                seed_kind, visibility, workspace_id, anchor_kind, anchor_ref, effective_clearance
              )
-             SELECT $6, $1, $2, 'web', $3, $4, 'draft', $5, 'workspace', a.workspace_id, 'feed_draft', $6::text, $7
+             SELECT $6::uuid, $1, $2, 'web', $3, $4, 'draft', $5, 'workspace', a.workspace_id, 'feed_draft', $6::uuid::text, $7
                FROM assistants a
               WHERE a.id = $1
              RETURNING id, user_id, created_at, last_active_at
@@ -398,6 +400,8 @@ export function createContentPlanningStore(): ContentPlanningStore {
              LEFT JOIN users u ON u.id = i.user_id`,
           [params.assistantId, params.userId, channelId, title, seedKind, draftId, admitted.effectiveClearance ?? null],
         )
+        if (!result.rows[0]) throw new Error('assistant not found')
+        if (seededMessage) await insertFeedDraftSeed(client,{sessionId:draftId,assistantId:params.assistantId,userId:params.userId,kind:'user'},seededMessage)
         await client.query('COMMIT')
       } catch (error) {
         await client.query('ROLLBACK').catch(() => undefined)
@@ -406,19 +410,6 @@ export function createContentPlanningStore(): ContentPlanningStore {
         client.release()
       }
       const row = result.rows[0]
-      if (!row) throw new Error('assistant not found')
-
-      const seededMessage = params.seed
-        ? seedFirstContentDraftMessage(params.seed)
-        : null
-      if (seededMessage) {
-        await addSessionMessage({
-          sessionId: row.id,
-          role: 'user',
-          content: [{ type: 'text', text: seededMessage }],
-          senderUserId: params.userId,
-        })
-      }
       return {
         id: row.id,
         platform: params.platform,
@@ -445,6 +436,8 @@ export function createContentPlanningStore(): ContentPlanningStore {
     },
 
     async listSessions(params) {
+      const native = conversationAnchorWriteAdmissionActive()
+      const visibleMessage = native ? feedVisibleMessageSql('$3') : ''
       const result = await query<{
         id: string
         title: string | null
@@ -480,17 +473,17 @@ export function createContentPlanningStore(): ContentPlanningStore {
            FROM sessions s
            LEFT JOIN users u ON u.id = s.user_id
            LEFT JOIN LATERAL (
-             SELECT sm.content #>> '{0,text}' AS text
-               FROM session_messages sm
-              WHERE sm.session_id = s.id
-              ORDER BY sm.sequence_num DESC
+             SELECT m.content #>> '{0,text}' AS text
+               FROM session_messages m
+              WHERE m.session_id = s.id ${visibleMessage}
+              ORDER BY m.sequence_num DESC
               LIMIT 1
            ) latest ON true
            LEFT JOIN LATERAL (
-             SELECT sm.content #>> '{0,text}' AS text
-               FROM session_messages sm
-              WHERE sm.session_id = s.id AND sm.role = 'user'
-              ORDER BY sm.sequence_num
+             SELECT m.content #>> '{0,text}' AS text
+               FROM session_messages m
+              WHERE m.session_id = s.id AND m.role = 'user' ${visibleMessage}
+              ORDER BY m.sequence_num
               LIMIT 1
            ) first_user ON true
            LEFT JOIN LATERAL (
@@ -514,11 +507,12 @@ export function createContentPlanningStore(): ContentPlanningStore {
                FROM content_planning_drafts d
               WHERE d.session_id = s.id AND d.removed_at IS NULL
            ) counts ON true
-          WHERE s.assistant_id = $1 AND feed_draft_audience_allowed(s.id)
+          WHERE s.assistant_id = $1
+            AND ${native ? 'public.conversation_member_read_allowed(s.workspace_id,s.id,$3)' : 'public.feed_draft_audience_allowed(s.id)'}
             AND ${sessionKindSql.anchored('s', 'feed_draft')}
             AND ($2::text IS NULL OR s.title LIKE '[' || $2 || ']%')
           ORDER BY s.last_active_at DESC`,
-        [params.assistantId, params.platform ?? null],
+        native ? [params.assistantId,params.platform ?? null,params.userId] : [params.assistantId,params.platform ?? null],
       )
       return result.rows.map((row) => {
         const platform = platformFromContentDraftTitle(row.title)

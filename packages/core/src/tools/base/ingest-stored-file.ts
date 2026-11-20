@@ -1,8 +1,8 @@
 import { z } from 'zod'
-import { buildTool } from '../types.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
 import { actorFromContext } from '../../retrieval/tools.js'
 import type { RetrievalActor } from '../../retrieval/types.js'
-import { toolFailure } from '../tool-failure.js'
+import { toolFailure } from '@use-brian/agent-runtime/tools/tool-failure.js'
 
 /**
  * `ingestFile` — deterministic (re-)ingestion of a file ALREADY stored in

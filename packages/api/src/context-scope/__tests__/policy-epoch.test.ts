@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { pinPolicyEpoch } from '../policy-epoch.js'
 import { createAuthorityLease } from '../authority-lease.js'
-import type { AccessCeiling } from '@use-brian/core'
+import type { AccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
 
 const identity = { workspaceId: randomUUID(), principalId: randomUUID(), assistantId: randomUUID() }
 const snapshot = () => ({ ...identity, version: 1, workspaceRevision: '1', contractRevision: '1', timedState: 'a'.repeat(64), modules: [
@@ -15,13 +15,13 @@ describe('[COMP:api/policy-epoch] metadata snapshot and sticky lease mechanics',
   it('pins detached content, compares before first data, and never revives after restoration', async () => {
     const state = snapshot(), read = vi.fn(async () => state)
     const current = await pinPolicyEpoch(identity, read)
-    expect(await current()).toBe(true)
+    expect(await current.isCurrent()).toBe(true)
     state.workspaceRevision = '2'
-    expect(await current()).toBe(false)
+    expect(await current.isCurrent()).toBe(false)
     state.workspaceRevision = '1'
-    expect(await current()).toBe(false)
+    expect(await current.isCurrent()).toBe(false)
     expect(read).toHaveBeenCalledTimes(3)
-    expect(await (await pinPolicyEpoch(identity, read))()).toBe(true)
+    expect(await (await pinPolicyEpoch(identity, read)).isCurrent()).toBe(true)
   })
 
   it.each([
@@ -38,8 +38,8 @@ describe('[COMP:api/policy-epoch] metadata snapshot and sticky lease mechanics',
       .rejects.toThrow('Access changed')
     const read = vi.fn().mockResolvedValueOnce(snapshot()).mockRejectedValue(new Error('private metadata'))
     const current = await pinPolicyEpoch(identity, read)
-    expect(await current()).toBe(false)
-    expect(await current()).toBe(false)
+    expect(await current.isCurrent()).toBe(false)
+    expect(await current.isCurrent()).toBe(false)
     expect(read).toHaveBeenCalledTimes(2)
   })
 
@@ -47,8 +47,8 @@ describe('[COMP:api/policy-epoch] metadata snapshot and sticky lease mechanics',
     let release!: (value: unknown) => void
     const read = vi.fn().mockResolvedValueOnce(snapshot()).mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
       .mockResolvedValueOnce({ ...snapshot(), workspaceRevision: '2' })
-    const current = await pinPolicyEpoch(identity, read), first = current()
-    expect(await current()).toBe(false)
+    const current = await pinPolicyEpoch(identity, read), first = current.isCurrent()
+    expect(await current.isCurrent()).toBe(false)
     release(snapshot())
     expect(await first).toBe(false)
   })
@@ -56,7 +56,7 @@ describe('[COMP:api/policy-epoch] metadata snapshot and sticky lease mechanics',
   it('compares on both sides of awaited ceiling resolution', async () => {
     let state = snapshot()
     const current = await pinPolicyEpoch(identity, async () => state)
-    const lease = createAuthorityLease(ceiling, async () => { state = { ...state, workspaceRevision: '2' }; return ceiling }, current)
+    const lease = createAuthorityLease(ceiling, async () => { state = { ...state, workspaceRevision: '2' }; return ceiling }, () => current.isCurrent())
     const data = vi.fn(async () => 'protected')
     await expect(lease.execute(data)).rejects.toMatchObject({ reason: 'authority_changed', operationMayHaveExecuted: false })
     expect(data).not.toHaveBeenCalled()
@@ -65,7 +65,7 @@ describe('[COMP:api/policy-epoch] metadata snapshot and sticky lease mechanics',
   it('retains uncertain-effect status after an awaited policy change without retries', async () => {
     let state = snapshot()
     const current = await pinPolicyEpoch(identity, async () => state)
-    const lease = createAuthorityLease(ceiling, async () => ceiling, current)
+    const lease = createAuthorityLease(ceiling, async () => ceiling, () => current.isCurrent())
     const effect = vi.fn(async () => { state = { ...state, workspaceRevision: '2' }; return 'protected output' })
     await expect(lease.execute(effect)).rejects.toMatchObject({ operationMayHaveExecuted: true, retrySafe: false })
     expect(effect).toHaveBeenCalledOnce()

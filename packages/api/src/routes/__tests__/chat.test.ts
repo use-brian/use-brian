@@ -1,8 +1,11 @@
 import { describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { chatRoutes, mayUsePersonalChatSession, createResearchWorkerDrainPrompt, appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildActiveRecordingInstruction, recordingParticipantsUpdatedReceipt, buildViewingSkillBlock, createUpdateViewedSkillTool, workspaceSkillRevision, resolveStickyChannelId, isAppSurface, attachUserVisibleContext, settleInlineToolApproval, buildAttachedRecordingContext, buildUnscopedFileAttachmentInstruction, mayOfferWorkspaceChatHandoff, turnInputAdmission, liveTurnAdmission, SSE_KEEPALIVE_INTERVAL_MS, filterBrainSurfaceTools } from '../chat.js'
+import { chatRoutes, mayUsePersonalChatSession, createResearchWorkerDrainPrompt, appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildActiveRecordingInstruction, recordingParticipantsUpdatedReceipt, buildViewingSkillBlock, resolveStickyChannelId, isAppSurface, attachUserVisibleContext, settleInlineToolApproval, buildAttachedRecordingContext, buildUnscopedFileAttachmentInstruction, mayOfferWorkspaceChatHandoff, turnInputAdmission, SSE_KEEPALIVE_INTERVAL_MS, filterBrainSurfaceTools } from '../chat.js'
+import { createUpdateViewedSkillTool, workspaceSkillRevision } from '../../skills/update-viewed-skill-tool.js'
 import { policyFor } from '../../session-kind.js'
-import type { ConfirmationResolver, Message, Tool, ToolContext } from '@use-brian/core'
+import type { ConfirmationResolver } from '@use-brian/agent-runtime/mcp/types.js'
+import type { Message } from '@use-brian/agent-runtime/providers/types.js'
+import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import type { PendingApproval, PendingApprovalsStore } from '../../db/pending-approvals-store.js'
 
 describe('[COMP:api/brain-entry-edit] transient Brain tool policy', () => {
@@ -156,6 +159,11 @@ describe('[COMP:api/chat-route] unscoped file attachment intent', () => {
   it('does not override an instruction supplied with the file', () => {
     expect(buildUnscopedFileAttachmentInstruction(true, 'Summarize this contract')).toBe('')
     expect(buildUnscopedFileAttachmentInstruction(false, '')).toBe('')
+  })
+
+  it('treats a voice note transcript as the instruction (M5Q-15)', () => {
+    expect(buildUnscopedFileAttachmentInstruction(true, '', ['Summarise the fictional plan'])).toBe('')
+    expect(buildUnscopedFileAttachmentInstruction(true, '', ['  '])).toContain('without instructions')
   })
 })
 
@@ -962,35 +970,7 @@ describe('[COMP:api/chat-route] attachUserVisibleContext — provenance boundary
   })
 })
 
-describe('[COMP:api/chat-route] live-turn admission guard (lease)', () => {
-  const base = { status: 'running', clientMidTurn: false, isRoom: false, leaseLive: false }
-
-  it('rejects an ordinary send while a turn is PROVABLY alive (fresh lease)', () => {
-    // 2026-08-18: the client had lost its stream, re-sent, and the ordinary
-    // claim path blind-minted a new lease - the live page build then aborted
-    // itself as an "orphan" at its next heartbeat. The lease makes "alive"
-    // provable, so the send is refused and the turn keeps working.
-    expect(liveTurnAdmission({ ...base, leaseLive: true })).toBe('reject')
-  })
-
-  it('reclaims a dead holder (stale lease) and proceeds - never swallows sends behind a crashed turn', () => {
-    // The mid-turn-input.md objection to keying on status: a turn that died
-    // without its finally left the row `running`. That row has a STALE lease
-    // now, and the answer is reclaim + run, not reject.
-    expect(liveTurnAdmission(base)).toBe('reclaim')
-  })
-
-  it('does not interfere with the mid-turn queue path or with rooms', () => {
-    // A client that says midTurn goes to the inbox (queue); rooms claim
-    // atomically and reclaim for themselves.
-    expect(liveTurnAdmission({ ...base, clientMidTurn: true, leaseLive: true })).toBe('proceed')
-    expect(liveTurnAdmission({ ...base, isRoom: true, leaseLive: true })).toBe('proceed')
-  })
-
-  it('is a no-op when nothing is running', () => {
-    expect(liveTurnAdmission({ ...base, status: 'idle', leaseLive: true })).toBe('proceed')
-  })
-
+describe('[COMP:api/chat-route] stream liveness', () => {
   it('keeps the SSE keepalive well inside a 100s proxy idle cut', () => {
     // Cloudflare drops an idle response after 100s; a delegated page build on
     // a slow provider was silent for 145s (2026-08-18) and the client lost

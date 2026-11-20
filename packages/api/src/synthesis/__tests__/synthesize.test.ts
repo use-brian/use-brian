@@ -1,17 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { z } from 'zod'
-import type { Tool } from '@use-brian/core'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 
-// Partial-mock the core barrel: only `queryLoop` is scripted, so the runner's
+// Partial-mock the composed query loop: only `queryLoop` is scripted, so the runner's
 // orchestration (page-first, idempotency, system prompt, tool map, COGS,
 // timeout) is asserted without a real model. resolveResearchBudget stays real.
 const queryLoopMock = vi.hoisted(() => vi.fn())
-vi.mock('@use-brian/core', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@use-brian/core')>()
-  return { ...actual, queryLoop: queryLoopMock }
-})
+vi.mock('@use-brian/core/engine/query-loop-defaults.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@use-brian/core/engine/query-loop-defaults.js')>()),
+  queryLoop: queryLoopMock,
+}))
 
-import { extractionSpecSchema } from '@use-brian/core'
+import { extractionSpecSchema } from '@use-brian/core/doc/custom-template-types.js'
 import { buildCitationIndex } from '@use-brian/shared'
 import {
   synthesizeFromSource,

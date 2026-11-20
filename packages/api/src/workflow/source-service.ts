@@ -1,7 +1,14 @@
 /** Existing deterministic workflow caller under the real bound app service. [COMP:api/source-service-binding] */
 import { z } from 'zod'
-import { ContextScopeAccumulator, buildTool, type ExecutionContext, type ScopeSource, type TurnScope, type Tool,
-  type WorkflowRunRecord, type ScopeEvidence } from '@use-brian/core'
+import type { WorkflowRunRecord } from '@use-brian/core/workflow/types.js'
+import {
+  ContextScopeAccumulator,
+  type TurnScope,
+  type ScopeEvidence
+} from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { SourceProtocolError } from '@use-brian/brian-app/connector'
 import { ApplicationPlatformError } from '@use-brian/shared'
 import { getPool,getAppPool,applyRLSGucs,runWithAgentAccess } from '../db/client.js'

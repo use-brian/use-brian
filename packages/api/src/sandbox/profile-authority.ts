@@ -1,5 +1,8 @@
 /** Current browser identity authority. [COMP:sandbox/profiles] */
-import { canRead, intersectDepartmentReadGrants, type BrowserProfile, type DepartmentReadGrant, type ToolContext } from '@use-brian/core'
+import type { BrowserProfile } from '@use-brian/core/sandbox/profiles.js'
+import { intersectDepartmentReadGrants, type DepartmentReadGrant } from '@use-brian/agent-runtime/security/department-read.js'
+import { canRead } from '@use-brian/agent-runtime/security/sensitivity.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { loadDepartmentSnapshot, resolveDepartmentReadGrant } from '../context-scope/department-resolver.js'
 import { currentAgentAccess } from '../db/agent-access-context.js'
 import { query } from '../db/client.js'

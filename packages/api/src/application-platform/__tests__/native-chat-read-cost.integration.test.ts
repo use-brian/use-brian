@@ -2,17 +2,21 @@ import {readFile,writeFile} from 'node:fs/promises'
 import {afterAll,beforeAll,describe,expect,it} from 'vitest'
 import express from 'express'
 import request from 'supertest'
-import {bindScopeSources,boundScopeSources,type LLMProvider,type ScopeSource,type SessionContextAuthority,type TopicClassification} from '@use-brian/core'
+import type {SessionContextAuthority} from '@use-brian/core/memory/session-state-types.js'
+import type {TopicClassification} from '@use-brian/core/memory/topic-classifier.js'
+import type {LLMProvider} from '@use-brian/agent-runtime/providers/types.js'
+import type {ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
+import {bindScopeSources, boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {requireAuth} from '../../auth/middleware.js'
 import {createTokens} from '../../auth/jwt.js'
 import {authSessionStore} from '../../db/auth-session-store.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
-import {publishNativeSessionMessage,publishNativeSessionMessageBatch} from '../../db/session-message-publication.js'
+import {publishNativeSessionMessage,publishNativeSessionMessageBatch} from '../../db/conversation-store.js'
 import {writeSessionMessageAnnotation} from '../../db/session-message-annotations.js'
-import {addSessionMessage,createPersonalWebSession,readSessionById} from '../../db/sessions.js'
-import {captureAttendedSessionClassification,classifyAttendedResearchMessage,classifyAttendedSessionMessage} from '../../routes/attended-session-context.js'
-import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
+import {addSessionMessage,createWorkspaceChatSession,readSessionById} from '../../db/sessions.js'
+import {captureAttendedSessionClassification,classifyAttendedResearchMessage,assessAttendedSessionMessage} from '../../routes/attended-turn-routing.js'
+import {readAdmittedSessionQuery} from '../../db/conversation-store.js'
 import {readRetainedContextFrame} from '../../db/session-context-revisions.js'
 import {publishSessionTitle} from '../../db/session-title-store.js'
 import {sessionRoutes} from '../../routes/sessions.js'
@@ -87,7 +91,7 @@ async function profile<T>(operation:Profile['operation'],run:()=>Promise<T>):Pro
  }
 }
 
-describe.sequential('[COMP:api/native-chat-read-cost] actual personal transcript read work',()=>{
+describe.sequential('[COMP:api/native-chat-read-cost] source-backed shared conversation read work',()=>{
  let fixture:Fixture|undefined
  const fixtures:Fixture[]=[]
  let current:Scenario
@@ -97,10 +101,11 @@ describe.sequential('[COMP:api/native-chat-read-cost] actual personal transcript
   if(profiling)expect((await getAppPool().query('SHOW track_functions')).rows[0].track_functions).toBe('all')
   const device=(await authSessionStore.create(f.ownerId,{deviceLabel:'Fictional cost browser',userAgent:null,ipAddress:null}))!
   const claims={userId:f.ownerId,sessionId:device.id,authVersion:device.authVersion}
-  const session=await createPersonalWebSession({assistantId:f.assistantId,userId:f.ownerId,workspaceId:f.workspaceId,
-   channelType:'web',channelId:crypto.randomUUID(),appOrigin:'chat'},
-   {actorUserId:f.ownerId,authSessionId:device.id,authVersion:device.authVersion})
-  const envelope={...f.envelope,userId:f.ownerId}
+  // Shared Chat owns source-backed history; private Chat deliberately uses its
+  // separate continuity contract. Keep this regression on the native DAG path.
+  const session=await createWorkspaceChatSession({assistantId:f.assistantId,starterUserId:f.ownerId,
+   workspaceId:f.workspaceId,effectiveClearance:'internal',authenticatedHuman:true})
+  const envelope={...f.envelope,userId:null}
   const original=await addSessionMessage({sessionId:session.id,role:'user',
    content:[{type:'text',text:'Fictional ordinary opening request'}],scope:envelope})
   const authority=()=>resolveSessionTitleAuthority({claims,sessionId:session.id,readOnly:false})
@@ -160,7 +165,7 @@ describe.sequential('[COMP:api/native-chat-read-cost] actual personal transcript
    const c=current,baseline:unknown[]=[]
    for(let round=0;round<3;round++){
     const responses=[await c.get('/'+c.session.id+'/messages'),await c.get('/'+c.session.id),
-     await c.get('?'+new URLSearchParams({assistantId:c.f.assistantId,workspaceId:c.f.workspaceId}))]
+     await c.get('/workspace?'+new URLSearchParams({assistantId:c.f.assistantId,workspaceId:c.f.workspaceId}))]
     for(let index=0;index<responses.length;index++){
      const response=responses[index]
      expect(response.status,JSON.stringify(response.body)).toBe(200)
@@ -200,7 +205,7 @@ describe.sequential('[COMP:api/native-chat-read-cost] actual personal transcript
     yield{type:'text_delta',text:JSON.stringify({topic_label:'Fictional admitted reply topic',state:'continue',confidence:0.9})}
     yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:3,outputTokens:2}}
    }}
-  const scope={workspaceId:c.f.workspaceId,userId:c.f.ownerId,assistantId:null,sensitivity:'internal' as const,compartments:[],projectIds:[]}
+  const scope={workspaceId:c.f.workspaceId,userId:null,assistantId:null,sensitivity:'internal' as const,compartments:[],projectIds:[]}
   for(let round=0;round<(annotations?2:3);round++){
    const authority=await c.authority()
    authority.accumulator.note({sources:c.sources})
@@ -210,8 +215,8 @@ describe.sequential('[COMP:api/native-chat-read-cost] actual personal transcript
     const capture=classification&&process.env.BRIAN_CHAT_PROFILE_SHARED==='1'
      ?await captureAttendedSessionClassification({authority,session,message}):undefined
     if(classification)await classifyAttendedResearchMessage({authority,session,message,provider,model:'fixture',capture})
-    return classifyAttendedSessionMessage({authority,session,message,provider,model:'fixture',capture,
-     ...(annotations?{reply:{channelType:'web' as const,replyToMessageId:c.original.id}}:{})})
+    return (await assessAttendedSessionMessage({authority,session,message,provider,model:'fixture',capture,
+     ...(annotations?{reply:{channelType:'web' as const,replyToMessageId:c.original.id}}:{})})).publish()
    })
    expect(classified.classification.confidence).toBe(annotations?0.9:0)
    const input=await readAdmittedSessionQuery({sessionId:session.id,throughSequence:message.sequenceNum,authority})
@@ -232,7 +237,7 @@ describe.sequential('[COMP:api/native-chat-read-cost] actual personal transcript
   authority.accumulator.note({sources:boundScopeSources(input)})
   const reply=await profile('native-publication',()=>publishNativeSessionMessageBatch({sessionId:c.session.id,
    messages:[{role:'assistant',content:[{type:'text',text:'Fictional second query-backed reply'}]}],authority,
-   derivationTarget:{workspaceId:c.f.workspaceId,userId:c.f.ownerId,assistantId:null,sensitivity:'internal',compartments:[],projectIds:[]},
+   derivationTarget:{workspaceId:c.f.workspaceId,userId:null,assistantId:null,sensitivity:'internal',compartments:[],projectIds:[]},
    derivation:{producer:'fixture:native-chat-publication',sources:authority.accumulator.evidence.sources??[]}}))
   expect(reply[0].role).toBe('assistant')
   expect((await c.get('/'+c.session.id+'/messages')).body.map((row:{id:string})=>row.id)).toContain(reply[0].id)
@@ -263,7 +268,7 @@ describe.sequential('[COMP:api/native-chat-read-cost] actual personal transcript
   try{
    await expect(publishNativeSessionMessageBatch({sessionId:c.session.id,
     messages:[{role:'assistant',content:[{type:'text',text:'Fictional withheld reply'}]}],authority,
-    derivationTarget:{workspaceId:c.f.workspaceId,userId:c.f.ownerId,assistantId:null,sensitivity:'internal',compartments:[],projectIds:[]},
+    derivationTarget:{workspaceId:c.f.workspaceId,userId:null,assistantId:null,sensitivity:'internal',compartments:[],projectIds:[]},
     derivation:{producer:'fixture:publication-source-hold',sources:authority.accumulator.evidence.sources??[]}})).rejects.toMatchObject({name:'DerivedScopeError',code:'scope_source_changed'})
    expect((await c.f.pool.query('SELECT id FROM session_messages WHERE session_id=$1 ORDER BY sequence_num',[c.session.id])).rows)
     .toEqual([{id:c.original.id},{id:c.reply.id}])
@@ -275,14 +280,14 @@ describe.sequential('[COMP:api/native-chat-read-cost] actual personal transcript
  })
  it('retains canonical refusal when the current-field reader contract changes in a history-derived conversation',async()=>{
   const c=await setup(),authority=await c.authority()
-  const scope={workspaceId:c.f.workspaceId,userId:c.f.ownerId,assistantId:null,sensitivity:'internal' as const,compartments:[],projectIds:[]}
+  const scope={workspaceId:c.f.workspaceId,userId:null,assistantId:null,sensitivity:'internal' as const,compartments:[],projectIds:[]}
   const message=await addSessionMessage({sessionId:c.session.id,role:'user',content:[{type:'text',text:'Fictional annotation input'}],scope})
   const input=await readAdmittedSessionQuery({sessionId:c.session.id,throughSequence:message.sequenceNum,topicThroughSequence:message.sequenceNum-1,authority})
   const classification=bindScopeSources<TopicClassification>({topic_label:'fictional derived topic',state:'continue',confidence:0.9},boundScopeSources(input))
   expect(await writeSessionMessageAnnotation({sessionId:c.session.id,messageId:message.id,classification,replyToText:null,authority})).not.toBeNull()
   const history=await readAdmittedSessionQuery({sessionId:c.session.id,throughSequence:message.sequenceNum,authority})
   authority.accumulator.note({sources:[...c.sources,...boundScopeSources(history)]})
-  const definition=(await c.f.pool.query<{definition:string}>("SELECT pg_get_functiondef('public.application_current_field_snapshot(uuid,uuid)'::regprocedure) AS definition")).rows[0].definition
+  const definition=(await c.f.pool.query<{definition:string}>("SELECT pg_get_functiondef('public.conversation_dag_point(uuid,text,uuid,text[],jsonb,jsonb,jsonb[])'::regprocedure) AS definition")).rows[0].definition
   const changed=definition.replace('BEGIN\n','BEGIN\n RETURN NULL;\n')
   expect(changed).not.toBe(definition)
   await c.f.pool.query(changed)
@@ -298,8 +303,8 @@ describe.sequential('[COMP:api/native-chat-read-cost] actual personal transcript
   expect(response.status,JSON.stringify(response.body)).toBe(200)
   expect(response.body).toMatchObject({title:c.title.title,titleRevisionId:c.title.revisionId})
  })
- it('loads the saved title through the personal list',async()=>{
-  const c=current,response=await profile('browser-list',async()=>await c.get('?'+new URLSearchParams({assistantId:c.f.assistantId,workspaceId:c.f.workspaceId})))
+ it('loads the saved title through the workspace list',async()=>{
+  const c=current,response=await profile('browser-list',async()=>await c.get('/workspace?'+new URLSearchParams({assistantId:c.f.assistantId,workspaceId:c.f.workspaceId})))
   expect(response.status,JSON.stringify(response.body)).toBe(200)
   expect(response.body.find((row:{id:string})=>row.id===c.session.id)).toMatchObject({title:c.title.title,titleRevisionId:c.title.revisionId})
  })
@@ -399,7 +404,7 @@ describe.sequential('[COMP:api/native-chat-read-cost] actual personal transcript
   await c.f.pool.query('REVOKE ALL ON FUNCTION fixture_native_chat_capture_race() FROM PUBLIC')
   await c.f.pool.query('CREATE TRIGGER fixture_native_chat_capture_race AFTER INSERT ON application_field_observations FOR EACH ROW EXECUTE FUNCTION fixture_native_chat_capture_race()')
   try{
-   expect((await c.f.pool.query('SELECT application_memory_statement_helpers_current() AS current')).rows[0].current).toBe(true)
+   expect((await c.f.pool.query('SELECT native_turn_helpers_current() AS current')).rows[0].current).toBe(true)
    const response=await c.get('/'+c.session.id+'/messages')
    expect(response.status,JSON.stringify(response.body)).toBe(403)
    expect(response.body.code).toBe('session_history_unavailable')
@@ -440,7 +445,7 @@ describe.sequential('[COMP:api/native-chat-read-cost] actual personal transcript
    const response=await c.get(path)
    expect([403,404]).toContain(response.status)
   }
-  const response=await c.get('?'+new URLSearchParams({assistantId:c.f.assistantId,workspaceId:c.f.workspaceId}))
+  const response=await c.get('/workspace?'+new URLSearchParams({assistantId:c.f.assistantId,workspaceId:c.f.workspaceId}))
   expect(response.status,JSON.stringify(response.body)).toBe(200)
   expect(response.body.some((row:{id:string})=>row.id===c.session.id)).toBe(false)
  })
@@ -450,7 +455,7 @@ describe.sequential('[COMP:api/native-chat-read-cost] actual personal transcript
   try{
    await fence.query('BEGIN')
    await fence.query('SELECT singleton FROM application_policy_contract_epoch WHERE singleton FOR UPDATE')
-   expect((await c.f.pool.query('SELECT application_memory_statement_helpers_current() AS current')).rows[0].current).toBe(true)
+   expect((await c.f.pool.query('SELECT native_turn_helpers_current() AS current')).rows[0].current).toBe(true)
    const history=await c.get('/'+c.session.id+'/messages')
    expect(history.status,JSON.stringify(history.body)).toBe(200)
    expect(history.body.map((row:{id:string})=>row.id)).toEqual([c.original.id,c.reply.id])

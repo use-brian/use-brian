@@ -3,7 +3,7 @@ import request from 'supertest'
 import {fileRoutes} from '../files.js'
 import {createTestApp} from './helpers.js'
 import type {FileCachePreviewProjection} from '../../db/file-store.js'
-import {LibreOfficeError} from '@use-brian/core'
+import {LibreOfficeError} from '@use-brian/core/files/libreoffice.js'
 
 const DOCX='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 const read=vi.fn(),convert=vi.fn()

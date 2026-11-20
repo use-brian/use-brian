@@ -1,9 +1,10 @@
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
-import {createKnowledgeTools,type LLMProvider} from '@use-brian/core'
+import {createKnowledgeTools} from '@use-brian/core/tools/base/knowledge.js'
+import type {LLMProvider} from '@use-brian/agent-runtime/providers/types.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {createDbKnowledgeStore} from '../../db/knowledge-store.js'
 import {configureConnectorSourceRuntimeFactory} from '../source-runtime.js'
-import {assertSourceModelInputAuthority} from '../model-source-authority.js'
+import {admitModelInput} from '../../context-scope/admission.js'
 import {generateTitle} from '../../routes/attended-session-title.js'
 import {retainedKnowledgeFixture} from './fixtures/retained-knowledge.js'
 import {knowledgeFieldPolicyFixture} from './fixtures/knowledge-field-policy.js'
@@ -42,7 +43,7 @@ describe.sequential('[COMP:api/application-persistence] actual Knowledge ID and 
   const replay=await c.context(c.f.secondId,true);replay.scopeAccumulator.note(projection.scopeEvidence)
   // Its extra body permission cannot invalidate the same already admitted
   // identity-only observation. The actual current field check still applies.
-  await expect(assertSourceModelInputAuthority(replay)).resolves.toBeUndefined()
+  await expect(admitModelInput(replay)).resolves.toBeUndefined()
   expect((await tool.execute({id:target.id},await c.context(c.f.secondId,true))).data).toMatchObject({content:'Fictional point field bytes'})
  })
  it('invalidates cached related absence under a fresh actual lease when a retained target identity becomes readable',async()=>{
@@ -53,7 +54,7 @@ describe.sequential('[COMP:api/application-persistence] actual Knowledge ID and 
   const context=await c.context(c.f.ownerId,true),tool=createKnowledgeTools(store).find(value=>value.name==='readKnowledgeEntry')!,result=await tool.execute({id:parent.id},context)
   expect(result.isError).not.toBe(true);expect(JSON.stringify(result.data)).not.toContain(target.id)
   if(!result.scopeEvidence)throw new Error('Actual point absence must retain current field observations')
-  context.scopeAccumulator.note(result.scopeEvidence);await expect(assertSourceModelInputAuthority(context)).resolves.toBeUndefined()
+  context.scopeAccumulator.note(result.scopeEvidence);await expect(admitModelInput(context)).resolves.toBeUndefined()
   const before=(await c.f.pool.query("SELECT read_scope_source($1,'knowledge_entry',$2) AS source",[c.f.workspaceId,parent.id])).rows[0].source
   await policy.grant(c.f.ownerId,'identity_reader');await policy.grant(c.f.secondId,'identity_reader')
   // A new canonical device/session/lease rules out an old lease's epoch alone
@@ -62,14 +63,14 @@ describe.sequential('[COMP:api/application-persistence] actual Knowledge ID and 
   let extractions=0,calls=0
   const provider:LLMProvider={name:'fictional-point-identity',models:['fixture'],createSession(){throw new Error('Stateless fixture required')},stream:async function*(){calls++;
    yield{type:'message_start',model:'fixture'};yield{type:'text_delta',text:'Fictional identity title'};yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:2,outputTokens:2}}}}
-  await expect(generateTitle(provider,[{role:'user',get content(){extractions++;return JSON.stringify(result.data)}}],'fixture',()=>assertSourceModelInputAuthority(replay)))
+  await expect(generateTitle(provider,[{role:'user',get content(){extractions++;return JSON.stringify(result.data)}}],'fixture',()=>admitModelInput(replay)))
    .rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
   expect(extractions).toBe(0);expect(calls).toBe(0)
   const second=await c.context(c.f.secondId,true),current=await tool.execute({id:parent.id},second)
   expect(current.data).toMatchObject({relatedEntries:[target.id]})
   if(!current.scopeEvidence)throw new Error('Independent current point must retain observations')
   second.scopeAccumulator.note(current.scopeEvidence)
-  await expect(generateTitle(provider,[{role:'user',content:JSON.stringify(current.data)}],'fixture',()=>assertSourceModelInputAuthority(second)))
+  await expect(generateTitle(provider,[{role:'user',content:JSON.stringify(current.data)}],'fixture',()=>admitModelInput(second)))
    .resolves.toEqual({title:'Fictional identity title',model:'fixture',usage:{inputTokens:2,outputTokens:2}})
   expect(calls).toBe(1)
   expect((await c.f.pool.query("SELECT read_scope_source($1,'knowledge_entry',$2) AS source",[c.f.workspaceId,parent.id])).rows[0].source).toEqual(before)

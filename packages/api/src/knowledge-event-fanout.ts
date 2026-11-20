@@ -22,11 +22,11 @@
  * [COMP:api/knowledge-event-fanout]
  */
 
+import type { WorkflowEventDispatcher } from '@use-brian/core/workflow/event-trigger.js'
 import {
   createKnowledgeLifecycleTrigger,
   type KnowledgeLifecycleEvent,
-  type WorkflowEventDispatcher,
-} from '@use-brian/core'
+} from '@use-brian/core/workflow/knowledge-event-trigger.js'
 
 let sink: ((event: KnowledgeLifecycleEvent) => Promise<void>) | null = null
 

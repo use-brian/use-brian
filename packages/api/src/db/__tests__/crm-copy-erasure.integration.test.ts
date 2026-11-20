@@ -1,7 +1,8 @@
 import {randomUUID} from 'node:crypto'
 import {afterAll,describe,expect,it} from 'vitest'
-import type {CrmOperationsContext,CrmErasurePreview} from '@use-brian/core'
-import {getPool} from '../client.js'
+import type {CrmOperationsContext, CrmErasurePreview} from '@use-brian/core/crm/operations-types.js'
+import {applyRLSGucs,getAppPool,getPool} from '../client.js'
+import {withTableTriggersSuspended} from '../../__tests__/fixtures/bootstrap-role.js'
 import {createSoftDeleteStore} from '../soft-delete-store.js'
 import {createCrmPrivacyService} from '../../crm-operations/privacy-previews.js'
 import {streamCrmPrivacyExport} from '../../crm-operations/privacy-export.js'
@@ -10,6 +11,24 @@ import {acquireCrmPrivacyAdmission} from '../../crm-operations/privacy-admission
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 const pool=getPool(),privacy=createCrmPrivacyService()
+// Canonical task fields and parent references are admitted only for an acting
+// member (migration 8051 refuses them to the owner pool), so task copies are
+// written by their own private user through the app role.
+async function asMember(userId:string,sql:string,values:unknown[]) {
+  const client=await getAppPool().connect()
+  try {await client.query('BEGIN');await applyRLSGucs(client,userId);const result=await client.query(sql,values);await client.query('COMMIT');return result}
+  catch(error) {await client.query('ROLLBACK');throw error}
+  finally {client.release()}
+}
+// Legacy-shaped rows the canonical task guards now refuse (a supersession
+// cycle, a cross-workspace move) are fixture-only: they are written with the
+// table's own triggers suspended by name inside one transaction (testing.md).
+async function legacyRow(sql:string,values:unknown[]) {
+  const client=await pool.connect()
+  try {await client.query('BEGIN');await withTableTriggersSuspended(client,['tasks'],()=>client.query(sql,values));await client.query('COMMIT')}
+  catch(error) {await client.query('ROLLBACK');throw error}
+  finally {client.release()}
+}
 async function fixture() {
   const workspaceId=randomUUID(),userId=randomUUID(),contactId=randomUUID(),otherId=randomUUID()
   await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[userId])
@@ -22,7 +41,7 @@ async function fixture() {
   const erase=(p:CrmErasurePreview)=>privacy.erase(context,{kind:'erase_contact_with_preview',contactId,previewId:p.id,previewHash:p.previewHash,confirmed:true})
   const legacy=async()=>{const repo=createSoftDeleteStore();await repo.applyHardPurge({primitive:'contact',workspaceId,rowId:contactId,actorUserId:userId,reason:'Synthetic privacy request',ticketReference:null,snapshot:(await repo.readForSoftDelete('contact',workspaceId,contactId))!,now:new Date()})}
   const task=async(attributes:Record<string,unknown>={crm_contact_id:contactId},parentId:string|null=null)=>{
-    const id=randomUUID();await pool.query("INSERT INTO tasks(id,workspace_id,title,user_id,attributes,parent_id) VALUES($1,$2,'Private task copy',$3,$4,$5)",[id,workspaceId,userId,JSON.stringify(attributes),parentId]);return id
+    const id=randomUUID();await asMember(userId,"INSERT INTO tasks(id,workspace_id,title,user_id,attributes,parent_id) VALUES($1,$2,'Private task copy',$3,$4,$5)",[id,workspaceId,userId,JSON.stringify(attributes),parentId]);return id
   }
   const draft=async(to:(string|null)[]=['subject@example.com'])=>{
     const id=randomUUID();await pool.query("INSERT INTO crm_email_drafts(id,workspace_id,to_addresses,body) VALUES($1,$2,$3,'Private draft copy')",[id,workspaceId,to]);return id
@@ -87,8 +106,8 @@ describe('[COMP:crm/privacy-copies] Canonical draft and task copy erasure',()=>{
   it('captures task descendants and supersession cycles, clears their history, and preserves unrelated tasks',async()=>{
     const f=await fixture(),root=await f.task(),unrelated=await f.task({}),other=await fixture(),otherTask=await other.task()
     const previous=await f.task({}),child=await f.task({},root)
-    await pool.query('UPDATE tasks SET superseded_by=$2 WHERE id=$1',[root,previous]);await pool.query('UPDATE tasks SET superseded_by=$2 WHERE id=$1',[previous,root])
-    await pool.query(`INSERT INTO tasks(workspace_id,title,user_id,parent_id) SELECT $1,'Private descendant '||n,$2,$3 FROM generate_series(1,106) n`,[f.workspaceId,f.userId,child])
+    await legacyRow('UPDATE tasks SET superseded_by=$2 WHERE id=$1',[root,previous]);await legacyRow('UPDATE tasks SET superseded_by=$2 WHERE id=$1',[previous,root])
+    await asMember(f.userId,`INSERT INTO tasks(workspace_id,title,user_id,parent_id) SELECT $1,'Private descendant '||n,$2,$3 FROM generate_series(1,106) n`,[f.workspaceId,f.userId,child])
     await link(f.workspaceId,f.userId,'task',root,'entity',f.contactId)
     await pool.query(`INSERT INTO brain_row_versions(primitive,row_id,version_no,before_image,valid_from,valid_to,mutation_actor,mutation_reason)
       VALUES('task',$1,1,'{"title":"Private before-image"}',now()-interval '1 minute',now(),'human_edit','Private history reason')`,[previous])
@@ -114,7 +133,7 @@ describe('[COMP:crm/privacy-copies] Canonical draft and task copy erasure',()=>{
     await link(f.workspaceId,f.userId,'task',root,'entity',f.contactId)
     const blocked=await f.preview();expect(blocked.blockers).toContainEqual({domain:'tasks',reason:'shared_or_unresolved_task',count:1})
     await expect(f.legacy()).rejects.toMatchObject({details:{reason:'crm_copy_resolution_required'}})
-    await pool.query("UPDATE tasks SET attributes=attributes||jsonb_build_object('crm_contact_id',$2::text) WHERE id=$1",[root,f.contactId])
+    await asMember(f.userId,"UPDATE tasks SET attributes=attributes||jsonb_build_object('crm_contact_id',$2::text) WHERE id=$1",[root,f.contactId])
     const ready=await f.preview();expect(ready.status).toBe('ready');await f.erase(ready)
     expect((await pool.query('SELECT id FROM tasks WHERE id=$1',[root])).rowCount).toBe(0)
   })
@@ -173,10 +192,11 @@ describe('[COMP:crm/privacy-copies] Canonical draft and task copy erasure',()=>{
   })
   it('refuses a cross-workspace cascade caused by a previously moved task',async()=>{
     const f=await fixture(),other=await fixture(),parent=await other.task(),child=await other.task({},parent)
-    await pool.query('UPDATE tasks SET workspace_id=$2,attributes=$3 WHERE id=$1',[parent,f.workspaceId,JSON.stringify({crm_contact_id:f.contactId})])
+    // A legacy cross-workspace move is now refused by the canonical identity guards.
+    await legacyRow('UPDATE tasks SET workspace_id=$2,attributes=$3 WHERE id=$1',[parent,f.workspaceId,JSON.stringify({crm_contact_id:f.contactId})])
     // Moving a row does not grant access to another user's private task.
     await expect(f.preview()).rejects.toMatchObject({code:'not_authorized'})
-    await pool.query('UPDATE tasks SET user_id=$2 WHERE id=$1',[parent,f.userId])
+    await legacyRow('UPDATE tasks SET user_id=$2 WHERE id=$1',[parent,f.userId])
     const review=await f.preview();expect(review.blockers).toContainEqual({domain:'tasks',reason:'cross_workspace_task_dependency',count:1})
     await expect(f.legacy()).rejects.toMatchObject({details:{reason:'crm_copy_resolution_required'}})
     expect((await pool.query('SELECT workspace_id FROM tasks WHERE id=$1',[child])).rows[0].workspace_id).toBe(other.workspaceId)

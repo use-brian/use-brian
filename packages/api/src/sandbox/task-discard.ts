@@ -1,4 +1,5 @@
-import type { RelayCommandTransport, SandboxOrchestrator } from '@use-brian/core'
+import type { SandboxOrchestrator } from '@use-brian/core/sandbox/orchestrator.js'
+import type { RelayCommandTransport } from '@use-brian/core/sandbox/types.js'
 import type { LocalComputerTaskStore } from '../routes/computer.js'
 
 export type BrowserTaskDiscard = (actor: {

@@ -1,0 +1,54 @@
+{
+  "$comment": "Chat-path import-graph contract (docs/plans/oss-chat-m4-runtime-separation-plan.md section 5). Paths are relative to the OSS root; platform paths carry a plat: prefix. `chat` is the gated entry set (add the post-M2 turn modules and the agent-runtime entries as they land); `m4-measure` is the before/after receipt set. `allow` entries need a reason each.",
+  "defaultEntrySet": "chat",
+  "entrySets": {
+    "chat": [
+      "packages/api/src/turn/kernel.ts",
+      "packages/api/src/routes/chat.ts",
+      "packages/agent-runtime/src/index.ts"
+    ],
+    "m4-measure": [
+      "packages/api/src/turn/kernel.ts",
+      "packages/api/src/routes/chat.ts",
+      "packages/api/src/boot.ts",
+      "apps/api/src/index.ts",
+      "plat:apps/api/src/index.ts"
+    ]
+  },
+  "forbidden": {
+    "files": [
+      { "glob": "packages/core/src/{office,crm,campaigns,ingest,sandbox}/**" },
+      { "glob": "packages/core/src/files/{pdf-*,xlsx,parsers,html,libreoffice}.ts" },
+      { "glob": "packages/{office-renderer,views-renderer}/**" },
+      { "glob": "packages/api/src/{office,crm-operations,campaigns,intake,ingest,mailbox,recordings}/**" },
+      { "glob": "packages/api/src/{db/email-archive-search,files/file-ingest-worker}.ts" }
+    ],
+    "npm": [
+      "pdfjs-dist", "unpdf", "@cantoo/pdf-lib", "@napi-rs/canvas", "sharp", "exceljs", "docx", "pptxgenjs",
+      "jszip", "linkedom", "turndown", "e2b", "imapflow", "mailparser", "nodemailer", "@google-cloud/storage",
+      "@tiptap/core", "culori"
+    ]
+  },
+  "allow": [],
+  "closure": {
+    "$comment": "Closure mode (--closure). The M4 runtime file set lives in runtime-file-set.txt next to this file (the harness reads a set only through --closure @file); run `node scripts/testing/import-graph.mjs --closure @scripts/testing/runtime-file-set.txt`. `allow` is the explicit contract allowlist; `allowReasons` gives the reason for each entry and the files it admits today.",
+    "runtimeFileSet": "scripts/testing/runtime-file-set.txt",
+    "allow": ["packages/shared/src/index.ts", "packages/shared/src/model-registry.ts"],
+    "allowReasons": {
+      "packages/shared/src/index.ts": "@use-brian/shared is a declared dependency of @use-brian/agent-runtime (plan section 2), and shared imports nothing from core or api. Six runtime files use the root: HostObservation (engine/query-loop-ports.ts, engine/turn-ledger.ts), HomeAppToolSet (tools/types.ts), homeAppToolRequirements (tools/capability-gate.ts), and FEED_IMAGE_CAPABILITY and feedImageCost (providers/gemini-image.ts, providers/codex-app-server/image.ts).",
+      "packages/shared/src/model-registry.ts": "The same declared dependency. Twelve runtime files use it: registryRow and the model rows drive cost tracking (billing/cost-tracker.ts), token budgets (providers/context-budget.ts, engine/query-loop.ts), routing and the provider adapters."
+    }
+  },
+  "categories": {
+    "core": ["packages/core/src/**"],
+    "office-pdf-render": [
+      "packages/core/src/{office,doc,views,media,brand}/**",
+      "packages/core/src/files/{pdf-*,xlsx,parsers,html,libreoffice}.ts",
+      "packages/{office-renderer,office-model,views-renderer,doc-model}/**",
+      "packages/api/src/{office,doc,structured-documents}/**"
+    ],
+    "crm-campaign": ["packages/core/src/{crm,campaigns}/**", "packages/api/src/{crm-operations,campaigns,intake}/**"],
+    "ingest": ["packages/core/src/ingest/**", "packages/api/src/{ingest,recordings,mailbox}/**"],
+    "sandbox": ["packages/core/src/sandbox/**", "packages/api/src/sandbox/**"]
+  }
+}

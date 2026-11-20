@@ -15,7 +15,8 @@
 
 import { z } from 'zod'
 import { rawArchiveProviderMessageId } from './normalize.js'
-import { buildTool, toolFailure, type Tool } from '@use-brian/core'
+import { toolFailure } from '@use-brian/agent-runtime/tools/tool-failure.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { CHAT_ARCHIVE_CHANNELS_TOOL, CHAT_ARCHIVE_SEARCH_TOOL } from './tool-catalog.js'
 import type { MessageStoreClient } from './message-store-client.js'
 

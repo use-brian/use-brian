@@ -13,7 +13,7 @@
  */
 
 import type { ResearchDepthConfig } from '../engine/research-depth.js'
-import type { AuthoringAuthority } from '../security/access-ceiling.js'
+import type { AuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
 
 // ── Definition shape ────────────────────────────────────────────────────
 
@@ -147,7 +147,7 @@ export type AssistantCallStep = WorkflowStepCommon & {
    * See `docs/architecture/engine/scheduled-jobs.md` → "Channel delivery".
    */
   /** Authored structured question template. Interpolated independently of the callee. */
-  question?: import('../tools/base/ask-question.js').AssistantQuestion
+  question?: import('@use-brian/agent-runtime/tools/base/ask-question.js').AssistantQuestion
   /** Author-controlled response action. Never taken from the question/webhook payload. */
   questionResponse?: { toolName: string; arguments: Record<string, unknown>; answerField: string }
   deliver?: WorkflowDelivery
@@ -1010,7 +1010,7 @@ export type WorkflowRunStore = {
   /** Insert a new run row in `pending` state. */
   createRun(params: {
     /** Host context only, never accepted from workflow input or HTTP JSON. */
-    executionContext?: import('../security/execution-context.js').ExecutionContext
+    executionContext?: import('@use-brian/agent-runtime/security/execution-context.js').ExecutionContext
     /** Internal queue proof, never workflow input or a user-supplied actor. */
     scheduledJob?: { id: string; claimId: string }
     workflowId: string

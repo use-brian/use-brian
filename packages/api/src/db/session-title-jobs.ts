@@ -1,5 +1,6 @@
 /** Durable native chat title metadata. [COMP:api/session-title-jobs] */
-import { parseAuthoringAuthority, type AuthoringAuthority, type SessionContextAuthority } from '@use-brian/core'
+import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
+import { parseAuthoringAuthority, type AuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { z } from 'zod'
 import type { PoolClient } from 'pg'
 import type { AuthTokenClaims } from './auth-session-store.js'

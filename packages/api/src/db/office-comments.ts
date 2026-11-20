@@ -1,6 +1,6 @@
 /** Office semantic/spatial discussion and suggestion store. [COMP:api/office-store] */
 import { defaultOfficeDbQuery, type OfficeDbQuery } from './office-artifacts.js'
-import type { WorkspaceCredentialDelegation } from '@use-brian/core'
+import type { WorkspaceCredentialDelegation } from '@use-brian/agent-runtime/security/workspace-delegation.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 
 export type OfficeCommentAnchor = {

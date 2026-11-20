@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { registeredToolDefinitions } from '../tool-registration.js'
-import { captureInputAdmissionProvider } from '../input-authority.js'
-import { bindExactModelProvider, createRoutingProvider } from '../routing.js'
-import { wrapProvider } from '../wrappers.js'
-import { wrapFallback } from '../wrap-fallback.js'
-import { wrapEndpointFallback } from '../wrap-endpoint-fallback.js'
-import type { LLMProvider, ProviderRequest, ToolDefinition } from '../types.js'
+import { registeredToolDefinitions, toolDiscoveryInstructions } from '@use-brian/agent-runtime/providers/tool-registration.js'
+import { captureInputAdmissionProvider } from '@use-brian/agent-runtime/providers/input-authority.js'
+import { bindExactModelProvider, createRoutingProvider } from '@use-brian/agent-runtime/providers/routing.js'
+import { wrapProvider } from '@use-brian/agent-runtime/providers/wrappers.js'
+import { wrapFallback } from '@use-brian/agent-runtime/providers/wrap-fallback.js'
+import { wrapEndpointFallback } from '@use-brian/agent-runtime/providers/wrap-endpoint-fallback.js'
+import type { LLMProvider, ProviderRequest, ToolDefinition } from '@use-brian/agent-runtime/providers/types.js'
 import { createLlmDecisionProvider } from '../../decisions/adapters/llm.js'
 import { decisionRequest } from '../../decisions/__tests__/fixtures.js'
 
@@ -23,6 +23,50 @@ describe('provider-neutral tool registration', () => {
       expect(registeredToolDefinitions({ tools }, mode)).toBe(tools)
       expect(registeredToolDefinitions({}, mode)).toEqual([])
     }
+  })
+
+  it('scopes discovery to the actual driver and its final admitted schemas', () => {
+    const catalog = ['saveMemory', 'readFile', 'mcp_search', 'mcp_call'].map(definition)
+    const active = ['mcp_search', 'mcp_call', 'discoverTools'].map(definition)
+    const options = { tools: catalog, toolRegistration: { mode: 'deferred' as const, catalog, active } }
+    const native = toolDiscoveryInstructions(options, 'native-deferred')
+    expect(native).toContain('native tool search')
+    expect(native).not.toContain('`discoverTools`')
+    expect(native).toContain('separate connected-service catalog, not all Brian tools')
+    expect(native).toContain('does not rule out a Brian tool')
+    expect(native).toContain('does not rule out a folded connector tool')
+    const dynamic = toolDiscoveryInstructions(options, 'dynamic')
+    expect(dynamic).toContain('`discoverTools`')
+    expect(dynamic).not.toContain('native tool search')
+    expect(dynamic).toContain('not execution permission')
+    // An eager fallback must not inherit a helper or native search it lacks.
+    expect(toolDiscoveryInstructions(options, 'eager')).toBe('')
+    for (const mode of ['eager', 'dynamic', 'native-deferred'] as const) {
+      expect(toolDiscoveryInstructions({ tools: catalog }, mode)).toBe('')
+    }
+    const restricted = { tools: [], toolRegistration: { mode: 'deferred' as const,
+      catalog: [definition('readFile')], active: [definition('discoverTools')] } }
+    expect(toolDiscoveryInstructions(restricted, 'native-deferred')).not.toContain('mcp_search')
+    expect(toolDiscoveryInstructions(restricted, 'dynamic')).not.toContain('mcp_search')
+    expect(toolDiscoveryInstructions({ toolRegistration: { ...restricted.toolRegistration, active: [] } }, 'dynamic')).toBe('')
+    for (const mode of ['dynamic', 'native-deferred'] as const) {
+      expect(toolDiscoveryInstructions({ toolRegistration: { mode: 'deferred', catalog, active: [...catalog, definition('discoverTools')] } }, mode)).toBe('')
+    }
+  })
+
+  it('renders the unified catalog only when the engine has bound it', () => {
+    const catalog = ['mcp_search', 'saveMemory'].map(definition)
+    const options = { toolRegistration: { mode: 'deferred' as const, discoveryTool: 'mcp_search' as const,
+      catalog, active: [catalog[0], definition('discoverTools')] } }
+    for (const mode of ['dynamic', 'native-deferred'] as const) {
+      const instructions = toolDiscoveryInstructions(options, mode)
+      expect(instructions).toContain('final admitted Brian tool catalog together with indexed')
+      expect(instructions).toContain('follow nextOffset until null')
+      expect(instructions).not.toContain('separate connected-service catalog')
+      if (mode === 'native-deferred') expect(instructions).toContain('native tool search for that exact name')
+      else expect(instructions).toContain('Matching native schemas are loaded for the next call')
+    }
+    expect(toolDiscoveryInstructions(options, 'eager')).toBe('')
   })
 
   it('forwards mode through captured, exact-model, routing, and endpoint wrappers', () => {

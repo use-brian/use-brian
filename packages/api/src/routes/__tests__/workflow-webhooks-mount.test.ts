@@ -20,16 +20,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import express from 'express'
 import request from 'supertest'
-import { readFileSync } from 'node:fs'
 import { createHmac } from 'node:crypto'
 
-vi.mock('@use-brian/core', async (io) => ({
-  ...(await io<typeof import('@use-brian/core')>()),
+vi.mock('@use-brian/core/workflow/executor.js', async (io) => ({
+  ...(await io<typeof import('@use-brian/core/workflow/executor.js')>()),
   advanceWorkflowRun: vi.fn(async () => ({ kind: 'completed', runId: 'run-1' })),
 }))
 
 import { workflowWebhookRoutes } from '../workflow-webhooks.js'
 import { requireAuth } from '../../auth/middleware.js'
+import { bootCompositionSource } from '../../boot/__tests__/composition-source.js'
 
 const SECRET = 'webhook-secret'
 
@@ -139,7 +139,7 @@ describe('[COMP:api/workflow-webhooks-route] webhook mount ordering + raw body',
   })
 
   it('boot.ts mounts the webhook receiver before the first bare /api requireAuth guard', () => {
-    const src = readFileSync(new URL('../../boot.ts', import.meta.url), 'utf8')
+    const src = bootCompositionSource()
     const webhookIdx = src.indexOf('workflowWebhookRoutes({')
     const firstGuardIdx = src.search(/app\.use\('\/api', requireAuth\(env\.JWT_SECRET\)/)
     expect(webhookIdx).toBeGreaterThan(0)

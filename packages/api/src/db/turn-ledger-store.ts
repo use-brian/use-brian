@@ -90,37 +90,48 @@ export async function insertTurnEvent(e: TurnEventInsert): Promise<string | null
   return res.rows[0]?.id ?? null
 }
 
-/** True when the payload row already exists (object write can be skipped). */
-export async function payloadExists(workspaceId: string | null | undefined, hash: string): Promise<boolean> {
-  const res = await query<{ ok: number }>(
-    `SELECT 1 AS ok FROM turn_payloads WHERE scope = $1 AND hash = $2`,
-    [payloadScope(workspaceId), hash],
-  )
-  return (res.rowCount ?? 0) > 0
-}
+export const PAYLOAD_INDEX_BATCH_SIZE = 512
 
-export async function insertPayloadIndex(p: {
+export type PayloadIndexInsert = {
   workspaceId?: string | null
   hash: string
   byteSize: number
   mediaType: string
   storageRef: string
   sensitivity?: string
-}): Promise<void> {
-  await query(
-    `INSERT INTO turn_payloads (scope, hash, workspace_id, byte_size, media_type, storage_ref, sensitivity)
-     VALUES ($1,$2,$3,$4,$5,$6,$7)
-     ON CONFLICT (scope, hash) DO NOTHING`,
-    [
-      payloadScope(p.workspaceId),
-      p.hash,
-      p.workspaceId ?? null,
-      p.byteSize,
-      p.mediaType,
-      p.storageRef,
-      p.sensitivity ?? 'internal',
-    ],
+}
+
+/** Includes tombstones: an erased payload must never be written again. */
+export async function getPayloadIndexStates(
+  workspaceId: string | null | undefined,
+  hashes: string[],
+): Promise<Array<{ hash: string; erasedAt: Date | null }>> {
+  if (hashes.length === 0) return []
+  if (hashes.length > PAYLOAD_INDEX_BATCH_SIZE) throw new Error('Payload index batch exceeds 512 hashes')
+  const res = await query<{ hash: string; erased_at: Date | null }>(
+    `SELECT hash, erased_at FROM turn_payloads WHERE scope = $1 AND hash = ANY($2::text[])`,
+    [payloadScope(workspaceId), hashes],
   )
+  return res.rows.map((r) => ({ hash: r.hash, erasedAt: r.erased_at }))
+}
+
+/** Index only confirmed object writes. Conflicts never update existing tombstones. */
+export async function insertPayloadIndexes(payloads: PayloadIndexInsert[]): Promise<string[]> {
+  if (payloads.length === 0) return []
+  if (payloads.length > PAYLOAD_INDEX_BATCH_SIZE) throw new Error('Payload index batch exceeds 512 hashes')
+  const res = await query<{ hash: string }>(
+    `INSERT INTO turn_payloads (scope, hash, workspace_id, byte_size, media_type, storage_ref, sensitivity)
+     SELECT scope, hash, workspace_id, byte_size, media_type, storage_ref, sensitivity
+       FROM jsonb_to_recordset($1::jsonb) AS p(scope text, hash text, workspace_id uuid,
+         byte_size bigint, media_type text, storage_ref text, sensitivity text)
+     ON CONFLICT (scope, hash) DO NOTHING RETURNING hash`,
+    [JSON.stringify(payloads.map((p) => ({
+      scope: payloadScope(p.workspaceId), hash: p.hash, workspace_id: p.workspaceId ?? null,
+      byte_size: p.byteSize, media_type: p.mediaType, storage_ref: p.storageRef,
+      sensitivity: p.sensitivity ?? 'internal',
+    })))],
+  )
+  return res.rows.map((r) => r.hash)
 }
 
 export async function getLedgerEpoch(): Promise<Date | null> {

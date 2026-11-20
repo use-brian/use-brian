@@ -1,8 +1,8 @@
-import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
+import { bootCompositionSource } from '../../boot/__tests__/composition-source.js'
 describe('watch boot registration regression', () => {
   it('mounts an opt-in device router before broad human guards and wires the real transcription provider', () => {
-    const boot = readFileSync(new URL('../../boot.ts', import.meta.url), 'utf8')
+    const boot = bootCompositionSource()
     const mount = boot.indexOf("app.use('/api/watch/v1'")
     expect(mount).toBeGreaterThan(0)
     expect(mount).toBeLessThan(boot.indexOf("app.use('/api', requireAuth(env.JWT_SECRET)"))

@@ -1,6 +1,6 @@
 import { connectorInstanceId } from './connector-helper.js'
 import { describe, expect, it, vi } from 'vitest'
-import type { ToolContext } from '@use-brian/core'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { createStructuredDocumentTools, trustedToolContext } from '../tools.js'
 import { StructuredDocumentServiceError, type StructuredDocumentService } from '../service.js'
 const uid = (n: number) => `49000000-0000-4000-8000-${String(n).padStart(12, '0')}`

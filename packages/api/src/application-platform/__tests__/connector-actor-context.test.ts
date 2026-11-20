@@ -1,6 +1,6 @@
 import { generateKeyPairSync, randomUUID } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
-import { createExecutionContext, type CreateExecutionContextInput } from '@use-brian/core'
+import { createExecutionContext, type CreateExecutionContextInput } from '@use-brian/agent-runtime/security/execution-context.js'
 import { createConnectorActorVerifier, createBoundedConnectorReplayConsumer } from '@use-brian/brian-app/connector'
 import { mintConnectorActorAssertion, type ConnectorActorMintingPorts } from '../connector-actor-context.js'
 import { createConnectorActorFetch } from '../connector-actor-transport.js'

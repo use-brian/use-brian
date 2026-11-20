@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const state = vi.hoisted(() => ({ data: new Map<string, unknown>(), owner: "viewer-a", quota: false }));
 vi.mock("@/lib/user", () => ({ getUserInfo: () => ({ id: state.owner }) }));
-vi.mock("../idb", () => ({
+vi.mock("../idb", async importOriginal => ({
+  ...await importOriginal<typeof import("../idb")>(),
   idbGet: async (key: string) => structuredClone(state.data.get(key) ?? null),
   idbSet: async (key: string, value: unknown) => { state.data.set(key, structuredClone(value)); },
   idbDelete: async (key: string) => { state.data.delete(key); },

@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import request from 'supertest'
-import { readFileSync } from 'node:fs'
 import { WORKSPACE_SEARCH_FAMILIES } from '@use-brian/shared'
 import { createTestApp } from './helpers.js'
 import { workspaceSearchRoutes } from '../workspace-search.js'
 import { createWorkspaceSearchService, type SearchAdapters, type SearchCandidate } from '../../workspace-search/service.js'
+import { bootCompositionSource } from '../../boot/__tests__/composition-source.js'
 
 const workspaceId='00000000-0000-4000-8000-000000000001'
 const path=`/api/workspace-search/${workspaceId}`
@@ -60,7 +60,7 @@ describe('[COMP:search/workspace-http] authenticated workspace search',()=>{
     expect((await request(app).get(`${path}/items/admin/task%3Aone`)).status).toBe(400)
   })
   it('mounts the authenticated router and bounded projection lifecycle in common OSS boot',()=>{
-    const source=readFileSync(new URL('../../boot.ts',import.meta.url),'utf8')
+    const source=bootCompositionSource()
     expect(source).toContain("app.use('/api', requireAuth(env.JWT_SECRET), workspaceSearchRoutes({")
     expect(source).toContain('if (runWorkers) officeSearchProjector.start()')
     expect(source).toContain('await officeSearchProjector.stop()')

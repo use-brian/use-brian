@@ -11,19 +11,32 @@
  */
 
 import {
-  bindScopeSources,boundScopeSources,inheritScopeSources,stitchMailboxThreads, validateCrmCustomFieldValue as validateCustomFieldValue,
-  CRM_CUSTOM_FIELD_TYPES, CRM_CONFIG_ENTITY_KINDS, CRM_PIPELINE_STAGE_CATEGORIES, CrmOperationsError,
-  type AccessContext,
-  type EntityRecord,
-  type MailboxSearchHit,
+  CRM_CONFIG_ENTITY_KINDS,
+  CRM_PIPELINE_STAGE_CATEGORIES,
   type CrmConfigCommand,
-  type CrmOperationsCommandResult,
-} from '@use-brian/core'
+} from '@use-brian/core/application-platform/record-configuration.js'
+import type { CrmOperationsCommandResult } from '@use-brian/core/crm/operations-types.js'
+import { CrmOperationsError } from '@use-brian/core/application-platform/operation-contract.js'
+import {
+  validateCrmCustomFieldValue as validateCustomFieldValue,
+  CRM_CUSTOM_FIELD_TYPES,
+} from '@use-brian/core/application-platform/record-values.js'
+import type { EntityRecord } from '@use-brian/core/entities/types.js'
+import { stitchMailboxThreads, type MailboxSearchHit } from '@use-brian/core/tools/base/mailbox.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { currentApplicationReadTransaction } from '../application-platform/execution-context.js'
+import { runWithAgentAccess } from './agent-access-context.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import {
+  bindScopeSources,
+  boundScopeSources,
+  inheritScopeSources,
+} from '@use-brian/agent-runtime/security/source-evidence.js'
 import type { PoolClient } from 'pg'
 import { applicationDecimalText,ApplicationPlatformError } from '@use-brian/shared'
-import { runLegacyCanonicalCrmRead,readLegacyCanonicalCrmConfiguration,mapCanonicalCrmRows,queryLegacyCanonicalCrmSql,queryLegacyCanonicalCrmPrivateSql } from './crm-reader.js'
+import { nativeQueryDataCeiling,runLegacyCanonicalCrmRead,readLegacyCanonicalCrmConfiguration,mapCanonicalCrmRows,queryLegacyCanonicalCrmSql,queryLegacyCanonicalCrmPrivateSql } from './crm-reader.js'
 import { buildAccessPredicate, buildCurrentMemberSourcePredicate, mutationActorAccess } from './access-predicate.js'
-import { applyRLSGucs, getAppPool, getPool, query, queryGated, queryWithRLS } from './client.js'
+import { applyRLSGucs, commitTransaction, getAppPool, getPool, query, queryGated, queryWithRLS, rollbackAndRelease } from './client.js'
 import { crmReferenceScope, prepareCrmParticipantMutation, readCrmMutationSource, readCrmReference, runCrmWriteTransaction, updateDeal } from './crm.js'
 import { assertNativeEntityFieldWrites, getEntityById, updateEntity } from './entities-store.js'
 
@@ -1292,7 +1305,59 @@ export type CrmSummary = {
   stages: Array<{ stageId: string; count: number; values: Record<string, number|string> }>
 }
 
+
+type CrmRollupProjection = {
+  rollups: Array<[kind: CrmEntityKind, stage: string | null, currency: string, count: number,
+    valued: number, amount: string, orphaned: number, open: boolean | null]>
+  overdue: number
+  stale: number
+}
+
+/** Convert admitted rollups to the existing public response without losing decimal precision. */
+function projectCrmSummary(input: CrmSummary | CrmRollupProjection): CrmSummary {
+  if (!('rollups' in input)) return input
+  const totals = { deals: 0, contacts: 0, companies: 0 }
+  const attention = { overdue: input.overdue, stale: input.stale, noAmount: 0, orphaned: 0 }
+  const stages = new Map<string, CrmSummary['stages'][number]>()
+  for (const [kind, stageId, currency, count, valued, amount, orphaned, open] of input.rollups) {
+    if (kind === 'company') {
+      totals.companies += count
+    } else if (kind === 'person') {
+      totals.contacts += count
+      attention.orphaned += orphaned
+    } else {
+      totals.deals += count
+      if (open) attention.noAmount += count - valued
+      if (stageId && count > 0) {
+        const stage = stages.get(stageId) ?? { stageId, count: 0, values: {} }
+        stage.count += count
+        if (valued > 0) addCurrency(stage.values, currency, amount)
+        stages.set(stageId, stage)
+      }
+    }
+  }
+  return { totals, attention, stages: [...stages.values()].sort((a, b) => a.stageId.localeCompare(b.stageId)) }
+}
+
 export async function getCrmSummary(
+  ctx: AccessContext,
+  pipelineId?: string | null,
+): Promise<CrmSummary> {
+  if (ctx.systemRead || currentApplicationReadTransaction(ctx)) return readCarrierCrmSummary(ctx, pipelineId)
+  const admitted = await runWithAgentAccess({ ...ctx, clearance: ctx.clearance ?? 'confidential', compartments: ctx.compartments,
+    visibilityAssistantIds: ctx.visibilityAssistantIds ?? (ctx.assistantKind === 'primary' ? null : [ctx.assistantId]) }, () => {
+    const { departmentRead } = nativeQueryDataCeiling(ctx, 'deal', undefined)
+    return readCrmSummary(ctx.userId, ctx.workspaceId, pipelineId, false, departmentRead)
+  })
+  if (!admitted) throw new ApplicationPlatformError('access_unavailable', 'The summary is unavailable.')
+  return admitted
+}
+
+/**
+ * Application-bound and public-share projections retain their own exact reader
+ * and lease. Neither can acquire the ordinary member reflector.
+ */
+async function readCarrierCrmSummary(
   ctx: AccessContext,
   pipelineId?: string | null,
 ): Promise<CrmSummary> {
@@ -1367,6 +1432,66 @@ export async function getCrmSummary(
     stages: [...stageMap.values()],
   },aggregate)
   })
+}
+
+export async function getWorkspaceCrmSummary(
+  actor: string, workspaceId: string, pipelineId?: string | null,
+): Promise<CrmSummary | null> {
+  return readCrmSummary(actor, workspaceId, pipelineId, true)
+}
+
+async function readCrmSummary(
+  actor: string, workspaceId: string, pipelineId: string | null | undefined, reflector: boolean, hostCeiling?: unknown,
+): Promise<CrmSummary | null> {
+  const client = await getAppPool().connect()
+  try {
+    await client.query('BEGIN')
+    await applyRLSGucs(client, actor)
+    if (hostCeiling) {
+      await client.query("SELECT set_config('app.crm_summary_host_ceiling',$1,true)", [JSON.stringify(hostCeiling)])
+    }
+    const capture = (await client.query<{
+      membership: boolean
+      summary: CrmSummary | CrmRollupProjection | null
+      sources: ScopeSource[] | null
+      revision: string
+      deadline: string | null
+      field_epoch: string | null
+      transaction_at: string
+      requires_lineage: boolean
+      packet: string
+      configuration_id: string
+      configuration_version: string
+      source_id: string
+      source_identity: string
+      source_user_id: string | null
+    }>('SELECT * FROM read_crm_summary_sealed($1,$2,$3)', [workspaceId, pipelineId || null, reflector])).rows[0]
+    if (!capture?.membership) return null
+    if (!capture.summary) throw new ApplicationPlatformError('access_unavailable', 'The summary is unavailable.')
+    const release = async () => {
+      const result = (await client.query<{ current: boolean }>({
+        name: 'crm-summary-current',
+        text: 'SELECT check_crm_summary_witness($1,$2,$3,$4,$5,$6,$7,$8) AS current',
+        values: [workspaceId, actor, capture.revision, capture.deadline, capture.field_epoch,
+          capture.transaction_at, capture.requires_lineage, capture.packet],
+      })).rows[0]
+      if (result?.current !== true) throw new ApplicationPlatformError('access_unavailable', 'The summary source changed.')
+    }
+    await release()
+    const projected = projectCrmSummary(capture.summary)
+    await release()
+    const base = { workspaceId, userId: null, assistantId: null, sensitivity: 'public' as const, compartments: [], projectIds: [] }
+    const domain = {
+      ...base, userId: capture.source_user_id, resourceKind: 'crm_summary_domain',
+      resourceId: capture.source_id, version: capture.source_identity, sourceProof: capture.packet,
+    }
+    const configuration = {
+      ...base, resourceKind: 'application_field', resourceId: capture.configuration_id, version: capture.configuration_version,
+    }
+    const summary = bindScopeSources(projected, [configuration, ...(capture.sources ?? [domain])])
+    await commitTransaction(client)
+    return summary
+  } finally { await rollbackAndRelease(client) }
 }
 
 export async function lookupCrmRecords(input: {
@@ -1463,8 +1588,6 @@ export async function setCrmDealPipelineStage(input: {
   const updated = await updateEntity(input.ctx.userId, input.entityId, { attributes }, input.ctx, transactionClient,{fieldIntent})
   return updated ? { entity: updated, fromStageId, toStage: stage } : null
 }
-
-export { validateCrmCustomFieldValue as validateCustomFieldValue } from '@use-brian/core'
 
 async function customDefinitionsForWrite(ctx: AccessContext, entityKind: CrmEntityKind, client?: PoolClient): Promise<CrmFieldDefinition[]> {
   mutationActorAccess(ctx.userId, ctx.workspaceId, ctx)

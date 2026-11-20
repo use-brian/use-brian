@@ -11,7 +11,7 @@
  * native multimodal), which carries a LibreOffice dependency and is a deploy
  * decision, not a parsing one. See docs/architecture/engine/file-handling.md.
  */
-import JSZip from 'jszip'
+import type JSZip from 'jszip'
 import { assertSafeOfficeArchive } from './office-archive-safety.js'
 
 function decodeEntities(s: string): string {
@@ -88,6 +88,8 @@ async function notesFor(zip: JSZip, slidePath: string): Promise<string> {
 
 export async function parsePptxToMarkdown(buffer: Buffer): Promise<string> {
   await assertSafeOfficeArchive(buffer)
+  // jszip loads at first use, never at module evaluation (M4 step 5).
+  const { default: JSZip } = await import('jszip')
   const zip = await JSZip.loadAsync(buffer)
   const slides = await orderedSlidePaths(zip)
 

@@ -5,7 +5,8 @@
  *
  * [COMP:goals/acknowledgement]
  */
-import type { ContentBlock, ToolResultMeta } from '@use-brian/core'
+import type { ContentBlock } from '@use-brian/agent-runtime/providers/types.js'
+import type { ToolResultMeta } from '@use-brian/agent-runtime/tools/types.js'
 
 export const GOAL_ACCEPTED_CHANNEL_MESSAGE =
   'Goal accepted. Execution has started in Autopilot.'

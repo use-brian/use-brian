@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import type { Block } from '@use-brian/core'
+import type { Block } from '@use-brian/core/views/blocks.js'
 import { labelChildPageBlocks } from '../_public-render.js'
 import type { ChildPageLabel } from '../../db/saved-views-store.js'
 

@@ -1,5 +1,9 @@
 import { z } from 'zod'
-import { boundScopeSources, buildTool, type ExecutionContext, type ContextScopeAccumulator, type ScopeSource, type ToolContext } from '@use-brian/core'
+import type { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
+import { buildTool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { validateCallerScopeEvidence, validateAudienceScopeEvidence } from '../context-scope/caller-evidence.js'
 /**
  * Shared route helpers — extracted from duplicated patterns across route files.
@@ -9,8 +13,24 @@ import { validateCallerScopeEvidence, validateAudienceScopeEvidence } from '../c
 
 import { findOrCreateUser, findUserById } from '../db/users.js'
 import { query, runWithAgentAccess } from '../db/client.js'
-import { loadBuiltinSkills, formatSkillListing, createUseSkillTool, createReadSkillResourceTool, createSearchSkillResourcesTool, expandSkillPointers, formatSkillInstructions, sha256, parseFileContent, shouldInline, isTabular, profileWorkbook, renderWorkbookProfile } from '@use-brian/core'
-import type { Tool, UsageStore, BudgetStatus, ContentBlock, FileStore, McpSettingsStore, KnowledgeStoreInterface, KnowledgeRepoWriter, GDriveFilesStore, SkillContent, EngineHooks, FilesApi, TurnScope } from '@use-brian/core'
+import { shouldInline } from '@use-brian/core/files/inline-content.js'
+import { isTabular, profileWorkbook, renderWorkbookProfile } from '@use-brian/core/files/tabular-profile.js'
+import { formatSkillInstructions, sha256 } from '@use-brian/core/skills/bundle.js'
+import { formatSkillListing } from '@use-brian/core/skills/listing.js'
+import { loadBuiltinSkills, expandSkillPointers } from '@use-brian/core/skills/loader.js'
+import { createReadSkillResourceTool, createSearchSkillResourcesTool } from '@use-brian/core/skills/resource-tool.js'
+import { createUseSkillTool } from '@use-brian/core/skills/tool.js'
+import type { FileStore } from '@use-brian/core/files/types.js'
+import type { KnowledgeStoreInterface, KnowledgeRepoWriter } from '@use-brian/core/knowledge/types.js'
+import type { SkillContent } from '@use-brian/core/skills/types.js'
+import type { GDriveFilesStore } from '@use-brian/core/tools/base/gdrive-files.js'
+import type { FilesApi } from '@use-brian/core/workspace-files/api.js'
+import type { UsageStore, BudgetStatus } from '@use-brian/agent-runtime/billing/cost-tracker.js'
+import type { EngineHooks } from '@use-brian/agent-runtime/engine/hooks.js'
+import type { McpSettingsStore } from '@use-brian/agent-runtime/mcp/types.js'
+import type { ContentBlock } from '@use-brian/agent-runtime/providers/types.js'
+import type { TurnScope } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 import type { ActorIdentity } from '../mcp/auth-headers.js'
 // NOTE: the real DB-backed credit gate (`checkCreditBudget`, closed billing/)
 // is NOT imported here — that would couple this OPEN helper to closed code.
@@ -22,7 +42,6 @@ import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
-import { injectMcpTools, type ConfirmationEnricher, type McpInjectionResult } from '../mcp/inject.js'
 import { CONNECTOR_SCOPE_RESTRICTION, CONNECTOR_SOURCE_RESTRICTION } from '../mcp/discovery-diagnostics.js'
 import { renderArtifactManifest } from '../files/artifact-manifest.js'
 import { truncateForInline } from '../files/inline-truncation.js'
@@ -213,8 +232,8 @@ export function isValidDateString(date: string): boolean {
  * conn-jira-post / wf-crm-deal-won).
  *
  * The closed world has to account for the DEFERRED surface (prod incident
- * 2026-07-23). `injectMcpTools` deletes every built-in connector tool from
- * the map and folds it behind `mcp_search`, so a connected + granted
+ * 2026-07-23). the capability surface (`mcp/surface.ts`) folds every built-in connector
+ * tool behind `mcp_search`, so a connected + granted
  * connector sits in NEITHER `capabilities` (it is connected, so it is never
  * adverted unavailable) NOR the visible tool map (it was plucked). The old
  * wording — "this list plus your tools is the complete integration surface:
@@ -225,7 +244,7 @@ export function isValidDateString(date: string): boolean {
  *
  * So when the search surface exists, the closed world is widened to include
  * it and a search is ordered before any denial. `tools` gates that wording
- * the same way `buildBrowserEscalationPrompt` gates its own: `injectMcpTools`
+ * the same way `buildBrowserEscalationPrompt` gates its own: the surface
  * skips the search pair entirely when no source is present, and naming a
  * tool that is not in the map is exactly what the tool-awareness rule bans.
  * It is REQUIRED, not optional, so a new call site cannot silently restore
@@ -236,8 +255,8 @@ export function isValidDateString(date: string): boolean {
  * drop `mcp_search`, and ordering a search for a tool the callee does not
  * hold is the same tool-awareness violation in the opposite direction.
  */
-const SEARCH_BEFORE_DENIAL =
-  'For an unlisted capability, run `mcp_search` before denying it.'
+const CAPABILITY_SEARCH_BEFORE_DENIAL =
+  'For an unlisted capability, run `mcp_search` before declaring it unavailable in this run. The model turn binds the final admitted Brian tool catalog as well as permitted indexed sources. A keyword result is not a complete inventory: use an empty query and follow nextOffset until null to list all currently searchable operations. The indexed-source count alone is not the total tool count.'
 
 /**
  * Deliberately "may be folded", not "is folded": the workflow path runs with
@@ -273,7 +292,7 @@ export function buildUnavailableCapabilitiesPrompt(
   // the model needs the search-before-denial rule or it answers from absence.
   if (capabilities.length === 0) {
     if (!searchable) return ''
-    return `\n\n# Connector tools\n\n${FOLDED_SURFACE}${sourceRoster} ${SEARCH_BEFORE_DENIAL}`
+    return `\n\n# Connector tools\n\n${FOLDED_SURFACE}${sourceRoster} ${CAPABILITY_SEARCH_BEFORE_DENIAL}`
   }
 
   const scopeRestricted = capabilities.includes(CONNECTOR_SCOPE_RESTRICTION)
@@ -285,13 +304,13 @@ export function buildUnavailableCapabilitiesPrompt(
 
   const head = `\n\n# Unavailable capabilities\n\nThese capabilities are not available in this run. Do not call, search for, or simulate them:\n${capabilities.map((c) => `- ${c}`).join('\n')}\n\n${remediation}`
 
-  const closedWorld = searchable
-    ? ` ${FOLDED_SURFACE}${sourceRoster} ${SEARCH_BEFORE_DENIAL} A listed capability remains unavailable even if searched.`
+  const discoveryScope = searchable
+    ? ` ${FOLDED_SURFACE}${sourceRoster} ${CAPABILITY_SEARCH_BEFORE_DENIAL} A listed capability remains unavailable even if searched.`
     : scopeRestricted || sourceRestricted
       ? ' Visible tools describe only this restricted run, not the platform integration catalog. Do not infer that an absent service is disconnected or unsupported.'
-      : ` The list and visible tools are the complete integration surface. For any other service, say Use Brian has no integration and offer the nearest supported alternative.`
+      : ' This list describes connected-service availability in this run, not all Brian tools or the platform integration catalog. For any other service, do not invent an integration; offer another admitted tool when appropriate. Missing parameter schemas do not establish that another Brian capability is unavailable.'
 
-  return `${head}${closedWorld} Do not suggest a connector setting for an unlisted service.`
+  return `${head}${discoveryScope} Do not suggest a connector setting for an unlisted service.`
 }
 
 /**
@@ -318,7 +337,7 @@ This chat has a controlled browser: browserNavigate opens a page and returns its
 // ── MCP injection (shared across channel routes) ──────────────
 
 /**
- * Stores needed by `applyMcpInjection`. Grouped so route option types
+ * Stores the web and public capability surfaces need (`turn/capabilities.ts`). Grouped so route option types
  * can spread the same shape (every chat-style channel passes the same
  * set of stores from `apps/api/src/index.ts`).
  */
@@ -343,7 +362,7 @@ export type ChannelMcpStores = {
   /**
    * Per-assistant connector grants store (#4 in
    * `docs/architecture/integrations/connector-actions.md`). Forwarded
-   * to `injectMcpTools` → `injectGoogleTools` so Gmail/GCal write
+   * to the capability surface (Google provider) so Gmail/GCal write
    * callbacks gate on `assertActionAllowed` before executing.
    */
   assistantConnectorGrantsStore?: import('../db/assistant-connector-grants-store.js').AssistantConnectorGrantsStore
@@ -354,7 +373,7 @@ export type ChannelMcpStores = {
   filesApi?: FilesApi
   /** Upload-cache reader, so a photo just attached to this turn can be
    *  promoted on demand (Shopify product images). Chat/channel paths only. */
-  readCachedFile?: (id: string, ctx: import('@use-brian/core').AccessContext) => Promise<import('@use-brian/core').CachedFile | null>
+  readCachedFile?: (id: string, ctx: import('@use-brian/agent-runtime/security/access-context.js').AccessContext) => Promise<import('@use-brian/core/files/types.js').CachedFile | null>
 }
 
 export type ApplyMcpInjectionParams = {
@@ -376,7 +395,7 @@ export type ApplyMcpInjectionParams = {
    * scoped + the right stores are wired, the Gmail `sendMessage` wrap
    * emits a `connector_action` Episode + audit row per
    * `docs/plans/company-brain/connector-actions.md`. Forwarded through
-   * to `injectMcpTools → injectGoogleTools`. Absent → Gmail still
+   * to the capability surface (Google provider). Absent → Gmail still
    * works, just without the brain-level audit.
    */
   connectorActionAudit?: import('../connector-action-port.js').ConnectorActionAudit
@@ -384,22 +403,22 @@ export type ApplyMcpInjectionParams = {
    * Authoritative primary email domain for the acting assistant's
    * workspace — drives `audience_clearance` derivation in the GCal
    * audit hook (`internal` when all attendees on-domain, else
-   * `public`). Forwarded to `injectMcpTools → injectGoogleTools`.
+   * `public`). Forwarded to the capability surface (Google provider).
    */
   workspaceDomain?: string | null
   /**
    * Tool-use interception port (remote MCP only), forwarded to
-   * `injectMcpTools`. Open default = unset. See
+   * the capability surface. Open default = unset. See
    * `docs/architecture/engine/tool-hooks.md`.
    */
   engineHooks?: EngineHooks
   /**
    * The acting user's resolved identity for this turn, forwarded to
-   * `injectMcpTools` (opted-in connectors get `X-Sidanclaw-Actor-*` headers).
+   * the capability surface (opted-in connectors get `X-Sidanclaw-Actor-*` headers).
    */
   actorIdentity?: ActorIdentity
   /**
-   * On-demand introspection lane tools, forwarded to `injectMcpTools` as the
+   * On-demand introspection lane tools, forwarded to the capability surface as the
    * `serverName: 'introspection'` mcp_search local source. The CALLER gates:
    * pass them only for interactive workspace-PRIMARY turns (they read
    * workspace-operational state — approvals, scheduled jobs, research runs,
@@ -407,8 +426,8 @@ export type ApplyMcpInjectionParams = {
    */
   introspectionTools?: Tool[]
   /**
-   * Whether this surface may expose the KB WRITE tools. `applyMcpInjection`
-   * serves BOTH the interactive web chat AND the public API channel, so the
+   * Whether this surface may expose the KB WRITE tools. These parameters
+   * serve BOTH the interactive web chat AND the public API channel, so the
    * flag is per-caller and never hardcoded here: web chat passes `true`
    * (live Approve/Deny loop); the public API passes `false` (no
    * confirmation loop — its strip would orphan an `ask` tool). Default
@@ -427,80 +446,10 @@ export type ApplyMcpInjectionParams = {
   knowledgeCaptureText?: string
   /** Trusted execution scope used to hide connectors with broader exposure. */
   contextScope?: TurnScope
-  executionContext?: import('@use-brian/core').ExecutionContext
-  scopeAccumulator?: import('@use-brian/core').ContextScopeAccumulator
+  executionContext?: import('@use-brian/agent-runtime/security/execution-context.js').ExecutionContext
+  scopeAccumulator?: import('@use-brian/agent-runtime/security/context-scope.js').ContextScopeAccumulator
 }
 
-/**
- * Run the same MCP injection step every chat-style route needs:
- * discover the team owner's connectors, inject `mcp_search`/`mcp_call`
- * + any built-in connectors + KB tools, return the unavailable-capability
- * list and confirmation enricher.
- *
- * No-op (returns identity enricher + empty unavailable list) when the
- * required stores aren't wired in. Catches injection failures so a flaky
- * MCP server can never crash the route.
- *
- * Used by web `chat.ts` and the public API channel — keeps the two
- * surfaces in lockstep so an assistant's tool set doesn't depend on
- * which transport the consumer happens to be using.
- */
-export async function applyMcpInjection(
-  params: ApplyMcpInjectionParams,
-): Promise<McpInjectionResult> {
-  const noop: McpInjectionResult = {
-    enrichConfirmation: async (_t, input) => input,
-    unavailable: [],
-    searchableSources: [],
-  }
-  const { stores } = params
-  if (!stores.connectorStore || !stores.mcpSettingsStore) return noop
-  try {
-    return await injectMcpTools({
-      userId: params.connectorUserId,
-      assistantId: params.assistant.id,
-      tools: params.tools,
-      connectorStore: stores.connectorStore,
-      settingsStore: stores.mcpSettingsStore,
-      assistantConnectorStore: stores.assistantConnectorStore,
-      userTimezone: params.userTimezone,
-      knowledgeStore: stores.knowledgeStore,
-      knowledgeRepoWriter: stores.knowledgeRepoWriter,
-      allowKnowledgeWrites: params.allowKnowledgeWrites === true,
-      knowledgeCaptureRuleStore: stores.knowledgeCaptureRuleStore,
-      knowledgeCaptureText: params.knowledgeCaptureText,
-      discoveryQuery: params.discoveryQuery,
-      exposeLocalReadTools: params.exposeLocalReadTools,
-      bindingMaximum: params.bindingMaximum,
-      restrictSearchToToolNames: params.restrictSearchToToolNames,
-      keepBuiltinsDirect: params.keepToolsDirect,
-      keepDynamicToolsDirect: params.keepToolsDirect,
-      knowledgeWriteAuthorization: 'capture',
-      gdriveFilesStore: stores.gdriveFilesStore,
-      connectorGrantStore: stores.connectorGrantStore,
-      connectorInstanceStore: stores.connectorInstanceStore,
-      workspaceToolPolicyStore: stores.workspaceToolPolicyStore,
-      assistantTeamId: params.assistant.workspaceId ?? null,
-      connectorActionAudit: params.connectorActionAudit,
-      assistantConnectorGrantsStore: stores.assistantConnectorGrantsStore,
-      workspaceDomain: params.workspaceDomain,
-      engineHooks: params.engineHooks,
-      actorIdentity: params.actorIdentity,
-      filesApi: stores.filesApi,
-      readCachedFile: stores.readCachedFile,
-      introspectionTools: params.introspectionTools,
-      contextScope: params.contextScope,
-      connectorSourceRuntimeFactory: stores.connectorSourceRuntimeFactory,
-      executionContext: params.executionContext,
-      scopeAccumulator: params.scopeAccumulator,
-    })
-  } catch (err) {
-    console.error(`[${params.scope}] MCP tool injection failed:`, err)
-    return noop
-  }
-}
-
-export type { ConfirmationEnricher, McpInjectionResult }
 
 // ── Skill injection ────────────────────────────────────────────
 
@@ -576,7 +525,7 @@ type InjectSkillsOptions = {
   tools: Map<string, Tool>
   connectorStore?: ConnectorStore
   unavailableCapabilities: string[]
-  communitySkills?: import('@use-brian/core').SkillContent[]
+  communitySkills?: import('@use-brian/core/skills/types.js').SkillContent[]
   channel: string
   /**
    * Assistant kind + app_type. Used to filter built-in skills with an
@@ -618,7 +567,7 @@ type InjectSkillsOptions = {
    */
   workspaceSkillFilesStore?: import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore
   workspaceId?: string
-  invocationBuffer?: import('@use-brian/core').SkillInvocationBuffer
+  invocationBuffer?: import('@use-brian/core/skills/invocation-buffer.js').SkillInvocationBuffer
   /**
    * Optional slug allow-list. When non-empty, only skills whose `id`/slug is
    * in this set are offered — the governance gates still apply on top. Used by
@@ -799,7 +748,7 @@ async function injectScopedSkills(opts: InjectSkillsOptions): Promise<InjectSkil
     // NOTE (residual of the 2026-06-01 connector-scoping fix): the skill
     // *listing* above is now workspace-scoped, but this connector-availability
     // gate still lists `connectorUserId`'s personal connectors — for a shared
-    // workspace that is the OWNER. `injectMcpTools` already suppresses the
+    // workspace that is the OWNER. The capability catalog already suppresses the
     // owner's personal connector *tools* for shared workspaces, so a
     // connector-gated skill surfaced here would be offered without working
     // tools, and the set leaks which providers the owner has connected. The
@@ -1113,6 +1062,7 @@ export async function buildFileContentBlocks(
         )
       }
     } else {
+      const { parseFileContent } = await import('@use-brian/core/files/parsers.js')
       const { text, mediaMimeType } = await parseFileContent(
         file.buffer,
         file.mimeType,

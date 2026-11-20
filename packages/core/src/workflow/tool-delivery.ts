@@ -1,6 +1,6 @@
 /** Scoped deterministic tool-result notifications. [COMP:workflow/tool-delivery] */
 import { sanitizeDeliveryText } from '@use-brian/shared'
-import type { ScopeEvidence } from '../security/context-scope.js'
+import type { ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
 import type { DeliveryOutcome, ExecutorDeps } from './executor.js'
 import { interpolateString, type InterpolationScope } from './interpolation.js'
 import { ToolCallDeliverySchema } from './schemas.js'

@@ -98,6 +98,45 @@ export async function idbUpdate<T>(key: string, update: (value: T | null) => T):
   });
 }
 
+/** Read a cache record and its fencing metadata from one consistent transaction. */
+export async function idbReadEntries(keys: readonly string[]): Promise<Record<string, unknown>> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readonly"), values: Record<string, unknown> = {};
+    for (const key of keys) {
+      const request = tx.objectStore(STORE).get(key);
+      request.onsuccess = () => { values[key] = request.result ?? null; };
+    }
+    tx.oncomplete = () => resolve(values);
+    tx.onerror = tx.onabort = () => reject(tx.error ?? new Error("Local cache read failed"));
+  });
+}
+
+/** Serialize cache bytes and their fence across every renderer sharing this KV. */
+export async function idbUpdateEntries(keys: readonly string[], update: (values: Readonly<Record<string, unknown>>) => Record<string, unknown>): Promise<Record<string, unknown>> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readwrite"), store = tx.objectStore(STORE), values: Record<string, unknown> = {};
+    let remaining = keys.length;
+    for (const key of keys) {
+      const request = store.get(key);
+      request.onsuccess = () => {
+        values[key] = request.result ?? null;
+        if (--remaining) return;
+        try {
+          for (const [changed, value] of Object.entries(update(values))) {
+            if (!keys.includes(changed)) throw new Error("Cache transaction key mismatch");
+            if (value === undefined) { store.delete(changed); values[changed] = null; }
+            else { store.put(value, changed); values[changed] = value; }
+          }
+        } catch (error) { tx.abort(); reject(error); }
+      };
+    }
+    tx.oncomplete = () => resolve(values);
+    tx.onerror = tx.onabort = () => reject(tx.error ?? new Error("Local cache transaction failed"));
+  });
+}
+
 /** Delete a key. Best-effort. */
 export async function idbDelete(key: string): Promise<void> {
   try {
@@ -139,6 +178,14 @@ export async function clearLocalDocCaches(timeoutMs = 1500): Promise<void> {
   try { for (const key of Object.keys(localStorage)) if ((key.startsWith("brian:unsent:v1:") || key.startsWith("brian:offline-routing:v1:"))) localStorage.removeItem(key); } catch { /* unavailable */ }
   if (typeof indexedDB === "undefined") return;
   const sweep = (async () => {
+    // Clear the shared KV transactionally first. Another window may keep its
+    // connection open and block deleteDatabase; old tickets must still die.
+    const kv = await openDb();
+    await new Promise<void>((resolve, reject) => {
+      const tx = kv.transaction(STORE, "readwrite"); tx.objectStore(STORE).clear();
+      tx.oncomplete = () => resolve(); tx.onabort = tx.onerror = () => reject(tx.error);
+    });
+    if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("brian:local-data-cleared", { detail: { committed: true } }));
     // `indexedDB.databases()` is missing on some older engines; without it the
     // per-page store names can't be enumerated, so only the KV store goes.
     const dbs = (await indexedDB.databases?.()) ?? [{ name: DB_NAME }];

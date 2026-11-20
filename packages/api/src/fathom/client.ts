@@ -11,7 +11,7 @@
  * See docs/architecture/integrations/fathom.md.
  */
 
-import { ConnectorApiError } from '@use-brian/core'
+import { ConnectorApiError } from '@use-brian/core/tools/base/_connector-result.js'
 
 const FATHOM_API_BASE = 'https://api.fathom.ai/external/v1'
 const FATHOM_TOKEN_URL = `${FATHOM_API_BASE}/oauth2/token`

@@ -20,6 +20,8 @@ Open-source. Hosted or self-hosted.
 
 <p align="center"><a href="assets/demo.mp4">Full demo (MP4)</a> · Current UI with a fictional example workspace</p>
 
+**Remember this in Brian.** Try “Remember in Brian that Acme needs the v1 API until its migration finishes.” In a fresh connected chat, ask “Use Brian to draft the Acme migration checklist.” For a chat without a connector, copy the selected memory from Brian and paste it with your task. [Memory picker](https://app.usebrian.ai/memory-context) · [Setup and pilot availability](https://usebrian.ai/remember) · [Agent guide](https://github.com/use-brian/agent-docs/blob/main/mcp/remember.md)
+
 ## Get work done
 
 - **Page:** store documents, notes and shared knowledge.
@@ -44,6 +46,10 @@ Open-source. Hosted or self-hosted.
 - **Your app:** build on Brian with the assistant API.
 
 [Getting started](https://usebrian.ai/docs/quickstart) · [Integrations & permissions](https://usebrian.ai/docs/tools) · [API & MCP](https://usebrian.ai/docs/api)
+
+## Frontend development
+
+[Common design system](docs/design-system/README.md) · [Consistency audit](docs/design-system/audit.md) · [Fixes and page-level review](docs/design-system/implementation.md) · [Before screenshots](docs/design-system/screenshots/index.html) · [After screenshots](docs/design-system/screenshots/after/index.html)
 
 ---
 

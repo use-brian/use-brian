@@ -1,17 +1,25 @@
 /** Native browser title readers and authored commands. [COMP:api/application-persistence] */
-import {ContextScopeAccumulator,DerivedScopeError,bindScopeSources,boundScopeSources,executionToolContext,sanitizeTitle,type SessionContextAuthority} from '@use-brian/core'
-import {getPool} from '../db/client.js'
+import {sanitizeTitle} from '@use-brian/core/doc/auto-title.js'
+import type {SessionContextAuthority} from '@use-brian/core/memory/session-state-types.js'
+import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
+import {DerivedScopeError} from '@use-brian/agent-runtime/security/derived-scope.js'
+import {executionToolContext} from '@use-brian/agent-runtime/security/execution-context.js'
+import {bindScopeSources, boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
+import {getPool,queryWithRLS} from '../db/client.js'
+import {z} from 'zod'
+import {conversationReadersActive} from '../db/conversation-visibility.js'
 import {isAuthorityChangedError} from '../context-scope/authority-lease.js'
+import {runOptionalEvidence} from '../context-scope/optional-evidence.js'
 import {authSessionStore,type AuthTokenClaims} from '../db/auth-session-store.js'
 import {readSessionById} from '../db/sessions.js'
 import {getUserAssistant} from '../db/users.js'
-import {readAdmittedSessionQuery} from '../db/session-query-reader.js'
+import {readAdmittedSessionQuery} from '../db/conversation-store.js'
 import {publishSessionTitle,readSessionTitle,readSessionTitlesGrouped,sessionTitleHead} from '../db/session-title-store.js'
 import {resolveExecutionContextSystem} from '../context-scope/execution-context.js'
 import {gateSessionRead} from '../session-read-authority.js'
 import {policyFor,classifySession} from '../session-kind.js'
 import {getApplicationExecutionBinding} from '../application-platform/execution-context.js'
-import {assertSourceModelOutputAuthority} from '../application-platform/model-source-authority.js'
+import {admitModelOutput} from '../context-scope/admission.js'
 
 type NativeClaims=Readonly<AuthTokenClaims>
 /** Only verified middleware properties are accepted; never request JSON. */
@@ -41,7 +49,9 @@ export async function resolveSessionTitleAuthority(input:{claims:NativeClaims|nu
 async function prepareCurrentSessionTitle(input:{claims:NativeClaims|null;sessionId:string}){
  const command=structuredClone(input),authority=await resolveSessionTitleAuthority({...command,readOnly:true})
  const title=await readSessionTitle(command.sessionId,authority)
- await assertSourceModelOutputAuthority({...executionToolContext(authority.execution,{appId:'native-session-title-read'}),scopeAccumulator:authority.accumulator})
+ await admitModelOutput({...executionToolContext(authority.execution,{appId:'native-session-title-read'}),scopeAccumulator:authority.accumulator},title?async()=>{
+  if(await sessionTitleHead(command.sessionId,authority)!==title.revisionId)denied()
+ }:undefined)
  return{authority,title}
 }
 export async function readCurrentSessionTitle(input:{claims:NativeClaims|null;sessionId:string}){
@@ -56,12 +66,25 @@ export async function renameCurrentSessionTitle(input:{claims:NativeClaims|null;
   derivation:{producer:'human:session-title',sources:authority.accumulator.evidence.sources??[]}})
  if(title){
   authority.accumulator.note({sources:boundScopeSources(title)})
-  await assertSourceModelOutputAuthority({...executionToolContext(authority.execution,{appId:'native-session-title-rename'}),scopeAccumulator:authority.accumulator})
+  await admitModelOutput({...executionToolContext(authority.execution,{appId:'native-session-title-rename'}),scopeAccumulator:authority.accumulator})
  }
  return title
 }
 
 type TitleProjection=Readonly<{title:string|null;titleRevisionId:string|null}>
+const recordTitleProjection=z.object({title:z.string(),titleRevisionId:z.string().uuid().nullable()}).strict()
+async function readRecordTitleProjections(claims:NativeClaims|null,sessionIds:readonly string[]):Promise<Map<string,TitleProjection>>{
+ const titles=new Map<string,TitleProjection>()
+ if(!claims||!sessionIds.length||!(await authSessionStore.validateAccess(claims)))return titles
+ const {rows}=await queryWithRLS<{id:string;value:unknown}>(claims.userId,`SELECT id,read_conversation_title_current(id) AS value
+  FROM unnest($1::uuid[]) id`,[sessionIds])
+ for(const row of rows){
+  if(row.value===null)continue
+  const title=recordTitleProjection.parse(row.value)
+  titles.set(row.id,title.titleRevisionId?title:{...title,title:sanitizeTitle(title.title)||null})
+ }
+ return titles
+}
 type ProjectionAuthority={authority:SessionContextAuthority;previewThrough?:number;previewPending?:boolean;headOnly?:boolean}
 const projectionAuthorities=new WeakMap<TitleProjection,ProjectionAuthority|null>()
 
@@ -71,7 +94,7 @@ async function hasSavedTitle(sessionId:string,authority:SessionContextAuthority)
   [authority.execution.security.access.workspaceId,sessionId])).rowCount!==0
 }
 async function assertPreviewOutput(sessionId:string,authority:SessionContextAuthority){
- await assertSourceModelOutputAuthority({...executionToolContext(authority.execution,{appId:'native-session-title-preview'}),scopeAccumulator:authority.accumulator},
+ await admitModelOutput({...executionToolContext(authority.execution,{appId:'native-session-title-preview'}),scopeAccumulator:authority.accumulator},
   async()=>{if(await hasSavedTitle(sessionId,authority))denied()})
 }
 /** Compatibility labels use admitted current history, never the held legacy scalar. */
@@ -106,6 +129,7 @@ function heldTitleProjection():TitleProjection{
 }
 /** Immutable value identity is private and grants no reusable admission. */
 export async function sessionTitleProjection(input:{claims:NativeClaims|null;sessionId:string}):Promise<TitleProjection>{
+ if(conversationReadersActive())return (await readRecordTitleProjections(input.claims,[input.sessionId])).get(input.sessionId)??heldTitleProjection()
  const command=structuredClone(input)
  try{
   const{authority,title}=await prepareCurrentSessionTitle(command)
@@ -159,7 +183,7 @@ async function tryTitleGroup(claims:NativeClaims,entries:PreparedTitle[],context
   }
   // This is the final awaited boundary: all original leases and provisional
   // projections are checked before the fresh union source/head proof.
-  await assertSourceModelOutputAuthority({...executionToolContext(authority.execution,{appId:'native-session-title-list-output'}),scopeAccumulator:authority.accumulator},async()=>{
+  await admitModelOutput({...executionToolContext(authority.execution,{appId:'native-session-title-list-output'}),scopeAccumulator:authority.accumulator},async()=>{
    const current=(await getPool().query<{sessionId:string;revisionId:string}>(`SELECT session_id AS "sessionId",scope_revision_id AS "revisionId"
     FROM session_title_heads WHERE workspace_id=$1 AND session_id=ANY($2::uuid[]) AND session_recording_read_allowed(session_id)`,
    [authority.execution.security.access.workspaceId,heads.map(head=>head.sessionId)])).rows
@@ -191,9 +215,12 @@ function titleDatabaseTimeout(error:unknown):object|null{
 /** Titles are optional list decoration. A database timeout must withhold all
  * provisional bytes, not fail the session list or reuse an earlier admission.
  * Do not retry per row: a workspace lock can block the whole page. */
-export async function sessionTitleProjections(input:{claims:NativeClaims|null;sessionIds:readonly string[]}):Promise<Map<string,TitleProjection>>{
- const command=structuredClone(input)
- try{return await collectSessionTitleProjections(command)}
+export async function sessionTitleProjections(input:{claims:NativeClaims|null;sessionIds:readonly string[];signal?:AbortSignal}):Promise<Map<string,TitleProjection>>{
+ if(conversationReadersActive())return readRecordTitleProjections(input.claims,input.sessionIds)
+ const {signal,...pinned}=input,command=structuredClone(pinned)
+ // Optional decoration: one installation owner, yields to foreground admission
+ // (context-scope/optional-evidence.ts). A deferral is the 55P03 withhold below.
+ try{return await runOptionalEvidence({signal},()=>collectSessionTitleProjections(command))}
  catch(error){
   const timeout=titleDatabaseTimeout(error);if(!timeout)throw error
   console.warn('Session list titles withheld after database timeout:',timeout)
@@ -311,7 +338,7 @@ async function collectSessionTitleProjections(command:{claims:NativeClaims|null;
   const binding=projectionAuthorities.get(projection)
   if(!binding){result.set(id,projection);continue}
   const{authority,previewThrough,previewPending,headOnly}=binding
-  try{
+  if(titleCandidates.has(id))try{
    let finalProjection=projection
    if(previewPending){
     const current=await prepareTitlePreview(id,authority)
@@ -328,7 +355,11 @@ async function collectSessionTitleProjections(command:{claims:NativeClaims|null;
     if(headOnly)finalProjection=bindScopeSources(Object.freeze({title:current.title,titleRevisionId:current.revisionId}),boundScopeSources(current))
    }
    if(previewThrough!==undefined)await assertPreviewOutput(id,authority)
-   else await assertSourceModelOutputAuthority({...executionToolContext(authority.execution,{appId:'native-session-title-list-output'}),scopeAccumulator:authority.accumulator})
+   else await admitModelOutput({...executionToolContext(authority.execution,{appId:'native-session-title-list-output'}),scopeAccumulator:authority.accumulator},async()=>{
+    // A readable historical revision is not the current display head. Check
+    // selection identity under the current source operation's locks.
+    if(await sessionTitleHead(id,authority)!==projection.titleRevisionId)denied()
+   })
    result.set(id,finalProjection)
   }catch(error){
    const timeout=titleDatabaseTimeout(error);if(timeout)throw timeout

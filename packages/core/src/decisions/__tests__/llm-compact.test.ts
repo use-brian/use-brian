@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { buildLlmDecisionMessages, createLlmDecisionProvider, type LlmDecisionAnswerFormat } from '../adapters/llm.js'
 import { buildToolSelectionQuestions } from '../../engine/tool-selection.js'
-import type { ProviderRequest } from '../../providers/types.js'
+import type { ProviderRequest } from '@use-brian/agent-runtime/providers/types.js'
 import { decisionRequest, llmProviderWithJson } from './fixtures.js'
 
 function rankedRequest() {

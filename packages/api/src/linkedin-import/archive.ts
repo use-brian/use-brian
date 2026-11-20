@@ -7,9 +7,15 @@
 
 import { createHash } from 'node:crypto'
 
-import JSZip from 'jszip'
+import type JSZip from 'jszip'
+import { lazyImplementation } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
 
 import type { LinkedInArchiveMember } from './types.js'
+
+// The ZIP library loads on the first archive, not at boot (M4 step 5); it is
+// loaded before the archive's own error mapping, so a failed load is the
+// honest `ImplementationUnavailableError`, never "not a readable zip".
+const loadJSZip = lazyImplementation('The ZIP library (jszip)', () => import('jszip').then((m) => m.default))
 
 export const MAX_LINKEDIN_ARCHIVE_BYTES = 50 * 1024 * 1024
 export const MAX_LINKEDIN_MEMBER_BYTES = 50 * 1024 * 1024
@@ -185,9 +191,10 @@ export async function inspectLinkedInArchive(bytes: Buffer): Promise<LinkedInArc
     throw new LinkedInArchiveError('invalid_zip', `Could not read ZIP directory: ${String(err)}`)
   }
 
+  const JSZipImpl = await loadJSZip()
   let zip: JSZip
   try {
-    zip = await JSZip.loadAsync(bytes, { checkCRC32: true, createFolders: false })
+    zip = await JSZipImpl.loadAsync(bytes, { checkCRC32: true, createFolders: false })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     const encrypted = /encrypted|password/i.test(message)

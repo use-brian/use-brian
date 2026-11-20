@@ -12,7 +12,8 @@
  */
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
-import { approvalReviewScopeKindSchema, buildTool, parameterPolicySchema, type Tool, type ToolContext } from '@use-brian/core'
+import { approvalReviewScopeKindSchema, parameterPolicySchema } from '@use-brian/core/approval-review/contracts.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { assignReviewer } from './assignment.js'
 import { inspectRequest } from './attention.js'
 import { getPattern, listPatterns, revokePattern } from './patterns.js'

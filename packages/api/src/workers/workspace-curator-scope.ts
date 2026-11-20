@@ -30,9 +30,10 @@
  */
 
 import { query } from '../db/client.js'
+import { backgroundWorkspaceFilter } from '../background-inference-policy.js'
 import type { WorkspaceSkillStore } from '../db/skill-store.js'
 import type { SkillCuratorDigestStore } from '../db/skill-curator-digest-store.js'
-import type { WorkspaceCuratorScope } from '@use-brian/core'
+import type { WorkspaceCuratorScope } from '@use-brian/core/consolidation/worker.js'
 import {
   applyDerivedSkillPatch,
   applyDerivedSkillSupportFile,
@@ -46,6 +47,7 @@ export type WorkspaceCuratorScopeDeps = {
   /** Weekly digest sink (already system-level). Structurally satisfies the
    *  pass's `SkillUmbrellaDigestStore` contract. */
   digestStore: SkillCuratorDigestStore
+  excludedBackgroundWorkspaceIdsSql?: string
   /** Batch embedder for S10 cluster detection. */
   getEmbeddings: (texts: string[]) => Promise<number[][]>
   onUmbrellaEvent?: WorkspaceCuratorScope['onUmbrellaEvent']
@@ -62,7 +64,9 @@ export function buildWorkspaceCuratorScope(
   return {
     listWorkspaces: async () => {
       const r = await query<{ id: string; created_at: Date }>(
-        `SELECT id, created_at FROM workspaces ORDER BY created_at ASC`,
+        `SELECT w.id, w.created_at FROM workspaces w
+         WHERE TRUE ${backgroundWorkspaceFilter('w.id', deps.excludedBackgroundWorkspaceIdsSql)}
+         ORDER BY w.created_at ASC`,
         [],
       )
       return r.rows.map((w) => ({ workspaceId: w.id, createdAt: w.created_at }))

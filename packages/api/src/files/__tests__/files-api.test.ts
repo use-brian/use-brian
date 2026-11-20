@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { runWithAgentAccess } from '../../db/agent-access-context.js'
 import { createAuthorityLease, runWithAuthorityLease } from '../../context-scope/authority-lease.js'
 import { WorkspaceAccessError } from '../../workspace-access/policy.js'
-import { DerivedScopeError, pinAccessCeiling } from '@use-brian/core'
+import { pinAccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import { DerivedScopeError } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { describe, it, expect, vi } from 'vitest'
 import { Writable } from 'node:stream'
 import {
@@ -20,7 +21,7 @@ import type {
   WorkspaceFileIndexRow,
   WorkspaceFileMetaPatch,
   WorkspaceFilesStore,
-} from '@use-brian/core'
+} from '@use-brian/core/workspace-files/types.js'
 import type { WorkspaceAuditStore } from '../../db/workspace-audit-store.js'
 
 function makeFakeGcs(): GcsFilesClient & { blobs: Map<string, Buffer>; mimes: Map<string, string> } {

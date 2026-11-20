@@ -13,12 +13,12 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import {
-  canRead,
   clientCompartment,
   isClientCompartment,
   subsetCompartments,
   unionCompartments,
-} from '@use-brian/core'
+} from '@use-brian/agent-runtime/security/compartments.js'
+import { canRead } from '@use-brian/agent-runtime/security/sensitivity.js'
 
 vi.mock('../../db/client.js', () => ({
   query: vi.fn(async () => ({ rows: [], rowCount: 0 })),

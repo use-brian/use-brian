@@ -1,7 +1,15 @@
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { afterAll, describe, expect, it, vi } from 'vitest'
-import { advanceWorkflowRun, buildTool, browserInputScope, pinToolAuthoringAuthority, executionToolContext, ContextScopeAccumulator, type AuthoritySource, type ScopeSource, type SandboxTaskRecord } from '@use-brian/core'
+import { browserInputScope } from '@use-brian/core/sandbox/input-scope.js'
+import type { SandboxTaskRecord } from '@use-brian/core/sandbox/orchestrator.js'
+import { pinToolAuthoringAuthority } from '@use-brian/core/security/tool-authority.js'
+import { advanceWorkflowRun } from '@use-brian/core/workflow/executor.js'
+import type { AuthoritySource } from '@use-brian/agent-runtime/security/authority-source.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
 import { z } from 'zod'
 import { createSandboxTaskStore } from '../../db/sandbox-task-store.js'
 import { createDbWorkspaceFilesStore } from '../../db/workspace-files-store.js'
@@ -107,11 +115,10 @@ describe('[COMP:api/workflow-input-evidence] canonical causal inputs',()=>{
   })
   it.each([['before','user'],['after','user'],['after','author']] as const)('rolls back a file when retained workflow authority expires %s host renewal (%s)',async(timing,principal)=>{
     const f=await fixture(),run=await f.create(),store=createSandboxTaskStore(),id=randomUUID()
-    if(principal==='user')await pool.query("UPDATE department_edges SET expires_at=clock_timestamp()+interval '2 seconds' WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.member])
-    else{
-      const author=randomUUID()
+    const author=principal==='author'?randomUUID():null
+    if(author){
       await pool.query("INSERT INTO assistants(id,name,workspace_id,owner_user_id,kind,clearance,compartments) VALUES($1,'Fixture author',$2,$3,'standard','confidential',NULL)",[author,f.workspaceId,f.member])
-      await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,assistant_id,clearance,origin,expires_at) VALUES($1,$2,'assistant',$3,'internal','store',clock_timestamp()+interval '2 seconds')",[f.workspaceId,f.team.id,author])
+      await pool.query("INSERT INTO department_edges(workspace_id,department_id,principal_kind,assistant_id,clearance,origin) VALUES($1,$2,'assistant',$3,'internal','store')",[f.workspaceId,f.team.id,author])
       const saved=await captureAuthoringAuthoritySystem({userId:f.member,workspaceId:f.workspaceId,assistantId:author})
       await pool.query('UPDATE workflows SET authoring_authority=$2::jsonb WHERE id=$1',[f.workflow.id,JSON.stringify(saved)])
     }
@@ -124,19 +131,33 @@ describe('[COMP:api/workflow-input-evidence] canonical causal inputs',()=>{
       sourceAuthority:scope.executionContext.security.authority.snapshotSource!(),inputScope:browserInputScope({},f.workspaceId)}
     await store.create(record)
     let inserted=false
+    let expiresAt:string
+    // Start the countdown on entry to publication. Leave time for the host to
+    // revalidate on shared runners before waiting on PostgreSQL's exact deadline.
+    const armExpiry:Parameters<typeof withFileTransactionAdmission>[0]=async()=>{
+      const armed=await pool.query<{expires_at:string}>(`UPDATE department_edges
+        SET expires_at=clock_timestamp()+interval '8 seconds'
+        WHERE workspace_id=$1 AND department_id=$2 AND (user_id=$3 OR assistant_id=$4)
+        RETURNING expires_at::text AS expires_at`,[f.workspaceId,f.team.id,author?null:f.member,author])
+      expect(armed.rowCount).toBe(1)
+      expiresAt=armed.rows[0].expires_at
+    }
     const delay:Parameters<typeof withFileTransactionAdmission>[0]=async client=>async()=>{
-      expect((await client.query('SELECT id FROM workspace_files WHERE id=$1',[id])).rows).toEqual([{id}])
+      expect((await client.query(`SELECT id,clock_timestamp()<$2::timestamptz AS before_expiry
+        FROM workspace_files WHERE id=$1`,[id,expiresAt])).rows).toEqual([{id,before_expiry:true}])
       inserted=true
-      await client.query('SELECT pg_sleep(2.1)')
+      await client.query('SELECT pg_sleep_until($1::timestamptz)',[expiresAt])
     }
     const write=()=>createWorkspaceFile(f.member,{id,workspaceId:f.workspaceId,
       path:`/${id}.txt`,parentPath:'/',name:'Fixture.txt',mime:'text/plain',sizeBytes:4,storageUri:`fixture://${id}`,
       createdByUserId:f.member,sensitivity:'public'})
-    const result=timing==='before'?withFileTransactionAdmission(delay,()=>store.withPublication!(record,write))
-      :store.withPublication!(record,()=>withFileTransactionAdmission(delay,write))
+    const result=withFileTransactionAdmission(armExpiry,()=>timing==='before'
+      ? withFileTransactionAdmission(delay,()=>store.withPublication!(record,write))
+      : store.withPublication!(record,()=>withFileTransactionAdmission(delay,write)))
     await expect(result).rejects.toMatchObject({code:'42501',message:timing==='before'?'workflow_authority_unavailable':'workflow_publication_expired'})
     expect(inserted).toBe(true)
     expect((await pool.query('SELECT id FROM workspace_files WHERE id=$1',[id])).rows).toEqual([])
+    expect((await pool.query('SELECT file_id FROM workspace_file_workflow_admissions WHERE file_id=$1',[id])).rows).toEqual([])
     expect((await store.getActiveBySession(run.id))?.taskId).toBe(record.taskId)
   })
   it('renews workflow authority on the caller transaction without owner-pool reads',async()=>{
@@ -416,11 +437,14 @@ describe('[COMP:api/workflow-input-evidence] canonical causal inputs',()=>{
     const history=async(userId:string)=>(await queryWithRLS(userId,'SELECT id FROM workflow_runs WHERE id=$1',[target.id])).rows
     expect(await history(f.member)).toEqual([{id:target.id}])
     expect(await history(f.owner)).toEqual([])
+    const [memberView,ownerView]=await Promise.all([resolveWorkspaceViewpoint(f.member,f.workspaceId),resolveWorkspaceViewpoint(f.owner,f.workspaceId)])
+    if(!memberView?.departmentRead||!ownerView?.departmentRead)throw new Error('Workflow fixture requires current Department grants')
     const ceiling={workspaceId:f.workspaceId,userId:f.member,clearance:'internal' as const,
-      compartments:[f.team.compartmentKey!],mutationCompartments:[f.team.compartmentKey!],projectIds:[projectId],visibilityAssistantIds:[sourceAssistant]}
+      compartments:[f.team.compartmentKey!],mutationCompartments:[f.team.compartmentKey!],projectIds:[projectId],visibilityAssistantIds:[sourceAssistant],
+      departmentRead:memberView.departmentRead}
     expect(await validateCallerScopeEvidence(copied,ceiling)).toEqual(evidence)
     expect(await runWithAgentAccess({...ceiling,sharedAudience:true},()=>history(f.member))).toEqual([])
-    for(const narrowed of [{userId:f.owner},{projectIds:[]},{visibilityAssistantIds:[]}]) {
+    for(const narrowed of [{userId:f.owner,departmentRead:ownerView.departmentRead},{projectIds:[]},{visibilityAssistantIds:[]}]) {
       await expect(validateCallerScopeEvidence(copied,{...ceiling,...narrowed})).rejects.toMatchObject({reason:'caller_evidence_unavailable'})
       await runWithAgentAccess({...ceiling,...narrowed},async()=>{
         const actor=narrowed.userId??f.member
@@ -645,6 +669,8 @@ describe('[COMP:api/workflow-input-evidence] canonical causal inputs',()=>{
       // Remove only those edges inside this rolled-back historical fixture.
       await client.query('DROP TRIGGER workflow_derivation_receipts ON scope_derivation_sources')
       await client.query('DROP TRIGGER page_derivation_receipts ON scope_derivation_sources')
+      await client.query('DROP TRIGGER application_field_sources_immutable ON scope_derivation_sources')
+      await client.query('DROP TRIGGER session_context_lineage_source ON scope_derivation_sources')
       await client.query("DELETE FROM scope_derivation_sources WHERE source_kind NOT IN('memory','entity','entity_link','task','workspace_file','episode','knowledge_entry','kb_chunk','crm_event')")
       // Later source wrappers use different parameter names. Keep them outside
       // this historical replay; transaction rollback restores the live chain.

@@ -1,4 +1,11 @@
-import { ContextScopeAccumulator, advanceWorkflowRun, buildTool, browserInputScope, createCrmCredentialTools, executionToolContext, pinToolAuthoringAuthority, type SandboxTaskRecord } from '@use-brian/core'
+import { createCrmCredentialTools } from '@use-brian/core/crm/operations-tools.js'
+import { browserInputScope } from '@use-brian/core/sandbox/input-scope.js'
+import type { SandboxTaskRecord } from '@use-brian/core/sandbox/orchestrator.js'
+import { pinToolAuthoringAuthority } from '@use-brian/core/security/tool-authority.js'
+import { advanceWorkflowRun } from '@use-brian/core/workflow/executor.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
 import { z } from 'zod'
 import { createDbWorkspaceGroupStore } from '../../db/workspace-group-store.js'
 import { createSandboxTaskStore } from '../../db/sandbox-task-store.js'
@@ -11,8 +18,11 @@ import { afterAll, describe, expect, it, vi } from 'vitest'
 import { applyRLSGucs, getPool, getAppPool, queryWithRLS, runWithAgentAccess } from '../../db/client.js'
 import { createDbWorkflowStore, createDbWorkflowRunStore } from '../../db/workflow-store.js'
 import { createGoal, getGoalByIdSystem } from '../../db/goals.js'
+import { createTask } from '../../db/tasks.js'
+import { executeWithCurrentAuthority } from '../authority-lease.js'
 import { currentAgentAccess } from '../../db/agent-access-context.js'
-import { captureAuthoringAuthoritySystem, resolveGoalAuthoritySystem, resolveWorkflowRunScope, resolveRetainedWorkflowSource } from '../workflow-authority.js'
+import { captureAuthoringAuthoritySystem, resolveGoalAuthoritySystem, resolveWorkflowAuthoringMetadataSystem, resolveWorkflowAuthoringScope, resolveWorkflowRunScope, resolveRetainedWorkflowSource } from '../workflow-authority.js'
+import { pinAccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { createCrmIntegrationStore, readCrmIntegrationCredential } from '../../db/crm-integration-store.js'
 import { assertCrmCredentialParent } from '../../crm-operations/integration-department-authority.js'
 
@@ -562,5 +572,53 @@ describe('[COMP:api/workflow-authority] persisted member-run authority',()=>{
       means:{workflowId:f.workflow.id},createdByUserId:f.userId,authoringAuthority:f.authoringAuthority})
     await pool.query("UPDATE workspace_members SET clearance='public',compartments=ARRAY[]::text[] WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.userId])
     await expect(resolveGoalAuthoritySystem(goal)).rejects.toMatchObject({reason:'goal_authority_unavailable'})
+  })
+  // m1-shared-room-lease-defect.md: the host Task read is RLS-gated by the
+  // ambient agent access, so renewal must not read it under a nested callee's
+  // narrower projection while admission read it under the saved ceiling.
+  async function taskHostedGoal() {
+    const f=await fixture()
+    const task=await createTask(f.userId,{workspaceId:f.workspaceId,title:'Fictional labelled host',sensitivity:'internal',compartments:['product']})
+    const authority=await captureAuthoringAuthoritySystem({workspaceId:f.workspaceId,userId:f.userId,assistantId:f.assistantId})
+    const goal=await createGoal({workspaceId:f.workspaceId,createdByUserId:f.userId,authoringAuthority:authority,
+      host:{type:'task',id:task.id},outcome:'Finish the fictional labelled task',doneWhen:{kind:'subtasks'}})
+    return {f,task,scope:await resolveGoalAuthoritySystem(goal)}
+  }
+  it.each<[string,{clearance:string;compartments:string[];projectIds:string[]|null}]>([
+    ['clearance',{clearance:'public',compartments:['product'],projectIds:null}],
+    ['labels',{clearance:'internal',compartments:[],projectIds:[]}]])(
+    'a task-hosted goal does not mistake a nested callee %s narrowing for a lost host',async(_kind,narrow)=>{
+    const {f,scope}=await taskHostedGoal()
+    // A nested tool dispatch under a narrower projection checks every retained lease.
+    await expect(scope.executeWithAuthority(()=>runWithAgentAccess({workspaceId:f.workspaceId,userId:f.userId,...narrow},
+      ()=>executeWithCurrentAuthority(async()=>'bounded result')))).resolves.toBe('bounded result')
+  })
+  it('renewal metadata for a saved authoring ceiling is the same under a nested callee projection',async()=>{
+    const f=await fixture()
+    const params={userId:f.userId,workspaceId:f.workspaceId,assistantId:f.assistantId,authoringAuthority:f.authoringAuthority,
+      contextGroupId:null,contextProjectId:null}
+    const outside=pinAccessCeiling((await resolveWorkflowAuthoringMetadataSystem(params)).access)
+    expect(outside).toMatchObject({clearance:'internal',compartments:['product']})
+    const nested=(read:typeof resolveWorkflowAuthoringScope)=>runWithAgentAccess({workspaceId:f.workspaceId,userId:f.userId,
+      clearance:'public',compartments:[],projectIds:[]},async()=>pinAccessCeiling((await read(params)).access))
+    // The ordinary (content) scope follows the caller; a lease pinned on `outside`
+    // and renewed through it would read that narrowing as revocation.
+    expect(await nested(resolveWorkflowAuthoringScope)).toMatchObject({clearance:'public',compartments:[]})
+    expect(await nested(resolveWorkflowAuthoringMetadataSystem)).toEqual(outside)
+    await pool.query("UPDATE workspace_members SET compartments=ARRAY[]::text[] WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.userId])
+    await expect(nested(resolveWorkflowAuthoringMetadataSystem)).rejects.toMatchObject({reason:'workflow_authority_unavailable'})
+  })
+  it('a task-hosted goal still fails closed when the author loses the host during a nested operation',async()=>{
+    const {f,scope}=await taskHostedGoal()
+    let effects=0
+    await expect(scope.executeWithAuthority(()=>runWithAgentAccess({workspaceId:f.workspaceId,userId:f.userId,clearance:'public',compartments:[],projectIds:[]},
+      ()=>executeWithCurrentAuthority(async()=>{
+        effects++
+        // An administrator removes the author's Product access, the host's label.
+        await pool.query("UPDATE workspace_members SET compartments=ARRAY[]::text[] WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.userId])
+        return 'stale result'
+      })))).rejects.toMatchObject({reason:'authority_changed',operationMayHaveExecuted:true})
+    expect(effects).toBe(1)
+    await expect(scope.executeWithAuthority(async()=>'revived')).rejects.toMatchObject({reason:'authority_changed'})
   })
 })

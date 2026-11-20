@@ -1,7 +1,7 @@
 import type { BrowserDownloads } from './browser-files.js'
-import type { AuthoritySource } from '../security/authority-source.js'
-import type { AuthoringAuthority } from '../security/access-ceiling.js'
-import type { CurrentAuthorityBoundary } from '../tools/types.js'
+import type { AuthoritySource } from '@use-brian/agent-runtime/security/authority-source.js'
+import type { AuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import type { CurrentAuthorityBoundary } from '@use-brian/agent-runtime/tools/types.js'
 import type { ProtectedFillScope, ProtectedFillItem } from './protected-fill.js'
 import type { BrowserProfileAuthority } from './profiles.js'
 /**

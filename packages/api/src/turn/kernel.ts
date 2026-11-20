@@ -30,25 +30,52 @@
  *
  * [COMP:api/turn-kernel]
  */
+import { queryLoop } from '@use-brian/core/engine/query-loop-defaults.js'
+import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
+import type { QueryOutputProvenance } from '@use-brian/agent-runtime/engine/output-provenance.js'
 import {
-  createTurnOutputCollector,
-  DEFAULT_STALL_IDLE_MS,
-  queryLoop,
   assertModelOutputAuthority,
   type QueryEvent,
   type QueryLoopOptions,
+  type QueryUsageSnapshot,
+} from '@use-brian/agent-runtime/engine/query-loop.js'
+import { DEFAULT_STALL_IDLE_MS } from '@use-brian/agent-runtime/engine/stall-watchdog.js'
+import {
+  createTurnOutputCollector,
+  type TurnOutputCollector,
+  type TurnOutputFormat,
   type TurnOutputSelection,
-  type ToolContext,
-} from '@use-brian/core'
+  type FinalizedOutputSelection,
+} from '@use-brian/agent-runtime/engine/turn-output.js'
+import type { ContentBlock, Message } from '@use-brian/agent-runtime/providers/types.js'
+import { inheritScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
+import type { ToolContext, Tool } from '@use-brian/agent-runtime/tools/types.js'
+import {createTerminalPublicationOwner} from './terminal-publication.js'
+import { committedTurnCompletion, type BufferedWebPublication } from '../db/conversation-publication-recovery.js'
 import { sanitizeDeliveryText } from '@use-brian/shared'
 import type { ProviderAvailability } from '@use-brian/shared/model-registry'
 import type { ResolvedWorkspaceCustomLlm } from '../custom-llm-runtime.js'
 import { ensureServableModel } from '../model-resolution.js'
-import { assertSourceModelInputAuthority, assertSourceModelOutputAuthority,tryAssertNativeCombinedOutput,type NativeAttendedOutputBoundary } from '../application-platform/model-source-authority.js'
+import { admitModelSourceEvidence } from '../application-platform/model-source-authority.js'
 import type { SessionPolicy } from '../session-kind.js'
-import { ownsRequestPermissionContext, type RequestPermissionContext } from '../context-scope/request-permission-context.js'
-import { hasTurnAbort, registerTurnAbort, releaseTurn, startLeaseHeartbeat, takeTurnLease, unregisterTurnAbort } from './lease.js'
-import type { TurnBilling } from './billing.js'
+import { ownsTurnDeliveryAdmission, type TurnDeliveryAdmission } from '../context-scope/admission.js'
+import { openTurnAdmissionClosure, type AdmissionClosureStats, type TurnAdmissionClosure } from '../context-scope/admission-closure.js'
+import { registerTurnAbort, releaseTurn, startLeaseHeartbeat, takeTurnLease, unregisterTurnAbort,TurnLeaseLostError,TurnStoppedError,turnAbortKind } from './lease.js'
+import { captureTurnUsageBilling, type TurnBilling, type TurnUsageBilling, type TurnUsageSettlement } from './billing.js'
+import { bindSessionTurnAuthority,isAuthorityChangedError } from '../context-scope/authority-lease.js'
+import { bindVerifiedResumeEvidence } from '../context-scope/native-invocation-evidence.js'
+import { findSessionTurnLeaseState, type TurnEndReason, type RecoveredTurn } from '../db/sessions.js'
+import { registerTurnInbox, type TurnInboxHandle } from '../turn-inbox.js'
+import { randomUUID } from 'node:crypto'
+import { currentTurnFrame, readTurnSqlLedger, turnSqlRecordingEnabled, withTurnFrame, type TurnSqlLedger } from '../db/turn-sql-accounting.js'
+import type { SessionMessage } from '../db/sessions.js'
+import { writeTurnPublication, type TurnPublicationRequest } from './publication.js'
+import { captureCapabilityComposition, type TurnCapabilityProfile, type TurnCapabilityRequest, type TurnCapabilityResult } from './capabilities.js'
+import { captureTurnHistory, type CapturedTurnHistory, type TurnHistoryRequest } from './history.js'
+import { resumePredecessorSlotWait, type ResumeSlotWaitOptions } from './resume-recovery.js'
+import { composeRecoveryMessage, type ComposeRecoveryMessageResult, type RecoveryPendingTurn } from './recovery-message.js'
+import { captureTurnModelPreparation, type TurnModelInvocation, type TurnModelServices, type TurnMainModelRequest, type PreparedTurnModel,
+  type TurnRunPreparationInput, type PreparedTurnRun, type PreparedBackgroundModel } from './prepare.js'
 
 export type TurnSinkKind = 'sse' | 'adapter' | 'json' | 'return' | 'none'
 
@@ -57,20 +84,21 @@ const FINAL_ONLY_SINKS: ReadonlySet<TurnSinkKind> = new Set(['adapter', 'json', 
 
 export type TurnSink = {
   kind: TurnSinkKind
-  /** Host-only recipient/source admission for a user-facing sink.
+  /** Host-only complete admission: live authority, sources and actual recipient.
+   * It must validate all accumulated evidence, not only recipient identity.
+   * An adapter receives the event kind to identify private processing before
+   * its external send. Outward events still require the destination proof.
    * Omission keeps the kernel's current source-delivery validator.
    */
-  assertOutputAuthority?: (context: ToolContext) => Promise<void>
-  /** Canonical native host capability; custom sink callbacks cannot opt in. */
-  nativeOutputBoundary?: NativeAttendedOutputBoundary
-  /** One request owner for action permission selections and delivery receipts.
+  admitOutput?: (context: ToolContext, eventKind?: QueryEvent['type']) => Promise<void>
+  /** Exact destination owner for this turn; no permission selections or receipts.
    * Input and writer authority retain their independent guards.
    */
-  permissionContext?: RequestPermissionContext
+  permissionContext?: TurnDeliveryAdmission
   /** Observational timing only; mutation of authority/evidence refuses output. */
   onOutputAuthorityTiming?: (milliseconds:number)=>void
   /** Every engine event, in order. The `sse` sink renders them; others may observe. */
-  onEvent?: (event: QueryEvent) => void | Promise<void>
+  onEvent?: (event: QueryEvent, provenance?: QueryOutputProvenance) => void | Promise<void>
   /** SSE display only: final text is selected, but cleanup/publication still follow. */
   onReplyTextComplete?: () => void
   /**
@@ -114,37 +142,25 @@ export type TurnLoopResult = {
   aborted: boolean
 }
 
-export type RunAssistantTurnParams = {
+const finalizedOutputs = new WeakMap<TurnLoopResult, { output: FinalizedOutputSelection; signal: AbortSignal }>()
+/** Actual kernel result only. Metadata is not a terminal intent or publication grant. */
+export function finalizedTurnOutput(result: TurnLoopResult): FinalizedOutputSelection | null {
+  const bound = finalizedOutputs.get(result)
+  return bound && !bound.signal.aborted ? structuredClone(bound.output) : null
+}
+
+export type AssistantTurnLoopInput = {
   sessionId: string
   policy: Pick<SessionPolicy, 'admission'>
   sink: TurnSink
   abortController: AbortController
   model: TurnModel
   /** The assembled loop, minus what the kernel owns (model, liveness, abort). */
-  loop: Omit<QueryLoopOptions, 'provider' | 'model' | 'stallIdleMs' | 'tryAssertOutputBoundary'>
-  /**
-   * `kernel` (default): admit, lease, heartbeat and release the session.
-   * `held`: the runner took the lease itself through `takeTurnLease`
-   * (`turn/lease.ts`), because its admission choreography (the web room's
-   * queue-and-fold) and its post-loop work (flush, catch-path recovery) must
-   * run under the lease; the kernel heartbeats it and the runner releases it
-   * in its own `finally` with `releaseTurn`. `none`: there is no sessions row
-   * to lock (a workflow-executor turn on a run id).
-   */
-  lease?:
-    | {
-        mode: 'kernel'
-        waitForSlot?: (sessionId: string) => Promise<boolean>
-        onTaken?: (token: string) => void
-        /** The answering assistant when it may differ from the session's binding (`startTurnLease`). */
-        assistantId?: string
-      }
-    | { mode: 'held'; token: string }
-    | { mode: 'none' }
+  loop: Omit<QueryLoopOptions, 'provider' | 'model' | 'stallIdleMs' | 'dispatchOutput' | 'observeUsage'>
   /** Throws `TurnRefusal('budget_blocked')` (or anything) to stop before the loop. */
   budget?: () => Promise<void>
   /** Output collector format for the final-only selection. */
-  outputFormat?: 'compact' | 'channel'
+  outputFormat?: TurnOutputFormat
   /** The stall window; defaults to `DEFAULT_STALL_IDLE_MS`. Derived, never an env knob. */
   stallIdleMs?: number
 }
@@ -155,12 +171,531 @@ export function servedTurnModel(model: TurnModel): string {
   return ensureServableModel(model.model, model.configuredProviders)
 }
 
-/**
- * Run one assistant turn. Resolves with the loop result after the lease is
- * released; rejects with `TurnRefusal` when admission or budget refuse, and
- * re-throws a loop or sink failure after releasing.
- */
-export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<TurnLoopResult> {
+type OpenAssistantTurnParams = Pick<AssistantTurnLoopInput, 'sessionId' | 'policy' | 'abortController'> & {
+  waitForSlot?: (sessionId: string, opts?:{signal?:AbortSignal}) => Promise<boolean>
+  resumeRecovery?: { workspaceId: string; approvalId: string; options?: ResumeSlotWaitOptions }
+  assistantId?: string
+  startedAt?: Date
+  /** Notification after an actual atomic stale takeover; never a claim decision. */
+  onReclaimed?: (outcome:RecoveredTurn) => void
+  /** The adapter's request ledger; the first owner it opens adopts its identity. */
+  sqlScope?: TurnSqlScope
+}
+/** Durable completion state of the owner's reply publication (plan section 3.3). */
+export type TurnCompletionState = Readonly<{
+  /** One completion identity per owner, bound to its session and lease token.
+   * The shared-web buffered root's operation id, which SQL persists with the
+   * terminal fact; otherwise minted by the owner and persisted by the 8277
+   * completion header when the reply publication carries its lane and input. */
+  operationId: string
+  durable: boolean
+  state: 'unpublished' | 'committed' | 'refused' | 'uncertain'
+  publishedReply: boolean
+}>
+/** The owner's closed set of SQL accounting frame ids (turn-kernel.md
+ * "Per-turn SQL accounting phases"). Ids are fixed so fingerprints compare
+ * across turns; nesting records where a nested effect ran. */
+export const TURN_SQL_FRAMES = ['admission', 'lease_heartbeat', 'preparation', 'provider_loop', 'model_input',
+  'output_admission', 'tool_effect', 'publication', 'follow_up', 'settlement'] as const
+export type TurnSqlFrameId = typeof TURN_SQL_FRAMES[number]
+type TurnSqlFrame = <T>(frameId: TurnSqlFrameId, fn: () => T) => T
+/** Enter a frame only while recording is enabled; otherwise run `fn` directly. */
+function turnSqlFrame(turnId: string): TurnSqlFrame {
+  return (frameId, fn) => turnSqlRecordingEnabled() ? withTurnFrame({ turnId, frameId }, fn) : fn()
+}
+/** The adapter's own frame around the owner (request parsing, session lookup,
+ * authored input, classification, delivery). Not an owner phase. */
+export const TURN_SQL_ADAPTER_FRAME = 'adapter'
+/** One request's SQL ledger identity, minted before the owner exists so the
+ * adapter's work and the owner's phases share one ledger. Data, never authority. */
+export type TurnSqlScope = Readonly<{ sqlTurnId: string; run<T>(fn: () => T): T }>
+const consumedSqlScopes = new WeakSet<TurnSqlScope>()
+export function openTurnSqlScope(): TurnSqlScope {
+  const sqlTurnId = randomUUID()
+  return Object.freeze({ sqlTurnId,
+    run: <T>(fn: () => T): T => turnSqlRecordingEnabled() ? withTurnFrame({ turnId: sqlTurnId, frameId: TURN_SQL_ADAPTER_FRAME }, fn) : fn() })
+}
+
+/** Values only the original owner's `prepareRun` supplies to its run. */
+const PREPARED_RUN_KEYS = ['systemPrompt', 'runtimeSystemContext', 'messages', 'tools', 'maxTokens', 'inputTokenLimit'] as const
+type PreparedRunKey = typeof PREPARED_RUN_KEYS[number]
+type KernelLoop = AssistantTurnLoopInput['loop']
+/** A prepared run's loop: the owner supplies tools, prompt, messages, runtime
+ * context and model limits. `routineCalendarRead.calendarTools` names bound
+ * candidates; the owner substitutes their adopted snapshots. */
+export type PreparedOwnedLoop = Omit<KernelLoop, PreparedRunKey> & { [K in PreparedRunKey]?: never }
+export type OwnedLoopParams = Omit<AssistantTurnLoopInput, 'sessionId' | 'policy' | 'abortController' | 'model' | 'loop'> & {
+  /** Every lane, durable resume included, runs only its owner's prepared run. */
+  loop: PreparedOwnedLoop
+}
+/** What an adapter may observe of its private prepared run. Data only; no
+ * authority, no adopted tool Map and nothing `run` would accept back. */
+export type PreparedTurnRunView = Readonly<{
+  /** Existing reply-grounding seed material (web/channel ordering preserved). */
+  grounding: PreparedTurnRun['grounding']
+  /** True only when the adopted tool derives unchanged from exactly this bound candidate. */
+  adoptsTool(name: string, candidate: Tool): boolean
+  /** Analytics-only copy of the adopted provider messages, without source bindings. */
+  messageSnapshot(): Message[]
+}>
+
+/** The existing kernel owns the complete lease lifetime, including recovery.
+ * The token identifies writes; it never proves permission to perform them. */
+class AssistantTurnOwner {
+  private readonly terminal
+  private readonly stopHeartbeat: () => void
+  private closing: Promise<boolean> | undefined
+  private closed = false
+  private ran = false
+  private finalizingReply = false
+  private finalizationBegun = false
+  private publishedReply = false
+  private bufferedPublicationBound=false
+  private publicationOperationId: string = randomUUID()
+  private publicationState: TurnCompletionState['state'] = 'unpublished'
+  private replyPublicationStarted = false
+  private completionRecorded = false
+  private sinkKind: TurnSinkKind | undefined
+  private lastResult: TurnLoopResult | undefined
+  private outputCollector: TurnOutputCollector | undefined
+  private readonly results=new WeakSet<TurnLoopResult>()
+  private modelPreparation: ReturnType<typeof captureTurnModelPreparation> | undefined
+  private modelPreparations: Promise<unknown>[] = []
+  private preparedMainModel: PreparedTurnModel | undefined
+  private mainPreparationStarted = false
+  private backgroundPreparationStarted = false
+  private preparedBackgroundModel: PreparedBackgroundModel | undefined
+  private recoveryContext: ToolContext | undefined
+  private recoveryMessage: Promise<ComposeRecoveryMessageResult | null> | undefined
+  bindModelPreparation(invocation: TurnModelInvocation, services: TurnModelServices): void {
+    if (this.modelPreparation || this.ran || this.closed) throw new Error('Model preparation must bind once before running.')
+    this.disposeSessionTurnAuthority=bindSessionTurnAuthority(invocation.execution.security.authority,
+      {sessionId:this.params.sessionId,assistantId:invocation.execution.assistant.id,token:this.token})
+    const recovery = this.params.resumeRecovery
+    const execution = invocation.execution
+    if (recovery && invocation.toolProfile === 'resume' && execution.identity.kind === 'system'
+      && execution.identity.purpose === 'session_resume' && execution.identity.jobId === recovery.approvalId
+      && execution.security.access.workspaceId === recovery.workspaceId
+      && execution.lifecycle.sessionId === this.params.sessionId && execution.assistant.id === this.params.assistantId) {
+      bindVerifiedResumeEvidence(execution, this.token, async () => {
+        const signal = this.params.abortController.signal
+        signal.throwIfAborted()
+        const lease = await findSessionTurnLeaseState(this.params.sessionId)
+        if (this.didRelease || lease?.status !== 'running' || lease.turnLeaseToken !== this.token) throw new TurnLeaseLostError()
+        signal.throwIfAborted()
+      })
+    }
+
+    this.modelPreparation = captureTurnModelPreparation(invocation, services,
+      { sessionId: this.params.sessionId, assistantId: this.params.assistantId, signal: this.params.abortController.signal,
+        effect: operation => {
+          if (this.didRelease || this.closed && (!this.ran || this.runDrained)) return Promise.reject(new Error('The original turn is closed.'))
+          const effect = this.frame('tool_effect', () => Promise.resolve().then(operation))
+          this.modelPreparations.push(effect)
+          return effect
+        } })
+    // A callee composes its roster before binding; the profile must match the lane.
+    if (this.capabilityProfile && this.capabilityProfile !== this.modelPreparation.lane) throw capabilityProfileChanged()
+    // The turn's admission closure, bound to this invocation's lease and
+    // disposed with the turn (turn-kernel.md "Per-turn admission closure").
+    this.admissionClosure = openTurnAdmissionClosure(invocation.execution)
+    this.preBindCapabilities()
+  }
+  private admissionClosure: TurnAdmissionClosure | undefined
+  private disposeSessionTurnAuthority:(()=>void)|undefined
+  /** What the turn's admission closure proved and shared; data, never authority. */
+  admissionClosureStats(): AdmissionClosureStats | undefined { return this.admissionClosure?.stats() }
+  private capabilityProfile: TurnCapabilityProfile | undefined
+  private capabilityTools: Map<string, Tool> | null = null
+  /** The turn's capability roster under the original owner (M3 catalog port).
+   * Today it delegates unchanged to the entrypoint's existing composition. */
+  prepareCapabilities(request: TurnCapabilityRequest): Promise<TurnCapabilityResult> {
+    if (this.capabilityProfile || this.runPreparationStarted || this.ran || this.closed) throw new Error('Capability preparation is unavailable or already started.')
+    if (this.modelPreparation && this.modelPreparation.lane !== request.profile) throw capabilityProfileChanged()
+    this.capabilityProfile = request.profile
+    const { tools, compose } = captureCapabilityComposition(request)
+    const prepared = this.frame('preparation', () => Promise.resolve().then(compose)).then(result => {
+      this.capabilityTools = tools
+      this.preBindCapabilities()
+      return result
+    })
+    this.modelPreparations.push(prepared)
+    return prepared
+  }
+  /** Opportunistic: `prepareRun` reuses these original-invocation wrappers. A
+   * Stop or authority change here leaves binding (and refusal) to `prepareRun`. */
+  private preBindCapabilities(): void {
+    if (!this.modelPreparation || !this.capabilityTools || this.params.abortController.signal.aborted) return
+    try { this.modelPreparation.tools(this.capabilityTools) } catch { /* prepareRun refuses */ }
+  }
+  /** Bind tools created after preparation (a later activation) through the
+   * same captured invocation and tool scope; allowed while the owner is open. */
+  activateAndBind(candidates: ReadonlyMap<string, Tool>): Map<string, Tool> {
+    if (!this.modelPreparation || this.closed) throw new Error('Activation binding requires the open original turn.')
+    return this.modelPreparation.tools(candidates)
+  }
+  prepareBackgroundModel(request: { model?: string; configuredDefault?: boolean }) {
+    if (!this.modelPreparation || this.backgroundPreparationStarted || this.ran || this.closed) throw new Error('Background model preparation is unavailable or already started.')
+    this.backgroundPreparationStarted = true
+    const preparation = this.modelPreparation, original = { ...request }
+    const prepared = this.frame('preparation', () => Promise.resolve().then(() => preparation.background(original)).then(background => {
+      this.preparedBackgroundModel = background
+      return background
+    }))
+    this.modelPreparations.push(prepared)
+    return prepared
+  }
+  prepareMainModel(request: TurnMainModelRequest): Promise<PreparedTurnModel> {
+    if (!this.modelPreparation || this.mainPreparationStarted || this.ran || this.closed) throw new Error('Main model preparation is unavailable or already started.')
+    this.mainPreparationStarted = true
+    const preparation = this.modelPreparation, original = structuredClone(request)
+    const prepared = this.frame('preparation', () => Promise.resolve().then(() => preparation.main(original)).then(value => {
+      if (!value.refusal && value.imageRoute !== 'refuse') this.preparedMainModel = value
+      return value
+    }))
+    this.modelPreparations.push(prepared)
+    return prepared
+  }
+  prepareTools(candidates: ReadonlyMap<string, Tool>): Map<string, Tool> {
+    if (!this.modelPreparation || this.ran || this.closed) throw new Error('Tool preparation requires the original prepared turn.')
+    return this.modelPreparation.tools(candidates)
+  }
+  private historyPreparationStarted = false
+  /** The main-turn history read under the original invocation: once per owner,
+   * before run preparation. Returns one captured admitted history frame (data,
+   * never a permission); the reader's own admitted query decides visibility. */
+  prepareHistory(request: TurnHistoryRequest): Promise<CapturedTurnHistory> {
+    const preparation = this.modelPreparation
+    if (!preparation || this.historyPreparationStarted || this.runPreparationStarted || this.ran || this.closed) {
+      throw new Error('History preparation is unavailable or already started.')
+    }
+    preparation.assertHistoryAuthority(request.native)
+    this.historyPreparationStarted = true
+    const read = captureTurnHistory(preparation.sessionId, request), native = request.native
+    const prepared = this.frame('preparation', () => Promise.resolve().then(read).then(history => {
+      // A replaced authority or a Stop during the read refuses its result.
+      preparation.assertHistoryAuthority(native)
+      return history
+    }))
+    this.modelPreparations.push(prepared)
+    return prepared
+  }
+  private runPreparationStarted = false
+  private preparedRun: PreparedTurnRun | undefined
+  /** Final assembly under the original invocation and prepared main model. The
+   * input is captured synchronously; admission, Brief and placement follow.
+   * The adopted run stays private and is consumed only by `run`. */
+  prepareRun(input: TurnRunPreparationInput): Promise<PreparedTurnRunView> {
+    if (!this.modelPreparation || this.runPreparationStarted || this.ran || this.closed) throw new Error('Run preparation is unavailable or already started.')
+    const model = this.preparedMainModel
+    if (!model) throw new Error('The original main model has not been prepared.')
+    this.runPreparationStarted = true
+    const assemble = this.modelPreparation.captureRun(input, model)
+    const prepared = this.frame('preparation', () => Promise.resolve().then(assemble).then((run): PreparedTurnRunView => {
+      this.preparedRun = run
+      return Object.freeze({ grounding: run.grounding,
+        adoptsTool: (name: string, candidate: Tool) => run.adoptsTool(name, candidate),
+        messageSnapshot: () => structuredClone(run.messages) })
+    }))
+    this.modelPreparations.push(prepared)
+    return prepared
+  }
+  private billing: ReturnType<typeof captureTurnUsageBilling> | undefined
+  private usageSettlement: Promise<TurnUsageSettlement> | undefined
+  private running: Promise<TurnLoopResult> | undefined
+  private runDrained = false
+  private producerTerminal = false
+  registerUsageBilling(registration: TurnUsageBilling): void {
+    if (this.billing || this.ran || this.closed) throw new Error('Turn billing must be registered once before running.')
+    // Main selection binds once. Read only that original producer's live key
+    // fact at settlement; route/store/registration mutations cannot redirect it.
+    this.billing = captureTurnUsageBilling(registration, () => this.preparedMainModel?.providerKeySource)
+  }
+  settleUsage(): Promise<TurnUsageSettlement> {
+    if ((this.ran && !this.runDrained && !this.producerTerminal) || (!this.ran && !this.closed)) {
+      return Promise.reject(new Error('Turn usage is not terminal yet.'))
+    }
+    return this.usageSettlement ??= Promise.resolve().then(() => this.billing?.(this.usage) ?? { status: this.usage ? 'not_configured' as const : 'no_usage' as const })
+  }
+  private usageSnapshot:QueryUsageSnapshot|null=null
+  get usage():QueryUsageSnapshot|null{return this.usageSnapshot?structuredClone(this.usageSnapshot):null}
+  private textComplete = false
+  private didRelease = false
+  private endReason: TurnEndReason | undefined
+  private input: TurnInboxHandle | undefined
+  private readonly frame: TurnSqlFrame
+  constructor(private readonly params: OpenAssistantTurnParams, readonly token: string,readonly turnId:string|null,
+    /** Opaque SQL-accounting ledger identity; not the lease token and never a permission. */
+    readonly sqlTurnId: string = randomUUID()) {
+    this.frame = turnSqlFrame(sqlTurnId)
+    this.terminal=createTerminalPublicationOwner(token,params.abortController.signal)
+    const stop = () => params.abortController.abort(new TurnStoppedError())
+    const lost = () => params.abortController.abort(new TurnLeaseLostError())
+    registerTurnAbort(params.sessionId, token, stop)
+    // Timers keep the frame they were created in: every tick is liveness work.
+    this.stopHeartbeat = this.frame('lease_heartbeat', () => startLeaseHeartbeat({ sessionId: params.sessionId, token,
+      onLost: lost, onCancelRequested: stop }))
+  }
+  /** Immutable per-turn SQL ledger snapshot (recording on only); data, never authority. */
+  sqlLedger(): TurnSqlLedger | undefined { return readTurnSqlLedger(this.sqlTurnId) }
+  get released(): boolean { return this.didRelease }
+  get completionReason():TurnEndReason|undefined{return this.endReason}
+  get abortKind():'stop'|'lease_lost'|'abort'|null{
+    return this.terminal.isStopped() ? 'stop' : turnAbortKind(this.params.abortController.signal)
+  }
+  openInput(): Pick<TurnInboxHandle, 'port'> {
+    if (this.closed) throw new Error('This turn has already closed.')
+    this.input ??= registerTurnInbox(this.params.sessionId, { assistantId: this.params.assistantId })
+    return { port: this.input.port }
+  }
+  async run(params: OwnedLoopParams): Promise<TurnLoopResult> {
+    if (this.closed || this.ran) throw new Error('This turn has already run or closed.')
+    if ('model' in params) throw new Error('The original owner supplies the prepared main model.')
+    const model = this.preparedMainModel
+    if (!model || !this.modelPreparation) throw new Error('The original main model has not been prepared.')
+    const supplied: PreparedOwnedLoop = params.loop, prepared = this.preparedRun
+    if (!this.runPreparationStarted) throw new Error('The original run has not been prepared.')
+    if (!prepared) throw new Error('The original run preparation has not finished.')
+    if (PREPARED_RUN_KEYS.some(key => key in supplied)) throw new Error('The original owner supplies the prepared run.')
+    this.modelPreparation.assertLoopContext(supplied.context)
+    let routine = supplied.routineCalendarRead
+    if (routine) {
+      // Identity query only: a candidate the owner did not adopt unchanged refuses.
+      routine = { ...routine, calendarTools: new Map([...routine.calendarTools].map(([name, candidate]) => {
+        if (!prepared.adoptsTool(name, candidate)) throw Object.assign(new Error('The routine calendar tool is not the adopted original.'), { reason: 'authority_changed' as const, retrySafe: false })
+        return [name, prepared.tools.get(name)!] as const
+      })) }
+    }
+    const loop: KernelLoop = { ...supplied, systemPrompt: prepared.systemPrompt, runtimeSystemContext: prepared.runtimeSystemContext,
+      messages: inheritScopeSources([...prepared.messages], prepared.messages), tools: new Map(prepared.tools),
+      ...(prepared.maxTokens !== undefined ? { maxTokens: prepared.maxTokens } : {}),
+      ...(prepared.inputTokenLimit !== undefined ? { inputTokenLimit: prepared.inputTokenLimit } : {}),
+      ...(routine ? { routineCalendarRead: routine } : {}) }
+    this.ran = true
+    this.sinkKind = params.sink.kind
+    this.recoveryContext = { ...supplied.context }
+    const collector = createTurnOutputCollector({ format: params.outputFormat })
+    this.outputCollector = collector
+    // Install the drain promise before a synchronous budget/host hook can finish.
+    this.running = Promise.resolve().then(() => runAssistantTurnLoop(collector, { ...params,
+      model: { provider: model.provider, model: model.model, configuredProviders: model.configuredProviders, customLlm: model.customLlm },
+      loop, sessionId: this.params.sessionId,
+      policy: this.params.policy, abortController: this.params.abortController },
+      result => { this.results.add(result); this.lastResult = result }, snapshot => { this.usageSnapshot = structuredClone(snapshot) },
+      () => { this.producerTerminal = true }, this.frame)).finally(() => { this.runDrained = true })
+    return this.running
+  }
+
+  /** Reconcile the original approval after claim and before replaying its outcome. */
+  async hasCommittedResumePublication(): Promise<boolean> {
+    const recovery = this.params.resumeRecovery
+    if (!recovery || this.closed || this.ran) throw new Error('Resume recovery requires its original turn owner before execution.')
+    const signal = this.params.abortController.signal
+    signal.throwIfAborted()
+    const completed = await this.frame('admission', () => committedTurnCompletion({
+      workspaceId: recovery.workspaceId,
+      sessionId: this.params.sessionId,
+      input: { kind: 'approval', ref: recovery.approvalId },
+    }))
+    signal.throwIfAborted()
+    return completed !== null
+  }
+
+  /** A presentation view of this owner's admitted events, never a delivery grant. */
+  selectedOutput(format?: TurnOutputFormat): TurnOutputSelection {
+    const selection = this.outputCollector?.select(format)
+    return selection ? structuredClone(selection) : { kind: 'empty', reason: 'no_model_output' }
+  }
+
+  /** One interactive synthesis, from this turn's already paired tool results. */
+  recoverInteractiveReply(request: {
+    reason: 'failed' | 'empty'
+    pendingAssistantTurns: readonly RecoveryPendingTurn[]
+    userText: string
+    channelType: string
+    authorizeDestination: () => Promise<void>
+    recordUsage: (result: ComposeRecoveryMessageResult) => Promise<void>
+  }): Promise<ComposeRecoveryMessageResult | null> {
+    const { reason, pendingAssistantTurns, userText, channelType, authorizeDestination, recordUsage } = request
+    const signal = this.params.abortController.signal
+    const model = this.preparedBackgroundModel, context = this.recoveryContext
+    if (this.closed || this.abortKind || this.recoveryMessage || !model || !context
+      || (this.sinkKind !== 'sse' && this.sinkKind !== 'adapter')) return Promise.resolve(null)
+    if (reason === 'empty') {
+      const selection = this.selectedOutput()
+      if (selection.kind !== 'empty' || selection.reason !== 'tools_only') return Promise.resolve(null)
+    }
+    const assertDestination = async () => {
+      signal.throwIfAborted()
+      await authorizeDestination()
+      signal.throwIfAborted()
+    }
+    this.recoveryMessage = this.frame('follow_up', () => composeRecoveryMessage({
+      provider: model.provider, pendingAssistantTurns, userText, channelType, signal,
+      beforeDispatch: () => this.frame('model_input', async () => {
+        signal.throwIfAborted()
+        await admitModelSourceEvidence(context, 'context')
+        await assertDestination()
+      }),
+    }).then(async recovered => {
+      if (!recovered) return null
+      await recordUsage(recovered)
+      await assertDestination()
+      return recovered
+    }))
+    return this.recoveryMessage
+  }
+
+  /** Presentation is distinct from durable publication. */
+  announceTextCompletion(announce: () => void): void {
+    if (this.textComplete) return
+    this.textComplete = true
+    announce()
+  }
+  beginFinalization(result: TurnLoopResult, providerFailed: boolean): boolean {
+    this.finalizationBegun = true
+    this.finalizingReply = result.selection.kind === 'text' && !result.aborted && !providerFailed
+    const actual=finalizedOutputs.get(result)
+    this.terminal.finalize(this.finalizingReply&&this.results.has(result)&&actual&&actual.signal===this.params.abortController.signal&&!actual.signal.aborted?actual.output:null)
+    return this.finalizingReply && !this.params.abortController.signal.aborted
+  }
+  bindBufferedPublication(root:BufferedWebPublication,authority:SessionContextAuthority):void {
+    if (this.replyPublicationStarted) throw new Error('The buffered root must bind before reply publication.')
+    this.terminal.bindRoot(root,authority.execution)
+    this.bufferedPublicationBound=true
+    this.publicationOperationId = root.operationId
+  }
+  hasCommittedTerminalReply():boolean{return this.terminal.isCommitted()}
+  /** The owner's one publication path for every lane (turn-kernel.md "Reply
+   * publication"). The owner pins its lease token (or the stopped token for a
+   * stopped streaming buffer), binds the terminal fact and records completion
+   * state; the adapter supplies rows, its write and its authority bracket.
+   * `afterCommit` runs the adapter's fresh post-commit delivery check and saved
+   * events; a reply counts as published only after it returns. */
+  async publish(request: TurnPublicationRequest & {
+    /** Index of the reply row in `rows`; default the last assistant row, `null` none. */
+    replyRowIndex?: number | null
+    afterCommit?: (rows: SessionMessage[]) => Promise<void>
+  }): Promise<SessionMessage[]> {
+    if (this.didRelease || this.closed) throw new Error('The original turn is closed.')
+    if (request.disposition === 'reply') {
+      if (this.replyPublicationStarted) throw new Error('This turn has already published its reply.')
+      this.replyPublicationStarted = true
+      if (!this.finalizationBegun && this.lastResult) this.beginFinalization(this.lastResult, false)
+    }
+    const signal = this.params.abortController.signal
+    // A final-only or persisted-only sink delivered nothing; a stopped buffer is
+    // never published for it. A streaming sink finalizes under the stopped token.
+    if (signal.aborted && this.sinkKind && this.sinkKind !== 'sse') signal.throwIfAborted()
+    const write = () => writeTurnPublication({ sessionId: this.params.sessionId, token: this.token, stopped: signal.aborted,
+      operationId: this.publicationOperationId,
+      bindTerminal: (root, authority, values, ordinals) => this.terminal.bind(root, authority.execution, values, ordinals) }, request)
+    const inPublication = () => { const frame = currentTurnFrame(); return frame?.turnId === this.sqlTurnId && frame.frameId === 'publication' }
+    let rows: SessionMessage[]
+    try {
+      rows = await (inPublication() ? write() : this.frame('publication', write))
+    } catch (error) {
+      if (request.disposition === 'reply') {
+        this.publicationState = (error as { operationMayHaveExecuted?: unknown })?.operationMayHaveExecuted === true ? 'uncertain' : 'refused'
+      }
+      throw error
+    }
+    if (request.disposition !== 'reply') return rows
+    this.publicationState = 'committed'
+    // The 8277 header committed with these rows: the identity is now durable.
+    if (request.completion && rows.length) this.completionRecorded = true
+    if (rows.length) await request.afterCommit?.(rows)
+    if (!this.bufferedPublicationBound) {
+      let index = request.replyRowIndex
+      if (index === undefined) { index = null; for (let i = request.rows.length - 1; i >= 0; i--) if (request.rows[i]!.role === 'assistant') { index = i; break } }
+      const content = index === null ? null : rows[index]?.content as ContentBlock[] | undefined
+      this.publishedReply = !!content && this.finalizingReply && !content.some(block => block.type === 'tool_use')
+        && content.some(block => block.type === 'text' && block.text.trim().length > 0)
+    }
+    return rows
+  }
+  /** Completion identity and state of the reply publication; data, never authority. */
+  get completion(): TurnCompletionState {
+    return Object.freeze({ operationId: this.publicationOperationId, durable: this.bufferedPublicationBound || this.completionRecorded,
+      state: this.publicationState, publishedReply: this.isPublishedReply() })
+  }
+  isPublishedReply(): boolean { return (this.bufferedPublicationBound?this.terminal.isCommitted():this.publishedReply) && !this.params.abortController.signal.aborted }
+  notice(error: unknown): { code: string; message: string } | null {
+    if (!this.isPublishedReply() || !isAuthorityChangedError(error) || error.operationMayHaveExecuted !== false) return null
+    return { code: 'post_reply_authority_changed',
+      message: 'Your reply was saved. Some follow-up processing stopped because access changed. Your next message will use the current permissions.' }
+  }
+  /** Source-proof reads also lock rows; follow-up starts only after commit. */
+  async afterReplyPublication<T>(publish: () => Promise<void>, followUp: () => Promise<T>): Promise<T> {
+    await publish()
+    return this.frame('follow_up', followUp)
+  }
+  private disposeAdmissionClosure(): void {
+    const closure = this.admissionClosure
+    if (!closure) return
+    this.admissionClosure = undefined
+    const stats = closure.stats()
+    closure.dispose()
+    if (stats.proofs || stats.sharedProofs || stats.discoveries) console.info('[turn-owner] admission closure', { sessionId: this.params.sessionId, ...stats })
+  }
+  finish(reason: TurnEndReason = 'completed'): Promise<boolean> {
+    if (this.closing) return this.closing
+    if (this.didRelease) return this.settleUsage().then(() => true)
+    this.closed = true
+    this.endReason ??= this.abortKind === 'stop' ? 'stopped_by_user' : reason
+    this.closing = this.frame('settlement', async () => {
+      try {
+        // Configuration preparation belongs to this same operation lifetime.
+        await Promise.allSettled(this.modelPreparations)
+        // Failure of output/run cannot discard already observed spend.
+        await this.running?.catch(() => {})
+        await this.recoveryMessage?.catch(() => {})
+        this.terminal.close()
+        this.input?.close()
+        this.input = undefined
+        await this.settleUsage()
+      } finally {
+        this.disposeAdmissionClosure()
+        this.disposeSessionTurnAuthority?.();this.disposeSessionTurnAuthority=undefined
+        this.stopHeartbeat()
+        unregisterTurnAbort(this.params.sessionId, this.token)
+        // A Stop may arrive while producer cleanup/accounting is awaited.
+        // It remains distinct from lease loss and the database classifies final state.
+        if (this.abortKind === 'stop') this.endReason = 'stopped_by_user'
+        // A failed database release retains exact-token retry ownership.
+        this.didRelease = await releaseTurn(this.params.sessionId, this.token, this.endReason!, result => { this.endReason = result.reason })
+      }
+      return this.didRelease
+    }).finally(() => { this.closing = undefined })
+    return this.closing
+  }
+}
+export type AssistantTurn = AssistantTurnOwner
+
+export async function openAssistantTurn(params: OpenAssistantTurnParams): Promise<AssistantTurn> {
+  const scope = params.sqlScope && !consumedSqlScopes.has(params.sqlScope) ? params.sqlScope : undefined
+  const sqlTurnId = scope?.sqlTurnId ?? randomUUID(), frame = turnSqlFrame(sqlTurnId)
+  const recovery = params.resumeRecovery
+  const resumeRecovery = recovery && { ...recovery, options: { ...recovery.options } }
+  const onReclaimed = (recovered: RecoveredTurn) => {
+    try { frame('admission', () => params.onReclaimed?.(recovered)) }
+    catch (error) { console.error('[turn-owner] stale recovery notification failed:', error) }
+  }
+  const waitForSlot = resumeRecovery
+    ? resumePredecessorSlotWait({ approvalId: resumeRecovery.approvalId, options: resumeRecovery.options, onReclaimed })
+    : params.waitForSlot
+  const slot = await frame('admission', () => takeTurnLease({ sessionId: params.sessionId, admission: params.policy.admission,
+    waitForSlot, idleOnly: !!resumeRecovery, assistantId: params.assistantId, startedAt: params.startedAt, signal: params.abortController.signal }))
+  if (!slot.taken) throw new TurnRefusal(slot.code)
+  const owner = new AssistantTurnOwner({ ...params, resumeRecovery }, slot.token, slot.turnId ?? null, sqlTurnId)
+  if (scope) consumedSqlScopes.add(scope)
+  if (slot.reclaimed && slot.recovered) onReclaimed(slot.recovered)
+  if(params.abortController.signal.aborted){await owner.finish('failed');params.abortController.signal.throwIfAborted()}
+  return owner
+}
+
+async function runAssistantTurnLoop(collector: TurnOutputCollector, params: AssistantTurnLoopInput,onResult?:(result:TurnLoopResult)=>void,observeUsage?:(snapshot:QueryUsageSnapshot)=>void,onProducerTerminal?:()=>void,
+  frame: TurnSqlFrame = (_id, fn) => fn()): Promise<TurnLoopResult> {
   const original = {
     execution: params.loop.context.executionContext,
     authority: params.loop.context.authority,
@@ -178,16 +713,18 @@ export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<
   const assertPermissionContextBinding = (context: ToolContext) => {
     if (permissions && (params.sink.kind !== 'sse'
       || params.sink.permissionContext !== permissions
-      || params.sink.assertOutputAuthority !== permissions.authorizeDelivery
-      || params.sink.nativeOutputBoundary
-      || !ownsRequestPermissionContext(permissions, context))) {
+      || params.sink.admitOutput !== permissions.authorizeDelivery
+      || !ownsTurnDeliveryAdmission(permissions, context))) {
       throw Object.assign(new Error('The request permission context changed.'), { reason: 'authority_changed' as const, retrySafe: false })
     }
   }
-  const assertSinkOutputAuthority = async (context: ToolContext): Promise<void> => {
+  const assertSinkOutputAuthority = async (context: ToolContext, admitted?: () => void, eventKind?: QueryEvent['type']): Promise<void> => {
     assertPermissionContextBinding(context)
     const started=Date.now()
-    if (!params.sink.assertOutputAuthority) return assertSourceModelOutputAuthority(context)
+    if (!params.sink.admitOutput) {
+      await admitModelSourceEvidence(context, params.sink.kind === 'return' || params.sink.kind === 'none' ? 'context' : 'deliver')
+      admitted?.(); return
+    }
     const assertIdentity = () => {
       if (!original.execution || !original.authority || !original.accumulator
         || original.authority !== original.execution.security.authority
@@ -197,165 +734,151 @@ export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<
       }
     }
     assertIdentity()
-    try{await params.sink.assertOutputAuthority(context)}finally{recordOutputTiming(context,started)}
+    try {
+      if (params.sink.kind === 'adapter' && eventKind) await params.sink.admitOutput(context, eventKind)
+      else await params.sink.admitOutput(context)
+      admitted?.()
+    } finally { recordOutputTiming(context,started) }
     assertIdentity()
     assertPermissionContextBinding(context)
   }
-  const lease = params.lease ?? { mode: 'kernel' as const }
-  let token: string | null = null
-  if (lease.mode === 'kernel') {
-    const slot = await takeTurnLease({
-      sessionId: params.sessionId,
-      admission: params.policy.admission,
-      waitForSlot: lease.waitForSlot,
-      ...(lease.assistantId ? { assistantId: lease.assistantId } : {}),
-    })
-    if (!slot.taken) throw new TurnRefusal(slot.code)
-    token = slot.token
-    lease.onTaken?.(token)
-  } else if (lease.mode === 'held') {
-    token = lease.token
-  }
-
-  // Register the in-process abort handle unless the runner already did (a
-  // held lease whose runner keeps it through its post-loop work).
-  const ownsAbortHandle = !!token && !hasTurnAbort(params.sessionId, token)
-  if (ownsAbortHandle) registerTurnAbort(params.sessionId, token!, () => params.abortController.abort())
-  const stopHeartbeat = token
-    ? startLeaseHeartbeat({
-        sessionId: params.sessionId,
-        token,
-        onLost: () => {
-          // Our lease was reclaimed while we were away: another turn may own
-          // this session now, so stop before writing into it.
-          console.warn(`[turn-kernel] lease lost for session ${params.sessionId}; aborting orphaned turn`)
-          params.abortController.abort()
-        },
-        onCancelRequested: () => {
-          console.log(`[turn-kernel] stop requested for session ${params.sessionId}; aborting turn`)
-          params.abortController.abort()
-        },
-      })
-    : () => {}
-
-  const collector = createTurnOutputCollector({ format: params.outputFormat ?? 'compact' })
-  type OutputFence={evidence:string;recipient:TurnSink['assertOutputAuthority'];boundary:TurnSink['nativeOutputBoundary']}
-  let combinedReceipt:{event:QueryEvent;fence:OutputFence}|undefined
-  const refuseCombinedReceipt=()=>{throw Object.assign(new Error('The output evidence changed.'),{reason:'authority_changed' as const,retrySafe:false})}
-  const assertOutputFence=(current:ToolContext,fence:OutputFence)=>{
-    if(current.executionContext!==original.execution||current.authority!==original.authority
-      ||current.scopeAccumulator!==original.accumulator||JSON.stringify(original.accumulator?.evidence)!==fence.evidence
-      ||params.loop.context.assertModelOutputAuthority||params.sink.assertOutputAuthority!==fence.recipient
-      ||params.sink.nativeOutputBoundary!==fence.boundary)refuseCombinedReceipt()
-  }
-  const nativeBoundary=permissions ? undefined : params.sink.nativeOutputBoundary
-  const tryCombinedProof=nativeBoundary&&!params.loop.context.assertModelOutputAuthority
-    &&params.sink.kind==='sse'
-    ?async(current:ToolContext):Promise<OutputFence|null>=>{
-      // A later custom callback retains the ordinary two-boundary path.
-      if(params.loop.context.assertModelOutputAuthority||params.sink.nativeOutputBoundary!==nativeBoundary)return null
-      if(current.executionContext!==original.execution||current.authority!==original.authority||current.scopeAccumulator!==original.accumulator)refuseCombinedReceipt()
-      const recipient=params.sink.assertOutputAuthority
-      const started=Date.now()
-      let admitted:Readonly<{evidence:string}>|null
-      try{admitted=await tryAssertNativeCombinedOutput(nativeBoundary,current,recipient,true)}
-      catch(error){recordOutputTiming(current,started);throw error}
-      if(!admitted)return null
-      const fence:OutputFence={evidence:admitted.evidence,recipient,boundary:nativeBoundary}
-      recordOutputTiming(current,started)
-      assertOutputFence(current,fence)
-      return fence
-    }:undefined
-  const tryCombinedOutput=tryCombinedProof?async(current:ToolContext,event:QueryEvent):Promise<boolean>=>{
-    combinedReceipt=undefined
-    const fence=await tryCombinedProof(current)
-    if(!fence)return false
-    combinedReceipt={event,fence}
-    return true
-  }:undefined
-  try {
+  // Text of the current model round that was admitted AND delivered to the
+  // streaming sink. A Stop closes the producer mid-round, so the loop never
+  // yields that round's `assistant_turn`; the owner records it at the Stop exit.
+  let deliveredRoundText = ''
+  const result = await frame('provider_loop', async (): Promise<TurnLoopResult> => {
     if (params.budget) await params.budget()
     // Loop and sink failures propagate unchanged: the runner's own error path
     // renders them. The lease is released in `finally` either way.
-    const context = { ...params.loop.context,assertModelInputAuthority: async (current: ToolContext) => {
+    const admitOutput = async (current: ToolContext, admitted?: () => void, eventKind?: QueryEvent['type']) => {
+      const execution = current.executionContext, accumulator = current.scopeAccumulator
+      if(params.loop.context.admitModelOutput){
+        await current.authority?.assertCurrent()
+        await params.loop.context.admitModelOutput(current)
+      }
+      if (current.executionContext !== execution || current.scopeAccumulator !== accumulator) {
+        throw Object.assign(new Error('The model context authority changed.'), { reason: 'authority_changed' as const,retrySafe: false })
+      }
+      // Covered web output uses its request-owned delivery admission.
+      // The owner evaluates the complete source/recipient requirements for
+      // this physical output. Input and publication remain separate effects.
+      await assertSinkOutputAuthority(current, admitted, eventKind)
+    }
+    const context = { ...params.loop.context,
+      abortSignal: params.loop.context.abortSignal
+        ? AbortSignal.any([params.loop.context.abortSignal, params.abortController.signal])
+        : params.abortController.signal,
+      admitModelInput: (current: ToolContext) => frame('model_input', async () => {
         const execution = current.executionContext, accumulator = current.scopeAccumulator
-        await params.loop.context.assertModelInputAuthority?.(current)
+        if (permissions?.authorizePageModelInput) {
+          assertPermissionContextBinding(current)
+          const at = Date.now()
+          const admitted = await permissions.authorizePageModelInput(current)
+          if (admitted) {
+            recordOutputTiming(current, at)
+            assertPermissionContextBinding(current)
+            return
+          }
+        }
+        if(params.loop.context.admitModelInput){
+          await current.authority?.assertCurrent()
+          await params.loop.context.admitModelInput(current)
+        }
         if (current.executionContext !== execution || current.scopeAccumulator !== accumulator) {
           throw Object.assign(new Error('The model context authority changed.'), { reason: 'authority_changed' as const,retrySafe: false })
         }
-        await assertSourceModelInputAuthority(current)
-      },assertModelOutputAuthority: async (current: ToolContext) => {
-        const execution = current.executionContext, accumulator = current.scopeAccumulator
-        await params.loop.context.assertModelOutputAuthority?.(current)
-        if (current.executionContext !== execution || current.scopeAccumulator !== accumulator) {
-          throw Object.assign(new Error('The model context authority changed.'), { reason: 'authority_changed' as const,retrySafe: false })
-        }
-        // Covered web output uses its request-owned delivery admission.
-        // New source observations still require admission, but unchanged text
-        // chunks do not resubmit the complete accumulated source set. The input
-        // callback above and persistence retain their live source checks.
-        if (permissions) await assertSinkOutputAuthority(current)
-        else await assertSourceModelInputAuthority(current)
+        await admitModelSourceEvidence(current, 'context')
+      }),admitModelOutput: admitOutput }
+    const deliver = (current: ToolContext, event?: QueryEvent, provenance?: QueryOutputProvenance): Promise<void> => frame('output_admission', async () => {
+      if (params.abortController.signal.aborted) return
+      const callback = params.sink.admitOutput
+      const sink = params.sink.onEvent
+      const outputHook = params.loop.context.admitModelOutput
+      let evidence: string | undefined
+      const checked = { ...current, admitModelOutput: async (value: ToolContext) => {
+        const capture = () => { evidence = JSON.stringify(value.scopeAccumulator?.evidence) }
+        await admitOutput(value, capture, event?.type)
       } }
-    for await (const event of queryLoop({
-      ...params.loop,
-      context,
-      tryAssertOutputBoundary:tryCombinedOutput,
-      provider: params.model.provider,
-      model: servedTurnModel(params.model),
-      stallIdleMs: params.stallIdleMs ?? DEFAULT_STALL_IDLE_MS,
-    })) {
-      // An aborted turn stops consuming: nothing after a stop reaches a sink.
-      if (params.abortController.signal.aborted) break
-      const receipt=combinedReceipt
-      combinedReceipt=undefined
-      if(receipt){
-        // Consume only this event's private fence. Keep any post-yield mutation
-        // failure inside the core's sticky authority wrapper as well.
-        await assertModelOutputAuthority(context,async()=>true,()=>{
-          if(receipt.event!==event)refuseCombinedReceipt()
-          assertOutputFence(context,receipt.fence)
-        })
-      }else if (params.sink.kind === 'sse' || params.sink.kind === 'adapter' || params.sink.kind === 'json') {
-        await assertSinkOutputAuthority(context)
+      await assertModelOutputAuthority(checked, {
+        assertCurrent() {
+          assertPermissionContextBinding(current)
+          if (current.executionContext !== original.execution || current.authority !== original.authority
+            || checked.executionContext !== original.execution || checked.authority !== original.authority
+            || checked.scopeAccumulator !== original.accumulator
+            || original.execution && original.execution.security.authority !== original.authority
+            || current.scopeAccumulator !== original.accumulator || JSON.stringify(current.scopeAccumulator?.evidence) !== evidence
+            || params.sink.admitOutput !== callback || params.sink.onEvent !== sink
+            || params.loop.context.admitModelOutput !== outputHook) {
+            throw Object.assign(new Error('The output context changed during admission.'), { reason: 'authority_changed' as const, retrySafe: false })
+          }
+        },
+        dispatch() {
+          if (!event || params.abortController.signal.aborted) return
+          collector.observe(event, provenance)
+          if (event.type === 'turn_complete') onProducerTerminal?.()
+          return Promise.resolve(sink?.(event, provenance)).then(() => {
+            if (event.type === 'text_delta') deliveredRoundText += event.text
+            else if (event.type === 'assistant_turn' || event.type === 'tool_start') deliveredRoundText = ''
+            if (event.type === 'turn_complete' && params.sink.kind === 'sse'
+              && !params.abortController.signal.aborted && collector.select().kind === 'text') {
+              params.sink.onReplyTextComplete?.()
+            }
+          })
+        },
+      })
+    })
+    try {
+      for await (const _event of queryLoop({
+        ...params.loop,
+        context,
+        observeUsage,
+        dispatchOutput: deliver,
+        provider: params.model.provider,
+        model: servedTurnModel(params.model),
+        stallIdleMs: params.stallIdleMs ?? DEFAULT_STALL_IDLE_MS,
+      })) {
+        throw new Error('A kernel-owned loop must dispatch through its output operation.')
       }
-      collector.observe(event)
-      await params.sink.onEvent?.(event)
-      // The generator may await resource cleanup after yielding its terminal
-      // event. Stop the writing UI now, without releasing the lease or claiming
-      // persistence. This event already passed the source/delivery boundary.
-      if (event.type === 'turn_complete' && params.sink.kind === 'sse'
-        && !params.abortController.signal.aborted && collector.select().kind === 'text') {
-        params.sink.onReplyTextComplete?.()
-      }
+    } catch (error) {
+      // A Stop that lands inside an awaited output admission surfaces as that
+      // admission's refusal (the admission refuses an aborted lifecycle). It is
+      // the same Stop exit, not a failure: the delivered round is still recorded
+      // below and publication runs its own fresh checks. An effect that may have
+      // executed keeps its uncertainty and propagates unchanged.
+      const uncertain = (error as { operationMayHaveExecuted?: unknown } | null)?.operationMayHaveExecuted === true
+      if (turnAbortKind(params.abortController.signal) !== 'stop' || uncertain) throw error
     }
     const selection = collector.select()
     const finalText = FINAL_ONLY_SINKS.has(params.sink.kind) && selection.kind === 'text'
       ? sanitizeDeliveryText(selection.text) || null
       : null
     const result: TurnLoopResult = { selection, finalText, aborted: params.abortController.signal.aborted }
-    if (!result.aborted) {
-      // Fresh final admission, through the same sticky wrapper as stream output.
-      // The last event's receipt cannot survive its arbitrary sink callback.
-      let combined=false
-      let terminalFence:OutputFence|undefined
-      await assertModelOutputAuthority(context,tryCombinedProof?async()=>{
-        terminalFence=await tryCombinedProof(context)??undefined
-        combined=terminalFence!==undefined
-        return combined
-      }:undefined,()=>{if(terminalFence)assertOutputFence(context,terminalFence)})
-      if (!combined && (params.sink.kind === 'sse' || params.sink.kind === 'adapter' || params.sink.kind === 'json')) {
-        await assertSinkOutputAuthority(context)
-      }
+    // Stop exit (chat-app.md "Stopping a turn": streamed text is kept): hand the
+    // streaming sink the record of the round it already delivered, so its
+    // stopped buffer publishes it as the stopped reply. Content-free of anything
+    // new: exactly the admitted, delivered text. Not a terminal or success fact.
+    if (result.aborted && params.sink.kind === 'sse' && turnAbortKind(params.abortController.signal) === 'stop'
+      && deliveredRoundText.trim() && params.sink.onEvent) {
+      await params.sink.onEvent({ type: 'assistant_turn', toolResults: [],
+        response: { content: [{ type: 'text', text: deliveredRoundText }], stopReason: 'incomplete',
+          usage: { inputTokens: 0, outputTokens: 0 }, model: servedTurnModel(params.model) } })
+      deliveredRoundText = ''
     }
-    await params.sink.afterLoop?.(result)
+    if (!result.aborted) {
+      await deliver(context)
+      const finalized = collector.finalizedSelection()
+      if (!params.abortController.signal.aborted && finalized) finalizedOutputs.set(result, { output: finalized, signal: params.abortController.signal })
+    }
     return result
-  } finally {
-    combinedReceipt=undefined
-    stopHeartbeat()
-    if (ownsAbortHandle) unregisterTurnAbort(params.sessionId, token!)
-    if (token && lease.mode === 'kernel') await releaseTurn(params.sessionId, token, 'completed')
-  }
+  })
+  onResult?.(result)
+  const afterLoop = params.sink.afterLoop
+  if (afterLoop) await frame('publication', () => afterLoop(result))
+  return result
+}
+
+function capabilityProfileChanged(): Error {
+  return Object.assign(new Error('The capability profile does not match the original turn invocation.'), { reason: 'authority_changed' as const, retrySafe: false })
 }
 
 /** A usage row's identity columns, from the turn's resolved billing (D2). */

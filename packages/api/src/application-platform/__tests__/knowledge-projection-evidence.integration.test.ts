@@ -1,10 +1,14 @@
 import {spawn} from 'node:child_process'
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
-import {ContextScopeAccumulator,boundScopeSources,createKnowledgeTools,executionToolContext,scopeEvidenceFromRows,type LLMProvider} from '@use-brian/core'
+import {createKnowledgeTools} from '@use-brian/core/tools/base/knowledge.js'
+import type {LLMProvider} from '@use-brian/agent-runtime/providers/types.js'
+import {ContextScopeAccumulator, scopeEvidenceFromRows} from '@use-brian/agent-runtime/security/context-scope.js'
+import {executionToolContext} from '@use-brian/agent-runtime/security/execution-context.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {createDbKnowledgeStore} from '../../db/knowledge-store.js'
 import {generateTitle} from '../../routes/attended-session-title.js'
-import {assertSourceModelInputAuthority} from '../model-source-authority.js'
+import {admitModelInput} from '../../context-scope/admission.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -58,7 +62,7 @@ describe.sequential('[COMP:api/application-persistence] actual knowledge project
   expect(result.data).toMatchObject({relatedEntries:[c.child.id]})
   if(!result.scopeEvidence)throw new Error('Actual knowledge tool must retain its source evidence')
   accumulator.note(result.scopeEvidence)
-  await expect(assertSourceModelInputAuthority(context)).resolves.toBeUndefined()
+  await expect(admitModelInput(context)).resolves.toBeUndefined()
   const before=await c.source(c.parent.id)
   await c.f.pool.query('UPDATE knowledge_entries SET scope_held=true WHERE id=$1',[c.child.id])
   let extractions=0,calls=0
@@ -66,7 +70,7 @@ describe.sequential('[COMP:api/application-persistence] actual knowledge project
    stream:async function*(){calls++;yield{type:'message_start',model:'fixture'};yield{type:'text_delta',text:'Fictional projection title'};
     yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:2,outputTokens:2}}}}
   const messages=[{role:'user' as const,get content(){extractions++;return JSON.stringify(result.data)}}]
-  await expect(generateTitle(provider,messages,'fixture',()=>assertSourceModelInputAuthority(context))).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
+  await expect(generateTitle(provider,messages,'fixture',()=>admitModelInput(context))).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
   expect(extractions).toBe(0);expect(calls).toBe(0)
   expect(await c.source(c.parent.id)).toEqual(before)
   const other=await c.f.execution(c.f.secondId),otherAccumulator=new ContextScopeAccumulator(),otherContext={...executionToolContext(other,{appId:'native-knowledge-projection'}),scopeAccumulator:otherAccumulator}
@@ -81,7 +85,7 @@ describe.sequential('[COMP:api/application-persistence] actual knowledge project
   expect((await c.f.pool.query(`SELECT resource_id,selection,selected_version FROM application_field_resources WHERE workspace_id=$1 AND id=$2`,[c.f.workspaceId,fields[0].resourceId])).rows)
    .toEqual([{resource_id:c.parent.id,selection:'history',selected_version:before.version}])
   otherAccumulator.note(current.scopeEvidence)
-  await expect(assertSourceModelInputAuthority(otherContext)).resolves.toBeUndefined()
+  await expect(admitModelInput(otherContext)).resolves.toBeUndefined()
  })
  it('holds a real misconfigured owner-pool reader even with copied current member GUCs',async()=>{
   const c=await fixture(false,false)

@@ -6,6 +6,7 @@ WORKDIR /app
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json turbo.json tsconfig.base.json ./
 COPY patches ./patches
 COPY packages/shared/package.json packages/shared/tsconfig.json ./packages/shared/
+COPY packages/agent-runtime/package.json packages/agent-runtime/tsconfig.json ./packages/agent-runtime/
 COPY packages/brian-kb/package.json packages/brian-kb/tsconfig.json ./packages/brian-kb/
 COPY packages/office-model/package.json packages/office-model/tsconfig.json ./packages/office-model/
 COPY packages/office-renderer/package.json packages/office-renderer/tsconfig.json ./packages/office-renderer/
@@ -26,6 +27,7 @@ FROM deps AS build
 ENV NODE_OPTIONS=--max-old-space-size=6144
 
 COPY packages/shared/src ./packages/shared/src
+COPY packages/agent-runtime/src ./packages/agent-runtime/src
 COPY packages/brian-kb/src ./packages/brian-kb/src
 COPY packages/office-model/src ./packages/office-model/src
 COPY packages/office-renderer/src ./packages/office-renderer/src
@@ -58,6 +60,7 @@ WORKDIR /app
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
 COPY patches ./patches
 COPY packages/shared/package.json ./packages/shared/
+COPY packages/agent-runtime/package.json ./packages/agent-runtime/
 COPY packages/brian-kb/package.json ./packages/brian-kb/
 COPY packages/brian-kb/bin ./packages/brian-kb/bin
 COPY packages/office-model/package.json ./packages/office-model/
@@ -73,6 +76,7 @@ COPY apps/api/package.json ./apps/api/
 RUN pnpm install --frozen-lockfile --prod
 
 COPY --from=build /app/packages/shared/dist ./packages/shared/dist
+COPY --from=build /app/packages/agent-runtime/dist ./packages/agent-runtime/dist
 COPY --from=build /app/packages/brian-kb/dist ./packages/brian-kb/dist
 COPY --from=build /app/packages/office-model/dist ./packages/office-model/dist
 COPY --from=build /app/packages/office-renderer/dist ./packages/office-renderer/dist

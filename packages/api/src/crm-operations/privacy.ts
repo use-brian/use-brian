@@ -9,7 +9,8 @@
  */
 
 import type pg from 'pg'
-import { CrmOperationsContextSchema, CrmOperationsError, type CrmPageQuery, type CrmOperationsContext } from '@use-brian/core'
+import { CrmOperationsContextSchema, CrmOperationsError, type CrmOperationsContext } from '@use-brian/core/crm/operations-types.js'
+import type { CrmPageQuery } from '@use-brian/core/crm/pagination.js'
 import { assertCrmPrivacyWorkspaceAuthority } from './privacy-subject-authority.js'
 import { assertAssociationSourceAuthority } from '../association/source-scope.js'
 import {assertCrmRetentionOwner} from './retention-service.js'

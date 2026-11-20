@@ -18,7 +18,8 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { query } from './client.js'
+import { commitTransaction, getPool, query, rollbackAndRelease } from './client.js'
+import { pageVisitorConversationsActive, readPageConversationRows } from './conversation-visibility.js'
 import { findOrCreateSession, addSessionMessage } from './sessions.js'
 import { COMMENT_THREAD_CHANNEL_TYPE } from './comment-thread-store.js'
 
@@ -35,6 +36,10 @@ export type CreateGuestThreadParams = {
   anchorBlockId?: string | null
   quote?: string | null
   body: string
+}
+
+function guestCommentScope(workspaceId: string) {
+  return { workspaceId, userId: null, assistantId: null, sensitivity: 'public' as const, compartments: [], projectIds: [] }
 }
 
 export type GuestComment = { body: string; createdAt: string }
@@ -112,6 +117,7 @@ export async function createGuestThread(params: CreateGuestThreadParams): Promis
     role: 'user',
     content: params.body,
     senderUserId: SENTINEL_GUEST_USER_ID,
+    ...(pageVisitorConversationsActive() ? { scope: guestCommentScope(params.workspaceId) } : {}),
   })
 
   return { threadId }
@@ -128,6 +134,21 @@ export async function addGuestComment(params: {
   guestSessionToken: string
   body: string
 }): Promise<boolean> {
+  if (pageVisitorConversationsActive()) {
+    const client = await getPool().connect()
+    try {
+      await client.query('BEGIN')
+      const allowed = (await client.query<{ sessionId: string; workspaceId: string }>(`SELECT e.session_id AS "sessionId", e.workspace_id AS "workspaceId"
+        FROM public.comment_threads ct
+        CROSS JOIN LATERAL public.conversation_page_visitor_current($1,ct.session_id,$2,true) e
+        WHERE ct.id=$3 AND ct.page_id=$1 AND e.session_id=ct.session_id`, [params.pageId, params.guestSessionToken, params.threadId])).rows[0]
+      if (!allowed) return false
+      await addSessionMessage({ sessionId: allowed.sessionId, role: 'user', content: params.body,
+        senderUserId: SENTINEL_GUEST_USER_ID, scope: guestCommentScope(allowed.workspaceId) }, client)
+      await commitTransaction(client)
+      return true
+    } finally { await rollbackAndRelease(client) }
+  }
   const t = await query<{ sessionId: string }>(
     `SELECT ct.session_id AS "sessionId"
        FROM comment_threads ct
@@ -157,6 +178,19 @@ export async function listGuestComments(
   pageId: string,
   guestSessionToken: string,
 ): Promise<GuestThreadView[]> {
+  if (pageVisitorConversationsActive()) {
+    const threads = new Map<string, GuestThreadView>()
+    for (const row of await readPageConversationRows(pageId, guestSessionToken)) {
+      let thread = threads.get(row.threadId)
+      if (!thread) {
+        thread = { threadId: row.threadId, anchorBlockId: row.anchorBlockId, quote: row.quote,
+          createdAt: row.threadCreatedAt.toISOString(), authorName: row.guestName, comments: [] }
+        threads.set(row.threadId, thread)
+      }
+      if (row.body && row.messageCreatedAt) thread.comments.push({ body: row.body, createdAt: row.messageCreatedAt.toISOString() })
+    }
+    return [...threads.values()]
+  }
   const threads = await query<{
     threadId: string
     sessionId: string

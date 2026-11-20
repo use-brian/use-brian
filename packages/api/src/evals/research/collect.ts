@@ -12,13 +12,13 @@
  * [COMP:evals/research-comparison]
  */
 import {
-  RESEARCH_MODE_ADDENDUM,
   ASSISTANT_CALL_DEFAULT_BUDGET,
   resolveResearchBudget,
-  type QueryEvent,
-  type Tool,
-  type TokenUsage,
-} from '@use-brian/core'
+} from '@use-brian/core/engine/research-depth.js'
+import { RESEARCH_MODE_ADDENDUM } from '@use-brian/core/system-prompt.js'
+import type { QueryEvent } from '@use-brian/agent-runtime/engine/query-loop.js'
+import type { TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { createResearchTurnObserver } from '../../research/delivery.js'
 import type { ResearchCase, ResearchCollectionAdapter, ResearchTrace } from './comparison.js'
 

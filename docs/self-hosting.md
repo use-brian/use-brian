@@ -99,6 +99,29 @@ Every channel is configured in the app under **Studio → Channels**.
 The My Browser extension pairs Chrome or Firefox. For Firefox on a headless
 server, see [`apps/firefox-companion/README.md`](../apps/firefox-companion/README.md).
 
+## Building the API from source
+
+`pnpm --filter @use-brian/api build` uses `packages/api/tsconfig.json` for
+production compilation. Files under `src/**/__tests__/` and files named
+`*.test.*` or `*.spec.*` are excluded from type-checking and emission, reducing
+the compiler's memory use and keeping test artifacts out of fresh builds.
+Production fixtures, such as the eval fixtures, remain included. Build the
+workspace dependencies first, as with other package-level build commands.
+
+`pnpm --filter @use-brian/api typecheck` uses `tsconfig.typecheck.json` to check
+both production and test sources without emitting JavaScript or declarations.
+This config repeats the production project references because TypeScript does
+not inherit `references` through `extends`. Vitest unit and integration commands continue
+running the original test sources; these exclusions do not disable tests.
+Full test-inclusive typechecking can still need more memory than a production
+build.
+
+When updating an existing checkout, remove `packages/api/dist` and
+`packages/api/tsconfig.tsbuildinfo` before rebuilding if test-free output is
+required: TypeScript does not delete artifacts emitted by an older config.
+Exclusions are not an import boundary, so production code must not import test
+files. CI checks the production import graph as well as the selected roots.
+
 ## Container images
 
 Prebuilt images for the independently deployable services are published to the
@@ -144,6 +167,29 @@ app-web:
     API_URL: http://api:4000
     USEBRIAN_EDITION: oss
 ```
+
+Two things the built app image does differently from `pnpm dev`:
+
+- **Sign-in cookies stay on the app's own host by default.** With
+  `USEBRIAN_EDITION: oss` (or `outpost`) and `COOKIE_DOMAIN` unset, the app
+  sets host-only cookies, which work on `localhost` and on a single host such
+  as `app.brian.customer.example`, so the example above leaves the variable
+  out. The API never reads cookies, so it does not need to share them. Set
+  `COOKIE_DOMAIN` to your own parent domain (for example
+  `.brian.customer.example`) only to share sign-in across sibling hosts; an
+  Outpost auth portal requires it. `COOKIE_DOMAIN=` (empty) always means
+  host-only. Keep `USEBRIAN_EDITION` set: an image started without an edition
+  runs the hosted profile, whose default is the hosted service's
+  `.usebrian.ai` parent, and the browser drops those cookies on your host.
+- **Give the browser a way to reach the API.** `pnpm dev` proxies `/api` from
+  the app origin to the API; the built image does not. Either serve the API on
+  the app's origin (route `/api/*` on the app host to the API container), or set
+  `API_DOMAIN` or `PUBLIC_API_URL` and put the app's origin in the API's
+  `APP_URL` or `AUTHED_APP_URL` so its CORS check admits the browser. Set
+  `DOC_SYNC_DOMAIN` or `PUBLIC_DOC_SYNC_URL` the same way for document sync.
+
+Under `pnpm dev` the `/api` proxy keeps a quiet response open for up to 30
+minutes, so a long silent model step does not drop the chat stream.
 
 ### App runtime variables
 

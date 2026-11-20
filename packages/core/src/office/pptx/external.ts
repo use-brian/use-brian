@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { posix } from 'node:path'
 import type JSZip from 'jszip'
-import { DOMParser } from 'linkedom'
+import { officeXmlDomParser } from '../xml-dom.js'
 import type {
   OfficeRichTextRun,
   OfficeTextStyleSchema,
@@ -29,6 +29,7 @@ const DEFAULT_THEME: Record<string, string> = {
 }
 
 function parseXml(xml: string): XmlDocument {
+  const DOMParser = officeXmlDomParser()
   return new DOMParser().parseFromString(xml.replace(/^\uFEFF/, ''), 'text/xml') as unknown as XmlDocument
 }
 

@@ -1,7 +1,7 @@
 import express from 'express'
 import { describe, expect, it, vi } from 'vitest'
 import request from 'supertest'
-import type { GoalDefaultBudgetStorePort } from '@use-brian/core'
+import type { GoalDefaultBudgetStorePort } from '@use-brian/core/goals/default-budget-tools.js'
 import { goalDefaultBudgetRoutes } from '../goal-default-budget.js'
 
 function makeApp(options: {

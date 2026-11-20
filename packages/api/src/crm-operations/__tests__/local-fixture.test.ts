@@ -4,14 +4,29 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const script = new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href
-const { validateAmbientDatabase, cleanRuntimeEnvironment, assertLocalFixture, loadMigrationEnvironment, parseLocalFixtureArguments } = await import(script)
+const { validateAmbientDatabase, cleanRuntimeEnvironment, fixtureCommandEnvironment, assertLocalFixture, loadMigrationEnvironment, parseLocalFixtureArguments, createLocalFixture } = await import(script)
 
 describe('[COMP:crm/assurance-fixture] Disposable database safety', () => {
   it('uses the canonical runtime by default and accepts its explicit selection', () => {
     const command=['node','fictional-case.mjs','--flag']
     expect(parseLocalFixtureArguments(['--',...command])).toMatchObject({runtimeRole:'app_user',command})
-    expect(parseLocalFixtureArguments(['--pg-bin','/fictional/pg18','--runtime-role','app_user','--migration-dir','/fictional/overlay','--',...command])).toEqual({pgBin:'/fictional/pg18',runtimeRole:'app_user',migrationDirs:['/fictional/overlay'],walArchive:false,ordinaryOwner:false,command})
+    expect(parseLocalFixtureArguments(['--pg-bin','/fictional/pg18','--runtime-role','app_user','--migration-dir','/fictional/overlay','--',...command])).toEqual({pgBin:'/fictional/pg18',runtimeRole:'app_user',migrationDirs:['/fictional/overlay'],walArchive:false,ordinaryOwner:true,statementStatistics:false,command})
     expect(parseLocalFixtureArguments(['--ordinary-owner','--',...command])).toMatchObject({ordinaryOwner:true,runtimeRole:'app_user',command})
+  })
+  it('keeps statement statistics off unless explicitly selected and forwards the marker only from the fixture', async () => {
+    const command=['node','fictional-case.mjs','--statement-statistics']
+    // Off by default; an option after `--` belongs to the command, not the launcher.
+    expect(parseLocalFixtureArguments(['--',...command])).toMatchObject({statementStatistics:false,command})
+    expect(parseLocalFixtureArguments(['--statement-statistics','--pg-bin','/fictional/pg18','--',...command])).toEqual({pgBin:'/fictional/pg18',runtimeRole:'app_user',migrationDirs:[],walArchive:false,ordinaryOwner:true,statementStatistics:true,command})
+    await expect(createLocalFixture({ env: {}, statementStatistics: 'true' })).rejects.toThrow('Invalid statement statistics profile')
+    // A caller cannot claim the profile: only the fixture's own environment carries the marker.
+    expect(fixtureCommandEnvironment({ BRIAN_ASSURANCE_STATEMENT_STATS: 'true', BRIAN_CHAT_COST_OUTPUT: '/tmp/fictional.json' }, { PGPORT: '54329' }))
+      .toEqual({ BRIAN_CHAT_COST_OUTPUT: '/tmp/fictional.json', PGPORT: '54329' })
+    expect(fixtureCommandEnvironment({}, { PGPORT: '54329', BRIAN_ASSURANCE_STATEMENT_STATS: 'true' }))
+      .toEqual({ PGPORT: '54329', BRIAN_ASSURANCE_STATEMENT_STATS: 'true' })
+  })
+  it('refuses a superuser-owned fixture before creating a cluster, because 8274 admits only an ordinary owner', async () => {
+    await expect(createLocalFixture({ env: {}, ordinaryOwner: false })).rejects.toThrow('Superuser-owned fixtures cannot apply migration 8274')
   })
   it('rejects arbitrary or missing role selection before fixture creation', () => {
     for (const role of ['assurance_app','admin_fixture_app','owner','app_user; SET ROLE owner','other_runtime']) expect(() => parseLocalFixtureArguments(['--runtime-role',role,'--','node','fictional-case.mjs'])).toThrow('Unsupported fixture runtime role')

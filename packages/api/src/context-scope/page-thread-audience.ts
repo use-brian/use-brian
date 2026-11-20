@@ -2,7 +2,7 @@
  * Labels remain the caller/destination validator's independent responsibility.
  * [COMP:api/page-thread-audience]
  */
-import type { ScopeSource } from '@use-brian/core'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { getPool } from '../db/client.js'
 import { sessionKindSql } from '../session-kind.js'
 

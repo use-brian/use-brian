@@ -1,5 +1,5 @@
 import type { IncomingMessage } from '@use-brian/channels'
-import type { DispatchEvent, WorkflowEventDispatcher } from '@use-brian/core'
+import type { DispatchEvent, WorkflowEventDispatcher } from '@use-brian/core/workflow/event-trigger.js'
 
 export type IncomingMessageEventInput = {
   workspaceId: string

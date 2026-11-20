@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CrmOperationsCommandSchema, crmOperationsSha256, type CrmOperationsContext, type RecordCrmSubmissionCommand } from '@use-brian/core'
+import { CrmOperationsCommandSchema, crmOperationsSha256, type CrmOperationsContext, type RecordCrmSubmissionCommand } from '@use-brian/core/crm/operations-types.js'
 import { assertIntakeVerificationConfiguration, verifyIntakeIdentity } from '../identity-verification.js'
 import { intakeProofFixture } from './intake-proof-fixture.js'
 

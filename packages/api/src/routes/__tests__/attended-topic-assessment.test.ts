@@ -1,16 +1,23 @@
 import {beforeEach,describe,expect,it,vi} from 'vitest'
-import {bindScopeSources,boundScopeSources,ContextScopeAccumulator,type LLMProvider,type SessionContextAuthority} from '@use-brian/core'
+import type {SessionContextAuthority} from '@use-brian/core/memory/session-state-types.js'
+import type {LLMProvider} from '@use-brian/agent-runtime/providers/types.js'
+import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
+import {bindScopeSources, boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import type {Session,SessionMessage} from '../../db/sessions.js'
-import {assessAttendedSessionMessage,topicEvidenceFromHistory} from '../attended-session-context.js'
+import {assessAttendedSessionMessage,topicEvidenceFromHistory} from '../attended-turn-routing.js'
 
 const spies=vi.hoisted(()=>({query:vi.fn(),proof:vi.fn(),classify:vi.fn(),sql:vi.fn(),prepare:vi.fn()}))
-vi.mock('@use-brian/core',async original=>({...await original<typeof import('@use-brian/core')>(),classifyTopic:spies.classify,
+vi.mock('@use-brian/core/memory/topic-classifier.js',async original=>({...await original<typeof import('@use-brian/core/memory/topic-classifier.js')>(),classifyTopic:spies.classify}))
+vi.mock('@use-brian/agent-runtime/security/execution-context.js',async original=>({...await original<typeof import('@use-brian/agent-runtime/security/execution-context.js')>(),
  executionToolContext:(execution:unknown,base:object)=>({...base,executionContext:execution})}))
 vi.mock('../../db/client.js',async original=>({...await original<typeof import('../../db/client.js')>(),getPool:()=>({query:spies.sql})}))
-vi.mock('../../db/session-query-reader.js',()=>({readAdmittedSessionQuery:spies.query,captureSessionTopics:vi.fn(),sessionQueryRootMetadata:vi.fn()}))
+vi.mock('../../db/conversation-store.js',()=>({readAdmittedSessionQuery:spies.query,captureSessionTopics:vi.fn(),sessionQueryRootMetadata:vi.fn()}))
 vi.mock('../../db/session-context-revisions.js',()=>({readSessionQueryFrame:vi.fn()}))
-vi.mock('../../db/session-message-annotations.js',()=>({prepareSessionMessageAnnotation:spies.prepare,writeSessionMessageAnnotation:vi.fn()}))
-vi.mock('../../application-platform/model-source-authority.js',()=>({assertSourceModelInputAuthority:spies.proof,ownsNativeAttendedAssembly:vi.fn()}))
+vi.mock('../../db/session-message-annotations.js',async original=>({
+ ...await original<typeof import('../../db/session-message-annotations.js')>(),
+ prepareSessionMessageAnnotation:spies.prepare,writeSessionMessageAnnotation:vi.fn(),
+}))
+vi.mock('../../context-scope/admission.js',()=>({admitModelInput:spies.proof}))
 
 beforeEach(()=>{
  vi.clearAllMocks()
@@ -22,7 +29,10 @@ beforeEach(()=>{
  })
 })
 function fixture(){
- const authority={execution:{security:{authority:{assertCurrent:vi.fn().mockResolvedValue(undefined)},access:{workspaceId:'workspace-fixture'}}},accumulator:new ContextScopeAccumulator()} as unknown as SessionContextAuthority
+ const authority={execution:{
+  identity:{kind:'attended',principal:{kind:'workspace_member',authenticationKind:'verified_channel',userId:'user-fixture'}},
+  security:{authority:{assertCurrent:vi.fn().mockResolvedValue(undefined)},access:{workspaceId:'workspace-fixture'}},
+ },accumulator:new ContextScopeAccumulator()} as unknown as SessionContextAuthority
  const session={id:'session-fixture'} as Session
  const oldText='Full old anchor '+ 'evidence '.repeat(1000)
  const history=[{id:'old',role:'user',content:[{type:'text',text:oldText}]},{id:'answer',role:'assistant',content:'Full assistant context'},

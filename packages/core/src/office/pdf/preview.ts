@@ -1,10 +1,13 @@
 /** Protected server-side page raster for exact PDF approval previews.
  * [COMP:office/pdf-tools] */
-import { definePDFJSModule, getDocumentProxy, renderPageAsImage } from 'unpdf'
+import { lazyImplementation } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
+
+// The PDF rasterizer loads on the first approval preview (M4 step 5).
+const loadUnpdf = lazyImplementation('The PDF page rasterizer (unpdf)', () => import('unpdf'))
 
 let pdfJsReady: Promise<void> | undefined
 
-function ensurePdfJs(): Promise<void> {
+function ensurePdfJs(definePDFJSModule: Awaited<ReturnType<typeof loadUnpdf>>['definePDFJSModule']): Promise<void> {
   pdfJsReady ??= definePDFJSModule(() => import('pdfjs-dist/legacy/build/pdf.mjs'))
   return pdfJsReady
 }
@@ -14,7 +17,8 @@ export async function renderPdfApprovalPage(
   pageNumber: number,
   width = 1_400,
 ): Promise<Buffer> {
-  await ensurePdfJs()
+  const { definePDFJSModule, getDocumentProxy, renderPageAsImage } = await loadUnpdf()
+  await ensurePdfJs(definePDFJSModule)
   const document = await getDocumentProxy(new Uint8Array(bytes))
   try {
     if (!Number.isInteger(pageNumber) || pageNumber < 1 || pageNumber > document.numPages) {

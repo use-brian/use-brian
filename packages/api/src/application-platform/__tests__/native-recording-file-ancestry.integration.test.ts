@@ -1,5 +1,8 @@
 /** [COMP:api/native-chat-read-cost] Canonical media provenance survives fresh native transcript proofs. */
-import { ContextScopeAccumulator, type ExecutionContext, type ScopeSource, type SessionContextAuthority } from '@use-brian/core'
+import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import type { PoolClient } from 'pg'
@@ -9,8 +12,8 @@ import { createPersonalWebSession } from '../../db/sessions.js'
 import { authSessionStore } from '../../db/auth-session-store.js'
 import { findAssistantById } from '../../db/users.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
-import { readAdmittedSessionQuery } from '../../db/session-query-reader.js'
-import { publishNativeSessionMessage } from '../../db/session-message-publication.js'
+import { readAdmittedSessionQuery } from '../../db/conversation-store.js'
+import { publishNativeSessionMessage } from '../../db/conversation-store.js'
 import { validateCallerScopeEvidence } from '../../context-scope/caller-evidence.js'
 import { createRecordingTranscriptFixture } from '../../__tests__/fixtures/recording-transcript-chain.js'
 import { persistentContextFixture } from './fixtures/persistent-context.js'
@@ -56,7 +59,7 @@ describe.sequential('[COMP:api/native-chat-read-cost] recording-derived file anc
         await applyRLSGucs(client, actor)
         await client.query("SET LOCAL statement_timeout='15s'")
         return (await client.query<{ value: { admitted: true; immutable: ScopeSource[]; current: ScopeSource[] } | null }>(
-          'SELECT read_native_turn_scope_evidence($1,$2) value', [fixture.workspaceId,
+          'SELECT capture_conversation_evidence($1,$2) value', [fixture.workspaceId,
             JSON.stringify(input.map(source => ({ kind: source.resourceKind, id: source.resourceId, version: source.version })))])).rows[0].value
       })
     } finally { await rollbackAndRelease(client) }
@@ -91,7 +94,7 @@ describe.sequential('[COMP:api/native-chat-read-cost] recording-derived file anc
     expect(privateSource.userId).toBe(fixture.ownerId)
     const input = [privateSource]
     expect((await proof(input, fixture.ownerId, execution))?.admitted).toBe(true)
-    expect(await proof(input, fixture.firstId)).toBeNull()
+    expect(await proof(input, fixture.firstId)).toEqual({admitted:false})
   })
 
   it('retains every media ancestor through a published reply and a fresh subsequent history query', async () => {
@@ -115,7 +118,7 @@ describe.sequential('[COMP:api/native-chat-read-cost] recording-derived file anc
     else await fixture.pool.query(`INSERT INTO scope_resource_states(workspace_id,resource_kind,resource_id,resource_version,
       review_state,classification_revision,holding_reason) VALUES($1,$2,$3,'1','held',1,'Fictional source review')`,
     [fixture.workspaceId, kind, id])
-    await expect(proof()).rejects.toMatchObject({ code: '42501', message: 'scope_operation_denied' })
+    expect(await proof()).toEqual({admitted:false})
     const client = await getAppPool().connect()
     const queries: string[] = []
     const observed = { query: ((sql: string, values?: unknown[]) => {
@@ -127,15 +130,15 @@ describe.sequential('[COMP:api/native-chat-read-cost] recording-derived file anc
         await client.query('BEGIN'); await applyRLSGucs(client, fixture.ownerId)
         return validateCallerScopeEvidence({ sources }, authority.execution.security.ceiling, observed)
       })).rejects.toMatchObject({ reason: 'caller_evidence_unavailable', diagnostic: 'source_unverifiable',
-        verificationPhase: 'native_proof', verificationSqlstateClass: '42' })
+        verificationPhase: 'native_proof' })
       const proofQueries = queries.filter(sql => !sql.includes('to_regprocedure'))
       expect(proofQueries).toHaveLength(1)
-      expect(proofQueries[0]).toMatch(/^SELECT read_native_(?:retained|turn)_scope_evidence\(/)
+      expect(proofQueries[0]).toMatch(/^SELECT capture_conversation_evidence\(/)
       expect(queries.some(sql => sql.includes('read_native_session_field_dependencies'))).toBe(false)
     } finally { await rollbackAndRelease(client) }
   })
 
-  it('keeps a held physical query candidate on the original fallback path', async () => {
+  it('omits a held physical query candidate without making it a declared input', async () => {
     const reply = await publishNativeSessionMessage({ sessionId: fixture.session.id, role: 'assistant',
       content: [{ type: 'text', text: 'Fictional earlier media-backed reply.' }], senderAssistantId: fixture.assistantId,
       authority, derivationTarget: fixture.envelope, derivation: { producer: 'fixture:query-candidate', sources } })
@@ -149,34 +152,33 @@ describe.sequential('[COMP:api/native-chat-read-cost] recording-derived file anc
         await client.query("SET LOCAL statement_timeout='15s'")
         // This is selector acquisition, not a declaration that every physical
         // candidate is factual input. It must not inherit the42501 fast denial.
-        expect((await client.query('SELECT read_native_turn_session_query($1,$2,$3,$3) value',
-          [fixture.workspaceId, fixture.session.id, reply.sequenceNum])).rows[0].value).toBeNull()
+        const captured=(await client.query('SELECT capture_conversation_query($1,$2,$3,$3) value',
+          [fixture.workspaceId,fixture.session.id,reply.sequenceNum])).rows[0].value
+        expect(captured.history.slice(1).map((row:{row:{id:string}})=>row.row.id)).not.toContain(reply.id)
       })
     } finally { await rollbackAndRelease(client) }
   })
 
-  it('refuses each permissive canonical admission callee until its exact catalog contract is restored', async () => {
-    for (const signature of dependencySignatures) {
-      const saved = (await fixture.pool.query<{ definition: string; body: string; routine: unknown; language: string }>(
-        `SELECT pg_get_functiondef(p.oid) definition,p.prosrc body,to_jsonb(p) routine,l.lanname language
-         FROM pg_proc p JOIN pg_language l ON l.oid=p.prolang WHERE p.oid=$1::regprocedure`, [signature])).rows[0]
-      try {
-        // This isolated owned fixture temporarily commits the mutation so the
-        // independent real app_user connection sees it. No policy is mocked.
-        const permissive = saved.language === 'sql' ? 'SELECT true' : 'BEGIN RETURN true;END'
-        await fixture.pool.query(saved.definition.replace(saved.body, () => permissive))
-        expect(await proof()).toBeNull()
-      } finally {
-        await fixture.pool.query(saved.definition)
-        expect((await fixture.pool.query('SELECT to_jsonb(p) routine FROM pg_proc p WHERE p.oid=$1::regprocedure', [signature])).rows[0].routine).toEqual(saved.routine)
-      }
-      expect((await proof())?.admitted).toBe(true)
+  it.each(dependencySignatures)('refuses a permissive %s until its exact catalog contract is restored', async signature => {
+    const saved = (await fixture.pool.query<{ definition: string; body: string; routine: unknown; language: string }>(
+      `SELECT pg_get_functiondef(p.oid) definition,p.prosrc body,to_jsonb(p) routine,l.lanname language
+       FROM pg_proc p JOIN pg_language l ON l.oid=p.prolang WHERE p.oid=$1::regprocedure`, [signature])).rows[0]
+    try {
+      // This isolated owned fixture temporarily commits the mutation so the
+      // independent real app_user connection sees it. No policy is mocked.
+      const permissive = saved.language === 'sql' ? 'SELECT true' : 'BEGIN RETURN true;END'
+      await fixture.pool.query(saved.definition.replace(saved.body, () => permissive))
+      await expect(proof()).rejects.toMatchObject({code:'42501',message:'scope_source_changed'})
+    } finally {
+      await fixture.pool.query(saved.definition)
+      expect((await fixture.pool.query('SELECT to_jsonb(p) routine FROM pg_proc p WHERE p.oid=$1::regprocedure', [signature])).rows[0].routine).toEqual(saved.routine)
     }
+    expect((await proof())?.admitted).toBe(true)
   })
 
-  it('falls back for an episode outside the canonical recording family', async () => {
+  it('refuses newly private episode ancestry outside the shared source floor', async () => {
     await fixture.pool.query("UPDATE episodes SET source_kind='manual',user_id=$2 WHERE id=$1", [media.episodeId, fixture.ownerId])
-    expect(await proof()).toBeNull()
+    expect(await proof()).toEqual({admitted:false})
   })
 
   it('rejects the persisted transcript hold caused by recording retirement', async () => {
@@ -189,15 +191,17 @@ describe.sequential('[COMP:api/native-chat-read-cost] recording-derived file anc
       FROM recordings r WHERE r.id=$1`, [media.recordingId, media.transcriptFileId, media.mediaFileId, fixture.workspaceId])).rows[0]
     expect(state).toEqual({ recording_held: false, retired: true, transcript_held: true,
       media_held: false, episode_held: false, review_markers: 0 })
-    await expect(proof()).rejects.toMatchObject({ code: '42501', message: 'scope_operation_denied' })
+    expect(await proof()).toEqual({admitted:false})
   })
 
-  it('keeps an unheld retired transcript root on the original fallback path', async () => {
+  it('preserves immutable provenance when an unheld transcript is retired', async () => {
     await fixture.pool.query('UPDATE workspace_files SET valid_to=now() WHERE id=$1', [media.transcriptFileId])
     expect((await fixture.pool.query(`SELECT scope_held,valid_to IS NOT NULL retired,
       (SELECT count(*)::int FROM scope_resource_states WHERE workspace_id=$2) review_markers
       FROM workspace_files WHERE id=$1`, [media.transcriptFileId, fixture.workspaceId])).rows[0])
       .toEqual({ scope_held: false, retired: true, review_markers: 0 })
-    expect(await proof()).toBeNull()
+    const result=await proof()
+    expect(result?.admitted).toBe(true)
+    expect(result?.current).toContainEqual(expect.objectContaining({resourceKind:'workspace_file',resourceId:media.transcriptFileId}))
   })
 })

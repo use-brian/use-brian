@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
-import { aiStudioTransport, vertexTransport, AI_STUDIO_BASE_URL } from '../google-transport.js'
-import { cachedTokenSource, metadataTokenSource, serviceAccountTokenSource } from '../google-auth.js'
-import { createGeminiProvider } from '../gemini.js'
+import { aiStudioTransport, vertexTransport, AI_STUDIO_BASE_URL } from '@use-brian/agent-runtime/providers/google-transport.js'
+import { cachedTokenSource, metadataTokenSource, serviceAccountTokenSource } from '@use-brian/agent-runtime/providers/google-auth.js'
+import { createGeminiProvider } from '@use-brian/agent-runtime/providers/gemini.js'
 import {
   documentModelForMediaBackend,
   GEMINI_VISION_MODEL,
@@ -12,10 +12,10 @@ import {
 } from '../../media/backend.js'
 import { createVertexEmbedder, createDashScopeEmbedder, VERTEX_EMBEDDING_MODEL_ID } from '../../embeddings/adapters.js'
 import { GEMINI_EMBEDDING_MODEL_ID } from '../../embeddings/embedder.js'
-import { stripUnsignedToolUses, modelRequiresToolSignatures } from '../../engine/tool-pairing.js'
+import { stripUnsignedToolUses, modelRequiresToolSignatures } from '@use-brian/agent-runtime/engine/tool-pairing.js'
 import { minimalPdf } from '../../files/__tests__/pdf-fixture.js'
 import { pdfPageCompletionMarker } from '../../files/pdf-distill.js'
-import type { Message } from '../types.js'
+import type { Message } from '@use-brian/agent-runtime/providers/types.js'
 
 describe('[COMP:providers/google-transport] Google transport', () => {
   it('builds AI Studio URLs against the developer host with the API-key header', async () => {

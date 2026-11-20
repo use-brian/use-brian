@@ -4,7 +4,6 @@ import pg from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
 import { createDbCrmIntakeReadStore } from '../crm-intake-store.js'
 import { createDbCrmSegmentStore } from '../crm-segment-store.js'
-import { createAssociationStore } from '../association-store.js'
 import { loadAssociationOrderScope } from '../../association/source-scope.js'
 import { getPool } from '../client.js'
 
@@ -38,20 +37,16 @@ describe('[COMP:crm/sendability] Actual evidence evaluation', () => {
       VALUES ($1,$2,$3,'updates',$4,'withdrawn','1','fixture','2026-01-01T00:00:00.123457Z','2026-01-01T00:00:00.123458Z',$5::jsonb,$6::jsonb)`, [withdrawnId, workspaceId, contactId, purposeId,scope,sources])
     const check = () => reads.checkSendability(workspaceId, contactId, 'email', 'updates',{kind:'user',userId})
     const segment = () => createDbCrmSegmentStore().previewSegment(workspaceId, segmentId)
-    const legacy = () => createAssociationStore(pool).listConsents(workspaceId, contactId,{credentialKind:'user',credentialId:userId,actingUserId:userId})
     expect(await check()).toMatchObject({ verdict: 'blocked', effectiveConsentEventId: withdrawnId })
-    expect((await legacy()).effective).toEqual({ updates: 'withdrawn' })
     expect((await segment()).snapshotIds).toEqual([contactId])
     const grantId = `${withdrawnId.slice(0, -1)}f`
     await pool.query(`INSERT INTO association_consent_events (id,workspace_id,contact_id,purpose,purpose_id,action,wording_version,source,occurred_at,created_at,scope_snapshot,scope_sources)
       VALUES ($1,$2,$3,'updates',$4,'granted','1','fixture','2025-12-31T19:00:00.123457-05:00','2026-01-01T00:00:00.123457Z',$5::jsonb,$6::jsonb)`, [grantId, workspaceId, contactId, purposeId,scope,sources])
     expect(await check()).toMatchObject({ verdict: 'blocked', effectiveConsentEventId: withdrawnId })
-    expect((await legacy()).effective).toEqual({ updates: 'withdrawn' })
     await pool.query(`UPDATE association_consent_events SET created_at='2026-01-01T00:00:00.123458Z' WHERE workspace_id=$1 AND id=$2`, [workspaceId, grantId])
     const tieWinner = grantId > withdrawnId ? grantId : withdrawnId
     expect((await check()).effectiveConsentEventId).toBe(tieWinner)
     expect((await segment()).count).toBe(tieWinner === withdrawnId ? 1 : 0)
-    expect((await legacy()).effective).toEqual({ updates: tieWinner === withdrawnId ? 'withdrawn' : 'granted' })
     await pool.query(`UPDATE association_consent_events SET occurred_at='2026-02-01T00:00:00Z' WHERE workspace_id=$1 AND id=$2`, [workspaceId, grantId])
     expect((await check()).verdict).toBe('allowed')
 

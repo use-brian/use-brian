@@ -32,6 +32,7 @@ import type { Dictionary } from "@/lib/i18n/dictionaries";
 import type { CommentThread } from "@/lib/api/comments";
 import type { DocSessionMessage } from "@/lib/api/sessions";
 import { authFetch } from "@/lib/auth-fetch";
+import { conversationRegistry } from "@/lib/chat/conversation-registry";
 
 // Override only fetchSessionMessages — keep the real extractMessageText /
 // parseMessageAttachments / stripCommentThreadReplyTag so visibleComments runs
@@ -141,19 +142,28 @@ describe("[COMP:app-web/comment-thread-body] seed one-shot across navigation", (
     root = null;
     container?.remove();
     container = null;
+    // Every case shares one session id: drop the controller entries a case
+    // left following (transport abort only, never a Stop).
+    conversationRegistry().disposeAll();
   });
+
+  /** The status read the controller makes when a direct stream ends: the turn is over. */
+  const idleStatus = () => Response.json({ status: "idle", turnId: null });
 
   async function mount(node: React.ReactNode) {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
     await act(async () => root!.render(node));
-    await act(async () => {});
+    // The reply turn runs through the shared conversation controller: let its
+    // attach, stream reads and the canonical re-read settle.
+    for (let i = 0; i < 10; i++) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
   }
 
   it.each(["delivery_audience_unverified", "authority_changed", "unknown"])(
     "keeps an explicit %s failure visible after reconciling a saved comment", async code => {
       vi.mocked(authFetch).mockImplementation(async url => {
+        if (/\/api\/sessions\/[^/]+$/.test(String(url))) return idleStatus();
         if (!String(url).endsWith("/api/chat")) return { ok: false, json: async () => ({}) } as Response;
         return { ok: true, body: new ReadableStream<Uint8Array>({
           start(controller) {
@@ -188,6 +198,7 @@ describe("[COMP:app-web/comment-thread-body] seed one-shot across navigation", (
   it("keeps an acknowledged comment and terminal failure when history cannot be read", async () => {
     mockFetchMessages.mockRejectedValue(new Error("History unavailable"));
     vi.mocked(authFetch).mockImplementation(async url => {
+      if (/\/api\/sessions\/[^/]+$/.test(String(url))) return idleStatus();
       if (!String(url).endsWith("/api/chat")) throw new TypeError("Connection interrupted");
       return { ok:true,body:new ReadableStream<Uint8Array>({ start(controller) {
         controller.enqueue(new TextEncoder().encode('event: user_message_saved\ndata: {"id":"saved-comment"}\n\nevent: error\ndata: {"code":"page_context_unavailable"}\n\n'));
@@ -244,6 +255,40 @@ describe("[COMP:app-web/comment-thread-body] seed one-shot across navigation", (
     // Reopening an AI-backed thread must not opt the next manual reply into AI.
     expect(container!.querySelector(`[aria-label="${dict.comments.aiReply}"]`)?.getAttribute("aria-pressed")).toBe("false");
   });
+
+  it("fences old document completion and done while a successor snapshot is displayed", async () => {
+    const first = "a".repeat(64), successor = "b".repeat(64);
+    let output!: ReadableStreamDefaultController<Uint8Array>;
+    let status = { status: "running", turnId: first, turnEndReason: null as string | null };
+    vi.mocked(authFetch).mockImplementation(async url => {
+      if (String(url).endsWith("/stream")) return new Response(new ReadableStream<Uint8Array>({ start(controller) { output = controller; } }));
+      if (String(url).includes("/api/sessions/")) return Response.json(status);
+      return new Response("{}", { status: 503 });
+    });
+    await mount(body(false, { id: "correlated_document", sessionStatus: "running" }));
+    const frame = async (event: string, data: unknown) => {
+      await act(async () => {
+        output.enqueue(new TextEncoder().encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+        await new Promise(resolve => setTimeout(resolve, 0));
+      });
+    };
+    await frame("status", { status: "running", turnId: first });
+    await frame("snapshot", { turnId: first, text: "Earlier document reply" });
+    status = { status: "running", turnId: successor, turnEndReason: null };
+    await frame("status", { status: "running", turnId: successor });
+    await frame("snapshot", { turnId: successor, text: "Current document reply" });
+    await frame("turn_completed", { turnId: first, reason: "failed" });
+    await frame("done", { turnId: first });
+    expect(container!.textContent).toContain("Current document reply");
+    expect(container!.querySelector('[role="alert"]')).toBeNull();
+    status = { status: "idle", turnId: successor, turnEndReason: "publication_recovered" };
+    mockFetchMessages.mockResolvedValue([...persisted, { ...persisted[0], id: "recovered-reply", role: "assistant", senderUserId: null, content: "Recovered document reply" }]);
+    await frame("turn_completed", { turnId: successor, reason: "publication_recovered" });
+    await frame("done", { turnId: successor });
+    expect(container!.textContent).toContain("Recovered document reply");
+    expect(container!.textContent).not.toContain("Current document reply");
+    expect(container!.querySelector('[role="alert"]')).toBeNull();
+  });
 });
 
 describe("[COMP:app-web/comment-thread-body] interrupted seed idempotency", () => {
@@ -274,4 +319,7 @@ describe("[COMP:app-web/comment-thread-body] interrupted seed idempotency", () =
       ),
     ).toBe(false);
   });
+
+
+
 });

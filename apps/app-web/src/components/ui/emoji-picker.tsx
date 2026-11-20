@@ -27,11 +27,11 @@ import { isPhoneViewport } from "@/lib/viewport";
 
 import * as React from "react";
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
-import type { LucideIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-import { isImageIcon } from "@use-brian/shared/page-icon";
 import { useT } from "@/lib/i18n/client";
+import { useOptionalTheme, type ResolvedTheme } from "@/lib/theme";
+import type { Picker } from "emoji-mart";
 
 export type EmojiPickerProps = {
   /** Raised with the chosen emoji, or `null` for the Remove action. */
@@ -121,6 +121,27 @@ export function EmojiPicker({
 }
 
 /**
+ * The app provider is authoritative (including system/custom modes). Existing
+ * standalone previews don't all mount it. Keep that compatibility here,
+ * without observing the DOM in the normal app or catching errors from hooks.
+ */
+function usePickerTheme(): ResolvedTheme {
+  const resolved = useOptionalTheme()?.resolved;
+  const subscribe = React.useCallback((onChange: () => void) => {
+    if (resolved !== undefined) return () => {};
+    const observer = new MutationObserver(onChange);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+    return () => observer.disconnect();
+  }, [resolved]);
+  const fallback = React.useSyncExternalStore<ResolvedTheme>(
+    subscribe,
+    () => document.documentElement.classList.contains("dark") ? "dark" : "light",
+    () => "light",
+  );
+  return resolved ?? fallback;
+}
+
+/**
  * Lazily loads + mounts the vanilla emoji-mart Picker (a custom element)
  * into a container div. Only rendered while the popover is open, so the
  * heavy data import is deferred to first use. Mounts once; the latest
@@ -133,6 +154,10 @@ function EmojiMart({
   onSelect: (native: string) => void;
   perLine?: number;
 }) {
+  const theme = usePickerTheme();
+  const themeRef = React.useRef(theme);
+  themeRef.current = theme;
+  const pickerRef = React.useRef<Picker | null>(null);
   const ref = React.useRef<HTMLDivElement>(null);
   const onSelectRef = React.useRef(onSelect);
   onSelectRef.current = onSelect;
@@ -148,7 +173,7 @@ function EmojiMart({
       if (cancelled || !host) return;
       const picker = new martMod.Picker({
         data: dataMod.default,
-        theme: "light",
+        theme: themeRef.current,
         previewPosition: "none",
         skinTonePosition: "none",
         navPosition: "top",
@@ -156,77 +181,23 @@ function EmojiMart({
         maxFrequentRows: 1,
         onEmojiSelect: (e: { native: string }) => onSelectRef.current(e.native),
       });
+      pickerRef.current = picker;
       host.appendChild(picker as unknown as Node);
     })();
     return () => {
       cancelled = true;
+      pickerRef.current = null;
       host?.replaceChildren();
     };
   }, [perLine]);
 
-  return <div ref={ref} />;
-}
+  React.useEffect(() => {
+    // Update the existing shadow-root picker, not its host/React key. Recreating
+    // it here would reset the search, active category, and keyboard focus.
+    pickerRef.current?.update({ theme });
+  }, [theme]);
 
-/**
- * The leading page-icon as a self-contained picker trigger. Renders the
- * chosen emoji when `icon` is set, otherwise the type-derived lucide
- * glyph (`fallback`). Clicking opens the `<EmojiPicker>`; picking calls
- * `onSetIcon(emoji | null)`.
- *
- * A *separate button from the row's navigation target* — rendered as a
- * sibling of the title button so the icon opens the picker while the
- * title navigates (never a button nested inside a button).
- * `stopPropagation` keeps a row-level drag/select from firing on tap.
- */
-export function PageIconButton({
-  icon,
-  fallback: Fallback,
-  onSetIcon,
-  side,
-  align,
-  className,
-  open,
-  onOpenChange,
-}: {
-  icon: string | null;
-  fallback: LucideIcon;
-  onSetIcon: (icon: string | null) => void;
-  side?: EmojiPickerProps["side"];
-  align?: EmojiPickerProps["align"];
-  /** Extra classes for the trigger button (sizing per row context). */
-  className?: string;
-  /** Controlled open — lets a sibling menu item open this picker. */
-  open?: boolean;
-  onOpenChange?: (open: boolean) => void;
-}) {
-  const t = useT().docPage.emojiPicker;
-  return (
-    <EmojiPicker
-      onPick={onSetIcon}
-      side={side}
-      align={align}
-      open={open}
-      onOpenChange={onOpenChange}
-      trigger={
-        <button
-          type="button"
-          aria-label={t.iconButtonAria}
-          onClick={(e) => e.stopPropagation()}
-          onPointerDown={(e) => e.stopPropagation()}
-          className={cn(
-            "flex shrink-0 items-center justify-center rounded hover:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
-            className,
-          )}
-        >
-          {icon && !isImageIcon(icon) ? (
-            <span className="text-[15px] leading-none">{icon}</span>
-          ) : (
-            <Fallback className="size-4 text-sidebar-foreground/55" />
-          )}
-        </button>
-      }
-    />
-  );
+  return <div ref={ref} />;
 }
 
 /**

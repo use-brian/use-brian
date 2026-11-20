@@ -1,0 +1,2800 @@
+{
+  "sourceRevision": "43a70a8e3608ffc53d76207af4aba85cfb37ea76",
+  "worktree": "Uncommitted F01–F07 fixes. sourceRevision identifies the parent commit, not a clean commit of the fixes.",
+  "sourceFiles": [
+    {
+      "file": "apps/app-web/src/components/association/__tests__/event-workspace.test.tsx",
+      "sha256": "864d92c940622b63bb081590ce82cc7ca947a68fbe5549195f188fee8e9d70d6"
+    },
+    {
+      "file": "apps/app-web/src/components/association/__tests__/ui.test.tsx",
+      "sha256": "e75dadb2cf0f2e56f986cdada5a27bd557ed865458c854f1ae946b24efc1f5f6"
+    },
+    {
+      "file": "apps/app-web/src/components/association/events/event-page-editor.tsx",
+      "sha256": "57a73935365ecb4ccce2a6efe186ee448361486b14375c0cb4c26e1ff44142bb"
+    },
+    {
+      "file": "apps/app-web/src/components/association/ui.tsx",
+      "sha256": "e2567cdb4b2de31d0151eccf0336c70eb89cbe49b5e20ccd073d7aa71ac02760"
+    },
+    {
+      "file": "apps/app-web/src/components/shopify/analyse-tab.tsx",
+      "sha256": "a508bf90352989ccf6fa19aff0fc3380c3369d94e5b5c73bbe31cd54d7bbbcc5"
+    },
+    {
+      "file": "apps/app-web/src/components/shopify/campaign-tab.tsx",
+      "sha256": "1afa6ef42e441bea63c5f145d9b694dc67cc1b1fa9ebd30f033003fe0a4bd6f4"
+    },
+    {
+      "file": "apps/app-web/src/components/ui/__tests__/button.test.ts",
+      "sha256": "1a8d9dc37f70744ec689d492dbdcc2752c4cc17465f729663dc74175c865f26e"
+    },
+    {
+      "file": "apps/app-web/src/components/ui/button.tsx",
+      "sha256": "3a929dd654e1e895a105d48a6be5d4874e2e951c4a7423c462186762a1ba6053"
+    },
+    {
+      "file": "apps/app-web/src/components/ui/checkbox.tsx",
+      "sha256": "5251f7bc99d7ab9104fa4deba482162c866e88e85cc560762e6d9bc12fa001ab"
+    },
+    {
+      "file": "apps/app-web/src/components/ui/emoji-picker.tsx",
+      "sha256": "3d5b6cc9f201ad3aeaeb79c47e519367c3c7e821f5b39d98e13388e317db9a91"
+    },
+    {
+      "file": "apps/app-web/src/components/ui/select.tsx",
+      "sha256": "8bd561724d0e8729acf376a32bf14333c4f833ec99c6570d3a373da4f9d8f9dc"
+    },
+    {
+      "file": "apps/app-web/src/components/ui/switch.tsx",
+      "sha256": "1e84b93704a0ef1e3b56ce91e4ed2d5aa74e7e1d6233db28604c0307edbca1a4"
+    },
+    {
+      "file": "apps/app-web/src/components/workflow/trigger-editor.tsx",
+      "sha256": "2041da50f226c2a41c5d85d0082fd1b22102d6cd5f88eeb11cbf23f98b175ba5"
+    },
+    {
+      "file": "apps/app-web/src/lib/theme.tsx",
+      "sha256": "fa8d02821a0b70770ee1bbd853d131ad2ef9f79a4f00226ca24c411eb28369bb"
+    },
+    {
+      "file": "apps/auth-web/src/app/globals.css",
+      "sha256": "6925fb49ba722725ea1957853030483e65fdac4268b569712f6f828e3b31bc98"
+    },
+    {
+      "file": "packages/views-renderer/src/properties/checkbox.tsx",
+      "sha256": "0d0f2b926baa11eba60bff867764494317b3499d394c6b9285532c4e63667060"
+    },
+    {
+      "file": "packages/views-renderer/src/properties/files.tsx",
+      "sha256": "6a07ecd1d07ffdaf0896a2926950d5a371ec5ab5dff1f62444141c0dc4360e8a"
+    },
+    {
+      "file": "packages/views-renderer/src/widgets/Button.tsx",
+      "sha256": "32ecb640048c60510c95cb5c4fe15317d6be6900d8ddf26d64fecf75f26e57d7"
+    }
+  ],
+  "capturedAt": "2026-11-17T04:21:54.700Z",
+  "browser": "153.0.8010.0",
+  "deviceScaleFactor": 1,
+  "locale": "en-US",
+  "timezone": "UTC",
+  "reducedMotion": "reduce",
+  "palette": "notion",
+  "caveats": [
+    "Only accounts and auth login are real public pages. No authentication, external actions or browser /api requests.",
+    "PAGE captures mount production route bodies with synthetic read-only data: header/tabs/content/overlays, NOT a session, workspace sidebar or real cross-route navigation.",
+    "Other feature captures mount isolated production components, not authenticated pages. No product styling is patched; only the labeled documentation frame and Next dev indicator are styled.",
+    "No mobile Safari, native desktop, custom palette visual or full authenticated workspace validation. Coarse pointer uses Chromium hasTouch emulation.",
+    "Linux fallback fonts differ from native systems; unavailable emoji/CJK glyphs are capture artifacts, not product findings."
+  ],
+  "screenshots": [
+    {
+      "id": "REF",
+      "name": "reference-accounts-light-desktop",
+      "url": "http://127.0.0.1:3203/accounts",
+      "kind": "public-page",
+      "width": 1440,
+      "height": 1000,
+      "mode": "light",
+      "file": "reference-accounts-light-desktop.png",
+      "pngWidth": 1440,
+      "pngHeight": 1000,
+      "sha256": "92841eeacf45e253a6895a6b601ab7d57b22311615804dde47179b0f6be60427",
+      "measurements": {
+        "root": {
+          "background": "#fff",
+          "action": "#37352f",
+          "ring": "#737373"
+        },
+        "elements": [],
+        "horizontalOverflow": false,
+        "heading": "Use Brian",
+        "dialogs": [],
+        "compactControls": [],
+        "fixtureRequests": [],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "REF",
+      "name": "reference-accounts-dark-desktop",
+      "url": "http://127.0.0.1:3203/accounts",
+      "kind": "public-page",
+      "width": 1440,
+      "height": 1000,
+      "mode": "dark",
+      "file": "reference-accounts-dark-desktop.png",
+      "pngWidth": 1440,
+      "pngHeight": 1000,
+      "sha256": "3de9bc115a58ba696e05bd1aa2af4c55deb28eaa0f2836207f1e619317447200",
+      "measurements": {
+        "root": {
+          "background": "#191919",
+          "action": "#d4d4d4",
+          "ring": "#a3a3a3"
+        },
+        "elements": [],
+        "horizontalOverflow": false,
+        "heading": "Use Brian",
+        "dialogs": [],
+        "compactControls": [],
+        "fixtureRequests": [],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F01",
+      "name": "f01-auth-login-light-1440",
+      "url": "http://127.0.0.1:3205/login",
+      "kind": "public-page",
+      "width": 1440,
+      "height": 1000,
+      "mode": "light",
+      "file": "f01-auth-login-light-1440.png",
+      "pngWidth": 1440,
+      "pngHeight": 1000,
+      "sha256": "e2a2335dc8c10d05e3da53d0afb639e475cdfdc25017efc5a681d4a035bf4346",
+      "measurements": {
+        "root": {
+          "background": "#fff",
+          "action": "#37352f",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "INPUT",
+            "label": "",
+            "width": 354,
+            "height": 47,
+            "background": "rgb(255, 255, 255)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(115, 115, 115)",
+            "fontSize": "14px"
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Sign in to your workspace",
+        "dialogs": [],
+        "compactControls": [],
+        "fixtureRequests": [],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F01",
+      "name": "f01-auth-login-dark-1440",
+      "url": "http://127.0.0.1:3205/login",
+      "kind": "public-page",
+      "width": 1440,
+      "height": 1000,
+      "mode": "dark",
+      "file": "f01-auth-login-dark-1440.png",
+      "pngWidth": 1440,
+      "pngHeight": 1000,
+      "sha256": "11bdb0f3dadbb7b4095802127c01bb037a220d170ec3f71bbca8e5ddf26b138f",
+      "measurements": {
+        "root": {
+          "background": "#191919",
+          "action": "#d4d4d4",
+          "ring": "#a3a3a3"
+        },
+        "elements": [
+          {
+            "tag": "INPUT",
+            "label": "",
+            "width": 354,
+            "height": 47,
+            "background": "rgb(25, 25, 25)",
+            "color": "rgb(212, 212, 212)",
+            "border": "rgb(163, 163, 163)",
+            "fontSize": "14px"
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Sign in to your workspace",
+        "dialogs": [],
+        "compactControls": [],
+        "fixtureRequests": [],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F01",
+      "name": "f01-auth-login-dark-360",
+      "url": "http://127.0.0.1:3205/login",
+      "kind": "public-page",
+      "width": 360,
+      "height": 800,
+      "mode": "dark",
+      "file": "f01-auth-login-dark-360.png",
+      "pngWidth": 360,
+      "pngHeight": 800,
+      "sha256": "afd5da1f1b3527fef4570b1f8a6a2e26d45facc2b395105387b5467685113d10",
+      "measurements": {
+        "root": {
+          "background": "#191919",
+          "action": "#d4d4d4",
+          "ring": "#a3a3a3"
+        },
+        "elements": [
+          {
+            "tag": "INPUT",
+            "label": "",
+            "width": 278,
+            "height": 50,
+            "background": "rgb(25, 25, 25)",
+            "color": "rgb(212, 212, 212)",
+            "border": "rgb(163, 163, 163)",
+            "fontSize": "16px"
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Sign in to your workspace",
+        "dialogs": [],
+        "compactControls": [],
+        "fixtureRequests": [],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F02",
+      "name": "f02-renderers-light-desktop",
+      "url": "http://127.0.0.1:3210/?surface=renderers&mode=light",
+      "kind": "isolated-production-components",
+      "surface": "renderers",
+      "width": 1440,
+      "height": 1000,
+      "mode": "light",
+      "file": "f02-renderers-light-desktop.png",
+      "pngWidth": 1440,
+      "pngHeight": 1000,
+      "sha256": "88609f05563fe94603d4d0d8644fead01bf1cfc64b7d1d2519ee6384256f0d68",
+      "measurements": {
+        "root": {
+          "background": "#FFFFFF",
+          "action": "#37352F",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "SECTION",
+            "label": "Common app primitivesSave changesShared checkbox",
+            "width": 496,
+            "height": 154,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Save changes",
+            "width": 109.75,
+            "height": 32,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "14px"
+          },
+          {
+            "tag": "SPAN",
+            "label": "App checkbox",
+            "width": 16,
+            "height": 16,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgb(55, 53, 47)",
+            "fontSize": "16px",
+            "pseudoTarget": {
+              "width": "0px",
+              "height": "0px"
+            },
+            "reservedArea": {
+              "width": 0,
+              "height": 0
+            }
+          },
+          {
+            "tag": "SECTION",
+            "label": "views-renderer primitivesSave changesCheckbox property cell",
+            "width": 496,
+            "height": 154,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Save changes",
+            "width": 111.75,
+            "height": 32,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "14px"
+          },
+          {
+            "tag": "SPAN",
+            "label": "Reference enabled",
+            "width": 36,
+            "height": 20,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "16px",
+            "pseudoTarget": {
+              "width": "0px",
+              "height": "0px"
+            },
+            "reservedArea": {
+              "width": 0,
+              "height": 0
+            }
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Rendered views: action and checkbox primitives",
+        "dialogs": [],
+        "compactControls": [],
+        "fixtureRequests": [],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F02",
+      "name": "f02-renderers-dark-desktop",
+      "url": "http://127.0.0.1:3210/?surface=renderers&mode=dark",
+      "kind": "isolated-production-components",
+      "surface": "renderers",
+      "width": 1440,
+      "height": 1000,
+      "mode": "dark",
+      "file": "f02-renderers-dark-desktop.png",
+      "pngWidth": 1440,
+      "pngHeight": 1000,
+      "sha256": "6edda96a77fd47ae3c06290d4501cfcad8a6c7ba97bb79091d6d3dc5fdb39781",
+      "measurements": {
+        "root": {
+          "background": "#191919",
+          "action": "#D4D4D4",
+          "ring": "#A3A3A3"
+        },
+        "elements": [
+          {
+            "tag": "SECTION",
+            "label": "Common app primitivesSave changesShared checkbox",
+            "width": 496,
+            "height": 154,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(212, 212, 212)",
+            "border": "rgb(47, 47, 47)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Save changes",
+            "width": 109.75,
+            "height": 32,
+            "background": "rgb(212, 212, 212)",
+            "color": "rgb(25, 25, 25)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "14px"
+          },
+          {
+            "tag": "SPAN",
+            "label": "App checkbox",
+            "width": 16,
+            "height": 16,
+            "background": "rgb(212, 212, 212)",
+            "color": "rgb(25, 25, 25)",
+            "border": "rgb(212, 212, 212)",
+            "fontSize": "16px",
+            "pseudoTarget": {
+              "width": "0px",
+              "height": "0px"
+            },
+            "reservedArea": {
+              "width": 0,
+              "height": 0
+            }
+          },
+          {
+            "tag": "SECTION",
+            "label": "views-renderer primitivesSave changesCheckbox property cell",
+            "width": 496,
+            "height": 154,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(212, 212, 212)",
+            "border": "rgb(47, 47, 47)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Save changes",
+            "width": 111.75,
+            "height": 32,
+            "background": "rgb(212, 212, 212)",
+            "color": "rgb(25, 25, 25)",
+            "border": "rgb(47, 47, 47)",
+            "fontSize": "14px"
+          },
+          {
+            "tag": "SPAN",
+            "label": "Reference enabled",
+            "width": 36,
+            "height": 20,
+            "background": "rgb(212, 212, 212)",
+            "color": "rgb(212, 212, 212)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "16px",
+            "pseudoTarget": {
+              "width": "0px",
+              "height": "0px"
+            },
+            "reservedArea": {
+              "width": 0,
+              "height": 0
+            }
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Rendered views: action and checkbox primitives",
+        "dialogs": [],
+        "compactControls": [],
+        "fixtureRequests": [],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F03",
+      "name": "f03-workflow-light-desktop",
+      "url": "http://127.0.0.1:3210/?surface=workflow&mode=light",
+      "kind": "isolated-production-components",
+      "surface": "workflow",
+      "width": 1440,
+      "height": 1000,
+      "mode": "light",
+      "file": "f03-workflow-light-desktop.png",
+      "pngWidth": 1440,
+      "pngHeight": 1000,
+      "sha256": "d60cf565d8d3c540c89037ac617c471dae07ced9479982a509f0573174ec0bd0",
+      "measurements": {
+        "root": {
+          "background": "#FFFFFF",
+          "action": "#37352F",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "BUTTON",
+            "label": "Manual onlyRuns only when you press Run now or when an assistant calls runWorkfl",
+            "width": 237.5,
+            "height": 113.75,
+            "background": "oklab(0.336797 0.0000153333 0.00000673532 / 0.05)",
+            "color": "rgb(55, 53, 47)",
+            "border": "oklab(0.336797 0.0000153333 0.00000673532 / 0.6)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "SPAN",
+            "label": "Reference enabled",
+            "width": 36,
+            "height": 20,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "16px",
+            "pseudoTarget": {
+              "width": "0px",
+              "height": "0px"
+            },
+            "reservedArea": {
+              "width": 0,
+              "height": 0
+            }
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Workflow builder: trigger selection",
+        "dialogs": [],
+        "compactControls": [],
+        "fixtureRequests": [],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F03",
+      "name": "f03-workflow-dark-desktop",
+      "url": "http://127.0.0.1:3210/?surface=workflow&mode=dark",
+      "kind": "isolated-production-components",
+      "surface": "workflow",
+      "width": 1440,
+      "height": 1000,
+      "mode": "dark",
+      "file": "f03-workflow-dark-desktop.png",
+      "pngWidth": 1440,
+      "pngHeight": 1000,
+      "sha256": "fbb882c138240ea1a24439e9d2ba70343ce709830182f07b22d52c387a0f8773",
+      "measurements": {
+        "root": {
+          "background": "#191919",
+          "action": "#D4D4D4",
+          "ring": "#A3A3A3"
+        },
+        "elements": [
+          {
+            "tag": "BUTTON",
+            "label": "Manual onlyRuns only when you press Run now or when an assistant calls runWorkfl",
+            "width": 237.5,
+            "height": 113.75,
+            "background": "oklab(0.869938 0.0000396967 0.0000174046 / 0.05)",
+            "color": "rgb(212, 212, 212)",
+            "border": "oklab(0.869938 0.0000396967 0.0000174046 / 0.6)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "SPAN",
+            "label": "Reference enabled",
+            "width": 36,
+            "height": 20,
+            "background": "rgb(212, 212, 212)",
+            "color": "rgb(212, 212, 212)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "16px",
+            "pseudoTarget": {
+              "width": "0px",
+              "height": "0px"
+            },
+            "reservedArea": {
+              "width": 0,
+              "height": 0
+            }
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Workflow builder: trigger selection",
+        "dialogs": [],
+        "compactControls": [],
+        "fixtureRequests": [],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F04",
+      "name": "f04-association-light-desktop",
+      "url": "http://127.0.0.1:3210/?surface=association&mode=light",
+      "kind": "isolated-production-components",
+      "surface": "association",
+      "width": 1440,
+      "height": 1000,
+      "mode": "light",
+      "file": "f04-association-light-desktop.png",
+      "pngWidth": 1440,
+      "pngHeight": 1000,
+      "sha256": "a6b71d16fcc6140079f71be2eaf9ae860cfc6d16a2fb12949b5b196c26b3debd",
+      "measurements": {
+        "root": {
+          "background": "#FFFFFF",
+          "action": "#37352F",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "BUTTON",
+            "label": "Public registrationAnyone can register for this event.",
+            "width": 504,
+            "height": 58,
+            "background": "oklab(0.336797 0.0000153333 0.00000673532 / 0.05)",
+            "color": "rgb(55, 53, 47)",
+            "border": "oklab(0.336797 0.0000153333 0.00000673532 / 0.6)",
+            "fontSize": "14px"
+          },
+          {
+            "tag": "SPAN",
+            "label": "",
+            "width": 36,
+            "height": 20,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "14px",
+            "pseudoTarget": {
+              "width": "0px",
+              "height": "0px"
+            },
+            "reservedArea": {
+              "width": 0,
+              "height": 0
+            }
+          },
+          {
+            "tag": "SPAN",
+            "label": "Reference enabled",
+            "width": 36,
+            "height": 20,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "16px",
+            "pseudoTarget": {
+              "width": "0px",
+              "height": "0px"
+            },
+            "reservedArea": {
+              "width": 0,
+              "height": 0
+            }
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Association: form choice cards",
+        "dialogs": [],
+        "compactControls": [],
+        "fixtureRequests": [],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F04",
+      "name": "f04-association-dark-desktop",
+      "url": "http://127.0.0.1:3210/?surface=association&mode=dark",
+      "kind": "isolated-production-components",
+      "surface": "association",
+      "width": 1440,
+      "height": 1000,
+      "mode": "dark",
+      "file": "f04-association-dark-desktop.png",
+      "pngWidth": 1440,
+      "pngHeight": 1000,
+      "sha256": "5da304c6eae830f0ef8f396570ce5db6af791fd597c13ea92f5b48cff695bf05",
+      "measurements": {
+        "root": {
+          "background": "#191919",
+          "action": "#D4D4D4",
+          "ring": "#A3A3A3"
+        },
+        "elements": [
+          {
+            "tag": "BUTTON",
+            "label": "Public registrationAnyone can register for this event.",
+            "width": 504,
+            "height": 58,
+            "background": "oklab(0.869938 0.0000396967 0.0000174046 / 0.05)",
+            "color": "rgb(212, 212, 212)",
+            "border": "oklab(0.869938 0.0000396967 0.0000174046 / 0.6)",
+            "fontSize": "14px"
+          },
+          {
+            "tag": "SPAN",
+            "label": "",
+            "width": 36,
+            "height": 20,
+            "background": "rgb(212, 212, 212)",
+            "color": "rgb(212, 212, 212)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "14px",
+            "pseudoTarget": {
+              "width": "0px",
+              "height": "0px"
+            },
+            "reservedArea": {
+              "width": 0,
+              "height": 0
+            }
+          },
+          {
+            "tag": "SPAN",
+            "label": "Reference enabled",
+            "width": 36,
+            "height": 20,
+            "background": "rgb(212, 212, 212)",
+            "color": "rgb(212, 212, 212)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "16px",
+            "pseudoTarget": {
+              "width": "0px",
+              "height": "0px"
+            },
+            "reservedArea": {
+              "width": 0,
+              "height": 0
+            }
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Association: form choice cards",
+        "dialogs": [],
+        "compactControls": [],
+        "fixtureRequests": [],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F05",
+      "name": "f05-shopify-light-desktop",
+      "url": "http://127.0.0.1:3210/?surface=shopify&mode=light",
+      "kind": "isolated-production-components",
+      "surface": "shopify",
+      "width": 1440,
+      "height": 1000,
+      "mode": "light",
+      "file": "f05-shopify-light-desktop.png",
+      "pngWidth": 1440,
+      "pngHeight": 1000,
+      "sha256": "04ff08a697a5dbeac362d91624d84014ce2969f9cd62552f02584905850a2ca4",
+      "measurements": {
+        "root": {
+          "background": "#FFFFFF",
+          "action": "#37352F",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "BUTTON",
+            "label": "Where am I losing shoppers?Every stage from landing to paid, and which step lose",
+            "width": 333.328125,
+            "height": 78,
+            "background": "oklab(0.336797 0.0000153333 0.00000673532 / 0.05)",
+            "color": "rgb(55, 53, 47)",
+            "border": "oklab(0.336797 0.0000153333 0.00000673532 / 0.6)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "SPAN",
+            "label": "Reference enabled",
+            "width": 36,
+            "height": 20,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "16px",
+            "pseudoTarget": {
+              "width": "0px",
+              "height": "0px"
+            },
+            "reservedArea": {
+              "width": 0,
+              "height": 0
+            }
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Shopify: Analyse choices",
+        "dialogs": [],
+        "compactControls": [],
+        "fixtureRequests": [],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F05",
+      "name": "f05-shopify-dark-desktop",
+      "url": "http://127.0.0.1:3210/?surface=shopify&mode=dark",
+      "kind": "isolated-production-components",
+      "surface": "shopify",
+      "width": 1440,
+      "height": 1000,
+      "mode": "dark",
+      "file": "f05-shopify-dark-desktop.png",
+      "pngWidth": 1440,
+      "pngHeight": 1000,
+      "sha256": "4307ed9ba750c38624d151e531d9464ada11d67db5a6b7167ffad0d2052e3f9e",
+      "measurements": {
+        "root": {
+          "background": "#191919",
+          "action": "#D4D4D4",
+          "ring": "#A3A3A3"
+        },
+        "elements": [
+          {
+            "tag": "BUTTON",
+            "label": "Where am I losing shoppers?Every stage from landing to paid, and which step lose",
+            "width": 333.328125,
+            "height": 78,
+            "background": "oklab(0.869938 0.0000396967 0.0000174046 / 0.05)",
+            "color": "rgb(212, 212, 212)",
+            "border": "oklab(0.869938 0.0000396967 0.0000174046 / 0.6)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "SPAN",
+            "label": "Reference enabled",
+            "width": 36,
+            "height": 20,
+            "background": "rgb(212, 212, 212)",
+            "color": "rgb(212, 212, 212)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "16px",
+            "pseudoTarget": {
+              "width": "0px",
+              "height": "0px"
+            },
+            "reservedArea": {
+              "width": 0,
+              "height": 0
+            }
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Shopify: Analyse choices",
+        "dialogs": [],
+        "compactControls": [],
+        "fixtureRequests": [],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F06",
+      "name": "f06-emoji-dark-desktop",
+      "url": "http://127.0.0.1:3210/?surface=emoji&mode=dark",
+      "kind": "isolated-production-components",
+      "surface": "emoji",
+      "width": 1440,
+      "height": 1000,
+      "mode": "dark",
+      "file": "f06-emoji-dark-desktop.png",
+      "pngWidth": 1440,
+      "pngHeight": 1000,
+      "sha256": "e61726b6d553b1cb3383c0c32987bb0b060cec2d4bd4bc2aeca2ce4c2c84b9a1",
+      "measurements": {
+        "root": {
+          "background": "#191919",
+          "action": "#D4D4D4",
+          "ring": "#A3A3A3"
+        },
+        "elements": [
+          {
+            "tag": "SPAN",
+            "label": "Reference enabled",
+            "width": 36,
+            "height": 20,
+            "background": "rgb(212, 212, 212)",
+            "color": "rgb(212, 212, 212)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "16px",
+            "pseudoTarget": {
+              "width": "0px",
+              "height": "0px"
+            },
+            "reservedArea": {
+              "width": 0,
+              "height": 0
+            }
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Document icon: emoji picker in dark mode",
+        "dialogs": [
+          {
+            "width": 316,
+            "height": 468.5,
+            "left": 212,
+            "top": 251,
+            "right": 528,
+            "bottom": 719.5,
+            "horizontalOverflow": false
+          }
+        ],
+        "compactControls": [],
+        "fixtureRequests": [],
+        "pickerBackground": "rgb(21, 22, 23)",
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F07",
+      "name": "f07-controls-light-360",
+      "url": "http://127.0.0.1:3210/?surface=controls&mode=light",
+      "kind": "isolated-production-components",
+      "surface": "controls",
+      "width": 360,
+      "height": 800,
+      "mode": "light",
+      "coarse": false,
+      "file": "f07-controls-light-360.png",
+      "pngWidth": 360,
+      "pngHeight": 800,
+      "sha256": "75d299e5ee5315c2850328b867e790a8f0d5a015e7764f3617f116a273c65b59",
+      "measurements": {
+        "root": {
+          "background": "#FFFFFF",
+          "action": "#37352F",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "DIV",
+            "label": "Default actionFirst option▼",
+            "width": 278,
+            "height": 104,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Default action",
+            "width": 113.28125,
+            "height": 44,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "14px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Add item",
+            "width": 44,
+            "height": 44,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "14px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Example choice",
+            "width": 126.921875,
+            "height": 44,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "SPAN",
+            "label": "Example checkbox",
+            "width": 16,
+            "height": 16,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgb(55, 53, 47)",
+            "fontSize": "16px",
+            "pseudoTarget": {
+              "width": "44px",
+              "height": "44px"
+            },
+            "reservedArea": {
+              "width": 44,
+              "height": 44
+            }
+          },
+          {
+            "tag": "SPAN",
+            "label": "Example switch",
+            "width": 36,
+            "height": 20,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "16px",
+            "pseudoTarget": {
+              "width": "44px",
+              "height": "44px"
+            },
+            "reservedArea": {
+              "width": 44,
+              "height": 44
+            }
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Shared controls: phone target-size verification",
+        "dialogs": [],
+        "compactControls": [],
+        "fixtureRequests": [],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F07",
+      "name": "f07-controls-light-639",
+      "url": "http://127.0.0.1:3210/?surface=controls&mode=light",
+      "kind": "isolated-production-components",
+      "surface": "controls",
+      "width": 639,
+      "height": 800,
+      "mode": "light",
+      "coarse": false,
+      "file": "f07-controls-light-639.png",
+      "pngWidth": 639,
+      "pngHeight": 800,
+      "sha256": "bad530e081adf24c9a6dbaf20ad95e3ed87450077930f79b26f2ac7a426fcad6",
+      "measurements": {
+        "root": {
+          "background": "#FFFFFF",
+          "action": "#37352F",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "DIV",
+            "label": "Default actionFirst option▼",
+            "width": 557,
+            "height": 44,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Default action",
+            "width": 113.28125,
+            "height": 44,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "14px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Add item",
+            "width": 44,
+            "height": 44,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "14px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Example choice",
+            "width": 126.921875,
+            "height": 44,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "SPAN",
+            "label": "Example checkbox",
+            "width": 16,
+            "height": 16,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgb(55, 53, 47)",
+            "fontSize": "16px",
+            "pseudoTarget": {
+              "width": "44px",
+              "height": "44px"
+            },
+            "reservedArea": {
+              "width": 44,
+              "height": 44
+            }
+          },
+          {
+            "tag": "SPAN",
+            "label": "Example switch",
+            "width": 36,
+            "height": 20,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "16px",
+            "pseudoTarget": {
+              "width": "44px",
+              "height": "44px"
+            },
+            "reservedArea": {
+              "width": 44,
+              "height": 44
+            }
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Shared controls: phone target-size verification",
+        "dialogs": [],
+        "compactControls": [],
+        "fixtureRequests": [],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F07",
+      "name": "f07-controls-light-640",
+      "url": "http://127.0.0.1:3210/?surface=controls&mode=light",
+      "kind": "isolated-production-components",
+      "surface": "controls",
+      "width": 640,
+      "height": 800,
+      "mode": "light",
+      "coarse": false,
+      "file": "f07-controls-light-640.png",
+      "pngWidth": 640,
+      "pngHeight": 800,
+      "sha256": "05ec0ef35001caddd52a35871967962a7a751c661db97c0d8c35d0bee1dbb1da",
+      "measurements": {
+        "root": {
+          "background": "#FFFFFF",
+          "action": "#37352F",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "DIV",
+            "label": "Default actionFirst option▼",
+            "width": 558,
+            "height": 44,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Default action",
+            "width": 113.28125,
+            "height": 44,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "14px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Add item",
+            "width": 44,
+            "height": 44,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "14px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Example choice",
+            "width": 126.921875,
+            "height": 44,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "SPAN",
+            "label": "Example checkbox",
+            "width": 16,
+            "height": 16,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgb(55, 53, 47)",
+            "fontSize": "16px",
+            "pseudoTarget": {
+              "width": "44px",
+              "height": "44px"
+            },
+            "reservedArea": {
+              "width": 44,
+              "height": 44
+            }
+          },
+          {
+            "tag": "SPAN",
+            "label": "Example switch",
+            "width": 36,
+            "height": 20,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "16px",
+            "pseudoTarget": {
+              "width": "44px",
+              "height": "44px"
+            },
+            "reservedArea": {
+              "width": 44,
+              "height": 44
+            }
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Shared controls: phone target-size verification",
+        "dialogs": [],
+        "compactControls": [],
+        "fixtureRequests": [],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F07",
+      "name": "f07-controls-light-700",
+      "url": "http://127.0.0.1:3210/?surface=controls&mode=light",
+      "kind": "isolated-production-components",
+      "surface": "controls",
+      "width": 700,
+      "height": 800,
+      "mode": "light",
+      "coarse": false,
+      "file": "f07-controls-light-700.png",
+      "pngWidth": 700,
+      "pngHeight": 800,
+      "sha256": "701329d6a868344c91bd274d36f733c2544168ad7644a2ae3080bc9f6dff894e",
+      "measurements": {
+        "root": {
+          "background": "#FFFFFF",
+          "action": "#37352F",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "DIV",
+            "label": "Default actionFirst option▼",
+            "width": 618,
+            "height": 44,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Default action",
+            "width": 113.28125,
+            "height": 44,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "14px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Add item",
+            "width": 44,
+            "height": 44,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "14px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Example choice",
+            "width": 126.921875,
+            "height": 44,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "SPAN",
+            "label": "Example checkbox",
+            "width": 16,
+            "height": 16,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgb(55, 53, 47)",
+            "fontSize": "16px",
+            "pseudoTarget": {
+              "width": "44px",
+              "height": "44px"
+            },
+            "reservedArea": {
+              "width": 44,
+              "height": 44
+            }
+          },
+          {
+            "tag": "SPAN",
+            "label": "Example switch",
+            "width": 36,
+            "height": 20,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "16px",
+            "pseudoTarget": {
+              "width": "44px",
+              "height": "44px"
+            },
+            "reservedArea": {
+              "width": 44,
+              "height": 44
+            }
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Shared controls: phone target-size verification",
+        "dialogs": [],
+        "compactControls": [],
+        "fixtureRequests": [],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F07",
+      "name": "f07-controls-light-767",
+      "url": "http://127.0.0.1:3210/?surface=controls&mode=light",
+      "kind": "isolated-production-components",
+      "surface": "controls",
+      "width": 767,
+      "height": 800,
+      "mode": "light",
+      "coarse": false,
+      "file": "f07-controls-light-767.png",
+      "pngWidth": 767,
+      "pngHeight": 800,
+      "sha256": "3f18a6fab2a1c3d5c743fe94d64cf5349444ffd2242be3798f3332e0dac387ee",
+      "measurements": {
+        "root": {
+          "background": "#FFFFFF",
+          "action": "#37352F",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "DIV",
+            "label": "Default actionFirst option▼",
+            "width": 685,
+            "height": 44,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Default action",
+            "width": 113.28125,
+            "height": 44,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "14px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Add item",
+            "width": 44,
+            "height": 44,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "14px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Example choice",
+            "width": 126.921875,
+            "height": 44,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "SPAN",
+            "label": "Example checkbox",
+            "width": 16,
+            "height": 16,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgb(55, 53, 47)",
+            "fontSize": "16px",
+            "pseudoTarget": {
+              "width": "44px",
+              "height": "44px"
+            },
+            "reservedArea": {
+              "width": 44,
+              "height": 44
+            }
+          },
+          {
+            "tag": "SPAN",
+            "label": "Example switch",
+            "width": 36,
+            "height": 20,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "16px",
+            "pseudoTarget": {
+              "width": "44px",
+              "height": "44px"
+            },
+            "reservedArea": {
+              "width": 44,
+              "height": 44
+            }
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Shared controls: phone target-size verification",
+        "dialogs": [],
+        "compactControls": [],
+        "fixtureRequests": [],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F07",
+      "name": "f07-controls-light-768",
+      "url": "http://127.0.0.1:3210/?surface=controls&mode=light",
+      "kind": "isolated-production-components",
+      "surface": "controls",
+      "width": 768,
+      "height": 800,
+      "mode": "light",
+      "coarse": false,
+      "file": "f07-controls-light-768.png",
+      "pngWidth": 768,
+      "pngHeight": 800,
+      "sha256": "4a5721db52d120d08b4551c8870fc8e42ed9de7edae604ffcd0dc19fb20d0482",
+      "measurements": {
+        "root": {
+          "background": "#FFFFFF",
+          "action": "#37352F",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "DIV",
+            "label": "Default actionFirst option▼",
+            "width": 662,
+            "height": 32,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Default action",
+            "width": 113.28125,
+            "height": 32,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "14px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Add item",
+            "width": 32,
+            "height": 32,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "14px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Example choice",
+            "width": 116.3125,
+            "height": 32,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "14px"
+          },
+          {
+            "tag": "SPAN",
+            "label": "Example checkbox",
+            "width": 16,
+            "height": 16,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgb(55, 53, 47)",
+            "fontSize": "16px",
+            "pseudoTarget": {
+              "width": "0px",
+              "height": "0px"
+            },
+            "reservedArea": {
+              "width": 0,
+              "height": 0
+            }
+          },
+          {
+            "tag": "SPAN",
+            "label": "Example switch",
+            "width": 36,
+            "height": 20,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "16px",
+            "pseudoTarget": {
+              "width": "0px",
+              "height": "0px"
+            },
+            "reservedArea": {
+              "width": 0,
+              "height": 0
+            }
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Shared controls: phone target-size verification",
+        "dialogs": [],
+        "compactControls": [],
+        "fixtureRequests": [],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F07",
+      "name": "f07-controls-light-1024",
+      "url": "http://127.0.0.1:3210/?surface=controls&mode=light",
+      "kind": "isolated-production-components",
+      "surface": "controls",
+      "width": 1024,
+      "height": 800,
+      "mode": "light",
+      "coarse": true,
+      "file": "f07-controls-light-1024.png",
+      "pngWidth": 1024,
+      "pngHeight": 800,
+      "sha256": "9bd8329de5b5be65fd14e9727f3aef40a760e776e0f504f18b97857dc42992b7",
+      "measurements": {
+        "root": {
+          "background": "#FFFFFF",
+          "action": "#37352F",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "DIV",
+            "label": "Default actionFirst option▼",
+            "width": 918,
+            "height": 44,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Default action",
+            "width": 113.28125,
+            "height": 44,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "14px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Add item",
+            "width": 44,
+            "height": 44,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "14px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Example choice",
+            "width": 116.3125,
+            "height": 44,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "14px"
+          },
+          {
+            "tag": "SPAN",
+            "label": "Example checkbox",
+            "width": 16,
+            "height": 16,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgb(55, 53, 47)",
+            "fontSize": "16px",
+            "pseudoTarget": {
+              "width": "44px",
+              "height": "44px"
+            },
+            "reservedArea": {
+              "width": 44,
+              "height": 44
+            }
+          },
+          {
+            "tag": "SPAN",
+            "label": "Example switch",
+            "width": 36,
+            "height": 20,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "16px",
+            "pseudoTarget": {
+              "width": "44px",
+              "height": "44px"
+            },
+            "reservedArea": {
+              "width": 44,
+              "height": 44
+            }
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Shared controls: phone target-size verification",
+        "dialogs": [],
+        "compactControls": [],
+        "fixtureRequests": [],
+        "pickerBackground": null,
+        "coarsePointer": true,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "PAGE",
+      "name": "page-workflow-light-1440-default",
+      "url": "http://127.0.0.1:3211/page.html?page=workflow&section=analyse&mode=light",
+      "kind": "production-route-body-synthetic-data",
+      "surface": "workflow",
+      "width": 1440,
+      "height": 900,
+      "mode": "light",
+      "state": "default",
+      "file": "page-workflow-light-1440-default.png",
+      "pngWidth": 1440,
+      "pngHeight": 900,
+      "sha256": "eae7fae551b17152313d0155f3b8d2a4452a7f38844a97fd8eeec7ec1d2bfb2c",
+      "measurements": {
+        "root": {
+          "background": "#FFFFFF",
+          "action": "#37352F",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "SPAN",
+            "label": "Enabled",
+            "width": 36,
+            "height": 20,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(120, 119, 116)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "12px",
+            "pseudoTarget": {
+              "width": "0px",
+              "height": "0px"
+            },
+            "reservedArea": {
+              "width": 0,
+              "height": 0
+            }
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Production route-body layout audit (synthetic data)",
+        "dialogs": [],
+        "compactControls": [],
+        "fixtureRequests": [
+          "GET /api/workflows/fictional-workflow",
+          "GET /api/assistants",
+          "GET /api/workflows/fictional-workflow/runs",
+          "GET /api/workspaces/fictional-workspace/groups",
+          "GET /api/workspaces/fictional-workspace/projects",
+          "GET /api/workspaces/fictional-workspace/connectors",
+          "GET /api/workspaces/fictional-workspace/channel-destinations",
+          "GET /api/workspaces/fictional-workspace/channels",
+          "GET /api/sessions/incoming-event-sources",
+          "GET /api/workspaces/fictional-workspace/slack-channels",
+          "GET /api/workspaces/fictional-workspace/page-templates",
+          "GET /api/skills/workspace",
+          "PATCH /api/workspaces/fictional-workspace/picker-preferences",
+          "GET /api/workflows/fictional-workflow/publication-consents",
+          "GET /api/workspaces/fictional-workspace/connectors",
+          "GET /api/workspaces/fictional-workspace/saved-views"
+        ],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "PAGE",
+      "name": "page-workflow-dark-1440-default",
+      "url": "http://127.0.0.1:3211/page.html?page=workflow&section=analyse&mode=dark",
+      "kind": "production-route-body-synthetic-data",
+      "surface": "workflow",
+      "width": 1440,
+      "height": 900,
+      "mode": "dark",
+      "state": "default",
+      "file": "page-workflow-dark-1440-default.png",
+      "pngWidth": 1440,
+      "pngHeight": 900,
+      "sha256": "589646fc17ea2c975201018c55965b39fdb1172ce8582f78b8dc4d88a728870b",
+      "measurements": {
+        "root": {
+          "background": "#191919",
+          "action": "#D4D4D4",
+          "ring": "#A3A3A3"
+        },
+        "elements": [
+          {
+            "tag": "SPAN",
+            "label": "Enabled",
+            "width": 36,
+            "height": 20,
+            "background": "rgb(212, 212, 212)",
+            "color": "rgb(151, 151, 151)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "12px",
+            "pseudoTarget": {
+              "width": "0px",
+              "height": "0px"
+            },
+            "reservedArea": {
+              "width": 0,
+              "height": 0
+            }
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Production route-body layout audit (synthetic data)",
+        "dialogs": [],
+        "compactControls": [],
+        "fixtureRequests": [
+          "GET /api/workflows/fictional-workflow",
+          "GET /api/assistants",
+          "GET /api/workflows/fictional-workflow/runs",
+          "GET /api/workspaces/fictional-workspace/groups",
+          "GET /api/workspaces/fictional-workspace/projects",
+          "GET /api/workspaces/fictional-workspace/connectors",
+          "GET /api/workspaces/fictional-workspace/channel-destinations",
+          "GET /api/workspaces/fictional-workspace/channels",
+          "GET /api/sessions/incoming-event-sources",
+          "GET /api/workspaces/fictional-workspace/slack-channels",
+          "GET /api/workspaces/fictional-workspace/page-templates",
+          "GET /api/skills/workspace",
+          "PATCH /api/workspaces/fictional-workspace/picker-preferences",
+          "GET /api/workflows/fictional-workflow/publication-consents",
+          "GET /api/workspaces/fictional-workspace/connectors",
+          "GET /api/workspaces/fictional-workspace/saved-views"
+        ],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "PAGE",
+      "name": "page-workflow-light-700-default",
+      "url": "http://127.0.0.1:3211/page.html?page=workflow&section=analyse&mode=light",
+      "kind": "production-route-body-synthetic-data",
+      "surface": "workflow",
+      "width": 700,
+      "height": 900,
+      "mode": "light",
+      "state": "default",
+      "file": "page-workflow-light-700-default.png",
+      "pngWidth": 700,
+      "pngHeight": 900,
+      "sha256": "bd8e7e0ca5dcba8ace4156c34c7a1e80403a67981dbe30fd62ad266cf33427c9",
+      "measurements": {
+        "root": {
+          "background": "#FFFFFF",
+          "action": "#37352F",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "SPAN",
+            "label": "Enabled",
+            "width": 36,
+            "height": 20,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(120, 119, 116)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "12px",
+            "pseudoTarget": {
+              "width": "44px",
+              "height": "44px"
+            },
+            "reservedArea": {
+              "width": 44,
+              "height": 44
+            }
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Production route-body layout audit (synthetic data)",
+        "dialogs": [],
+        "compactControls": [
+          {
+            "tag": "BUTTON",
+            "label": "Edit the workflow name",
+            "width": 314.84375,
+            "height": 28,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Edit the description",
+            "width": 368.203125,
+            "height": 24,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "",
+            "width": 32,
+            "height": 32,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(120, 119, 116)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "14px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Run now",
+            "width": 81.3125,
+            "height": 32,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "14px"
+          }
+        ],
+        "fixtureRequests": [
+          "GET /api/workflows/fictional-workflow",
+          "GET /api/assistants",
+          "GET /api/workflows/fictional-workflow/runs",
+          "GET /api/workspaces/fictional-workspace/groups",
+          "GET /api/workspaces/fictional-workspace/projects",
+          "GET /api/workspaces/fictional-workspace/connectors",
+          "GET /api/workspaces/fictional-workspace/channel-destinations",
+          "GET /api/workspaces/fictional-workspace/channels",
+          "GET /api/sessions/incoming-event-sources",
+          "GET /api/workspaces/fictional-workspace/slack-channels",
+          "GET /api/workspaces/fictional-workspace/page-templates",
+          "GET /api/skills/workspace",
+          "PATCH /api/workspaces/fictional-workspace/picker-preferences",
+          "GET /api/workflows/fictional-workflow/publication-consents",
+          "GET /api/workspaces/fictional-workspace/connectors",
+          "GET /api/workspaces/fictional-workspace/saved-views"
+        ],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "PAGE",
+      "name": "page-workflow-light-360-default",
+      "url": "http://127.0.0.1:3211/page.html?page=workflow&section=analyse&mode=light",
+      "kind": "production-route-body-synthetic-data",
+      "surface": "workflow",
+      "width": 360,
+      "height": 900,
+      "mode": "light",
+      "state": "default",
+      "file": "page-workflow-light-360-default.png",
+      "pngWidth": 360,
+      "pngHeight": 900,
+      "sha256": "7c9281af4930f7d8c5aba2f6f9115107332084baf40e043632d28a3216a08419",
+      "measurements": {
+        "root": {
+          "background": "#FFFFFF",
+          "action": "#37352F",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "SPAN",
+            "label": "Enabled",
+            "width": 36,
+            "height": 20,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(120, 119, 116)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "12px",
+            "pseudoTarget": {
+              "width": "44px",
+              "height": "44px"
+            },
+            "reservedArea": {
+              "width": 44,
+              "height": 44
+            }
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Production route-body layout audit (synthetic data)",
+        "dialogs": [],
+        "compactControls": [
+          {
+            "tag": "BUTTON",
+            "label": "Edit the workflow name",
+            "width": 314.84375,
+            "height": 28,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Edit the description",
+            "width": 328,
+            "height": 24,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "16px"
+          }
+        ],
+        "fixtureRequests": [
+          "GET /api/workflows/fictional-workflow",
+          "GET /api/assistants",
+          "GET /api/workflows/fictional-workflow/runs",
+          "GET /api/workspaces/fictional-workspace/groups",
+          "GET /api/workspaces/fictional-workspace/projects",
+          "GET /api/workspaces/fictional-workspace/connectors",
+          "GET /api/workspaces/fictional-workspace/channel-destinations",
+          "GET /api/workspaces/fictional-workspace/channels",
+          "GET /api/sessions/incoming-event-sources",
+          "GET /api/workspaces/fictional-workspace/slack-channels",
+          "GET /api/workspaces/fictional-workspace/page-templates",
+          "GET /api/skills/workspace",
+          "PATCH /api/workspaces/fictional-workspace/picker-preferences",
+          "GET /api/workflows/fictional-workflow/publication-consents",
+          "GET /api/workspaces/fictional-workspace/connectors",
+          "GET /api/workspaces/fictional-workspace/saved-views"
+        ],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "PAGE",
+      "name": "page-workflow-light-1440-settings",
+      "url": "http://127.0.0.1:3211/page.html?page=workflow&section=analyse&mode=light",
+      "kind": "production-route-body-synthetic-data",
+      "surface": "workflow",
+      "width": 1440,
+      "height": 900,
+      "mode": "light",
+      "state": "settings",
+      "file": "page-workflow-light-1440-settings.png",
+      "pngWidth": 1440,
+      "pngHeight": 900,
+      "sha256": "d5e208a56b9ae0361b48ebd3638d3631e35262117b0b6928fa6eafff3d3b90ff",
+      "measurements": {
+        "root": {
+          "background": "#FFFFFF",
+          "action": "#37352F",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "SPAN",
+            "label": "Enabled",
+            "width": 36,
+            "height": 20,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(120, 119, 116)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "12px",
+            "pseudoTarget": {
+              "width": "0px",
+              "height": "0px"
+            },
+            "reservedArea": {
+              "width": 0,
+              "height": 0
+            }
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Production route-body layout audit (synthetic data)",
+        "dialogs": [],
+        "compactControls": [],
+        "fixtureRequests": [
+          "GET /api/workflows/fictional-workflow",
+          "GET /api/assistants",
+          "GET /api/workflows/fictional-workflow/runs",
+          "GET /api/workspaces/fictional-workspace/groups",
+          "GET /api/workspaces/fictional-workspace/projects",
+          "GET /api/workspaces/fictional-workspace/connectors",
+          "GET /api/workspaces/fictional-workspace/channel-destinations",
+          "GET /api/workspaces/fictional-workspace/channels",
+          "GET /api/sessions/incoming-event-sources",
+          "GET /api/workspaces/fictional-workspace/slack-channels",
+          "GET /api/workspaces/fictional-workspace/page-templates",
+          "GET /api/skills/workspace",
+          "PATCH /api/workspaces/fictional-workspace/picker-preferences",
+          "GET /api/workflows/fictional-workflow/publication-consents",
+          "GET /api/workspaces/fictional-workspace/connectors",
+          "GET /api/workspaces/fictional-workspace/saved-views",
+          "GET /api/workspaces/fictional-workspace/approval-review/assignments",
+          "GET /api/assistants"
+        ],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "PAGE",
+      "name": "page-workflow-light-360-trigger",
+      "url": "http://127.0.0.1:3211/page.html?page=workflow&section=analyse&mode=light",
+      "kind": "production-route-body-synthetic-data",
+      "surface": "workflow",
+      "width": 360,
+      "height": 900,
+      "mode": "light",
+      "state": "trigger",
+      "file": "page-workflow-light-360-trigger.png",
+      "pngWidth": 360,
+      "pngHeight": 900,
+      "sha256": "20cf0d5c8d0fd34f956203cd7ec4e8766073fd668ec9c09f58500fa30970b73c",
+      "measurements": {
+        "root": {
+          "background": "#FFFFFF",
+          "action": "#37352F",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "SPAN",
+            "label": "Enabled",
+            "width": 36,
+            "height": 20,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(120, 119, 116)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "12px",
+            "pseudoTarget": {
+              "width": "44px",
+              "height": "44px"
+            },
+            "reservedArea": {
+              "width": 44,
+              "height": 44
+            }
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Manual onlyRuns only when you press Run now or when an assistant calls runWorkfl",
+            "width": 142.5,
+            "height": 113.75,
+            "background": "oklab(0.336797 0.0000153333 0.00000673532 / 0.05)",
+            "color": "rgb(55, 53, 47)",
+            "border": "oklab(0.336797 0.0000153333 0.00000673532 / 0.6)",
+            "fontSize": "16px"
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Production route-body layout audit (synthetic data)",
+        "dialogs": [
+          {
+            "width": 360,
+            "height": 900,
+            "left": 0,
+            "top": 0,
+            "right": 360,
+            "bottom": 900,
+            "horizontalOverflow": false
+          }
+        ],
+        "compactControls": [
+          {
+            "tag": "BUTTON",
+            "label": "Edit the workflow name",
+            "width": 314.84375,
+            "height": 28,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Edit the description",
+            "width": 328,
+            "height": 24,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Copy endpoint",
+            "width": 99.921875,
+            "height": 30,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "12px"
+          }
+        ],
+        "fixtureRequests": [
+          "GET /api/workflows/fictional-workflow",
+          "GET /api/assistants",
+          "GET /api/workflows/fictional-workflow/runs",
+          "GET /api/workspaces/fictional-workspace/groups",
+          "GET /api/workspaces/fictional-workspace/projects",
+          "GET /api/workspaces/fictional-workspace/connectors",
+          "GET /api/workspaces/fictional-workspace/channel-destinations",
+          "GET /api/workspaces/fictional-workspace/channels",
+          "GET /api/sessions/incoming-event-sources",
+          "GET /api/workspaces/fictional-workspace/slack-channels",
+          "GET /api/workspaces/fictional-workspace/page-templates",
+          "GET /api/skills/workspace",
+          "PATCH /api/workspaces/fictional-workspace/picker-preferences",
+          "GET /api/workflows/fictional-workflow/publication-consents",
+          "GET /api/workspaces/fictional-workspace/connectors",
+          "GET /api/workspaces/fictional-workspace/saved-views"
+        ],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "PAGE",
+      "name": "page-workflow-light-360-inspector",
+      "url": "http://127.0.0.1:3211/page.html?page=workflow&section=analyse&mode=light",
+      "kind": "production-route-body-synthetic-data",
+      "surface": "workflow",
+      "width": 360,
+      "height": 500,
+      "mode": "light",
+      "state": "inspector",
+      "file": "page-workflow-light-360-inspector.png",
+      "pngWidth": 360,
+      "pngHeight": 500,
+      "sha256": "9842591a87a989f186591c0dd2582ea5896871a6e01c3ea00a3572c97a972f24",
+      "measurements": {
+        "root": {
+          "background": "#FFFFFF",
+          "action": "#37352F",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "SPAN",
+            "label": "Enabled",
+            "width": 36,
+            "height": 20,
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(120, 119, 116)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "12px",
+            "pseudoTarget": {
+              "width": "44px",
+              "height": "44px"
+            },
+            "reservedArea": {
+              "width": 44,
+              "height": 44
+            }
+          },
+          {
+            "tag": "SPAN",
+            "label": "Send output to a channel",
+            "width": 36,
+            "height": 20,
+            "background": "rgb(237, 237, 236)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgba(0, 0, 0, 0)",
+            "fontSize": "14px",
+            "pseudoTarget": {
+              "width": "44px",
+              "height": "44px"
+            },
+            "reservedArea": {
+              "width": 44,
+              "height": 44
+            }
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Production route-body layout audit (synthetic data)",
+        "dialogs": [
+          {
+            "width": 360,
+            "height": 500,
+            "left": 0,
+            "top": 0,
+            "right": 360,
+            "bottom": 500,
+            "horizontalOverflow": false
+          }
+        ],
+        "compactControls": [
+          {
+            "tag": "BUTTON",
+            "label": "Edit the workflow name",
+            "width": 314.84375,
+            "height": 28,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Edit the description",
+            "width": 328,
+            "height": 24,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Move up",
+            "width": 36,
+            "height": 36,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(120, 119, 116)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Move down",
+            "width": 36,
+            "height": 36,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(120, 119, 116)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Remove",
+            "width": 36,
+            "height": 36,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(120, 119, 116)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "INPUT",
+            "label": "Name this step",
+            "width": 293,
+            "height": 25,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "20px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Recent uses the assigned approver’s last inbound message to this assistant, falling back to web approvals. Explicit legacy channels other than Telegram do not send notifications.",
+            "width": 16,
+            "height": 16,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "oklab(0.56919 -0.0000956058 0.0047127 / 0.6)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "16px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Send an authored message after this tool succeeds. The destination must be approved for every source used by this run.",
+            "width": 16,
+            "height": 16,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "oklab(0.56919 -0.0000956058 0.0047127 / 0.6)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "14px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Later steps can reference this via {{vars.NAME}}.",
+            "width": 16,
+            "height": 16,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "oklab(0.56919 -0.0000956058 0.0047127 / 0.6)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "14px"
+          }
+        ],
+        "fixtureRequests": [
+          "GET /api/workflows/fictional-workflow",
+          "GET /api/assistants",
+          "GET /api/workflows/fictional-workflow/runs",
+          "GET /api/workspaces/fictional-workspace/groups",
+          "GET /api/workspaces/fictional-workspace/projects",
+          "GET /api/workspaces/fictional-workspace/connectors",
+          "GET /api/workspaces/fictional-workspace/channel-destinations",
+          "GET /api/workspaces/fictional-workspace/channels",
+          "GET /api/sessions/incoming-event-sources",
+          "GET /api/workspaces/fictional-workspace/slack-channels",
+          "GET /api/workspaces/fictional-workspace/page-templates",
+          "GET /api/skills/workspace",
+          "PATCH /api/workspaces/fictional-workspace/picker-preferences",
+          "GET /api/workflows/fictional-workflow/publication-consents",
+          "GET /api/workspaces/fictional-workspace/connectors",
+          "GET /api/workspaces/fictional-workspace/saved-views"
+        ],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": [
+          {
+            "tag": "DIV",
+            "clientHeight": 452,
+            "scrollHeight": 713,
+            "reachedBottom": true
+          },
+          {
+            "tag": "DIV",
+            "clientHeight": 431,
+            "scrollHeight": 653,
+            "reachedBottom": true
+          }
+        ]
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "PAGE",
+      "name": "page-shopify-light-1440-default",
+      "url": "http://127.0.0.1:3211/page.html?page=shopify&section=analyse&mode=light",
+      "kind": "production-route-body-synthetic-data",
+      "surface": "shopify",
+      "width": 1440,
+      "height": 900,
+      "mode": "light",
+      "state": "default",
+      "file": "page-shopify-light-1440-default.png",
+      "pngWidth": 1440,
+      "pngHeight": 900,
+      "sha256": "18a9922d9e4356778ab0e8743e805defed37996e25955e8b0b914cf567c69e74",
+      "measurements": {
+        "root": {
+          "background": "#FFFFFF",
+          "action": "#37352F",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "BUTTON",
+            "label": "Act on the numbers",
+            "width": 131.0625,
+            "height": 26,
+            "background": "rgb(255, 255, 255)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "12.5px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Where am I losing shoppers?Every stage from landing to paid, and which step lose",
+            "width": 464,
+            "height": 60.75,
+            "background": "oklab(0.336797 0.0000153333 0.00000673532 / 0.05)",
+            "color": "rgb(55, 53, 47)",
+            "border": "oklab(0.336797 0.0000153333 0.00000673532 / 0.6)",
+            "fontSize": "16px"
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Production route-body layout audit (synthetic data)",
+        "dialogs": [],
+        "compactControls": [],
+        "fixtureRequests": [
+          "GET /api/apps/shopify/tools",
+          "PATCH /api/workspaces/fictional-workspace/picker-preferences"
+        ],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "PAGE",
+      "name": "page-shopify-dark-1440-default",
+      "url": "http://127.0.0.1:3211/page.html?page=shopify&section=analyse&mode=dark",
+      "kind": "production-route-body-synthetic-data",
+      "surface": "shopify",
+      "width": 1440,
+      "height": 900,
+      "mode": "dark",
+      "state": "default",
+      "file": "page-shopify-dark-1440-default.png",
+      "pngWidth": 1440,
+      "pngHeight": 900,
+      "sha256": "6f3f718915f0195be032f0d3e068516fd1e393b6a65505413a20805b9c4ceed7",
+      "measurements": {
+        "root": {
+          "background": "#191919",
+          "action": "#D4D4D4",
+          "ring": "#A3A3A3"
+        },
+        "elements": [
+          {
+            "tag": "BUTTON",
+            "label": "Act on the numbers",
+            "width": 131.0625,
+            "height": 26,
+            "background": "rgb(25, 25, 25)",
+            "color": "rgb(212, 212, 212)",
+            "border": "rgb(47, 47, 47)",
+            "fontSize": "12.5px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Where am I losing shoppers?Every stage from landing to paid, and which step lose",
+            "width": 464,
+            "height": 60.75,
+            "background": "oklab(0.869938 0.0000396967 0.0000174046 / 0.05)",
+            "color": "rgb(212, 212, 212)",
+            "border": "oklab(0.869938 0.0000396967 0.0000174046 / 0.6)",
+            "fontSize": "16px"
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Production route-body layout audit (synthetic data)",
+        "dialogs": [],
+        "compactControls": [],
+        "fixtureRequests": [
+          "GET /api/apps/shopify/tools",
+          "PATCH /api/workspaces/fictional-workspace/picker-preferences"
+        ],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "PAGE",
+      "name": "page-shopify-light-700-default",
+      "url": "http://127.0.0.1:3211/page.html?page=shopify&section=analyse&mode=light",
+      "kind": "production-route-body-synthetic-data",
+      "surface": "shopify",
+      "width": 700,
+      "height": 900,
+      "mode": "light",
+      "state": "default",
+      "file": "page-shopify-light-700-default.png",
+      "pngWidth": 700,
+      "pngHeight": 900,
+      "sha256": "398d8f5d718ac60602963eb34bb00132be3bad6e9e6af551ff72bee0db876de1",
+      "measurements": {
+        "root": {
+          "background": "#FFFFFF",
+          "action": "#37352F",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "BUTTON",
+            "label": "Act on the numbers",
+            "width": 335,
+            "height": 36,
+            "background": "rgb(255, 255, 255)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "12.5px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Where am I losing shoppers?Every stage from landing to paid, and which step lose",
+            "width": 330,
+            "height": 78,
+            "background": "oklab(0.336797 0.0000153333 0.00000673532 / 0.05)",
+            "color": "rgb(55, 53, 47)",
+            "border": "oklab(0.336797 0.0000153333 0.00000673532 / 0.6)",
+            "fontSize": "16px"
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Production route-body layout audit (synthetic data)",
+        "dialogs": [],
+        "compactControls": [
+          {
+            "tag": "BUTTON",
+            "label": "Draft a product",
+            "width": 335,
+            "height": 36,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "oklab(0.328941 -0.00029397 0.0106801 / 0.7)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "12.5px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Inventory vs orders",
+            "width": 335,
+            "height": 36,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "oklab(0.328941 -0.00029397 0.0106801 / 0.7)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "12.5px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Act on the numbers",
+            "width": 335,
+            "height": 36,
+            "background": "rgb(255, 255, 255)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "12.5px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Campaign",
+            "width": 335,
+            "height": 36,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "oklab(0.328941 -0.00029397 0.0106801 / 0.7)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "12.5px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Period",
+            "width": 150,
+            "height": 36,
+            "background": "oklab(0.973071 -0.0000594854 0.00413698 / 0.5)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "14px"
+          }
+        ],
+        "fixtureRequests": [
+          "GET /api/apps/shopify/tools",
+          "PATCH /api/workspaces/fictional-workspace/picker-preferences"
+        ],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": []
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "PAGE",
+      "name": "page-shopify-light-360-default",
+      "url": "http://127.0.0.1:3211/page.html?page=shopify&section=analyse&mode=light",
+      "kind": "production-route-body-synthetic-data",
+      "surface": "shopify",
+      "width": 360,
+      "height": 900,
+      "mode": "light",
+      "state": "default",
+      "file": "page-shopify-light-360-default.png",
+      "pngWidth": 360,
+      "pngHeight": 900,
+      "sha256": "cf196fa861ac3bd91ccb8026674116974917da84dd88a638d28d6763283b7c99",
+      "measurements": {
+        "root": {
+          "background": "#FFFFFF",
+          "action": "#37352F",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "BUTTON",
+            "label": "Act on the numbers",
+            "width": 165,
+            "height": 36,
+            "background": "rgb(255, 255, 255)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "12.5px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Where am I losing shoppers?Every stage from landing to paid, and which step lose",
+            "width": 328,
+            "height": 78,
+            "background": "oklab(0.336797 0.0000153333 0.00000673532 / 0.05)",
+            "color": "rgb(55, 53, 47)",
+            "border": "oklab(0.336797 0.0000153333 0.00000673532 / 0.6)",
+            "fontSize": "16px"
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Production route-body layout audit (synthetic data)",
+        "dialogs": [],
+        "compactControls": [
+          {
+            "tag": "BUTTON",
+            "label": "Draft a product",
+            "width": 165,
+            "height": 36,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "oklab(0.328941 -0.00029397 0.0106801 / 0.7)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "12.5px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Inventory vs orders",
+            "width": 165,
+            "height": 36,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "oklab(0.328941 -0.00029397 0.0106801 / 0.7)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "12.5px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Act on the numbers",
+            "width": 165,
+            "height": 36,
+            "background": "rgb(255, 255, 255)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "12.5px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Campaign",
+            "width": 165,
+            "height": 36,
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "oklab(0.328941 -0.00029397 0.0106801 / 0.7)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "12.5px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Period",
+            "width": 150,
+            "height": 36,
+            "background": "oklab(0.973071 -0.0000594854 0.00413698 / 0.5)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "fontSize": "14px"
+          }
+        ],
+        "fixtureRequests": [
+          "GET /api/apps/shopify/tools",
+          "PATCH /api/workspaces/fictional-workspace/picker-preferences"
+        ],
+        "pickerBackground": null,
+        "coarsePointer": false,
+        "scrollOwners": [
+          {
+            "tag": "DIV",
+            "clientHeight": 713,
+            "scrollHeight": 822,
+            "reachedBottom": true
+          }
+        ]
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    }
+  ]
+}

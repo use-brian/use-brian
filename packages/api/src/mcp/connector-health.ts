@@ -17,7 +17,7 @@
  * Component tag: [COMP:integrations/connector-health].
  */
 
-import type { Tool } from '@use-brian/core'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 import type { ConnectorInstanceStore, ConnectorHealthStatus } from '../db/connector-instance-store.js'
 
 /**

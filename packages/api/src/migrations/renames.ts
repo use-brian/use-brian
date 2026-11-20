@@ -17,6 +17,7 @@ const migrationRenames = [
   ['8147_private_chat_recovery.sql', '81470_private_chat_recovery.sql'],
   ['8259_workspace_decision_shadow_sampling.sql', '8264_workspace_decision_shadow_sampling.sql'],
   ['8260_workspace_decision_classifier_first.sql', '8265_workspace_decision_classifier_first.sql'],
+  ['8268_private_transcript_preparation_eligibility.sql', '82690_private_transcript_preparation_eligibility.sql'],
 
   // Resolve every released spelling directly to its final name: embedded
   // migration lookup intentionally does not follow transitive rename chains.

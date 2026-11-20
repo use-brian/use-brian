@@ -2,13 +2,17 @@ import {writeFile} from 'node:fs/promises'
 import type {PoolClient} from 'pg'
 import {randomUUID} from 'node:crypto'
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
-import {boundScopeSources,executionToolContext,createCorrectionTools,createRetrievalTools,type RetrievalStore} from '@use-brian/core'
+import {createCorrectionTools} from '@use-brian/core/corrections/tools.js'
+import {createRetrievalTools} from '@use-brian/core/retrieval/tools.js'
+import type {RetrievalStore} from '@use-brian/core/retrieval/types.js'
+import {executionToolContext} from '@use-brian/agent-runtime/security/execution-context.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {getAppPool,getPool,applyRLSGucs,runWithAgentAccess,rollbackAndRelease} from '../../db/client.js'
 import {createWorkspaceChatSession,releaseTurnLease} from '../../db/sessions.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
-import {publishNativeSessionMessage,publishNativeSessionMessageBatch} from '../../db/session-message-publication.js'
+import {publishNativeSessionMessage,publishNativeSessionMessageBatch} from '../../db/conversation-store.js'
 import {withSessionMessagePublication,writeRetainedContextFrame,readRetainedQueryFrame} from '../../db/session-context-revisions.js'
-import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
+import {readAdmittedSessionQuery} from '../../db/conversation-store.js'
 import {createMemory} from '../../db/memories.js'
 import {createDbRowHistoryStore} from '../../db/row-history-store.js'
 import {createMemoryRetractionStore} from '../../db/retraction-store.js'
@@ -17,7 +21,7 @@ import {createSensitivityReclassificationStore} from '../../db/sensitivity-recla
 import {turnOutputWrite} from '../../context-scope/resolve-turn-scope.js'
 import {takeTurnLease} from '../../turn/lease.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
-import {assertSourceModelInputAuthority,assertSourceModelOutputAuthority} from '../model-source-authority.js'
+import {admitModelInput,admitModelOutput} from '../../context-scope/admission.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 describe.sequential('[COMP:api/application-persistence] actual canonical native transcript batches',()=>{
@@ -39,8 +43,9 @@ describe.sequential('[COMP:api/application-persistence] actual canonical native 
   expect(rows.map(row=>row.sequenceNum)).toEqual(Array.from({length:34},(_,n)=>n+4))
   for(const row of rows){
    expect(boundScopeSources(row)).toMatchObject([{resourceKind:'session_message',resourceId:row.id}])
-   const edges=(await f.pool.query(`SELECT source_kind,source_id,source_version FROM scope_derivations d JOIN scope_derivation_sources edge
-    ON edge.workspace_id=d.workspace_id AND edge.derivation_id=d.id WHERE d.workspace_id=$1 AND d.resource_kind='session_message' AND d.resource_id=$2`,[f.workspaceId,row.id])).rows
+   const edges=(await f.pool.query(`SELECT edge.source_kind,edge.source_id,edge.source_version FROM scope_derivations d JOIN scope_derivation_sources link ON link.workspace_id=d.workspace_id AND link.derivation_id=d.id
+    JOIN scope_derivations frame ON frame.workspace_id=d.workspace_id AND frame.resource_kind='session_context_revision' AND frame.resource_id=link.source_id
+    JOIN scope_derivation_sources edge ON edge.workspace_id=frame.workspace_id AND edge.derivation_id=frame.id WHERE d.workspace_id=$1 AND d.resource_kind='session_message' AND d.resource_id=$2`,[f.workspaceId,row.id])).rows
    expect(edges.map(edge=>[edge.source_kind,edge.source_id,edge.source_version]).sort()).toEqual(sources.map(source=>[source.resourceKind,source.resourceId,source.version]).sort())
   }
  })
@@ -79,7 +84,7 @@ describe.sequential('[COMP:api/application-persistence] actual canonical native 
   try{await runWithAgentAccess(authority.execution.security.access,async()=>{
    await db.query('BEGIN');await applyRLSGucs(db,f.firstId)
    await expect(publishNativeSessionMessageBatch(batch,db)).rejects.toMatchObject({code:'scope_evidence_missing'})
-   await expect(db.query('SELECT prepare_native_session_message_batch($1,$2,$3,$4,$5)',[f.workspaceId,f.session.id,batch.derivation.producer,JSON.stringify(batch.derivation.sources),f.envelope])).rejects.toMatchObject({code:'42501'})
+   await expect(db.query('SELECT conversation_prepare_publications($1,$2,$3)',[f.workspaceId,f.session.id,JSON.stringify([{producer:batch.derivation.producer,sources:batch.derivation.sources,target:f.envelope}])])).rejects.toMatchObject({code:'42501'})
   })}finally{await rollbackAndRelease(db)}
  })
  it.each(['single','batch'] as const)('keeps the original target pinned when the caller mutates a %s command during admission',async mode=>{
@@ -226,14 +231,20 @@ describe.sequential('[COMP:api/application-persistence] actual canonical native 
    expect(after.messages.filter(row=>before!.messages.some(old=>old.value.id===row.value.id))).toEqual(before.messages)
    expect(after.messages).toHaveLength(before.messages.length+3)
    const newDerivations=after.derivations.filter(row=>!before!.derivations.some(old=>old.value.id===row.value.id))
-   expect(newDerivations).toHaveLength(3)
-   for(const row of newDerivations){
+   expect(newDerivations).toHaveLength(4)
+   const frame=newDerivations.find(row=>row.value.resource_kind==='session_context_revision')!
+   expect(frame).toBeDefined()
+   const messageDerivations=newDerivations.filter(row=>row.value.resource_kind==='session_message')
+   expect(messageDerivations).toHaveLength(3)
+   for(const row of messageDerivations){
     const message=after.messages.find(message=>message.value.id===row.value.resource_id)!.value
     expect(row.value).toMatchObject({resource_kind:'session_message',resource_version:'1',producer:'turn:web',user_id:null,assistant_id:null,
      sensitivity:message.sensitivity,compartments:message.compartments,project_ids:message.project_ids})
     expect(message).toMatchObject({workspace_id:f.workspaceId,session_id:f.session.id,scope_version:1,scope_held:false,user_id:null,assistant_id:null,
      sensitivity:write.derivationTarget!.sensitivity,compartments:write.derivationTarget!.compartments,project_ids:write.derivationTarget!.projectIds})
-    const edges=after.edges.filter(edge=>edge.value.derivation_id===row.value.id)
+    const links=after.edges.filter(edge=>edge.value.derivation_id===row.value.id)
+    expect(links.map(edge=>[edge.value.source_kind,edge.value.source_id,edge.value.source_version])).toEqual([['session_context_revision',frame.value.resource_id,'1']])
+    const edges=after.edges.filter(edge=>edge.value.derivation_id===frame.value.id)
     for(const source of roots)expect(edges.map(edge=>[edge.value.source_kind,edge.value.source_id,edge.value.source_version])).toContainEqual([source.resourceKind,source.resourceId,source.version])
     for(const source of oldSources)expect(edges.some(edge=>edge.value.source_kind===source.resourceKind&&edge.value.source_id===source.resourceId&&edge.value.source_version===source.version)).toBe(false)
     const oldOwnFields=before.resources.filter(resource=>resource.value.type_key==='memory'&&resource.value.selection==='read'
@@ -241,14 +252,16 @@ describe.sequential('[COMP:api/application-persistence] actual canonical native 
     for(const field of oldOwnFields)expect(edges.some(edge=>edge.value.source_kind==='application_field'&&edge.value.source_id===field.value.id)).toBe(false)
     for(const source of reasonFieldTuples)expect(edges.map(edge=>[edge.value.source_kind,edge.value.source_id,edge.value.source_version])).toContainEqual([source.resourceKind,source.resourceId,source.version])
    }
+   expect(after.revisions.filter(row=>before!.revisions.some(old=>old.value.id===row.value.id))).toEqual(before.revisions)
+   expect(after.revisions.filter(row=>!before!.revisions.some(old=>old.value.id===row.value.id)).map(row=>row.value)).toEqual([expect.objectContaining({parent_kind:'turn_frame',id:frame.value.resource_id,session_id:f.session.id})])
    expect(after.parent).toEqual(before.parent)
    expect(after.parent[0].value).toMatchObject({status:'running',turn_lease_token:token,last_turn_lease_token:token})
    expect(after.derivations.filter(row=>before!.derivations.some(old=>old.value.id===row.value.id))).toEqual(before.derivations)
    expect(after.edges.filter(row=>before!.edges.some(old=>JSON.stringify(old)===JSON.stringify(row)))).toEqual(before.edges)
-   const edgeSets=newDerivations.map(row=>after.edges.filter(edge=>edge.value.derivation_id===row.value.id)
+   const edgeSets=messageDerivations.map(row=>after.edges.filter(edge=>edge.value.derivation_id===row.value.id)
     .map(edge=>[edge.value.source_kind,edge.value.source_id,edge.value.source_version]).sort())
    for(const edges of edgeSets)expect(edges).toEqual(edgeSets[0])
-   for(const key of ['resources','observations','memories','transitions','receipts','revisions','fieldSources','resourceStates'] as const)expect(after[key]).toEqual(before[key])
+   for(const key of ['resources','observations','memories','transitions','receipts','fieldSources','resourceStates'] as const)expect(after[key]).toEqual(before[key])
    expect(report.batchCommitAttempted).toBe(true);expect(report.batchCommitCompleted).toBe(true)
    expect(trace.filter(entry=>typeof entry.sql==='string'&&entry.sql.startsWith('SELECT publish_native_session_message_batch('))
     .map(entry=>{expect(typeof entry.originalSources).toBe('string');return JSON.parse(entry.originalSources as string)})).toEqual([roots])
@@ -276,8 +289,8 @@ describe.sequential('[COMP:api/application-persistence] actual canonical native 
    expect(freshBindings.some(row=>row.resource.type_key==='session_message'&&row.resource.selection==='query_domain')).toBe(true)
    if(controls==='bindings'){
    const modelRoots=structuredClone(reader.accumulator.evidence.sources)
-   report.stage='modelInput';await assertSourceModelInputAuthority(context(reader));report.modelInputPassed=true
-   report.stage='modelOutput';await assertSourceModelOutputAuthority(context(reader));report.modelOutputPassed=true
+   report.stage='modelInput';await admitModelInput(context(reader));report.modelInputPassed=true
+   report.stage='modelOutput';await admitModelOutput(context(reader));report.modelOutputPassed=true
    report.modelEvidence=structuredClone(reader.accumulator.evidence)
    const modelSources=reader.accumulator.evidence.sources??[]
    for(const source of modelRoots??[])expect(modelSources).toContainEqual(source)
@@ -285,7 +298,15 @@ describe.sequential('[COMP:api/application-persistence] actual canonical native 
     .flatMap(entry=>(entry.resultRows as Array<{source:(typeof modelSources)[number]}>).map(row=>row.source))
    const addedModelFields=modelSources.filter(source=>!(modelRoots??[]).some(original=>JSON.stringify(original)===JSON.stringify(source)))
    expect(addedModelFields.length).toBeGreaterThan(0)
-   for(const source of addedModelFields){expect(source.resourceKind).toBe('application_field');expect(admittedModelFields).toContainEqual(source)}
+   for(const source of addedModelFields){
+    if(source.resourceKind==='session_context_revision'){
+     // The canonical manifest is itself an immutable obligation, in addition
+     // to each independently admitted field in the original history cohort.
+     expect(source).toEqual({workspaceId:f.workspaceId,userId:frame.value.user_id,assistantId:frame.value.assistant_id,
+      sensitivity:frame.value.sensitivity,compartments:frame.value.compartments,projectIds:frame.value.project_ids,
+      resourceKind:'session_context_revision',resourceId:frame.value.resource_id,version:'1'})
+    }else{expect(source.resourceKind).toBe('application_field');expect(admittedModelFields).toContainEqual(source)}
+   }
    report.modelFieldProvenance={added:addedModelFields,admitted:admittedModelFields}
    const oldOwnFields=before.resources.filter(resource=>resource.value.type_key==='memory'&&resource.value.selection==='read'
     &&[root.id,successor!.id].includes(resource.value.resource_id))
@@ -293,8 +314,11 @@ describe.sequential('[COMP:api/application-persistence] actual canonical native 
    expect(modelSources.some(source=>source.resourceKind==='memory'&&[root.id,successor!.id].includes(source.resourceId))).toBe(false)
    report.stage='ownFactualObservationUnavailable'
    expect(await store.getById(reader.execution.security.access,root.id,reader)).toBeNull()
+   // A canonical capture can refuse an unavailable ordinary source before
+   // entering the historical SQL reader. Preserve the public refusal and its
+   // source diagnostic, without requiring that deleted reader's exception.
    await expect(store.getById(reader.execution.security.access,successor!.id,reader)).rejects.toMatchObject({code:'scope_source_changed',
-    cause:{reason:'caller_evidence_unavailable',cause:{code:'42501',message:'scope_operation_denied'}}})
+    cause:{reason:'caller_evidence_unavailable',diagnostic:'source_unverifiable'}})
    report.ownFactualObservationUnavailable=true
    const stable=await state(),refusals:Array<Record<string,unknown>>=[]
    const probe=async(sources:typeof modelSources)=>readRetainedQueryFrame(await f.modelContext(f.ownerId),[],async client=>({
@@ -334,9 +358,9 @@ describe.sequential('[COMP:api/application-persistence] actual canonical native 
     expect(held.scope_held).toBe(true);expect(held.scope_version).toBe(reasonBefore.scope_version)
     report.reasonHold={fixtureOnly:true,before:reasonBefore,held}
     report.stage='cachedModelInputAfterReasonHold'
-    await expect(assertSourceModelInputAuthority(context(cachedInput))).rejects.toMatchObject({code:'source_unavailable',reason:'authority_changed',retrySafe:false})
+    await expect(admitModelInput(context(cachedInput))).rejects.toMatchObject({code:'source_unavailable',reason:'authority_changed',retrySafe:false})
     report.stage='cachedModelOutputAfterReasonHold'
-    await expect(assertSourceModelOutputAuthority(context(cachedOutput))).rejects.toMatchObject({code:'source_unavailable',reason:'authority_changed',retrySafe:false})
+    await expect(admitModelOutput(context(cachedOutput))).rejects.toMatchObject({code:'source_unavailable',reason:'authority_changed',retrySafe:false})
     report.stage='freshQueryAfterReasonHold'
     const heldReader=await f.modelContext(f.ownerId),heldRead=await readAdmittedSessionQuery({sessionId:f.session.id,throughSequence,authority:heldReader})
     expect(heldRead.history.map(row=>[row.id,row.sequenceNum,row.role,row.content])).toEqual(initial.map(row=>[row.id,row.sequenceNum,row.role,row.content]))
@@ -352,8 +376,8 @@ describe.sequential('[COMP:api/application-persistence] actual canonical native 
    const restoredReader=await f.modelContext(f.ownerId),restoredRead=await readAdmittedSessionQuery({sessionId:f.session.id,throughSequence,authority:restoredReader})
    expect(restoredRead.history.map(row=>[row.id,row.sequenceNum,row.role,row.content])).toEqual([...initial,...rows].map(row=>[row.id,row.sequenceNum,row.role,row.content]))
    report.restoredRead={history:restoredRead.history,evidence:restoredReader.accumulator.evidence}
-   report.stage='restoredModelInput';await assertSourceModelInputAuthority(context(restoredReader));report.restoredModelInputPassed=true
-   report.stage='restoredModelOutput';await assertSourceModelOutputAuthority(context(restoredReader));report.restoredModelOutputPassed=true
+   report.stage='restoredModelInput';await admitModelInput(context(restoredReader));report.restoredModelInputPassed=true
+   report.stage='restoredModelOutput';await admitModelOutput(context(restoredReader));report.restoredModelOutputPassed=true
    }
    report.stage='complete'
   }catch(error){report.failure=errorInfo(error);throw error}
@@ -367,10 +391,10 @@ describe.sequential('[COMP:api/application-persistence] actual canonical native 
       const{updated_at:fixtureTimestamp,...value}=row.value;return{value}
      }
      expect(after.memories.map(stableMemory)).toEqual(before.memories.map(stableMemory))
-     for(const key of ['transitions','receipts','revisions','resourceStates'] as const)expect(after[key]).toEqual(before[key])
+     for(const key of ['transitions','receipts','resourceStates'] as const)expect(after[key]).toEqual(before[key])
      if(!report.batchCommitCompleted)expect(after).toEqual(before)
      else if(afterCommit){
-      for(const key of ['messages','parent','derivations','edges'] as const)expect(after[key]).toEqual(afterCommit[key])
+      for(const key of ['messages','parent','derivations','edges','revisions'] as const)expect(after[key]).toEqual(afterCommit[key])
       const key=(value:Record<string,unknown>,kind:'resources'|'observations')=>kind==='resources'?value.id:JSON.stringify([value.resource_id,value.version])
       const newRows:Record<string,unknown>={}
       for(const kind of ['resources','observations'] as const){

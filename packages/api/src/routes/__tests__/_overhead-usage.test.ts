@@ -77,8 +77,10 @@ describe('[COMP:api/route-helpers] recordOverheadUsage', () => {
     // See [COMP:api/channel-billing-identity].
     const source = readFileSync(new URL('../channel-pipeline.ts', import.meta.url), 'utf8')
 
-    for (const usageSource of ['overhead:classifier', 'overhead:transcription']) {
-      const markerIndex = source.indexOf(`source: '${usageSource}'`)
+    // Classifier rows are the turn route's records (`source: record.source`,
+    // routes/attended-turn-routing.ts); transcription keeps its literal source.
+    for (const marker of ['source: record.source', "source: 'overhead:transcription'"]) {
+      const markerIndex = source.indexOf(marker)
       expect(markerIndex).toBeGreaterThan(-1)
 
       const callIndex = source.lastIndexOf('recordOverheadUsage({', markerIndex)

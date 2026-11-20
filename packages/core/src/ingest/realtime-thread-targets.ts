@@ -11,7 +11,7 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '../tools/types.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 
 export const REALTIME_THREAD_TARGET_MAX_TIMEOUT_MINUTES = 43_200
 

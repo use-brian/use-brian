@@ -2,8 +2,8 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import { ApplicationPlatformError } from '@use-brian/shared'
-import type { DocEntityFilter, DocEntitySort, DocEntityType, PropertyDef } from '@use-brian/core'
-import { validApplicationDate } from '@use-brian/core'
+import type { EntityFilter as DocEntityFilter, EntitySort as DocEntitySort, EntityType as DocEntityType, PropertyDef } from '@use-brian/core/entities/doc-types.js'
+import { validApplicationDate } from '@use-brian/core/application-platform/values.js'
 
 const cursorSchema=z.object({v:z.literal(1),typeId:z.string().uuid(),schemaVersion:z.number().int(),signature:z.string(),
   values:z.array(z.union([z.null(),z.string(),z.number().finite(),z.boolean()])).max(10)}).strict()

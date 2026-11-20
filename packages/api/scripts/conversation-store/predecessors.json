@@ -1,0 +1,504 @@
+[
+  {
+    "signature": "prepare_native_session_message_batch(uuid,uuid,text,jsonb,jsonb)",
+    "pin": "application_native_transcript_prepare_helpers_current()",
+    "occurrences": 2,
+    "body": "cbfbd9c0b42030d9bf3ef83a7746ab92a222875218f9022df43d2c6d3727c035",
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "prepare_native_session_message_batch",
+      "prorows": 0,
+      "pronargs": 5,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "s",
+        "producer",
+        "sources",
+        "target"
+      ],
+      "proargtypes": [
+        "2950",
+        "2950",
+        "25",
+        "3802",
+        "3802"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": false
+  },
+  {
+    "signature": "publish_native_session_context_revision(uuid,uuid,text,uuid,uuid,jsonb,text,jsonb,uuid,bigint,integer)",
+    "pin": "application_native_context_fields_current()",
+    "occurrences": 6,
+    "body": "c189e8e07eb23055f8047f977f8b54cf7cf7d4aed91e9bcde3261242147d577d",
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "publish_native_session_context_revision",
+      "prorows": 0,
+      "pronargs": 11,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "s",
+        "k",
+        "p",
+        "i",
+        "payload",
+        "producer",
+        "sources",
+        "expected_revision",
+        "expected_generation",
+        "expected_cursor"
+      ],
+      "proargtypes": [
+        "2950",
+        "2950",
+        "25",
+        "2950",
+        "2950",
+        "3802",
+        "25",
+        "3802",
+        "2950",
+        "20",
+        "23"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": true
+  },
+  {
+    "signature": "read_native_session_field_dependencies(uuid,text[],uuid[],text[])",
+    "pin": "native_turn_helpers_current()",
+    "occurrences": 0,
+    "body": "2f7b7fbf728e1b675e06b4ffe56ae2ebb159e28e8f59612b0c035de658a1b166",
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "read_native_session_field_dependencies",
+      "prorows": 1000,
+      "pronargs": 4,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": true,
+      "prosecdef": true,
+      "prorettype": "2249",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": [
+        "i",
+        "i",
+        "i",
+        "i",
+        "t",
+        "t"
+      ],
+      "proargnames": [
+        "w",
+        "kinds",
+        "ids",
+        "versions",
+        "node_version",
+        "source"
+      ],
+      "proargtypes": [
+        "2950",
+        "1009",
+        "2951",
+        "1009"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": [
+        "2950",
+        "1009",
+        "2951",
+        "1009",
+        "25",
+        "3802"
+      ],
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "appExecute": true
+  },
+  {
+    "signature": "read_native_personal_title_group_evidence(uuid,uuid[],uuid[])",
+    "pin": "application_native_title_acquisition_helpers_current()",
+    "occurrences": 2,
+    "body": "ebefad7e9e462ebe4103360ed29a2dbea842dd1cbddb43e28382b7ebe33e354d",
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "read_native_personal_title_group_evidence",
+      "prorows": 0,
+      "pronargs": 3,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "session_ids",
+        "revision_ids"
+      ],
+      "proargtypes": [
+        "2950",
+        "2951",
+        "2951"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "appExecute": true
+  },
+  {
+    "signature": "read_native_session_field_snapshots(uuid,uuid[],text[])",
+    "pin": "native_turn_helpers_current()",
+    "occurrences": 0,
+    "body": "50cb4616c970bb1a2960cf9e285a0991c0338f77a13c15e1887ddc2c9309500c",
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "read_native_session_field_snapshots",
+      "prorows": 1000,
+      "pronargs": 3,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": true,
+      "prosecdef": true,
+      "prorettype": "2249",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": [
+        "i",
+        "i",
+        "i",
+        "t",
+        "t"
+      ],
+      "proargnames": [
+        "w",
+        "ids",
+        "versions",
+        "ord",
+        "snapshot"
+      ],
+      "proargtypes": [
+        "2950",
+        "2951",
+        "1009"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": [
+        "2950",
+        "2951",
+        "1009",
+        "23",
+        "3802"
+      ],
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": true
+  },
+  {
+    "signature": "publish_native_session_message(uuid,uuid,jsonb,text,jsonb,jsonb)",
+    "pin": "publish_native_session_message(uuid,uuid,jsonb,text,jsonb,jsonb)",
+    "occurrences": 0,
+    "body": "90d99f2ba0d20fc32e3ebdeff91d871c43471089e51d74728abc05d3e8cbb30a",
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "publish_native_session_message",
+      "prorows": 0,
+      "pronargs": 6,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "s",
+        "payload",
+        "producer",
+        "sources",
+        "target"
+      ],
+      "proargtypes": [
+        "2950",
+        "2950",
+        "3802",
+        "25",
+        "3802",
+        "3802"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "appExecute": true
+  },
+  {
+    "signature": "read_native_covered_session_evidence(uuid,text[],uuid[],text[])",
+    "pin": "application_native_covered_evidence_helpers_current()",
+    "occurrences": 2,
+    "body": "3679d9281b0a9ee7fcf5c61009d991609a495d9e13463aa9254cf40cb1cc83a9",
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "read_native_covered_session_evidence",
+      "prorows": 0,
+      "pronargs": 4,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "kinds",
+        "ids",
+        "versions"
+      ],
+      "proargtypes": [
+        "2950",
+        "1009",
+        "2951",
+        "1009"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": true
+  },
+  {
+    "signature": "capture_native_session_query_stage(uuid,uuid,integer,text,jsonb,jsonb)",
+    "pin": "application_native_file_capture_helpers_current()",
+    "occurrences": 3,
+    "body": "9694e162ad1ec7a30259c93bfb1bbe4c079f0d05f33a7b71106c5198c3c4f651",
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "capture_native_session_query_stage",
+      "prorows": 0,
+      "pronargs": 6,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp",
+        "plan_cache_mode=force_generic_plan"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "s",
+        "through",
+        "t",
+        "initial_frame",
+        "reader_context"
+      ],
+      "proargtypes": [
+        "2950",
+        "2950",
+        "23",
+        "25",
+        "3802",
+        "3802"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": false
+  },
+  {
+    "signature": "read_native_private_title_acquisition(uuid,uuid,uuid)",
+    "pin": "native_private_title_helpers_current()",
+    "occurrences": 2,
+    "body": "ab2abf193e6299125d8f53dc98e07491b9f8f896bb595f4d84743c0e1a7c967b",
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "read_native_private_title_acquisition",
+      "prorows": 0,
+      "pronargs": 3,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "s",
+        "i"
+      ],
+      "proargtypes": [
+        "2950",
+        "2950",
+        "2950"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": true
+  },
+  {
+    "signature": "read_native_private_title_evidence(uuid,uuid)",
+    "pin": "native_private_title_helpers_current()",
+    "occurrences": 2,
+    "body": "50640d6ba43f914300a89fc2e3aafd111b71a82bb802b248ffb0389731e4c94d",
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "read_native_private_title_evidence",
+      "prorows": 0,
+      "pronargs": 2,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "i"
+      ],
+      "proargtypes": [
+        "2950",
+        "2950"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    },
+    "language": "plpgsql",
+    "appExecute": true
+  }
+]

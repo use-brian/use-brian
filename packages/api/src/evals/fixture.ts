@@ -24,21 +24,19 @@ import { homeAppToolRequirements } from '@use-brian/shared'
  * [COMP:evals/capability-probes]
  */
 
-import {
-  LAYER_1_SYSTEM_PROMPT,
-  createCrmTools,
-  createEntityAliasTools,
-  createDocTools,
-  createGoogleCalendarTools,
-  createMemoryTools,
-  createRetrievalTools,
-  createSchedulingTools,
-  createTaskTools,
-  createWorkflowBrainTools,
-  createWorkspaceTools,
-  createWorkflowTools,
-  type Tool,
-} from '@use-brian/core'
+import { createCrmTools } from '@use-brian/core/crm/tools.js'
+import { createDocTools } from '@use-brian/core/doc/tools.js'
+import { createEntityAliasTools } from '@use-brian/core/entities/alias-tools.js'
+import { createMemoryTools } from '@use-brian/core/memory/tools.js'
+import { createRetrievalTools } from '@use-brian/core/retrieval/tools.js'
+import { createSchedulingTools } from '@use-brian/core/scheduling/tools.js'
+import { LAYER_1_SYSTEM_PROMPT } from '@use-brian/core/system-prompt.js'
+import { createTaskTools } from '@use-brian/core/tasks/tools.js'
+import { createGoogleCalendarTools } from '@use-brian/core/tools/base/google-calendar.js'
+import { createWorkflowTools } from '@use-brian/core/workflow/tools.js'
+import { createWorkflowBrainTools } from '@use-brian/core/workflows/tools.js'
+import { createWorkspaceTools } from '@use-brian/core/workspace/tools.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { OFFICIAL_CONNECTORS } from '@use-brian/shared/connector-registry'
 
 import { buildUnavailableCapabilitiesPrompt } from '../routes/route-helpers.js'

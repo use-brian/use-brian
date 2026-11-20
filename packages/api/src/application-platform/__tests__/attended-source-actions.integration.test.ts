@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { beforeAll, afterAll, describe, expect, it } from 'vitest'
-import { ContextScopeAccumulator } from '@use-brian/core'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import { getPool, getAppPool, queryWithRLS } from '../../db/client.js'
 import { findAssistantById } from '../../db/users.js'
 import { buildConnectorAuthHeaders } from '../../mcp/auth-headers.js'

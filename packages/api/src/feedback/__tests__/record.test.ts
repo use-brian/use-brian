@@ -27,7 +27,7 @@ vi.mock('../../db/derived-scope-store.js', () => ({ recordDerivedResource: vi.fn
 import { recordFeedback, type RecordFeedbackParams } from '../record.js'
 import { createMemory } from '../../db/memories.js'
 import { recordDerivedResource } from '../../db/derived-scope-store.js'
-import type { ScopeSource } from '@use-brian/core'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 
 const mockCreateMemory = vi.mocked(createMemory)
 const mockRecordDerived = vi.mocked(recordDerivedResource)

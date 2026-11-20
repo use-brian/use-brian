@@ -9,8 +9,8 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool, type ToolContext, type ToolInput } from '../tools/types.js'
-import { missingToolCapability } from '../tools/capability-gate.js'
+import { buildTool, type Tool, type ToolContext, type ToolInput } from '@use-brian/agent-runtime/tools/types.js'
+import { missingToolCapability } from '@use-brian/agent-runtime/tools/capability-gate.js'
 import { crmOperationsToolContext, crmOperationsToolFailure } from './operations-tools.js'
 import type { CrmOperationsCommand, CrmOperationsServicePort } from './operations-types.js'
 import {

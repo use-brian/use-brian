@@ -15,7 +15,7 @@
 // See docs/architecture/brain/structural-synthesis.md -> "Generate is user-surfaced".
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '@use-brian/core'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import type { GenerateSynthesizeFn } from './generate-synthesizer.js'
 import type { PageTemplateStore } from '../db/page-templates-store.js'
 

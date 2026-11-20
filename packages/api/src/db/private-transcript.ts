@@ -1,6 +1,9 @@
 /** Same-owner conversation evidence, independent of upstream facts. [COMP:api/private-transcript] */
 import {z} from 'zod'
-import {bindScopeSources,DerivedScopeError,type ScopeSource,type SessionContextAuthority,type ExecutionContext} from '@use-brian/core'
+import type {SessionContextAuthority} from '@use-brian/core/memory/session-state-types.js'
+import {DerivedScopeError, type ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
+import type {ExecutionContext} from '@use-brian/agent-runtime/security/execution-context.js'
+import {bindScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {applyRLSGucs,getAppPool,runWithAgentAccess,rollbackAndRelease} from './client.js'
 import {privateHistoryText} from './session-legacy-history.js'
 import type {SessionMessage} from './sessions.js'
@@ -12,6 +15,17 @@ const capture=z.object({source:z.object({workspaceId:z.string().uuid(),userId:z.
  sensitivity:z.enum(['public','internal','confidential']),compartments:z.array(z.string()),projectIds:z.array(z.string().uuid())}).strict(),
  rows:z.array(z.object({id:z.string().uuid(),sequence:z.number().int(),role:z.enum(['user','assistant']),timestamp:z.string(),
  available:z.literal(true),content:z.unknown()}))})
+
+const privateResponderTurns=new WeakSet<ExecutionContext>()
+
+/** This personal turn uses the private transcript owner's reader floor. */
+export function bindPrivateResponderTranscript(execution:ExecutionContext):void{
+ privateResponderTurns.add(execution)
+}
+
+export function usesPrivateResponderTranscript(execution:ExecutionContext):boolean{
+ return privateResponderTurns.has(execution)
+}
 
 const nativeCredentials=new WeakMap<ExecutionContext,{userId:string;sessionId:string;authVersion:number}>()
 /** Called by the canonical execution-context factory with middleware credentials. */
@@ -77,6 +91,7 @@ export async function readPrivateTranscript(authority:SessionContextAuthority,se
  await security.authority.assertCurrent()
  return runWithAgentAccess(security.access,async()=>{
   const client=await getAppPool().connect()
+  let captured:{source:ScopeSource;rows:SessionMessage[]}
   try{
    await client.query('BEGIN')
    await applyRLSGucs(client,security.access.userId)
@@ -92,11 +107,15 @@ export async function readPrivateTranscript(authority:SessionContextAuthority,se
      sequenceNum:row.sequence,createdAt:new Date(row.timestamp),replyToText:null,topicLabel:null,topicConfidence:null,
      channelMessageId:null,senderUserId:row.role==='user'?source.userId:null,senderAssistantId:null,attachments:[]},[source])]:[]
    })
-   await security.authority.assertCurrent()
    await client.query('COMMIT')
-   accumulator.note({sources:[source]})
-   return bindScopeSources(rows,[source])
+   captured={source,rows}
   }catch(error){await client.query('ROLLBACK');throw error}
   finally{await rollbackAndRelease(client)}
+  // The observation is data, not an authority receipt. Resolve live authority
+  // only after releasing the app connection and transcript locks: that check
+  // may itself wait on the system pool. No dialogue enters context on denial.
+  await security.authority.assertCurrent()
+  accumulator.note({sources:[captured.source]})
+  return bindScopeSources(captured.rows,[captured.source])
  })
 }

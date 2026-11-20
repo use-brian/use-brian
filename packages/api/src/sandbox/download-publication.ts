@@ -1,9 +1,17 @@
 import { createHash } from 'node:crypto'
+import { browserInputScope, parseBrowserInputScope } from '@use-brian/core/sandbox/input-scope.js'
+import type { SandboxTaskRecord } from '@use-brian/core/sandbox/orchestrator.js'
+import { BrowserProfileAuthoritySchema } from '@use-brian/core/sandbox/profiles.js'
+import { assertBrowserTaskPublication } from '@use-brian/core/sandbox/task-publication.js'
+import type { FilesApi, FilesContext } from '@use-brian/core/workspace-files/api.js'
+import { parseAuthoringAuthority } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import { AuthoritySourceSchema } from '@use-brian/agent-runtime/security/authority-source.js'
 import {
-  AuthoritySourceSchema, BrowserProfileAuthoritySchema, browserInputScope, parseBrowserInputScope, assertBrowserTaskPublication,
-  parseAuthoringAuthority, maxSensitivity, deriveResourceScope,
-  type FilesApi, type FilesContext, type SandboxTaskRecord, type ScopeSource, type CurrentAuthorityBoundary,
-} from '@use-brian/core'
+  deriveResourceScope,
+  type ScopeSource,
+} from '@use-brian/agent-runtime/security/derived-scope.js'
+import { maxSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import type { CurrentAuthorityBoundary } from '@use-brian/agent-runtime/tools/types.js'
 import { createAuthorityLease, runWithAuthorityLease } from '../context-scope/authority-lease.js'
 import { runWithAgentAccess } from '../db/agent-access-context.js'
 import { queryWithRLS } from '../db/client.js'

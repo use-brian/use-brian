@@ -8,8 +8,8 @@
 > **Last updated:** 2026-10-29.
 > **Related:** [`../../../docs/plans/model-registry.md`](../../../docs/plans/model-registry.md),
 > [`../../../docs/architecture/engine/provider-abstraction.md`](../../../docs/architecture/engine/provider-abstraction.md),
-> [`../../packages/core/src/providers/types.ts`](../../packages/core/src/providers/types.ts),
-> [`../../packages/core/src/providers/routing.ts`](../../packages/core/src/providers/routing.ts).
+> [`../../packages/agent-runtime/src/providers/types.ts`](../../packages/agent-runtime/src/providers/types.ts),
+> [`../../packages/agent-runtime/src/providers/routing.ts`](../../packages/agent-runtime/src/providers/routing.ts).
 
 ## Outcome
 

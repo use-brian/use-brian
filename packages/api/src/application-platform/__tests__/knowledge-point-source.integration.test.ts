@@ -1,9 +1,10 @@
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
-import {createKnowledgeTools,type LLMProvider} from '@use-brian/core'
+import {createKnowledgeTools} from '@use-brian/core/tools/base/knowledge.js'
+import type {LLMProvider} from '@use-brian/agent-runtime/providers/types.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {createDbKnowledgeStore} from '../../db/knowledge-store.js'
 import {configureConnectorSourceRuntimeFactory} from '../source-runtime.js'
-import {assertSourceModelInputAuthority} from '../model-source-authority.js'
+import {admitModelInput} from '../../context-scope/admission.js'
 import {generateTitle} from '../../routes/attended-session-title.js'
 import {retainedKnowledgeFixture} from './fixtures/retained-knowledge.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
@@ -58,12 +59,12 @@ describe.sequential('[COMP:api/application-persistence] actual retained-source k
   const shared=await c.context(),sharedResult=await tool.execute({id:c.row.id},shared)
   if(!sharedResult.scopeEvidence)throw new Error('Shared Knowledge tool must retain evidence')
   shared.scopeAccumulator.note(sharedResult.scopeEvidence)
-  await expect(assertSourceModelInputAuthority(shared)).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
+  await expect(admitModelInput(shared)).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
   const result=await tool.execute({id:c.row.id},context)
   expect(result.data).toMatchObject({content:'Fictional protected Knowledge bytes'})
   if(!result.scopeEvidence)throw new Error('Actual Knowledge tool output must carry canonical evidence')
   context.scopeAccumulator.note(result.scopeEvidence)
-  await expect(assertSourceModelInputAuthority(context)).resolves.toBeUndefined()
+  await expect(admitModelInput(context)).resolves.toBeUndefined()
   const before=await c.snapshot()
   await c.source.pool.query("DELETE FROM grants WHERE kind='human' AND account_id=$1",[c.f.ownerId])
   let extractions=0,calls=0
@@ -71,14 +72,14 @@ describe.sequential('[COMP:api/application-persistence] actual retained-source k
    stream:async function*(){calls++;yield{type:'message_start',model:'fixture'};yield{type:'text_delta',text:'Fictional current Knowledge title'};
     yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:2,outputTokens:2}}}}
   const messages=[{role:'user' as const,get content(){extractions++;return JSON.stringify(result.data)}}]
-  await expect(generateTitle(provider,messages,'fixture',()=>assertSourceModelInputAuthority(context))).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
+  await expect(generateTitle(provider,messages,'fixture',()=>admitModelInput(context))).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
   expect(extractions).toBe(0);expect(calls).toBe(0)
   expect(await c.snapshot()).toEqual(before)
   const other=await c.context(c.f.secondId,true),current=await tool.execute({id:c.row.id},other)
   expect(current.data).toMatchObject({content:'Fictional protected Knowledge bytes'})
   if(!current.scopeEvidence)throw new Error('Independent Knowledge reader must carry canonical evidence')
   other.scopeAccumulator.note(current.scopeEvidence)
-  await expect(generateTitle(provider,[{role:'user',content:JSON.stringify(current.data)}],'fixture',()=>assertSourceModelInputAuthority(other))).resolves.toEqual({title:'Fictional current Knowledge title',model:'fixture',usage:{inputTokens:2,outputTokens:2}})
+  await expect(generateTitle(provider,[{role:'user',content:JSON.stringify(current.data)}],'fixture',()=>admitModelInput(other))).resolves.toEqual({title:'Fictional current Knowledge title',model:'fixture',usage:{inputTokens:2,outputTokens:2}})
   expect(calls).toBe(1)
   expect(await c.snapshot()).toEqual(before)
  })

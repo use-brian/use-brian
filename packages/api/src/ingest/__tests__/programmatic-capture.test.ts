@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { PendingBatch, PipelineBResult } from '@use-brian/core'
+import type { PipelineBResult } from '@use-brian/core/ingest/pipeline-b.js'
+import type { PendingBatch } from '@use-brian/core/scheduling/types.js'
 import type { BrainAuth } from '../../brain-mcp/auth.js'
 import type { BrainEpisodeInput } from '../../ingest-port.js'
 import type {

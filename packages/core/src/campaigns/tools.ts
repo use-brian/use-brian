@@ -8,8 +8,8 @@ import {
   campaignSaveSchema,
   campaignUuidSchema,
 } from '@use-brian/shared/campaigns'
-import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
-import { missingToolCapability } from '../tools/capability-gate.js'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { missingToolCapability } from '@use-brian/agent-runtime/tools/capability-gate.js'
 import {
   CampaignError,
   type CampaignContext,

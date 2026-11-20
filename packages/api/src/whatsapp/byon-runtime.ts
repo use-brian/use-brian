@@ -1,16 +1,13 @@
 import { createWhatsAppAdapter } from '@use-brian/channels'
-import type {
-  AnalyticsLogger,
-  CrmStore,
-  EntityLinksStore,
-  EntityStore,
-  LLMProvider,
-  MemoryStore,
-  PipelineBApplicationPort,
-  TaskAdmissionPort,
-  TaskStore,
-  UsageStore,
-} from '@use-brian/core'
+import type { AnalyticsLogger } from '@use-brian/core/analytics/logger.js'
+import type { CrmStore } from '@use-brian/core/crm/types.js'
+import type { EntityLinksStore, EntityStore } from '@use-brian/core/entities/types.js'
+import type { PipelineBApplicationPort } from '@use-brian/core/ingest/pipeline-b-application.js'
+import type { MemoryStore } from '@use-brian/core/memory/types.js'
+import type { TaskAdmissionPort } from '@use-brian/core/tasks/admission.js'
+import type { TaskStore } from '@use-brian/core/tasks/types.js'
+import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
 import { query } from '../db/client.js'
 import { withChatLock } from '../db/chat-lock.js'
 import type { DbEpisodesStore } from '../db/episodes-store.js'

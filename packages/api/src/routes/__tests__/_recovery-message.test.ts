@@ -9,8 +9,8 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
-import { composeRecoveryMessage, type RecoveryPendingTurn } from '../_recovery-message.js'
-import type { LLMProvider, ContentBlock } from '@use-brian/core'
+import { composeRecoveryMessage, type RecoveryPendingTurn } from '../../turn/recovery-message.js'
+import type { LLMProvider, ContentBlock } from '@use-brian/agent-runtime/providers/types.js'
 
 // ── Helpers ──────────────────────────────────────────────────────
 

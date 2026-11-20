@@ -1,4 +1,4 @@
-import type { ConfirmationDecision } from './types.js'
+import type { ConfirmationDecision } from '@use-brian/agent-runtime/mcp/types.js'
 
 export const CONFIRMATION_DECISIONS = [
   'allow',

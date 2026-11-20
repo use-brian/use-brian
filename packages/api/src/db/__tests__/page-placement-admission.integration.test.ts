@@ -329,6 +329,10 @@ describe('authored page placement admission', () => {
   })
   it('blocks unreviewed Teamspace creation in ready modes', async () => {
     const f = await fixture()
+    // Since e753d7e48 the block is a classic-mode restriction: v2 workspaces
+    // admit Teamspace creation (organization-cutover.md). Pin this workspace to
+    // the pre-v2 rollback model the case is about.
+    await pool.query('UPDATE workspaces SET department_read_v2=false WHERE id=$1', [f.w])
     await expect(createTeamspaceStore().create({ workspaceId: f.w, createdBy: f.owner, name: 'New audience', sensitivity: 'internal' })).rejects.toMatchObject({ code: 'context_selection_required' })
   })
 })

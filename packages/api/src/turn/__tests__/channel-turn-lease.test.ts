@@ -5,7 +5,7 @@
  * `status='running'` with no lease: the sweeper fell back to
  * `last_active_at` and could time out a live channel turn, and web Stop could
  * not reach it. The channel pipeline now runs through `runAssistantTurn` with
- * a held lease the kernel heart-beats and registers for in-process Stop.
+ * the kernel owner heartbeating and registering in-process Stop.
  *
  * Spec: docs/architecture/engine/turn-kernel.md.
  */
@@ -17,8 +17,13 @@ const state = vi.hoisted(() => ({ touches: 0, releases: [] as string[] }))
 
 vi.mock('../../db/sessions.js', async (original) => ({
   ...await original<any>(),
+  claimTurnLease: vi.fn(async () => 'channel-token'),
+  claimTurnLeaseOutcome:vi.fn(async()=>({token:'channel-token',turnId:null})),
   touchTurnLease: vi.fn(async () => { state.touches++; return { held: true, cancelRequested: false } }),
   releaseTurnLease: vi.fn(async (_id: string, reason: string) => { state.releases.push(reason); return true }),
+  releaseTurnOutcome:vi.fn(async(_id:string,reason:string)=>{state.releases.push(reason);return{turnId:null,reason}}),
+  captureTurnCancellation:vi.fn(async()=>({state:'cancel_requested',token:'channel-token',turnId:null,stale:false})),
+  reclaimStaleTurnOutcome:vi.fn(async()=>null),
   findSessionById: vi.fn(async (id: string) => ({ id, userId: 'u', assistantId: 'a', channelType: 'telegram', channelId: '1', status: 'running', visibility: 'owner', mode: null })),
   requestTurnCancel: vi.fn(async () => true),
   reclaimStaleTurn: vi.fn(async () => false),
@@ -27,10 +32,11 @@ vi.mock('../../session-read-authority.js', () => ({ gateSessionRead: vi.fn(async
 vi.mock('../../routes/route-helpers.js', async (original) => ({
   ...await original<any>(), resolveUser: async () => ({ id: 'u', name: 'Tester' }),
 }))
-vi.mock('@use-brian/core', async (original) => ({
+vi.mock('@use-brian/core/engine/query-loop-defaults.js', async (original) => ({
   ...await original<any>(),
-  queryLoop: vi.fn(async function* (options: { context?: { abortSignal?: AbortSignal } }) {
-    yield { type: 'text_delta', text: 'working' }
+  queryLoop: vi.fn(async function* (options: import('@use-brian/agent-runtime/engine/query-loop.js').QueryLoopOptions) {
+    if (options.dispatchOutput) await options.dispatchOutput(options.context, { type: 'text_delta', text: 'working' })
+    else yield { type: 'text_delta', text: 'working' }
     // Hold the turn open until something aborts it (or the test releases it).
     await new Promise<void>((resolve) => {
       holdOpen.release = resolve
@@ -41,7 +47,7 @@ vi.mock('@use-brian/core', async (original) => ({
 
 const holdOpen: { release: null | (() => void) } = { release: null }
 
-import { runAssistantTurn } from '../kernel.js'
+import { runAssistantTurn } from './fixtures/owned-turn.js'
 import { TURN_LEASE_STALE_AFTER_MS } from '../../db/sessions.js'
 import { chatRoutes } from '../../routes/chat.js'
 
@@ -50,7 +56,6 @@ function channelTurn(abortController: AbortController) {
     sessionId: 'channel-session',
     policy: { admission: 'personal' },
     abortController,
-    lease: { mode: 'held', token: 'channel-token' },
     model: { provider: {} as never, model: 'gemini-flash', configuredProviders: undefined, customLlm: null },
     loop: { ledger: {} as never, systemPrompt: '', messages: [], tools: new Map(), context: { abortSignal: abortController.signal } as never },
     sink: { kind: 'adapter' },
@@ -76,6 +81,15 @@ describe('[COMP:api/turn-lease] channel turns hold the kernel lease', () => {
     expect(abortController.signal.aborted).toBe(false)
     holdOpen.release?.()
     await turn
+  })
+
+  it.each([{turnId:['a'.repeat(64)]},{turnId:{}},{turnId:12},{turnId:true},{turnId:'A'.repeat(64)}])('rejects malformed public Stop identity without a store mutation: %j',async({turnId})=>{
+    const {captureTurnCancellation}=await import('../../db/sessions.js')
+    vi.mocked(captureTurnCancellation).mockClear()
+    const app=express();app.use(express.json());app.use((req,_res,next)=>{req.userId='u';next()})
+    app.use('/chat',chatRoutes({publishSessionEvent:()=>{}} as never))
+    const response=await request(app).post('/chat/stop').send({sessionId:'channel-session',turnId})
+    expect(response.status).toBe(400);expect(captureTurnCancellation).not.toHaveBeenCalled()
   })
 
   it('POST /api/chat/stop aborts a channel turn running in this process', async () => {

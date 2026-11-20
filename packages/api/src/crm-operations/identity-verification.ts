@@ -3,10 +3,15 @@
  */
 import { createPublicKey, verify } from 'node:crypto'
 import {
-  CrmIntakeVerificationConfigSchema, CrmOperationsError, canonicalCrmRequest, isUnverifiedIdentityPolicy,
-  type CrmOperationsContext, type CrmIntakeDefinitionVersionInput, type CrmIntakeIdentityProof,
+  CrmIntakeVerificationConfigSchema,
+  CrmOperationsError,
+  canonicalCrmRequest,
+  isUnverifiedIdentityPolicy,
+  type CrmOperationsContext,
+  type CrmIntakeDefinitionVersionInput,
+  type CrmIntakeIdentityProof,
   type RecordCrmSubmissionCommand,
-} from '@use-brian/core'
+} from '@use-brian/core/crm/operations-types.js'
 import type { StoredIntakeDefinition } from '../db/crm-operations-store.js'
 
 function publicKey(value: string) {

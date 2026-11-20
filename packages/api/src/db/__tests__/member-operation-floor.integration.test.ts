@@ -3,6 +3,7 @@ import pg from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
 import { getPool, getAppPool, queryWithRLS } from '../client.js'
 import { createDbWorkspaceGroupStore } from '../workspace-group-store.js'
+import { withBootstrap } from '../../__tests__/fixtures/bootstrap-role.js'
 
 // This suite asserts the legacy (pre-v2) model, which workspaces.department_read_v2=false still
 // serves as the cutover's rollback path (migration 650, decision D22); its workspaces are pinned to it.
@@ -99,7 +100,8 @@ describe('[COMP:api/member-operation-floor] per-statement member operation floor
     const rows=400
     await pool.query("INSERT INTO entities(workspace_id,created_by_user_id,kind,display_name,source) SELECT $1,$2,'person','Row '||n,'user' FROM generate_series(1,$3) n",[ws,owner,rows])
     const appRole=new URL(process.env.DATABASE_URL_APP!).username
-    await pool.query(`ALTER ROLE ${pg.escapeIdentifier(appRole)} SET track_functions='all'`)
+    // A role setting is fixture-only privileged setup: the bootstrap role sets it.
+    await withBootstrap(bootstrap=>bootstrap.query(`ALTER ROLE ${pg.escapeIdentifier(appRole)} SET track_functions='all'`))
     const calls=async()=>{
       await pool.query('SELECT pg_stat_clear_snapshot()')
       return Number((await pool.query("SELECT coalesce(sum(calls),0) calls FROM pg_stat_user_functions WHERE funcname='effective_member_read_compartments'")).rows[0].calls)
@@ -123,7 +125,7 @@ describe('[COMP:api/member-operation-floor] per-statement member operation floor
       // Two statements, one membership: bounded by statements, not by 2 x 400 rows.
       expect(delta).toBeGreaterThan(0)
       expect(delta).toBeLessThanOrEqual(4)
-    }finally{await app.end();await pool.query(`ALTER ROLE ${pg.escapeIdentifier(appRole)} RESET track_functions`)}
+    }finally{await app.end();await withBootstrap(bootstrap=>bootstrap.query(`ALTER ROLE ${pg.escapeIdentifier(appRole)} RESET track_functions`))}
   })
 
   it('leaves no policy evaluating the floor per row',async()=>{
@@ -131,7 +133,7 @@ describe('[COMP:api/member-operation-floor] per-statement member operation floor
         coalesce(pg_get_expr(polqual,polrelid),'')||' '||coalesce(pg_get_expr(polwithcheck,polrelid),'') expr FROM pg_policy`)).rows
     expect(policies.filter(p=>/member_operation_scope_allows\(/.test(p.expr)).map(p=>`${p.tab}.${p.polname}`)).toEqual([])
     const floor=policies.filter(p=>/member_operation_grants\(/.test(p.expr))
-    expect(floor).toHaveLength(44)
+    expect(floor).toHaveLength(45)
     // Every grants call must sit inside a sub-select, which PostgreSQL runs once.
     for(const p of floor)expect({policy:`${p.tab}.${p.polname}`,bare:/(?<!SELECT )member_operation_grants\(/.test(p.expr)}).toEqual({policy:`${p.tab}.${p.polname}`,bare:false})
   })

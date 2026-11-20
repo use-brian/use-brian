@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs'
 import express from 'express'
 import request from 'supertest'
 import { afterAll, describe, expect, it, vi } from 'vitest'
-import { CrmOperationsCommandSchema, type AssociationServicePort, type CrmIntegrationGrant, type CrmOperationsServicePort } from '@use-brian/core'
+import type { CrmIntegrationGrant } from '@use-brian/core/crm/integration-authority.js'
+import { CrmOperationsCommandSchema, type CrmOperationsServicePort } from '@use-brian/core/crm/operations-types.js'
 import { getAppPool, getPool } from '../client.js'
 import { createWorkspaceStore } from '../workspace-store.js'
 import { createCrmIntegrationStore } from '../crm-integration-store.js'
@@ -34,10 +35,9 @@ async function fixture(grants: CrmIntegrationGrant[] = [{ operation: 'crm.record
   const credential = await keys.create(workspaceId, userId, { label: 'Catalog fixture', expiresAt: '2099-01-01T00:00:00Z', grants })
   const execute = vi.fn(async () => { throw new Error('Catalog discovery must not execute a command') })
   const service: CrmOperationsServicePort = { execute }
-  const association: AssociationServicePort = { execute }
   const app = express()
   app.use(express.json())
-  app.use('/api/crm/integration', crmIntegrationRoutes({ credentials: keys, service, association }))
+  app.use('/api/crm/integration', crmIntegrationRoutes({ credentials: keys, service,}))
   // Simulate only the upstream member JWT identity. Membership is read from
   // the actual app-role database by the production workspace store.
   app.use((req, _res, next) => { req.userId = userId; next() })

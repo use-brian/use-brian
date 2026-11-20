@@ -2,15 +2,22 @@ import {createHash} from 'node:crypto'
 /** Actual core memory tools over canonical nonowner writers and source readers. */
 import {afterAll,describe,expect,it} from 'vitest'
 import type {PoolClient} from 'pg'
-import {ContextScopeAccumulator,boundScopeSources,createMemoryTools,createRetrievalTools,executionToolContext,type RetrievalStore,type ScopeSource,type ToolContext} from '@use-brian/core'
+import {createMemoryTools} from '@use-brian/core/memory/tools.js'
+import {createRetrievalTools} from '@use-brian/core/retrieval/tools.js'
+import type {RetrievalStore} from '@use-brian/core/retrieval/types.js'
+import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
+import type {ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
+import {executionToolContext} from '@use-brian/agent-runtime/security/execution-context.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
+import type {ToolContext} from '@use-brian/agent-runtime/tools/types.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {authSessionStore} from '../../db/auth-session-store.js'
 import {configureConnectorSourceRuntimeFactory} from '../source-runtime.js'
-import {assertSourceModelInputAuthority,assertSourceModelOutputAuthority} from '../model-source-authority.js'
+import {admitModelInput,admitModelOutput} from '../../context-scope/admission.js'
 import {createDbRowHistoryStore} from '../../db/row-history-store.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
 import {createDbEntityLinksStore} from '../../db/entity-links-store.js'
-import type {EntityLinksStore} from '@use-brian/core'
+import type {EntityLinksStore} from '@use-brian/core/entities/types.js'
 import {createMemory,updateMemory,getMemoryHistory} from '../../db/memories.js'
 import {bindSessionContextRetainedAuthority,readRetainedContextFrame,writeRetainedContextFrame} from '../../db/session-context-revisions.js'
 import {sourceModeFixture} from './fixtures/source-modes.js'
@@ -23,7 +30,7 @@ describe.sequential('[COMP:api/application-persistence] original-authority memor
  const store=createDbMemoryStore(),tools=createMemoryTools(store),historyStore=createDbRowHistoryStore(),historyTools=createRetrievalTools(historyStore as RetrievalStore)
  const authority=originalMemoryAuthority,save=saveOriginalMemory,read=readOriginalMemory
 
- it.each([false,true])('captures explicit learning or atomically refuses stale memory-index evidence (index=%s)',async(readIndex)=>{
+ it.each([false,true])('captures explicit learning without invalidating its own memory-index evidence (index=%s)',async(readIndex)=>{
   const previous=process.env.BRIAN_MEMORY_LEARNING_V1
   process.env.BRIAN_MEMORY_LEARNING_V1='1'
   const x=await sourceModeFixture('internal')
@@ -33,7 +40,7 @@ describe.sequential('[COMP:api/application-persistence] original-authority memor
    if(readIndex){const index=await selectedStore.getIndexRanked!(current.execution.security.access,20,current);current.accumulator.note({sources:boundScopeSources(index.rows)})}
    const {addSessionMessage}=await import('../../db/sessions.js')
    const {sessionMessageInputScope}=await import('../../context-scope/resolve-turn-scope.js')
-   const {readAdmittedSessionQuery}=await import('../../db/session-query-reader.js')
+   const {readAdmittedSessionQuery}=await import('../../db/conversation-store.js')
    const text='Remember: I prefer concise status updates.'
    const message=await addSessionMessage({sessionId:current.session.id,role:'user',content:[{type:'text',text}],senderUserId:x.f.ownerId,
     scope:sessionMessageInputScope({scope:current.turnScope,workspaceId:x.f.workspaceId,userId:x.f.ownerId})})
@@ -42,12 +49,6 @@ describe.sequential('[COMP:api/application-persistence] original-authority memor
    const saving=createMemoryTools(selectedStore).saveMemory.execute({summary:'Prefers concise status updates',scope:'user',
     learning:{intent:'explicit',kind:'preference',quote:text,applicability:{activity:'status_update'}}},
     {...current.context,userMessageId:message.id,userMessageText:text})
-   if(readIndex){
-    await expect(saving).rejects.toMatchObject({code:'scope_source_changed'})
-    expect((await x.f.pool.query('SELECT id FROM memories WHERE workspace_id=$1 AND summary=$2',[x.f.workspaceId,'Prefers concise status updates'])).rows).toHaveLength(0)
-    expect((await x.f.pool.query("SELECT id FROM decision_events WHERE workspace_id=$1 AND event_kind='memory.observation_recorded'",[x.f.workspaceId])).rows).toHaveLength(0)
-    return
-   }
    const result=await saving
    expect(result.isError,JSON.stringify(result)).not.toBe(true)
    const id=String(result.data).match(/\[([a-f0-9-]{36})\]/)?.[1];expect(id,JSON.stringify(result)).toBeTruthy()
@@ -79,7 +80,7 @@ describe.sequential('[COMP:api/application-persistence] original-authority memor
    expect(current.accumulator.evidence.sources?.some(source=>source.resourceKind==='entity_link'&&source.resourceId===edge.id)).toBe(true)
    const reader=await authority(x),result=await links.getRetainedMemoryLink!(reader.execution.security.access,edge.id,reader)
    expect(result).toMatchObject({id:edge.id,sourceId:memoryId,targetId:target.id});expect(boundScopeSources(result!).some(source=>source.resourceKind==='external_source')).toBe(true)
-   reader.accumulator.note({sources:boundScopeSources(result!)});await expect(assertSourceModelInputAuthority(reader.context)).resolves.toBeUndefined()
+   reader.accumulator.note({sources:boundScopeSources(result!)});await expect(admitModelInput(reader.context)).resolves.toBeUndefined()
    expect(await links.getById(access,edge.id)).toBeNull()
    expect((await links.walkOutbound(access,'memory',memoryId!)).map(link=>link.id)).not.toContain(edge.id)
    const previousSessions=new Set((await authSessionStore.listForUser(x.f.ownerId)).map(session=>session.id))
@@ -107,10 +108,10 @@ describe.sequential('[COMP:api/application-persistence] original-authority memor
    expect((await x.f.pool.query('SELECT id FROM entity_links WHERE workspace_id=$1 AND source_id=$2',[x.f.workspaceId,uncertainMemoryId])).rows).toHaveLength(1)
    const freshReader=await authority(x),freshLink=await links.getRetainedMemoryLink!(freshReader.execution.security.access,edge.id,freshReader)
    expect(freshLink?.id).toBe(edge.id);freshReader.accumulator.note({sources:boundScopeSources(freshLink!)})
-   await expect(assertSourceModelInputAuthority(freshReader.context)).resolves.toBeUndefined()
+   await expect(admitModelInput(freshReader.context)).resolves.toBeUndefined()
    await x.sourcePool.query("DELETE FROM grants WHERE kind='human' AND account_id=$1",[x.f.ownerId])
    const after=await authority(x)
-   await expect(assertSourceModelInputAuthority(freshReader.context)).rejects.toMatchObject({reason:'authority_changed'})
+   await expect(admitModelInput(freshReader.context)).rejects.toMatchObject({reason:'authority_changed'})
    expect(await links.getRetainedMemoryLink!(after.execution.security.access,edge.id,after).catch(error=>{expect(['scope_source_changed','source_access_denied']).toContain(error.code);return null})).toBeNull()
    await expect(links.createRetainedMemoryLink!({sourceKind:'memory',sourceId:memoryId!,targetKind:'memory',targetId:target.id,edgeType:'mentioned',source:'model',workspaceId:x.f.workspaceId,userId:x.f.ownerId,assistantId:x.f.assistantId},after)).rejects.toMatchObject({code:'scope_source_changed'})
    expect((await x.f.pool.query("SELECT id FROM entity_links WHERE workspace_id=$1 AND source_id=$2",[x.f.workspaceId,memoryId])).rows).toEqual([{id:edge.id}])
@@ -306,7 +307,7 @@ describe.sequential('[COMP:api/application-persistence] original-authority memor
    expect(attendedHistory.isError,JSON.stringify(attendedHistory)).not.toBe(true)
    expect(attendedHistory.scopeEvidence?.sources?.some(source=>source.resourceKind==='application_field')).toBe(true)
    reader.accumulator.note(attendedHistory.scopeEvidence??{})
-   await expect(assertSourceModelInputAuthority(reader.context)).resolves.toBeUndefined()
+   await expect(admitModelInput(reader.context)).resolves.toBeUndefined()
    const delegated={execution:await x.f.delegatedExecution(),accumulator:new ContextScopeAccumulator()}
    bindSessionContextRetainedAuthority(delegated.execution,(execution,sources,action)=>x.coordinator.prepare(execution,sources,action))
    const delegatedContext={...executionToolContext(delegated.execution,{appId:'fictional-history-tool'}),scopeAccumulator:delegated.accumulator} as ToolContext
@@ -314,17 +315,17 @@ describe.sequential('[COMP:api/application-persistence] original-authority memor
    expect(delegatedHistory.isError,JSON.stringify(delegatedHistory)).not.toBe(true)
    expect(boundScopeSources(delegatedHistory.data as object).some(source=>source.resourceKind==='application_field')).toBe(true)
    delegated.accumulator.note(delegatedHistory.scopeEvidence??{})
-   await expect(assertSourceModelInputAuthority(delegatedContext)).resolves.toBeUndefined()
+   await expect(admitModelInput(delegatedContext)).resolves.toBeUndefined()
    const serialized=JSON.parse(JSON.stringify({...reader.execution.security.access,authority:{execution:reader.execution,accumulator:reader.accumulator}}))
    await expect(historyStore.getRowHistory(serialized,{primitive:'memories',row_id:nextId!})).rejects.toBeDefined()
    expect((attendedHistory.data as {data:{chain:Array<{id:string}>}}).data.chain.map(row=>row.id)).toEqual([saved.id,nextId])
    await x.sourcePool.query("DELETE FROM grants WHERE kind='human' AND account_id=$1",[x.f.ownerId])
    const withdrawn=await authority(x)
    expect((await historyTools.getRowHistory.execute({primitive:'memories',row_id:nextId!},withdrawn.context)).isError).toBe(true)
-   await expect(assertSourceModelInputAuthority(reader.context)).rejects.toBeDefined()
-   await expect(assertSourceModelInputAuthority(delegatedContext)).resolves.toBeUndefined()
+   await expect(admitModelInput(reader.context)).rejects.toBeDefined()
+   await expect(admitModelInput(delegatedContext)).resolves.toBeUndefined()
    await x.f.pool.query('UPDATE memories SET scope_held=true WHERE id=$1',[saved.nativeSource.resourceId])
-   await expect(assertSourceModelInputAuthority(delegatedContext)).rejects.toBeDefined()
+   await expect(admitModelInput(delegatedContext)).rejects.toBeDefined()
 
   }finally{configureConnectorSourceRuntimeFactory(undefined);await x.cleanup()}
  })
@@ -344,14 +345,14 @@ describe.sequential('[COMP:api/application-persistence] original-authority memor
     return tool
    }
    const incoming=await context(),outgoing=await context()
-   await expect(assertSourceModelInputAuthority(incoming)).resolves.toBeUndefined()
-   await expect(assertSourceModelOutputAuthority(outgoing)).resolves.toBeUndefined()
+   await expect(admitModelInput(incoming)).resolves.toBeUndefined()
+   await expect(admitModelOutput(outgoing)).resolves.toBeUndefined()
    const incomingBefore=structuredClone(incoming.scopeAccumulator!.evidence),outgoingBefore=structuredClone(outgoing.scopeAccumulator!.evidence)
    const parentBefore=structuredClone(incoming.executionContext!.identity)
    if(contraction==='session')await x.f.pool.query('DELETE FROM sessions WHERE id=$1',[x.f.session.id])
    else await x.f.pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[x.f.workspaceId,x.f.firstId])
-   await expect(assertSourceModelInputAuthority(incoming)).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
-   await expect(assertSourceModelOutputAuthority(outgoing)).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
+   await expect(admitModelInput(incoming)).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
+   await expect(admitModelOutput(outgoing)).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
    expect(incoming.scopeAccumulator!.evidence).toEqual(incomingBefore);expect(outgoing.scopeAccumulator!.evidence).toEqual(outgoingBefore)
    expect(incoming.executionContext!.identity).toEqual(parentBefore)
   }finally{await x.cleanup()}

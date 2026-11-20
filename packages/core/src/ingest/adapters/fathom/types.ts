@@ -99,7 +99,7 @@ export type FathomEpisodeContext = {
   created_by_user_id: string
   created_by_assistant_id: string | null
   /** Adapter-stamped sensitivity. Defaults to 'internal' (data-model.md:264). */
-  sensitivity?: import('../../../security/sensitivity.js').Sensitivity
+  sensitivity?: import('@use-brian/agent-runtime/security/sensitivity.js').Sensitivity
 }
 
 // ── Re-exports for callers that compose adapter + envelope helpers ────

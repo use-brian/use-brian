@@ -24,9 +24,9 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '../tools/types.js'
-import type { ToolContext } from '../tools/types.js'
-import { resolveWriteScope } from '../security/context-scope.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { resolveWriteScope } from '@use-brian/agent-runtime/security/context-scope.js'
 import type { RoutingMode, RuleEpisodeSensitivity } from './engine.js'
 import {
   INGEST_SOURCE_PROVIDERS,

@@ -126,7 +126,7 @@ function toolMessage(error: unknown): string {
 function choiceClass(active: boolean): string {
   return cn(
     "rounded-xl border p-3 text-left transition-colors",
-    active ? "border-primary bg-primary/5" : "border-border bg-card hover:border-primary/40",
+    active ? "border-interaction/60 bg-interaction/5" : "border-border bg-card hover:border-interaction/40 hover:bg-interaction/5",
   );
 }
 

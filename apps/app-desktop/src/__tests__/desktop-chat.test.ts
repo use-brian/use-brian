@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  chatWindowSurvivesIdentityChange,
   companionClickFollowsChatBlur,
   desktopChatRoute,
   nativeUseBrianTarget,
@@ -44,5 +45,26 @@ describe("[COMP:app-desktop/awake-brian] desktop chat routing", () => {
     expect(companionClickFollowsChatBlur(1_250, 1_000)).toBe(true);
     expect(companionClickFollowsChatBlur(1_500, 1_000)).toBe(false);
     expect(companionClickFollowsChatBlur(1_000, 0)).toBe(false);
+  });
+});
+
+describe("[COMP:app-desktop/awake-brian] chat window identity isolation rule", () => {
+  it("retires the chat window on every account, deployment and sign-out transition", () => {
+    expect(chatWindowSurvivesIdentityChange({ kind: "account-switch" })).toBe(false);
+    expect(chatWindowSurvivesIdentityChange({ kind: "deployment-switch" })).toBe(false);
+    expect(chatWindowSurvivesIdentityChange({ kind: "sign-out" })).toBe(false);
+  });
+
+  it("keeps the chat window only for a restore proven to be the same identity", () => {
+    const restored = (previousUserId?: string | null, intendedUserId?: string | null, restoredUserId = "user-a") =>
+      chatWindowSurvivesIdentityChange({ kind: "session-restored", restoredUserId, previousUserId, intendedUserId });
+    expect(restored("user-a")).toBe(true);
+    expect(restored(null, "user-a")).toBe(true);
+    expect(restored("user-b")).toBe(false);
+    expect(restored("user-b", "user-a")).toBe(false);
+    expect(restored(null, "user-b")).toBe(false);
+    expect(restored(null, null)).toBe(false);
+    expect(restored(undefined, undefined)).toBe(false);
+    expect(restored("", "", "")).toBe(false);
   });
 });

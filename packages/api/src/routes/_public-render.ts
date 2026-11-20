@@ -9,20 +9,18 @@
  * [COMP:doc/public-share-route]
  */
 
+import type { CrmStore } from '@use-brian/core/crm/types.js'
+import type { TaskStore } from '@use-brian/core/tasks/types.js'
+import type { ViewPayload } from '@use-brian/core/views/a2ui.js'
+import { buildPublicAccessContext, type BindingDeps } from '@use-brian/core/views/bindings.js'
+import type { Block, Page } from '@use-brian/core/views/blocks.js'
+import { renderPage } from '@use-brian/core/views/page-render.js'
 import {
-  buildPublicAccessContext,
   neutralizeBlocksForPublic,
   neutralizePublicPayload,
-  renderPage,
-  type Block,
-  type BindingDeps,
-  type CrmStore,
-  type Page,
-  type TaskStore,
-  type ViewPayload,
-  type WorkflowRunStore,
-  type WorkspaceDirectoryStore,
-} from '@use-brian/core'
+} from '@use-brian/core/views/public-sanitize.js'
+import type { WorkflowRunStore } from '@use-brian/core/workflow/types.js'
+import type { WorkspaceDirectoryStore } from '@use-brian/core/workspace/types.js'
 import { runWithCanonicalPublicShare,type CanonicalPublicShareAuthority } from '../application-platform/public-share-context.js'
 import { getChildPageLabelsSystem, type ChildPageLabel } from '../db/saved-views-store.js'
 

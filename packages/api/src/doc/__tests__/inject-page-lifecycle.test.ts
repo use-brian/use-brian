@@ -15,17 +15,15 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import type {
-  DocEntityStore,
-  DocPageStore,
-  CrmStore,
-  PageLifecycleEvent,
-  TaskStore,
-  Tool,
-  WorkflowRunStore,
-  WorkspaceDirectoryStore,
-  LLMProvider,
-} from '@use-brian/core'
+import type { CrmStore } from '@use-brian/core/crm/types.js'
+import type { DocPageStore } from '@use-brian/core/doc/tools.js'
+import type { EntityStore as DocEntityStore } from '@use-brian/core/entities/doc-types.js'
+import type { TaskStore } from '@use-brian/core/tasks/types.js'
+import type { PageLifecycleEvent } from '@use-brian/core/workflow/page-event-trigger.js'
+import type { WorkflowRunStore } from '@use-brian/core/workflow/types.js'
+import type { WorkspaceDirectoryStore } from '@use-brian/core/workspace/types.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 
 vi.mock('../../db/client.js', () => ({
   query: vi.fn(),
@@ -46,7 +44,7 @@ vi.mock('../../db/saved-views-store.js', () => ({
 import { injectDocTools } from '../inject.js'
 import { createDbSavedViewStore } from '../../db/saved-views-store.js'
 import { setPageEventDispatcher } from '../../page-event-fanout.js'
-import type { DispatchEvent, WorkflowEventDispatcher } from '@use-brian/core'
+import type { DispatchEvent, WorkflowEventDispatcher } from '@use-brian/core/workflow/event-trigger.js'
 
 function noopStore<T>(): T {
   return new Proxy({}, { get: () => vi.fn() }) as T

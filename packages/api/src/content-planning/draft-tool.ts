@@ -9,7 +9,7 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '@use-brian/core'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 
 /** Long-form manual drafts remain bounded without inheriting a post limit. */
 export const MAX_PROPOSED_DRAFT_CHARS = 100_000

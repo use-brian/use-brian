@@ -14,22 +14,24 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import request from 'supertest'
 import { createTestApp } from './helpers.js'
 
-vi.mock('@use-brian/core', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@use-brian/core')>()
-  return {
-    loadBuiltinSkills: vi.fn(() => [
-      { id: 'builtin-1', name: 'Built In', description: 'b', category: 'general', source: 'builtin' },
-    ]),
-    // routes/skills.ts constructs the POST /draft limiter at mount time.
-    createRateLimiter: vi.fn(() => ({ check: () => true })),
-    // draft-generator imports these; the draft path itself is tested without
-    // this mock in skills-draft.test.ts.
-    collectStream: vi.fn(),
-    // draft-generator builds its reply schema from the real blueprint
-    // extraction-spec shape at module load — a zod schema, keep it real.
-    extractionSpecSchema: actual.extractionSpecSchema,
-  }
-})
+vi.mock('@use-brian/core/skills/loader.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@use-brian/core/skills/loader.js')>()),
+  loadBuiltinSkills: vi.fn(() => [
+    { id: 'builtin-1', name: 'Built In', description: 'b', category: 'general', source: 'builtin' },
+  ]),
+}))
+// routes/skills.ts constructs the POST /draft limiter at mount time.
+vi.mock('@use-brian/core/security/rate-limiter.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@use-brian/core/security/rate-limiter.js')>()),
+  createRateLimiter: vi.fn(() => ({ check: () => true })),
+}))
+// draft-generator imports this; the draft path itself is tested without
+// this mock in skills-draft.test.ts. Its reply schema stays the real
+// blueprint extraction-spec shape (`doc/custom-template-types.js` is not mocked).
+vi.mock('@use-brian/agent-runtime/providers/accumulator.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@use-brian/agent-runtime/providers/accumulator.js')>()),
+  collectStream: vi.fn(),
+}))
 
 import { skillRoutes } from '../skills.js'
 

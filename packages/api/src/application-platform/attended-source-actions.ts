@@ -1,6 +1,7 @@
 /** Source-owned attended commands with durable, actor-bound no-repeat receipts. [COMP:api/attended-source-actions] */
 import { z } from 'zod'
-import type { ExecutionContext, McpToolInfo } from '@use-brian/core'
+import type { McpToolInfo } from '@use-brian/agent-runtime/mcp/types.js'
+import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { SourceProtocolError, SOURCE_PROTOCOL_VERSION, sourceEffectDigest } from '@use-brian/brian-app/connector'
 import { getPool } from '../db/client.js'
 import type { SourceAccessClient, TrustedSourceRead } from './source-access.js'

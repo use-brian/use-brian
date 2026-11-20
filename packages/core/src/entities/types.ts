@@ -9,8 +9,8 @@
  * §"Sub-resource expansion".
  */
 
-import type { AccessContext } from '../security/access-context.js'
-import type { Sensitivity } from '../security/sensitivity.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type { SessionContextAuthority } from '../memory/session-state-types.js'
 
 // ── Entity kinds ─────────────────────────────────────────────────────
@@ -159,7 +159,7 @@ export type EntityCreateParams = {
   /** Explicit human General destination; empty labels alone still use the home department. */
   explicitGeneral?: boolean
   /** Exact canonical inputs captured by a trusted producer, never body labels. */
-  derivation?: import('../security/derived-scope.js').DerivedWriteEvidence
+  derivation?: import('@use-brian/agent-runtime/security/derived-scope.js').DerivedWriteEvidence
   kind: EntityKind
   displayName: string
   workspaceId: string

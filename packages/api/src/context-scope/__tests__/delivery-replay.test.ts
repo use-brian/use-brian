@@ -19,19 +19,21 @@ vi.mock('../delivery-authority.js', async (importOriginal) => ({
   createDeliveryAudienceAuthorizer: () => mocks.authorizeAudience,
 }))
 
+// The durable stored writer and completion reconciliation stay off any database (8277).
+vi.mock('../../db/conversation-store.js', async importOriginal => (await import('../../turn/__tests__/fixtures/stored-publication.js')).storedPublicationModule(await importOriginal()))
+vi.mock('../../db/conversation-publication-recovery.js', async importOriginal => (await import('../../turn/__tests__/fixtures/stored-publication.js')).completionRecoveryModule(await importOriginal()))
 vi.mock('../../db/sessions.js', () => ({
   findSessionById: mocks.findSessionById,
   getSessionMessages: mocks.getSessionMessages,
   addSessionMessage: mocks.addSessionMessage,
   toStampedMessages: mocks.toStampedMessages,
   // Turn-kernel lease (the replay holds one like every runner).
-  isTurnLeaseLive: async () => false,
   reclaimStaleTurn: async () => false,
-  takeTurnSlot: async () => undefined,
-  claimTurnSlot: async () => true,
-  startTurnLease: async () => 'lease-token',
+  claimTurnLease: async () => 'lease-token',
+  claimTurnLeaseOutcome: async () => ({token:'lease-token',turnId:null}),
   touchTurnLease: async () => ({ held: true, cancelRequested: false }),
   releaseTurnLease: async () => true,
+  releaseTurnOutcome: async (_session:string,reason:string) => ({turnId:null,reason}),
   TURN_HEARTBEAT_INTERVAL_MS: 20_000,
 }))
 
@@ -54,18 +56,20 @@ vi.mock('../../ledger/runtime.js', () => ({
   getLedgerPayloadStore: vi.fn(() => ({})),
 }))
 
-vi.mock('@use-brian/core', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@use-brian/core')>()),
-  queryLoop: mocks.queryLoop,
+vi.mock('@use-brian/core/engine/query-loop-defaults.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@use-brian/core/engine/query-loop-defaults.js')>()),
+  queryLoop: async function* (options: import('@use-brian/agent-runtime/engine/query-loop.js').QueryLoopOptions) {
+    for await (const event of mocks.queryLoop(options)) {
+      if (options.dispatchOutput) await options.dispatchOutput(options.context, event)
+      else yield event
+    }
+  },
 }))
 
-import {
-  buildTool,
-  type AccessCeiling,
-  type Tool,
-} from '@use-brian/core'
+import type { AccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
+import { buildTool, type Tool } from '@use-brian/agent-runtime/tools/types.js'
 import { currentAgentAccess } from '../../db/agent-access-context.js'
-import { AuthorityChangedError } from '../authority-lease.js'
+import { AuthorityChangedError, isAuthorityChangedError } from '../authority-lease.js'
 import { createSessionResumeReplay } from '../../routes/session-resume-replay.js'
 import type { ResumeReplayParams } from '../../routes/chat.js'
 
@@ -110,8 +114,9 @@ function turnScope(access: AccessCeiling) {
     },
     effectiveCompartments: access.compartments,
     effectiveProjectIds: access.projectIds,
-    writeCompartments: access.mutationCompartments,
-    writeProjectIds: access.projectIds,
+    // The resolver's write defaults are concrete labels, never an unbounded grant.
+    writeCompartments: access.mutationCompartments ?? ['product'],
+    writeProjectIds: access.projectIds ?? ['project-1'],
     activeGroupId: null,
     activeProjectId: null,
     activeTeam: null,
@@ -289,7 +294,12 @@ describe('[COMP:api/scope-delivery-replay] persisted replay authority', () => {
       answerText: 'the first',
     })).catch((caught: unknown) => caught)
     expect(error).toMatchObject({ reason: 'delivery_audience_unverified', diagnostic: 'user_visibility' })
-    expect(mocks.addSessionMessage).not.toHaveBeenCalledWith(expect.objectContaining({ role: 'assistant' }))
+    // The captured answer remains authorized input. Audience refusal publishes no assistant row.
+    expect(mocks.addSessionMessage.mock.calls).toEqual([[
+      expect.objectContaining({ role: 'system', content: [
+        expect.objectContaining({ type: 'text', text: expect.stringContaining('The user answered: the first') }),
+      ] }),
+    ]])
   })
 
   it('withholds a completed model event when authority changes before persistence', async () => {
@@ -313,8 +323,11 @@ describe('[COMP:api/scope-delivery-replay] persisted replay authority', () => {
       approvalKind: 'question',
       answerText: 'the first',
     })).catch((caught: unknown) => caught)
-    expect(error).toBeInstanceOf(AuthorityChangedError)
-    expect(error).toMatchObject({ operationMayHaveExecuted: false })
+    // The kernel's canonical output admission on the resume's own execution
+    // refuses the event first (as on every lane), before the sink or publication.
+    expect(isAuthorityChangedError(error)).toBe(true)
+    expect(error).toMatchObject({ retrySafe: false })
+    expect((error as { operationMayHaveExecuted?: unknown }).operationMayHaveExecuted).not.toBe(true)
     expect(mocks.addSessionMessage).toHaveBeenCalledTimes(1)
     expect(mocks.addSessionMessage).toHaveBeenCalledWith(expect.objectContaining({ role: 'system' }))
     expect(mocks.addSessionMessage).not.toHaveBeenCalledWith(expect.objectContaining({ role: 'assistant' }))

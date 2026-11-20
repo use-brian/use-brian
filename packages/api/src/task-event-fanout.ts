@@ -19,11 +19,11 @@
  * [COMP:api/task-event-fanout]
  */
 
+import type { WorkflowEventDispatcher } from '@use-brian/core/workflow/event-trigger.js'
 import {
   createTaskLifecycleTrigger,
   type TaskLifecycleEvent,
-  type WorkflowEventDispatcher,
-} from '@use-brian/core'
+} from '@use-brian/core/workflow/task-event-trigger.js'
 
 let sink: ((event: TaskLifecycleEvent) => Promise<void>) | null = null
 

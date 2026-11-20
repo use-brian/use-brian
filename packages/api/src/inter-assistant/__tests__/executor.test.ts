@@ -1,4 +1,4 @@
-import type { SessionStateRecord } from '@use-brian/core'
+import type { SessionStateRecord } from '@use-brian/core/memory/session-state-types.js'
 /**
  * Unit tests for the cross-assistant (callee) executor.
  * Component tag: [COMP:api/inter-assistant-executor].
@@ -22,8 +22,17 @@ vi.mock('../../context-scope/execution-context.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../../context-scope/execution-context.js')>()
   return { ...actual,resolveExecutionContextSystem: (input: Parameters<typeof actual.resolveExecutionContextSystem>[0],
     deps: Parameters<typeof actual.resolveExecutionContextSystem>[1] = {}) => actual.resolveExecutionContextSystem(input,{
-      ...deps,pinPolicyEpoch: async () => async () => true,resolveAssistant: async () => input.assistant,
+      ...deps,pinPolicyEpoch: async () => ({isCurrent: async () => true, matches: () => true}),resolveAssistant: async () => input.assistant,
     }) }
+})
+// Legacy fake rows have no database authority facts. This fixture boundary
+// retains ambient caller leases; owner.test.ts exercises the canonical session lease.
+vi.mock('../../context-scope/authority-lease.js', async original => {
+  const actual = await original<typeof import('../../context-scope/authority-lease.js')>()
+  return { ...actual, createSessionAuthorityLease: () => ({
+    assertCurrent: async () => {}, execute: async <T>(operation: () => Promise<T>) => operation(),
+    markOperationMayHaveExecuted() {},
+  }) }
 })
 import { z } from 'zod'
 
@@ -36,9 +45,20 @@ const mockLoadDecisionPlaybookContext = vi.fn()
 // Override queryLoop + runPreflight; everything else (buildPreflightPrompt,
 // prompt/memory-context builders, MODEL_MAP) runs for real so the system-prompt
 // injection + model resolution are exercised end to end.
-vi.mock('@use-brian/core', async (io) => ({
-  ...(await io<typeof import('@use-brian/core')>()),
-  queryLoop: (...a: unknown[]) => mockQueryLoop(...a),
+vi.mock('@use-brian/core/engine/query-loop-defaults.js', async (io) => ({
+  ...(await io<typeof import('@use-brian/core/engine/query-loop-defaults.js')>()),
+  queryLoop: async function* (options: import('@use-brian/agent-runtime/engine/query-loop.js').QueryLoopOptions) {
+    for await (const event of mockQueryLoop(options)) {
+      if (event.type === 'turn_complete' && event.totalUsage) {
+        options.observeUsage?.({model:event.response.model,totalUsage:event.totalUsage})
+      }
+      if (options.dispatchOutput) await options.dispatchOutput(options.context, event)
+      else yield event
+    }
+  },
+}))
+vi.mock('@use-brian/core/workers/preflight.js', async (io) => ({
+  ...(await io<typeof import('@use-brian/core/workers/preflight.js')>()),
   runPreflight: (...a: unknown[]) => mockRunPreflight(...a),
 }))
 vi.mock('../../db/users.js', () => ({
@@ -51,6 +71,9 @@ vi.mock('../../db/users.js', () => ({
 vi.mock('../../decision-learning/playbook-context.js', () => ({
   loadDecisionPlaybookContext: (...args: unknown[]) => mockLoadDecisionPlaybookContext(...args),
 }))
+// The durable stored writer and completion reconciliation stay off any database (8277).
+vi.mock('../../db/conversation-store.js', async importOriginal => (await import('../../turn/__tests__/fixtures/stored-publication.js')).storedPublicationModule(await importOriginal()))
+vi.mock('../../db/conversation-publication-recovery.js', async importOriginal => (await import('../../turn/__tests__/fixtures/stored-publication.js')).completionRecoveryModule(await importOriginal()))
 vi.mock('../../db/sessions.js', () => ({
   findOrCreateSession: vi.fn(),
   addSessionMessage: vi.fn().mockResolvedValue({ id: 'msg-1' }),
@@ -64,13 +87,12 @@ vi.mock('../../db/sessions.js', () => ({
   // unless a test seeds it.
   listSessionsByChannelForWorkspaceSystem: vi.fn().mockResolvedValue([]),
   // Turn-kernel lease (every callee turn holds one).
-  isTurnLeaseLive: vi.fn().mockResolvedValue(false),
   reclaimStaleTurn: vi.fn().mockResolvedValue(false),
-  takeTurnSlot: vi.fn().mockResolvedValue(undefined),
-  claimTurnSlot: vi.fn().mockResolvedValue(true),
-  startTurnLease: vi.fn().mockResolvedValue('lease-token'),
+  claimTurnLease: vi.fn().mockResolvedValue('lease-token'),
+  claimTurnLeaseOutcome:vi.fn().mockResolvedValue({token:'lease-token',turnId:null}),
   touchTurnLease: vi.fn().mockResolvedValue({ held: true, cancelRequested: false }),
   releaseTurnLease: vi.fn().mockResolvedValue(true),
+  releaseTurnOutcome:vi.fn(async(_id:string,reason:string)=>({turnId:null,reason})),
   TURN_HEARTBEAT_INTERVAL_MS: 20_000,
 }))
 vi.mock('../../billing-party.js', () => ({
@@ -80,7 +102,7 @@ vi.mock('../../db/workspace-store.js', () => ({
   getConnectorUserId: vi.fn().mockResolvedValue('owner-1'),
   getWorkspacePlan: vi.fn().mockResolvedValue('pro'),
   getWorkspaceRoleSystem: vi.fn().mockResolvedValue('member'),
-  // injectMcpTools gates the owner-personal base load on this; `true`
+  // The retired injector gated the owner-personal base load on this; `true`
   // (solo workspace) preserves the pre-gate load behavior these tests expect.
   isSoloWorkspaceSystem: vi.fn().mockResolvedValue(true),
   // Read-ceiling resolver for the brain retrieval actor. Returned shape mirrors
@@ -90,13 +112,22 @@ vi.mock('../../db/workspace-store.js', () => ({
     .fn()
     .mockResolvedValue({ clearance: 'confidential', compartments: null, mutationCompartments: null }),
 }))
-vi.mock('../../mcp/inject.js', () => ({
-  injectMcpTools: vi.fn().mockResolvedValue({
-    enrichConfirmation: async (_t: string, i: unknown) => i,
+// The callee's capability surface (`turn/capabilities.ts` → `mcp/surface.ts`):
+// `composeCallee` records the callee's parameter block, `surfaces` the surface id.
+const surfaceMocks = vi.hoisted(() => ({
+  surfaces: [] as string[],
+  composeCallee: vi.fn<(params: SurfaceCapabilityOptions) => Promise<SurfaceCapabilities>>(async () => ({
+    enrichConfirmation: async (_t: string, i: Record<string, unknown>) => i,
     unavailable: [],
     searchableSources: [],
     restrictedSearchToolNames: [],
-  }),
+  })),
+}))
+vi.mock('../../mcp/surface.js', () => ({
+  composeSurfaceCapabilities: (surface: string, params: SurfaceCapabilityOptions) => {
+    surfaceMocks.surfaces.push(surface)
+    return surfaceMocks.composeCallee(params)
+  },
 }))
 vi.mock('../../routes/proactive-compaction.js', () => ({
   runProactiveCompaction: vi.fn().mockResolvedValue({ messages: [], compacted: false, episodes: [] }),
@@ -112,28 +143,32 @@ vi.mock('../../doc/inject.js', () => ({
 import { runWithAgentAccess } from '../../db/agent-access-context.js'
 import { createCalleeExecutor } from '../executor.js'
 import * as callerEvidence from '../../context-scope/caller-evidence.js'
-// Real (unmocked) core factories — the '@use-brian/core' mock above spreads the
-// actual module, so everything but queryLoop/runPreflight resolves for real.
+// Real (unmocked) core factories — the query-loop and preflight mocks above
+// spread the actual modules, so everything but queryLoop/runPreflight resolves for real.
 // Used by the goal-path browser-surface describes at the bottom of this file.
 import {
-  createComputerTools,
-  buildTool,
-  createSkillRunnerTools,
-  createBuFallbackTool,
-  createLocalBrowserProvider,
-  createCloudBrowserProvider,
-  StubSandboxProvider,
-  createSandboxOrchestrator,
-  createInMemorySandboxTaskStore,
-  createInMemoryBrowserProfileStore,
-  createInMemorySessionVault,
   createInMemoryBrowserSkillStore,
   createInMemoryBrowserSkillGrantStore,
   createInMemoryBlockApprovals,
-  extractEffectContract,
-  RESULT_PATH,
-  AuthoritySourceSchema,
-} from '@use-brian/core'
+} from '@use-brian/core/sandbox/browser-skills.js'
+import { createBuFallbackTool } from '@use-brian/core/sandbox/bu-fallback.js'
+import { createCloudBrowserProvider } from '@use-brian/core/sandbox/cloud-browser-provider.js'
+import { extractEffectContract } from '@use-brian/core/sandbox/effect-contract.js'
+import { createLocalBrowserProvider } from '@use-brian/core/sandbox/local-browser-provider.js'
+import {
+  createSandboxOrchestrator,
+  createInMemorySandboxTaskStore,
+} from '@use-brian/core/sandbox/orchestrator.js'
+import {
+  createInMemoryBrowserProfileStore,
+  createInMemorySessionVault,
+} from '@use-brian/core/sandbox/profiles.js'
+import { StubSandboxProvider } from '@use-brian/core/sandbox/providers/stub.js'
+import { RESULT_PATH } from '@use-brian/core/sandbox/runner-shim.js'
+import { createSkillRunnerTools } from '@use-brian/core/sandbox/skill-runner.js'
+import { createComputerTools } from '@use-brian/core/sandbox/tools.js'
+import { AuthoritySourceSchema } from '@use-brian/agent-runtime/security/authority-source.js'
+import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
 import {
   findAssistantById,
   findOrCreateUser,
@@ -143,6 +178,7 @@ import {
 } from '../../db/users.js'
 import {
   findOrCreateSession,
+  readSessionById,
   addSessionMessage,
   listSessionsByChannelForWorkspaceSystem,
 } from '../../db/sessions.js'
@@ -150,16 +186,17 @@ import { billingPartyForAssistant } from '../../billing-party.js'
 import { resolveOperationCeilingsSystem, getWorkspaceRoleSystem } from '../../db/workspace-store.js'
 import { runProactiveCompaction } from '../../routes/proactive-compaction.js'
 import { injectDocTools } from '../../doc/inject.js'
-import { injectMcpTools } from '../../mcp/inject.js'
+import type { SurfaceCapabilities, SurfaceCapabilityOptions } from '../../mcp/surface.js'
+const composeCallee = surfaceMocks.composeCallee
 import {
-  encodeExternalCostMeta,
   engineCostModel,
   flatEngineCostUsd,
-  flatSearchCostUsd,
-} from '@use-brian/core'
+} from '@use-brian/core/billing/engine-provider-rates.js'
+import { encodeExternalCostMeta } from '@use-brian/core/billing/external-cost.js'
+import { flatSearchCostUsd } from '@use-brian/core/billing/search-provider-rates.js'
 
 const mockInjectDoc = vi.mocked(injectDocTools)
-const mockInjectMcp = vi.mocked(injectMcpTools)
+const mockInjectMcp = vi.mocked(composeCallee)
 
 const mockFindAssistant = vi.mocked(findAssistantById)
 const mockFindUser = vi.mocked(findUserById)
@@ -279,7 +316,12 @@ beforeEach(() => {
     mutationCompartments: compartments === undefined ? [] : compartments,
   }))
   mockBilling.mockResolvedValue('owner-1')
-  mockSession.mockResolvedValue({ id: 'sess-1' } as never)
+  mockSession.mockImplementation(async params => ({ id:'sess-1',visibility:'personal',mode:null,
+    anchorKind:'none',anchorRef:null,appOrigin:null,contextLockedAt:null,effectiveClearance:null,
+    contextCompartments:[], ...params }) as never)
+  vi.mocked(readSessionById).mockImplementation(async () => ({ id:'sess-1',visibility:'personal',mode:null,
+    anchorKind:'none',anchorRef:null,appOrigin:null,contextLockedAt:null,effectiveClearance:null,
+    contextCompartments:[],...mockSession.mock.lastCall?.[0] }) as never)
   vi.spyOn(console, 'error').mockImplementation(() => {})
 })
 
@@ -302,7 +344,8 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     await expect(run({ ...baseParams,callerUserId:parent.userId,callerAssistantId:parent.assistantId,expectedWorkspaceId: '10000000-0000-4000-8000-000000000011',callerAccessCeiling: ceiling,callerWorkspaceDelegation: parent })).resolves.toBe('bounded');
     const loop = mockQueryLoop.mock.calls.at(-1)![0];
     expect([...loop.tools.keys()]).toEqual(['permittedRead']);
-    expect(vi.mocked(injectMcpTools)).toHaveBeenCalledWith(expect.objectContaining({ bindingMaximum: { 'fictional-account': 'fingerprint' },keepBuiltinsDirect: true,keepDynamicToolsDirect: true }));
+    expect(vi.mocked(composeCallee)).toHaveBeenCalledWith(expect.objectContaining({ bindingMaximum: { 'fictional-account': 'fingerprint' },keepBuiltinsDirect: true,keepDynamicToolsDirect: true }));
+    expect(surfaceMocks.surfaces.at(-1)).toBe('callee');
     expect(authority.assertCurrent).toHaveBeenCalled();
     restoreWorkspaceParent.mockRejectedValueOnce(new Error('workspace_mcp_parent_unavailable'));
     const calls = mockQueryLoop.mock.calls.length;
@@ -1759,7 +1802,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     // This is the structural single-hop bound (the transport's chain gates are
     // not fed accumulated state). See executor.ts step 4c.
     yieldsText()
-    const stub = (name: string) => [name, { name }] as const
+    const stub = (name: string) => [name, buildTool({ name, description: 'Fictional retained candidate.', inputSchema: z.object({}), execute: async () => ({ data: 'unused fixture' }) })] as const
     const callee = createCalleeExecutor({
       provider: {} as never,
       tools: new Map([
@@ -1788,7 +1831,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     // parallel-research path is the executor-managed runPreflight fan-out, which
     // does not use these tools. See executor.ts step 4c-bis.
     yieldsText()
-    const stub = (name: string) => [name, { name }] as const
+    const stub = (name: string) => [name, buildTool({ name, description: 'Fictional retained candidate.', inputSchema: z.object({}), execute: async () => ({ data: 'unused fixture' }) })] as const
     const callee = createCalleeExecutor({
       provider: {} as never,
       tools: new Map([
@@ -1813,7 +1856,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
 
   it('strips workflow orchestration tools from every callee', async () => {
     yieldsText()
-    const stub = (name: string) => [name, { name }] as const
+    const stub = (name: string) => [name, buildTool({ name, description: 'Fictional retained candidate.', inputSchema: z.object({}), execute: async () => ({ data: 'unused fixture' }) })] as const
     const callee = createCalleeExecutor({
       provider: {} as never,
       tools: new Map([
@@ -2046,7 +2089,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
       } as never
       const callee = anchoredExecutor(store)
       await callee({ ...baseParams, pageAnchorId: PAGE_ID })
-      expect(seen).toEqual(['internal'])
+      expect(seen).toEqual(['internal', 'internal'])
       // No agent context leaks outside the execution (fail-closed).
       expect(currentAgentClearance()).toBeUndefined()
     })
@@ -2139,10 +2182,10 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
       // Make the doc injector actually add a tool to the live map, like the
       // real one does — proving injection precedes filterToolsByAllowList.
       mockInjectDoc.mockImplementationOnce(async (opts: { tools: Map<string, unknown> }) => {
-        opts.tools.set('delegateDocEdit', { name: 'delegateDocEdit' })
+        opts.tools.set('delegateDocEdit', buildTool({ name: 'delegateDocEdit', description: 'Fictional injected tool.', inputSchema: z.object({}), execute: async () => ({ data: 'unused fixture' }) }))
         return { injected: true, injectedCount: 1 } as never
       })
-      const base = new Map([['search', { name: 'search' }]])
+      const base = new Map([['search', buildTool({ name: 'search', description: 'Fictional search.', inputSchema: z.object({}), execute: async () => ({ data: 'unused fixture' }) })]])
       const callee = anchoredExecutor(
         savedViewStoreWith({ id: PAGE_ID, workspaceId: 'ws-1', clearance: 'internal' }),
         base,
@@ -2905,23 +2948,6 @@ describe('[COMP:sandbox/browser-tools] browser surface on the goal path (workflo
     return { tools, provider, profileStore, skillStore }
   }
 
-  type RunnableTool = {
-    execute: (input: never, context: never) => Promise<{ data: unknown; isError?: boolean }>
-    inputSchema: { parse: (v: unknown) => unknown }
-  }
-
-  /** The ToolContext shape a goal iteration's callee turn stamps. */
-  const goalContext = () => ({
-    userId: 'owner-1',
-    assistantId: 'callee-1',
-    sessionId: 'sess-1',
-    appId: 'Use Brian',
-    channelType: 'assistant-call',
-    channelId: 'caller-1',
-    workspaceId: 'ws-1',
-    abortSignal: new AbortController().signal,
-  })
-
   it('workflow-origin consults keep the one-call browser tools and drop browserClick (fail-closed)', async () => {
     yieldsText()
     const { tools } = await realBrowserTools({ unattended: true })
@@ -2967,9 +2993,9 @@ describe('[COMP:sandbox/browser-tools] browser surface on the goal path (workflo
     }
   })
 
-  it('a goal iteration executes a read-only browser skill end-to-end (unattended + paid)', async () => {
-    yieldsText()
-    const { tools, provider, profileStore, skillStore } = await realBrowserTools({ unattended: true })
+  it.each([true, false])('executes the actual owned goal skill with unattended=%s', async unattended => {
+    mockFindAssistant.mockImplementation(async id => ({ ...(id === 'callee-1' ? calleeAssistant : callerAssistant), workspaceId: 'ws-1' }) as never)
+    const { tools, provider, profileStore, skillStore } = await realBrowserTools({ unattended })
     await profileStore.create({
       workspaceId: 'ws-1',
       ownerUserId: 'owner-1',
@@ -2991,28 +3017,23 @@ describe('[COMP:sandbox/browser-tools] browser surface on the goal path (workflo
       io.writeFile(RESULT_PATH, JSON.stringify({ ok: true, summary: 'collected 3 items' }))
       return { stdout: '', stderr: '', exitCode: 0 }
     })
+    let result: { data: unknown; isError?: boolean } | undefined
+    mockQueryLoop.mockImplementationOnce(async function* (options) {
+      const runSkill = options.tools.get('runBrowserSkill')!
+      result = await runSkill.execute(runSkill.inputSchema.parse({ skill: unattended ? 'collect-example' : 'whatever' }), {
+        ...options.context,
+      })
+      yield { type: 'assistant_turn', response: { content: [{ type: 'text', text: 'Fictional completed goal.' }] }, toolResults: [] }
+      yield { type: 'turn_complete', response: { content: [{ type: 'text', text: 'Fictional completed goal.' }] } }
+    })
     await browserExecutor(tools)({ ...baseParams, callerChannelType: 'workflow' })
-    const passed = mockQueryLoop.mock.calls[0][0].tools as Map<string, RunnableTool>
-    const runSkill = passed.get('runBrowserSkill')!
-    const res = await runSkill.execute(
-      runSkill.inputSchema.parse({ skill: 'collect-example' }) as never,
-      goalContext() as never,
-    )
-    expect(res.isError ?? false).toBe(false)
-    expect(String(res.data)).toContain('collected 3 items')
-  })
-
-  it('the same surface refuses honestly on the goal path while unattended computer-use is OFF', async () => {
-    yieldsText()
-    const { tools } = await realBrowserTools({ unattended: false })
-    await browserExecutor(tools)({ ...baseParams, callerChannelType: 'workflow' })
-    const passed = mockQueryLoop.mock.calls[0][0].tools as Map<string, RunnableTool>
-    const runSkill = passed.get('runBrowserSkill')!
-    const res = await runSkill.execute(
-      runSkill.inputSchema.parse({ skill: 'whatever' }) as never,
-      goalContext() as never,
-    )
-    expect(res.isError).toBe(true)
-    expect(String(res.data)).toContain('unattended')
+    expect(result).toBeDefined()
+    if (unattended) {
+      expect(result!.isError ?? false, JSON.stringify(result)).toBe(false)
+      expect(String(result!.data)).toContain('collected 3 items')
+    } else {
+      expect(result!.isError).toBe(true)
+      expect(String(result!.data)).toContain('unattended')
+    }
   })
 })

@@ -17,7 +17,8 @@
  * Component tag: [COMP:scheduling/confirmation-prompt].
  */
 
-import { buildConfirmationActions, type ToolConfirmationRequest } from '@use-brian/core'
+import { buildConfirmationActions } from '@use-brian/core/mcp/confirmation-events.js'
+import type { ToolConfirmationRequest } from '@use-brian/agent-runtime/mcp/types.js'
 import {
   createSlackAdapter,
   createFeishuAdapter,
@@ -56,7 +57,7 @@ export type ConfirmationPromptDeps = {
   waConnectorSecret?: string
   customChannelStore?: Pick<CustomChannelStore, 'enqueue'>
   authorizeDeliveryAudience?: AuthorizeDeliveryAudience
-  scopeEvidence?: import('@use-brian/core').ScopeEvidence
+  scopeEvidence?: import('@use-brian/agent-runtime/security/context-scope.js').ScopeEvidence
   userId?: string
 }
 

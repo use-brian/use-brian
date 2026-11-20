@@ -1,11 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import {
-  ContextScopeAccumulator, createExecutionContext, executionToolContext, type Tool,
-} from '@use-brian/core'
-import { injectMcpTools } from '../inject.js'
+  createExecutionContext,
+  executionToolContext,
+} from '@use-brian/agent-runtime/security/execution-context.js'
+import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
+import { composeForTest } from './surface-harness.js'
 import { createMailboxIdleWatcher, type IdleClientLike } from '../../mailbox/idle-watcher.js'
 import { createMailboxSyncWorker, readMailboxSyncState } from '../../mailbox/sync-worker.js'
 import type { ConnectorSourceRuntime } from '../../application-platform/source-runtime.js'
+import { instanceBindingFingerprint } from '../activation.js'
 
 const mocks = vi.hoisted(() => ({ read: vi.fn(), current: vi.fn() }))
 vi.mock('../../connector-config.js', () => ({
@@ -69,7 +73,7 @@ async function setup(options: { config?: Record<string, unknown>; custom?: boole
     call: vi.fn(), assertCurrent: async () => {}, authorize: vi.fn(),
   }
   const tools = new Map<string, Tool>()
-  await injectMcpTools({
+  await composeForTest({
     userId: 'user-example', assistantId: 'assistant-example', assistantTeamId: 'workspace-example', tools,
     executionContext: execution, scopeAccumulator: accumulator, exposeLocalReadTools: true,
     contextScope: { access: execution.security.access, effectiveCompartments: [], effectiveProjectIds: [] },
@@ -79,9 +83,18 @@ async function setup(options: { config?: Record<string, unknown>; custom?: boole
     connectorGrantStore: { listForTargetSystem: async () => grants } as never,
     connectorSourceRuntimeFactory: async () => source,
   })
+  const context = { ...executionToolContext(execution, { appId: 'test' }), scopeAccumulator: accumulator, requestTools: tools }
+  // Protected sources are discovered lazily: a search naming the source discovers it.
+  expect(source.discover).not.toHaveBeenCalled()
+  await tools.get('mcp_search')!.execute({ query: 'Protected source' }, context)
   expect(source.discover).toHaveBeenCalled()
+  // Activation pins the bindings a lane uses: resolve the mailbox family (argument
+  // validation then refuses before any effect), so later checks cover its row.
+  const server = (options.provider ?? 'imap') === 'imap' && !options.custom ? 'imap' : null
+  if (server) await tools.get('mcp_call')!.execute({ server, tool: 'imapGetMessage', args: { messageId: 42 } }, context)
+  await tools.get('mcp_call')!.execute({ server: 'gcal', tool: 'googleCalendarListEvents', args: { calendarId: 42 } }, context)
   expect(tools.has('googleCalendarListEvents')).toBe(true)
-  return { execution, accumulator, tools, rows, mailbox, store, grants, auth, context: { ...executionToolContext(execution, { appId: 'test' }), scopeAccumulator: accumulator, requestTools: tools } }
+  return { execution, accumulator, tools, rows, mailbox, store, grants, auth, context }
 }
 
 beforeEach(() => {
@@ -92,7 +105,7 @@ beforeEach(() => {
 
 const imapCredentials = { type: 'imap' as const, email: 'maya@example.org', appPassword: 'fictional', imapHost: 'imap.example.org', imapPort: 993, smtpHost: 'smtp.example.org', smtpPort: 465 }
 
-describe('[COMP:api/mcp-inject] mailbox operational state and current authority', () => {
+describe('[COMP:api/mcp-surface] mailbox operational state and current authority', () => {
   it.each([false, true])('retains direct and gateway tools after the IDLE writer updates an owned/granted mailbox (granted=%s)', async granted => {
     const { context, tools, store, mailbox, rows } = await setup({ granted })
     const search = () => tools.get('mcp_search')!.execute({ query: 'calendar' }, context)
@@ -151,8 +164,16 @@ describe('[COMP:api/mcp-inject] mailbox operational state and current authority'
   })
 
   it.each([{ custom: true }, { provider: 'custom' }, { provider: 'gcal' }])('does not classify other connector configuration as mailbox telemetry: %j', async options => {
-    const { context, tools, mailbox } = await setup(options)
+    const { mailbox } = await setup(options)
+    const before = instanceBindingFingerprint(structuredClone(mailbox) as never)
     mailbox.config = { mailboxIdle: { status: 'connected', since: '2030-01-01', lastEventAt: null } }
+    // Only an IMAP row's operational telemetry is excluded from its binding fingerprint.
+    expect(instanceBindingFingerprint(mailbox as never)).not.toBe(before)
+  })
+
+  it('refuses an effect on a changed Calendar binding the turn already activated', async () => {
+    const { context, tools, rows } = await setup({ provider: 'gcal' })
+    rows.find(row => row.id === 'calendar-example')!.config = { mailboxIdle: { status: 'connected', since: '2030-01-01', lastEventAt: null } }
     await expect(tools.get('mcp_search')!.execute({ query: 'calendar' }, context)).rejects.toMatchObject({ reason: 'authority_changed' })
   })
 

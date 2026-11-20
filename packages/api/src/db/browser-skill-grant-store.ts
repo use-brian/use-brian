@@ -3,7 +3,7 @@
  *
  * [COMP:sandbox/approval-grants]
  */
-import type { BrowserSkillGrant, BrowserSkillGrantStore } from '@use-brian/core'
+import type { BrowserSkillGrant, BrowserSkillGrantStore } from '@use-brian/core/sandbox/browser-skills.js'
 import type { PoolClient } from 'pg'
 import { query } from './client.js'
 import { createBrowserProfileStore, withBrowserProfileOwnerMutation } from './browser-profile-store.js'

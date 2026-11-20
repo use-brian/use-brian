@@ -5,7 +5,11 @@ import {resolveExecutionContextSystem} from '../../context-scope/execution-conte
 import type {PoolClient} from 'pg'
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
-import { ContextScopeAccumulator,boundScopeSources,deriveResourceScope,createSelfProfileTool,type AccessContext,type ScopeSource } from '@use-brian/core'
+import { createSelfProfileTool } from '@use-brian/core/memory/self-profile-tool.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { deriveResourceScope, type ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { getAppPool, getPool } from '../client.js'
 import { createEntity,updateSelfEntityAttributes,createDbEntitiesStore } from '../entities-store.js'
 import {createDbEntityLinksStore} from '../entity-links-store.js'
@@ -17,7 +21,7 @@ import {sourceModeFixture} from '../../application-platform/__tests__/fixtures/s
 import {originalMemoryAuthority} from '../../application-platform/__tests__/fixtures/retained-memory.js'
 import {readRetainedContextFrame,writeRetainedContextFrame} from '../session-context-revisions.js'
 import {configureConnectorSourceRuntimeFactory} from '../../application-platform/source-runtime.js'
-import {assertSourceModelInputAuthority} from '../../application-platform/model-source-authority.js'
+import {admitModelInput} from '../../context-scope/admission.js'
 import {canonicalNativeResourceDefinitions} from '../../application-platform/native-resources.js'
 import {readCanonicalNativeRecord} from '../../application-platform/field-evidence.js'
 import {queryCanonicalNativeRecords} from '../../application-platform/native-reader.js'
@@ -111,7 +115,7 @@ describe('[COMP:api/identity-context] canonical identity prompt scope', () => {
       expect(emptyRows).toEqual([]);expect(boundScopeSources(emptyRows).some(root=>root.resourceKind==='application_field')).toBe(true)
       noteAutomaticScopeEvidence(empty.accumulator,[emptyRows,...emptyRows])
       expect(empty.accumulator.evidence.sources?.some(root=>root.resourceKind==='application_field')).toBe(true)
-      await expect(assertSourceModelInputAuthority(empty.context)).resolves.toBeUndefined()
+      await expect(admitModelInput(empty.context)).resolves.toBeUndefined()
     }finally{await x.cleanup()}
   })
 
@@ -128,7 +132,7 @@ describe('[COMP:api/identity-context] canonical identity prompt scope', () => {
       expect(rows.map(row=>row.summary)).toEqual(expect.arrayContaining(["User's name is 42",`User's role: {"title":"Fictional planning lead"}`,'Sources: {"legacy":true}','Licenses: ["fictional",7]','Title: Fictional pilot','Domain: fictional.example','Stage: false']))
       expect(rows.some(row=>row.id.endsWith(':empty'))).toBe(false)
       noteAutomaticScopeEvidence(current.accumulator,rows)
-      await expect(assertSourceModelInputAuthority(current.context)).resolves.toBeUndefined()
+      await expect(admitModelInput(current.context)).resolves.toBeUndefined()
       const selected=(await x.f.pool.query("SELECT application_native_entity_values('person',$1::jsonb,ARRAY['profile.role']) AS role,application_native_entity_values('person',$1::jsonb,ARRAY['profile.extra']) AS extra",[{attributes:{self:true,role:extra.role,name:42,title:'Fictional pilot',email:'fictional@example.com'}}])).rows[0]
       expect(selected).toEqual({role:{'profile.role':{value:extra.role}},extra:{'profile.extra':{title:'Fictional pilot'}}})
       // Existing canonical CRM shapes are not reclassified as arbitrary extras.
@@ -157,10 +161,10 @@ describe('[COMP:api/identity-context] canonical identity prompt scope', () => {
       expect(rows.map(row=>row.summary)).toContain("User's role: Protected planning lead")
       expect(boundScopeSources(rows).some(root=>root.resourceKind==='application_field')).toBe(true)
       noteAutomaticScopeEvidence(current.accumulator,rows)
-      await expect(assertSourceModelInputAuthority(current.context)).resolves.toBeUndefined()
+      await expect(admitModelInput(current.context)).resolves.toBeUndefined()
       const observations=(await x.f.pool.query('SELECT resource_id,version,source_scope FROM application_field_observations WHERE workspace_id=$1 ORDER BY resource_id,version',[x.f.workspaceId])).rows
       await x.sourcePool.query("DELETE FROM grants WHERE kind='human' AND account_id=$1",[x.f.ownerId])
-      await expect(assertSourceModelInputAuthority(current.context)).rejects.toMatchObject({reason:'authority_changed'})
+      await expect(admitModelInput(current.context)).rejects.toMatchObject({reason:'authority_changed'})
       const after=await originalMemoryAuthority(x)
       await expect(createDbMemoryStore().getIdentity(after.execution.security.access,after)).rejects.toMatchObject({code:'scope_source_changed'})
       expect((await x.f.pool.query('SELECT resource_id,version,source_scope FROM application_field_observations WHERE workspace_id=$1 ORDER BY resource_id,version',[x.f.workspaceId])).rows).toEqual(observations)

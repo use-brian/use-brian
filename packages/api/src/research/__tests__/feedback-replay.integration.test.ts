@@ -1,10 +1,12 @@
 /** Real persisted-message replay; only the one-shot transport failure is injected. */
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
-import { interpretResearchFollowup } from '@use-brian/core'
+import { interpretResearchFollowup } from '@use-brian/core/research/contracts.js'
 import pg from 'pg'
 import { randomUUID } from 'node:crypto'
 import { getAppPool, getPool, queryWithRLS } from '../../db/client.js'
+import { conversationAnchorWriteAdmissionActive, initializeConversationVisibility } from '../../db/conversation-visibility.js'
 import * as researchStore from '../../db/research-store.js'
+import * as attempts from '../../db/research-feedback-attempt-store.js'
 import { createProjectSharedStore } from '../../db/project-shared-store.js'
 import { flushWorkspaceData } from '../../db/workspace-flush.js'
 import { beginResearchActivity, captureResearchFollowupForMessage } from '../runtime.js'
@@ -38,6 +40,19 @@ async function counts(messageId: string) {
     (SELECT count(*)::int FROM research_feedback_revisions r JOIN research_feedback f ON f.id=r.feedback_id WHERE f.message_id=$1) AS revisions,
     (SELECT count(*)::int FROM decision_events WHERE event_kind='research.followup_recorded' AND source_id=$1::text) AS events`, [messageId])).rows[0]
 }
+async function attachResearchPageThread(f: BriefFixture, r: Saved): Promise<string> {
+  const pageTeamspace = randomUUID()
+  const page=randomUUID(),thread=randomUUID()
+  await pool.query("INSERT INTO teamspaces(id,workspace_id,name,created_by) VALUES($1,$2,'Fictional Page teamspace',$3)",[pageTeamspace,f.workspaceId,f.people.lead])
+  await pool.query('INSERT INTO teamspace_members(teamspace_id,user_id) VALUES($1,$2)',[pageTeamspace,f.people.member])
+  await pool.query(`INSERT INTO saved_views(id,workspace_id,created_by,name,entity,view_type,teamspace_id)
+    VALUES($1,$2,$3,'Fictional notes','tasks','table',$4)`,[page,f.workspaceId,f.people.lead,pageTeamspace])
+  await pool.query(`INSERT INTO comment_threads(id,page_id,workspace_id,session_id,anchor_kind,created_by,effective_clearance)
+    VALUES($1,$2,$3,$4,'ai_block',$5,'internal')`,[thread,page,f.workspaceId,r.sessionId,f.people.lead])
+  await pool.query("UPDATE sessions SET visibility='workspace',anchor_kind='doc_thread',anchor_ref=$2,app_origin='doc' WHERE id=$1",[r.sessionId,thread])
+  return pageTeamspace
+}
+
 async function failCaptureOnce(f: BriefFixture, r: Saved, messageId: string, extra: Partial<Parameters<typeof captureResearchFollowupForMessage>[0]> = {}) {
   const original = researchStore.recordResearchFeedbackSystem
   const transportFailure = new Error('synthetic feedback transport interruption')
@@ -107,6 +122,94 @@ async function journalAssistant(messageId:string) {
 }
 
 describe('[COMP:api/research-feedback] [COMP:api/research-feedback-replay] persisted replay exhaustion and source identity (PG18)', () => {
+  it('retains a no-research evaluation and discovers it after later activity backfill', async () => {
+    const f=await briefFixture(),sessionId=await researchSession(f,f.people.member,f.projectId)
+    const request=await researchMessage(f,sessionId,'user','Research fictional supplier terms',f.people.member)
+    const output=await researchMessage(f,sessionId,'assistant','Fictional supplier findings',f.people.member)
+    const missed=await researchMessage(f,sessionId,'user','You missed the warranty terms',f.people.member)
+    const run=(messageId:string)=>captureResearchFollowupForMessage({workspaceId:f.workspaceId,sessionId,assistantId:f.assistants.brian,
+      messageId,actorUserId:f.people.member,externalPrincipal:false})
+    expect(await run(missed)).toMatchObject({outcome:'no_research'})
+    expect((await pool.query('SELECT state,reason,message_version::int FROM research_feedback_attempts WHERE message_id=$1',[missed])).rows)
+      .toEqual([{state:'evaluated',reason:'no_research',message_version:1}])
+    const activity=await beginResearchActivity({workspaceId:f.workspaceId,sessionId,requestMessageId:request,
+      actorUserId:f.people.member,assistantId:f.assistants.brian,projectId:f.projectId,entry:'explicit',runtime:{}})
+    await researchStore.settleResearchActivitySystem({workspaceId:f.workspaceId,activityId:activity.id,status:'partial',outputMessageId:output,
+      sources:[],gaps:[],findingsCount:1,summary:null,saveError:null,links:[]})
+    await run(await researchMessage(f,sessionId,'user','what time is it in Tokyo',f.people.member))
+    expect(await counts(missed)).toEqual({feedback:1,revisions:1,events:1})
+    expect((await row(missed))[0]).toMatchObject({activity_id:activity.id,association:'same_chat_continuation'})
+  })
+
+  it('detects held pending retries without exposing their owner-only metadata',async()=>{
+    const f=await briefFixture(),r=await savedResearch(f,f.people.member,f.projectId)
+    const missed=await researchMessage(f,r.sessionId,'user','You missed the warranty terms',f.people.member)
+    await failCaptureOnce(f,r,missed)
+    await pool.query('UPDATE session_messages SET scope_held=true WHERE id=$1',[missed])
+    const current=await researchMessage(f,r.sessionId,'user','what time is it in Tokyo',f.people.member)
+    const snapshot=await attempts.readFeedbackCaptureSnapshot(f.people.member,f.workspaceId,r.sessionId,f.assistants.brian,current)
+    expect(snapshot?.pendingRetries).toBe(true)
+    expect(snapshot).not.toHaveProperty('targetActivityId')
+    await capture(f,r,current)
+    expect(await counts(missed)).toEqual({feedback:0,revisions:0,events:0})
+    await pool.query('UPDATE session_messages SET scope_held=false WHERE id=$1',[missed])
+    await capture(f,r,current)
+    expect(await counts(missed)).toEqual({feedback:1,revisions:1,events:1})
+  })
+
+  it.each(['hold','version','member','assistant','recording','anchor'] as const)('linked capture refuses a %s withdrawal after the finite read',async withdrawal=>{
+    const f=await briefFixture(),r=await savedResearch(f,f.people.member,f.projectId)
+    const pageTeamspace=withdrawal==='anchor' ? await attachResearchPageThread(f,r) : null
+    const text='You missed the warranty terms'
+    const id=pageTeamspace ? await canonicalHuman(f,r,text,true) : await researchMessage(f,r.sessionId,'user',text,f.people.member)
+    expect(await nativeSessionGate(f,r)).toBeNull()
+    const original=attempts.readFeedbackCaptureSnapshot
+    let changed=false
+    const spy=vi.spyOn(attempts,'readFeedbackCaptureSnapshot').mockImplementation(async(...args)=>{
+      const value=await original(...args)
+      if(args[4]===id&&!changed){
+        if(withdrawal==='hold')await pool.query('UPDATE session_messages SET scope_held=true WHERE id=$1',[id])
+        if(withdrawal==='version')await pool.query('UPDATE session_messages SET content=$2::jsonb WHERE id=$1',[id,JSON.stringify([{type:'text',text:'Use a completely different research objective'}])])
+        if(withdrawal==='member')await pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[f.workspaceId,f.people.member])
+        if(withdrawal==='assistant')await pool.query('UPDATE assistants SET blocked_user_ids=$2::uuid[] WHERE id=$1',[f.assistants.brian,[f.people.member]])
+        if(withdrawal==='recording')await pool.query('UPDATE sessions SET recording_privacy_held=true WHERE id=$1',[r.sessionId])
+        if(pageTeamspace)await pool.query('DELETE FROM teamspace_members WHERE teamspace_id=$1 AND user_id=$2',[pageTeamspace,f.people.member])
+        changed=true
+      }
+      return value
+    })
+    try{
+      await capture(f,r,id)
+      expect(changed).toBe(true)
+      if(withdrawal==='recording'||withdrawal==='anchor')expect(await nativeSessionGate(f,r)).toMatchObject({status:404})
+      expect(await counts(id)).toEqual({feedback:0,revisions:0,events:0})
+    }finally{spy.mockRestore()}
+  })
+
+  it.each(['recording','session-binding'] as const)('the native write pins %s after fresh linked admission',async change=>{
+    const f=await briefFixture(),r=await savedResearch(f,f.people.member,f.projectId)
+    const id=await researchMessage(f,r.sessionId,'user','You missed the warranty terms',f.people.member)
+    const original=researchStore.recordResearchFeedbackSystem
+    let reachedWrite=false
+    const spy=vi.spyOn(researchStore,'recordResearchFeedbackSystem').mockImplementation(async input=>{
+      if(input.messageId===id){
+        if(change==='recording')await pool.query('UPDATE sessions SET recording_privacy_held=true WHERE id=$1',[r.sessionId])
+        if(change==='session-binding')await pool.query("UPDATE sessions SET app_origin='doc' WHERE id=$1",[r.sessionId])
+        reachedWrite=true
+      }
+      return original(input)
+    })
+    try{
+      const errors:unknown[]=[]
+      expect(await capture(f,r,id,{onError:error=>errors.push(error)})).toBeNull()
+      expect(reachedWrite).toBe(true)
+      expect(errors).toEqual([new Error('research_feedback_source_changed')])
+      expect(await counts(id)).toEqual({feedback:0,revisions:0,events:0})
+      expect((await pool.query('SELECT state,lease_token FROM research_feedback_attempts WHERE message_id=$1',[id])).rows)
+        .toEqual([{state:'pending',lease_token:null}])
+    }finally{spy.mockRestore()}
+  })
+
   it('recovers a failed eleventh message after ten real captured receipts, exactly once on the next turn', async () => {
     const f = await briefFixture(), r = await savedResearch(f, f.people.member, f.projectId)
     const prefix: string[] = []
@@ -837,6 +940,44 @@ describe('[COMP:api/research-feedback] [COMP:api/research-feedback-replay] persi
     expect(await capture(f,r,id,{assistantId:f.assistants.ops,selectedActivityId:r.activity.id})).toMatchObject({outcome:'replayed'})
     expect(await counts(id)).toEqual({feedback:1,revisions:1,events:1})
     expect(await journalAssistant(id)).toEqual([{assistant_id:f.assistants.ops}])
+  })
+
+  it('pins the original Page grant in the linked feedback and journal transaction', async context=>{
+    const installed=(await pool.query<{installed:boolean}>(
+      "SELECT to_regprocedure('public.lock_conversation_member_read(uuid,uuid,uuid)') IS NOT NULL installed")).rows[0].installed
+    if (!installed) return context.skip()
+    await initializeConversationVisibility()
+    expect(conversationAnchorWriteAdmissionActive()).toBe(true)
+    const f=await briefFixture(),r=await savedResearch(f,f.people.member,f.projectId)
+    const teamspace=await attachResearchPageThread(f,r)
+    const message=await canonicalHuman(f,r,'You missed the warranted fictional terms',true)
+    expect(await nativeSessionGate(f,r)).toBeNull()
+    const original=researchStore.recordResearchFeedbackSystem
+    const errors:unknown[]=[]
+    let withdrew=false
+    const record=vi.spyOn(researchStore,'recordResearchFeedbackSystem').mockImplementation(async input=>{
+      if(input.messageId===message&&!withdrew){
+        expect(input.attemptLease?.admittedSessionReadKey).toBeTypeOf('string')
+        await pool.query('DELETE FROM teamspace_members WHERE teamspace_id=$1 AND user_id=$2',[teamspace,f.people.member])
+        withdrew=true
+      }
+      return original(input)
+    })
+    try {
+      const options={selectedActivityId:r.activity.id,onError:(error:unknown)=>errors.push(error)}
+      expect(await capture(f,r,message,options)).toBeNull()
+      expect(withdrew).toBe(true)
+      expect(errors).toEqual([new Error('research_feedback_source_changed')])
+      expect(await nativeSessionGate(f,r)).toEqual({status:403,error:'conversation_access_denied'})
+      expect(await counts(message)).toEqual({feedback:0,revisions:0,events:0})
+      expect((await pool.query('SELECT state,lease_token FROM research_feedback_attempts WHERE message_id=$1',[message])).rows)
+        .toEqual([{state:'pending',lease_token:null}])
+      await pool.query('INSERT INTO teamspace_members(teamspace_id,user_id) VALUES($1,$2)',[teamspace,f.people.member])
+      expect(await nativeSessionGate(f,r)).toBeNull()
+      expect(await capture(f,r,message,options)).toMatchObject({outcome:'recorded'})
+      expect(await capture(f,r,message,options)).toMatchObject({outcome:'replayed'})
+      expect(await counts(message)).toEqual({feedback:1,revisions:1,events:1})
+    } finally {record.mockRestore()}
   })
 
 })

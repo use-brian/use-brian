@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
-import { buildTool, createExecutionContext, executionToolContext, type ToolContext } from '@use-brian/core'
+import { createExecutionContext, executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { buildTool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { createAuthorityLease } from '../../context-scope/authority-lease.js'
 import { readWorkspaceMcpConsent, snapshotWorkspaceMcpConsent, workspaceMcpMaximum } from '../consent.js'
 

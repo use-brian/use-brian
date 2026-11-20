@@ -5,7 +5,7 @@ type Status = Awaited<ReturnType<NonNullable<DesktopBridge["browserControl"]>>>;
 export type LocalProfile = { id: string; defaultBackend: string; canManage?: boolean };
 export type BrowserState = {
   workspaceId: string; profileId?: string;
-  phase: "idle" | "connecting" | "connected" | "paused" | "failed";
+  phase: "idle" | "connecting" | "connected" | "paused" | "failed" | "disabled";
 };
 const empty: BrowserState = { workspaceId: "", phase: "idle" };
 
@@ -52,6 +52,7 @@ export class AutomaticDesktopBrowser {
     if (this.pairing) void this.control()?.({ type: "cancel" }).catch(() => {});
   }
   leave() { this.cancel(); this.workspace = ""; }
+  preferencesChanged = () => { this.attempted.clear(); void this.check(); };
   show = async () => { await this.control()?.({ type: "show" }); };
   retry = async () => { await this.check(true); };
   check = async (explicit = false) => {
@@ -67,6 +68,10 @@ export class AutomaticDesktopBrowser {
       let status: Status = await control({ type: "status" });
       if (!valid()) return;
       if (!status.ok) throw new Error("status unavailable");
+      if (status.browserEnabled === false) {
+        this.attempted.clear();
+        this.publish({ workspaceId: workspace, phase: "disabled" }); return;
+      }
       // Native pairing may finish before its IPC reply. Reconcile the native
       // identity even when cancellation prevented this renderer from adopting it.
       if (status.workspaceId === workspace && status.browserProfileId &&
@@ -100,6 +105,10 @@ export class AutomaticDesktopBrowser {
       status = await control({ type: "status" });
       if (!valid()) { this.attempted.delete(key); return; }
       if (!status.ok) throw new Error("status unavailable");
+      if (status.browserEnabled === false) {
+        this.attempted.delete(key);
+        this.publish({ workspaceId: workspace, profileId: target.id, phase: "disabled" }); return;
+      }
       if (explicit && status.controlEpoch !== expectedControlEpoch) {
         this.publish({ ...base, phase: "paused" }); return;
       }
@@ -111,7 +120,7 @@ export class AutomaticDesktopBrowser {
       if (!valid()) { this.attempted.delete(key); return; }
       const after = await control({ type: "status" });
       if (!valid()) return;
-      this.publish({ ...base, phase: after.automaticBlocked ? "paused" : result.ok && after.connected && after.workspaceId === workspace && after.browserProfileId === target.id ? "connected" : "failed" });
+      this.publish({ ...base, phase: after.browserEnabled === false ? "disabled" : after.automaticBlocked ? "paused" : result.ok && after.connected && after.workspaceId === workspace && after.browserProfileId === target.id ? "connected" : "failed" });
     } catch {
       if (valid()) this.publish({ workspaceId: workspace, profileId: target?.id, phase: "failed" });
       else if (key) this.attempted.delete(key);

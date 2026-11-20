@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import { verifyUploadFormat } from './uploads.js'
 import { z } from 'zod'
-import type { FilesApi, FilesContext } from '@use-brian/core'
+import type { FilesApi, FilesContext } from '@use-brian/core/workspace-files/api.js'
 import { Binding, RenderInput, ExportInput, canonical, renderDocument, renderExport, sha256, templateRegistry, type Template } from './render.js'
 
 export class DocumentError extends Error { constructor(readonly code:string,readonly status=409){super(code)} }

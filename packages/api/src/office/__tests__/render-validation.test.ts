@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
-import { renderedPdfPageCount } from '@use-brian/core'
+import { renderedPdfPageCount } from '@use-brian/core/files/libreoffice.js'
 import { validateOfficeCandidateRendering, validateOfficeInternalCandidateRendering } from '../render-validation.js'
 import { documentSnapshot, completePresentationSnapshot, completeSpreadsheetSnapshot, resolveFixtureResource } from '../../../../core/src/office/__tests__/fixtures.js'
 import { minimalPdf } from '../../../../core/src/files/__tests__/pdf-fixture.js'

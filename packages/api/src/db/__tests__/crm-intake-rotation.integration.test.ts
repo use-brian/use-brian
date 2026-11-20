@@ -7,14 +7,13 @@ import express from 'express'
 import request from 'supertest'
 import pg from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
-import { CrmOperationsCommandSchema, type CrmOperationsContext, type CrmOperationsCommand } from '@use-brian/core'
+import { CrmOperationsCommandSchema, type CrmOperationsContext, type CrmOperationsCommand } from '@use-brian/core/crm/operations-types.js'
 import { currentAgentAccess } from '../agent-access-context.js'
 import { createDbCrmOperationsStore } from '../crm-operations-store.js'
 import { createDbCrmIntakeReadStore } from '../crm-intake-store.js'
 import { createCrmOperationsService } from '../../crm-operations/service.js'
 import { crmIntakeRoutes } from '../../routes/crm-intake.js'
 import { streamCrmPrivacyExport } from '../../crm-operations/privacy-export.js'
-import { createAssociationStore } from '../association-store.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -121,8 +120,7 @@ describe('[COMP:crm/operations-store] Actual intake rotation replay', () => {
     const submissionId=submitted.body.submissionId
     expect((await pool.query('SELECT scope_snapshot FROM association_enquiries WHERE id=$1',[submissionId])).rows[0].scope_snapshot)
       .toMatchObject({compartments:[`team:${department}`],sensitivity:'internal',userId:null})
-    const legacyReads=createAssociationStore(pool),actor={credentialKind:'user' as const,credentialId:f.userId,actingUserId:f.userId}
-    await legacyReads.addEnquiryNote(f.workspaceId,submissionId,{body:'Fictional protected note'},actor)
+    await service.execute(f.context,CrmOperationsCommandSchema.parse({kind:'update_submission',submissionId,note:'Fictional protected note'}))
     const contentBytes=Buffer.from('Fictional normalized attachment fixture')
     await store.transaction(f.context,tx=>tx.createSubmissionAttachments(submissionId,[{
       key:'proof',originalName:'fixture.png',mimeType:'image/png',contentBytes,
@@ -144,12 +142,9 @@ describe('[COMP:crm/operations-store] Actual intake rotation replay', () => {
     expect((await reads.listSubmissions(f.workspaceId,{},f.context.actor)).submissions).toEqual([])
     expect(await reads.getSubmission(f.workspaceId,submissionId,f.context.actor)).toBeNull()
     expect(await reads.getSubmissionAttachment(f.workspaceId,submissionId,attachmentId,f.context.actor)).toBeNull()
-    expect((await legacyReads.listEnquiries(f.workspaceId,{limit:25,cursor:null},actor)).items).toEqual([])
-    await expect(legacyReads.listEnquiryNotes(f.workspaceId,submissionId,actor)).rejects.toMatchObject({code:'not_authorized'})
     await expect(reads.listSubmissions(f.workspaceId)).rejects.toMatchObject({code:'not_authorized'})
     await expect(reads.getConsent(f.workspaceId,submitted.body.contactId,f.context.actor)).rejects.toMatchObject({code:'not_authorized'})
     await expect(reads.checkSendability(f.workspaceId,submitted.body.contactId,'email','updates',f.context.actor)).rejects.toMatchObject({code:'not_authorized'})
-    await expect(legacyReads.listConsents(f.workspaceId,submitted.body.contactId,actor)).rejects.toMatchObject({code:'not_authorized'})
     await expect(service.execute(f.context,suppressionCommand)).rejects.toMatchObject({code:'not_authorized'})
 
     expect((await f.submit(issued.oneTimeSecret!)).status).toBe(401)
@@ -161,8 +156,6 @@ describe('[COMP:crm/operations-store] Actual intake rotation replay', () => {
     expect((await reads.listSubmissions(f.workspaceId,{},f.context.actor)).submissions.map(row=>row.id)).toEqual([submissionId])
     expect(await reads.getSubmission(f.workspaceId,submissionId,f.context.actor)).toMatchObject({id:submissionId})
     expect(await reads.getSubmissionAttachment(f.workspaceId,submissionId,attachmentId,f.context.actor)).toEqual({name:'fixture.png',mimeType:'image/png',contentBytes})
-    expect((await legacyReads.listEnquiries(f.workspaceId,{limit:25,cursor:null},actor)).items.map(row=>row.id)).toEqual([submissionId])
-    expect(await legacyReads.listEnquiryNotes(f.workspaceId,submissionId,actor)).toMatchObject([{body:'Fictional protected note'}])
     expect((await reads.getConsent(f.workspaceId,submitted.body.contactId,f.context.actor)).suppressions).toHaveLength(1)
     expect((await service.execute(f.context,suppressionCommand)).duplicate).toBe(true)
     expect((await f.submit(issued.oneTimeSecret!)).status).toBe(200)

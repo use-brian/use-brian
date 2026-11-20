@@ -2,7 +2,9 @@
 import {captureCrmErasure} from './erasure-journal.js'
 import {createHash} from 'node:crypto'
 import type {PoolClient} from 'pg'
-import {canonicalCrmRequest,type CrmPrivacyDomainReview,type CrmPrivacyBlocker,type CrmRetentionPolicy,type CrmOperationsContext,type ResourceScope} from '@use-brian/core'
+import {canonicalCrmRequest, type CrmPrivacyDomainReview, type CrmPrivacyBlocker, type CrmOperationsContext} from '@use-brian/core/crm/operations-types.js'
+import type {CrmRetentionPolicy} from '@use-brian/core/crm/retention-types.js'
+import type {ResourceScope} from '@use-brian/agent-runtime/security/derived-scope.js'
 import {readCrmPrivacyPolicy,retireCrmIntakeReceipts} from './privacy-policy.js'
 
 import {createCrmRetentionAuthority} from './retention-authority.js'

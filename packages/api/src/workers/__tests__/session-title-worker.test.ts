@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { ContextScopeAccumulator, type SessionContextAuthority, type LLMProvider } from '@use-brian/core'
+import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
+import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import { createAuthorityLease } from '../../context-scope/authority-lease.js'
 import { createSessionTitleWorker, restrictTitleJobAuthority } from '../session-title-worker.js'
 import type { SessionTitleJob } from '../../db/session-title-jobs.js'
@@ -16,11 +18,12 @@ function authority(current = async () => ceiling): SessionContextAuthority {
 }
 function fixture() {
  const fresh = authority(), resolveAuthority = vi.fn(async()=>fresh), finish = vi.fn(async()=>{}), generate = vi.fn(async(_input: unknown)=>({title:'Fictional project notes',written:true,model:'fixture',usage:{inputTokens:3,outputTokens:2}}))
+ const readTurnCount=vi.fn(async()=>10)
  const deps = {claim:vi.fn(async()=>job),finish,current:vi.fn(async()=>true),resolveAuthority,
   readTitle:vi.fn(async()=>null as {title:string;manual:boolean;revisionId:string}|null),
-  readHistory:vi.fn(async()=>[]),countTurns:vi.fn(async()=>10),generate,notify:vi.fn()}
+  readHistory:vi.fn(async()=>({messages:[],readTurnCount,frame:{} as never})),generate,notify:vi.fn()}
  const resolveRuntime = vi.fn(async()=>({provider,model:'fixture',providerKeySource:'user' as const})),recordUsage=vi.fn(async()=>{})
- return {deps,resolveRuntime,recordUsage,worker:createSessionTitleWorker({deps,resolveRuntime,recordUsage})}
+ return {deps,readTurnCount,resolveRuntime,recordUsage,worker:createSessionTitleWorker({deps,resolveRuntime,recordUsage})}
 }
 describe('[COMP:api/session-title-jobs] current-authority background titles',()=>{
  it('reacquires the originating claims, uses the current runtime and invalidates viewers only after successful publication',async()=>{
@@ -38,15 +41,15 @@ describe('[COMP:api/session-title-jobs] current-authority background titles',()=
  })
  it('retains the existing every-ten-human-turn cadence and ignores a lost title CAS',async()=>{
   const f=fixture();f.deps.readTitle.mockResolvedValue({title:'Earlier generated title',manual:false,revisionId:uid(8)})
-  f.deps.countTurns.mockResolvedValue(9);await f.worker.tick();expect(f.deps.generate).not.toHaveBeenCalled()
-  f.deps.countTurns.mockResolvedValue(10);f.deps.generate.mockResolvedValue({title:null,written:false,model:'fixture',usage:{inputTokens:3,outputTokens:2}} as never)
+  f.readTurnCount.mockResolvedValue(9);await f.worker.tick();expect(f.deps.generate).not.toHaveBeenCalled()
+  f.readTurnCount.mockResolvedValue(10);f.deps.generate.mockResolvedValue({title:null,written:false,model:'fixture',usage:{inputTokens:3,outputTokens:2}} as never)
   await f.worker.tick();expect(f.deps.generate).toHaveBeenCalledOnce();expect(f.deps.notify).not.toHaveBeenCalled()
  })
  it('replaces host placeholders with the same title prefix policy',async()=>{
   const f=fixture();f.deps.readTitle.mockResolvedValue({title:'[Channel] Draft',manual:false,revisionId:uid(8)})
   const prefix=()=> '[Channel]'
   const worker=createSessionTitleWorker({deps:f.deps,resolveRuntime:f.resolveRuntime,recordUsage:f.recordUsage,isPlaceholderTitle:()=>true,getTitleChannelPrefix:prefix})
-  await worker.tick();expect(f.deps.countTurns).not.toHaveBeenCalled();expect(f.deps.generate.mock.calls[0][0]).toMatchObject({channelPrefix:prefix})
+  await worker.tick();expect(f.readTurnCount).not.toHaveBeenCalled();expect(f.deps.generate.mock.calls[0][0]).toMatchObject({channelPrefix:prefix})
  })
  it('terminates malformed persisted authentication claims',async()=>{
   const f=fixture();f.deps.claim.mockResolvedValue({...job,claims:{userId:'invalid'}})

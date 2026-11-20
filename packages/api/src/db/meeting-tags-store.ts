@@ -1,5 +1,6 @@
 /** Caller-scoped, versioned meeting tags. [COMP:recordings/meeting-tags] */
-import { blocksToMarkdown, type Page } from '@use-brian/core'
+import { blocksToMarkdown } from '@use-brian/core/doc/to-markdown.js'
+import type { Page } from '@use-brian/core/views/blocks.js'
 import { queryWithRLS } from './client.js'
 import { emptyTagState, type TagState, type TagExample } from '../recordings/meeting-tags.js'
 

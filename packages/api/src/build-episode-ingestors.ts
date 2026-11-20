@@ -24,9 +24,9 @@ import {
   processEpisode,
   type PipelineBDeps,
   type PipelineBEpisode,
-  type Sensitivity,
-  type SourceKind,
-} from '@use-brian/core'
+} from '@use-brian/core/ingest/pipeline-b.js'
+import type { SourceKind } from '@use-brian/core/ingest/types.js'
+import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type { EpisodeIngestorDeps } from './boot.js'
 import type { EpisodeSensitivity } from './db/episodes-store.js'
 import type { BrainEpisodeIngestor, ChatEpisodeIngestor, ChatEpisodeInput } from './ingest-port.js'

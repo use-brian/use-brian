@@ -1,6 +1,7 @@
 import { query, getPool } from './client.js'
 import { seedBuiltinPrimitiveCapabilities } from './capability-seed.js'
-import { generateHandle } from '@use-brian/core'
+import { generateHandle } from '@use-brian/core/handles.js'
+import type { WorkspacePlan } from './workspace-store.js'
 
 export type User = {
   id: string
@@ -769,12 +770,7 @@ export type AssistantAccess = {
  * See docs/architecture/platform/workspaces.md → "The assistant list" and
  * component `[COMP:api/assistant-access]`.
  */
-export async function resolveAssistantAccess(
-  userId: string,
-  assistantId: string,
-): Promise<AssistantAccess | null> {
-  const result = await query<UserAssistantView & { role: AssistantRole }>(
-    `SELECT a.id, a.name,
+const reachableAssistant = `SELECT a.id, a.name,
             a.workspace_id as "workspaceId",
             a.system_prompt as "systemPrompt",
             a.bio,
@@ -801,7 +797,14 @@ export async function resolveAssistantAccess(
               OR (a.workspace_id IS NOT NULL AND wm.user_id IS NOT NULL)
             )
         AND public.assistant_placement_visible($1, a.id)
-      LIMIT 1`,
+      LIMIT 1`
+
+export async function resolveAssistantAccess(
+  userId: string,
+  assistantId: string,
+): Promise<AssistantAccess | null> {
+  const result = await query<UserAssistantView & { role: AssistantRole }>(
+    reachableAssistant,
     [userId, assistantId],
   )
   const row = result.rows[0]
@@ -816,6 +819,31 @@ export async function resolveAssistantAccess(
  *  doesn't exist or the user has no access. */
 export async function getUserAssistant(userId: string, assistantId: string): Promise<UserAssistantView | null> {
   return (await resolveAssistantAccess(userId, assistantId))?.assistant ?? null
+}
+
+/** Explicit attended chat identity, current device and allowed assistant
+ * placement in one owner statement. Session and effect gates run separately. */
+export async function readAttendedChatIdentity(credential: { userId:string; sessionId:string; authVersion:number },
+  assistantId:string, requestedWorkspaceId?:string|null):Promise<{
+    user:User; assistant:UserAssistantView|null; plan:WorkspacePlan
+  }|null> {
+  const result = await query<User & { reachable: UserAssistantView | null; plan:WorkspacePlan }>(`
+    WITH identity AS MATERIALIZED (
+      SELECT ${USER_COLUMNS} FROM users
+      WHERE id=$1 AND auth_version=$4 AND EXISTS (
+        SELECT 1 FROM auth_sessions s WHERE s.id=$3 AND s.user_id=$1 AND s.auth_version=$4
+          AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp()
+      )
+    )
+    SELECT identity.*, to_jsonb(assistant)-'role' AS reachable, coalesce(w.plan,'free') AS plan
+    FROM identity
+    LEFT JOIN LATERAL (${reachableAssistant}) assistant ON true
+    LEFT JOIN workspaces w ON w.id=assistant."workspaceId" AND ($5::text IS NULL OR w.id::text=$5)`,
+    [credential.userId,assistantId,credential.sessionId,credential.authVersion,requestedWorkspaceId ?? null])
+  const row = result.rows[0]
+  if (!row) return null
+  const { reachable, plan, ...user } = row
+  return { user, assistant:reachable, plan }
 }
 
 /**

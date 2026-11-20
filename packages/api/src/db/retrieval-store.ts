@@ -1,9 +1,9 @@
 import { buildMemoryAccessPredicate } from './memory-access-predicate.js'
+import type { Embedder } from '@use-brian/core/embeddings/embedder.js'
+import type { EntityRollup, EntityStore } from '@use-brian/core/entities/types.js'
+import type { RrfRankedList, VectorHit } from '@use-brian/core/retrieval/rrf.js'
 import type {
-  Embedder,
   EntityInstanceSearchRow,
-  EntityRollup,
-  EntityStore,
   GetEntityData,
   GetEntityInput,
   RecentEpisodeRow,
@@ -16,22 +16,14 @@ import type {
   RetrievalStep,
   RetrievalStepCandidate,
   RetrievalStore,
-  RrfRankedList,
   SearchData,
   SearchInput,
   SearchResultRow,
-  VectorHit,
-} from '@use-brian/core'
-import {
-  DEFAULT_MMR_LAMBDA,
-  RRF_METHOD,
-  SENSITIVITY_VALUES,
-  isSensitivity,
-  mmrRerank,
-  rowTrustWeight,
-  rrfFuse,
-  vectorRankedList,
-} from '@use-brian/core'
+} from '@use-brian/core/retrieval/types.js'
+import { DEFAULT_MMR_LAMBDA, mmrRerank } from '@use-brian/core/retrieval/mmr.js'
+import { RRF_METHOD, rrfFuse, vectorRankedList } from '@use-brian/core/retrieval/rrf.js'
+import { rowTrustWeight } from '@use-brian/core/retrieval/trust-signals.js'
+import { SENSITIVITY_VALUES, isSensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { buildAccessPredicate } from './access-predicate.js'
 import { query, queryWithRLS } from './client.js'
 

@@ -26,8 +26,8 @@
 import {
   createBrandLifecycleTrigger,
   type BrandLifecycleEvent,
-  type WorkflowEventDispatcher,
-} from '@use-brian/core'
+} from '@use-brian/core/workflow/brand-event-trigger.js'
+import type { WorkflowEventDispatcher } from '@use-brian/core/workflow/event-trigger.js'
 
 let sink: ((event: BrandLifecycleEvent) => Promise<void>) | null = null
 

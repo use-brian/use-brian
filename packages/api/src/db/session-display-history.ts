@@ -1,6 +1,6 @@
 /** Native human transcript display, never model/source evidence. [COMP:api/session-display-history] */
 import { z } from 'zod'
-import { DerivedScopeError } from '@use-brian/core'
+import { DerivedScopeError } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { applyRLSGucs, getAppPool, runWithAgentAccess } from './client.js'
 import type { AuthTokenClaims } from './auth-session-store.js'
 import { privateHistoryText } from './session-legacy-history.js'

@@ -1,7 +1,10 @@
 /** Shared native history preview and restoration. [COMP:api/office-routes] */
 import { createHash } from 'node:crypto'
 import { assertOfficeArtifactSnapshot, encodeOfficeState, officeStateVector, snapshotToYDoc, type OfficeArtifactSnapshot } from '@use-brian/office-model'
-import { scopeEvidenceFromRows, workspaceCredentialDelegation, type FilesApi, type ToolContext } from '@use-brian/core'
+import type { FilesApi } from '@use-brian/core/workspace-files/api.js'
+import { scopeEvidenceFromRows } from '@use-brian/agent-runtime/security/context-scope.js'
+import { workspaceCredentialDelegation } from '@use-brian/agent-runtime/security/workspace-delegation.js'
+import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import type { createOfficeArtifactStore } from '../db/office-artifacts.js'
 
 export function createOfficeVersionRuntime(deps: {

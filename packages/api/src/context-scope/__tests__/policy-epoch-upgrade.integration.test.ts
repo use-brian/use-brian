@@ -1,8 +1,11 @@
+import {randomBytes} from 'node:crypto'
 import {readFile} from 'node:fs/promises'
+import pg from 'pg'
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
 import {getAppPool,getPool} from '../../db/client.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
 import {persistentContextFixture} from '../../application-platform/__tests__/fixtures/persistent-context.js'
+import {withBootstrap} from '../../__tests__/fixtures/bootstrap-role.js'
 
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -32,19 +35,25 @@ describe.sequential('[COMP:api/policy-epoch] existing workspace epoch upgrade',(
 
   // Membership in the actual owner role supplies ordinary object ownership,
   // without SUPERUSER or BYPASSRLS privileges. The migration needs neither.
+  // The fixture-only member login is provisioned and dropped by the bootstrap
+  // role; the ordinary owner has no CREATEROLE.
   const owner=(await legacy.pool.query<{name:string}>('SELECT current_user AS name')).rows[0].name
   const ownerIdentifier='"'+owner.replaceAll('"','""')+'"'
-  await legacy.pool.query('CREATE ROLE fixture_epoch_upgrade_owner NOLOGIN NOSUPERUSER NOBYPASSRLS')
+  const memberPassword=randomBytes(24).toString('hex')
+  await withBootstrap(async bootstrap=>{
+   await bootstrap.query("CREATE ROLE fixture_epoch_upgrade_owner LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB INHERIT PASSWORD '"+memberPassword+"'")
+   await bootstrap.query('GRANT '+ownerIdentifier+' TO fixture_epoch_upgrade_owner WITH INHERIT TRUE')
+  })
   try{
-   await legacy.pool.query('GRANT '+ownerIdentifier+' TO fixture_epoch_upgrade_owner')
-   const client=await legacy.pool.connect()
+   const memberUrl=new URL(process.env.DATABASE_URL!);memberUrl.username='fixture_epoch_upgrade_owner';memberUrl.password=memberPassword
+   const client=new pg.Client({connectionString:memberUrl.href});await client.connect()
    try{
-    await client.query('BEGIN');await client.query('SET LOCAL ROLE fixture_epoch_upgrade_owner')
-    expect((await client.query('SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')).rows[0])
-     .toEqual({rolsuper:false,rolbypassrls:false})
+    await client.query('BEGIN')
+    expect((await client.query('SELECT current_user AS name,rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')).rows[0])
+     .toEqual({name:'fixture_epoch_upgrade_owner',rolsuper:false,rolbypassrls:false})
     await client.query(migrationBody);await client.query('COMMIT')
-   }finally{await client.query('ROLLBACK');client.release()}
-  }finally{await legacy.pool.query('DROP ROLE fixture_epoch_upgrade_owner')}
+   }finally{await client.query('ROLLBACK');await client.end()}
+  }finally{await withBootstrap(bootstrap=>bootstrap.query('DROP ROLE fixture_epoch_upgrade_owner'))}
 
   const repaired=await epochs(),initialized=repaired.find(row=>row.workspaceId===legacy.workspaceId)
   expect(BigInt(initialized!.revision)).toBeGreaterThan(0n)

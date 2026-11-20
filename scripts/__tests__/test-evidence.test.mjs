@@ -4,8 +4,19 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { discoveryEnvironment, reconcile, runnerSegments, writeReport } from '../testing/inventory.mjs'
+import { unitTestExclusions } from '../testing/unit-partition.mjs'
 
 describe('[COMP:tooling/test-evidence] discovery does not overclaim execution', () => {
+  it('keeps local coverage complete and assigns ordinary-CI exclusions to acceptance owners only', () => {
+    assert.deepEqual(unitTestExclusions('packages/api', ''), [])
+    assert.deepEqual(unitTestExclusions('packages/channels', 'ordinary'), [])
+    assert.ok(unitTestExclusions('packages/api', 'ordinary').includes('src/context-scope/__tests__/authority-lease.test.ts'))
+    assert.ok(!unitTestExclusions('packages/api', 'ordinary').includes('src/routes/__tests__/auth-email.test.ts'))
+    assert.ok(unitTestExclusions('packages/core', 'ordinary').includes('src/consolidation/__tests__/department-isolation.test.ts'))
+    assert.ok(unitTestExclusions('packages/agent-runtime', 'ordinary').includes('src/security/__tests__/access-ceiling.test.ts'))
+    assert.ok(unitTestExclusions('apps/app-web', 'ordinary').includes('src/components/organization/__tests__/organization-chart.test.tsx'))
+    assert.throws(() => unitTestExclusions('packages/api', 'typo'), /Unknown test partition/)
+  })
   it('separates mixed Node/Vitest commands and refuses to execute custom shell text', () => {
     const parsed = runnerSegments('node --import tsx --test src/__tests__/*.test.ts && vitest run src/runtime.test.ts')
     assert.deepEqual(parsed.map(entry => entry.runner), ['node', 'vitest'])

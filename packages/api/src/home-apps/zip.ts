@@ -30,7 +30,8 @@
  * [COMP:api/home-app-zip]
  */
 
-import JSZip from 'jszip'
+import type JSZip from 'jszip'
+import { lazyImplementation } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
 import {
   BUNDLE_MAX_FILES,
   BUNDLE_MAX_FILE_BYTES,
@@ -40,6 +41,11 @@ import {
 } from '@use-brian/brian-app'
 import { isBundleAsset } from './sync.js'
 import type { BundleWriteFile } from './tools.js'
+
+// The ZIP library loads on the first archive, not at boot (M4 step 5); it is
+// loaded before the archive's own error mapping, so a failed load is the
+// honest `ImplementationUnavailableError`, never "not a readable zip".
+const loadJSZip = lazyImplementation('The ZIP library (jszip)', () => import('jszip').then((m) => m.default))
 
 export type FilesFromZipResult =
   | { ok: true; files: BundleWriteFile[] }
@@ -70,9 +76,10 @@ function isTextType(path: string): boolean {
  * the uploader's input, and the message is the user-facing explanation.
  */
 export async function filesFromZipBuffer(buf: Uint8Array): Promise<FilesFromZipResult> {
+  const JSZipImpl = await loadJSZip()
   let zip: JSZip
   try {
-    zip = await JSZip.loadAsync(buf)
+    zip = await JSZipImpl.loadAsync(buf)
   } catch {
     return { ok: false, message: 'That file is not a readable zip archive.' }
   }
@@ -128,7 +135,8 @@ export async function filesFromZipBuffer(buf: Uint8Array): Promise<FilesFromZipR
 export async function buildBundleZip(
   files: Array<{ path: string; bytes: Uint8Array }>,
 ): Promise<Buffer> {
-  const zip = new JSZip()
+  const JSZipImpl = await loadJSZip()
+  const zip = new JSZipImpl()
   for (const file of files) {
     zip.file(file.path, file.bytes)
   }
