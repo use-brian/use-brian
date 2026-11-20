@@ -1,4 +1,5 @@
 import { chatTierDefaults } from '@use-brian/shared/model-registry'
+import { withBootstrap } from '../../__tests__/fixtures/bootstrap-role.js'
 import express from 'express'
 import request from 'supertest'
 import {authSessionStore} from '../../db/auth-session-store.js'
@@ -774,10 +775,11 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
       invocationNumber++
       if(surface==='delegated-consult')return consult({callerUserId:f.firstId,callerAssistantId:f.assistantId,callerAccessCeiling:parent.security.ceiling,
         onScopeEvidence:evidence=>returned.push(evidence),calleeAssistantId:f.assistantId,expectedWorkspaceId:f.workspaceId,callerSessionId:f.session.id,question:'Fictional attributed input'})
-      const req=new EventEmitter(),res={statusCode:200,body:undefined as unknown,status(code:number){this.statusCode=code;return this},json(body:unknown){this.body=body;return this}}
-      await executePublicTurn({provider,tools:new Map(),systemPrompt:'Fictional public member fixture',memoryStore:memories,capabilityStore:createDbCapabilityStore()},
+      const app=express()
+      app.post('/turn',async(req,res)=>{await executePublicTurn({provider,tools:new Map(),systemPrompt:'Fictional public member fixture',memoryStore:memories,capabilityStore:createDbCapabilityStore()},
         {assistantId:f.assistantId,identityNamespace:'api:fictional-member-key',contextScope:'internal-member',internalActor:{email:null,defaultUserId:f.firstId},credentialCurrent:async()=>true,
-          body:{externalUserId:'fictional-attribution',sessionId:`fictional-member-session-${invocationNumber}`,message:'Fictional attributed input'}},req as never,res as never)
+          body:{externalUserId:'fictional-attribution',sessionId:`fictional-member-session-${invocationNumber}`,message:'Fictional attributed input'}},req,res)})
+      const res=await request(app).post('/turn')
       expect(res.statusCode,JSON.stringify(res.body)).toBe(200);return JSON.stringify(res.body)
     }
     expect(await invoke()).toContain('Fictional attributed response')
@@ -1025,17 +1027,17 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
     const f = fixture, role = `context_owner_${randomBytes(8).toString('hex')}`, password = randomBytes(32).toString('hex')
     await f.history()
     const owner = (await f.pool.query<{ owner: string }>("SELECT r.rolname AS owner FROM pg_class c JOIN pg_roles r ON r.oid=c.relowner WHERE c.oid='session_messages'::regclass")).rows[0].owner
-    await f.pool.query(`CREATE ROLE ${role} LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD '${password}'`)
+    await withBootstrap(client=>client.query(`CREATE ROLE ${role} LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD '${password}'`))
     const url = new URL(process.env.DATABASE_URL!); url.username = role; url.password = password
     const pool = new pg.Pool({ connectionString: url.href })
     try {
-      await f.pool.query(`GRANT "${owner.replaceAll('"', '""')}" TO ${role}`)
+      await withBootstrap(client=>client.query(`GRANT "${owner.replaceAll('"', '""')}" TO ${role}`))
       const tx = await pool.connect()
       try {
         await tx.query('BEGIN'); await tx.query("SELECT set_config('app.current_user_id',$1,true)", [f.ownerId])
         await expect(getSessionMessages(f.session.id, { excludeHeld: true }, tx)).rejects.toThrow('scope_source_changed')
         await tx.query('ROLLBACK')
       } finally { tx.release() }
-    } finally { await pool.end(); await f.pool.query(`DROP ROLE ${role}`) }
+    } finally { await pool.end(); await withBootstrap(client=>client.query(`DROP ROLE ${role}`)) }
   })
 })

@@ -132,6 +132,7 @@ export async function runMigrations({ databaseUrl, migrationDirs = [], beforeApp
       // batched query (preserves dollar-quoted functions + explicit BEGIN/COMMIT).
       const bindLineageReceipt = file === memoryPublicationMigration || file === memoryWriteSuccessorMigration
         || file === '8330_memory_prompt_candidates.sql'
+        || file === '8331_workspace_mcp_dispatch.sql'
       if (bindLineageReceipt) {
         // A lost COMMIT acknowledgement may safely resume using the same
         // receipt. Do not leave an authenticated schema change unrecorded.

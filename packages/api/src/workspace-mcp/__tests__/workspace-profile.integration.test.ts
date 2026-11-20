@@ -351,7 +351,7 @@ describe('[COMP:api/workspace-mcp] explicit native workspace profiles', () => {
     expect((await invoke('listBrianRuns', {}, other.key)).body.result.structuredContent.data.runs).toEqual([])
     expect((await invoke('listBrianRuns', { cursor: runs[0] }, other.key)).body.result.isError).toBe(true)
     // The source-held conversation still permits status recovery, never source reads.
-    await pool.query('UPDATE workspace_mcp_contexts SET invalidated=true WHERE id=(SELECT context_id FROM workspace_mcp_runs WHERE id=$1)', [runs[0]])
+    await queryWithRLS(actor, 'UPDATE workspace_mcp_contexts SET invalidated=true WHERE id=(SELECT context_id FROM workspace_mcp_runs WHERE id=$1)', [runs[0]])
     const held = (await invoke('listBrianRuns')).body.result
     expect(held.isError, JSON.stringify(held)).toBeFalsy()
     expect(held.structuredContent.data.runs).toHaveLength(3)
@@ -848,7 +848,7 @@ describe('[COMP:api/workspace-mcp] explicit native workspace profiles', () => {
     let executed=false;runNative=async()=>{executed=true;return {status:'succeeded',messageIds:[]}}
     profile.runWorker!.start();await profile.runWorker!.tick();await profile.runWorker!.stop()
     expect(executed).toBe(false)
-    expect((await pool.query('SELECT status FROM workspace_mcp_runs WHERE id=$1',[nextId])).rows[0].status).toBe('failed')
+    expect((await queryWithRLS(actor, 'SELECT status FROM workspace_mcp_runs WHERE id=$1',[nextId])).rows[0].status).toBe('failed')
   })
   it.each(['brain','assistant'] as const)('%s OAuth read-only consent excludes mutating operations',async surface=>{
     const grant=await issueOAuth(surface,'read')
@@ -869,7 +869,7 @@ describe('[COMP:api/workspace-mcp] explicit native workspace profiles', () => {
       expect(used.body.result.isError, JSON.stringify(used.body)).toBeFalsy()
       expect(JSON.stringify(used.body)).toContain('Use the reviewed fictional format.')
       const column = surface === 'brain' ? 'brain_key_id' : 'api_key_id'
-      const retained = (await pool.query(`SELECT evidence FROM workspace_mcp_contexts WHERE ${column}=$1`, [key.id])).rows[0]
+      const retained = (await queryWithRLS(actor, `SELECT evidence FROM workspace_mcp_contexts WHERE ${column}=$1`, [key.id])).rows[0]
       expect(JSON.stringify(retained)).toContain('workspace_skill_revision')
       await pool.query('UPDATE workspace_skill_scope_revisions SET scope_held=true WHERE id=(SELECT scope_revision_id FROM workspace_skills WHERE id=$1)', [skillId])
       const refused = await call(surface, key.key, 'tools/call', { name: 'useSkill', arguments: { skill: slug } })
@@ -913,7 +913,7 @@ describe('[COMP:api/workspace-mcp] explicit native workspace profiles', () => {
     const initial = await read()
     expect(initial.body.result.isError, JSON.stringify(initial.body)).toBeFalsy()
     const column = surface === 'brain' ? 'brain_key_id' : 'api_key_id'
-    const retained = (await pool.query(`SELECT evidence FROM workspace_mcp_contexts WHERE ${column}=$1`, [key.id])).rows[0]
+    const retained = (await queryWithRLS(actor, `SELECT evidence FROM workspace_mcp_contexts WHERE ${column}=$1`, [key.id])).rows[0]
     expect(JSON.stringify(retained)).toContain('page_live_changed')
     await pool.query("UPDATE saved_views SET clearance='confidential' WHERE id=$1", [page.id])
     expect((await read()).body.result.isError).toBe(true)
@@ -958,7 +958,7 @@ describe('[COMP:api/workspace-mcp] explicit native workspace profiles', () => {
     expect(status.body.result.structuredContent.data.status).toBe('succeeded')
     expect((await call(surface, key.key, 'tools/call', { name: 'getBrianRun', arguments: { runId } })).body.result.isError).toBe(true)
     expect((await call(surface, key.key, 'tools/call', { name: 'listBrianRuns', arguments: {} })).body.result.structuredContent.data.runs).toEqual([])
-    await pool.query('UPDATE workspace_mcp_contexts SET invalidated=true WHERE selection_id=$1', [selection.contextId])
+    await queryWithRLS(actor, 'UPDATE workspace_mcp_contexts SET invalidated=true WHERE selection_id=$1', [selection.contextId])
     const recovered = await selectedCall('listBrianRuns', {})
     expect(recovered.body.result.isError, JSON.stringify(recovered.body)).toBeFalsy()
     expect(recovered.body.result.structuredContent.data.runs).toEqual([expect.objectContaining({ runId, status: 'succeeded' })])
@@ -1016,7 +1016,9 @@ describe('[COMP:api/workspace-mcp] explicit native workspace profiles', () => {
       expect(replies[0]?.text).toBe('Fictional native reply.')
       const ids = replies.map((reply: { id: string }) => reply.id)
       expect(ids).toHaveLength(1)
-      expect((await pool.query(`SELECT s.id FROM sessions s JOIN workspace_mcp_runs r ON r.session_id=s.id WHERE r.id=$1 AND (${sessionKindSql.railRoom('s')})`, [runId])).rowCount).toBe(1)
+      const completion = await pool.query('SELECT lane FROM native_turn_completions WHERE session_id=$1', [result.body.result.structuredContent.data.sessionId])
+      expect(completion.rows).toEqual([{ lane: 'public' }])
+      expect((await queryWithRLS(actor, `SELECT s.id FROM sessions s JOIN workspace_mcp_runs r ON r.session_id=s.id WHERE r.id=$1 AND (${sessionKindSql.railRoom('s')})`, [runId])).rowCount).toBe(1)
       const rows = (await pool.query('SELECT role,content,sender_user_id FROM session_messages WHERE session_id=(SELECT session_id FROM session_messages WHERE id=$1) ORDER BY sequence_num', [ids[0]])).rows
       expect(rows.some(row => JSON.stringify(row.content).includes('Fictional native reply.'))).toBe(true)
       expect(rows.filter(row => row.role === 'user').every(row => row.sender_user_id === null)).toBe(true)
@@ -1044,7 +1046,7 @@ describe('[COMP:api/workspace-mcp] explicit native workspace profiles', () => {
     expect(queued.body.result.isError,JSON.stringify(queued.body)).toBeFalsy()
     const runId=queued.body.result.structuredContent.data.runId
     profile.runWorker!.start();try{await profile.runWorker!.tick()}finally{await profile.runWorker!.stop()}
-    const row=(await pool.query('SELECT session_id,status,result FROM workspace_mcp_runs WHERE id=$1',[runId])).rows[0]
+    const row=(await queryWithRLS(actor, 'SELECT session_id,status,result FROM workspace_mcp_runs WHERE id=$1',[runId])).rows[0]
     expect(row.status,JSON.stringify(row)).toBe('succeeded')
     const activity=(await pool.query('SELECT id,status,save_error,actor_user_id,request_message_id FROM research_activities WHERE session_id=$1',[row.session_id])).rows[0]
     expect(activity).toMatchObject({actor_user_id:actor})
@@ -1058,12 +1060,12 @@ describe('[COMP:api/workspace-mcp] explicit native workspace profiles', () => {
     const first = await call(surface, key.key, 'tools/call', params)
     const runId = first.body.result.structuredContent.data.runId
     expect((await call(surface, key.key, 'tools/call', params)).body.result).toEqual(first.body.result)
-    expect((await pool.query('SELECT id FROM workspace_mcp_runs WHERE id=$1', [runId])).rowCount).toBe(1)
+    expect((await queryWithRLS(actor, 'SELECT id FROM workspace_mcp_runs WHERE id=$1', [runId])).rowCount).toBe(1)
     const cancelled = await call(surface, key.key, 'tools/call', { name: 'cancelBrianRun', arguments: { runId } })
     expect(cancelled.body.result.structuredContent.data.status).toBe('cancelled')
     runNative = async () => { throw new Error('Cancelled work must not enter the model') }
     profile.runWorker!.start(); await profile.runWorker!.tick(); await profile.runWorker!.stop()
-    expect((await pool.query('SELECT status FROM workspace_mcp_runs WHERE id=$1', [runId])).rows[0].status).toBe('cancelled')
+    expect((await queryWithRLS(actor, 'SELECT status FROM workspace_mcp_runs WHERE id=$1', [runId])).rows[0].status).toBe('cancelled')
   })
   it('keeps inspection and cancellation responsive during a native turn and stops subsequent effects', async () => {
     const key = await issue('brain')
@@ -1086,7 +1088,7 @@ describe('[COMP:api/workspace-mcp] explicit native workspace profiles', () => {
       expect(cancel.body.result.structuredContent.data.cancelRequested).toBe(true)
     } finally { release(); await pending; await profile.runWorker!.stop() }
     expect(effect).toBe(false)
-    expect((await pool.query('SELECT status FROM workspace_mcp_runs WHERE id=$1', [runId])).rows[0].status).toBe('uncertain')
+    expect((await queryWithRLS(actor, 'SELECT status FROM workspace_mcp_runs WHERE id=$1', [runId])).rows[0].status).toBe('uncertain')
   })
   it.each(['brain', 'assistant'] as const)('%s binds a runtime tool review to its run and continues without replaying the action', async surface => {
     const key = await issue(surface), summary = `Fictional run review ${surface}`
@@ -1116,7 +1118,7 @@ describe('[COMP:api/workspace-mcp] explicit native workspace profiles', () => {
     profile.runWorker!.start(); await profile.runWorker!.tick(); await profile.runWorker!.stop()
     const final = await call(surface, key.key, 'tools/call', { name: 'getBrianRunResult', arguments: { runId } })
     expect(final.body.result.structuredContent.data).toMatchObject({ status: 'succeeded', replies: [{ text: 'Fictional native reply.' }] })
-    expect((await pool.query('SELECT count(*)::int AS count FROM workspace_mcp_operations WHERE run_id=$1', [runId])).rows[0].count).toBe(1)
+    expect((await queryWithRLS(actor, 'SELECT count(*)::int AS count FROM workspace_mcp_operations WHERE run_id=$1', [runId])).rows[0].count).toBe(1)
     await pool.query("UPDATE pending_approvals SET expires_at=now()-interval '1 second' WHERE id=$1",[approvalId])
     const repeated = await request(app).post(`/approvals/${approvalId}/respond`).auth(bearer, { type: 'bearer' }).send({ decision: 'approved' })
     expect(repeated.status, repeated.text).toBe(200)
@@ -1151,11 +1153,11 @@ describe('[COMP:api/workspace-mcp] explicit native workspace profiles', () => {
       const runId = queued.body.result.structuredContent.data.runId
       let entered = false
       runNative = async () => { entered = true; return { status: 'failed', messageIds: [] } }
-      if (interrupted) await pool.query("UPDATE workspace_mcp_runs SET status='running',claim_token=gen_random_uuid(),heartbeat_at=now()-interval '3 minutes' WHERE id=$1", [runId])
+      if (interrupted) await queryWithRLS(actor, "UPDATE workspace_mcp_runs SET status='running',claim_token=gen_random_uuid(),heartbeat_at=now()-interval '3 minutes' WHERE id=$1", [runId])
       else await brainStore.revoke(actor, key.id)
       profile.runWorker!.start(); await profile.runWorker!.tick(); await profile.runWorker!.stop()
       expect(entered).toBe(false)
-      expect((await pool.query('SELECT status FROM workspace_mcp_runs WHERE id=$1', [runId])).rows[0].status).toBe(interrupted ? 'uncertain' : 'failed')
+      expect((await queryWithRLS(actor, 'SELECT status FROM workspace_mcp_runs WHERE id=$1', [runId])).rows[0].status).toBe(interrupted ? 'uncertain' : 'failed')
     }
   })
   it.each(['brain', 'assistant'] as const)('%s prepares a native review and applies exactly once under its original parent', async surface => {

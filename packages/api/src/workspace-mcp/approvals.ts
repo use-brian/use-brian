@@ -2,7 +2,7 @@
 import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { authSessionStore } from '../db/auth-session-store.js'
-import { query, queryWithRLS } from '../db/client.js'
+import { queryWithRLS } from '../db/client.js'
 import type { PendingApproval, PendingApprovalsStore } from '../db/pending-approvals-store.js'
 import { admitModelInput } from '../context-scope/admission.js'
 import { executeWorkspaceNativeTool } from './catalog.js'
@@ -75,7 +75,7 @@ export function createWorkspaceMcpApprovals(deps: {
       if (!authSessionId || authVersion === undefined || approval.approverUserId !== userId
         || approval.approvalPayload.workspaceMcpOperation !== true || approval.kind !== 'tool_invocation'
         || !await authSessionStore.validateAccess({ userId, sessionId: authSessionId, authVersion })) return fail('native_human_review_required')
-      const row = (await query<{ id: string; context_id: string; operation_name: string; delegation: WorkspaceMcpDelegation; run_id: string | null }>(
+      const row = (await queryWithRLS<{ id: string; context_id: string; operation_name: string; delegation: WorkspaceMcpDelegation; run_id: string | null }>(userId,
         `SELECT o.id,o.context_id,o.operation_name,o.delegation,o.run_id FROM workspace_mcp_operations o
          JOIN workspace_mcp_contexts c ON c.id=o.context_id
          WHERE o.approval_id=$1 AND c.user_id=$2 AND c.workspace_id=$3`, [approval.id, userId, approval.workspaceId])).rows[0]

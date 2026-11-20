@@ -7102,7 +7102,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           pendingAnnotation: roomResponseGroupContext?.sourceMessageId ? undefined : nativeClassification?.pendingAnnotation,
           replyRowIndex: replyRow,
           // The durable completion header (8277): this turn's answer to its authored input.
-          completion: { lane: 'web', input: { kind: 'session_message', ref: storedUserMsg.id }, assistantId: assistant.id },
+          completion: { lane: programmatic ? 'public' : 'web', input: { kind: 'session_message', ref: storedUserMsg.id }, assistantId: assistant.id },
           ...(bufferedWebPublication ? { buffered: { root: bufferedWebPublication, selectedOrdinals } } : {}),
           afterCommit: async (rows) => {
           const savedTurns = [...assembled.assistantRows].flatMap(([index, row]) => rows[index]

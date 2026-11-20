@@ -57,6 +57,21 @@ import { routePreparedTurn } from '../turn/capabilities.js'
 import { resolveReplyText, type ResolveReplyParams } from './_reply-context.js'
 import { prepareAdmittedSessionHistory, type PreparedAttendedSessionHistory } from './attended-session-context.js'
 
+// The Telegram recording proof locks the route against changes. Concurrent
+// classifier transactions for the same turn must take turns acquiring it.
+const telegramAdmission = new WeakMap<Session, Promise<void>>()
+
+async function admitClassifierInput(session: Session, context: Parameters<typeof admitModelInput>[0]) {
+  if (session.channelType !== 'telegram') return admitModelInput(context)
+  const pending = telegramAdmission.get(session) ?? Promise.resolve()
+  const check = pending.then(() => admitModelInput(context))
+  const settled = check.catch(() => {})
+  telegramAdmission.set(session, settled)
+  try { await check } finally {
+    if (telegramAdmission.get(session) === settled) telegramAdmission.delete(session)
+  }
+}
+
 type Measure = <T>(counter: string, run: () => Promise<T>) => Promise<T>
 type Classified = Awaited<ReturnType<Awaited<ReturnType<typeof assessAttendedSessionMessage>>['defer']>>
 
@@ -373,7 +388,7 @@ export async function assessAttendedSessionMessage(input:{
   if(refusal)throw refusal
   try{
    assertBinding()
-   await(measure?measure('topic_authority',()=>admitModelInput(context)):admitModelInput(context))
+   await(measure?measure('topic_authority',()=>admitClassifierInput(session, context)):admitClassifierInput(session, context))
    assertBinding()
   }catch(error){
    if(!(error instanceof DerivedScopeError)&&!isAuthorityChangedError(error))throw error
@@ -438,7 +453,7 @@ export async function classifyAttendedResearchMessage(input:{
  const context={...executionToolContext(authority.execution,{appId:'native-session-research'}),scopeAccumulator:authority.accumulator}
  const options=bindScopeSources<ResearchClassifyOptions>({provider:input.provider,model:input.model,decisionRuntime:input.decisionRuntime,
   message:text(current),recentConversation:recent,toolCandidates:input.toolCandidates,authority,signal:authority.execution.lifecycle.abortSignal,
-  assertInputAuthority:()=>input.measure?input.measure('research_authority',()=>admitModelInput(context)):admitModelInput(context),workspaceId:authority.execution.security.access.workspaceId,
+  assertInputAuthority:()=>input.measure?input.measure('research_authority',()=>admitClassifierInput(session, context)):admitClassifierInput(session, context),workspaceId:authority.execution.security.access.workspaceId,
   runId:'research-intent-'+message.id},boundScopeSources(query))
  return classifyResearchIntent(options)
 }
@@ -478,7 +493,7 @@ export async function prepareAttendedSplitMessage(input:ClassificationInput&{
  const check=async()=>{
   try{
    assertBinding()
-   await (measure?measure('split_authority',()=>admitModelInput(context)):admitModelInput(context))
+   await (measure?measure('split_authority',()=>admitClassifierInput(session, context)):admitClassifierInput(session, context))
    assertBinding()
   }catch(error){throw Object.assign(error instanceof Error?error:new Error('The assessment context is unavailable.'),{reason:'authority_changed',retrySafe:false})}
  }
@@ -536,7 +551,7 @@ export async function routeAttendedTurn(input: AttendedTurnRoutingInput): Promis
   const proveLane = (lane: TurnRoutingLane) => async () => {
     if (!forks[lane]) return
     if (proved.delete(lane)) return
-    await admitModelInput(context(lane))
+    await admitClassifierInput(native!.session, context(lane))
   }
 
   let assessment: Awaited<ReturnType<typeof assessAttendedSessionMessage>> | undefined

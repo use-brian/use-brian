@@ -623,7 +623,7 @@ export type PendingApprovalsStore = {
   ): Promise<PendingApproval | null>
   /** Ordinary machine answer, never human approval or connector authorization
    *  (a `connector_authorization:*` question is refused; other action ids are inert). */
-  recordExternalQuestionAnswer(id: string, answerText: string, runId: string): Promise<PendingApproval | null>
+  recordExternalQuestionAnswer(id: string, answerText: string, runId: string, actorId: string): Promise<PendingApproval | null>
 
   /** RLS-gated — pending skill approvals (both kinds) for a workspace. */
   listSkillApprovals(userId: string, workspaceId: string): Promise<PendingApproval[]>
@@ -1333,8 +1333,8 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
       return approval
     },
 
-    async recordExternalQuestionAnswer(id, answerText, runId) {
-      const result = await query(`UPDATE pending_approvals p SET status='approved',responded_at=now(),responded_by=NULL,
+    async recordExternalQuestionAnswer(id, answerText, runId, actorId) {
+      const result = await queryWithRLS(actorId, `UPDATE pending_approvals p SET status='approved',responded_at=now(),responded_by=NULL,
         answer_text=$2,resolution_origin='system'
         WHERE p.id=$1 AND p.kind='question' AND p.status='pending' AND (p.expires_at IS NULL OR p.expires_at>now())
         AND p.approval_payload->>'workspaceMcpRunId'=$3

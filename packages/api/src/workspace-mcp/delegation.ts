@@ -8,7 +8,7 @@ import { executionToolContext } from '@use-brian/agent-runtime/security/executio
 import { WorkspaceCredentialDelegationSchema, bindWorkspaceCredentialDelegation } from '@use-brian/agent-runtime/security/workspace-delegation.js'
 import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { findSessionById } from '../db/sessions.js'
-import { query } from '../db/client.js'
+import { query, queryWithRLS } from '../db/client.js'
 import { findAssistantById } from '../db/users.js'
 import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
 import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
@@ -62,8 +62,8 @@ export async function restoreWorkspaceMcpDelegation(parent: WorkspaceMcpDelegati
   const constraints = await Promise.all((parent.constraints ?? []).map(item => restoreWorkspaceMcpDelegation(item,capabilities)))
   if (constraints.some(item => item.context.userId !== parent.userId || item.context.workspaceId !== parent.workspaceId)) throw new Error('workspace_mcp_parent_mismatch')
   const column = parent.kind === 'brain_key' ? 'brain_key_id' : parent.kind === 'oauth_token' ? 'oauth_authorization_id' : 'api_key_id'
-  const readContext = async () => (await query<{id:string;invalidated:boolean;evidence:import('@use-brian/agent-runtime/security/context-scope.js').ScopeEvidence}>(
-    `SELECT id,invalidated,evidence FROM workspace_mcp_contexts WHERE ${column}=$1 AND selection_id=$2 AND user_id=$3 AND workspace_id=$4 AND assistant_id=$5`,
+  const readContext = async () => (await queryWithRLS<{id:string;invalidated:boolean;evidence:import('@use-brian/agent-runtime/security/context-scope.js').ScopeEvidence}>(
+    parent.userId, `SELECT id,invalidated,evidence FROM workspace_mcp_contexts WHERE ${column}=$1 AND selection_id=$2 AND user_id=$3 AND workspace_id=$4 AND assistant_id=$5`,
     [parent.credentialId,parent.selectionId ?? DEFAULT_WORKSPACE_MCP_SELECTION,parent.userId,parent.workspaceId,parent.assistantId])).rows[0]
   const saved = await readContext()
   const session = await findSessionById(parent.sessionId)
@@ -81,7 +81,7 @@ export async function restoreWorkspaceMcpDelegation(parent: WorkspaceMcpDelegati
       for (const constraint of constraints) await constraint.context.authority!.assertCurrent()
 
     } catch {
-      await query('UPDATE workspace_mcp_contexts SET invalidated=true WHERE id=$1',[saved.id])
+      await queryWithRLS(parent.userId, 'UPDATE workspace_mcp_contexts SET invalidated=true WHERE id=$1',[saved.id])
       return null
     }
     return await getWorkspaceRoleSystem(parent.userId, parent.workspaceId) ? row : null

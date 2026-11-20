@@ -170,7 +170,7 @@ export function createWorkspaceMcpRuns(deps: Deps) {
         if (!question || question.kind !== 'question' || question.approvalPayload.workspaceMcpRunId !== runId
           || question.expiresAt && question.expiresAt.getTime() <= Date.now()) return { isError: true, data: { code: 'question_unavailable' } }
         if (answer && question.status === 'pending') {
-          question = await context.authority!.execute(() => deps.approvalsStore!.recordExternalQuestionAnswer(ids[0], answer, runId))
+          question = await context.authority!.execute(() => deps.approvalsStore!.recordExternalQuestionAnswer(ids[0], answer, runId, context.userId))
         }
         if (!question || question.status !== 'approved' || !question.answerText) return { isError: true, data: { code: 'answer_required' } }
         observation = 'The pending ordinary question was answered. This answer grants no additional permission.\n' + question.answerText
@@ -193,20 +193,25 @@ export function createWorkspaceMcpRuns(deps: Deps) {
   let timer: ReturnType<typeof setInterval> | undefined, active: Promise<void> | undefined
   let stopped = false, controller: AbortController | undefined
   async function processOne() {
-    await query(`UPDATE workspace_mcp_runs r SET status='failed',updated_at=now()
-      WHERE r.status IN('waiting_approval','waiting_input') AND EXISTS(
+    const dispatch = (await query<{ run_id: string; actor_id: string }>(`UPDATE workspace_mcp_dispatch SET poll_at=clock_timestamp()+interval '1 second'
+      WHERE run_id=(SELECT run_id FROM workspace_mcp_dispatch WHERE poll_at<=clock_timestamp()
+        ORDER BY poll_at,run_id FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING run_id,actor_id`)).rows[0]
+    if (!dispatch) return
+    const actor = dispatch.actor_id
+    await queryWithRLS(actor, `UPDATE workspace_mcp_runs r SET status='failed',updated_at=now()
+      WHERE r.id=$1 AND r.status IN('waiting_approval','waiting_input') AND EXISTS(
         SELECT 1 FROM pending_approvals p WHERE
           (p.id::text IN(SELECT jsonb_array_elements_text(coalesce(r.result->'approvalIds','[]'::jsonb)))
            OR p.id::text IN(SELECT jsonb_array_elements_text(coalesce(r.result->'questionIds','[]'::jsonb))))
-          AND (p.status='expired' OR p.expires_at<=now() OR p.kind='question' AND p.status='rejected'))`)
-    const ready = (await query<Run>(`SELECT r.* FROM workspace_mcp_runs r WHERE r.status IN('waiting_approval','waiting_input')
+          AND (p.status='expired' OR p.expires_at<=now() OR p.kind='question' AND p.status='rejected'))`, [dispatch.run_id])
+    const ready = (await queryWithRLS<Run>(actor, `SELECT r.* FROM workspace_mcp_runs r WHERE r.id=$1 AND r.status IN('waiting_approval','waiting_input')
       AND NOT r.cancel_requested AND (
         r.status='waiting_approval' AND jsonb_array_length(coalesce(r.result->'approvalIds','[]'::jsonb))>0
         AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements_text(r.result->'approvalIds') AS pending(approval_id)
           WHERE NOT EXISTS(SELECT 1 FROM workspace_mcp_operations o WHERE o.run_id=r.id AND o.approval_id::text=pending.approval_id AND o.status IN('succeeded','failed')))
         OR r.status='waiting_input' AND jsonb_array_length(coalesce(r.result->'questionIds','[]'::jsonb))=1
         AND EXISTS(SELECT 1 FROM pending_approvals p WHERE p.id::text=r.result->'questionIds'->>0 AND p.status='approved'))
-      ORDER BY r.updated_at LIMIT 1`)).rows[0]
+      ORDER BY r.updated_at LIMIT 1`, [dispatch.run_id])).rows[0]
     if (ready) {
       try {
         const { context } = await deps.restore(ready.delegation)
@@ -216,29 +221,28 @@ export function createWorkspaceMcpRuns(deps: Deps) {
             return { isError: result.isError, content: [{ type: 'text', text: result.isError ? 'Continuation unavailable.' : 'Continuation queued.' }] }
           } })
         if (receipt.isError && receipt.structuredContent?.code !== 'connection_busy') {
-          await query("UPDATE workspace_mcp_runs SET status='failed',updated_at=now() WHERE id=$1 AND status IN('waiting_approval','waiting_input')", [ready.id])
+          await queryWithRLS(actor, "UPDATE workspace_mcp_runs SET status='failed',updated_at=now() WHERE id=$1 AND status IN('waiting_approval','waiting_input')", [ready.id])
         }
       } catch {
-        await query("UPDATE workspace_mcp_runs SET status='failed',updated_at=now() WHERE id=$1 AND status IN('waiting_approval','waiting_input')", [ready.id])
+        await queryWithRLS(actor, "UPDATE workspace_mcp_runs SET status='failed',updated_at=now() WHERE id=$1 AND status IN('waiting_approval','waiting_input')", [ready.id])
       }
     }
     // A claimed turn may have committed effects. Never reclaim/replay it.
-    await query(`WITH stale AS (UPDATE workspace_mcp_runs SET status='uncertain',updated_at=now()
-      WHERE status='running' AND heartbeat_at<now()-interval '2 minutes' RETURNING context_id)
-      UPDATE workspace_mcp_contexts SET invalidated=true WHERE id IN(SELECT context_id FROM stale)`)
+    await queryWithRLS(actor, `WITH stale AS (UPDATE workspace_mcp_runs SET status='uncertain',updated_at=now()
+      WHERE id=$1 AND status='running' AND heartbeat_at<now()-interval '2 minutes' RETURNING context_id)
+      UPDATE workspace_mcp_contexts SET invalidated=true WHERE id IN(SELECT context_id FROM stale)`, [dispatch.run_id])
     const token = randomUUID()
-    const job = (await query<Run>(`UPDATE workspace_mcp_runs SET status='running',claim_token=$1,heartbeat_at=now(),updated_at=now()
-      WHERE id=(SELECT id FROM workspace_mcp_runs WHERE status='queued' AND NOT cancel_requested
-        ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *`, [token])).rows[0]
+    const job = (await queryWithRLS<Run>(actor, `UPDATE workspace_mcp_runs SET status='running',claim_token=$1,heartbeat_at=now(),updated_at=now()
+      WHERE id=$2 AND status='queued' AND NOT cancel_requested RETURNING *`, [token, dispatch.run_id])).rows[0]
     if (!job) return
     const abort = new AbortController(); controller = abort
     let heartbeatBusy = false
-    const current = async () => (await query(`SELECT 1 FROM workspace_mcp_runs WHERE id=$1 AND claim_token=$2
+    const current = async () => (await queryWithRLS(actor, `SELECT 1 FROM workspace_mcp_runs WHERE id=$1 AND claim_token=$2
       AND status='running' AND NOT cancel_requested AND heartbeat_at>now()-interval '2 minutes'`, [job.id, token])).rowCount === 1
     const heartbeat = setInterval(() => {
       if (heartbeatBusy) return
       heartbeatBusy = true
-      void query(`UPDATE workspace_mcp_runs SET heartbeat_at=now() WHERE id=$1 AND claim_token=$2 AND status='running'
+      void queryWithRLS(actor, `UPDATE workspace_mcp_runs SET heartbeat_at=now() WHERE id=$1 AND claim_token=$2 AND status='running'
         AND NOT cancel_requested AND heartbeat_at>now()-interval '2 minutes' RETURNING id`, [job.id, token]).then(result => { if (!result.rowCount) abort.abort() })
         .catch(() => abort.abort()).finally(() => { heartbeatBusy = false })
     }, 5000)
@@ -271,15 +275,15 @@ export function createWorkspaceMcpRuns(deps: Deps) {
             structuredContent: { status: result.status, data: result } }
         } })
       if (receipt.structuredContent?.code === 'connection_busy') {
-        await query("UPDATE workspace_mcp_runs SET status=CASE WHEN cancel_requested THEN 'cancelled' ELSE 'queued' END,claim_token=NULL,updated_at=now() WHERE id=$1 AND claim_token=$2 AND status='running'", [job.id, token])
+        await queryWithRLS(actor, "UPDATE workspace_mcp_runs SET status=CASE WHEN cancel_requested THEN 'cancelled' ELSE 'queued' END,claim_token=NULL,updated_at=now() WHERE id=$1 AND claim_token=$2 AND status='running'", [job.id, token])
         return
       }
       const result = receipt.structuredContent?.data as WorkspaceTurnResult | undefined
       const status = receipt.structuredContent?.status === 'uncertain' ? 'uncertain' : result?.status ?? 'failed'
-      await query(`UPDATE workspace_mcp_runs SET status=$3,result=$4,updated_at=now() WHERE id=$1 AND claim_token=$2 AND status='running'`,
+      await queryWithRLS(actor, `UPDATE workspace_mcp_runs SET status=$3,result=$4,updated_at=now() WHERE id=$1 AND claim_token=$2 AND status='running'`,
         [job.id, token, status, result ? JSON.stringify(result) : null])
     } catch {
-      await query("UPDATE workspace_mcp_runs SET status='failed',updated_at=now() WHERE id=$1 AND claim_token=$2 AND status='running'", [job.id, token])
+      await queryWithRLS(actor, "UPDATE workspace_mcp_runs SET status='failed',updated_at=now() WHERE id=$1 AND claim_token=$2 AND status='running'", [job.id, token])
     } finally { clearInterval(heartbeat); controller = undefined }
   }
   const tick = () => {
