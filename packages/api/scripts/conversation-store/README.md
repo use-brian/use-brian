@@ -197,6 +197,49 @@ Inputtable COPY does not complete portable restore: the existing backup owner mu
 preserve original proofs separately from trusted source-rendered target contracts
 and import user facts only into trusted, quarantined schema.
 
+### Reviewed harness / 8331 portable extension
+
+The head roster now covers 807 migrations through 8331: 603 tables, including
+all seven durable harness tables. The separately pinned 8273 cohort is unchanged.
+`portable-restore-roster-8328.json` preserves the reviewed predecessor bytes.
+`portable-harness-review.mjs` verifies their exact digest and adds only the seven
+explicit names to produce `portable-harness-classification-8331.json`. This is
+reviewed source input, never runtime catalog enrollment.
+
+`installation-authentication-8331.mjs` pins the three numbered migration recipes
+and the expected artifact's bytes. It composes 8328 authentication with the exact
+harness/admission catalog, checking all three ledger receipts in the same
+repeatable-read authentication snapshot. Unknown harness routine/table names,
+extra overloads, altered actor ACLs, policies, columns, constraints, indexes and
+triggers refuse. The scope includes the altered Project scope and admission
+function/trigger, not only newly created harness tables.
+
+Reproduce or check both artifacts ONLY on a newly created disposable fixture:
+
+```sh
+node packages/api/scripts/conversation-store/build-portable-harness-catalog.mjs --pg-bin <PG18>
+node packages/api/scripts/conversation-store/build-portable-harness-catalog.mjs --pg-bin <PG18> --check
+```
+
+This generator accepts no database URL/catalog input, verifies source pins and
+reviewed classification before cluster creation, checks fixture ownership and
+ordinary-owner privileges, builds both outputs before writing, and always
+cleans up its cluster. Check mode also authenticates the registered 8331 profile.
+Expected field counts are fixed: 23 routines, 8 relations, 0 types, 11 triggers.
+Source or expected-artifact changes require source review, never rebaselining
+from a failing/live catalog. Generating new bytes does not authorize them: the
+profile's expected-artifact SHA must also match.
+
+Revisions, approvals, runs, evidence and audit are durable, not projections.
+Approval/run `auth_session_id` values are opaque historical UUIDs, retained
+exactly without a corresponding auth-session row or restored login capability.
+`scope_id` is a generated column. All eight harness triggers are reviewed;
+`harness_run_audit` is suspended as a derived effect so archived audit is imported
+once. New reference cycles requiring restoration UPDATEs on immutable harness
+history refuse pending a separate reviewed design. Full populated-history,
+evidence, attribution and receiving-proof round-trip validation is owned by the
+portable integration proof, not replaced by generator/unit success.
+
 Portable brain restore has its own owner, `portable-restore.mjs`, beside this
 registry module. `executable-record.mjs` exports complete registry records as
 original source proof and compares signature rosters; restore never imports,
@@ -228,7 +271,7 @@ deferred column or the whole row become `suspended:restoration-placeholder`.
 Any new table, sequence, insert/update trigger or FORCE-RLS policy refuses
 import until the roster is regenerated and reviewed. The builder also refuses an
 inventory whose `ledgerCount` differs from the fresh chain and records the chain
-head (762 entries, `8280_query_domain_visibility.sql`). The 8276 witness is
+head (807 entries, `8331_project_chat_creation_admission.sql`). The 8276 witness is
 installation-derived (D7): a head import ends with the owner-only refresh, and an
 8273-cohort transfer is refreshed by 8276 itself as the runner moves forward.
 `portableTableDigests` returns the canonical per-table rows and record digests

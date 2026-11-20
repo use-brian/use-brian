@@ -1,0 +1,5465 @@
+{
+ "format": 1,
+ "ledgerCount": 807,
+ "tables": [
+  {
+   "schema": "public",
+   "table": "_migrations",
+   "ownership": "installation_derived",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "account_erasures",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "analytics_events",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "api_keys",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_access_grants",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_activation_reviews",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_api_credentials",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_authority_events",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_clients",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_command_audit",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_committed_events",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_credential_grants",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_credential_reviews",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_deployed_module_capabilities",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_field_observation_sources",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_field_observations",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_field_resources",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_grant_reviews",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_home_bindings",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_native_configuration_execution",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_native_configuration_operations",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": [
+    {
+     "column": "apply_handler"
+    }
+   ]
+  },
+  {
+   "schema": "public",
+   "table": "application_native_crm_configuration_epochs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_native_field_contracts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": [
+    {
+     "column": "metadata_reader"
+    },
+    {
+     "column": "catalog_reader"
+    },
+    {
+     "column": "configuration_reader"
+    }
+   ]
+  },
+  {
+   "schema": "public",
+   "table": "application_native_governance_events",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_native_governance_reviews",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_native_module_lifecycle_reviews",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_native_resource_owners",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_native_role_assignments",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_native_task_write_intents",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_oauth_bindings",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_operation_receipts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_policy_contract_epoch",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_policy_workspace_epochs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_query_domains",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_record_revisions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_record_tombstones",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_schema_change_reviews",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_schema_versions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_scoped_activations",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_source_setup_approvals",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_source_setup_reviews",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "application_unique_values",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "approval_delegated_resolutions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "approval_pattern_support",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "approval_patterns",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "approval_review_assignments",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "approval_review_attempts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "approval_review_attention_seen",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "assistant_capabilities",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "assistant_chat_links",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "assistant_connections",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "assistant_connector_grants",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "assistant_connector_settings",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "assistant_disabled_knowledge_sources",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "assistant_members",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "assistant_playbook_rules",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "assistant_project_grants",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "assistant_skill_settings",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "assistants",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_audit_log",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_consent_events",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_enquiries",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_enquiry_notes",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_events",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_external_identities",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_integration_events",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_inventory_boundaries",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_membership_catalogue_revisions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_membership_catalogues",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_membership_checkouts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_membership_offline_rescues",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_membership_plans",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_membership_source_imports",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_memberships",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_notification_outbox",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_order_lines",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_orders",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_programme_catalogue_revisions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_programme_catalogues",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_promotion_source_contact_uses",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_promotion_uses",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_promotions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_provider_events",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_registrations",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_site_content",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_site_content_revisions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_sponsorship_allocations",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_sponsorship_invitations",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_submission_attachments",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_ticket_types",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "association_waitlist_offers",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "auth_sessions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "blueprint_records",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "brain_keys",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "brain_row_versions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "brain_verifications",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "brief_bindings",
+   "ownership": "durable",
+   "generatedColumns": [
+    "owner_id"
+   ],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "brief_department_selections",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "brief_proposals",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "brief_receipts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "brief_revisions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "brief_work_bases",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "browser_credentials",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "browser_profiles",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "browser_sessions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "browser_skill_grants",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "browser_skills",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "bulk_ingest_surcharges",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "campaign_command_receipts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "campaign_conversion_outbox",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "campaign_conversions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "campaign_daily_metrics",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "campaign_email_dispatches",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "campaign_email_jobs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "campaign_email_link_tokens",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "campaign_email_recipients",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "campaign_events",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "campaign_links",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "campaign_placements",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "campaign_site_credentials",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "campaign_sites",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "campaign_subject_links",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "campaign_unsubscribe_tokens",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "campaigns",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "channel_assistants",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "channel_event_dedup",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "channel_identity_challenges",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "channel_identity_claim_failures",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "channel_integrations",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "channel_media_receipts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "channel_message_turn_claims",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "channel_recording_messages",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "channel_recording_policies",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "channel_recording_recovery_receipts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "channel_routes",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "channel_sensitivity_rules",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "channel_trusted_access_grants",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "channel_trusted_memberships",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "channel_user_cache",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "channels",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "chat_turn_locks",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "claim_provenance",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "comment_threads",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "connector_actor_key_events",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "connector_actor_signing_keys",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "connector_app_credentials",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "connector_attended_commands",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "connector_attended_setup_approvals",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "connector_attended_setup_reviews",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "connector_grant",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "connector_instance",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "connector_pending_setups",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": true,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "connector_rotation_attempts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": true,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "connector_setup_auth_material",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": true,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "connector_setup_identity",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": true,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "connector_setup_rotation_receipts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": true,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "connector_setup_staged_credentials",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": true,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "connector_source_profile_events",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "connector_source_profiles",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "consolidation_logs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "content_ideas",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "content_plan_briefs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "content_plan_slots",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "content_planning_drafts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "context_scope_reclassification_events",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "conversation_envelope_backfill_checkpoint",
+   "ownership": "installation_derived",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "conversation_envelopes",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "conversation_legacy_history_enrollments",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "conversation_message_quarantine",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "conversation_participants",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "conversation_settings_transitions",
+   "ownership": "installation_derived",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "conversation_visibility_audit",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "conversation_visibility_notices",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "correction_audit",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_activities",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_address_suppression_tombstones",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_billing_requests",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_business_reference_history",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_business_references",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_change_request_decisions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_change_request_revisions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_change_requests",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_commercial_preparations",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_commercial_profile_versions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_commercial_values",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_consent_purpose_versions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_consent_purposes",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_customer_accounts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_cutover_runs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_deal_contacts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_delivery_commitments",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_delivery_history",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_delivery_observations",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_delivery_receipt_contacts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_delivery_receipts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_domain_event_outbox",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_email_draft_session_anchors",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_email_draft_versions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_email_drafts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_engagement_catalogs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_engagement_extensions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_entity_separations",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_erasure_journal",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [
+    "sequence"
+   ],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_erasure_journal_targets",
+   "ownership": "installation_derived",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_erp_imports",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_field_definitions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_governance_policies",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_identity_bindings",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_import_chunks",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_import_errors",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_import_file_cleanups",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_import_jobs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_import_rows",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_import_sources",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_intake_credential_definitions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_intake_credentials",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_intake_definition_versions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_intake_definitions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_intake_idempotency",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_integration_credential_grants",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_integration_credentials",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_invoice_allocations",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_invoice_lines",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_invoices",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_issue_attempts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_legacy_id_mappings",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_mailbox_integration_grants",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_managed_mailbox_policies",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_number_partitions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_number_series",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_operation_definitions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_operation_receipts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_operation_versions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_pipeline_stages",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_pipelines",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_preparation_versions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_privacy_policies",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_privacy_previews",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_projection_events",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [
+    "seq"
+   ],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_projection_receipts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_provider_bindings",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_reference_definitions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_retention_runs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_saved_views",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_segments",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_seller_profiles",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_summary_attention_rollups",
+   "ownership": "installation_derived",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_summary_company_references",
+   "ownership": "installation_derived",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_summary_configuration_publications",
+   "ownership": "installation_derived",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_summary_entity_domain_versions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_summary_entity_publications",
+   "ownership": "installation_derived",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_summary_partition_leaves",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_summary_policy_adapters",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_summary_policy_inputs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_summary_policy_requirements",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_summary_principal_revisions",
+   "ownership": "installation_derived",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_summary_receipt_keys",
+   "ownership": "installation_derived",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_summary_record_policies",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_summary_release_revisions",
+   "ownership": "installation_derived",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_summary_rollup_leaves",
+   "ownership": "installation_derived",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_summary_rollups",
+   "ownership": "installation_derived",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_summary_scope_classes",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_summary_scope_partition_versions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_summary_scope_policy_usage",
+   "ownership": "installation_derived",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_summary_selected_cells",
+   "ownership": "installation_derived",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_summary_source_descriptors",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_summary_source_groups",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "crm_suppression_events",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "custom_channel_bridge_state",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "custom_channel_outbox",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "decision_applications",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "decision_derivations",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "decision_evaluation_profiles",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "decision_events",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "deferred_confirmations",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "department_audit_events",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "department_edges",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "department_owners",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "department_revisions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "desktop_auth_codes",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "doc_inbox_dismissals",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "doc_notifications",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "doc_themes",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "documents",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "domain_summaries",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "email_archive_messages",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "email_archive_segments",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "email_domains",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "engineering_history_commands",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "entities",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "entity_external_identities",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "entity_instances",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "entity_link_types",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "entity_links",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "entity_merges",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "entity_types",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "episode_extraction_items",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "episode_extraction_runs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "episodes",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "episodic_memories",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "external_app_access_versions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "external_app_record_bindings",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "external_app_record_observations",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "external_app_record_versions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "external_approval_requests",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "external_services",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "external_source_authorizations",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "external_source_observations",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "external_source_resources",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "extraction_outbox",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "feed_collaboration_mutations",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "feed_comment_threads",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "feed_draft_suggestions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "feed_editorial_runs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "feed_generation_estimates",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "feed_learning_outputs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "feed_linkedin_manual_receipts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "feed_post_confirmations",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "feed_post_revisions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "feed_post_working_copies",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "feed_review_findings",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "feishu_notification_clients",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "feishu_notification_receipts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "feishu_notification_recipients",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "file_cache",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "file_ingest_jobs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "file_segments",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "gdrive_catalog_syncs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "gdrive_file_catalog",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "gdrive_file_enrichments",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "goal_crm_event_sources",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "goal_recipes",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "goal_task_source_authority",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "goals",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "home_app_state",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "home_dock_layouts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "identities",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "identity_bindings",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "ingest_external_sink",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "ingest_outbox",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "ingest_rules",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "kb_chunks",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "kb_maintenance_agents",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "knowledge_capture_rules",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "knowledge_entries",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "knowledge_entry_revision_capture_inputs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "knowledge_entry_revision_fields",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "knowledge_entry_revision_publications",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "knowledge_entry_revision_values",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "knowledge_entry_scope_revisions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "knowledge_repo_publication_heads",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "ledger_epoch",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "linked_identities",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "linkedin_import_members",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "linkedin_import_rows",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "linkedin_import_runs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "live_interaction_captures",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "live_interaction_jobs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "live_interaction_settings",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "live_interaction_utterances",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [
+    "cursor"
+   ],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "live_transcript_windows",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "magic_link_tokens",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "mcp_tool_settings",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "meeting_tag_state",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "member_compartment_grants",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "memories",
+   "ownership": "durable",
+   "generatedColumns": [
+    "search_vector"
+   ],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "memories_shadow",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "memory_recall_events",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "memory_summary_slots",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "memory_verifications",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "metered_model_profiles",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "mobile_auth_codes",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "native_conversation_conversion_inputs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "native_conversation_conversion_pages",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "native_conversation_conversion_pending",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "native_conversation_conversion_runs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "native_conversation_frame_requirements",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "native_conversation_publications",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "native_memory_query_write_intents",
+   "ownership": "installation_derived",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "native_memory_successor_transitions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "native_retained_contract_helpers",
+   "ownership": "installation_derived",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "native_turn_completions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "native_turn_contract_helpers",
+   "ownership": "installation_derived",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "native_turn_contract_witness",
+   "ownership": "installation_derived",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "native_turn_frames",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "native_turn_publication_debt",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "native_turn_publication_events",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "native_turn_publication_impossible",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "native_turn_publication_seals",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "native_turn_publication_work",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "oauth_authorizations",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "oauth_clients",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "office_artifact_grants",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "office_artifact_sessions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "office_artifact_sources",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "office_artifact_versions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "office_artifacts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "office_audit_events",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "office_claims",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "office_collab_documents",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "office_comment_messages",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "office_comment_threads",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "office_generation_events",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "office_generation_file_bindings",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "office_generation_jobs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "office_generation_steering",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "office_media_uses",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "office_offline_packages",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "office_pdf_purge_objects",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "office_pdf_session_assets",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "office_release_records",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "office_resources",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "office_scope_observations",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "office_suggestions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "office_template_resource_refs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "office_template_versions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "office_templates",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "operational_route_bindings",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "operational_route_events",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "oss_usage_tracking",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "page_actions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "page_domains",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "page_grants",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "page_link_aliases",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "page_send_log",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "page_slugs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "pdf_distillates",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "pending_approvals",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "pending_ingest_batches",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "pending_recording_confirmations",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "plan_steps",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "private_session_display_contract",
+   "ownership": "installation_derived",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "private_transcript_observations",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "programmatic_archive_events",
+   "ownership": "durable",
+   "generatedColumns": [
+    "search_vector"
+   ],
+   "identityColumns": [
+    "sequence"
+   ],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "programmatic_capture_profiles",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "programmatic_capture_receipts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "project_harness_approvals",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "project_harness_components",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "project_harness_evidence",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "project_harness_execution_audit",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "project_harness_products",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "project_harness_revisions",
+   "ownership": "durable",
+   "generatedColumns": [
+    "scope_id"
+   ],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "project_harness_runs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "project_shared_audit_events",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "project_shared_conversions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "project_shared_members",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "project_shared_owners",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "project_shared_scopes",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "realtime_thread_targets",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "rebuild_runs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "recording_device_grants",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "recording_device_renewals",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "recording_intake_bindings",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "recording_jobs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "recording_surcharges",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "recordings",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "research_activities",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "research_artifact_links",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "research_comparisons",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "research_feedback",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "research_feedback_attempts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "research_feedback_revisions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "research_improvements",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "sandbox_tasks",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "saved_views",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "scheduled_jobs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "scope_derivation_sources",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "scope_derivations",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "scope_resource_states",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "self_host_feed_cloud_links",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "sensitivity_reclassifications",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "session_archives",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": true,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "session_context_revision_contents",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "session_context_scope_revisions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "session_legacy_history",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "session_legacy_history_messages",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "session_message_annotation_heads",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "session_messages",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "session_pins",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "session_recoveries",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "session_resume_points",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "session_state",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "session_state_jobs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "session_title_heads",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "session_title_jobs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "sessions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "skill_curator_digest",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "source_service_binding_approvals",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "source_service_bindings",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "source_service_release_reviews",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "source_service_workflow_runs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "structured_document_extractions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "structured_document_fill_proposals",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": true,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "support_diagnostic_events",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "support_diagnostic_sessions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "synthesis_surcharges",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "task_candidates",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "task_execution_commands",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "task_execution_pools",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "task_execution_segments",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "task_execution_states",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "task_routine_intake_receipts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "task_rules",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "task_tombstones",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "tasks",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "teamspace_members",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "teamspaces",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "telegram_channel_posts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "telegram_discussion_roots",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "telegram_link_codes",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "tool_result_cache",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "transcript_segments",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "turn_events",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "turn_payloads",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "user_merges",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "user_skill_stars",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "user_souls",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "users",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "wa_auth_state",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "watch_capture_uploads",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "watch_capture_windows",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "watch_captures",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "wechat_context_tokens",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "whatsapp_cloud_managed_groups",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "worker_locks",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "worker_runs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workflow_channel_questions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workflow_knowledge_event_receipts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workflow_page_event_observations",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workflow_page_event_receipts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workflow_publication_consent_states",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workflow_publication_consents",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workflow_run_copy_sources",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workflow_runs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workflow_schedule_edit_reviews",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workflow_step_runs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workflow_task_event_receipts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workflow_task_pause_admissions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workflows",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_access_command_reviews",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_access_events",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_access_grants",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_access_inventory_checkpoints",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_access_inventory_snapshots",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_access_migration_items",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_access_migration_plans",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_access_migration_resource_reviews",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_access_migration_reviews",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_access_policies",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_access_requests",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_audit_log",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_brain_evolution",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_brand_versions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_brands",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_compartments",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_custom_llm_endpoints",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_custom_llm_profiles",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_decision_routing",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_external_approval_sources",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_file_cleanup_queue",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_file_session_bindings",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_file_uploads",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_file_workflow_admissions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_files",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_goal_defaults",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_group_assistants",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_group_compartment_grants",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_group_members",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_groups",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_home_apps",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_invitations",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_knowledge_binding_reviews",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_knowledge_sources",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_legacy_cleanup_reviews",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_link_aliases",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_llm_provider_settings",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_mcp_contexts",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": true,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_mcp_operations",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": true,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_mcp_runs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": true,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_members",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_memory_evolution",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_model_defaults",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_model_tier_routes",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_modules",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_org_placements",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_org_state",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_org_units",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_organization_cutover_reviews",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_organization_upgrade_jobs",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_page_templates",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_project_members",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_projects",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_scope_review_items",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_scope_reviews",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_search_office_queue",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_search_office_text",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_skill_enablement",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_skill_files",
+   "ownership": "durable",
+   "generatedColumns": [
+    "search_vector"
+   ],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_skill_scope_revisions",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_skills",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_team_managers",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspace_tool_policy",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  },
+  {
+   "schema": "public",
+   "table": "workspaces",
+   "ownership": "durable",
+   "generatedColumns": [],
+   "identityColumns": [],
+   "forceRls": false,
+   "namedSlots": []
+  }
+ ]
+}

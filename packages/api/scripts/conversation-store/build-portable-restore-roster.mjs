@@ -19,6 +19,7 @@ import {fileURLToPath} from 'node:url'
 import {parseArgs} from 'node:util'
 import {createHash} from 'node:crypto'
 import {portableLegacyConversionTables,portableOwnerPolicies,restoreStrippedFields} from './portable-restore-seals.mjs'
+import {harnessTables,harnessTriggerReview} from './portable-harness-review.mjs'
 
 import {
  crmSummaryAuthorityEpochs,crmSummaryCredentialRule,crmSummaryDerivedRules,crmSummaryOriginStamps,
@@ -337,6 +338,12 @@ export async function buildRoster(client,inventory){
   if(!inserts&&!updates)continue
   const key=row.relname+'.'+row.tgname,trigger={function:row.function,tgtype:row.tgtype,class:classifyTrigger(row.tgname,row.proname,row.prosrc,writerHelpers),
    events:[inserts&&'insert',updates&&'update'].filter(Boolean)}
+  if(harnessTables.includes(row.relname)){
+   const review=harnessTriggerReview[key]
+   const expectedType=review==='suspended:derived-effect'?21:review==='update-only'?19:review==='update-delete-only'?27:null
+   if(row.tgtype!==expectedType||review==='suspended:derived-effect'&&trigger.class!==review)
+    throw Error('portable_roster_harness_trigger_changed: '+key)
+  }
   // INSERT stamp audit: a firing BEFORE INSERT trigger that can change the row
   // must have been reviewed as an origin stamp or a fixpoint stamp.
   const stamps=trigger.class==='fires'&&inserts&&(row.tgtype&2)!==0&&(row.lanname!=='plpgsql'||assignsInsertedRow(row.prosrc))
@@ -346,6 +353,10 @@ export async function buildRoster(client,inventory){
   triggers[key]=trigger;bodies.set(key,row)
  }
  for(const key of stampAudit)if(!triggers[key])throw Error('portable_roster_stamp_review_stale: '+key)
+ if(harnessTables.some(name=>tables[name])){
+  if(harnessTables.some(name=>tables[name]?.class!=='durable'))throw Error('portable_roster_harness_table_missing')
+  for(const key of Object.keys(harnessTriggerReview))if(!triggers[key])throw Error('portable_roster_harness_trigger_missing: '+key)
+ }
  // Cross-table cycles among non-deferrable references are broken only at
  // reviewed nullable references, inserted NULL then restored by primary key.
  const references=(await client.query(`SELECT k.conname,c.relname child,p.relname parent,k.condeferrable deferrable,
@@ -354,6 +365,9 @@ export async function buildRoster(client,inventory){
   FROM pg_constraint k JOIN pg_class c ON c.oid=k.conrelid JOIN pg_class p ON p.oid=k.confrelid
   WHERE k.contype='f' AND c.relnamespace='public'::regnamespace AND k.conrelid<>k.confrelid ORDER BY k.conname COLLATE "C"`)).rows
  const deferredReferences=chooseDeferredReferences(references.filter(edge=>!edge.deferrable&&['durable','rebound'].includes(tables[edge.child]?.class)&&['durable','rebound'].includes(tables[edge.parent]?.class)))
+ // History guards must never judge restoration-generated UPDATEs. A future
+ // harness reference cycle requires its own reviewed restoration design.
+ if(deferredReferences.some(reference=>harnessTables.includes(reference.table)))throw Error('portable_roster_harness_deferred_update_unsupported')
  // Restoration updates (deferred cycle references, seed replacement) restore
  // archived values; the generic updated_at stamp would overwrite them.
  const restoredByUpdate=new Set([...deferredReferences.map(reference=>reference.table),...Object.keys(tables).filter(name=>tables[name].seeded)])

@@ -1,0 +1,16 @@
+{
+ "format": 1,
+ "migrations": {
+  "8329_project_harnesses.sql": "ad859bba78d4ac91ce9b4a085974bcc09c193ad777efbbdaab311f34369583b6",
+  "8330_project_harness_verification.sql": "caa51f17859088f5084edf10365503ee302d8e7c06057759438fa89d8204fa8b",
+  "8331_project_chat_creation_admission.sql": "58d8f6fa3c31a9493d620a93731442dbedadff5d28578c128fd71ce0b7e9c3b6"
+ },
+ "scopeSha256": "2af7666bdd575c41f03789de0aee5affb71364a6a0da4e4651d0bb0d4d0ecd4a",
+ "inventory": {
+  "sha256": "fe4c4af857b21d75e28639bcf17df5cd592a5c4c5f77a76bd24f68dcb4778d9a",
+  "routines": 23,
+  "relations": 8,
+  "types": 0,
+  "triggers": 11
+ }
+}
