@@ -1,4 +1,5 @@
 import { debugDocumentFlow } from './document-flow-debug.js'
+import {toolInputTextProblem} from './rejected-tool-input.js'
 import { missingToolCapability } from '../tools/capability-gate.js'
 import type { Tool, ToolContext, ToolResult, ToolResultMeta } from '../tools/types.js'
 import type { ContentBlock } from '../providers/types.js'
@@ -417,6 +418,15 @@ export function createToolExecutor(options: ToolExecutorOptions) {
 
     if (action === 'nudge') {
       nudgeDetected = true
+    }
+
+    // Reject the original input before confirmation, hooks, schema defaults or
+    // execution. A diagnostic representation must never become runnable input.
+    const textProblem=toolInputTextProblem(t.input)
+    if(textProblem){
+      t.result={type:'tool_result',toolUseId:t.id,name:t.wireName??t.name,isError:true,
+        content:`ERROR: ${textProblem}. This call was NOT executed. Submit valid arguments; if preparation is required, forward its exact fresh arguments. Do not strip fields and dispatch this rejected request.`}
+      t.status='completed';wake();return
     }
 
     // ── Confirmation gate ───────────────────────────────────────
@@ -1060,7 +1070,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
       // Resolve only host-owned envelopes, never a model-supplied executor.
       // Proxy and target must both be admitted. Target guards run below using
       // its canonical name/input, sharing denial state with direct calls.
-      if (requested?.resolveToolCall && !requested.hiddenFromModel && !deniedTools.has(name)
+      if (!toolInputTextProblem(input) && requested?.resolveToolCall && !requested.hiddenFromModel && !deniedTools.has(name)
         && !missingToolCapability(requested, options.context.activeCapabilities)
         && (!options.admittedToolNames || options.admittedToolNames.has(name))) {
         const envelope = requested.inputSchema.safeParse(input)

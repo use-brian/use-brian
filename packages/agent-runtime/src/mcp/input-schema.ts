@@ -48,7 +48,25 @@ export function createMcpInputSchema(schema: Record<string, unknown>) {
   return adapter
 }
 
+// Escape diagnostic text only, never the schema or arguments. Escaping literal
+// backslashes distinguishes a NUL from the printable characters "\\u0000".
+// Unicode mode leaves valid surrogate pairs (e.g. emoji) intact.
+export function escapeMcpDiagnosticText(text: string): string {
+  return text.replace(/[\\\u0000-\u001f\u007f-\u009f\ud800-\udfff]/gu, character => {
+    switch (character) {
+      case '\\': return '\\\\'
+      case '\b': return '\\b'
+      case '\f': return '\\f'
+      case '\n': return '\\n'
+      case '\r': return '\\r'
+      case '\t': return '\\t'
+      default: return `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`
+    }
+  })
+}
+
 export function mcpArgumentError(tool: string, error: z.ZodError): string {
-  const issues = error.issues.map(issue => `${issue.path.join('.') || '(args)'}: ${issue.message}`).join('; ')
-  return `ERROR: invalid arguments for "${tool}": ${issues}. Re-check this tool's parameter names and types in its mcp_search entry, then retry.`
+  const issues = error.issues.map(issue =>
+    `${escapeMcpDiagnosticText(issue.path.join('.') || '(args)')}: ${escapeMcpDiagnosticText(issue.message)}`).join('; ')
+  return `ERROR: invalid arguments for "${escapeMcpDiagnosticText(tool)}": ${issues}. Re-check this tool's parameter names and types in its mcp_search entry, then retry.`
 }
