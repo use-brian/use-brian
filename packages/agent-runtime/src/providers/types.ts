@@ -9,7 +9,7 @@
 
 export type StreamChunk =
   | { type: 'message_start'; model: string }
-  | { type: 'text_delta'; text: string }
+  | { type: 'text_delta'; text: string; providerSignature?: string }
   /**
    * Verbatim model reasoning ("thinking") streamed live as the model
    * produces it. Display-only: the accumulator never folds it into the
@@ -29,7 +29,7 @@ export type StreamChunk =
    * ContentBlock so the chat route can persist it to JSONB and the provider
    * can restore it when rebuilding the request on a later HTTP request.
    */
-  | { type: 'tool_use_end'; id: string; providerSignature?: string }
+  | { type: 'tool_use_end'; id: string; providerSignature?: string; parallelWith?: string }
   | { type: 'grounding_metadata'; sources: Array<{ url: string; title: string }> }
   | { type: 'message_end'; stopReason: StopReason; usage: TokenUsage }
 
@@ -57,7 +57,7 @@ export type TokenUsage = {
 // ── Messages (internal representation) ─────────────────────────
 
 export type ContentBlock =
-  | { type: 'text'; text: string }
+  | { type: 'text'; text: string; providerSignature?: string }
   /**
    * Base64-encoded inline media (image/* or application/pdf) — mapped to
    * Gemini `inlineData` parts. `name` is the original filename when the
@@ -74,7 +74,7 @@ export type ContentBlock =
    * providers it's unused. Persisted to the session_messages JSONB so it
    * survives process restarts.
    */
-  | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown>; providerSignature?: string }
+  | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown>; providerSignature?: string; parallelWith?: string }
   | { type: 'tool_result'; toolUseId: string; name: string; content: string; isError?: boolean }
 
 export type Message = {

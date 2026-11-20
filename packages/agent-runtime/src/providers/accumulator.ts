@@ -7,10 +7,17 @@ import type { AssistantResponse, ContentBlock, StreamChunk, TokenUsage, StopReas
 export function createAccumulator() {
   let model = ''
   let textBuffer = ''
+  let textSignature: string | undefined
   let stopReason: StopReason = 'end_turn'
   let usage: TokenUsage = { inputTokens: 0, outputTokens: 0 }
   const toolCalls = new Map<string, { name: string; inputJson: string }>()
   const content: ContentBlock[] = []
+
+  function flushText() {
+    if (textBuffer) content.push({ type: 'text', text: textBuffer, ...(textSignature ? { providerSignature: textSignature } : {}) })
+    textBuffer = ''
+    textSignature = undefined
+  }
 
   return {
     push(chunk: StreamChunk) {
@@ -20,6 +27,10 @@ export function createAccumulator() {
           break
         case 'text_delta':
           textBuffer += chunk.text
+          if (chunk.providerSignature) {
+            textSignature = chunk.providerSignature
+            flushText()
+          }
           break
         case 'tool_use_start':
           toolCalls.set(chunk.id, { name: chunk.name, inputJson: '' })
@@ -31,16 +42,14 @@ export function createAccumulator() {
         }
         case 'tool_use_end': {
           // Flush any preceding text
-          if (textBuffer) {
-            content.push({ type: 'text', text: textBuffer })
-            textBuffer = ''
-          }
+          flushText()
           const tc = toolCalls.get(chunk.id)
           if (tc) {
             let input: Record<string, unknown> = {}
             try { input = JSON.parse(tc.inputJson) } catch { /* use empty */ }
             const block: ContentBlock = { type: 'tool_use', id: chunk.id, name: tc.name, input }
             if (chunk.providerSignature) block.providerSignature = chunk.providerSignature
+            if (chunk.parallelWith) block.parallelWith = chunk.parallelWith
             content.push(block)
             toolCalls.delete(chunk.id)
           }
@@ -55,10 +64,7 @@ export function createAccumulator() {
 
     finish(): AssistantResponse {
       // Flush remaining text
-      if (textBuffer) {
-        content.push({ type: 'text', text: textBuffer })
-        textBuffer = ''
-      }
+      flushText()
       return { content, stopReason, usage, model }
     },
   }

@@ -300,8 +300,10 @@ export function stripUnsignedToolUses(
     if (msg.role === 'assistant') {
       const kept: ContentBlock[] = []
       let changed = false
+      const signedCalls = new Set<string>()
       for (const b of blocks) {
-        if (b.type === 'tool_use' && !b.providerSignature) {
+        if (b.type === 'tool_use' && b.providerSignature) signedCalls.add(b.id)
+        if (b.type === 'tool_use' && !b.providerSignature && !(b.parallelWith && signedCalls.has(b.parallelWith))) {
           droppedIds.add(b.id)
           changed = true
           continue

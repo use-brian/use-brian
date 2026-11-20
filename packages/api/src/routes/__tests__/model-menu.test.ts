@@ -71,15 +71,11 @@ describe('[COMP:api/model-menu] GET /models/menu', () => {
   it('lists per-class menus with the wave-1 metered ports when the key is configured', async () => {
     const res = await request(makeApp()).get('/api/models/menu?workspaceId=00000000-0000-0000-0000-000000000001').expect(200)
     expect(res.body.classes['standard-pro'].map((m: { alias: string }) => m.alias))
-      .toEqual(['gemini-3.8-flash-standard', 'gemini-3.8-flash-pro'])
-    // Both standard-pro aliases are billing labels of ONE wire model; the
-    // serialized apiModelId is what lets pickers collapse them.
+      .toEqual(['gemini-3.8-flash-standard', 'gemini-4-hydrogen-pro'])
     expect(res.body.classes['standard-pro'].map((m: { apiModelId: string }) => m.apiModelId))
-      .toEqual(['gemini-3.8-flash', 'gemini-3.8-flash'])
-    // Labels come from the registry displayName; alias rows of one model
-    // share one human name.
+      .toEqual(['gemini-3.8-flash', 'gemini-4-hydrogen'])
     expect(res.body.classes['standard-pro'].map((m: { displayName: string }) => m.displayName))
-      .toEqual(['Gemini 3.8 Flash', 'Gemini 3.8 Flash'])
+      .toEqual(['Gemini 3.8 Flash', 'Gemini 4 Hydrogen'])
     expect(res.body.classes['metered'].map((m: { alias: string }) => m.alias).sort())
       .toEqual(['deepseek-v4-flash', 'deepseek-v4-pro', 'qwen3.7-max', 'qwen3.7-plus'])
     expect(res.body.meteredBillingAvailable).toBe(true)
@@ -169,10 +165,10 @@ describe('[COMP:api/model-menu] metered estimate + profiles CRUD', () => {
   })
 
   it('maps a non-metered model to a 400', async () => {
-    profiles.create.mockRejectedValue(new Error("metered-profile: 'gemini-3.8-flash' is not an active metered registry model"))
+    profiles.create.mockRejectedValue(new Error("metered-profile: 'gemini-4-hydrogen' is not an active metered registry model"))
     const res = await request(makeApp())
       .post('/api/workspaces/00000000-0000-0000-0000-000000000001/metered-profiles')
-      .send({ name: 'x', modelAlias: 'gemini-3.8-flash', toolRounds: 10 })
+      .send({ name: 'x', modelAlias: 'gemini-4-hydrogen', toolRounds: 10 })
       .expect(400)
     expect(res.body.error).toBe('Not a metered model')
   })
@@ -205,7 +201,7 @@ describe('[COMP:api/model-menu] workspace model defaults', () => {
     getRole.mockResolvedValue('member')
     await request(makeApp())
       .put(`/api/workspaces/${WID}/model-defaults/max`)
-      .send({ modelAlias: 'gemini-3.8-flash' })
+      .send({ modelAlias: 'gemini-4-hydrogen' })
       .expect(403)
     await request(makeApp()).delete(`/api/workspaces/${WID}/model-defaults/max`).expect(403)
     expect(modelDefaults.setCurated).not.toHaveBeenCalled()
@@ -213,12 +209,12 @@ describe('[COMP:api/model-menu] workspace model defaults', () => {
 
   it('sets a curated pin for an admin and maps cross-class rejection to 400', async () => {
     getRole.mockResolvedValue('admin')
-    modelDefaults.setCurated.mockResolvedValue({ workspaceId: WID, modelClass: 'max', modelAlias: 'gemini-3.8-flash', meteredProfileId: null, updatedAt: 'now' })
+    modelDefaults.setCurated.mockResolvedValue({ workspaceId: WID, modelClass: 'max', modelAlias: 'gemini-4-hydrogen', meteredProfileId: null, updatedAt: 'now' })
     const ok = await request(makeApp())
       .put(`/api/workspaces/${WID}/model-defaults/max`)
-      .send({ modelAlias: 'gemini-3.8-flash' })
+      .send({ modelAlias: 'gemini-4-hydrogen' })
       .expect(200)
-    expect(ok.body.default.modelAlias).toBe('gemini-3.8-flash')
+    expect(ok.body.default.modelAlias).toBe('gemini-4-hydrogen')
 
     modelDefaults.setCurated.mockRejectedValue(new Error("model-default: 'qwen3.7-max' is not an active curated menu model of class 'max'"))
     const bad = await request(makeApp())

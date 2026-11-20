@@ -121,7 +121,7 @@ describe('[COMP:api/recovery-message] composeRecoveryMessage', () => {
     expect(provider.stream).not.toHaveBeenCalled()
   })
 
-  it('synthesizes a recovery via Flash when at least one tool succeeded', async () => {
+  it('synthesizes a recovery via Pro when at least one tool succeeded', async () => {
     const provider = makeFakeProvider(
       '幫你改咗做 12:00–14:00 喇，但我未嚟得切寫齊個答覆。可以問我「改好未」確認，唔好再叫我改一次。',
     )
@@ -132,12 +132,12 @@ describe('[COMP:api/recovery-message] composeRecoveryMessage', () => {
       channelType: 'telegram',
     })
     expect(result).not.toBeNull()
-    expect(result!.model).toBe('gemini-3.8-flash-pro')
+    expect(result!.model).toBe('gemini-4-hydrogen-pro')
     expect(result!.text).toContain('12:00')
     expect(result!.usage).toEqual({ inputTokens: 100, outputTokens: 50 })
     // Verify the helper sent the right model + a structured payload.
     const call = (provider.stream as ReturnType<typeof vi.fn>).mock.calls[0][0]
-    expect(call.model).toBe('gemini-3.8-flash-pro')
+    expect(call.model).toBe('gemini-4-hydrogen-pro')
     const payload = JSON.parse(call.messages[0].content)
     expect(payload.userMessage).toBe('改做兩個鐘 12-2')
     expect(payload.successfulActions).toHaveLength(1)

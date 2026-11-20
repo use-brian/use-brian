@@ -62,7 +62,7 @@ beforeEach(() => vi.clearAllMocks())
 describe('[COMP:api/custom-llm-endpoints] custom connection/profile store', () => {
   it.each(['standard', 'pro'] as const)('reads a saved Flash 3.6 %s pin as the current selector', async tier => {
     const oldAlias = `gemini-3.6-flash-${tier}`
-    const modelAlias = `gemini-3.8-flash-${tier}`
+    const modelAlias = tier === 'pro' ? 'gemini-4-hydrogen-pro' : 'gemini-3.8-flash-standard'
     const route = { workspaceId, tier, profileId: null, modelAlias: oldAlias, updatedAt: new Date() }
     const store = createDbWorkspaceCustomLlmEndpointStore()
     mockQueryWithRLS.mockResolvedValueOnce({ rows: [route] } as never)
