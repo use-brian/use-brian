@@ -669,6 +669,29 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
       const before = await snapshots()
       await db.transaction(async (tx) => { await tx.exec(sql) })
       assert.deepEqual(await snapshots(), before)
+      await t.test('retires the residual 8071 reader grant after 81110 removed the creation default', async () => {
+        const name = '8269_canonical_conversation_publication.sql'
+        const candidate = toPgliteMigrationSql(await readFile(`${migrationsDir}/${name}`, 'utf8'), name)
+        const privilege = `SELECT has_function_privilege('app_user',
+          'public.read_native_session_query_cohort_nodes(uuid,jsonb)', 'EXECUTE') AS allowed`
+        await db.exec('BEGIN')
+        try {
+          assert.deepEqual((await db.query(privilege)).rows, [{ allowed: true }])
+          const defaults = (await db.query('SELECT * FROM pg_default_acl ORDER BY oid')).rows
+          await db.exec('SAVEPOINT before_history')
+          await db.query('DELETE FROM public._migrations WHERE name=$1', [migration])
+          await assert.rejects(db.exec(candidate), /conversation_rule_predecessor_changed: read_native_session_query_cohort_nodes/)
+          await db.exec('ROLLBACK TO SAVEPOINT before_history')
+          await db.exec(candidate)
+          assert.deepEqual((await db.query(privilege)).rows, [{ allowed: false }])
+          assert.deepEqual((await db.query('SELECT * FROM pg_default_acl ORDER BY oid')).rows, defaults)
+          assert.deepEqual((await db.query(`SELECT native_turn_helpers_current() AS helpers,
+            native_turn_publication_contract() AS publication, native_retained_helpers_current() AS retained`)).rows,
+          [{ helpers: true, publication: true, retained: true }])
+        } finally {
+          await db.exec('ROLLBACK')
+        }
+      })
       await db.exec('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO app_user')
       try {
         const withLegacyDefault = await snapshots()
@@ -893,6 +916,10 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
       assert.equal(beforePolicies.length, repairedPolicies.length)
       const beforeOrdinary = await finalUpgradeState(ordinaryRoutines)
       await t.test('refuses changed ordinary-routine policy or registered dependencies without partial rebind', async () => {
+        await rejectsFinalUpgrade(triggerRepair, ordinaryRoutines,
+          `REVOKE EXECUTE ON FUNCTION public.${appRoutines[0]} FROM app_user;
+           GRANT EXECUTE ON FUNCTION public.${appRoutines[0]} TO app_user`,
+          /legacy_bypass_function_predecessor_changed/)
         await rejectsFinalUpgrade(triggerRepair, ordinaryRoutines,
           'ALTER POLICY workspace_groups_directory ON public.workspace_groups TO app_user', /legacy_ordinary_acl_policy_changed/)
         await rejectsFinalUpgrade(triggerRepair, ordinaryRoutines,

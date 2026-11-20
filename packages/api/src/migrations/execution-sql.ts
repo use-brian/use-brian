@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { conversationTriggerPrivilegesExecutionSql } from './historical-function-acl.js'
 import { configuredTaskPublicationExecutionSql } from './configured-task-publication-execution.js'
 import { participationRetirementExecutionSql } from './participation-retirement-execution.js'
 import {
@@ -11,10 +12,16 @@ import { pageThreadSourceExecutionSql } from './page-thread-execution.js'
  * [COMP:api/migration-execution-sql]
  */
 const privateTranscriptPreparation = '82690_private_transcript_preparation_eligibility.sql'
+const canonicalConversation = '8269_canonical_conversation_publication.sql'
+const pageAuthorityPrivileges = '82775_legacy_page_authority_privileges.sql'
+const conversationTriggerPrivileges = '82980_legacy_conversation_trigger_privileges.sql'
 const participationRetirement = '8290_participation_read_retirement.sql'
 const configuredTaskPublication = '8296_configured_task_publication.sql'
 const crmSealedProjection = '8322_crm_summary_sealed_projection.sql'
 const reviewed: Readonly<Record<string, readonly [string, number]>> = {
+  [canonicalConversation]: ['d17106c521097797416a2a51ba53d07fce978ea1da587dae82d066da4575ec39', 0],
+  [pageAuthorityPrivileges]: ['aec23511a8e0630a0b04a3aa5d9ac3e6405e0936e5eab580444da7747c40f42b', 0],
+  [conversationTriggerPrivileges]: ['88b5922d0350f6c7dca79a8305ce428385d53a878d008797192a632ff436a7ed', 0],
   '8188_native_turn_shared_publication.sql': ['b374051b82a095f5ed4e7d9a1c78f8da0d4107c03deba3f9891e2bfcfdb02e65', 1],
   '8196_native_turn_annotation_publication.sql': ['45d10e796082730586ba2969a42c0e8d57c0847beca1cff12f9884b308a27a38', 2],
   '8197_native_turn_query_acquisition.sql': ['8a095b513ef136566807c14d505960e2385a24c7c350e58a4098e7e77bf711b6', 2],
@@ -136,6 +143,29 @@ export function toMigrationExecutionSql(sql: string, file: string): string {
     throw new Error(`${file}: historical migration content changed; refusing execution adapter`)
   }
   if (file === crmSealedProjection) return crmSealedProjectionExecutionSql(sql)
+  if (file === conversationTriggerPrivileges) return conversationTriggerPrivilegesExecutionSql(sql)
+  if (file === pageAuthorityPrivileges) {
+    const runtime = "makeaclitem(runtime,owner_id,'EXECUTE',false)"
+    const owner = "makeaclitem(owner_id,owner_id,'EXECUTE',false)"
+    const appFirst = `AND actual.proacl IS DISTINCT FROM ARRAY[${runtime},${owner}]`
+    if (sql.split(appFirst).length !== 2) throw new Error('82775: predecessor ACL check changed')
+    return sql.replace(appFirst, `${appFirst}\n   AND actual.proacl IS DISTINCT FROM ARRAY[${owner},${runtime}]`)
+  }
+  if (file === canonicalConversation) {
+    // 8071 revoked PUBLIC while the old app_user creation default was active.
+    // 81110 removes that default. Keep the residual grant in the original
+    // snapshot until 8269 itself revokes it and repins its callers atomically.
+    const anchor = "(expected->>'appExecute')::boolean OR legacy_app_default"
+    if (sql.split(anchor).length !== 2) throw new Error('8269: private prerequisite ACL check changed')
+    return sql.replace(anchor, `${anchor} OR (
+       expected->>'signature'='read_native_session_query_cohort_nodes(uuid,jsonb)'
+       AND EXISTS (SELECT 1 FROM public._migrations WHERE name='81110_legacy_function_execute_privileges.sql')
+       AND NOT EXISTS (SELECT 1 FROM pg_default_acl WHERE defaclrole=owner_id
+         AND defaclobjtype='f' AND defaclnamespace IN (0,'public'::regnamespace))
+       AND cardinality(actual.proacl)=2
+       AND actual.proacl @> ARRAY[makeaclitem(owner_id,owner_id,'EXECUTE',false),
+         makeaclitem('app_user'::regrole,owner_id,'EXECUTE',false)])`)
+  }
   if (file === memoryPublicationMigration) return memoryLineagePublicationExecutionSql(sql)
   if (file === memoryWriteSuccessorMigration) return memoryWriteSuccessorExecutionSql(sql)
   if (file === configuredTaskPublication) return configuredTaskPublicationExecutionSql(sql)
