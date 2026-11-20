@@ -30,6 +30,16 @@ const nativeGroups = [
   ['recovered-calendar-history'],
 ]
 
+export function fixtureChecksForSuites(suites) {
+  if (!suites.some(suite => suite.packageDir !== 'apps/api')) return []
+  const checks = ['scripts/__tests__/prepared-fixture.integration.test.mjs']
+  // All native fixtures check their own clones. Exercise migration lock waits once per matrix.
+  if (suites.some(suite => suite.id === 'derived-store')) {
+    checks.push('scripts/__tests__/migration-diagnostics.integration.test.mjs')
+  }
+  return checks
+}
+
 /** The CI matrix and receipt partition must use the same production topology. */
 export function acceptanceShards(profile = 'full') {
   if (!['full', 'current'].includes(profile)) throw new Error('Unknown acceptance profile')

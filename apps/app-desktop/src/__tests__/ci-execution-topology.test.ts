@@ -102,6 +102,8 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     const aggregate = workflow.jobs['department-isolation'];
     expect(aggregate.needs).toEqual(['ci-scope', 'department-isolation-shards']);
     expect(aggregate.if).toContain('always()');
+    expect(aggregate.steps.map((step: { uses?: string; run?: string }) => step.uses ?? step.run).join('\n'))
+      .not.toContain('pnpm');
     expect(aggregate.steps.find((step: { name?: string }) => step.name === 'Verify complete acceptance evidence').run)
       .toContain('--merge');
     expect(workflow.jobs['build-test'].needs).toEqual([
