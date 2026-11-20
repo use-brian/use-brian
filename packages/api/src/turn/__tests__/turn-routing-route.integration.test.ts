@@ -195,6 +195,81 @@ describe.sequential('[COMP:api/turn-kernel] turn routing through the real routes
     } finally { await f.cleanup() }
   }, 120_000)
 
+  it('defers ambient indexes for a bare Pro greeting while the charter can retrieve Memory', async () => {
+    await initializeConversationVisibility()
+    const f = await persistentContextFixture('internal')
+    try {
+      const memoryStore = createDbMemoryStore()
+      const createMemory = (summary: string) => memoryStore.create({ workspaceId: f.workspaceId, assistantId: f.assistantId,
+        userId: f.ownerId, createdByUserId: f.ownerId, sensitivity: 'internal', summary, confidence: 0.9 })
+      const requested = await createMemory('Fictional charter retrieval fact')
+      const ambient = await createMemory('Fictional ambient index fact')
+      const charter = `When I say hi, use getMemory with id ${requested.id} before replying.`
+      await f.pool.query("UPDATE workspaces SET plan='pro' WHERE id=$1", [f.workspaceId])
+      await f.pool.query('UPDATE assistants SET charter=$2::jsonb WHERE id=$1', [f.assistantId, JSON.stringify({ instructions: charter })])
+      const device = (await authSessionStore.create(f.ownerId, { deviceLabel: 'Fictional greeting browser', userAgent: null, ipAddress: null }))!
+      const session = await createPersonalWebSession({ assistantId: f.assistantId, userId: f.ownerId, workspaceId: f.workspaceId,
+        channelType: 'web', channelId: randomUUID(), appOrigin: 'chat' },
+      { actorUserId: f.ownerId, authSessionId: device.id, authVersion: device.authVersion })
+      const earlier = await addSessionMessage({ sessionId: session.id, role: 'user',
+        content: [{ type: 'text', text: 'Fictional retained conversation input.' }], senderUserId: f.ownerId,
+        scope: { ...f.envelope, userId: f.ownerId } })
+      const main: Array<{ system: string; messages: string; tools: string[] }> = []
+      const llm = provider(FIXED[0]!, { research: 0, topic: 0, split: 0, other: 0, main: 0 })
+      llm.createSession = options => ({ send(messages) {
+        main.push({ system: `${options.systemPrompt}\n${options.runtimeSystemContext ?? ''}`, messages: JSON.stringify(messages),
+          tools: (options.tools ?? []).map(tool => tool.name) })
+        return (async function* () {
+          yield { type: 'message_start', model: 'fixture' }
+          if (main.length === 1) {
+            yield { type: 'tool_use_start', id: 'fictional-memory-call', name: 'getMemory' }
+            yield { type: 'tool_use_delta', id: 'fictional-memory-call', input: JSON.stringify({ id: requested.id }) }
+            yield { type: 'tool_use_end', id: 'fictional-memory-call' }
+            yield { type: 'message_end', stopReason: 'tool_use', usage }
+          } else {
+            yield { type: 'text_delta', text: 'Fictional greeting reply.' }
+            yield { type: 'message_end', stopReason: 'end_turn', usage }
+          }
+        })()
+      } })
+      const app = express()
+      app.use(express.json()); app.use((req, _res, next) => {
+        req.userId = f.ownerId; req.authSessionId = device.id; req.authVersion = device.authVersion; next()
+      })
+      app.use('/chat', chatRoutes({ provider: llm, systemPrompt: 'Continue the fictional conversation.', tools: new Map(),
+        memoryStore, capabilityStore: createDbCapabilityStore(), pendingApprovalsStore: createPendingApprovalsStore() }))
+      const post = async (body: object) => String((await request(app).post('/chat').send({ sessionId: session.id, assistantId: f.assistantId,
+        workspaceId: f.workspaceId, appOrigin: 'chat', model: 'pro', ...body }).buffer(true).parse((response, done) => {
+        let text = ''; response.on('data', chunk => { text += String(chunk) }); response.on('end', () => done(null, text)); response.on('error', done)
+      }).expect(200)).body)
+      const directFloor = async () => (await f.pool.query<{ source_kind: string; source_id: string; type_key: string | null; field_resource_id: string | null; selection: string | null }>(`
+        SELECT ds.source_kind,ds.source_id,f.type_key,f.resource_id AS field_resource_id,f.selection
+        FROM session_context_scope_revisions r JOIN scope_derivations d ON d.workspace_id=r.workspace_id
+         AND d.resource_kind='session_context_revision' AND d.resource_id=r.id
+        JOIN scope_derivation_sources ds ON ds.workspace_id=d.workspace_id AND ds.derivation_id=d.id
+        LEFT JOIN application_field_resources f ON f.workspace_id=d.workspace_id AND ds.source_kind='application_field' AND f.id=ds.source_id
+        WHERE r.workspace_id=$1 AND r.session_id=$2 AND d.producer='turn:web'`, [f.workspaceId, session.id])).rows
+      const greeting = await post({ message: 'hi' })
+      expect(greeting).not.toContain('event: error')
+      expect(greeting).toContain('Fictional greeting reply.')
+      expect(main[0]?.system).toContain(charter)
+      expect(main[0]?.system).toContain('Use getMemory to read a known memory ID')
+      expect(main[0]?.tools).toContain('getMemory')
+      expect(main[0]?.messages).toContain('Fictional retained conversation input.')
+      expect(main[0]?.system).not.toContain(ambient.summary)
+      expect(main[1]?.messages).toContain(requested.summary)
+      const greetingFloor = await directFloor()
+      expect(greetingFloor.some(row => row.source_kind === 'conversation_record')).toBe(true)
+      expect(greetingFloor.some(row => row.type_key === 'memory' && row.selection === 'query_domain')).toBe(false)
+      expect(greetingFloor.some(row => row.source_kind === 'memory' && row.source_id === requested.id
+        || row.type_key === 'memory' && row.field_resource_id === requested.id)).toBe(true)
+
+      expect(await post({ message: 'hi', replyTo: { id: earlier.id } })).not.toContain('event: error')
+      expect(main.at(-1)?.system).toContain(ambient.summary)
+      expect((await directFloor()).some(row => row.type_key === 'memory' && row.selection === 'query_domain')).toBe(true)
+    } finally { await f.cleanup() }
+  })
+
   it('blocks authored input on the current question, then accepts one replacement on retry', async () => {
     await initializeConversationVisibility()
     const f = await persistentContextFixture('internal')

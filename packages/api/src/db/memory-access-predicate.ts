@@ -36,19 +36,35 @@ export function buildMemoryAccessPredicate(
     if (ctx.memoryContext) { ordinary.params.push(JSON.stringify(ctx.memoryContext)); ordinary.nextIdx++ }
     const exception = buildMemoryAccessPredicate({...ctx,memoryReview:true},{...options,alias:'learning_exception',startIdx:ordinary.nextIdx})
     ordinary.params.push(...exception.params); ordinary.nextIdx=exception.nextIdx
+    const exceptionTo = "learning_exception.learning#>>'{applicability,exceptionTo}'"
+    // UUID output is lowercase and hyphenated. Older noncanonical strings
+    // cannot match that output, and malformed strings must never reach a cast.
+    const exceptionTarget = `CASE WHEN ${exceptionTo} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      THEN (${exceptionTo})::uuid END`
     semantic = ` AND public.memory_learning_allows(${prefix}learning,${context})
-      AND ${prefix}id::text NOT IN(SELECT learning_exception.learning#>>'{applicability,exceptionTo}' FROM memories learning_exception
-        JOIN memories learning_broad ON learning_broad.id::text=learning_exception.learning#>>'{applicability,exceptionTo}'
-          AND learning_broad.created_by_user_id=learning_exception.created_by_user_id
-          AND learning_broad.user_id IS NOT DISTINCT FROM learning_exception.user_id
-          AND learning_broad.assistant_id IS NOT DISTINCT FROM learning_exception.assistant_id
-          AND (coalesce(learning_broad.learning->'applicability','{}')-'exceptionTo') <@ ((learning_exception.learning->'applicability')-'exceptionTo')
-          AND (coalesce(learning_broad.learning->'applicability','{}')-'exceptionTo') <> ((learning_exception.learning->'applicability')-'exceptionTo')
-        WHERE learning_exception.learning#>>'{applicability,exceptionTo}' IS NOT NULL
-        AND learning_exception.learning->>'origin'='explicit' AND learning_exception.learning->>'confirmed'='true'
-        AND learning_exception.valid_to IS NULL AND learning_exception.retracted_at IS NULL AND NOT learning_exception.scope_held
-        AND public.memory_learning_allows(learning_exception.learning,${context}) AND ${exception.sql}
-        AND public.application_memory_field_ancestry_allows(learning_exception.workspace_id,learning_exception.id,learning_exception.scope_version::text))`
+      AND ${prefix}id NOT IN (
+        WITH eligible_exceptions AS MATERIALIZED (
+          SELECT ${exceptionTarget} AS target_id, user_id, assistant_id, created_by_user_id,
+            (learning->'applicability')-'exceptionTo' AS applicability
+          FROM memories learning_exception
+          WHERE ${exceptionTo} IS NOT NULL
+            AND learning_exception.learning->>'origin'='explicit' AND learning_exception.learning->>'confirmed'='true'
+            AND learning_exception.valid_to IS NULL AND learning_exception.retracted_at IS NULL AND NOT learning_exception.scope_held
+            AND public.memory_learning_allows(learning_exception.learning,${context}) AND ${exception.sql}
+            AND public.application_memory_field_ancestry_allows(learning_exception.workspace_id,learning_exception.id,learning_exception.scope_version::text)
+        )
+        SELECT eligible.target_id FROM eligible_exceptions eligible
+        JOIN LATERAL (
+          SELECT 1 FROM memories learning_broad
+          WHERE learning_broad.id=eligible.target_id
+            AND learning_broad.created_by_user_id=eligible.created_by_user_id
+            AND learning_broad.user_id IS NOT DISTINCT FROM eligible.user_id
+            AND learning_broad.assistant_id IS NOT DISTINCT FROM eligible.assistant_id
+            AND (coalesce(learning_broad.learning->'applicability','{}')-'exceptionTo') <@ eligible.applicability
+            AND (coalesce(learning_broad.learning->'applicability','{}')-'exceptionTo') <> eligible.applicability
+          LIMIT 1
+        ) matching_target ON true
+      )`
   }
   const holding = `${prefix}scope_held = false AND ${fieldAuthority}${semantic}`
   const self = ctx.clientSelfMemory

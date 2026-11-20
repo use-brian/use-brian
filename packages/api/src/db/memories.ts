@@ -2276,7 +2276,7 @@ export async function withWorkerLock(
 
 // ── Workspace memory queries ─────────────────────────────────────
 
-const workspaceIdentityMemorySql = "(scope = 'workspace' AND 'self-profile' = ANY(tags))"
+const workspaceIdentityMemorySql = "(scope = 'workspace' AND tags @> ARRAY['self-profile']::text[])"
 
 export async function getWorkspaceIdentityMemories(ctx: AccessContext): Promise<Memory[]> {
   // Workspace identity = team-wide identity facts. Post-Phase-4
@@ -2301,14 +2301,15 @@ type SelectedPromptMemory = Memory & { inIdentity: boolean | null; inTagged: boo
 
 function workspacePromptMemorySelection(ctx: AccessContext,tag: string,startIdx=1) {
   const ap = buildMemoryAccessPredicate(ctx,{startIdx})
-  const taggedSql = `$${ap.nextIdx} = ANY(tags)`
+  const voice = tag === 'voice'
+  const taggedSql = voice ? "tags @> ARRAY['voice']::text[]" : `tags @> ARRAY[$${ap.nextIdx}]::text[]`
   const sql = `SELECT ${MEMORY_SELECT}, ${workspaceIdentityMemorySql} AS "inIdentity", (${taggedSql}) AS "inTagged"
      FROM memories
      WHERE ${ap.sql}
        AND (${workspaceIdentityMemorySql} OR ${taggedSql})
        AND valid_to IS NULL
      ORDER BY confidence DESC, updated_at DESC`
-  const params = [...ap.params, tag]
+  const params = voice ? ap.params : [...ap.params, tag]
   return {sql,params}
 }
 

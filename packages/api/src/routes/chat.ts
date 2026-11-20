@@ -5,6 +5,7 @@ import { bindWorkspaceCredentialDelegation, workspaceCredentialDelegation } from
 import { createWorkspaceTurnSink, type NativeChatRequest, type NativeChatSink, type WorkspaceTurnInput, type WorkspaceTurnResult, type WorkspaceTurnBinding } from '../workspace-mcp/native-turn.js'
 import { bindWorkspaceMcpPublication, hasWorkspaceMcpRetainedAuthority } from '../db/session-context-revisions.js'
 import { memoryActivityFromText } from '@use-brian/core/memory/learning.js'
+import { isBareChatGreeting } from '@use-brian/core/classification/trivial-chat.js'
 import {inheritRoutineCalendarRead} from '@use-brian/core/engine/routine-read-ownership.js'
 import {consumeHostReadObservation, combineHostReadObservations, type RoutineCalendarCall} from '@use-brian/core/engine/routine-read.js'
 import {parseHostObservation,type HostObservation} from '@use-brian/shared'
@@ -3707,11 +3708,13 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // message with a structured 409-equivalent SSE event so the
       // frontend can render "answer or cancel" instead of starting a
       // fresh turn. See docs/architecture/engine/askquestion-suspend-resume.md.
+      let pendingQuestionChecked = false
       if (assistant.workspaceId) {
         try {
           const pendingQuestion = await options.pendingApprovalsStore.findBlockingQuestion(
             user.id, assistant.workspaceId, session.id,
           )
+          pendingQuestionChecked = true
           if (pendingQuestion) {
             sendEvent('error', {
               code: 'pending_question_exists',
@@ -4712,24 +4715,82 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       const privatePromptShape = !executionContext.security.access.sharedAudience && usesStoredPrivateChat(session)
         && session.workspaceId===assistant.workspaceId
         && session.userId===user.id && session.assistantId===assistant.id
-      const auxiliaryPrompt = nativeTranscriptAuthority && privatePromptShape
-        ? options.memoryStore.getPromptAuxiliaryContext?.(viewerCtx,'Use Brian',nativeTranscriptAuthority) : undefined
+      const readTaskContext = async () => {
+        let sessionStateBlock: string | null = null
+        let planBlock: string | null = null
+        let available = true
+        if (options.sessionStateStore && !pageBoundTurn) {
+          try {
+            sessionStateBlock = await optionalContext(candidate => buildSessionStateBlock({
+              authority: candidate ?? { execution: executionContext, accumulator: scopeAccumulator },
+              store: options.sessionStateStore!,
+              sessionId: session.id,
+            }), null)
+          } catch (err) {
+            available = false
+            console.error('[chat] session-state block fetch failed:', err)
+          }
+        }
+        if (options.planStore && !turnScope.access.sharedAudience) {
+          try {
+            planBlock = await buildActivePlanBlock({ store: options.planStore, sessionId: session.id })
+          } catch (err) {
+            available = false
+            console.error('[chat] active-plan block fetch failed:', err)
+          }
+        }
+        return { sessionStateBlock, planBlock, available }
+      }
+      const readPinnedPromptContext = async () => {
+        if (!turnPolicy.pins || !assistant.workspaceId) return null
+        try {
+          return await resolvePinnedContext({
+            sessionId: session.id, context: { executionContext, scopeAccumulator },
+            workspaceId: assistant.workspaceId,
+            clearance: session.effectiveClearance,
+          })
+        } catch (err) {
+          console.warn('[chat] pinned-context resolution failed:', err)
+          return null
+        }
+      }
+      // Only a plain greeting on the owned native Chat path can defer ambient
+      // indexes. Validate ongoing work and pins through their existing owners;
+      // an unavailable reader keeps the full preparation path.
+      const explicitPromptContext = replyTo || fileIds?.length || attachedRecordingIds?.length
+        || requestedDocViewId || requestedDocAnchorBlockId || requestedViewingSkillRowId
+        || requestedViewingBrainEntry || requestedKbSourceId || requestedResearchActivityId || turnScope.activeProjectId
+      const continuedPromptContext = truncateFromMessageId || requestedSteer || requestedMidTurn || requestedRoomResponseGroup
+        || prePersistedUserMsg || workflowProposalReceipt
+      const barePersonalGreeting = typeof rawMessage === 'string' && userMessageText === rawMessage && isBareChatGreeting(rawMessage)
+        && nativeTranscriptAuthority && privatePromptShape && pendingQuestionChecked
+        && !programmatic && !pageBoundTurn && !officeLane && !feedTurnContext
+        && (!requestedAppOrigin || requestedAppOrigin === 'chat') && !researchMode && !requestedCustom
+        && !isExplicitMeteredModelSelection(requestedModel) && !explicitPromptContext && !continuedPromptContext
+      turnTiming.mark('admission')
+      const earlyTaskContext = barePersonalGreeting ? await turnTiming.time('prompt_task_context', readTaskContext) : undefined
+      const earlyPinnedContext = earlyTaskContext?.available && !earlyTaskContext.sessionStateBlock && !earlyTaskContext.planBlock
+        ? await turnTiming.time('prompt_pins', readPinnedPromptContext) : undefined
+      const deferAmbientIndexes = earlyPinnedContext?.block === null
+      if (deferAmbientIndexes) turnTiming.count('prompt_ambient_indexes_deferred')
+      const auxiliaryPrompt = nativeTranscriptAuthority && privatePromptShape && options.memoryStore.getPromptAuxiliaryContext
+        ? turnTiming.time('prompt_identity_context', () => options.memoryStore.getPromptAuxiliaryContext!(viewerCtx, 'Use Brian', nativeTranscriptAuthority!))
+        : undefined
       const readNativePromptMemory = (candidate: typeof nativeTranscriptAuthority) =>
-        candidate && privatePromptShape
-          ? (nativePromptMemory ??= options.memoryStore.getPromptMemoryContext?.(viewerCtx,PER_TURN_INDEX_CAP,candidate))
+        candidate && privatePromptShape && !deferAmbientIndexes && options.memoryStore.getPromptMemoryContext
+          ? (nativePromptMemory ??= turnTiming.time('prompt_packed_memory', () => options.memoryStore.getPromptMemoryContext!(viewerCtx, PER_TURN_INDEX_CAP, candidate)))
           : undefined
       const readPromptIndexes = (candidate: typeof nativeTranscriptAuthority) =>
-        candidate && assistant.workspaceId && (!executionContext.security.access.sharedAudience
+        candidate && assistant.workspaceId && options.memoryStore.getPairedPromptIndexes && (!executionContext.security.access.sharedAudience
           || conversationReadersActive() && usesWorkspacePromptIndexes(session, pageBoundTurn)
           && session.workspaceId===assistant.workspaceId && session.assistantId===assistant.id
           && turnScope.activeProjectId===null)
-          ? (promptIndexes ??= options.memoryStore.getPairedPromptIndexes?.(viewerCtx,PER_TURN_INDEX_CAP,candidate))
+          ? (promptIndexes ??= turnTiming.time('prompt_paired_memory', () => options.memoryStore.getPairedPromptIndexes!(viewerCtx, PER_TURN_INDEX_CAP, candidate)))
           : undefined
       const indexValue = <T>(result: PromiseSettledResult<T>) => {
         if (result.status === 'rejected') throw result.reason
         return result.value
       }
-      turnTiming.mark('admission')
       const [soulContext, identityMemories, rankedIndex, preferredChannel, selfEntityId] = await Promise.all([
         optionalContext(async () => {
           const auxiliary = await auxiliaryPrompt
@@ -4745,6 +4806,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           return auxiliary?.identity ?? options.memoryStore.getIdentity(viewerCtx,candidate)
         }, []),
         optionalContext(async candidate => {
+          if (deferAmbientIndexes) return { rows: [], totalCount: 0 }
           const packed = await readNativePromptMemory(candidate)
           if (packed) return indexValue(packed.indexes.ranked)
           const paired = readPromptIndexes(candidate)
@@ -4808,7 +4870,9 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       let workspaceIdentity: { name: string; purpose: string } | null = null
       if (assistant.workspaceId) {
         let promptMemories: ReturnType<NonNullable<typeof options.memoryStore.getWorkspacePromptMemories>> | undefined
-        const readPromptMemories = () => (promptMemories ??= options.memoryStore.getWorkspacePromptMemories?.(viewerCtx, 'voice'))
+        const readPromptMemories = () => options.memoryStore.getWorkspacePromptMemories
+          ? (promptMemories ??= turnTiming.time('prompt_workspace_identity_voice', () => options.memoryStore.getWorkspacePromptMemories!(viewerCtx, 'voice')))
+          : undefined
         ;[workspaceIdentityMemories, teamMemoryIndex, teamVoiceRules, workspaceIdentity] = await Promise.all([
           optionalContext(async candidate => {
             const packed = await readNativePromptMemory(candidate)
@@ -4817,6 +4881,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             return paired ? (await paired).identity : options.memoryStore.getWorkspaceIdentity(viewerCtx)
           }, []),
           optionalContext(async candidate => {
+            if (deferAmbientIndexes) return []
             const packed = await readNativePromptMemory(candidate)
             if (packed) return indexValue(packed.indexes.workspace)
             const paired = readPromptIndexes(candidate)
@@ -4855,6 +4920,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         soul,
         identityMemories: identityMemories.map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
         memoryIndex: feedTurnContext ? [] : rankedIndex.rows.map((m) => ({ ...m, appId: null })),
+        memoryIndexDeferred: deferAmbientIndexes,
         totalNonIdentityCount: rankedIndex.totalCount,
         workspaceIdentityMemories: feedTurnContext ? [] : workspaceIdentityMemories.map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
         teamMemoryIndex: feedTurnContext ? [] : teamMemoryIndex.map((m) => ({ ...m, appId: null })),
@@ -4886,12 +4952,13 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // store is wired (skipped in dev / smoke without GCS).
       let workspaceFilesContext: string | null = null
       if (
+        !deferAmbientIndexes &&
         options.workspaceFilesStore &&
         assistant.workspaceId &&
         activeCapabilities.has('files')
       ) {
         try {
-          const rows = await optionalContext(() => options.workspaceFilesStore!.listIndexRanked(
+          const rows = await turnTiming.time('prompt_workspace_files', () => optionalContext(() => options.workspaceFilesStore!.listIndexRanked(
             {
               workspaceId: assistant.workspaceId!,
               userId: user.id,
@@ -4906,7 +4973,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
               ...(viewerCtx.departmentRead ? { departmentRead: viewerCtx.departmentRead } : {}),
             },
             PER_TURN_FILES_INDEX_CAP,
-          ), [])
+          ), []))
           noteAutomaticScopeEvidence(scopeAccumulator, rows)
           workspaceFilesContext = buildWorkspaceFilesContext(rows)
         } catch (err) {
@@ -5033,36 +5100,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         }
       }
 
-      // Session-state block (always-on tier — # Open commitments).
-      // Injected every turn regardless of classifier verdict so the model
-      // doesn't re-derive resolved commitments from raw history.
-      let sessionStateBlock: string | null = null
-      if (options.sessionStateStore && !pageBoundTurn) {
-        try {
-          sessionStateBlock = await optionalContext(candidate => buildSessionStateBlock({
-            authority: candidate ?? { execution: executionContext, accumulator: scopeAccumulator },
-            store: options.sessionStateStore!,
-            sessionId: session.id,
-          }), null)
-        } catch (err) {
-          console.error('[chat] session-state block fetch failed:', err)
-        }
-      }
-
-      // Execution-plan tier. Drive counterpart to # Open commitments — present
-      // only while the session has an `active` task attempt (the builder
-      // returns null for dormant/archived attempts, so it can't leak).
-      let planBlock: string | null = null
-      if (options.planStore && !turnScope.access.sharedAudience) {
-        try {
-          planBlock = await buildActivePlanBlock({
-            store: options.planStore,
-            sessionId: session.id,
-          })
-        } catch (err) {
-          console.error('[chat] active-plan block fetch failed:', err)
-        }
-      }
+      // Open commitments and the active plan stay in every applicable prompt.
+      const { sessionStateBlock, planBlock } = earlyTaskContext ?? await turnTiming.time('prompt_task_context', readTaskContext)
 
       const anchorTz = user.timezone ?? 'UTC'
       const presenceTz = resolvePresenceTimezone({
@@ -5324,19 +5363,11 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // resolver failure costs the block, never the turn. Every Chat
       // conversation pins (`policy.pins`): a personal chat is a room with one
       // human (chat-parity D1).
-      if (turnPolicy.pins && assistant.workspaceId) {
-        try {
-          const pinnedContext = await resolvePinnedContext({
-            sessionId: session.id, context: { executionContext, scopeAccumulator },
-            workspaceId: assistant.workspaceId,
-            clearance: session.effectiveClearance,
-          })
-          if (pinnedContext.block) userVisibleContextParts.push(pinnedContext.block)
-          if (programmatic || classifySession(session).surface === 'chat') {
-            pinnedPageEditTargets = pinnedContext.pageTargets
-          }
-        } catch (err) {
-          console.warn('[chat] pinned-context resolution failed:', err)
+      const pinnedContext = earlyPinnedContext === undefined ? await turnTiming.time('prompt_pins', readPinnedPromptContext) : earlyPinnedContext
+      if (pinnedContext) {
+        if (pinnedContext.block) userVisibleContextParts.push(pinnedContext.block)
+        if (programmatic || classifySession(session).surface === 'chat') {
+          pinnedPageEditTargets = pinnedContext.pageTargets
         }
       }
 

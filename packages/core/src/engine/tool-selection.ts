@@ -1,5 +1,6 @@
 import { decisionUsageModelId } from '../decisions/usage.js'
 import { createLlmDecisionProvider } from '../decisions/adapters/llm.js'
+import { isBareChatGreeting } from '../classification/trivial-chat.js'
 import type { DecisionCompletionRoute, DecisionExecutionPort } from '../decisions/hydra.js'
 import type { DecisionQuestion, DecisionResponse } from '../decisions/types.js'
 import { isInputAuthorityError } from '@use-brian/agent-runtime/providers/input-authority.js'
@@ -76,8 +77,7 @@ export async function selectInitialToolSchemas(input: ToolSelectionOptions & {
     .map(message => ({ ...message, text: message.text.slice(-2000) }))
   // A bare greeting needs no eager schemas. The main model retains discovery
   // and its full context, so this never suppresses a later action.
-  if (conversation.length === 1 && conversation[0].role === 'user'
-    && /^(?:hi|hello|hey|你好|您好|こんにちは)[!.！。\s]*$/iu.test(conversation[0].text.trim())) return empty('greeting')
+  if (conversation.length === 1 && conversation[0].role === 'user' && isBareChatGreeting(conversation[0].text)) return empty('greeting')
   const state = { conversation, tools: catalog }
   if (JSON.stringify(state).length > 100_000) return empty('catalog_limit')
   const { questions, namesFrom } = plan
