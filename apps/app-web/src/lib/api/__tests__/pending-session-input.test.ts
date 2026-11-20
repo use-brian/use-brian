@@ -88,11 +88,15 @@ describe("[COMP:app-web/pending-questions] pending session input", () => {
     expect(await fetchPendingSessionInput("s1")).toEqual({ pending: null, toolConfirmation: null, externalConfirmations: [] });
   });
 
-  it("omits external confirmation updates on a transient read failure, preserving mounted cards", async () => {
-    mockFetch.mockResolvedValueOnce(new Response("unavailable", { status: 503 }));
-    await expect(fetchPendingSessionInput("s1")).resolves.toEqual({
-      pending: null,
-      toolConfirmation: null,
-    });
+  it.each([408, 429, 500, 502, 503, 504])("does not turn a transient HTTP failure into empty native or external input (%s)", async (status) => {
+    mockFetch.mockResolvedValueOnce(new Response("unavailable", { status }));
+    await expect(fetchPendingSessionInput("s1")).rejects.toThrow(`Pending session input unavailable (${status})`);
+  });
+
+  it("propagates transport and malformed-response failures rather than clearing mounted cards", async () => {
+    mockFetch.mockRejectedValueOnce(new TypeError("offline"));
+    await expect(fetchPendingSessionInput("s1")).rejects.toThrow("offline");
+    mockFetch.mockResolvedValueOnce(new Response("not json"));
+    await expect(fetchPendingSessionInput("s1")).rejects.toThrow();
   });
 });
