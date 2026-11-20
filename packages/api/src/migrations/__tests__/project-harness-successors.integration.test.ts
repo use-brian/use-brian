@@ -20,6 +20,24 @@ describe.sequential('[COMP:api/harness-migration-upgrade] harness successors aga
       expect((await client.query("SELECT to_regclass('public.native_turn_helper_attestations') absent")).rows[0].absent).toBeNull()
     } finally { await rollbackAndRelease(client) }
   })
+  it('keeps the chat admission successor private and its insert trigger bound to the same owner', async () => {
+    const client = await getPool().connect()
+    try {
+      const result = await client.query(`SELECT p.oid=t.tgfoid bound,
+        p.proowner=c.relowner owner_matches,p.prosecdef,p.proconfig,
+        t.tgtype,t.tgenabled,t.tgisinternal,
+        (SELECT count(*)=1 AND bool_and(a.grantee=p.proowner AND a.grantor=p.proowner
+          AND a.privilege_type='EXECUTE' AND NOT a.is_grantable)
+          FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a) private_acl,
+        position('-- D24: an explicitly shared Project room' IN p.prosrc)>0 successor
+        FROM pg_proc p JOIN pg_class c ON c.oid='public.sessions'::regclass
+        JOIN pg_trigger t ON t.tgrelid=c.oid AND t.tgname='zzzz_session_creation_admission'
+        WHERE p.oid='public.require_session_creation_admission()'::regprocedure`)
+      expect(result.rows).toEqual([{ bound: true, owner_matches: true, prosecdef: true,
+        proconfig: ['search_path=pg_catalog, public, pg_temp'], tgtype: 7, tgenabled: 'O',
+        tgisinternal: false, private_acl: true, successor: true }])
+    } finally { await rollbackAndRelease(client) }
+  })
   it.each(['8269_project_harnesses.sql','8270_project_harness_verification.sql','8271_project_chat_creation_admission.sql','8272_native_helper_attestation_cost.sql'])('refuses historical candidate receipt %s without erasing it', async name => {
     const client = await getPool().connect()
     try {

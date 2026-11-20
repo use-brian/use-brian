@@ -5,7 +5,8 @@ BEGIN;
 DO $project_chat_creation$
 DECLARE target regprocedure := 'public.require_session_creation_admission()'::regprocedure;
  routine pg_proc; original text; successor text; trigger_before jsonb;
- signature text; ok boolean;
+ signature text; ok boolean; legacy_acl boolean;
+ runtime_id constant oid := (SELECT oid FROM pg_roles WHERE rolname='app_user');
  needle constant text := $needle$    -- A matched receipt/row pair is not a grant. Resolve live member and$needle$;
  addition constant text := $addition$    -- D24: an explicitly shared Project room has exactly one Project label
     -- and no Department audience. Do not pass that label to the legacy
@@ -67,8 +68,20 @@ BEGIN
   OR routine.pronargdefaults<>0 OR routine.provariadic<>0 OR routine.proretset OR routine.proisstrict OR routine.proleakproof
   OR routine.procost<>100 OR routine.prorows<>0 OR routine.probin IS NOT NULL OR routine.prosqlbody IS NOT NULL
   OR routine.prosupport<>0 OR routine.protrftypes IS NOT NULL
-  OR (SELECT count(*)=1 AND coalesce(bool_and(a.grantee=routine.proowner AND a.grantor=routine.proowner
-    AND a.privilege_type='EXECUTE' AND NOT a.is_grantable),false)
+ THEN RAISE EXCEPTION 'project_chat_creation_predecessor_changed'; END IF;
+ -- 8221 replaced an already-private trigger function while historical owner
+ -- defaults still granted app_user EXECUTE. Authenticate the exact source and
+ -- all metadata above before accepting that one additional, non-grantable edge.
+ -- Defaults have already been retired by the canonical prerequisite chain.
+ IF EXISTS(SELECT 1 FROM pg_default_acl WHERE defaclrole=routine.proowner
+   AND defaclobjtype='f' AND defaclnamespace IN(0,'public'::regnamespace))
+ THEN RAISE EXCEPTION 'project_chat_creation_predecessor_changed'; END IF;
+ SELECT count(*)=2 INTO legacy_acl
+ FROM aclexplode(coalesce(routine.proacl,acldefault('f',routine.proowner)));
+ IF (SELECT count(*) IN(1,2) AND count(*) FILTER(WHERE a.grantee=routine.proowner)=1
+   AND coalesce(bool_and(a.grantee IN(routine.proowner,runtime_id) AND a.grantor=routine.proowner
+     AND a.privilege_type='EXECUTE' AND NOT a.is_grantable),false)
+   AND (count(*)=1 OR (runtime_id IS NOT NULL AND runtime_id<>routine.proowner))
    FROM aclexplode(coalesce(routine.proacl,acldefault('f',routine.proowner))) a) IS NOT TRUE
  THEN RAISE EXCEPTION 'project_chat_creation_predecessor_changed'; END IF;
  SELECT to_jsonb(t) INTO STRICT trigger_before FROM pg_trigger t
@@ -85,6 +98,12 @@ BEGIN
  THEN RAISE EXCEPTION 'project_chat_creation_unexpected_pin_consumer'; END IF;
  IF (length(original)-length(replace(original,needle,'')))/length(needle)<>1
  THEN RAISE EXCEPTION 'project_chat_creation_splice_changed'; END IF;
+ -- All refusal checks precede the only privilege change. Keep the OID, owner,
+ -- body and trigger intact; the following splice is the separately reviewed D24 change.
+ IF legacy_acl THEN
+  REVOKE EXECUTE ON FUNCTION public.require_session_creation_admission() FROM app_user;
+  SELECT * INTO STRICT routine FROM pg_proc WHERE oid=target;
+ END IF;
  successor := replace(original,needle,addition||needle);
  EXECUTE replace(pg_get_functiondef(target),original,successor);
  IF (SELECT to_jsonb(p)-'prosrc' FROM pg_proc p WHERE oid=target) IS DISTINCT FROM to_jsonb(routine)-'prosrc'

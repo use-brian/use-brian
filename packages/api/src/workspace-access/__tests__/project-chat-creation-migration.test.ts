@@ -96,6 +96,44 @@ describe.sequential('Project chat forward SQL admission', () => {
       await expect(db.exec(sql)).rejects.toThrow('workspace_creation_admission_required')
     } finally { await db.exec('ROLLBACK') }
   })
+  it('narrows only the authenticated historical app_user edge', async () => {
+    await db.exec('RESET ROLE; CREATE ROLE app_user; SET ROLE fixture_owner; GRANT EXECUTE ON FUNCTION require_session_creation_admission() TO app_user')
+    const before = await state()
+    await db.exec(migration)
+    const after = await state()
+    expect(after.metadata).toEqual({ ...(before.metadata as object), proacl: ['fixture_owner=X/fixture_owner'] })
+    expect(after.registration).toEqual(before.registration)
+    expect((await insert()).rows).toHaveLength(1)
+    expect((await db.query(`SELECT has_function_privilege('app_user','require_session_creation_admission()','EXECUTE') exposed`)).rows).toEqual([{ exposed: false }])
+  })
+  it.each([
+    'GRANT EXECUTE ON FUNCTION require_session_creation_admission() TO extra_principal',
+    'GRANT EXECUTE ON FUNCTION require_session_creation_admission() TO app_user WITH GRANT OPTION',
+    'GRANT EXECUTE ON FUNCTION require_session_creation_admission() TO PUBLIC',
+    'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO app_user',
+    'ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO extra_principal',
+  ])('atomically refuses unreviewed historical ACL/default profile: %s', async change => {
+    await db.exec('RESET ROLE; CREATE ROLE app_user; CREATE ROLE extra_principal; SET ROLE fixture_owner; GRANT EXECUTE ON FUNCTION require_session_creation_admission() TO app_user')
+    await db.exec(change)
+    const before = await state()
+    const defaults = (await db.query('SELECT to_jsonb(d) record FROM pg_default_acl d ORDER BY oid')).rows
+    await expect(db.exec(migration)).rejects.toThrow('project_chat_creation_predecessor_changed')
+    await db.exec('ROLLBACK')
+    expect(await state()).toEqual(before)
+    expect((await db.query('SELECT to_jsonb(d) record FROM pg_default_acl d ORDER BY oid')).rows).toEqual(defaults)
+  })
+  it.each([
+    `DO $tamper$ DECLARE body text; BEGIN SELECT prosrc INTO body FROM pg_proc WHERE oid='require_session_creation_admission()'::regprocedure;
+      EXECUTE replace(pg_get_functiondef('require_session_creation_admission()'::regprocedure),body,body||E'\\n-- unreviewed'); END $tamper$`,
+    'ALTER TABLE sessions DISABLE TRIGGER zzzz_session_creation_admission',
+  ])('does not narrow the legacy ACL when a later source/trigger proof fails: %s', async change => {
+    await db.exec('RESET ROLE; CREATE ROLE app_user; SET ROLE fixture_owner; GRANT EXECUTE ON FUNCTION require_session_creation_admission() TO app_user')
+    await db.exec(change)
+    const before = await state()
+    await expect(db.exec(migration)).rejects.toThrow()
+    await db.exec('ROLLBACK')
+    expect(await state()).toEqual(before)
+  })
   it.each([
     { policyRevision: '6' }, { actor: other }, { assistantId: other }, { projectId: other },
     { channelId: 'wrong' }, { appOrigin: 'studio' }, { anchorKind: 'channel' }, { compartments: [] }, { sensitivity: 'public' },
