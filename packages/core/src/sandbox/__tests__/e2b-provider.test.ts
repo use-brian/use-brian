@@ -1,3 +1,4 @@
+import { chatTierDefaults, registryRow } from '@use-brian/shared/model-registry'
 import { describe, it, expect } from 'vitest'
 import { createE2bCloudProvider, SCRATCH_DIR } from '../providers/e2b/index.js'
 import { BU_DRIVER_PY, mapBrowserUseHistory } from '../providers/e2b/bu-driver.js'
@@ -11,6 +12,8 @@ import {
   TAKEOVER_INPUT_HELPER_PATH,
 } from '../providers/e2b/takeover-input.js'
 import type { E2bCommandResult, E2bRuntime, E2bSandboxHandle } from '../providers/e2b/runtime.js'
+
+const geminiWireModel = registryRow(chatTierDefaults().standard)!.apiModelId
 
 /**
  * Fake E2bRuntime — records every command/file op so tests assert the
@@ -422,7 +425,7 @@ const JEV_RECEIPT = {
     { model: 'jev-1.13.0', operation: 'DONE', usage: { input_tokens: 60, output_tokens: 0 } },
   ],
   text_calls: [
-    { model: 'gemini-3-flash-preview', usage: { prompt_tokens: 30, completion_tokens: 8 } },
+    { model: geminiWireModel, usage: { prompt_tokens: 30, completion_tokens: 8 } },
   ],
   error: null,
 }
@@ -447,7 +450,7 @@ describe('[COMP:sandbox/e2b-cloud] runBrowserAgent — Jev primary and safe fall
       browserUse: {
         apiKeyEnvName: 'GOOGLE_API_KEY',
         apiKey: 'gemini-test',
-        model: 'gemini-3-flash-preview',
+        model: geminiWireModel,
       },
     })
     const { sandboxId } = await provider.create({ workspaceId: 'w', taskId: 't' })
@@ -462,7 +465,7 @@ describe('[COMP:sandbox/e2b-cloud] runBrowserAgent — Jev primary and safe fall
       status: 'completed',
       usage: [
         { kind: 'jev', model: 'jev-1.13.0', inputTokens: 240, outputTokens: 0, providerKeySource: 'platform' },
-        { kind: 'text_helper', model: 'gemini-3-flash-preview', inputTokens: 30, outputTokens: 8, providerKeySource: 'platform' },
+        { kind: 'text_helper', model: geminiWireModel, inputTokens: 30, outputTokens: 8, providerKeySource: 'platform' },
       ],
     })
     expect(result.output).toContain('Three matching items are visible')
@@ -476,7 +479,7 @@ describe('[COMP:sandbox/e2b-cloud] runBrowserAgent — Jev primary and safe fall
       TYPESAFE_API_KEY: 'typesafe-test',
       TYPESAFE_MODEL: 'jev-1.13.0',
       TEXT_MODEL_API_KEY: 'gemini-test',
-      TEXT_MODEL: 'gemini-3-flash-preview',
+      TEXT_MODEL: geminiWireModel,
       TEXT_MODEL_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/openai',
       TEXT_MODEL_DIALECT: 'openai-chat-completions',
     })
@@ -805,7 +808,7 @@ describe('[COMP:sandbox/e2b-cloud] mapJevUltrafastReceipt — receipt → trace 
     expect(result.trace.map((step) => step.action)).toEqual(['open', 'fill', 'click', 'scroll', 'done'])
     expect(result.usage).toEqual([
       { kind: 'jev', model: 'jev-1.13.0', inputTokens: 240, outputTokens: 0 },
-      { kind: 'text_helper', model: 'gemini-3-flash-preview', inputTokens: 30, outputTokens: 8 },
+      { kind: 'text_helper', model: geminiWireModel, inputTokens: 30, outputTokens: 8 },
     ])
   })
 

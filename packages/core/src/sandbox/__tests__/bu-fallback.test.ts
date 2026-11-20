@@ -4,6 +4,7 @@
  * gated; the agentic loop is cloud-only — unattended-on-local is an outright
  * refusal, and a local-default profile is never silently re-routed.
  */
+import { chatTierDefaults, registryRow } from '@use-brian/shared/model-registry'
 import { describe, it, expect, vi } from 'vitest'
 import { createBuFallbackTool } from '../bu-fallback.js'
 import { createSkillRunnerTools } from '../skill-runner.js'
@@ -15,6 +16,8 @@ import { createInMemorySandboxTaskStore, createSandboxOrchestrator } from '../or
 import { StubSandboxProvider } from '../providers/stub.js'
 import type { BrowserAgentUsage, BrowserUseLlmConfig, BuTraceStep } from '../types.js'
 import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+
+const geminiWireModel = registryRow(chatTierDefaults().standard)!.apiModelId
 
 function toolContext(overrides: Partial<ToolContext> = {}): ToolContext {
   return {
@@ -185,7 +188,7 @@ describe('[COMP:sandbox/bu-fallback] Watched agentic fallback (R2-1/R2-7)', () =
       resolveLlm: async () => ({
         apiKeyEnvName: 'GOOGLE_API_KEY',
         apiKey: 'fixture-key',
-        model: 'gemini-3-flash-preview',
+        model: geminiWireModel,
         providerKeySource: 'platform',
         recordSpend,
       }),
@@ -198,7 +201,7 @@ describe('[COMP:sandbox/bu-fallback] Watched agentic fallback (R2-1/R2-7)', () =
       status: 'completed',
       usage: [
         { kind: 'jev', model: 'jev-1.13.0', inputTokens: 100, outputTokens: 0, providerKeySource: 'platform' },
-        { kind: 'text_helper', model: 'gemini-3-flash-preview', inputTokens: 20, outputTokens: 5, providerKeySource: 'platform' },
+        { kind: 'text_helper', model: geminiWireModel, inputTokens: 20, outputTokens: 5, providerKeySource: 'platform' },
       ],
     })
 
@@ -206,7 +209,7 @@ describe('[COMP:sandbox/bu-fallback] Watched agentic fallback (R2-1/R2-7)', () =
 
     expect(onUsage).toHaveBeenCalledOnce()
     expect(recordSpend).toHaveBeenCalledOnce()
-    expect(recordSpend).toHaveBeenCalledWith('gemini-3-flash-preview', {
+    expect(recordSpend).toHaveBeenCalledWith(geminiWireModel, {
       inputTokens: 20,
       outputTokens: 5,
     })

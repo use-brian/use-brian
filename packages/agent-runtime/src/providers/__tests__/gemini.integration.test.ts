@@ -1,3 +1,4 @@
+import { chatTierDefaults } from '@use-brian/shared/model-registry'
 import { describe, it, expect } from 'vitest'
 import dotenv from 'dotenv'
 import { resolve } from 'node:path'
@@ -7,6 +8,7 @@ import { collectStream } from '../accumulator.js'
 
 dotenv.config({ path: resolve(import.meta.dirname, '..', '..', '..', '..', '..', '.env') })
 
+const proModel = chatTierDefaults().pro
 const apiKey = process.env.GEMINI_API_KEY
 const describeIf = apiKey ? describe : describe.skip
 
@@ -16,7 +18,7 @@ describeIf('[COMP:providers/gemini] Gemini provider (integration)', () => {
   it('streams a simple text response', async () => {
     const chunks: string[] = []
     const stream = provider.stream({
-      model: 'gemini-flash',
+      model: proModel,
       messages: [{ role: 'user', content: 'Say "hello world" and nothing else.' }],
       systemPrompt: 'You are a test assistant. Be extremely concise.',
     })
@@ -31,7 +33,7 @@ describeIf('[COMP:providers/gemini] Gemini provider (integration)', () => {
 
   it('streams a tool call response', async () => {
     const stream = provider.stream({
-      model: 'gemini-flash',
+      model: proModel,
       messages: [{ role: 'user', content: 'What is the weather in Tokyo?' }],
       systemPrompt: 'You are a test assistant.',
       tools: [{
@@ -63,7 +65,7 @@ describeIf('[COMP:providers/gemini] Gemini provider (integration)', () => {
     )
 
     const response = await collectStream(wrappedStream({
-      model: 'gemini-flash',
+      model: proModel,
       messages: [{ role: 'user', content: 'Say "ok".' }],
       systemPrompt: 'Be concise.',
     }))

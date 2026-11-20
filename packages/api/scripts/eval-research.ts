@@ -3,6 +3,7 @@
  * "Eval CLI"). Offline by default; the configured-provider adapter is built
  * only after `--collect --confirm`.
  */
+import { chatTierDefaults } from '@use-brian/shared/model-registry'
 import { queryLoop } from '@use-brian/core/engine/query-loop-defaults.js'
 import { createBaseTools } from '@use-brian/core/tools/base/index.js'
 import { calculateCost } from '@use-brian/agent-runtime/billing/cost-tracker.js'
@@ -15,7 +16,7 @@ void runResearchEvalCli(process.argv.slice(2), { log: console.log, error: consol
   configuredAdapter: async () => {
     const apiKey = process.env.GEMINI_API_KEY
     if (!apiKey) throw new Error('GEMINI_API_KEY is not configured; collection needs the configured provider.')
-    const model = process.env.RESEARCH_EVAL_MODEL ?? 'gemini-3.6-flash-pro'
+    const model = process.env.RESEARCH_EVAL_MODEL ?? chatTierDefaults().pro
     const tools = createBaseTools()
     const provider = createGeminiProvider(apiKey)
     return createConfiguredProviderCollectionAdapter({

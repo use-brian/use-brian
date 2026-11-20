@@ -21,7 +21,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { createGeminiProvider } from '../gemini.js'
 import { createOpenAICompatProvider } from '../openai-compat.js'
 import { createAnthropicProvider } from '../anthropic.js'
-import { registryRow, MODEL_REGISTRY } from '@use-brian/shared/model-registry'
+import { registryRow, MODEL_REGISTRY, chatTierDefaults } from '@use-brian/shared/model-registry'
 import type { LLMProvider, Message, StreamChunk } from '../types.js'
 
 const PDF_BASE64 = Buffer.from('%PDF-1.4 contract').toString('base64')
@@ -74,12 +74,13 @@ describe('[COMP:providers/pdf-contract] every registered provider handles a PDF 
   })
 
   it('gemini (nativePdf: true) emits a real inlineData document part', async () => {
-    expect(registryRow('gemini-flash-3')!.capabilities.nativePdf).toBe(true)
+    const model = chatTierDefaults().pro
+    expect(registryRow(model)!.capabilities.nativePdf).toBe(true)
     const captured: { body?: string } = {}
     const provider = createGeminiProvider('key')
     vi.stubGlobal('fetch', capturingFetch(captured))
     try {
-      const body = JSON.parse(await wireBodyFor(provider, 'gemini-3-flash-preview', captured))
+      const body = JSON.parse(await wireBodyFor(provider, model, captured))
       const parts = body.contents[0].parts as Array<Record<string, unknown>>
       const inline = parts.find((p) => 'inlineData' in p) as { inlineData: { mimeType: string; data: string } }
       expect(inline.inlineData.mimeType).toBe('application/pdf')

@@ -25,6 +25,7 @@
  * `pnpm tsx packages/api/scripts/dump-classifier-fixtures.ts`.
  */
 
+import { chatTierDefaults } from '@use-brian/shared/model-registry'
 import { describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
@@ -43,6 +44,8 @@ import type { EntityStore, EntityLinksStore } from '../../entities/types.js'
 import type { MemoryStore } from '../../memory/types.js'
 import type { TaskStore } from '../../tasks/types.js'
 import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+
+const standardModel = chatTierDefaults().standard
 
 type Fixture = {
   name: string
@@ -214,7 +217,7 @@ async function runExtraction(provider: LLMProvider, content: string) {
     // Keep in lockstep with EXTRACTION_MODEL in
     // packages/api/src/build-episode-ingestors.ts — the golden set must
     // eval the model prod extraction actually runs, not a sibling tier.
-    model: 'gemini-3.6-flash-standard',
+    model: standardModel,
     crm,
     entities,
     entityLinks,

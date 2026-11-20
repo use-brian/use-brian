@@ -15,6 +15,7 @@
  * See docs/architecture/context-engine/compaction.md.
  */
 
+import { MODEL_MAP } from '../model-resolution.js'
 import { sanitize as sanitizeAnalytics } from '@use-brian/core/analytics/logger.js'
 import { isTopicIdentity } from '@use-brian/core/memory/topic-identity.js'
 import {
@@ -414,7 +415,7 @@ export async function runProactiveCompaction(
   let sessionMessages = suppliedRows
   const persistLongTermContext = params.persistLongTermContext !== false
   const persistSessionSummary = params.persistSessionSummary !== false
-  const compactionModel = params.model ?? 'gemini-3.6-flash-pro'
+  const compactionModel = params.model ?? MODEL_MAP.pro
   const usageAttribution = { modelTier: params.modelTier, providerKeySource: params.providerKeySource }
   const binding = params.modelContext
   const execution = binding?.execution, accumulator = binding?.accumulator

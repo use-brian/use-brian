@@ -52,6 +52,8 @@ const relevantPaths = new Set([
   'scripts/__tests__/migration-diagnostics.integration.test.mjs',
   'scripts/__tests__/prepared-fixture.integration.test.mjs',
   'packages/shared/src/department-isolation-coverage.ts',
+  'packages/shared/src/model-registry.ts',
+  'packages/api/src/__tests__/fixtures/standard-gemini.ts',
   ...DEPARTMENT_ISOLATION_BOUNDARIES.flatMap(boundary => boundary.sourcePaths),
   ...DEPARTMENT_ISOLATION_SUITES.flatMap(suite => suite.testFiles.map(file => relTest(suite,file))),
 ])

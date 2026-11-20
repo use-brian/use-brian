@@ -11,7 +11,7 @@ import type { HttpRetryWindow } from './types.js'
  */
 import { debugDocumentFlow } from '../engine/document-flow-debug.js'
 import { Agent } from 'undici'
-import { providerAliasMap, recordedAliasIds, providerModelIds, registryRow } from '@use-brian/shared/model-registry'
+import { servingModelAlias, providerAliasMap, recordedAliasIds, providerModelIds, registryRow } from '@use-brian/shared/model-registry'
 import type { LLMProvider, ProviderRequest, ProviderSession, SendOptions, SessionOptions, StreamChunk, Message, ContentBlock, ThinkingLevel, ToolDefinition, ToolSchemaRegistration, StopReason, TokenUsage } from './types.js'
 import type { GoogleTransport } from './google-transport.js'
 import { aiStudioTransport } from './google-transport.js'
@@ -29,7 +29,7 @@ const PREFILL_DISPATCHERS = new Map<number, Agent>()
  * tier but must stay billable-distinct in `usage_tracking`. They run the real
  * model on the wire (via MODEL_ALIASES above) but we **record** the synthetic
  * id in `message_start` so the row classifies as the right tier:
- *   - `gemini-3.6-flash-standard` (MODEL_MAP.standard) — Flash 3.6, vs Pro.
+ *   - `gemini-3.8-flash-standard` (MODEL_MAP.standard) — Flash 3.8, shared with Pro and Max.
  *   - `gemini-4-argon-research` (MODEL_MAP.research) — Argon, vs historical Research.
  * Standard/Pro both use synthetic ids; historical synthetic ids also remain.
  * Every other model records its resolved provider id unchanged. Derived from
@@ -896,8 +896,9 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
 
     // Stateless single-shot
     async *stream(request: ProviderRequest): AsyncIterable<StreamChunk> {
-      const modelId = resolveModel(request.model)           // real Google model name (URL + thinking config)
-      const recordId = recordedModelId(request.model, modelId) // billing/tier key recorded on the turn
+      const selector = servingModelAlias(request.model)
+      const modelId = resolveModel(selector)           // real Google model name (URL + thinking config)
+      const recordId = recordedModelId(selector, modelId) // billing/tier key recorded on the turn
       const contents = toGeminiContents(request.messages)
       // System-role rows (compaction summary, budget breadcrumb) are skipped
       // by toGeminiContents; deliver them through systemInstruction instead.
@@ -915,8 +916,9 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
 
     // Stateful session preserving raw Gemini parts (incl. thoughtSignature)
     createSession(options: SessionOptions): ProviderSession {
-      const modelId = resolveModel(options.model)              // real Google model name (URL + thinking config)
-      const recordId = recordedModelId(options.model, modelId) // billing/tier key recorded on each turn
+      const selector = servingModelAlias(options.model)
+      const modelId = resolveModel(selector)              // real Google model name (URL + thinking config)
+      const recordId = recordedModelId(selector, modelId) // billing/tier key recorded on each turn
       // Raw history preserving thoughtSignature — NOT converted from our format
       const rawHistory: GeminiContent[] = []
       // System-role rows from the first send (the full transcript: compaction

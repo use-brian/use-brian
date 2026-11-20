@@ -275,7 +275,7 @@ describe('[COMP:providers/gemini-input-parts] stripNonInputParts', () => {
     expect(normalizeGeminiRequestContents(history, 'gemini-3.8-flash')).toEqual([
       userText('translate this'),
     ])
-    expect(normalizeGeminiRequestContents(history, 'gemini-3.6-flash')).toEqual([
+    expect(normalizeGeminiRequestContents(history, 'gemini-3.8-flash')).toEqual([
       userText('translate this'),
     ])
     expect(normalizeGeminiRequestContents(history, 'gemini-4.0-flash')).toEqual([

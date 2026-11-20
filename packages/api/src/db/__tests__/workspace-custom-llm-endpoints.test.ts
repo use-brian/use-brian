@@ -14,6 +14,7 @@ import {
   createDbWorkspaceCustomLlmEndpointStore,
   CustomLlmEncryptionKeyRequiredError,
 } from '../workspace-custom-llm-endpoints.js'
+import { createWorkspaceModelDefaultsStore } from '../workspace-model-defaults-store.js'
 import { decryptApiKey } from '../workspace-llm-provider-settings.js'
 
 const mockQuery = vi.mocked(query)
@@ -59,6 +60,20 @@ function mockCreateTransaction() {
 beforeEach(() => vi.clearAllMocks())
 
 describe('[COMP:api/custom-llm-endpoints] custom connection/profile store', () => {
+  it.each(['standard', 'pro'] as const)('reads a saved Flash 3.6 %s pin as the current selector', async tier => {
+    const oldAlias = `gemini-3.6-flash-${tier}`
+    const modelAlias = `gemini-3.8-flash-${tier}`
+    const route = { workspaceId, tier, profileId: null, modelAlias: oldAlias, updatedAt: new Date() }
+    const store = createDbWorkspaceCustomLlmEndpointStore()
+    mockQueryWithRLS.mockResolvedValueOnce({ rows: [route] } as never)
+    mockQuery.mockResolvedValueOnce({ rows: [route] } as never)
+    await expect(store.listModelRoutes({ actingUserId: 'user-1', workspaceId })).resolves.toEqual([{ ...route, modelAlias }])
+    await expect(store.getTierRouteSystem({ workspaceId, tier })).resolves.toEqual({ ...route, modelAlias })
+
+    mockQuery.mockResolvedValueOnce({ rows: [{ workspace_id: workspaceId, model_class: 'standard-pro', model_alias: oldAlias }] } as never)
+    await expect(createWorkspaceModelDefaultsStore().list(workspaceId)).resolves.toMatchObject([{ modelAlias }])
+  })
+
   it('stores the bearer key once on the connection and creates its first profile atomically', async () => {
     const key = randomBytes(32)
     const store = createDbWorkspaceCustomLlmEndpointStore(key)

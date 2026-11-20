@@ -117,7 +117,7 @@ import {
   truncateMessagesFrom,
 } from '../db/sessions.js'
 import { billingPartyForAssistant } from '../billing-party.js'
-import { resolveChatModelSelection } from '../model-resolution.js'
+import { MODEL_MAP, resolveChatModelSelection } from '../model-resolution.js'
 import { checkUsageBudget, type CreditBudgetGate } from './route-helpers.js'
 import { query } from '../db/client.js'
 import { publicConversationScope, readPublicConversationFloor, readPublicConversationHistory,
@@ -1633,7 +1633,7 @@ async function executePublicTurnInScope(
         channelType: 'api',
         // Reactive compaction on context-overflow errors —
         // matches web chat (chat.ts:1541).
-        compactModel: 'gemini-3.6-flash-pro',
+        compactModel: MODEL_MAP.pro,
         maxTurns,
         },
         sink: { kind: 'json', onEvent: async (event) => {

@@ -89,6 +89,8 @@ describe('[COMP:compaction/full] modelToCompactionTier', () => {
     expect(modelToCompactionTier('gemini-3-flash-preview')).toBe('standard')
     expect(modelToCompactionTier('gemini-3.6-flash-standard')).toBe('standard')
     expect(modelToCompactionTier('gemini-3.6-flash-pro')).toBe('standard')
+    expect(modelToCompactionTier('gemini-3.8-flash-standard')).toBe('standard')
+    expect(modelToCompactionTier('gemini-3.8-flash-pro')).toBe('standard')
   })
 
   it('maps Flash Lite (current Standard tier) to standard', () => {

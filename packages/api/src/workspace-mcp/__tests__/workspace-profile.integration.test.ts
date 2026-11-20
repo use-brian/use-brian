@@ -1,3 +1,4 @@
+import { chatTierDefaults } from '@use-brian/shared/model-registry'
 import { createOfficeVersionRuntime } from '../../office/version-runtime.js'
 import { documentSnapshot } from '../../../../core/src/office/__tests__/fixtures.js'
 import { publishDepartmentOfficeSnapshot } from '../../office/generation-publication.js'
@@ -163,16 +164,16 @@ const capabilityStore = createDbCapabilityStore()
 const approvalsStore = createPendingApprovalsStore()
 let includeDatabaseSkills = false
 const databaseSkills = createDbSkillStore(), workspaceSkills = createDbWorkspaceSkillStore()
-    const provider: LLMProvider = { name: 'fictional-native-model', models: ['gemini-2.5-flash'],
-      async *stream() {
-        yield { type: 'message_start', model: 'gemini-2.5-flash' }
+    const provider: LLMProvider = { name: 'fictional-native-model', models: [chatTierDefaults().standard],
+      async *stream(request) {
+        yield { type: 'message_start', model: request.model }
         yield { type: 'text_delta', text: JSON.stringify({ topic_label: 'Fictional check', state: 'continue', confidence: 0.9 }) }
         yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 2, outputTokens: 2 } }
       },
       createSession(options) {
         return { async *send(_messages, sendOptions) {
           await (sendOptions?.assertInputAuthority ?? options.assertInputAuthority)?.()
-          yield { type: 'message_start', model: 'gemini-2.5-flash' }
+          yield { type: 'message_start', model: options.model }
           yield { type: 'text_delta', text: 'Fictional native reply.' }
           yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 3, outputTokens: 3 } }
         } }

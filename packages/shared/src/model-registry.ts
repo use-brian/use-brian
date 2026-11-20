@@ -172,6 +172,8 @@ type ModelRegistryBase = {
   /** `legacy` rows exist for classification/pricing of historical rows only —
    * they are never callable and never appear in menus. */
   status: 'active' | 'legacy'
+  /** Successor for a saved selector. Historical classification and pricing use the original row. */
+  servingSuccessor?: string
   /** Marks this row as the chat selector default: `MODEL_MAP[chatTierKey] = alias`. */
   chatTierKey?: ChatTierKey
   /** Offered in selection menus (workspace/assistant/session pickers). False
@@ -294,7 +296,41 @@ const FREE_RATES: ModelRates = {
 
 export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   // ── Chat tiers (Gemini incumbents — every class's default, L10) ──
-  // 2026-10-17 defaults. New recorded ids preserve the old rows' pricing.
+  // Standard, Pro and Max share a wire model. Each tier has its own recording id.
+  {
+    alias: 'gemini-3.8-flash-standard',
+    displayName: 'Gemini 3.8 Flash',
+    provider: 'gemini',
+    apiModelId: 'gemini-3.8-flash',
+    class: 'standard-pro',
+    tier: 'standard',
+    status: 'active',
+    chatTierKey: 'standard',
+    menu: true,
+    recordAlias: true,
+    fallbackAlias: 'claude-haiku-4-5',
+    rates: FLASH38_RATES,
+    contextWindow: 1_048_576,
+    maxOutput: 65_536,
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: true },
+  },
+  {
+    alias: 'gemini-3.8-flash-pro',
+    displayName: 'Gemini 3.8 Flash',
+    provider: 'gemini',
+    apiModelId: 'gemini-3.8-flash',
+    class: 'standard-pro',
+    tier: 'pro',
+    status: 'active',
+    chatTierKey: 'pro',
+    menu: true,
+    recordAlias: true,
+    fallbackAlias: 'claude-haiku-4-5',
+    rates: FLASH38_RATES,
+    contextWindow: 1_048_576,
+    maxOutput: 65_536,
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: true },
+  },
   {
     alias: 'gemini-3.6-flash-standard',
     displayName: 'Gemini 3.6 Flash',
@@ -302,9 +338,9 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     apiModelId: 'gemini-3.6-flash',
     class: 'standard-pro',
     tier: 'standard',
-    status: 'active',
-    chatTierKey: 'standard',
-    menu: true,
+    status: 'legacy',
+    servingSuccessor: 'gemini-3.8-flash-standard',
+    menu: false,
     recordAlias: true,
     fallbackAlias: 'claude-haiku-4-5',
     rates: FLASH36_RATES,
@@ -319,9 +355,9 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     apiModelId: 'gemini-3.6-flash',
     class: 'standard-pro',
     tier: 'pro',
-    status: 'active',
-    chatTierKey: 'pro',
-    menu: true,
+    status: 'legacy',
+    servingSuccessor: 'gemini-3.8-flash-pro',
+    menu: false,
     recordAlias: true,
     fallbackAlias: 'claude-haiku-4-5',
     rates: FLASH36_RATES,
@@ -1134,6 +1170,11 @@ for (const row of MODEL_REGISTRY) {
 /** Row a selector/recorded id classifies to (alias + idAliases). */
 export function registryRow(id: string): ModelRegistryRow | undefined {
   return byClassifierId.get(id)
+}
+
+/** Resolve a retired selector only when preparing a new request or reading a saved preference. */
+export function servingModelAlias(id: string): string {
+  return registryRow(id)?.servingSuccessor ?? id
 }
 
 /** Row an id prices at (alias + idAliases + priceAliases + apiModelId). */

@@ -1,3 +1,4 @@
+import { chatTierDefaults } from '@use-brian/shared/model-registry'
 import { resolveWorkspaceTurnLlm } from '../../turn/prepare.js'
 import { describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
@@ -190,7 +191,7 @@ describe('[COMP:api/chat-route] routine read model-route eligibility', () => {
   }
   it('retains a resolved managed registry route rather than treating its runtime object as custom', async () => {
     const provider = { name: 'managed-fixture' } as import('@use-brian/agent-runtime/providers/types.js').LLMProvider
-    const runtime = { provider, selector: 'gemini-3.6-flash-standard', profileId: null,
+    const runtime = { provider, selector: chatTierDefaults().standard, profileId: null,
       modelTier: 'standard', providerKeySource: 'platform', routeKind: 'managed', inputTokenLimit: 1_048_576, maxTokens: 8192 } as import('../../custom-llm-runtime.js').ResolvedWorkspaceCustomLlm
     const resolved = await resolveWorkspaceTurnLlm({ workspaceId: 'fictional-workspace', requestedTier: 'standard', platformProvider: provider,
       resolveWorkspaceCustomLlm: vi.fn(async () => runtime), resolveLegacyByoKey: null, buildLegacyByoProvider: null })
@@ -242,7 +243,7 @@ describe('[COMP:api/chat-route] routine completion admission', () => {
     const events: unknown[] = [], outcomes: unknown[] = [], sent: Array<{ state: { systemPrompt: string; messages: unknown[] }; questions: unknown[] }> = []
     const systemPrompt = extra.large ? 'Fictional governing instruction.\n'.repeat(4500) : 'Check the requested calendar scope.'
     const messages = [{ role: 'user' as const, content: 'Check my calendar today.' }]
-    const runtime = createDecisionRuntime({ llmProvider: provider, defaultLlmModel: 'gemini-2.5-flash', typesafeApiKey: 'fictional-key',
+    const runtime = createDecisionRuntime({ llmProvider: provider, defaultLlmModel: chatTierDefaults().standard, typesafeApiKey: 'fictional-key',
       ...(extra.adapter ? { adapters: new DecisionAdapterRegistry().register('typesafe', () => createTypeSafeDecisionProvider({ apiKey: 'fictional-key',
         ...(extra.adapter === 'unknown' ? { transport: vi.fn() } : { capabilities: { ...TYPESAFE_JEV_CAPABILITIES, ...(extra.adapter === 'primitive' ? { primitives: ['score'] as const } : {}) } }) })) } : {}),
       onAttempt: customHook ? async () => {} : registerDecisionMetadataSink(async (event: DecisionRuntimeAttempt) => { events.push(event); await meter(event) }),
@@ -274,7 +275,7 @@ describe('[COMP:api/chat-route] routine completion admission', () => {
         usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 } }
       return new Response('data: ' + JSON.stringify(packet) + '\n\n', { headers: { 'content-type': 'text/event-stream' } })
     })
-    const run = () => planRoutineCalendarRead({ runtime, llm: { provider, modelId: 'gemini-2.5-flash' }, workspaceId: 'fictional-workspace',
+    const run = () => planRoutineCalendarRead({ runtime, llm: { provider, modelId: chatTierDefaults().standard }, workspaceId: 'fictional-workspace',
       systemPrompt, messages, tools, calendarTools: tools,
       assertInputAuthority: full, now: Date.parse('2031-06-02T00:00:00Z'),
       context: { userId: 'fictional-user', assistantId: 'fictional-assistant', sessionId: 'fictional-session', appId: 'fixture', channelType: 'web', channelId: 'fixture',
@@ -315,7 +316,7 @@ describe('[COMP:api/chat-route] routine completion admission', () => {
   it('pins explicit override dispatch and key attribution across a pending source proof', async () => {
     const { createGeminiProvider } = await import('@use-brian/agent-runtime/providers/gemini.js')
     const provider = createGeminiProvider({ kind: 'ai-studio', endpoint: () => 'https://fictional.example/override', headers: async () => ({}) })
-    const selected = { provider, modelId: 'gemini-2.5-flash' }
+    const selected = { provider, modelId: chatTierDefaults().standard }
     const f = await fixture('llm_only', undefined, false, {
       patch: config => ({ ...config, llm: selected }) })
     f.full.mockImplementationOnce(async () => { await Promise.resolve(); selected.provider = f.provider })

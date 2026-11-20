@@ -1,5 +1,6 @@
 /** Workspace-scoped OpenAI-compatible connections, profiles, and tier routing. */
 
+import { servingModelAlias } from '@use-brian/shared/model-registry'
 import { randomUUID } from 'node:crypto'
 import { applyRLSGucs, getAppPool, query, queryWithRLS, rollbackAndRelease } from './client.js'
 import { decryptApiKey, encryptApiKey } from './workspace-llm-provider-settings.js'
@@ -78,6 +79,10 @@ export type WorkspaceModelTierRoute = {
   profileId: string | null
   modelAlias: string | null
   updatedAt: Date
+}
+
+function servingTierRoute(row: WorkspaceModelTierRoute): WorkspaceModelTierRoute {
+  return row.modelAlias ? { ...row, modelAlias: servingModelAlias(row.modelAlias) } : row
 }
 
 export type VerifiedCustomLlmProfileInput = {
@@ -267,7 +272,7 @@ export function createDbWorkspaceCustomLlmEndpointStore(
           ORDER BY tier`,
         [workspaceId],
       )
-      return result.rows
+      return result.rows.map(servingTierRoute)
     },
 
     async create({ actingUserId, workspaceId, input }) {
@@ -476,7 +481,7 @@ export function createDbWorkspaceCustomLlmEndpointStore(
           LIMIT 1`,
         [workspaceId, tier],
       )
-      return result.rows[0] ?? null
+      return result.rows[0] ? servingTierRoute(result.rows[0]) : null
     },
   }
 }

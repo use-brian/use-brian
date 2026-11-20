@@ -536,7 +536,7 @@ export type CompactionTier = 'standard' | 'pro'
  */
 export function modelToCompactionTier(model: string): CompactionTier {
   if (model.includes('flash-lite')) return 'standard'
-  if (model === 'gemini-3.6-flash-standard' || model === 'gemini-3.6-flash-pro') return 'standard'
+  if (/^gemini-.*-flash-(standard|pro)$/.test(model)) return 'standard'
   if (
     model.includes('gemini-3.8-flash') ||
     model.includes('gemini-3.7-flash') ||

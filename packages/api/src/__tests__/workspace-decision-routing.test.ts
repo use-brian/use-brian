@@ -287,7 +287,7 @@ describe('[COMP:decisions/workspace-routing] explicit classifier-first authority
     expect(() => parseOperatorDecisionDefault(mode, model, scope)).toThrow(/required together/)
   })
 
-  it.each(['not-a-model', 'gemini-3.6-flash-standard'])('rejects non-decision model %s', model => {
+  it.each(['not-a-model', 'gemini-3.8-flash-standard'])('rejects non-decision model %s', model => {
     expect(() => parseOperatorDecisionDefault('classifier_first', model)).toThrow(/active decision model/)
   })
 

@@ -1,3 +1,4 @@
+import { chatTierDefaults } from '@use-brian/shared/model-registry'
 import { afterEach, describe, it, expect, vi } from 'vitest'
 import { createTopicIdentity, isTopicIdentity } from '../topic-identity.js'
 import { bindRecordTopicAdmission, classifyTopic } from '../topic-classifier.js'
@@ -7,6 +8,8 @@ import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/se
 import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import type { SessionContextAuthority } from '../session-state-types.js'
 import { executionFixture, fixtureDecisionProvider } from '../../decisions/__tests__/execution-fixture.js'
+
+const standardModel = chatTierDefaults().standard
 
 /**
  * Build a minimal mock provider whose stream emits the given JSON as a
@@ -178,8 +181,8 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
   it.each([
     ['openai-codex', 'gpt-6-luna', 8_000],
     ['routing', 'gpt-6-luna', 8_000],
-    ['gemini', 'gemini-3.6-flash-standard', 2_000],
-    ['routing', 'gemini-3.6-flash-standard', 2_000],
+    ['gemini', standardModel, 2_000],
+    ['routing', standardModel, 2_000],
     ['routing', 'unknown-codex-looking-model', 2_000],
     ['openai-compat:workspace', 'unknown-model', 2_000],
     ['routing', 'qwen3.5-flash', 2_000],
@@ -294,7 +297,7 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it.each([['gemini-3.6-flash-standard', 2_000], ['gpt-6-luna', 8_000]] as const)('does not re-enter the original authority window after a timed-out classifier returns (%s)', async (model, budget) => {
+  it.each([[standardModel, 2_000], ['gpt-6-luna', 8_000]] as const)('does not re-enter the original authority window after a timed-out classifier returns (%s)', async (model, budget) => {
     vi.useFakeTimers()
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     const assertInputAuthority = vi.fn(async () => {})
@@ -325,7 +328,7 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it.each([['gemini-3.6-flash-standard', 2_000], ['gpt-6-luna', 8_000]] as const)('drains a losing cascade authority check before returning the timeout fallback (%s)', async (model, budget) => {
+  it.each([[standardModel, 2_000], ['gpt-6-luna', 8_000]] as const)('drains a losing cascade authority check before returning the timeout fallback (%s)', async (model, budget) => {
     vi.useFakeTimers()
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     let checksStarted = 0
@@ -385,7 +388,7 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it.each([['gemini-3.6-flash-standard', 2_000], ['gpt-6-luna', 8_000]] as const)('passes the same total budget through the decision runtime to its LLM transport (%s)', async (model, budget) => {
+  it.each([[standardModel, 2_000], ['gpt-6-luna', 8_000]] as const)('passes the same total budget through the decision runtime to its LLM transport (%s)', async (model, budget) => {
     vi.useFakeTimers()
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     const aborted = vi.fn()
@@ -406,7 +409,7 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it.each([['gemini-3.6-flash-standard', 2_000], ['gpt-6-luna', 8_000]] as const)('cancels the transport with the caller and propagates its current authority refusal (%s)', async (model, budget) => {
+  it.each([[standardModel, 2_000], ['gpt-6-luna', 8_000]] as const)('cancels the transport with the caller and propagates its current authority refusal (%s)', async (model, budget) => {
     vi.useFakeTimers()
     const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const refusal = Object.assign(new Error('Synthetic turn authority revoked'), { reason: 'authority_changed', retrySafe: false })
@@ -425,7 +428,7 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it.each([['gemini-3.6-flash-standard', 2_000], ['gpt-6-luna', 8_000]] as const)('cancels decision-provider and follow-up transports at shorter cascade deadlines (%s)', async (model, budget) => {
+  it.each([[standardModel, 2_000], ['gpt-6-luna', 8_000]] as const)('cancels decision-provider and follow-up transports at shorter cascade deadlines (%s)', async (model, budget) => {
     vi.useFakeTimers()
     const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const decisionAborted = vi.fn()
@@ -452,7 +455,7 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it.each([['gemini-3.6-flash-standard', 2_000], ['gpt-6-luna', 8_000]] as const)('waits for an in-flight authority refusal when the classification deadline expires (%s)', async (model, budget) => {
+  it.each([[standardModel, 2_000], ['gpt-6-luna', 8_000]] as const)('waits for an in-flight authority refusal when the classification deadline expires (%s)', async (model, budget) => {
     vi.useFakeTimers()
     const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const refusal = Object.assign(new Error('Synthetic input authority revoked'), { reason: 'authority_changed', retrySafe: false })

@@ -1,3 +1,4 @@
+import { chatTierDefaults, registryRow } from '@use-brian/shared/model-registry'
 import { describe, it, expect, vi } from 'vitest'
 import { aiStudioTransport, vertexTransport, AI_STUDIO_BASE_URL } from '@use-brian/agent-runtime/providers/google-transport.js'
 import { cachedTokenSource, metadataTokenSource, serviceAccountTokenSource } from '@use-brian/agent-runtime/providers/google-auth.js'
@@ -17,21 +18,23 @@ import { minimalPdf } from '../../files/__tests__/pdf-fixture.js'
 import { pdfPageCompletionMarker } from '../../files/pdf-distill.js'
 import type { Message } from '@use-brian/agent-runtime/providers/types.js'
 
+const standardModel = registryRow(chatTierDefaults().standard)!
+
 describe('[COMP:providers/google-transport] Google transport', () => {
   it('builds AI Studio URLs against the developer host with the API-key header', async () => {
     const t = aiStudioTransport('key-123')
     expect(t.kind).toBe('ai-studio')
-    expect(t.endpoint('gemini-3-flash-preview', 'streamGenerateContent', { alt: 'sse' }))
-      .toBe(`${AI_STUDIO_BASE_URL}/models/gemini-3-flash-preview:streamGenerateContent?alt=sse`)
+    expect(t.endpoint(standardModel.apiModelId, 'streamGenerateContent', { alt: 'sse' }))
+      .toBe(`${AI_STUDIO_BASE_URL}/models/${standardModel.apiModelId}:streamGenerateContent?alt=sse`)
     expect(await t.headers()).toMatchObject({ 'x-goog-api-key': 'key-123' })
   })
 
   it('builds Vertex URLs against the REGIONAL host with a project-scoped path + bearer', async () => {
     const t = vertexTransport({ project: 'proj-1', location: 'asia-east2', tokenSource: async () => 'tok-abc' })
     expect(t.kind).toBe('vertex')
-    expect(t.endpoint('gemini-3-flash-preview', 'streamGenerateContent', { alt: 'sse' })).toBe(
+    expect(t.endpoint(standardModel.apiModelId, 'streamGenerateContent', { alt: 'sse' })).toBe(
       'https://asia-east2-aiplatform.googleapis.com/v1/projects/proj-1/locations/asia-east2' +
-      '/publishers/google/models/gemini-3-flash-preview:streamGenerateContent?alt=sse',
+      `/publishers/google/models/${standardModel.apiModelId}:streamGenerateContent?alt=sse`,
     )
     expect(await t.headers()).toMatchObject({ Authorization: 'Bearer tok-abc' })
   })
@@ -101,7 +104,7 @@ describe('[COMP:media/backend] Multimodal backend per adapter', () => {
   /** A document with no pages to render — still the qwen-long upload's job. */
   const OFFICE_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
   const req = (over: Record<string, unknown>) => ({
-    prompt: 'p', model: 'gemini-2.5-flash', maxOutputTokens: 100,
+    prompt: 'p', model: standardModel.apiModelId, maxOutputTokens: 100,
     timeoutMs: 5000, errorLabel: 'test call', ...over,
   })
 

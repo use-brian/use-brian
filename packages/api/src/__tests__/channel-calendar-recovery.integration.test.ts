@@ -2,6 +2,7 @@
  * managed model request and Telegram delivery after large-history recovery.
  * Google/model HTTP and blob storage are synthetic; injection, policy, preparation, kernel,
  * source admission, publication and the receiving adapter remain real. */
+import { standardGemini } from './fixtures/standard-gemini.js'
 import {createHash,randomBytes,randomUUID} from 'node:crypto'
 import {mkdtemp,readFile,rm,writeFile} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
@@ -253,7 +254,7 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
    // This allowlist guarantees the test can never make a live provider request.
    expect(url.origin).toBe('https://calendar-model.example')
    const request=JSON.parse(String(init?.body)) as ModelRequest
-   const main=url.pathname.endsWith('/gemini-3.6-flash')&&request.generationConfig?.responseMimeType!=='application/json'
+   const main=url.pathname.endsWith(`/${standardGemini.apiModelId}`)&&request.generationConfig?.responseMimeType!=='application/json'
    if(change==='prior-topic-timeout'&&!main&&request.generationConfig?.responseMimeType==='application/json'){
     const signal=init?.signal
     if(!signal)throw new Error('The fictional classifier transport requires its real deadline signal')
@@ -308,7 +309,7 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
    channelIntegrationId:integration,channelIntegrationStore:integrationStore,incomingChannelMessageId:id,
    messageText,userContentBlocks:[{type:'text',text:messageText}],replyToMessageId:change==='trivial-topic'?undefined:26,
    abortController,modelAlias:'standard',adaptiveResearchEnabled:false,
-   decisionRuntime:createDecisionRuntime({llmProvider:provider,defaultLlmModel:'gemini-3.6-flash-standard'}),configuredProviders:new Set(['gemini']),provider,
+   decisionRuntime:createDecisionRuntime({llmProvider:provider,defaultLlmModel:standardGemini.alias}),configuredProviders:new Set(['gemini']),provider,
    systemPrompt:'Use the actual Calendar read tool for this fictional request.',tools:new Map(),memoryStore:createDbMemoryStore(),capabilityStore,workspaceFilesStore,
    connectorStore,mcpSettingsStore:settings,assistantConnectorStore:assistantConnectors,connectorInstanceStore:instances,connectorGrantStore:grants,
    hooks:{onProcessingStart:async()=>{if(accountSql)mark('processing-start')},

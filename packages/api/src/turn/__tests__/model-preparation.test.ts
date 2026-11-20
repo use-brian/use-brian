@@ -8,7 +8,7 @@ import {
   executionToolContext
 } from '@use-brian/agent-runtime/security/execution-context.js'
 import type { CurrentAuthorityBoundary } from '@use-brian/agent-runtime/tools/types.js'
-import { MODEL_REGISTRY, MutableProviderAvailability } from '@use-brian/shared/model-registry'
+import { MODEL_REGISTRY, MutableProviderAvailability, chatTierDefaults } from '@use-brian/shared/model-registry'
 vi.mock('../../turn/lease.js', async importOriginal => ({ ...await importOriginal<typeof import('../../turn/lease.js')>(),
   takeTurnLease: vi.fn(async () => ({ taken: true, token: 'model-token', turnId: 'a'.repeat(64) })),
   startLeaseHeartbeat: () => () => {}, releaseTurn: vi.fn(async () => true),
@@ -21,6 +21,8 @@ import { abortLocalTurn, releaseTurn } from '../lease.js'
 import { createWorkspaceCustomLlmResolver, customLlmAlias, type ResolvedWorkspaceCustomLlm } from '../../custom-llm-runtime.js'
 import type { WorkspaceCustomLlmEndpointStore } from '../../db/workspace-custom-llm-endpoints.js'
 import type { TurnUsageBilling, TurnUsageRow } from '../billing.js'
+
+const proModel = chatTierDefaults().pro
 
 const owners: AssistantTurn[] = [], pending: (() => void)[] = []
 function deferred() { let resolve!: () => void; const promise = new Promise<void>(yes => { resolve = yes }); pending.push(resolve); return { promise, resolve } }
@@ -223,7 +225,7 @@ it.each(['own', 'prototype'] as const)('[COMP:api/assistant-run-preparation] pin
   let runtime!: ResolvedWorkspaceCustomLlm
   const fallback = { enabled: true, used: false, reason: null, status: null, detail: null, endpointName: 'fictional-receiver' }
   const producer: LLMProvider = { name: 'fictional-original-producer', models: [], async *stream() {
-    yield { type: 'message_start', model: 'gemini-3.6-flash-pro' }; yield { type: 'text_delta', text: 'Fictional receiver-bound answer.' }
+    yield { type: 'message_start', model: proModel }; yield { type: 'text_delta', text: 'Fictional receiver-bound answer.' }
     yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 7, outputTokens: 3 } }
     facts.set(runtime, 'platform'); fallback.used = true
   }, createSession(options) { return { send(messages) { return producer.stream({ ...options, messages }) } } } }

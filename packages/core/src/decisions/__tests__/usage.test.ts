@@ -14,7 +14,7 @@ const cases: Array<{ label: string; model: DecisionModelRef; expected: string }>
   { label: 'existing Jev native ID', model: { catalogId: 'typesafe-jev-1.13', wireId: 'jev-1.13.0' }, expected: 'jev-1.13.0' },
   { label: 'unknown catalog reference', model: { catalogId: 'unknown-decision', wireId: 'unknown-native-v2' }, expected: 'unknown-native-v2' },
   { label: 'unknown catalog even with a colliding native wire', model: { catalogId: 'unknown-decision', wireId: 'gpt-6-luna' }, expected: 'gpt-6-luna' },
-  { label: 'chat recordAlias row', model: { catalogId: 'gemini-3.6-flash-standard', wireId: 'gemini-3.6-flash' }, expected: 'gemini-3.6-flash' },
+  { label: 'chat recordAlias row', model: { catalogId: 'gemini-3.8-flash-standard', wireId: 'gemini-3.8-flash' }, expected: 'gemini-3.8-flash' },
   { label: 'legacy fixture reference', model: { catalogId: 'fixture-decision', wireId: 'fixture-decision-v1' }, expected: 'fixture-decision-v1' },
 ]
 
@@ -26,7 +26,7 @@ describe('[COMP:decisions/usage] domain result attribution', () => {
   })
 
   it('exercises a real chat recordAlias row, not an unknown reference', () => {
-    expect(registryRow('gemini-3.6-flash-standard')).toMatchObject({ recordAlias: true, apiModelId: 'gemini-3.6-flash' })
+    expect(registryRow('gemini-3.8-flash-standard')).toMatchObject({ recordAlias: true, apiModelId: 'gemini-3.8-flash' })
     expect(registryRow('gpt-6-luna')).toMatchObject({ provider: 'openai-codex', apiModelId: apiModel.wireId })
   })
 

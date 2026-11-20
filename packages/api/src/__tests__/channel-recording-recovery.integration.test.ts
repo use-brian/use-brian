@@ -1,4 +1,5 @@
 /** [COMP:api/channel-recording] Reviewed history reaches the model and delivery. */
+import { standardGemini } from './fixtures/standard-gemini.js'
 import {randomUUID,randomBytes} from 'node:crypto'
 import pg from 'pg'
 import {conversationCaptureSources} from '../db/conversation-store.js'
@@ -176,7 +177,7 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
    expect(String(url)).toMatch(/^https:\/\/fictional\.example\/models\//)
    const request=JSON.parse(String(init?.body))
    providerRequests.push(request)
-   const main=String(url).endsWith('/gemini-3.6-flash')&&request.generationConfig?.responseMimeType!=='application/json'
+   const main=String(url).endsWith(`/${standardGemini.apiModelId}`)&&request.generationConfig?.responseMimeType!=='application/json'
    if(main)mainRequests.push(request)
    if(options.timeoutTopic&&!main&&request.generationConfig?.responseMimeType==='application/json'){
     const signal=init?.signal
@@ -194,7 +195,7 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
    }))}):'{"research":false,"operate_site":false,"reason":null,"topic_label":"fictional","state":"continue","confidence":1}'
    return new Response('data: '+JSON.stringify({candidates:[{content:{parts:[{text}]},finishReason:'STOP'}],usageMetadata:{promptTokenCount:3,candidatesTokenCount:2}})+'\n\n',{headers:{'content-type':'text/event-stream'}})
   }))
-  const decisionRuntime=createDecisionRuntime({llmProvider:provider,defaultLlmModel:'gemini-3.6-flash-standard'})
+  const decisionRuntime=createDecisionRuntime({llmProvider:provider,defaultLlmModel:standardGemini.alias})
   async function turn(id:string,text:string){
    nativeQueryStart=nativeQueries.length
    const started=performance.now()
