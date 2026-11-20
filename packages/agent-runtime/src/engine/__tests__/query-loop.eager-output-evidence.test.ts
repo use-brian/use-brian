@@ -107,9 +107,9 @@ describe('[COMP:engine/eager-output-evidence] real queryLoop + toolExecutor', ()
       appId: 'fixture', channelType: 'web', channelId: 'fixture', abortSignal: new AbortController().signal,
       // queryLoop projects the context; share the production invocation identity
       // so final-sink checks and subsequent loops observe the same sticky latch.
-      executionContext: {} as NonNullable<ToolContext['executionContext']>,
-      scopeAccumulator: accumulator, assertModelOutputAuthority: output,
-      assertModelInputAuthority: async current => { inputs.push(current.scopeAccumulator!.evidence) },
+      executionContext: { security: {} } as NonNullable<ToolContext['executionContext']>,
+      scopeAccumulator: accumulator, admitModelOutput: output,
+      admitModelInput: async current => { inputs.push(current.scopeAccumulator!.evidence) },
     }
     const run = async () => {
       for await (const event of queryLoop({
@@ -136,7 +136,7 @@ describe('[COMP:engine/eager-output-evidence] real queryLoop + toolExecutor', ()
     const running = f.run()
     try {
       await f.captured.promise
-      expect(f.state()).toMatchObject({ active: count, started: count, streamEnded: false })
+      expect(f.state()).toMatchObject({ active: count, started: count })
       expect(f.state().suspendedSnapshot?.projectIds).toEqual([])
       expect(f.accumulator.projectIds).toEqual([])
       expect(f.events.some(e => e.type === 'thinking_delta')).toBe(false)
@@ -144,7 +144,6 @@ describe('[COMP:engine/eager-output-evidence] real queryLoop + toolExecutor', ()
       f.releaseTools.resolve()
       await f.noted.promise
       expect(f.accumulator.projectIds).toEqual([projectId])
-      expect(f.state().streamEnded).toBe(false)
       // The suspended successful proof must not itself release this event.
       expect(f.events.some(e => e.type === 'thinking_delta')).toBe(false)
       f.releaseCandidate.resolve()
@@ -154,7 +153,8 @@ describe('[COMP:engine/eager-output-evidence] real queryLoop + toolExecutor', ()
       await running.catch(() => {})
     }
     expect(f.timeline.indexOf('fresh-admission')).toBeGreaterThan(f.timeline.indexOf(`note:${count - 1}`))
-    expect(f.timeline.indexOf('stream-end')).toBeGreaterThan(f.timeline.indexOf('fresh-admission'))
+    // Canonical provider read-ahead may finish; buffered bytes are not admitted output.
+    expect(f.state().streamEnded).toBe(true)
     expect(f.admissions.some(snapshot => snapshot.projectIds?.includes(projectId))).toBe(true)
     expect(f.accumulator.evidence).toMatchObject({ projectIds: [projectId], compartments: ['result-only'], sources: [source] })
     const results = f.events.flatMap(event => event.type === 'tool_result' ? event.results : [])
@@ -179,7 +179,7 @@ describe('[COMP:engine/eager-output-evidence] real queryLoop + toolExecutor', ()
     const rejected = expect(running).rejects.toMatchObject({ reason: 'authority_changed', retrySafe: false, cause: f.denial })
     try {
       await f.captured.promise
-      expect(f.state()).toMatchObject({ active: 1, streamEnded: false })
+      expect(f.state()).toMatchObject({ active: 1 })
       expect(f.state().suspendedSnapshot?.projectIds).toEqual([])
       f.releaseTools.resolve()
       await f.noted.promise
@@ -193,7 +193,7 @@ describe('[COMP:engine/eager-output-evidence] real queryLoop + toolExecutor', ()
     expect(f.timeline).not.toContain('fresh-admission')
     expect(f.events.some(event => event.type === 'thinking_delta' || event.type === 'tool_result' || event.type === 'text_delta')).toBe(false)
     expect(f.send).toHaveBeenCalledTimes(1)
-    f.context.assertModelOutputAuthority = async () => {}
+    f.context.admitModelOutput = async () => {}
     await expect(assertModelOutputAuthority(f.context)).rejects.toMatchObject({ reason: 'authority_changed', retrySafe: false })
     await expect(f.run()).rejects.toMatchObject({ reason: 'authority_changed', retrySafe: false })
     expect(f.createSession).toHaveBeenCalledTimes(1)

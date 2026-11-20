@@ -7,6 +7,7 @@ import { buildTool, type Tool, type ToolContext } from '../../tools/types.js'
 import { createLoopDetector } from '../loop-detector.js'
 import { queryLoop, type QueryEvent } from '../query-loop.js'
 import { createToolExecutor } from '../tool-executor.js'
+import { applyOutputRevisions, queryOutputProvenance, type OutputRecord } from '../output-provenance.js'
 import { NOOP_TURN_LEDGER } from '../turn-ledger.js'
 
 const usage = { inputTokens: 1, outputTokens: 1 }
@@ -88,6 +89,7 @@ describe('[COMP:engine/rejected-tool-input] recovery without executable diagnost
       const raw = JSON.stringify(original), originalCopy = structuredClone(original)
       const p = scripted([call(raw, 'rejected-1'), call(JSON.stringify(canonical), 'valid-2'), answer])
       const events: QueryEvent[] = [], snapshots: Message[][] = []
+      const records = new Map<string, OutputRecord>()
       const resolver = createConfirmationResolver()
       const initialEvidence = structuredClone(f.scopeAccumulator.evidence)
       for await (const event of queryLoop({ provider: p.provider, model: 'fixture-model', systemPrompt: 'Fictional fixture',
@@ -96,10 +98,18 @@ describe('[COMP:engine/rejected-tool-input] recovery without executable diagnost
         onTurnEnd: (_turn, history) => { snapshots.push(structuredClone(history)) },
       })) {
         events.push(event)
+        const provenance = queryOutputProvenance(event)
+        expect(provenance?.qualified).toBe(true)
+        applyOutputRevisions(records, provenance!)
         if (event.type === 'tool_confirmation_required') {
           expect(event.request).toMatchObject({ toolCallId: 'valid-2', input: canonical })
           resolver.resolve(event.request.toolCallId, 'deny')
         }
+      }
+      expect(records.size).toBe(3)
+      expect([...records.values()].every(record => record.sealed)).toBe(true)
+      for (const record of records.values()) {
+        expect(record.response.content.some(block => block.type === 'tool_use' && block.id === 'rejected-1')).toBe(false)
       }
       expect(p.sent).toHaveLength(3)
       expect(f.normalAsk).toHaveBeenCalledOnce()
@@ -174,7 +184,7 @@ describe('[COMP:engine/rejected-tool-input] recovery without executable diagnost
     const f=fixture(),before=structuredClone(f.scopeAccumulator.evidence)
     const p=scripted([call(JSON.stringify({...canonical,['bad\0key']:true}),'rejected-1'),call(JSON.stringify(canonical),'valid-2')])
     let revoked=false
-    f.context.assertModelInputAuthority=async()=>{if(revoked)throw new Error('Synthetic source authority withdrawn')}
+    f.context.admitModelInput=async()=>{if(revoked)throw new Error('Synthetic source authority withdrawn')}
     let failure:unknown
     try{
       for await(const event of queryLoop({provider:p.provider,model:'fixture-model',systemPrompt:'Fixture',messages:[{role:'user',content:'Test rejection recovery'}],
