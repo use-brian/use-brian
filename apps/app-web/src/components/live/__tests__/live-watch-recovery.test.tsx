@@ -3,15 +3,16 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-const f = vi.hoisted(() => ({ fetch: vi.fn(), history: vi.fn(), stop: vi.fn(), take: vi.fn(), drain: vi.fn(() => []), queue: vi.fn(), steer: vi.fn() }));
+const f = vi.hoisted(() => ({ fetch: vi.fn(), history: vi.fn(), stop: vi.fn() }));
 vi.mock("@/lib/auth-fetch", () => ({ authFetch: f.fetch }));
-vi.mock("@/lib/api/sessions", () => ({ fetchSessionMessages: f.history, stopTurn: f.stop, extractMessageText: () => "", stripAttachmentMarkup: (s: string) => s }));
-vi.mock("@/lib/use-mid-turn-queue", () => ({ useMidTurnQueue: () => ({ take: f.take, drain: f.drain, queue: f.queue, steer: f.steer, queued: [] }) }));
+vi.mock("@/lib/api/sessions", () => ({ readChatTurnStatus: async () => ({ status: "running", turnId: "a".repeat(64) }), fetchSessionMessages: f.history, stopTurn: f.stop, extractMessageText: () => "", stripAttachmentMarkup: (s: string) => s }));
+vi.mock("@/lib/offline/application-write-authority", () => ({ currentOfflineWriteAuthority: () => ({ apiOrigin: "https://api.example", viewerId: "viewer-1", workspaceId: "w1" }) }));
 vi.mock("@/components/chrome/chat-confirmation-card", () => ({ ChatConfirmationCard: ({ confirmation }: any) => <div data-approval={confirmation.approvalId ?? confirmation.toolCallId}>{confirmation.toolName}</div> }));
 import { LiveWatchPane } from "../live-watch-pane";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
+import { conversationRegistry } from "@/lib/chat/conversation-registry";
 import { APPROVALS_REFRESH_EVENT } from "@/lib/approvals-events";
 
 let host: HTMLDivElement, root: Root;
@@ -49,7 +50,7 @@ beforeEach(() => {
   });
   host = document.createElement("div"); document.body.append(host); root = createRoot(host);
 });
-afterEach(async () => { await act(async () => { root.unmount(); await flush(); }); host.remove(); vi.useRealTimers(); });
+afterEach(async () => { await act(async () => { root.unmount(); await flush(); }); conversationRegistry().disposeAll(); host.remove(); vi.useRealTimers(); });
 
 describe("[COMP:app-web/live-watch-pane] approval recovery", () => {
   it("preserves a mounted Ask on HTTP503 and later recovers without any approval mutation", async () => {
@@ -83,16 +84,17 @@ describe("[COMP:app-web/live-watch-pane] approval recovery", () => {
   });
   it("does not fetch in hidden views, and recovers on visibility return", async () => {
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
-    // The one mount snapshot remains allowed; periodic recovery/stream is gated.
+    // The shared controller allows the initial hydrate and releases its
+    // existing follow after the upstream 60-second hidden grace period.
     pending.push(empty()); await mount();
-    expect(streamCalls).toBe(0);
+    expect(streamCalls).toBe(1);
     const count = f.fetch.mock.calls.length;
-    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
     expect(f.fetch.mock.calls).toHaveLength(count);
     pending.push(ask()); Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
     await act(async () => { document.dispatchEvent(new Event("visibilitychange")); await flush(); });
     expect(host.querySelector('[data-approval="approval-1"]')).not.toBeNull();
-    expect(streamCalls).toBe(1);
+    expect(streamCalls).toBe(2);
   });
   it("deduplicates slow pending reads across periodic, online and workspace signals", async () => {
     let finish!: (response: Response) => void;
@@ -108,7 +110,7 @@ describe("[COMP:app-web/live-watch-pane] approval recovery", () => {
     let finish!: (response: Response) => void;
     pending.push(new Promise(resolve => { finish = resolve; })); await mount();
     await act(async () => {
-      controllers[0]!.enqueue(new TextEncoder().encode('event: activity\ndata: {"event":"tool_confirmation_required","toolCallId":"live-1","toolName":"mcp_call","input":{}}\n\n'));
+      controllers[0]!.enqueue(new TextEncoder().encode(`event: status\ndata: ${JSON.stringify({ status: "running", turnId: "a".repeat(64) })}\n\nevent: activity\ndata: ${JSON.stringify({ event: "tool_confirmation_required", toolCallId: "live-1", toolName: "mcp_call", input: {}, turnId: "a".repeat(64) })}\n\n`));
       await flush();
       finish(empty()); await flush();
     });
@@ -118,12 +120,34 @@ describe("[COMP:app-web/live-watch-pane] approval recovery", () => {
     let finish!: (response: Response) => void;
     pending.push(new Promise(resolve => { finish = resolve; })); await mount();
     await act(async () => {
-      controllers[0]!.enqueue(new TextEncoder().encode('event: done\ndata: {}\n\n'));
+      controllers[0]!.enqueue(new TextEncoder().encode(`event: status\ndata: ${JSON.stringify({ status: "running", turnId: "a".repeat(64) })}\n\nevent: done\ndata: ${JSON.stringify({ turnId: "a".repeat(64) })}\n\n`));
       await flush(); finish(ask("stopped-turn")); await flush();
     });
     expect(host.querySelector("[data-approval]")).toBeNull();
     await act(async () => { window.dispatchEvent(new Event("online")); await vi.advanceTimersByTimeAsync(30_000); });
     expect(streamCalls).toBe(1);
+  });
+  it("removes an old card but preserves a newer live card observed during the read", async () => {
+    pending.push(ask()); await mount();
+    let finish!: (response: Response) => void;
+    pending.push(new Promise(resolve => { finish = resolve; })); await refresh();
+    await act(async () => {
+      controllers[0]!.enqueue(new TextEncoder().encode(`event: status\ndata: ${JSON.stringify({ status: "running", turnId: "a".repeat(64) })}\n\nevent: activity\ndata: ${JSON.stringify({ event: "tool_confirmation_required", toolCallId: "new-live", toolName: "mcp_call", input: {}, turnId: "a".repeat(64) })}\n\n`));
+      await flush(); finish(empty()); await flush();
+    });
+    expect(host.querySelector('[data-approval="approval-1"]')).toBeNull();
+    expect(host.querySelector('[data-approval="new-live"]')).not.toBeNull();
+    expect(f.fetch.mock.calls.every(([, options]) => options?.method === undefined)).toBe(true);
+  });
+  it("does not restore an older positive snapshot over a newer live card", async () => {
+    let finish!: (response: Response) => void;
+    pending.push(new Promise(resolve => { finish = resolve; })); await mount();
+    await act(async () => {
+      controllers[0]!.enqueue(new TextEncoder().encode(`event: status\ndata: ${JSON.stringify({ status: "running", turnId: "a".repeat(64) })}\n\nevent: activity\ndata: ${JSON.stringify({ event: "tool_confirmation_required", toolCallId: "new-live", toolName: "mcp_call", input: {}, turnId: "a".repeat(64) })}\n\n`));
+      await flush(); finish(ask("old-snapshot")); await flush();
+    });
+    expect(host.querySelector('[data-approval="old-snapshot"]')).toBeNull();
+    expect(host.querySelector('[data-approval="new-live"]')).not.toBeNull();
   });
   it("does not apply a late pending result to a different session", async () => {
     let finish!: (response: Response) => void;
