@@ -1,8 +1,9 @@
 /** [COMP:api/conversation-record-conversion] Native bounded exact-copy receiving proof. */
 import { randomUUID } from 'node:crypto'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
+import * as jitter from '@use-brian/core/scheduling/jitter.js'
 import pg from 'pg'
 import { persistentContextFixture } from './fixtures/persistent-context.js'
 import { addSessionMessage, createWorkspaceChatSession } from '../../db/sessions.js'
@@ -177,4 +178,77 @@ describe('[COMP:api/conversation-record-conversion] compiled record candidates',
       if (expectedRows === 1) await append('Fictional appended suffix after the worker stopped')
     }
   }, 20_000)
+
+  it('compiles ready records while a locked envelope backs off and later advances its committed cursor', async () => {
+    await drain()
+    const createRoom = () => createWorkspaceChatSession({ assistantId: example.assistantId, starterUserId: example.ownerId,
+      workspaceId: example.workspaceId, effectiveClearance: 'internal', authenticatedHuman: true })
+    const blocked = await createRoom(), ready = await createRoom()
+    await pool.query('DELETE FROM public.conversation_envelopes WHERE session_id=$1', [blocked.id])
+    await addSessionMessage({ sessionId: ready.id, role: 'assistant', scope: example.envelope,
+      content: [{ type: 'text', text: 'Fictional ready record during backfill contention' }] })
+    const saved = (await pool.query<{ after_session_id: string | null; complete: boolean }>(
+      'SELECT after_session_id,complete FROM public.conversation_envelope_backfill_checkpoint')).rows[0]!
+    const cursor = (await pool.query<{ cursor: string | null }>(
+      'SELECT id AS cursor FROM public.sessions WHERE id<$1 ORDER BY id DESC LIMIT 1', [blocked.id])).rows[0]?.cursor ?? null
+    await pool.query('UPDATE public.conversation_envelope_backfill_checkpoint SET after_session_id=$1,complete=false', [cursor])
+    const locker = await pool.connect()
+    const attempts: number[] = []
+    let enrollments = 0
+    let now = 0
+    const scheduled: { tick?: () => void | Promise<void> } = {}
+    // Drive the existing scheduler callback with a controlled clock while
+    // keeping the real transaction deadline, row locks and worker queries.
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => now)
+    const scheduler = vi.spyOn(jitter, 'startJitteredInterval').mockImplementation(callback => {
+      scheduled.tick = callback
+      return { _initialTimeout: null, _interval: null, _stopped: false, _ticking: false }
+    })
+    const query = pg.Client.prototype.query
+    const observer = vi.spyOn(pg.Client.prototype, 'query').mockImplementation(function (this: pg.Client, ...args: unknown[]) {
+      const [statement, binds] = args
+      if (typeof statement === 'string' && Array.isArray(binds)) {
+        if (statement.startsWith('SELECT public.advance_conversation_envelope_backfill($1)')) attempts.push(Number(binds[0]))
+        if (statement === 'SELECT public.enroll_existing_conversation_records($1)') enrollments++
+      }
+      return Reflect.apply(query, this, args)
+    } as typeof query)
+    let worker: Awaited<ReturnType<typeof startConversationRecordConversionWorker>> = null
+    try {
+      await locker.query('BEGIN')
+      await locker.query('SELECT id FROM public.sessions WHERE id=$1 FOR UPDATE', [blocked.id])
+      worker = await startConversationRecordConversionWorker()
+      expect(worker).not.toBeNull()
+      const tick = scheduled.tick
+      if (!tick) throw new Error('Conversion worker did not schedule its callback')
+      await tick()
+      expect((await exact(ready.id, example.ownerId, 'visual_rows_v1'))?.rows).toHaveLength(1)
+      for (let n = 0; n < 5; n++) {
+        now += 2000
+        await tick()
+      }
+      expect(attempts).toEqual([32, 16, 8, 4, 2, 1])
+      const duringCooldown = enrollments
+      for (let n = 0; n < 2; n++) {
+        now += 2000
+        await tick()
+      }
+      expect(enrollments).toBe(duringCooldown + 2)
+      expect(attempts).toEqual([32, 16, 8, 4, 2, 1])
+      expect((await pool.query('SELECT after_session_id FROM public.conversation_envelope_backfill_checkpoint')).rows[0]!.after_session_id).toBe(cursor)
+      await locker.query('COMMIT')
+      now += 60_000
+      await tick()
+      expect((await pool.query('SELECT 1 FROM public.conversation_envelopes WHERE session_id=$1', [blocked.id])).rowCount).toBe(1)
+    } finally {
+      await locker.query('ROLLBACK').catch(() => {})
+      locker.release()
+      await worker?.stop()
+      observer.mockRestore()
+      scheduler.mockRestore()
+      clock.mockRestore()
+      await pool.query('UPDATE public.conversation_envelope_backfill_checkpoint SET after_session_id=$1,complete=$2',
+        [saved.after_session_id, saved.complete])
+    }
+  })
 })
