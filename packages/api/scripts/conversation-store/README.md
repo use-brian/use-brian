@@ -447,3 +447,19 @@ callers already run with as a function-level setting (which stops inlining; bodi
 outcomes are unchanged), rewrites their typed registry records directly (nothing pins them) and ends
 with the witness refresh. `installation-authentication.mjs` still verifies 392 functions and compiles
 the tuned references with the same setting; the 8290 and 8294 recipes refuse each other's installation.
+
+## Verified retained graph adjacency
+
+`8327_conversation_graph_set_verification.sql` authenticates the installed
+8326 release before replacing the private `conversation_dag` body and
+refreshing its executable witness. Generate or verify the numbered SQL with
+`node packages/api/scripts/conversation-store/build-conversation-graph-set.mjs
+--candidate PATH` or `--check`.
+
+Each graph evaluation retains the canonical volatile closure reads and
+independently observes its complete adjacency again. The second observation
+uses typed joins for reviewed native node shapes and the canonical resolver
+for every other node. Any disagreement discards the candidate and reruns the
+canonical closure and adjacency. The evaluator still applies the same graph
+limits, source and privacy checks, deadlines, and before/after materialization
+proofs. The migration changes no persistent relation or execution grant.

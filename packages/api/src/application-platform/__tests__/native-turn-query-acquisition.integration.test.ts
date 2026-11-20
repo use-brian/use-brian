@@ -5,7 +5,8 @@ import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/conte
 import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
-import { getAppPool, getPool } from '../../db/client.js'
+import { applyRLSGucs, getAppPool, getPool, rollbackAndRelease, runWithAgentAccess } from '../../db/client.js'
+import { applyApplicationRLSContext, releaseApplicationTransactionBinding } from '../execution-context.js'
 import { readAdmittedSessionQuery } from '../../db/conversation-store.js'
 import { readRetainedContextFrame, writeSessionContextRevision } from '../../db/session-context-revisions.js'
 import { addSessionMessage, createWorkspaceChatSession } from '../../db/sessions.js'
@@ -27,9 +28,11 @@ async function acquire(client: PoolClient, body = 3, topics = body): Promise<Jso
 async function original(client: PoolClient, body = 3, topics = body) {
   return captureConversationQuery(client, f.workspaceId, { sessionId: f.session.id, throughSequence: body, topicThroughSequence: topics })
 }
-async function counts() {
-  return (await f.pool.query(`SELECT (SELECT count(*)::integer FROM application_field_observations WHERE workspace_id=$1) fields,
-    (SELECT count(*)::integer FROM application_query_domains WHERE workspace_id=$1) domains`, [f.workspaceId])).rows[0]
+async function counts(workspaceId = f.workspaceId) {
+  return (await f.pool.query(`SELECT (SELECT count(*)::integer FROM application_field_resources WHERE workspace_id=$1) resources,
+    (SELECT count(*)::integer FROM application_field_observations WHERE workspace_id=$1) fields,
+    (SELECT count(*)::integer FROM application_field_observation_sources WHERE workspace_id=$1) sources,
+    (SELECT count(*)::integer FROM application_query_domains WHERE workspace_id=$1) domains`, [workspaceId])).rows[0]
 }
 async function sourceProof(client: PoolClient, sources: ScopeSource[]) {
   return (await client.query('SELECT capture_conversation_evidence($1,$2) value', [f.workspaceId,
@@ -140,6 +143,105 @@ describe.sequential('[COMP:api/native-turn-frame] canonical conversation query a
       await expect(frame(client => acquire(client, 4, 4))).rejects.toMatchObject({ code: 'scope_source_changed', cause: { code: '42501', message: 'scope_source_changed' } })
       expect(await counts()).toEqual(before)
     } finally { await f.pool.query(`DROP TRIGGER ${trigger} ON application_field_observations;DROP FUNCTION ${trigger}()`) }
+  }, 60_000)
+
+  it.each(['hold', 'membership'] as const)('rechecks concurrent %s at the observation boundary', async change => {
+    const current = await persistentContextFixture()
+    const latch = `native_query_latch_${randomUUID().replaceAll('-', '')}`
+    let barrier: PoolClient | undefined
+    let mutator: PoolClient | undefined
+    let pending: Promise<unknown> | undefined
+    let pendingChange: Promise<unknown> | undefined
+    try {
+      const history = await current.history()
+      const first = history[0]
+      const selection = { sessionId: current.session.id, throughSequence: history.at(-1)!.sequenceNum, topicThroughSequence: 0 }
+      const context = await current.modelContext(current.firstId)
+
+      // The barrier holds the app reader after its first graph read. A third
+      // connection can now change unpinned state or prove it waits on a pin.
+      await current.pool.query(`CREATE FUNCTION ${latch}() RETURNS trigger LANGUAGE plpgsql
+        SET search_path=pg_catalog,public,pg_temp AS $fixture$
+        BEGIN
+          IF NEW.workspace_id='${current.workspaceId}'::uuid THEN
+            PERFORM pg_advisory_xact_lock(hashtextextended('${latch}',0));
+          END IF;
+          RETURN NULL;
+        END $fixture$;
+        CREATE TRIGGER ${latch} AFTER INSERT ON application_field_observations FOR EACH ROW EXECUTE FUNCTION ${latch}()`)
+
+      const before = await counts(current.workspaceId)
+      barrier = await current.pool.connect()
+      await barrier.query('BEGIN')
+      const locker = (await barrier.query<{ pid: number }>(
+        'SELECT pg_backend_pid() pid,pg_advisory_xact_lock(hashtextextended($1,0))', [latch])).rows[0]
+      mutator = await current.pool.connect()
+      await mutator.query('BEGIN')
+      await mutator.query("SET LOCAL statement_timeout='5s'")
+      const writer = (await mutator.query<{ pid: number }>('SELECT pg_backend_pid() pid')).rows[0]
+
+      const readAsOriginalMember = (started?: (pid: number) => void) => runWithAgentAccess(context.execution.security.access, async () => {
+        const client = await getAppPool().connect()
+        try {
+          await client.query('BEGIN')
+          await applyRLSGucs(client, current.firstId, current.assistantId)
+          await applyApplicationRLSContext(client, context.execution)
+          const reader = (await client.query<{ pid: number; role: string; login: string }>(
+            'SELECT pg_backend_pid() pid,current_user AS role,session_user AS login')).rows[0]
+          expect(reader).toMatchObject({ role: 'app_user', login: 'app_user' })
+          started?.(reader.pid)
+          const captured = await captureConversationQuery(client, current.workspaceId, selection)
+          await client.query('COMMIT')
+          return captured.history.slice(1).map(entry => entry.row?.id)
+        } finally {
+          releaseApplicationTransactionBinding(client)
+          await rollbackAndRelease(client)
+        }
+      }).then(value => ({ value }), error => ({ error }))
+
+      let readerPid: number | undefined
+      pending = readAsOriginalMember(pid => { readerPid = pid })
+
+      const blockedBy = async (pid: number, blocker: number) => (await current.pool.query<{ blocked: boolean }>(
+        'SELECT $2::integer=ANY(pg_blocking_pids($1)) blocked', [pid, blocker])).rows[0].blocked
+      await expect.poll(async () => {
+        return readerPid !== undefined && blockedBy(readerPid, locker.pid)
+      }, { timeout: 8_000 }).toBe(true)
+
+      if (change === 'hold') {
+        expect((await mutator.query(`INSERT INTO scope_resource_states(workspace_id,resource_kind,resource_id,resource_version,
+          review_state,classification_revision,holding_reason)
+          SELECT workspace_id,'session_message',id,scope_version::text,'held',1,'Concurrent fixture hold' FROM session_messages WHERE id=$1`,
+        [first.id])).rowCount).toBe(1)
+        await mutator.query('COMMIT')
+        await barrier.query('ROLLBACK')
+        expect(await pending).toMatchObject({ error: { code: '42501', message: 'scope_source_changed' } })
+        expect(await counts(current.workspaceId)).toEqual(before)
+      } else {
+        const membership = mutator
+        pendingChange = membership.query("UPDATE workspace_members SET clearance='public' WHERE workspace_id=$1 AND user_id=$2",
+          [current.workspaceId, current.firstId]).then(async result => {
+          await membership.query('COMMIT')
+          return { updated: result.rowCount }
+        }).catch(error => ({error}))
+        await expect.poll(() => blockedBy(writer.pid, readerPid!), { timeout: 4_000 }).toBe(true)
+        await barrier.query('ROLLBACK')
+        expect(await pending).toEqual({ value: history.map(message => message.id) })
+        expect(await pendingChange).toEqual({ updated: 1 })
+        expect(await readAsOriginalMember()).toMatchObject({ error: { code: '42501', message: 'scope_source_changed' } })
+      }
+
+      const stillAuthorized = await current.modelContext(current.secondId)
+      const recaptured = await readAdmittedSessionQuery({ ...selection, authority: stillAuthorized })
+      expect(recaptured.history.map(message => message.id)).toEqual(history.slice(change === 'hold' ? 1 : 0).map(message => message.id))
+    } finally {
+      if (barrier) await rollbackAndRelease(barrier)
+      await pending
+      await pendingChange
+      if (mutator) await rollbackAndRelease(mutator)
+      await current.pool.query(`DROP TRIGGER IF EXISTS ${latch} ON application_field_observations;DROP FUNCTION IF EXISTS ${latch}()`)
+      await current.cleanup()
+    }
   }, 60_000)
 
   it('checks a historical annotation ancestor under the same stable query-field identity before payload', async () => {

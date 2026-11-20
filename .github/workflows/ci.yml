@@ -66,7 +66,9 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Verify canonical conversation migration source
-        run: node packages/api/scripts/conversation-store/build.mjs --check
+        run: |
+          node packages/api/scripts/conversation-store/build.mjs --check
+          node packages/api/scripts/conversation-store/build-conversation-graph-set.mjs --check
 
       # Clean API compilation can exceed 4 GiB; keep this a step-local build budget.
       - name: Build

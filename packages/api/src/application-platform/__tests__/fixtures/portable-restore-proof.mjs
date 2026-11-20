@@ -12,7 +12,7 @@
 // receiving checks. Both clusters are disposed; only non-secret receipts remain.
 import {createHash} from 'node:crypto'
 import {copyFile,mkdir,readFile,readdir,rm,writeFile} from 'node:fs/promises'
-import {join,resolve} from 'node:path'
+import {dirname,join,resolve} from 'node:path'
 import {fileURLToPath} from 'node:url'
 import {parseArgs} from 'node:util'
 import {createRequire} from 'node:module'
@@ -23,16 +23,23 @@ const pg=createRequire(join(apiRoot,'package.json'))('pg')
 const {createLocalFixture,runCommand}=await import(join(ossRoot,'scripts/crm/local-fixture.mjs'))
 const sha=value=>createHash('sha256').update(value).digest('hex')
 const suite='src/application-platform/__tests__/portable-restore.integration.test.ts'
+const historicalMemorySource='scripts/conversation-store/historical/8268_native_memory_query_write_lineage.sql'
+
+function pinnedReleaseAssets(migrations){
+ return ['src/migrations/renames.ts',
+  ...Object.hasOwn(migrations,'8326_native_memory_query_write_contract.sql')?[historicalMemorySource]:[]]
+}
 
 async function migrationSnapshot(){
  const dir=join(apiRoot,'migrations'),names=(await readdir(dir)).filter(name=>name.endsWith('.sql')).sort()
  return Object.fromEntries(await Promise.all(names.map(async name=>[name,sha(await readFile(join(dir,name)))])))
 }
 
-async function receivingSources(){
+async function receivingSources(pinnedAssets){
  const store='packages/api/scripts/conversation-store/',files=[
   'packages/api/src/application-platform/__tests__/portable-restore.integration.test.ts',
   'packages/api/src/db/__tests__/programmatic-intake-ready.integration.test.ts','packages/api/src/migrations/execution-sql.ts',
+  ...pinnedAssets.map(file=>'packages/api/'+file),
   ...['portable-restore.mjs','portable-restore-seals.mjs','installation-release.mjs','build-portable-restore-roster.mjs',
    'installation-authentication-8297.mjs','installation-authentication-8298.mjs','installation-authentication-8300.mjs',
    'installation-authentication-8301.mjs'].map(name=>store+name),
@@ -45,11 +52,15 @@ async function main(){
  if(!values['pg-bin']||!values.evidence)throw Error('Supply --pg-bin and a new absolute --evidence directory')
  const evidence=resolve(values.evidence);await mkdir(evidence,{mode:0o700})
  const work=join(evidence,'private');await mkdir(work,{mode:0o700})
- const before=await migrationSnapshot(),sourceBefore=await receivingSources()
- // Pinned shipped release: the exact migration set both chains apply.
- const sourceRoot=join(work,'shipped');await mkdir(join(sourceRoot,'migrations'),{recursive:true});await mkdir(join(sourceRoot,'src/migrations'),{recursive:true})
+ const before=await migrationSnapshot(),pinnedAssets=pinnedReleaseAssets(before),sourceBefore=await receivingSources(pinnedAssets)
+ // Pin the exact migration set and the shipped source assets used to authenticate it.
+ const sourceRoot=join(work,'shipped');await mkdir(join(sourceRoot,'migrations'),{recursive:true})
  for(const name of Object.keys(before))await copyFile(join(apiRoot,'migrations',name),join(sourceRoot,'migrations',name))
- await copyFile(join(apiRoot,'src/migrations/renames.ts'),join(sourceRoot,'src/migrations/renames.ts'))
+ for(const file of pinnedAssets){
+  const target=join(sourceRoot,file)
+  await mkdir(dirname(target),{recursive:true})
+  await copyFile(join(apiRoot,file),target)
+ }
  const env={PATH:process.env.PATH,HOME:process.env.HOME,TMPDIR:process.env.TMPDIR,LANG:process.env.LANG}
  const phaseEnv={BRIAN_PORTABLE_RESTORE_STATE:join(work,'state'),BRIAN_PORTABLE_RESTORE_SOURCE_ROOT:sourceRoot+'/',CI:'true',NO_COLOR:'1'}
  if(Object.hasOwn(before,'8296_configured_task_publication.sql'))phaseEnv.BRIAN_PORTABLE_CONFIGURED_TASK_PROOF=join(work,'configured-task-proof.json')
@@ -98,7 +109,7 @@ async function main(){
   try{await source?.dispose()}finally{await target?.dispose()}
   receipt.disposed=true
   receipt.migrationsUnchanged=JSON.stringify(await migrationSnapshot())===JSON.stringify(before)
-  receipt.sourcesUnchanged=JSON.stringify(await receivingSources())===JSON.stringify(sourceBefore)
+  receipt.sourcesUnchanged=JSON.stringify(await receivingSources(pinnedAssets))===JSON.stringify(sourceBefore)
   await rm(work,{recursive:true,force:true})
   receipt.completedAt=new Date().toISOString()
   await writeFile(join(evidence,'receipt.json'),JSON.stringify(receipt,null,2)+'\n')
