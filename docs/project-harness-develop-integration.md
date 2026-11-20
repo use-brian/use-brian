@@ -18,7 +18,7 @@ Foundation and verification SQL are byte-identical to the previous branch candid
 
 The old branch 8272 helper compiler is **superseded**, not blindly renumbered. Develop 8269 replaces fingerprint hashing with executable-record comparison, and 8274/8276 establish the portable **`native_executable_contract_v1`** registry. The incompatible compiler and its obsolete compiler-specific unit test are removed from the active source chain. New coverage instead verifies the current source-owned installation, metadata tamper refusal, private registry ACLs and unsupported candidate boundaries.
 
-8331 requires the 8328 receipt and current portable registry. It preserves the exact predecessor trigger body/metadata/private ACL, receipt equality/consumption, live person+assistant membership, Project-only audience, clearance, original actor, trigger identity and unknown-pin-consumer refusal. Its before/after proof ports are the complete current `native_turn_helpers_current`, `native_turn_publication_contract` and `native_retained_helpers_current` cohorts, not obsolete legacy batch helper names. It does not repin unrelated helpers or turn observed database hashes into authentication roots.
+8331 requires the 8328 receipt and current portable registry. It authenticates the exact predecessor trigger body/metadata and either its owner-only ACL or the one source-reviewed historical non-grantable `app_user` EXECUTE edge, narrowing only that edge before installing the successor. Receipt equality/consumption, live person+assistant membership, Project-only audience, clearance, original actor, trigger identity and unknown-pin-consumer refusal remain enforced. Its before/after proof ports are the complete current `native_turn_helpers_current`, `native_turn_publication_contract` and `native_retained_helpers_current` cohorts, not obsolete legacy batch helper names. It does not repin unrelated helpers or turn observed database hashes into authentication roots.
 
 Both native and embedded entry points check candidate compatibility **before ledger creation, recovery or rename aliasing**. The native runner binds each of these exact three successor SQL effects and its ledger receipt in one transaction; lost-acknowledgment continuation is tested. There is no generic numeric-range receipt rule or changed-DDL rename alias.
 
@@ -58,7 +58,29 @@ node scripts/crm/local-fixture.mjs --pg-bin "$PG_BIN" --ordinary-owner --runtime
   src/routes/__tests__/sessions-workspace-project-admission.integration.test.ts --maxWorkers=1
 ```
 
-Initial replay failures exposed the portable registry type, retired helper names and stale test assumptions; these were corrected against published source, not bypassed. No SQL/provider/fixture deadlines, authority checks, source closure/CAS or application-role restrictions were relaxed. Full embedded-chain replay and broad all-profile/release acceptance are not claimed by these focused checks.
+Initial replay failures exposed the portable registry type, retired helper names and stale test assumptions; these were corrected against published source, not bypassed. No SQL/provider/fixture deadlines, authority checks, source closure/CAS or application-role restrictions were relaxed. These initial focused checks alone did not establish full embedded-chain replay or broad all-profile/release acceptance; the subsequent CI repair adds the specific historical-owner replay below.
+
+## PR #497 CI repair
+
+The first rebased CI run exposed five failing jobs, with three distinct test-port assumptions and two integration gaps:
+
+- API delivery snapshot tests now require a fresh admission of current evidence after a successful superseded candidate, rather than unconditional refusal. Added assertions retain sticky genuine errors, the 32-attempt bound, cancellation, identity/access changes and disposal refusal.
+- The owner-wiring source assertion now requires the privately retained invocation accumulator to be forwarded and checked, not the obsolete two-argument call.
+- The frontend ownership test now settles attachment's initial single-flight read before changing the synthetic response. It additionally checks 503/network preservation and authoritative empty clearing; no production recovery behavior was weakened.
+- The historical-owner full embedded replay proved that only the admission trigger's ACL differed: an inherited `app_user` EXECUTE grant from the supported legacy chain. 8331 authenticates the unchanged source/metadata and exact finite ACL profile, refuses unexpected principals/grant options/PUBLIC/defaults atomically, then removes only that edge. It preserves OID, owner, trigger registration and unrelated defaults. The original **owner-legacy replay passed 92 assertions**; the focused migration unit suite passed **35 tests**.
+- Portable restore needed a real release extension, not a count adjustment. A pinned 8328 baseline classification adds exactly seven durable tables; the 8331 release profile composes the current 8328/CRM proof with exact source-pinned harness schema/routine/ACL/trigger metadata in the same authentication snapshot and requires all three successor receipts. Unknown names/overloads/drift remain refused. The roster has **603 tables / 807 migrations**. The 8273 cohort is unchanged. The expected artifact generator accepts no connection URL: it creates a new owned ordinary-owner fixture, validates the pinned recipes and reviewed classification, and generates/checks only that fresh source installation.
+
+A real two-installation PostgreSQL 18 portable proof passed: distinct catalog OIDs, all seven populated harness tables, two revision histories, independent approval, terminal human run/evidence, exact three-event audit without duplicate trigger effects, exact row digests/timestamps/attribution, immutable history, restricted-role denial, live-session guards, 18 archive/catalog/receipt refusals and withheld activation until receiving proof. Both disposable fixtures were disposed; all 807 migration files and 207 pinned proof sources remained unchanged. This supports the current shipped source release, **not** an upgrade of the historical 755-migration candidate.
+
+Parent reruns of the original ordinary CI shards passed: API **2/4: 3,165 tests**, API **3/4: 2,887 tests**, web **3/4: 1,935 tests** (existing declared skips unchanged). API typecheck passed. The guarded native verifier passed all three modes again with **17 tests each / 51 executions**. Targeted owner-wiring/delivery units and frontend recovery suites also passed. Broad all-profile/release acceptance and the separate page acceptance remain unclaimed; the pushed revision still needs its own GitHub CI result.
+
+Reproducible portable commands (owned disposable fixtures only):
+
+```sh
+node packages/api/scripts/conversation-store/build-portable-harness-catalog.mjs --pg-bin "$PG_BIN" --check
+node packages/api/src/application-platform/__tests__/fixtures/portable-restore-proof.mjs \
+  --pg-bin "$PG_BIN" --evidence "$NEW_PRIVATE_EVIDENCE_DIRECTORY"
+```
 
 ## Live and release limits
 
