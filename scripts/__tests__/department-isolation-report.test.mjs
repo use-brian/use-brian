@@ -1,11 +1,16 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { readdirSync, statSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { cleanRuntimeEnvironment } from '../crm/local-fixture.mjs'
 import { embeddedTestFiles } from '../testing/embedded-database-tests.mjs'
 import {
   DEPARTMENT_ISOLATION_BOUNDARIES, DEPARTMENT_ISOLATION_CASES, DEPARTMENT_ISOLATION_SUITES,
 } from '../../packages/shared/src/department-isolation-coverage.ts'
-import { acceptanceMatrix, acceptanceShards, createAcceptanceReport, mergeAcceptanceReports, parseShard, suitesForShard } from '../testing/department-isolation-report.mjs'
+import { acceptanceMatrix, acceptanceShards, createAcceptanceReport, fixtureChecksForSuites, mergeAcceptanceReports, parseShard, suitesForShard } from '../testing/department-isolation-report.mjs'
 
 const metadata = { revision: 'fixture-revision', sourceHashes: { 'fixture.ts': 'hash' }, dirtySourceHashes: {},
   migration: { latest: 'fixture.sql', count: 1, ledgerHash: 'fixture-ledger' } }
@@ -40,6 +45,56 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
       }
     }
   })
+  it('requires migration diagnostics once and clone checks on every native shard in both profiles', () => {
+    const clones = 'scripts/__tests__/prepared-fixture.integration.test.mjs'
+    const locks = 'scripts/__tests__/migration-diagnostics.integration.test.mjs'
+    for (const profile of ['full', 'current']) {
+      const shards = acceptanceShards(profile)
+      const checks = shards.map(index => {
+        const suites = suitesForShard({ index, total: shards.length }, profile)
+        const files = fixtureChecksForSuites(suites)
+        assert.equal(files.includes(clones), suites.some(suite => suite.packageDir !== 'apps/api'))
+        return files
+      })
+      assert.equal(checks.flat().filter(file => file === locks).length, 1)
+      assert.deepEqual(fixtureChecksForSuites(suitesForShard(null, profile)), [clones, locks])
+    }
+  })
+  it('merges verified receipts in a checkout without installed packages', t => {
+    const root = mkdtempSync(join(tmpdir(), 'ci-report-merge-'))
+    t.after(() => rmSync(root, { recursive: true, force: true }))
+    const cli = 'scripts/test-department-isolation.mjs'
+    const sources = [cli, 'scripts/testing/department-isolation-report.mjs', 'scripts/crm/local-fixture.mjs',
+      'scripts/crm/runtime-role.mjs', 'packages/shared/src/department-isolation-coverage.ts']
+    const sourceHashes = {}
+    for (const path of sources) {
+      const data = readFileSync(new URL(`../../${path}`, import.meta.url))
+      mkdirSync(dirname(join(root, path)), { recursive: true })
+      writeFileSync(join(root, path), data)
+      sourceHashes[path] = createHash('sha256').update(data).digest('hex')
+    }
+    mkdirSync(join(root, 'packages/api/migrations'), { recursive: true })
+    const options = { cwd: root, env: cleanRuntimeEnvironment(process.env), encoding: 'utf8' }
+    const git = args => execFileSync('git', args, options).trim()
+    git(['init', '--quiet'])
+    git(['add', '.'])
+    git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.com', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture'])
+    const revision = git(['rev-parse', 'HEAD'])
+    const directory = join(root, 'receipts')
+    mkdirSync(directory)
+    for (const part of receipts('current')) {
+      writeFileSync(join(directory, `department-isolation-${part.shard.index}.json`),
+        JSON.stringify({ ...part, revision, sourceHashes, dirtySourceHashes: {} }))
+    }
+    const report = join(root, 'merged.json')
+    const args = [cli, '--profile', 'current', '--merge', directory, '--report', report]
+    execFileSync(process.execPath, args, options)
+    assert.equal(JSON.parse(readFileSync(report, 'utf8')).profileAccepted, true)
+    rmSync(join(directory, 'department-isolation-1.json'))
+    const missing = spawnSync(process.execPath, args, options)
+    assert.equal(missing.status, 1)
+    assert.match(missing.stderr, /Missing acceptance shards/)
+  })
   it('keeps heavy embedded replays apart and automatically includes new files', () => {
     const files = readdirSync(new URL('../../apps/api/src/__tests__/', import.meta.url))
     files.push('future-fixture.test.ts', 'helper.ts')
@@ -73,7 +128,9 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
       const indexes = acceptanceShards(profile)
       const partitions = indexes.map(index => suitesForShard(parseShard(`${index}/${indexes.length}`), profile))
       const matrix = acceptanceMatrix(profile).include
-      assert.deepEqual(matrix.map(entry => entry.shard), indexes)
+      assert.deepEqual(matrix.map(entry => entry.shard).toSorted((a, b) => a - b), indexes)
+      assert.deepEqual(matrix.slice(0, 2).flatMap(entry => partitions[entry.shard - 1].map(suite => suite.id)),
+        ['recovered-calendar-history', 'retained-conversation'])
       assert.deepEqual(matrix.filter(entry => entry.timeoutMinutes === 45)
         .flatMap(entry => partitions[entry.shard - 1].map(suite => suite.id)).sort(),
       ['recovered-calendar-history', 'retained-conversation'])

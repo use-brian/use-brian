@@ -18,6 +18,7 @@ import {
   tierCaseExpression,
   tierClassifierExpression,
   registryRow,
+  servingModelAlias,
   menuForClass,
   activeForClass,
   isRegistryModelAvailable,
@@ -63,6 +64,7 @@ export function ensureServableModel(
   model: string,
   configuredProviders: ProviderAvailability,
 ): string {
+  model = servingModelAlias(model)
   const row = registryRow(model)
   if (!row) return model
   const rowAvailable = isRegistryModelAvailable(row, configuredProviders)
@@ -263,7 +265,7 @@ export function backgroundLatencyBudgetMs(model: string): number {
 
 /**
  * Model alias mapping for the selector — the registry rows flagged with a
- * `chatTierKey`. Standard runs Flash 3.6 (the same model as Pro) under a
+ * `chatTierKey`. Standard runs Flash 3.8 (the same model as Pro) under a
  * synthetic id and a tighter budget; Research runs Gemini 4 Argon under a synthetic
  * id on the deep budget. See the registry rows for the full provenance notes.
  */

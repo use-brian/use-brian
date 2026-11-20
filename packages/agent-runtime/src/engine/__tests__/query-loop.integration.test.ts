@@ -1,3 +1,4 @@
+import { chatTierDefaults } from '@use-brian/shared/model-registry'
 import { describe, it, expect } from 'vitest'
 import { NOOP_TURN_LEDGER } from '../turn-ledger.js'
 import dotenv from 'dotenv'
@@ -9,6 +10,7 @@ import { queryLoop, type QueryEvent } from '../query-loop.js'
 
 dotenv.config({ path: resolve(import.meta.dirname, '..', '..', '..', '..', '..', '.env') })
 
+const proModel = chatTierDefaults().pro
 const apiKey = process.env.GEMINI_API_KEY
 const describeIf = apiKey ? describe : describe.skip
 
@@ -21,7 +23,7 @@ describeIf('[COMP:engine/query-loop] Query loop (integration)', () => {
 
     for await (const event of queryLoop({ ledger: NOOP_TURN_LEDGER,
       provider,
-      model: 'gemini-flash',
+      model: proModel,
       systemPrompt: 'You are a test assistant. Be extremely concise.',
       messages: [{ role: 'user', content: 'What is 2 + 2? Answer with just the number.' }],
       tools: new Map(),
@@ -67,7 +69,7 @@ describeIf('[COMP:engine/query-loop] Query loop (integration)', () => {
 
     for await (const event of queryLoop({ ledger: NOOP_TURN_LEDGER,
       provider,
-      model: 'gemini-flash',
+      model: proModel,
       systemPrompt: 'You are a test assistant. Use tools when needed. Be concise.',
       messages: [{ role: 'user', content: 'What is the weather in Tokyo?' }],
       tools: new Map([['get_weather', weatherTool]]),

@@ -23,7 +23,7 @@ import {classifySession,policyFor} from '../../session-kind.js'
 import {persistentContextFixture} from '../../application-platform/__tests__/fixtures/persistent-context.js'
 
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
-const {authenticateConversationInstallation,currentFunctionCount}=await import(new URL('../../../scripts/conversation-store/installation-authentication.mjs',import.meta.url).href)
+const {authenticateConversationInstallation,currentReleaseSource}=await import(new URL('../../../scripts/conversation-store/installation-release.mjs',import.meta.url).href)
 await assertLocalFixture()
 let f:Awaited<ReturnType<typeof persistentContextFixture>>
 type Mode='committed'|'uncommitted'
@@ -269,10 +269,10 @@ describe.sequential('[COMP:api/native-turn-frame] durable turn completion header
  it('authenticates the four members from source and refuses each tampered member',async()=>{
   const authenticate=async()=>{const client=await getPool().connect();try{return await authenticateConversationInstallation(client)}finally{client.release()}}
   const refresh=()=>f.pool.query('SELECT native_turn_contract_witness_refresh() value')
-  // A fresh 8277 install records the witness itself; an earlier interrupted run may not have.
-  if(!(await authenticate()).witnessCurrent)await refresh()
+  const {name}=(await f.pool.query('SELECT name FROM public._migrations ORDER BY name COLLATE "C" DESC LIMIT 1')).rows[0]
+  const {functions:currentFunctionCount}=await currentReleaseSource(name)
   const first=await authenticate(),second=await authenticate()
-  expect(first).toEqual(second);expect(first.functions).toBe(currentFunctionCount);expect(currentFunctionCount).toBe(392);expect(first.witnessCurrent).toBe(true)
+  expect(first).toEqual(second);expect(first.functions).toBe(currentFunctionCount);expect(first.witnessCurrent).toBe(true)
   const guard=async()=>(await f.pool.query('SELECT native_turn_helpers_current() value')).rows[0].value as boolean
   // Claim and release are guarded too, so the lease is held across each tamper.
   const lane=lanes[3]!

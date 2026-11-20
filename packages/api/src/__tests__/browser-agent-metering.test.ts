@@ -1,7 +1,10 @@
+import { chatTierDefaults, registryRow } from '@use-brian/shared/model-registry'
 import { describe, expect, it, vi } from 'vitest'
 import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
 import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { createBrowserAgentUsageRecorder } from '../browser-agent-metering.js'
+
+const geminiWireModel = registryRow(chatTierDefaults().standard)!.apiModelId
 
 const context: ToolContext = {
   userId: '00000000-0000-4000-8000-000000000001',
@@ -29,7 +32,7 @@ describe('[COMP:sandbox/bu-fallback] Jev browser-agent usage metering', () => {
       },
       {
         kind: 'text_helper',
-        model: 'gemini-3-flash-preview',
+        model: geminiWireModel,
         inputTokens: 200,
         outputTokens: 25,
         providerKeySource: 'user',
@@ -49,7 +52,7 @@ describe('[COMP:sandbox/bu-fallback] Jev browser-agent usage metering', () => {
     }))
     expect(rows[0]?.actualCostUsd).toBeGreaterThan(0)
     expect(recordUsage).toHaveBeenNthCalledWith(2, expect.objectContaining({
-      model: 'gemini-3-flash-preview',
+      model: geminiWireModel,
       triggerKey: 'computer_use:jev_text_helper',
       providerKeySource: 'user',
       actualCostUsd: 0,

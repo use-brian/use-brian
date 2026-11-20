@@ -1,7 +1,12 @@
+import { chatTierDefaults, registryRow } from '@use-brian/shared/model-registry'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createGeminiProvider } from '../gemini.js'
+import { collectStream } from '../accumulator.js'
+import { stripUnsignedToolUses } from '../../engine/tool-pairing.js'
 import { bufferProviderStream } from '../stream-backpressure.js'
 import type { Message, StreamChunk, ToolDefinition } from '../types.js'
+
+const tiers = chatTierDefaults()
 
 /**
  * Guards the stateful Gemini session path AFTER it was converted from a
@@ -84,7 +89,7 @@ describe('[COMP:providers/gemini-session-stream] Gemini session streaming', () =
       kind: 'ai-studio', endpoint: () => 'https://model.example/stream',
       headers: async () => { if (phase === 'headers') await pause(); return {} },
     })
-    const session = provider.createSession!({ model: 'gemini-3.6-flash-standard', systemPrompt: 'Fictional context',
+    const session = provider.createSession!({ model: tiers.standard, systemPrompt: 'Fictional context',
       ...(phase === 'authority' ? { assertInputAuthority: pause } : {}),
     })
     const stream = bufferProviderStream(signal => session.send([{ role: 'user', content: 'Hello' }], { signal }))
@@ -102,7 +107,7 @@ describe('[COMP:providers/gemini-session-stream] Gemini session streaming', () =
       .mockResolvedValueOnce(sseResponse([{ candidates: [{ content: { role: 'model', parts: [{ text: 'Done.' }] }, finishReason: 'STOP' }] }]))
     const tools: ToolDefinition[] = [{ name: 'patchPage', description: 'Patch a page', parameters: { type: 'object', properties: {} } }]
     const catalog = [...tools, { name: 'findRecord', description: 'Find a record', parameters: { type: 'object' as const, properties: {} } }]
-    const session = createGeminiProvider('test-key').createSession({ model: 'gemini-pro', systemPrompt: 'sys', tools: catalog,
+    const session = createGeminiProvider('test-key').createSession({ model: tiers.pro, systemPrompt: 'sys', tools: catalog,
       toolRegistration: { mode: 'deferred', catalog, active: tools } })
     await collect(session.send([{ role: 'user', content: 'Build a page' }]))
     tools.push({ name: 'findRecord', description: 'Find a record', parameters: { type: 'object', properties: {} } })
@@ -114,16 +119,33 @@ describe('[COMP:providers/gemini-session-stream] Gemini session streaming', () =
     expect(JSON.stringify(second.contents)).toContain('sig-abc')
   })
 
-  it.each(['gemini-3.6-flash-standard', 'gemini-3.6-flash-pro', 'gemini-4-argon-research'])('records %s while sending its wire model', async model => {
+  it.each([tiers.standard, tiers.pro, tiers.max, tiers.research])('records %s while sending its wire model', async model => {
     fetchMock.mockResolvedValueOnce(sseResponse(TURN_CHUNKS))
     const session = createGeminiProvider('test-key').createSession({ model, systemPrompt: 'sys' })
     const chunks = await collect(session.send([{ role: 'user', content: 'Hello' }]))
     expect(chunks[0]).toMatchObject({ type: 'message_start', model })
-    const wireModel = model === 'gemini-4-argon-research' ? 'gemini-4-argon' : 'gemini-3.6-flash'
+    const wireModel = registryRow(model)!.apiModelId
     expect(fetchMock.mock.calls[0][0]).toContain(`/models/${wireModel}:streamGenerateContent`)
   })
 
-  it.each(['gemini-pro', 'gemini-4-argon-research'])('streams reasoning, reply text, and tool chunks for %s', async model => {
+  it.each([
+    ['gemini-3.6-flash-standard', tiers.standard, 'gemini-3.8-flash'],
+    ['gemini-3.6-flash-pro', tiers.pro, 'gemini-4-hydrogen'],
+    ['gemini-3.8-flash-pro', tiers.pro, 'gemini-4-hydrogen'],
+    ['gemini-3.8-flash', tiers.max, 'gemini-4-hydrogen'],
+  ])('upgrades saved selector %s on dispatch and records %s', async (saved, recorded, wire) => {
+    fetchMock.mockResolvedValueOnce(sseResponse(TURN_CHUNKS))
+    const provider = createGeminiProvider('test-key')
+    const chunks = await collect(provider.stream({
+      model: saved,
+      systemPrompt: 'sys',
+      messages: [{ role: 'user', content: 'Hello' }],
+    }))
+    expect(fetchMock.mock.calls[0][0]).toContain(`/models/${wire}:streamGenerateContent`)
+    expect(chunks[0]).toMatchObject({ type: 'message_start', model: recorded })
+  })
+
+  it.each([tiers.pro, tiers.research])('streams reasoning, reply text, and tool chunks for %s', async model => {
     fetchMock.mockResolvedValueOnce(sseResponse(TURN_CHUNKS))
     const session = createGeminiProvider('test-key').createSession({
       model,
@@ -204,7 +226,38 @@ describe('[COMP:providers/gemini-session-stream] Gemini session streaming', () =
     expect(chunks.at(-1)).toMatchObject({ type: 'message_end', stopReason: 'end_turn' })
   })
 
-  it.each(['gemini-pro', 'gemini-4-argon-research'])('preserves signatures across %s tool turns and drops thought bodies', async model => {
+  it.each(['session', 'restored'] as const)('replays signed Hydrogen text and both parallel calls through %s history', async path => {
+    const firstCall = { name: 'findPage', id: 'a', args: {} }
+    const secondCall = { name: 'findSkill', id: 'b', args: {} }
+    const parts = [
+      { text: 'Searching.', thoughtSignature: 'text-proof' },
+      { functionCall: firstCall, thoughtSignature: 'calls-proof' },
+      { functionCall: secondCall },
+    ]
+    fetchMock.mockResolvedValueOnce(sseResponse([{ candidates: [{ content: { role: 'model', parts }, finishReason: 'STOP' }] }]))
+    fetchMock.mockResolvedValueOnce(sseResponse([{ candidates: [{ content: { role: 'model', parts: [{ text: 'Done.' }] }, finishReason: 'STOP' }] }]))
+    const provider = createGeminiProvider('test-key')
+    const options = { model: tiers.pro, systemPrompt: 'Test.', maxTokens: 100_000 }
+    const session = provider.createSession(options)
+    const start: Message = { role: 'user', content: 'Find both.' }
+    const results: Message = { role: 'user', content: [firstCall, secondCall].map(call => ({
+      type: 'tool_result', name: call.name, toolUseId: call.id, content: 'ok',
+    })) }
+    if (path === 'session') {
+      await collect(session.send([start]))
+      await collect(session.send([results]))
+    } else {
+      const response = await collectStream(provider.stream({ ...options, messages: [start] }))
+      const messages = stripUnsignedToolUses([start, { role: 'assistant', content: response.content }, results])
+      await collect(provider.stream({ ...options, messages }))
+    }
+    const body = JSON.parse(fetchMock.mock.calls[1][1].body)
+    expect(body.generationConfig.maxOutputTokens).toBe(65_536)
+    expect(body.contents.find((turn: { role: string }) => turn.role === 'model').parts).toEqual(parts)
+    expect(body.contents.at(-1).parts).toHaveLength(2)
+  })
+
+  it.each([tiers.pro, tiers.research])('preserves signatures across %s tool turns and drops thought bodies', async model => {
     fetchMock.mockResolvedValueOnce(sseResponse(TURN_CHUNKS))
     fetchMock.mockResolvedValueOnce(
       sseResponse([

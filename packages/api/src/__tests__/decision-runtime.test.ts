@@ -1,3 +1,4 @@
+import { standardGemini } from './fixtures/standard-gemini.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createTypeSafeDecisionProvider } from '@use-brian/core/decisions/adapters/typesafe.js'
 import { DecisionAdapterRegistry } from '@use-brian/core/decisions/registry.js'
@@ -110,7 +111,7 @@ describe('[COMP:decisions/runtime] certified classifier admission', () => {
     const fetch = vi.fn(async (url: unknown, init?: RequestInit) => {
       if (String(url).includes('typesafe.ai')) return new Response('{}', { status: 503 })
       expect(full).toHaveBeenCalledTimes(mode === 'fallback' ? 2 : 1)
-      expect(String(url)).toContain('gemini-3.6-flash')
+      expect(String(url)).toContain(standardGemini.apiModelId)
       const body = JSON.parse(String(init?.body))
       expect(body.contents).toEqual([{ role: 'user', parts: [{ text: JSON.stringify({
         currentMessage: 'Compare fictional battery recycling methods',
@@ -120,7 +121,7 @@ describe('[COMP:decisions/runtime] certified classifier admission', () => {
       return researchCompletionResponse()
     })
     vi.stubGlobal('fetch', fetch)
-    const result = await classifyResearchIntent(bindScopeSources({ provider: routed, model: 'gemini-3.6-flash-standard',
+    const result = await classifyResearchIntent(bindScopeSources({ provider: routed, model: standardGemini.alias,
       message: 'Compare fictional battery recycling methods', recentConversation, authority: classifierAuthority(async () => {}),
       decisionRuntime: classifierRuntime({ llmProvider: routed,
         ...(mode === 'llm_only' ? { resolveRoute: () => ({ mode: 'llm_only' as const }) } : {}) }), assertInputAuthority: full }, [classifierSource]))
@@ -190,7 +191,7 @@ describe('[COMP:decisions/runtime] certified classifier admission', () => {
       yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } }
     })
     const routed = createRoutingProvider({ gemini: primary, anthropic: fallback })
-    const result = classifyResearchIntent({ provider: routed, model: 'gemini-3.6-flash-standard', message: 'Compare fictional energy storage methods',
+    const result = classifyResearchIntent({ provider: routed, model: standardGemini.alias, message: 'Compare fictional energy storage methods',
       decisionRuntime: classifierRuntime({ llmProvider: routed, resolveRoute: () => ({ mode: 'llm_only' }) }), assertInputAuthority: full })
     if (withdrawn) { await expect(result).rejects.toBe(refusal); expect(fallback.stream).not.toHaveBeenCalled() }
     else { expect(await result).toMatchObject({ research: false }); expect(fallback.stream).toHaveBeenCalledOnce(); expect(full).toHaveBeenCalledTimes(4) }
@@ -216,7 +217,7 @@ describe('[COMP:decisions/runtime] certified classifier admission', () => {
     const raw = createGeminiProvider({ kind: 'ai-studio', endpoint: () => 'https://fictional.example/completion', headers: async () => ({}) })
     const routed = createRoutingProvider({ gemini: wrapProvider(raw) })
     const route = await createWorkspaceCustomLlmResolver({
-      getTierRouteSystem: async () => ({ modelAlias: 'gemini-3.6-flash-standard' }),
+      getTierRouteSystem: async () => ({ modelAlias: standardGemini.alias }),
     } as unknown as WorkspaceCustomLlmEndpointStore, { managedProvider: routed })({ workspaceId: 'fictional-workspace', requestedTier: 'standard' })
     expect(route?.routeKind).toBe('managed')
     const fetch = vi.fn(async (url: unknown) => String(url).includes('typesafe.ai') ? new Response('{}', { status: 503 }) : typedCompletionResponse())
@@ -234,7 +235,7 @@ describe('[COMP:decisions/runtime] certified classifier admission', () => {
     const refusal = authorityRefusal(), replacement = vi.fn(async function* () { throw new Error('Unexpected replacement') })
     const raw = createGeminiProvider({ kind: 'ai-studio', endpoint: () => 'https://fictional.example/completion', headers: async () => ({}) })
     const routed = createRoutingProvider({ gemini: wrapProvider(raw) })
-    const route = await createWorkspaceCustomLlmResolver({ getTierRouteSystem: async () => ({ modelAlias: 'gemini-3.6-flash-standard' }) } as unknown as WorkspaceCustomLlmEndpointStore, { managedProvider: routed })({ workspaceId: 'fictional-workspace', requestedTier: 'standard' })
+    const route = await createWorkspaceCustomLlmResolver({ getTierRouteSystem: async () => ({ modelAlias: standardGemini.alias }) } as unknown as WorkspaceCustomLlmEndpointStore, { managedProvider: routed })({ workspaceId: 'fictional-workspace', requestedTier: 'standard' })
     const full = vi.fn(async () => {
       await Promise.resolve()
       if (boundary === 'method') routed.stream = replacement
@@ -255,7 +256,7 @@ describe('[COMP:decisions/runtime] certified classifier admission', () => {
     const provider = createGeminiProvider({ kind: 'ai-studio', endpoint: () => 'https://fictional.example/completion', headers: async () => ({}) })
     const fetch = vi.fn(async () => typedCompletionResponse())
     vi.stubGlobal('fetch', fetch)
-    const result = await classifyResearchIntent({ provider, model: 'gemini-2.5-flash', message: 'Fictional research context. '.repeat(6000),
+    const result = await classifyResearchIntent({ provider, model: standardGemini.alias, message: 'Fictional research context. '.repeat(6000),
       toolCandidates: [{ name: 'calendarListEvents', description: 'Read calendar events' }],
       decisionRuntime: classifierRuntime({ llmProvider: provider }), assertInputAuthority: async () => {} })
     expect(result.research).toBe(false)
@@ -271,9 +272,9 @@ describe('[COMP:decisions/runtime] certified classifier admission', () => {
       return typedCompletionResponse()
     })
     vi.stubGlobal('fetch', fetch)
-    const runtime = classifierRuntime({ llmProvider: provider, defaultLlmModel: 'gemini-2.5-flash',
+    const runtime = classifierRuntime({ llmProvider: provider, defaultLlmModel: standardGemini.alias,
       ...(mode === 'llm_only' ? { resolveRoute: () => ({ mode: 'llm_only' as const }) } : {}) })
-    const result = await classifyResearchIntent({ provider, model: 'gemini-2.5-flash', message: 'Check my calendar today',
+    const result = await classifyResearchIntent({ provider, model: standardGemini.alias, message: 'Check my calendar today',
       workspaceId: 'fictional-workspace', toolCandidates: [{ name: 'calendarListEvents', description: 'Read calendar events' }],
       decisionRuntime: runtime, assertInputAuthority: full })
     expect(result).toMatchObject({ research: false, toolNames: ['calendarListEvents'] })
@@ -287,9 +288,9 @@ describe('[COMP:decisions/runtime] certified classifier admission', () => {
     const provider = createGeminiProvider({ kind: 'ai-studio', endpoint: () => 'https://fictional.example/completion', headers: async () => ({}) })
     const fetch = vi.fn(async (url: unknown) => String(url).includes('typesafe.ai') ? new Response('{}', { status: 503 }) : typedCompletionResponse())
     vi.stubGlobal('fetch', fetch)
-    await expect(classifyResearchIntent({ provider, model: 'gemini-2.5-flash', message: 'Check my calendar today',
+    await expect(classifyResearchIntent({ provider, model: standardGemini.alias, message: 'Check my calendar today',
       workspaceId: 'fictional-workspace', toolCandidates: [{ name: 'calendarListEvents', description: 'Read calendar events' }],
-      decisionRuntime: classifierRuntime({ llmProvider: provider, defaultLlmModel: 'gemini-2.5-flash' }), assertInputAuthority: full })).rejects.toBe(refusal)
+      decisionRuntime: classifierRuntime({ llmProvider: provider, defaultLlmModel: standardGemini.alias }), assertInputAuthority: full })).rejects.toBe(refusal)
     expect(fetch).toHaveBeenCalledTimes(boundary === 'primary' ? 0 : boundary === 'dispatch' ? 1 : 2)
   })
 
@@ -298,7 +299,7 @@ describe('[COMP:decisions/runtime] certified classifier admission', () => {
     const replacement = vi.fn(async function* () { throw new Error('Replacement must not execute') })
     const full = vi.fn(async () => { await Promise.resolve(); provider.stream = replacement })
     vi.stubGlobal('fetch', vi.fn(async () => typedCompletionResponse()))
-    const result = await classifyResearchIntent({ provider, model: 'gemini-2.5-flash', message: 'Check my calendar today',
+    const result = await classifyResearchIntent({ provider, model: standardGemini.alias, message: 'Check my calendar today',
       toolCandidates: [{ name: 'calendarListEvents', description: 'Read calendar events' }],
       decisionRuntime: classifierRuntime({ resolveRoute: () => ({ mode: 'llm_only' }), llmProvider: provider }), assertInputAuthority: full })
     expect(result.toolNames).toEqual(['calendarListEvents']);expect(full).toHaveBeenCalledTimes(2)
@@ -313,7 +314,7 @@ describe('[COMP:decisions/runtime] certified classifier admission', () => {
       yield* original(request)
     })
     vi.stubGlobal('fetch', vi.fn(async () => typedCompletionResponse()))
-    await classifyResearchIntent({ provider, model: 'gemini-2.5-flash', message: 'Check my calendar today',
+    await classifyResearchIntent({ provider, model: standardGemini.alias, message: 'Check my calendar today',
       toolCandidates: [{ name: 'calendarListEvents', description: 'Read calendar events' }],
       decisionRuntime: classifierRuntime({ resolveRoute: async () => { await Promise.resolve();provider.stream = replacement;return { mode: 'llm_only' } }, llmProvider: provider }), assertInputAuthority: full })
     expect(replacement).toHaveBeenCalledOnce();expect(full.mock.calls.length).toBeGreaterThan(2)
@@ -328,7 +329,7 @@ describe('[COMP:decisions/runtime] certified classifier admission', () => {
     const provider = createGeminiProvider({ kind: 'ai-studio', endpoint: () => 'https://fictional.example/completion', headers: async () => ({}) })
     const fetch = vi.fn(async () => typedCompletionResponse())
     vi.stubGlobal('fetch', fetch)
-    const work = classifyResearchIntent({ provider, model: 'gemini-2.5-flash', message: 'Check my calendar today',
+    const work = classifyResearchIntent({ provider, model: standardGemini.alias, message: 'Check my calendar today',
       toolCandidates: [{ name: 'calendarListEvents', description: 'Read calendar events' }], signal: controller.signal,
       decisionRuntime: classifierRuntime({ resolveRoute: () => ({ mode: 'llm_only' }), llmProvider: provider }), assertInputAuthority: full })
     const rejected = expect(work).rejects.toBeDefined()
@@ -344,9 +345,9 @@ describe('[COMP:decisions/runtime] certified classifier admission', () => {
     const full = vi.fn(async () => {})
     const provider = createGeminiProvider({ kind: 'ai-studio', endpoint: () => 'https://fictional.example/completion', headers: async () => ({}) })
     vi.stubGlobal('fetch', vi.fn(async (url: unknown) => String(url).includes('typesafe.ai') ? new Response('{}', { status: 503 }) : typedCompletionResponse()))
-    await classifyResearchIntent({ provider, model: 'gemini-2.5-flash', message: 'Check my calendar today',
+    await classifyResearchIntent({ provider, model: standardGemini.alias, message: 'Check my calendar today',
       workspaceId: 'fictional-workspace', toolCandidates: [{ name: 'calendarListEvents', description: 'Read calendar events' }],
-      decisionRuntime: classifierRuntime({ llmProvider: provider, defaultLlmModel: 'gemini-2.5-flash', onAttempt: async () => {} }), assertInputAuthority: full })
+      decisionRuntime: classifierRuntime({ llmProvider: provider, defaultLlmModel: standardGemini.alias, onAttempt: async () => {} }), assertInputAuthority: full })
     expect(full.mock.calls.length).toBeGreaterThan(3)
   })
 

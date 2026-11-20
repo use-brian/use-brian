@@ -1,3 +1,4 @@
+import { chatTierDefaults } from '@use-brian/shared/model-registry'
 import { describe, expect, it } from 'vitest'
 import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
 import { createGeminiProvider } from '@use-brian/agent-runtime/providers/gemini.js'
@@ -9,6 +10,7 @@ import {
 } from '../_prompt-builder.js'
 import { attachUserVisibleContext } from '../../turn/user-visible-context.js'
 
+const proModel = chatTierDefaults().pro
 const apiKey = process.env.GEMINI_API_KEY
 const describeIf = apiKey ? describe : describe.skip
 
@@ -45,7 +47,7 @@ describeIf('[COMP:prompt/builder] Runtime-context provenance (live Gemini)', () 
     const provider = createGeminiProvider(apiKey!)
     const response = await collectStream(
       provider.stream({
-        model: 'gemini-flash',
+        model: proModel,
         systemPrompt: split.stablePrompt,
         runtimeSystemContext: privateBlock,
         messages: messages!,

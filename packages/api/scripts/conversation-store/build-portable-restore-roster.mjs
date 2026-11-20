@@ -522,7 +522,7 @@ async function main(){
   const target=values.cohort===undefined?rosterPath:here+cohortRosters[values.cohort]
   const roster=await buildRoster(client,JSON.parse(await readFile(values.inventory,'utf8')))
   if(values.cohort!==undefined&&roster.inventory.ledgerHead!==values.cohort)throw Error('portable_roster_cohort_head_mismatch: '+roster.inventory.ledgerHead)
-  const text=JSON.stringify(roster,null,1)+'\n'
+  const text=JSON.stringify(roster,null,values.cohort ? 1 : 2)+'\n'
   if(values.check){if(await readFile(target,'utf8')!==text)throw Error('portable_roster_stale');console.log('portable restore roster is current: '+target.slice(here.length))}
   else{await writeFile(target,text);console.log(JSON.stringify(roster.counts))}
  }finally{await client.end()}

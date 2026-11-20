@@ -2,6 +2,7 @@
  * retained channel turn. Database admission, archive client, tool injection,
  * preparation, kernel, currentness and recording delivery are real. Only model
  * and archive HTTP transports are synthetic; no production database is used. */
+import { standardGemini } from './fixtures/standard-gemini.js'
 import {randomBytes,randomUUID} from 'node:crypto'
 import {afterAll,beforeAll,describe,expect,it,onTestFinished,vi} from 'vitest'
 import {createGeminiProvider} from '@use-brian/agent-runtime/providers/gemini.js'
@@ -120,7 +121,7 @@ describe.sequential('[COMP:api/channel-recording] connector operational progress
   vi.stubGlobal('fetch',vi.fn(async(raw:unknown,init?:RequestInit)=>{
    const url=new URL(String(raw));expect(url.origin).toBe('https://operational-model.example')
    const request=JSON.parse(String(init?.body)) as ModelRequest
-   const main=url.pathname.endsWith('/gemini-3.6-flash')&&request.generationConfig?.responseMimeType!=='application/json'
+   const main=url.pathname.endsWith(`/${standardGemini.apiModelId}`)&&request.generationConfig?.responseMimeType!=='application/json'
    if(main){
     mainRequests.push(request)
     mark('provider-dispatch',mainRequests.length)
@@ -162,7 +163,7 @@ describe.sequential('[COMP:api/channel-recording] connector operational progress
    isIdentified:true,senderLinkedIdentity,externalGuest:false,channelType:'telegram',channelId:conversation,isGroupChat:true,
    channelIntegrationId:integration,channelIntegrationStore:integrationStore,incomingChannelMessageId:id,messageText,credentialCurrent,
    userContentBlocks:[{type:'text',text:messageText}],abortController,modelAlias:'standard',adaptiveResearchEnabled:false,
-   decisionRuntime:createDecisionRuntime({llmProvider:provider,defaultLlmModel:'gemini-3.6-flash-standard'}),
+   decisionRuntime:createDecisionRuntime({llmProvider:provider,defaultLlmModel:standardGemini.alias}),
    configuredProviders:new Set(['gemini']),provider,systemPrompt:'Use the supplied archive tools and then discover mailbox search.',
    tools:new Map(createChatArchiveTools({client:archive}).map(tool=>[tool.name,tool])),memoryStore:createDbMemoryStore(),capabilityStore,
    connectorStore,mcpSettingsStore:settings,assistantConnectorStore:assistantConnectors,connectorInstanceStore:instances,connectorGrantStore:grants,

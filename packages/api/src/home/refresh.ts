@@ -14,6 +14,7 @@
  * [COMP:api/home-refresh]
  */
 
+import { MODEL_MAP } from '../model-resolution.js'
 import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { randomUUID } from 'node:crypto'
@@ -81,7 +82,7 @@ export async function runHomeRefresh(params: {
         payloads: getLedgerPayloadStore(),
       }).ledger,
       provider: params.provider,
-      model: params.model ?? 'gemini-3.6-flash-pro',
+      model: params.model ?? MODEL_MAP.pro,
       systemPrompt: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: buildUserMessage(params.signals) }],
       tools: new Map([['setHomeDock', setHomeDock]]),

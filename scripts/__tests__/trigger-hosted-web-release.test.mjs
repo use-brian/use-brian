@@ -20,6 +20,25 @@ describe('[COMP:infra/hosted-web-release] Hosted frontend release trigger', () =
     assert.deepEqual(result, { id: 'job_example', state: 'PENDING' });
   });
 
+  it('accepts a hook acknowledgement after 50 seconds on the original request', async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    t.mock.method(AbortSignal, 'timeout', ms => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), ms);
+      return controller.signal;
+    });
+    let calls = 0;
+    const result = triggerHostedWebRelease({ env, request: async (_url, { signal }) => {
+      calls++;
+      await new Promise(resolve => setTimeout(resolve, 50_000));
+      signal.throwIfAborted();
+      return Response.json({ job: { id: 'slow_job', state: 'RUNNING' } });
+    } });
+    t.mock.timers.tick(50_000);
+    assert.deepEqual(await result, { id: 'slow_job', state: 'RUNNING' });
+    assert.equal(calls, 1);
+  });
+
   it('rejects forks, other branches, missing secrets and untrusted destinations before networking', async () => {
     for (const override of [
       { GITHUB_REPOSITORY: 'example/fork' }, { GITHUB_REF: 'refs/heads/develop' },

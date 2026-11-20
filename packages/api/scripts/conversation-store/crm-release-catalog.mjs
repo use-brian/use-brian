@@ -100,7 +100,7 @@ SELECT jsonb_build_object(
  'triggers',(SELECT jsonb_agg(to_jsonb(t) ORDER BY t.relation COLLATE "C",t.name COLLATE "C") FROM triggers t)
 )::text AS catalog;`
 
-async function readReviewedCrmCatalog(owner, scope) {
+async function readReviewedInstallationCatalog(owner, scope) {
   const value = (await owner.query(CATALOG, [scope.functions,scope.tables,scope.types,scope.triggers])).rows[0]?.catalog
   if (typeof value !== 'string') throw Error('crm_installation_catalog_unavailable')
   const valueJson = JSON.parse(value)
@@ -129,12 +129,18 @@ export async function authenticateCrmSuccessor(owner, source) {
       throw Error('installation_authentication_receipt_malformed')
     await owner.query(source.cleanup)
     await owner.query('SET LOCAL search_path=pg_catalog,public')
-    const actual = await readReviewedCrmCatalog(owner, source.crmScope)
+    const actual = await readReviewedInstallationCatalog(owner, source.crmScope)
     const { scopeSha256, ...expected } = source.crmInventory
     if (Object.entries(actual).some(([key,value])=>expected[key]!==value)) throw Error('crm_installation_catalog_changed')
+    let localDigests = row.local_digest + actual.sha256
+    if (source.additionalCatalog) {
+      const catalog = await readReviewedInstallationCatalog(owner, source.additionalCatalog.scope)
+      if (catalog.sha256 !== source.additionalCatalog.sha256) throw Error('installation_additional_catalog_changed')
+      localDigests += catalog.sha256
+    }
     await owner.query('COMMIT')
     return Object.freeze({ format: 1, sourceDefinitionDigest: source.sourceDigest, functions: source.functions,
-      localContractDigest: sha(row.local_digest+actual.sha256), witnessCurrent: true })
+      localContractDigest: sha(localDigests), witnessCurrent: true })
   } catch (error) {
     await owner.query('ROLLBACK').catch(()=>{})
     throw error

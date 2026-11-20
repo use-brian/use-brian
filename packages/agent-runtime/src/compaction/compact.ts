@@ -535,8 +535,9 @@ export type CompactionTier = 'standard' | 'pro'
  * Substring matching then covers current and historical provider ids.
  */
 export function modelToCompactionTier(model: string): CompactionTier {
+  if (model === 'gemini-4-hydrogen-pro') return 'standard'
   if (model.includes('flash-lite')) return 'standard'
-  if (model === 'gemini-3.6-flash-standard' || model === 'gemini-3.6-flash-pro') return 'standard'
+  if (/^gemini-.*-flash-(standard|pro)$/.test(model)) return 'standard'
   if (
     model.includes('gemini-3.8-flash') ||
     model.includes('gemini-3.7-flash') ||

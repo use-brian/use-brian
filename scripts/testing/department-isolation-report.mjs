@@ -30,6 +30,16 @@ const nativeGroups = [
   ['recovered-calendar-history'],
 ]
 
+export function fixtureChecksForSuites(suites) {
+  if (!suites.some(suite => suite.packageDir !== 'apps/api')) return []
+  const checks = ['scripts/__tests__/prepared-fixture.integration.test.mjs']
+  // All native fixtures check their own clones. Exercise migration lock waits once per matrix.
+  if (suites.some(suite => suite.id === 'derived-store')) {
+    checks.push('scripts/__tests__/migration-diagnostics.integration.test.mjs')
+  }
+  return checks
+}
+
 /** The CI matrix and receipt partition must use the same production topology. */
 export function acceptanceShards(profile = 'full') {
   if (!['full', 'current'].includes(profile)) throw new Error('Unknown acceptance profile')
@@ -40,11 +50,15 @@ export function acceptanceShards(profile = 'full') {
 /** Whole-job budgets include setup and every serialized case, not slower reads. */
 export function acceptanceMatrix(profile = 'full') {
   const shards = acceptanceShards(profile)
-  return { include: shards.map(index => ({
-    shard: index,
-    timeoutMinutes: suitesForShard({ index, total: shards.length }, profile)
-      .some(suite => ['retained-conversation', 'recovered-calendar-history'].includes(suite.id)) ? 45 : 20,
-  })) }
+  // Submit the slowest measured suites first while keeping shard IDs stable for receipts.
+  const longSuites = ['recovered-calendar-history', 'retained-conversation']
+  const matrix = shards.map(shard => {
+    const suites = suitesForShard({ index: shard, total: shards.length }, profile)
+    const priority = longSuites.findIndex(id => suites.some(suite => suite.id === id))
+    return { shard, rank: priority < 0 ? longSuites.length : priority, timeoutMinutes: priority < 0 ? 20 : 45 }
+  })
+  matrix.sort((a, b) => a.rank - b.rank)
+  return { include: matrix.map(({ shard, timeoutMinutes }) => ({ shard, timeoutMinutes })) }
 }
 
 export function suitesForShard(shard, profile = 'full') {

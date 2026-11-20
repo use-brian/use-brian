@@ -176,7 +176,7 @@ import type { McpSettingsStore, ConfirmationDecision, ConfirmationResolver } fro
 import type { Message, LLMProvider, ContentBlock, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
 import type { ConnectorResumeTarget, Tool, WorkerResult } from '@use-brian/agent-runtime/tools/types.js'
 
-import { resolveModel, ensureServableModel, backgroundModelFor, isStandardTier, chatTierBudget, planNudgeCap, tierForModel, isExplicitMeteredModelSelection } from '../model-resolution.js'
+import { MODEL_MAP, resolveModel, ensureServableModel, backgroundModelFor, isStandardTier, chatTierBudget, planNudgeCap, tierForModel, isExplicitMeteredModelSelection } from '../model-resolution.js'
 import { isRegistryModelAvailable, registryRow } from '@use-brian/shared/model-registry'
 import type { ConnectorStore } from '../db/connector-store.js'
 import { sanitizeDeliveryText, getToolDisplayName, stripFollowUps, stripCommentThreadReplyTag, resolveCharter, charterMission, recordingIdFromAnchorKey } from '@use-brian/shared'
@@ -7102,7 +7102,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           pendingAnnotation: roomResponseGroupContext?.sourceMessageId ? undefined : nativeClassification?.pendingAnnotation,
           replyRowIndex: replyRow,
           // The durable completion header (8277): this turn's answer to its authored input.
-          completion: { lane: 'web', input: { kind: 'session_message', ref: storedUserMsg.id }, assistantId: assistant.id },
+          completion: { lane: programmatic ? 'public' : 'web', input: { kind: 'session_message', ref: storedUserMsg.id }, assistantId: assistant.id },
           ...(bufferedWebPublication ? { buffered: { root: bufferedWebPublication, selectedOrdinals } } : {}),
           afterCommit: async (rows) => {
           const savedTurns = [...assembled.assistantRows].flatMap(([index, row]) => rows[index]
@@ -7581,7 +7581,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             },
           },
           channelType: session.channelType,
-          compactModel: 'gemini-3.6-flash-pro',
+          compactModel: MODEL_MAP.pro,
           confirmationResolver,
           confirmationTimeoutMs: 86_400_000, // 24h for web
           // Coordinator mode: the model is told "Do NOT write any response text

@@ -20,6 +20,7 @@
  * docs/architecture/brain/ingest-pipeline.md.
  */
 
+import { MODEL_MAP } from './model-resolution.js'
 import {
   processEpisode,
   type PipelineBDeps,
@@ -39,7 +40,7 @@ import type { BrainEpisodeIngestor, ChatEpisodeIngestor, ChatEpisodeInput } from
 // golden set (pipeline-b.golden-set.test.ts) and ingest-pipeline.md both pin
 // the extraction model to this constant, and a drifted literal misclassifies
 // the usage-tracking tier (2026-07-16: platform sites carried a background id).
-export const EXTRACTION_MODEL = 'gemini-3.6-flash-standard'
+export const EXTRACTION_MODEL = MODEL_MAP.standard
 const CLASSIFIER_MODEL = 'gemini-3.5-flash-lite'
 
 /** Head of the raw text stored inline on a generic Episode's `content_ref`

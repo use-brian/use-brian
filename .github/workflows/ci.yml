@@ -46,6 +46,41 @@ jobs:
       - id: scope
         run: node scripts/testing/ci-scope.mjs
 
+  database-test-dependencies:
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.head_ref != 'develop' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build package dependencies for database tests
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: pnpm exec turbo run build --filter='./packages/*'
+
+      - name: Archive database test dependencies
+        run: tar -czf "$RUNNER_TEMP/database-test-dependencies.tgz" packages/*/dist
+
+      - name: Retain database test dependencies
+        uses: actions/upload-artifact@v4
+        with:
+          name: database-test-dependencies-${{ github.sha }}
+          path: ${{ runner.temp }}/database-test-dependencies.tgz
+          if-no-files-found: error
+          retention-days: 1
+
   build-typecheck:
     if: >-
       github.event_name != 'pull_request' ||
@@ -89,17 +124,6 @@ jobs:
 
       - name: Test build config and release-evidence checks
         run: node --test scripts/__tests__/api-build-config.test.mjs scripts/__tests__/test-evidence.test.mjs scripts/__tests__/department-isolation-report.test.mjs scripts/__tests__/ci-scope.test.mjs scripts/__tests__/migration-owner-groups.test.mjs scripts/__tests__/preflight-push.test.mjs scripts/__tests__/docker-build-closure.test.mjs
-
-      - name: Archive database test dependencies
-        run: tar -czf "$RUNNER_TEMP/database-test-dependencies.tgz" packages/*/dist
-
-      - name: Retain database test dependencies
-        uses: actions/upload-artifact@v4
-        with:
-          name: database-test-dependencies-${{ github.sha }}
-          path: ${{ runner.temp }}/database-test-dependencies.tgz
-          if-no-files-found: error
-          retention-days: 1
 
       # Discovery is report-only until complete journeys qualify ten candidates.
       # The required build-test gate depends on complete selected-scope coverage.
@@ -301,7 +325,7 @@ jobs:
           --concurrency=1
 
   embedded-current-tests:
-    needs: ci-scope
+    needs: [ci-scope, database-test-dependencies]
     if: needs.ci-scope.outputs.historical == 'false'
     name: Embedded database current schema
     runs-on: ubuntu-latest
@@ -315,15 +339,20 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Build test dependencies
-        env:
-          NODE_OPTIONS: --max-old-space-size=6144
-        run: pnpm exec turbo run build --filter="@use-brian/api-open^..."
+      - name: Download database test dependencies
+        uses: actions/download-artifact@v4
+        with:
+          name: database-test-dependencies-${{ github.sha }}
+          path: ${{ runner.temp }}
+
+      - name: Restore database test dependencies
+        run: tar -xzf "$RUNNER_TEMP/database-test-dependencies.tgz"
+
       - run: node scripts/testing/embedded-database-tests.mjs current
       - run: pnpm --filter @use-brian/api-open exec vitest run src/runtime.test.ts
 
   embedded-database-tests:
-    needs: ci-scope
+    needs: [ci-scope, database-test-dependencies]
     if: needs.ci-scope.outputs.historical == 'true'
     name: Embedded database tests (${{ matrix.group }})
     runs-on: ubuntu-latest
@@ -332,7 +361,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Full-chain replays need time for dependency compilation and migration.
+          # Full-chain replays need time for artifact restoration and migration.
           - { group: owner-legacy, timeoutMinutes: 25 }
           - { group: owner-fresh, timeoutMinutes: 15 }
           - { group: owner-cutover, timeoutMinutes: 15 }
@@ -349,10 +378,15 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Build test dependencies
-        env:
-          NODE_OPTIONS: --max-old-space-size=6144
-        run: pnpm exec turbo run build --filter="@use-brian/api-open^..."
+      - name: Download database test dependencies
+        uses: actions/download-artifact@v4
+        with:
+          name: database-test-dependencies-${{ github.sha }}
+          path: ${{ runner.temp }}
+
+      - name: Restore database test dependencies
+        run: tar -xzf "$RUNNER_TEMP/database-test-dependencies.tgz"
+
       - name: Embedded database tests
         run: node scripts/testing/embedded-database-tests.mjs ${{ matrix.group }}
       - name: Runtime unit tests
@@ -360,7 +394,7 @@ jobs:
         run: pnpm --filter @use-brian/api-open exec vitest run src/runtime.test.ts
 
   department-isolation-shards:
-    needs: [ci-scope, build-typecheck]
+    needs: [ci-scope, database-test-dependencies]
     if: >-
       github.event_name != 'pull_request' ||
       github.head_ref != 'develop' ||
@@ -440,13 +474,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
       - uses: actions/download-artifact@v4
         with:
           pattern: department-isolation-shard-*
@@ -480,7 +510,7 @@ jobs:
       (github.event_name != 'pull_request' ||
       github.head_ref != 'develop' ||
       github.event.pull_request.head.repo.full_name != github.repository)
-    needs: [ci-scope, embedded-current-tests, build-typecheck, api-tests, app-web-tests, offline-continuity, heavyweight-tests, remaining-tests, embedded-database-tests, department-isolation]
+    needs: [ci-scope, database-test-dependencies, embedded-current-tests, build-typecheck, api-tests, app-web-tests, offline-continuity, heavyweight-tests, remaining-tests, embedded-database-tests, department-isolation]
     runs-on: ubuntu-latest
     steps:
       - name: Require every CI lane
@@ -488,6 +518,7 @@ jobs:
           SCOPE_RESULT: ${{ needs.ci-scope.result }}
           HISTORICAL: ${{ needs.ci-scope.outputs.historical }}
           EMBEDDED_CURRENT_RESULT: ${{ needs.embedded-current-tests.result }}
+          DATABASE_BUILD_RESULT: ${{ needs.database-test-dependencies.result }}
           BUILD_TYPECHECK_RESULT: ${{ needs.build-typecheck.result }}
           API_TESTS_RESULT: ${{ needs.api-tests.result }}
           APP_WEB_TESTS_RESULT: ${{ needs.app-web-tests.result }}
@@ -504,13 +535,14 @@ jobs:
             [[ "$EMBEDDED_CURRENT_RESULT" == success && "$EMBEDDED_DATABASE_TESTS_RESULT" == skipped ]] || exit 1
           else exit 1
           fi
-          if [[ "$BUILD_TYPECHECK_RESULT" != "success" ||
+          if [[ "$DATABASE_BUILD_RESULT" != "success" ||
+                "$BUILD_TYPECHECK_RESULT" != "success" ||
                 "$API_TESTS_RESULT" != "success" ||
                 "$APP_WEB_TESTS_RESULT" != "success" ||
                 "$OFFLINE_CONTINUITY_RESULT" != "success" ||
                 "$HEAVYWEIGHT_TESTS_RESULT" != "success" ||
                 "$REMAINING_TESTS_RESULT" != "success" ||
                 "$DEPARTMENT_ISOLATION_RESULT" != "success" ]]; then
-            echo "CI lane failure: build=$BUILD_TYPECHECK_RESULT api=$API_TESTS_RESULT app_web=$APP_WEB_TESTS_RESULT offline=$OFFLINE_CONTINUITY_RESULT heavy=$HEAVYWEIGHT_TESTS_RESULT remaining=$REMAINING_TESTS_RESULT embedded=$EMBEDDED_DATABASE_TESTS_RESULT isolation=$DEPARTMENT_ISOLATION_RESULT"
+            echo "CI lane failure: database_build=$DATABASE_BUILD_RESULT build=$BUILD_TYPECHECK_RESULT api=$API_TESTS_RESULT app_web=$APP_WEB_TESTS_RESULT offline=$OFFLINE_CONTINUITY_RESULT heavy=$HEAVYWEIGHT_TESTS_RESULT remaining=$REMAINING_TESTS_RESULT embedded=$EMBEDDED_DATABASE_TESTS_RESULT isolation=$DEPARTMENT_ISOLATION_RESULT"
             exit 1
           fi

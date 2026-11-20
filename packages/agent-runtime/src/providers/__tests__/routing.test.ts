@@ -127,7 +127,7 @@ describe('[COMP:providers/routing-provider] dispatch', () => {
     const availability = new MutableProviderAvailability()
     availability.setStaticProvider('gemini', true)
     availability.setModelCatalog('openai-codex', new Set(['gpt-5.6-sol']))
-    const resolveModel = vi.fn(() => 'gemini-3.6-flash')
+    const resolveModel = vi.fn(() => 'gemini-3.8-flash')
     const routing = createRoutingProvider(
       { gemini, 'openai-codex': codex },
       { availability, resolveModel },

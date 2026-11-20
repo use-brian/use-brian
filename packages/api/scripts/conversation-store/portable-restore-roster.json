@@ -2,8 +2,8 @@
   "format": 1,
   "status": "reviewed contract; fail closed on any unknown table, sequence, trigger, policy or reference",
   "inventory": {
-    "ledgerCount": 806,
-    "ledgerHead": "8330_memory_prompt_candidates.sql"
+    "ledgerCount": 807,
+    "ledgerHead": "8331_workspace_mcp_dispatch.sql"
   },
   "rules": {
     "D1-ledger": "Migration ledger. The target ledger is produced by the shipped installer; the archived source ledger is retained as original proof and must name the same shipped release.",
@@ -289,12 +289,12 @@
     "native_conversation_conversion_pending": "D6-enrollment-maintenance"
   },
   "counts": {
-    "tables": 596,
-    "durable": 573,
+    "tables": 597,
+    "durable": 574,
     "derived": 20,
     "rebound": 2,
     "rederived": 1,
-    "durableOrRebound": 575,
+    "durableOrRebound": 576,
     "regprocedureSlots": 4,
     "forceRls": 11,
     "seededTables": 4,
@@ -303,8 +303,8 @@
     "authorityEpochTables": 6,
     "transactionBoundTables": 13,
     "sequences": 6,
-    "triggers": 1435,
-    "suspendedTriggers": 393,
+    "triggers": 1436,
+    "suspendedTriggers": 394,
     "deferredReferences": 23
   },
   "tables": {
@@ -2745,6 +2745,10 @@
         ],
         "policyDigest": "28b5e7b22e7f41122c9d73f7f055dc96d40c6d6e1e9b87e6adfff402868d5194"
       }
+    },
+    "workspace_mcp_dispatch": {
+      "class": "durable",
+      "rule": "F1-durable-fact"
     },
     "workspace_mcp_operations": {
       "class": "durable",
@@ -14808,6 +14812,15 @@
       "function": "crm_capture_erasure_effect()",
       "tgtype": 29,
       "class": "fires:recovery-capture",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "workspace_mcp_runs.workspace_mcp_dispatch_sync": {
+      "function": "sync_workspace_mcp_dispatch()",
+      "tgtype": 21,
+      "class": "suspended:derived-effect",
       "events": [
         "insert",
         "update"

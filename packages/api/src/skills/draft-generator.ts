@@ -29,6 +29,7 @@
  * [COMP:skills/draft-generator]
  */
 
+import { MODEL_MAP } from '../model-resolution.js'
 import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { randomUUID } from 'node:crypto'
@@ -59,7 +60,7 @@ export class SkillDraftError extends Error {
 
 /** Fallback when the route doesn't resolve a tier — real procedural
  *  writing, not just extraction. */
-const DRAFT_MODEL = 'gemini-3.6-flash-pro'
+const DRAFT_MODEL = MODEL_MAP.pro
 
 /** Transcript caps — the route validates looser ones; these are the
  *  authoritative backstops (stateless endpoint: the client resends the

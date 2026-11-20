@@ -41,7 +41,7 @@ describe('[COMP:billing/cost-tracker] isOverheadSource', () => {
 })
 
 describe('[COMP:billing/cost-tracker] calculateCost', () => {
-  it.each(['gemini-3.6-flash-standard', 'gemini-3.6-flash-pro'])('prices the refreshed %s at Flash 3.6 list rates', model => {
+  it.each(['gemini-3.6-flash-standard', 'gemini-3.6-flash-pro', 'gemini-3.8-flash-standard', 'gemini-3.8-flash-pro'])('prices the %s at its registered Flash list rates', model => {
     const usage = { inputTokens: 10_000, cacheReadTokens: 20_000, outputTokens: 1_000 }
     expect(calculateCost(model, usage)).toBeCloseTo(0.0255, 10)
     expect(calculateCost('gemini-3-flash-standard', usage)).toBeCloseTo(0.009, 10)

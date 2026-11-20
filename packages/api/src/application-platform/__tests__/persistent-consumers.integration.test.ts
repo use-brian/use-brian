@@ -1,3 +1,5 @@
+import { chatTierDefaults } from '@use-brian/shared/model-registry'
+import { withBootstrap } from '../../__tests__/fixtures/bootstrap-role.js'
 import express from 'express'
 import request from 'supertest'
 import {authSessionStore} from '../../db/auth-session-store.js'
@@ -46,6 +48,8 @@ import { writeSessionContextRevision, sessionContextGeneration, bindSessionConte
 import { admitModelInput } from '../../context-scope/admission.js'
 import { persistentContextFixture } from './fixtures/persistent-context.js'
 import { persistentSourceFixture } from './fixtures/persistent-source.js'
+
+const proModel = chatTierDefaults().pro
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -728,8 +732,8 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
       expect(source.resourceKind).toBe(resourceKind)
       await expect(validateCallerScopeEvidence({sources:[source]},parent.security.ceiling)).rejects.toMatchObject({diagnostic:'source_unverifiable'})
     }
-    const answer:StreamFn=async function*(){yield{type:'message_start',model:'gemini-3.6-flash-pro'};yield{type:'text_delta',text:'Fictional private consult result'};yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:1,outputTokens:1}}}
-    const provider:LLMProvider={name:'fixture',models:['gemini-3.6-flash-pro'],stream:answer,createSession(options){return{send:()=>answer({model:options.model,systemPrompt:options.systemPrompt,messages:[]})}}}
+    const answer:StreamFn=async function*(){yield{type:'message_start',model:proModel};yield{type:'text_delta',text:'Fictional private consult result'};yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:1,outputTokens:1}}}
+    const provider:LLMProvider={name:'fixture',models:[proModel],stream:answer,createSession(options){return{send:()=>answer({model:options.model,systemPrompt:options.systemPrompt,messages:[]})}}}
     const returned:ScopeEvidence[]=[],execute=createCalleeExecutor({provider,tools:new Map(),memoryStore:createDbMemoryStore(),capabilityStore:createDbCapabilityStore()})
     const invocation:Parameters<typeof execute>[0]={callerUserId:f.firstId,callerAssistantId:f.assistantId,callerAccessCeiling:parent.security.ceiling,
       callerScopeEvidence:{sources:[source]},onScopeEvidence:evidence=>{returned.push(evidence)},calleeAssistantId:f.assistantId,
@@ -754,8 +758,8 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
     const self=await updateSelfEntityAttributes({userId:f.firstId,workspaceId:f.workspaceId,displayName:'Fictional attributed identity',
       attributes:{name:'Fictional attributed identity',role:'Fictional bounded planner'}})
     const prompts:string[]=[],returned:ScopeEvidence[]=[],identities:ScopeSource[][]=[]
-    const answer:StreamFn=async function*(){yield{type:'message_start',model:'gemini-3.6-flash-pro'};yield{type:'text_delta',text:'Fictional attributed response'};yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:1,outputTokens:1}}}
-    const provider:LLMProvider={name:'fixture',models:['gemini-3.6-flash-pro'],stream:answer,createSession(options){prompts.push(JSON.stringify(options));return{send:()=>answer({model:options.model,systemPrompt:options.systemPrompt,messages:[]})}}}
+    const answer:StreamFn=async function*(){yield{type:'message_start',model:proModel};yield{type:'text_delta',text:'Fictional attributed response'};yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:1,outputTokens:1}}}
+    const provider:LLMProvider={name:'fixture',models:[proModel],stream:answer,createSession(options){prompts.push(JSON.stringify(options));return{send:()=>answer({model:options.model,systemPrompt:options.systemPrompt,messages:[]})}}}
     const memories=createDbMemoryStore(),readIdentity=memories.getIdentity.bind(memories)
     let contractAfterRead=false,invocationNumber=0
     memories.getIdentity=async(ctx,authority)=>{
@@ -771,10 +775,11 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
       invocationNumber++
       if(surface==='delegated-consult')return consult({callerUserId:f.firstId,callerAssistantId:f.assistantId,callerAccessCeiling:parent.security.ceiling,
         onScopeEvidence:evidence=>returned.push(evidence),calleeAssistantId:f.assistantId,expectedWorkspaceId:f.workspaceId,callerSessionId:f.session.id,question:'Fictional attributed input'})
-      const req=new EventEmitter(),res={statusCode:200,body:undefined as unknown,status(code:number){this.statusCode=code;return this},json(body:unknown){this.body=body;return this}}
-      await executePublicTurn({provider,tools:new Map(),systemPrompt:'Fictional public member fixture',memoryStore:memories,capabilityStore:createDbCapabilityStore()},
+      const app=express()
+      app.post('/turn',async(req,res)=>{await executePublicTurn({provider,tools:new Map(),systemPrompt:'Fictional public member fixture',memoryStore:memories,capabilityStore:createDbCapabilityStore()},
         {assistantId:f.assistantId,identityNamespace:'api:fictional-member-key',contextScope:'internal-member',internalActor:{email:null,defaultUserId:f.firstId},credentialCurrent:async()=>true,
-          body:{externalUserId:'fictional-attribution',sessionId:`fictional-member-session-${invocationNumber}`,message:'Fictional attributed input'}},req as never,res as never)
+          body:{externalUserId:'fictional-attribution',sessionId:`fictional-member-session-${invocationNumber}`,message:'Fictional attributed input'}},req,res)})
+      const res=await request(app).post('/turn')
       expect(res.statusCode,JSON.stringify(res.body)).toBe(200);return JSON.stringify(res.body)
     }
     expect(await invoke()).toContain('Fictional attributed response')
@@ -807,8 +812,8 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
   it('keeps an actual consult identity inside its pinned parent ceiling without substituting the callee owner',async()=>{
     fixture=await persistentContextFixture();const f=fixture,parent=await f.execution(f.firstId)
     await updateSelfEntityAttributes({userId:f.firstId,workspaceId:f.workspaceId,displayName:'Fictional hidden identity',attributes:{name:'Fictional hidden identity'}})
-    const prompts:string[]=[],answer:StreamFn=async function*(){yield{type:'message_start',model:'gemini-3.6-flash-pro'};yield{type:'text_delta',text:'Fictional public bounded response'};yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:1,outputTokens:1}}}
-    const provider:LLMProvider={name:'fixture',models:['gemini-3.6-flash-pro'],stream:answer,createSession(options){prompts.push(JSON.stringify(options));return{send:()=>answer({model:options.model,systemPrompt:options.systemPrompt,messages:[]})}}}
+    const prompts:string[]=[],answer:StreamFn=async function*(){yield{type:'message_start',model:proModel};yield{type:'text_delta',text:'Fictional public bounded response'};yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:1,outputTokens:1}}}
+    const provider:LLMProvider={name:'fixture',models:[proModel],stream:answer,createSession(options){prompts.push(JSON.stringify(options));return{send:()=>answer({model:options.model,systemPrompt:options.systemPrompt,messages:[]})}}}
     const memories=createDbMemoryStore(),authority=await f.delegatedExecution(f.firstId),accumulator=new ContextScopeAccumulator()
     await expect(memories.getIdentity({...authority.security.access,userId:f.secondId},{execution:authority,accumulator})).rejects.toMatchObject({code:'scope_evidence_missing'})
     const substituted={...authority,identity:{...authority.identity,parentCeiling:{...parent.security.ceiling,userId:f.secondId}}} as typeof authority
@@ -848,11 +853,11 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
     const calleeId = f.assistantId
     const prompts: string[] = []
     const answer: StreamFn = async function* () {
-      yield { type: 'message_start', model: 'gemini-3.6-flash-pro' }
+      yield { type: 'message_start', model: proModel }
       yield { type: 'text_delta', text: 'Fictional delegated report' }
       yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 } }
     }
-    const provider: LLMProvider = { name: 'deterministic-context-fixture', models: ['gemini-3.6-flash-pro'], stream: answer,
+    const provider: LLMProvider = { name: 'deterministic-context-fixture', models: [proModel], stream: answer,
       createSession(options) {
         prompts.push(options.systemPrompt)
         return { send: () => answer({ model: options.model, systemPrompt: options.systemPrompt, messages: [] }) }
@@ -1022,17 +1027,17 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
     const f = fixture, role = `context_owner_${randomBytes(8).toString('hex')}`, password = randomBytes(32).toString('hex')
     await f.history()
     const owner = (await f.pool.query<{ owner: string }>("SELECT r.rolname AS owner FROM pg_class c JOIN pg_roles r ON r.oid=c.relowner WHERE c.oid='session_messages'::regclass")).rows[0].owner
-    await f.pool.query(`CREATE ROLE ${role} LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD '${password}'`)
+    await withBootstrap(client=>client.query(`CREATE ROLE ${role} LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD '${password}'`))
     const url = new URL(process.env.DATABASE_URL!); url.username = role; url.password = password
     const pool = new pg.Pool({ connectionString: url.href })
     try {
-      await f.pool.query(`GRANT "${owner.replaceAll('"', '""')}" TO ${role}`)
+      await withBootstrap(client=>client.query(`GRANT "${owner.replaceAll('"', '""')}" TO ${role}`))
       const tx = await pool.connect()
       try {
         await tx.query('BEGIN'); await tx.query("SELECT set_config('app.current_user_id',$1,true)", [f.ownerId])
         await expect(getSessionMessages(f.session.id, { excludeHeld: true }, tx)).rejects.toThrow('scope_source_changed')
         await tx.query('ROLLBACK')
       } finally { tx.release() }
-    } finally { await pool.end(); await f.pool.query(`DROP ROLE ${role}`) }
+    } finally { await pool.end(); await withBootstrap(client=>client.query(`DROP ROLE ${role}`)) }
   })
 })

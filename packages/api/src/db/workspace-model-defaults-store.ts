@@ -9,7 +9,7 @@
  * alias can never become a curated default), and a profile must belong to
  * the workspace. Spec: docs/architecture/platform/model-registry.md.
  */
-import { registryRow } from '@use-brian/shared/model-registry'
+import { registryRow, servingModelAlias } from '@use-brian/shared/model-registry'
 import { query } from './client.js'
 
 export const DEFAULTABLE_CLASSES = ['standard-pro', 'max', 'research'] as const
@@ -39,7 +39,7 @@ function toDefault(r: DefaultRow): WorkspaceModelDefault {
   return {
     workspaceId: r.workspace_id,
     modelClass: r.model_class,
-    modelAlias: r.model_alias,
+    modelAlias: r.model_alias && servingModelAlias(r.model_alias),
     meteredProfileId: r.metered_profile_id,
     updatedAt: r.updated_at,
   }

@@ -5,7 +5,6 @@ import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { delimiter, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import pg from 'pg'
 import { prepareRuntimeRole, activateRuntimeRole } from './runtime-role.mjs'
 
 const ossRoot = fileURLToPath(new URL('../../', import.meta.url))
@@ -84,6 +83,7 @@ async function availablePort() {
 /** Creates only a new cluster. No caller-supplied database or data directory. */
 export async function createLocalFixture({ pgBin, migrationDirs = [], env = process.env, walArchive = false, beforeApply, beforeApplyFile, runtimeRole = 'app_user', prepareTemplate = false, migrationProgress = false, ordinaryOwner = true, statementStatistics = false, executorProbe } = {}) {
   validateAmbientDatabase(env)
+  const { default: pg } = await import('pg')
   if (typeof statementStatistics !== 'boolean') throw new Error('Invalid statement statistics profile')
   if (typeof ordinaryOwner !== 'boolean') throw new Error('Invalid ordinary owner profile')
   // Migration 8274 admits only an ordinary owner and refuses a superuser-run chain
@@ -302,6 +302,7 @@ export async function cloneLocalFixture(env = process.env) {
   const adminUrl = withDatabase(env.DATABASE_URL), appUrl = withDatabase(env.DATABASE_URL_APP)
   const maintenanceUrl = new URL(env.DATABASE_URL); maintenanceUrl.pathname = '/postgres'
   if (parent.bootstrapRole) maintenanceUrl.username = parent.bootstrapRole
+  const { default: pg } = await import('pg')
   const admin = new pg.Client({ connectionString: maintenanceUrl.href })
   await admin.connect()
   let created = false

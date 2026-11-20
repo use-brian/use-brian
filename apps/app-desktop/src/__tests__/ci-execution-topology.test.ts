@@ -15,6 +15,7 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     const workflow = yaml.load(readFileSync(join(sourceRoot, '.github/workflows/ci.yml'), 'utf8'));
     const executionJobs = [
       workflow.jobs['build-typecheck'],
+      workflow.jobs['database-test-dependencies'],
       workflow.jobs['api-tests'],
       workflow.jobs['app-web-tests'],
       workflow.jobs['offline-continuity'],
@@ -101,10 +102,13 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     const aggregate = workflow.jobs['department-isolation'];
     expect(aggregate.needs).toEqual(['ci-scope', 'department-isolation-shards']);
     expect(aggregate.if).toContain('always()');
+    expect(aggregate.steps.map((step: { uses?: string; run?: string }) => step.uses ?? step.run).join('\n'))
+      .not.toContain('pnpm');
     expect(aggregate.steps.find((step: { name?: string }) => step.name === 'Verify complete acceptance evidence').run)
       .toContain('--merge');
     expect(workflow.jobs['build-test'].needs).toEqual([
       'ci-scope',
+      'database-test-dependencies',
       'embedded-current-tests',
       'build-typecheck',
       'api-tests',
@@ -159,11 +163,14 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
 
   it('restores same-run dependencies without spending acceptance time recompiling', () => {
     const workflow = yaml.load(readFileSync(join(sourceRoot, '.github/workflows/ci.yml'), 'utf8'));
-    const build = workflow.jobs['build-typecheck'];
+    const build = workflow.jobs['database-test-dependencies'];
     const acceptance = workflow.jobs['department-isolation-shards'];
-    expect(acceptance.needs).toEqual(['ci-scope', 'build-typecheck']);
+    expect(build.needs).toBeUndefined();
+    expect(workflow.jobs['build-typecheck'].needs).toBeUndefined();
     expect(acceptance['timeout-minutes']).toBe('${{ matrix.timeoutMinutes }}');
     const step = (job: any, name: string) => job.steps.find((item: { name?: string }) => item.name === name);
+    expect(step(build, 'Build package dependencies for database tests').run).toBe("pnpm exec turbo run build --filter='./packages/*'");
+    expect(workflow.jobs['build-test'].steps[0].env.DATABASE_BUILD_RESULT).toBe('${{ needs.database-test-dependencies.result }}');
     const upload = step(build, 'Retain database test dependencies');
     const download = step(acceptance, 'Download database test dependencies');
     expect(upload.uses).toBe('actions/upload-artifact@v4');
@@ -172,7 +179,12 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     expect(download.with.name).toBe(upload.with.name);
     expect(upload.with['if-no-files-found']).toBe('error');
     expect(download.with.path).toBe('${{ runner.temp }}');
-    expect(acceptance.steps.some((item: { run?: string }) => item.run?.includes('turbo run build'))).toBe(false);
+    for (const consumer of [acceptance, workflow.jobs['embedded-current-tests'], workflow.jobs['embedded-database-tests']]) {
+      expect(consumer.needs).toEqual(['ci-scope', 'database-test-dependencies']);
+      expect(step(consumer, 'Download database test dependencies')).toEqual(download);
+      expect(step(consumer, 'Restore database test dependencies')).toEqual(step(acceptance, 'Restore database test dependencies'));
+      expect(consumer.steps.some((item: { run?: string }) => item.run?.includes('turbo run build'))).toBe(false);
+    }
     for (const transfer of [upload, download]) {
       expect(transfer['continue-on-error']).not.toBe(true);
       expect(transfer.if).toBeUndefined();

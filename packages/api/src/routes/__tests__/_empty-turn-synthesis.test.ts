@@ -185,7 +185,7 @@ describe('[COMP:api/empty-turn-synthesis] composeEmptyTurnSynthesis', () => {
     expect(payload.toolEvidence).toEqual([])
   })
 
-  it('synthesises an answer from the worker findings + emits Flash usage', async () => {
+  it('synthesises an answer from the worker findings + emits Pro usage', async () => {
     const provider = makeFakeProvider(
       'Top TikTok this week: TEN — Chongqing motorcycle (2.7M likes). https://www.tiktok.com/@tenlee_1001.official/video/7641092602216959252',
     )
@@ -197,13 +197,13 @@ describe('[COMP:api/empty-turn-synthesis] composeEmptyTurnSynthesis', () => {
       channelType: 'web',
     })
     expect(result).not.toBeNull()
-    expect(result!.model).toBe('gemini-3.6-flash-pro')
+    expect(result!.model).toBe('gemini-4-hydrogen-pro')
     expect(result!.text).toContain('tiktok.com')
     expect(result!.usage).toEqual({ inputTokens: 120, outputTokens: 80 })
 
     // Verify Flash got the right model + the worker findings in the payload.
     const call = (provider.stream as ReturnType<typeof vi.fn>).mock.calls[0][0]
-    expect(call.model).toBe('gemini-3.6-flash-pro')
+    expect(call.model).toBe('gemini-4-hydrogen-pro')
     const payload = JSON.parse(call.messages[0].content)
     expect(payload.userMessage).toBe('give me the links of the video')
     expect(payload.toolEvidence).toHaveLength(1)

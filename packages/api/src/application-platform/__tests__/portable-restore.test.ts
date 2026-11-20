@@ -42,8 +42,10 @@ describe('[COMP:api/portable-restore] finite portable restore roster',()=>{
  it('classifies every inventoried table exactly once with a reviewed rule',async()=>{
   const roster=await restore.loadPortableRoster()
   const entries=Object.entries(roster.tables) as [string,{class:string;rule:string;slots?:string[];forceRls?:unknown;generated?:string[];identity?:string[]}][]
-  expect(entries).toHaveLength(596)
-  expect(roster.counts).toMatchObject({tables:596,derived:20,rederived:1,rebound:2,durable:573,regprocedureSlots:4,forceRls:11,generatedTables:4,identityTables:4,sequences:6})
+  expect(entries).toHaveLength(597)
+  expect(roster.counts).toMatchObject({tables:597,derived:20,rederived:1,rebound:2,durable:574,regprocedureSlots:4,forceRls:11,generatedTables:4,identityTables:4,sequences:6})
+  expect(roster.tables.workspace_mcp_dispatch).toEqual({class:'durable',rule:'F1-durable-fact'})
+  expect(roster.triggers['workspace_mcp_runs.workspace_mcp_dispatch_sync']).toMatchObject({class:'suspended:derived-effect'})
   for(const [,entry] of entries)expect(Object.keys(roster.rules)).toContain(entry.rule)
   expect(entries.filter(([,entry])=>entry.class==='derived').map(([name])=>name).sort()).toEqual(
    ['_migrations','conversation_envelope_backfill_checkpoint','conversation_settings_transitions','crm_erasure_journal_targets',
@@ -70,7 +72,7 @@ describe('[COMP:api/portable-restore] finite portable restore roster',()=>{
   expect(Object.keys(head.tables).filter(name=>!cohort.tables[name]).sort()).toEqual([
    'conversation_envelope_backfill_checkpoint','conversation_envelopes','conversation_legacy_history_enrollments',
    'conversation_message_quarantine','conversation_participants','conversation_settings_transitions',
-   'conversation_visibility_audit','conversation_visibility_notices','native_memory_query_write_intents','native_turn_completions','native_turn_contract_witness',
+   'conversation_visibility_audit','conversation_visibility_notices','native_memory_query_write_intents','native_turn_completions','native_turn_contract_witness','workspace_mcp_dispatch',
    ...crmSummaryProjections,...crmSummaryDurableFacts,...crmSummaryEpochs,crmSummaryCredentials].sort())
   const forcedAtCohortOnly=['page_link_aliases','realtime_thread_targets','task_candidates','task_rules','task_tombstones','workspace_brand_versions','workspace_brands','workspace_link_aliases']
   const changed=[...forcedAtCohortOnly,...Object.keys(portableOwnerPolicies),'episode_extraction_items',...portableLegacyConversionTables].sort()
@@ -125,7 +127,7 @@ describe('[COMP:api/portable-restore] finite portable restore roster',()=>{
    for(const key of builder.fixpointStamps)expect(triggers[key].class).not.toBe('suspended:origin-stamp')
    for(const key of expectedStamps)expect(triggers[key].events).toContain('insert')
   }
-  expect(head.counts.suspendedTriggers).toBe(393);expect(cohort.counts.suspendedTriggers).toBe(344)
+  expect(head.counts.suspendedTriggers).toBe(394);expect(cohort.counts.suspendedTriggers).toBe(344)
   expect(head.originStamps).toHaveLength(65);expect(builder.originStamps).toHaveLength(62);expect(builder.fixpointStamps).toHaveLength(17)
   expect(new Set([...builder.originStamps,...builder.fixpointStamps]).size).toBe(79)
   expect(cohort.inventory).toMatchObject({ledgerCount:756,ledgerHead:embedded.embeddedTransferCohort.through})

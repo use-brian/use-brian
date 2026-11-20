@@ -20,7 +20,7 @@ export async function triggerHostedWebRelease({ env = process.env, request = fet
   let response;
   try {
     response = await request(url.href, {
-      method: 'POST', redirect: 'error', signal: AbortSignal.timeout(30_000),
+      method: 'POST', redirect: 'error', signal: AbortSignal.timeout(90_000),
     });
   } catch {
     // Fetch errors can contain the credential-bearing URL. Never print them.

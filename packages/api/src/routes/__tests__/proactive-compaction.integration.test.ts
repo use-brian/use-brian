@@ -1,3 +1,4 @@
+import { chatTierDefaults } from '@use-brian/shared/model-registry'
 import { describe, it, expect, vi } from 'vitest'
 import dotenv from 'dotenv'
 import { resolve } from 'node:path'
@@ -27,6 +28,7 @@ import type { Session, SessionMessage } from '../../db/sessions.js'
 
 dotenv.config({ path: resolve(import.meta.dirname, '..', '..', '..', '..', '..', '.env') })
 
+const proModel = chatTierDefaults().pro
 const apiKey = process.env.GEMINI_API_KEY
 const describeIf = apiKey ? describe : describe.skip
 
@@ -155,7 +157,7 @@ describeIf('[COMP:api/proactive-compaction] Fix 1a integration — no Gemini 400
     // request shape is valid.
     const chunks: string[] = []
     for await (const chunk of provider.stream({
-      model: 'gemini-flash',
+      model: proModel,
       messages: result.messages,
       systemPrompt: 'You are a helpful test assistant. Reply in ≤ 20 words.',
     })) {

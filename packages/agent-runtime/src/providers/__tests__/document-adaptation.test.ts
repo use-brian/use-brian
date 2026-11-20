@@ -1,3 +1,4 @@
+import { chatTierDefaults } from '@use-brian/shared/model-registry'
 import { describe, it, expect, vi } from 'vitest'
 import {
   wrapDocumentAdaptation,
@@ -347,7 +348,7 @@ describe('[COMP:providers/document-adaptation] honest failure', () => {
 
 describe('[COMP:providers/document-adaptation] applied per concrete model in routing', () => {
   it('uses one cached validated distillate for a Gemini primary and its Anthropic fallback', async () => {
-    // The registry pairs `gemini-flash-3` (nativePdf) with the `claude-haiku-4-5`
+    // The registry pairs the Pro default (nativePdf) with the `claude-haiku-4-5`
     // outage fallback (not native). An outage mid-PDF-turn used to hand the
     // fallback a block its adapter drops silently.
     const gemini = recordingProvider('gemini')
@@ -374,7 +375,7 @@ describe('[COMP:providers/document-adaptation] applied per concrete model in rou
 
     await drain(routing.stream({
       ...REQUEST([{ role: 'user', content: [pdfBlock()] }]),
-      model: 'gemini-flash-3',
+      model: chatTierDefaults().pro,
     }))
 
     const primaryContent = gemini.requests[0]!.messages[0]!.content as Array<{ type: string; text?: string }>

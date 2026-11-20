@@ -363,7 +363,7 @@ export function captureTurnModelPreparation(invocation: TurnModelInvocation, inp
         }
         provider = runtime?.provider ?? services.provider; keySource = runtime?.providerKeySource ?? 'platform'
       } else if (request.kind === 'callee') {
-        logicalModel = request.researchFanout ? MODEL_MAP.research : request.modelAlias ? MODEL_MAP[request.modelAlias] ?? MODEL_MAP.standard : 'gemini-3.6-flash-pro'
+        logicalModel = request.researchFanout ? MODEL_MAP.research : request.modelAlias ? MODEL_MAP[request.modelAlias] ?? MODEL_MAP.standard : MODEL_MAP.pro
         logicalTier = tierForModel(logicalModel); model = logicalModel
         runtime = workspaceId ? await resolveCustom({ workspaceId, requestedTier: logicalTier, allowDefault: true }) : null
         provider = runtime?.provider ?? services.provider; keySource = runtime?.providerKeySource ?? 'platform'

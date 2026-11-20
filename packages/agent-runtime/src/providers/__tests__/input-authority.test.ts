@@ -1,3 +1,4 @@
+import { chatTierDefaults } from '@use-brian/shared/model-registry'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createGeminiProvider } from '../gemini.js'
 import { createOpenAICompatProvider } from '../openai-compat.js'
@@ -10,6 +11,8 @@ import { createRoutingProvider, bindExactModelProvider } from '../routing.js'
 import { wrapCredentialPoolProvider } from '../credential-pool.js'
 import { wrapDocumentAdaptation } from '../document-adaptation.js'
 import type { LLMProvider, ProviderRequest, StreamChunk } from '../types.js'
+
+const standardModel = chatTierDefaults().standard
 
 const request: ProviderRequest = { model: 'gemini-3-flash',systemPrompt: 'Fictional input',messages: [{ role: 'user',content: 'Fictional record' }] }
 const denied = () => Object.assign(new Error('Input unavailable'), { reason: 'authority_changed',retrySafe: false })
@@ -26,7 +29,7 @@ describe('[COMP:engine/model-input-authority] provider attempts', () => {
   afterEach(() => vi.unstubAllGlobals())
   function ownedProvider(before: () => void = () => {}): LLMProvider {
     return registerInputAdmissionOwner({
-      name: 'gemini', models: ['gemini-3-flash-standard'],
+      name: 'gemini', models: [standardModel],
       async *stream(input) {
         before()
         await assertInputAuthority(input.assertInputAuthority)
@@ -41,7 +44,7 @@ describe('[COMP:engine/model-input-authority] provider attempts', () => {
   it.each([false,true])('delegates nested preparation to a fresh physical check (%s)', async stateless => {
     const check = vi.fn(async () => {})
     const routed = createRoutingProvider({ gemini: wrapProvider(ownedProvider()) })
-    await drain(dispatch(routed, stateless, { ...request, model: 'gemini-3-flash-standard', assertInputAuthority: check }))
+    await drain(dispatch(routed, stateless, { ...request, model: standardModel, assertInputAuthority: check }))
     expect(check).toHaveBeenCalledTimes(1)
   })
   it.each([false,true])('still refuses revocation during owned request preparation (%s)', async stateless => {
@@ -57,7 +60,7 @@ describe('[COMP:engine/model-input-authority] provider attempts', () => {
     base.createSession = options => ({ send: (messages, send) => stream({ ...options, messages,
       assertInputAuthority: send?.assertInputAuthority ?? options.assertInputAuthority }) })
     registerInputAdmissionOwner(base)
-    const exact = bindExactModelProvider(base, 'gemini-3-flash-standard')
+    const exact = bindExactModelProvider(base, standardModel)
     const full = vi.fn(async () => { await Promise.resolve(); base.stream = replacement; base.createSession = replacement })
     await drain(dispatch(exact, stateless, { ...request, model: 'wrong-model', assertInputAuthority: full }))
     expect(full).toHaveBeenCalledOnce()
@@ -92,7 +95,7 @@ describe('[COMP:engine/model-input-authority] provider attempts', () => {
       : kind === 'document' ? wrapDocumentAdaptation(base, { nativePdf: false, vision: false })
       : wrapProvider(base)
     const check = vi.fn(async () => { throw denied() })
-    const pending = wrapped.stream({ ...request, model: 'gemini-3-flash-standard', assertInputAuthority: check })[Symbol.asyncIterator]().next()
+    const pending = wrapped.stream({ ...request, model: standardModel, assertInputAuthority: check })[Symbol.asyncIterator]().next()
     const replaced = vi.fn(() => (async function* () { yield { type: 'text_delta' as const, text: 'Unchecked' } })())
     base.stream = replaced
     await expect(pending).rejects.toMatchObject({ reason: 'authority_changed' })
@@ -106,7 +109,7 @@ describe('[COMP:engine/model-input-authority] provider attempts', () => {
       : kind === 'document' ? wrapDocumentAdaptation(base, { nativePdf: false, vision: false })
       : wrapProvider(base)
     const check = vi.fn(async () => { throw denied() })
-    const session = wrapped.createSession({ ...request, model: 'gemini-3-flash-standard', assertInputAuthority: check })
+    const session = wrapped.createSession({ ...request, model: standardModel, assertInputAuthority: check })
     const pending = session.send(request.messages)[Symbol.asyncIterator]().next()
     const replaced = vi.fn(() => ({ send: () => (async function* () {})() }))
     base.createSession = replaced

@@ -1,5 +1,6 @@
 /** [COMP:api/conversation-visibility] Actual public history through both HTTP
  * credentials and the ordinary PostgreSQL roles. */
+import { chatTierDefaults } from '@use-brian/shared/model-registry'
 import { randomUUID } from 'node:crypto'
 import express from 'express'
 import request from 'supertest'
@@ -15,6 +16,8 @@ import { getAppPool, getPool } from '../client.js'
 import { initializeConversationVisibility, publicConversationHistoryActive } from '../conversation-visibility.js'
 import { createDbMemoryStore } from '../memory-store.js'
 import { addSessionMessage, findOrCreateSession } from '../sessions.js'
+
+const proModel = chatTierDefaults().pro
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -150,12 +153,12 @@ describe('[COMP:api/conversation-visibility] public history receiving', () => {
       const key = await keys.create({ actingUserId: f.ownerId, assistantId: f.assistantId, name: 'Fictional turn key', audience })
       credentialId = key.id
       const answer: StreamFn = async function* () {
-        yield { type: 'message_start', model: 'gemini-3.6-flash-pro' }
+        yield { type: 'message_start', model: proModel }
         yield { type: 'text_delta', text: 'Fictional public answer' }
         if (revokeDuringReply) await keys.revokeForUser(f.ownerId, key.id)
         yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 } }
       }
-      const provider: LLMProvider = { name: 'fixture', models: ['gemini-3.6-flash-pro'], stream: answer,
+      const provider: LLMProvider = { name: 'fixture', models: [proModel], stream: answer,
         createSession(options) { return { send: () => answer({ model: options.model, systemPrompt: options.systemPrompt, messages: [] }) } } }
       const app = express().use(express.json()).use('/api/v1', publicApiRoutes({
         apiKeyStore: keys, provider, tools: new Map(), systemPrompt: 'Fictional public turn',

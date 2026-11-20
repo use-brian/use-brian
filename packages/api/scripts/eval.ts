@@ -5,7 +5,7 @@
  *   pnpm eval                       run probes → hard checks + worksheet; the
  *                                   SESSION then judges the worksheet and runs
  *                                   --finalize (D1 primary mode)
- *   pnpm eval --judge=gemini        run + judge headlessly (gemini-pro) + finalize
+ *   pnpm eval --judge=gemini        run + judge headlessly (current Research model) + finalize
  *   pnpm eval --finalize <scores>   merge a scores.json against its run dir and
  *                                   apply the baseline ratchet
  *   pnpm eval --replay <msgId>      REPLAY CLASS (turn-ledger plan §9): rebuild a
@@ -15,12 +15,13 @@
  *
  * Design + locked decisions: docs/plans/behavioral-evals.md (§1 D1-D4, §3).
  * Probes: src/evals/probes/*.json (transcribed from the WS9 battery).
- * SUT: gemini-flash (the prod chat alias) by default, or EVAL_SUT_MODEL for
+ * SUT: the current Pro chat selector by default, or EVAL_SUT_MODEL for
  * candidate cutovers, via the real queryLoop, one turn, every tool execute
  * stubbed — probes grade PROPOSALS, nothing runs.
  * [COMP:evals/capability-probes]
  */
 
+import { chatTierDefaults } from '@use-brian/shared/model-registry'
 import { NOOP_TURN_LEDGER } from '@use-brian/agent-runtime/engine/turn-ledger.js'
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -48,8 +49,8 @@ const EVALS_DIR = join(__dirname, '..', 'src', 'evals')
 const RESULTS_ROOT = join(__dirname, '..', 'eval-results')
 const BASELINES_DIR = join(EVALS_DIR, 'baselines')
 
-const SUT_MODEL = process.env.EVAL_SUT_MODEL?.trim() || 'gemini-3.6-flash-pro'
-const HEADLESS_JUDGE_MODEL = 'gemini-4-argon-research' // Current Research judge.
+const SUT_MODEL = process.env.EVAL_SUT_MODEL?.trim() || chatTierDefaults().pro
+const HEADLESS_JUDGE_MODEL = chatTierDefaults().research // Current Research judge.
 
 const RUBRICS: Array<{ dimension: 'justification-grounding' | 'nearest-route' | 'no-invented-ui'; question: string }> = [
   {

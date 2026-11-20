@@ -82,6 +82,16 @@ describe('[COMP:providers/model-registry] registry integrity', () => {
     expect(modelRates('research')).toBe(modelRates('gemini-3-pro-research'))
   })
 
+  it.each(['standard', 'pro'] as const)('preserves historical %s pricing and identity when the serving selector moves', tier => {
+    const retired = registryRow(`gemini-3.6-flash-${tier}`)!
+    const active = registryRow(chatTierDefaults()[tier])!
+    expect(retired).toMatchObject({ tier, status: 'legacy', menu: false, apiModelId: 'gemini-3.6-flash', servingSuccessor: active.alias })
+    expect(active).toMatchObject({ tier, status: 'active', recordAlias: true, apiModelId: tier === 'pro' ? 'gemini-4-hydrogen' : 'gemini-3.8-flash' })
+    expect(modelRates(retired.alias)).toBe(modelRates('gemini-3.6-flash'))
+    expect(modelRates(active.alias)).toBe(modelRates(active.apiModelId))
+    expect(tierForModelId(active.apiModelId)).toBe('max')
+  })
+
   it('rate brackets are ascending and end at Infinity', () => {
     for (const row of MODEL_REGISTRY) {
       if (!row.rates) continue
@@ -98,16 +108,16 @@ describe('[COMP:providers/model-registry] derivations match the pre-registry lit
   // deliberate product change, not a refactor — update these with the spec.
   it('chatTierDefaults reproduces MODEL_MAP', () => {
     expect(chatTierDefaults()).toEqual({
-      standard: 'gemini-3.6-flash-standard',
-      pro: 'gemini-3.6-flash-pro',
-      max: 'gemini-3.8-flash',
+      standard: 'gemini-3.8-flash-standard',
+      pro: 'gemini-4-hydrogen-pro',
+      max: 'gemini-4-hydrogen',
       research: 'gemini-4-argon-research',
     })
   })
 
   it('tierModelIds reproduces the four tier sets exactly', () => {
     expect([...tierModelIds('standard')].sort()).toEqual([
-      'gemini-3.6-flash-standard', 'gemini-3.5-flash-lite',
+      'gemini-3.8-flash-standard', 'gemini-3.6-flash-standard', 'gemini-3.5-flash-lite',
       'gemini-3-flash-standard',
       'gemini-3.1-flash-lite',
       'gemini-3.1-flash-lite-preview',
@@ -118,14 +128,14 @@ describe('[COMP:providers/model-registry] derivations match the pre-registry lit
       'gpt-6-luna',
     ].sort())
     expect([...tierModelIds('pro')].sort()).toEqual([
-      'pro', 'gemini-3.6-flash-pro', 'gemini-flash-3', 'gemini-3-flash-preview', 'gemini-flash',
+      'pro', 'gemini-4-hydrogen-pro', 'gemini-3.8-flash-pro', 'gemini-3.6-flash-pro', 'gemini-flash-3', 'gemini-3-flash-preview', 'gemini-flash',
       'gpt-5.6-terra',
       'gpt-6.1-terra',
       'gpt-6.1-sol-pro',
       'gpt-6-sol',
     ].sort())
     expect([...tierModelIds('max')].sort()).toEqual([
-      'max', 'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gpt-5.6-sol', 'gpt-6.1-sol',
+      'max', 'gemini-4-hydrogen', 'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gpt-5.6-sol', 'gpt-6.1-sol',
     ].sort())
     expect([...tierModelIds('research')].sort()).toEqual([
       'research', 'gemini-4-argon-research', 'gemini-4-argon', 'gemini-3-pro-research', 'gpt-5.5', 'gpt-5.2', 'gpt-6-astra',
@@ -180,12 +190,15 @@ describe('[COMP:providers/model-registry] pricing lookups', () => {
     expect(modelRates('gemini-3-pro-research')).toBe(modelRates('gemini-3.1-pro-preview'))
   })
 
-  it('prices the active Flash 3.8 default without repricing legacy Flash models', () => {
+  it('preserves historical Flash pricing after Hydrogen becomes the Max default', () => {
     expect(modelRates('gemini-3.8-flash')?.brackets[0]?.outPerMTok).toBe(7.50)
     expect(modelRates('gemini-3.7-flash')?.brackets[0]?.outPerMTok).toBe(7.50)
     expect(modelRates('gemini-3.6-flash')?.brackets[0]?.outPerMTok).toBe(7.50)
     expect(modelRates('gemini-3.5-flash')?.brackets[0]?.outPerMTok).toBe(9.00)
-    expect(registryRow('gemini-3.8-flash')?.status).toBe('active')
+    expect(registryRow('gemini-3.8-flash')?.status).toBe('legacy')
+    expect(modelRates('gemini-3.8-flash')?.cacheReadPerMTok).toBe(0.15)
+    expect(modelRates('gemini-4-hydrogen')?.cacheReadPerMTok).toBe(0.075)
+    expect(modelRates('gemini-4-hydrogen-pro')).toBe(modelRates('gemini-4-hydrogen'))
     expect(registryRow('gemini-3.7-flash')?.status).toBe('legacy')
     expect(tierForModelId('gemini-3.7-flash')).toBe('max')
     expect(providerModelIds('gemini')).not.toContain('gemini-3.7-flash')
@@ -237,15 +250,18 @@ describe('[COMP:providers/model-registry] provider derivations', () => {
   it('recordedAliasIds returns exactly the synthetic billing ids', () => {
     expect([...recordedAliasIds('gemini')].sort()).toEqual([
       'gemini-3-flash-standard', 'gemini-3-pro-research',
-      'gemini-3.6-flash-standard', 'gemini-3.6-flash-pro', 'gemini-4-argon-research',
+      'gemini-3.6-flash-standard', 'gemini-3.6-flash-pro',
+      'gemini-3.8-flash-standard', 'gemini-3.8-flash-pro', 'gemini-4-hydrogen-pro', 'gemini-4-argon-research',
     ].sort())
     expect(recordedAliasIds('anthropic').size).toBe(0)
   })
 
   it('providerModelIds lists active callable ids without bare tier keys or embeddings', () => {
     const gemini = providerModelIds('gemini')
-    expect(gemini).toContain('gemini-3.6-flash-standard')
-    expect(gemini).toContain('gemini-3.8-flash')
+    expect(gemini).toContain('gemini-3.8-flash-standard')
+    expect(gemini).not.toContain('gemini-3.6-flash-standard')
+    expect(gemini).not.toContain('gemini-3.6-flash-pro')
+    expect(gemini).toContain('gemini-4-hydrogen')
     expect(gemini).toContain('gemini-3.5-flash-lite')
     expect(gemini).not.toContain('pro')
     expect(gemini).not.toContain('max')
@@ -307,8 +323,8 @@ describe('[COMP:providers/model-registry] wave-1 slate + menus (plan §5.1)', ()
 
   it('menuForClass lists curated defaults and metered ports, never fallback/background/legacy', () => {
     expect(menuForClass('standard-pro').map((r) => r.alias)).toEqual([
-      'gemini-3.6-flash-standard',
-      'gemini-3.6-flash-pro',
+      'gemini-3.8-flash-standard',
+      'gemini-4-hydrogen-pro',
       'gpt-5.6-luna',
       'gpt-6-luna',
       'gpt-6.1-terra',
@@ -317,7 +333,7 @@ describe('[COMP:providers/model-registry] wave-1 slate + menus (plan §5.1)', ()
       'gpt-6-sol',
     ])
     expect(menuForClass('max').map((r) => r.alias)).toEqual([
-      'gemini-3.8-flash',
+      'gemini-4-hydrogen',
       'gpt-5.6-sol',
       'gpt-6.1-sol',
     ])
@@ -337,7 +353,7 @@ describe('[COMP:providers/model-registry] wave-1 slate + menus (plan §5.1)', ()
     const geminiOnly = new Set(['gemini'])
     expect(menuForClass('metered', geminiOnly)).toEqual([])
     expect(menuForClass('standard-pro', geminiOnly).map((r) => r.alias))
-      .toEqual(['gemini-3.6-flash-standard', 'gemini-3.6-flash-pro'])
+      .toEqual(['gemini-3.8-flash-standard', 'gemini-4-hydrogen-pro'])
   })
 
   it('intersects dynamic-provider rows with the live account model catalog', () => {
@@ -346,19 +362,19 @@ describe('[COMP:providers/model-registry] wave-1 slate + menus (plan §5.1)', ()
     availability.setModelCatalog('openai-codex', new Set(['gpt-5.6-sol', 'gpt-5.6-terra']))
 
     expect(menuForClass('standard-pro', availability).map((r) => r.alias)).toEqual([
-      'gemini-3.6-flash-standard',
-      'gemini-3.6-flash-pro',
+      'gemini-3.8-flash-standard',
+      'gemini-4-hydrogen-pro',
       'gpt-5.6-terra',
     ])
     expect(menuForClass('max', availability).map((r) => r.alias)).toEqual([
-      'gemini-3.8-flash',
+      'gemini-4-hydrogen',
       'gpt-5.6-sol',
     ])
     expect(menuForClass('research', availability).map(r => r.alias)).toEqual(['gemini-4-argon-research'])
 
     availability.setModelCatalog('openai-codex', null)
     expect(menuForClass('max', availability).map((r) => r.alias)).toEqual([
-      'gemini-3.8-flash',
+      'gemini-4-hydrogen',
     ])
   })
 })

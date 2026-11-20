@@ -165,7 +165,7 @@ describe('[COMP:tooling/push-preflight] actual local publication boundary', () =
 
   test('plans the complete maintained full/current workflow with no guessed test command list', async () => {
     const source = await readFile(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8')
-    for (const [historical, count] of [[true, 34], [false, 25]]) {
+    for (const [historical, count] of [[true, 35], [false, 26]]) {
       const context = workflowContext({ historical })
       const jobs = compileWorkflow(source, context).filter(job => job.definition.if === undefined || expression(job.definition.if, context))
       assert.equal(jobs.flatMap(job => job.variants).length, count)

@@ -327,7 +327,7 @@ describe('[COMP:api/custom-llm-endpoints] custom endpoint runtime', () => {
     })
     if (!resolved) throw new Error('expected a managed route')
     for await (const _chunk of resolved.provider.stream({
-      model: 'gemini-3.6-flash',
+      model: 'gemini-3.8-flash',
       systemPrompt: '',
       messages: [],
     })) { /* drain */ }

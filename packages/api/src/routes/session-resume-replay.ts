@@ -398,7 +398,7 @@ export async function resolveResumeOutcomeNote(
 }
 
 export function createSessionResumeReplay(deps: SessionResumeReplayDeps): SessionResumeReplay {
-  const model = deps.model ?? 'gemini-3.6-flash-pro'
+  const model = deps.model ?? MODEL_MAP.pro
 
   return function replay(params: ResumeReplayParams): Promise<'completed' | 'deferred'> {
     // One request SQL ledger before the owner exists, as on every lane: the

@@ -38,6 +38,7 @@
  * See `docs/architecture/engine/query-loop.md` → "Recovery message".
  */
 
+import { MODEL_MAP } from '../model-resolution.js'
 import type { ContentBlock, LLMProvider, TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
 import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
 
@@ -67,7 +68,7 @@ export type ComposeRecoveryMessageResult = {
 }
 
 /** Always-Flash so a Pro outage doesn't take the recovery path with it. */
-const RECOVERY_MODEL = 'gemini-3.6-flash-pro' as const
+const RECOVERY_MODEL = MODEL_MAP.pro
 
 /**
  * Cap each tool_result snippet sent to Flash. The full Calendar /

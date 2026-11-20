@@ -8,9 +8,11 @@
  * single "beep" — Gemini reliably transcribes it as empty or a word
  * like "beep". We only assert the call succeeds and returns a string.
  */
+import { chatTierDefaults, registryRow } from '@use-brian/shared/model-registry'
 import { describe, it, expect } from 'vitest'
 import { transcribeAudio } from '../transcribe.js'
 
+const model = registryRow(chatTierDefaults().standard)!.apiModelId
 const describeIf = process.env.GEMINI_API_KEY ? describe : describe.skip
 
 /**
@@ -42,10 +44,10 @@ describeIf('[COMP:media/transcribe-live] transcribeAudio (integration)', () => {
   it('returns a string for a short WAV clip', async () => {
     const result = await transcribeAudio(
       { buffer: buildSilentWav(1), mime: 'audio/wav' },
-      { apiKey: process.env.GEMINI_API_KEY!, timeoutMs: 30_000 },
+      { apiKey: process.env.GEMINI_API_KEY!, model, timeoutMs: 30_000 },
     ).catch((err: Error) => {
       // Silence can legitimately produce "missing text" — treat as pass.
-      if (err.message.includes('missing text')) return { text: '', usage: null, model: 'gemini-3.6-flash' }
+      if (err.message.includes('missing text')) return { text: '', usage: null, model }
       throw err
     })
     expect(typeof result.text).toBe('string')

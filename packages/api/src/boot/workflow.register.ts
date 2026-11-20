@@ -11,6 +11,7 @@
  * INVARIANT: never import `@use-brian/api-platform/*` or
  * `@use-brian/shared-server` (closed code arrives through OpenApiPorts).
  */
+import { MODEL_MAP } from '../model-resolution.js'
 import { sanitize as sanitizeAnalytics } from '@use-brian/core/analytics/logger.js'
 import { createBrainHealingTools } from '@use-brian/core/brain/healing-tools.js'
 import {
@@ -770,7 +771,7 @@ export function registerWorkflow(scope: WorkflowScope) {
       promotion: createMemoryToEntityPromotionStore(),
       entityMerge: { repo: createEntityMergeStore() },
       provider,
-      reclassifierModel: 'gemini-3.6-flash-pro',
+      reclassifierModel: MODEL_MAP.pro,
       decisionRuntime,
       resolveLlm: async (workspaceId) => {
         const runtime = await resolveBackgroundRuntime(workspaceId)

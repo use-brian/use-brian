@@ -237,13 +237,13 @@ describe('[COMP:api/skills-route] POST /draft', () => {
     await request(draftApp({ provider: mockProvider(VALID_DRAFT, free), plan: 'free' }))
       .post('/api/skills/draft')
       .send(turnBody({ model: 'max' }))
-    expect(free.model).toBe('gemini-3.6-flash-standard')
+    expect(free.model).toBe('gemini-3.8-flash-standard')
 
     const paid: Captured = {}
     await request(draftApp({ provider: mockProvider(VALID_DRAFT, paid), plan: 'max_5x' }))
       .post('/api/skills/draft')
       .send(turnBody({ model: 'max' }))
-    expect(paid.model).toBe('gemini-3.8-flash')
+    expect(paid.model).toBe('gemini-4-hydrogen')
   })
 
   it('blocks the turn when the usage budget is exhausted (429)', async () => {

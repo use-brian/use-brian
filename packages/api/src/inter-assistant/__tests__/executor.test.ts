@@ -13,6 +13,7 @@ import type { SessionStateRecord } from '@use-brian/core/memory/session-state-ty
  * the callee's tool set.
  */
 
+import { chatTierDefaults } from '@use-brian/shared/model-registry'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 // These unit fixtures replace database/scope ports and have no canonical policy
@@ -35,6 +36,8 @@ vi.mock('../../context-scope/authority-lease.js', async original => {
   }) }
 })
 import { z } from 'zod'
+
+const proModel = chatTierDefaults().pro
 
 const restoreWorkspaceParent = vi.hoisted(() => vi.fn())
 vi.mock('../../workspace-mcp/delegation.js', () => ({ restoreWorkspaceMcpDelegation: restoreWorkspaceParent }))
@@ -1503,7 +1506,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
       { type: 'assistant_turn', response: { content: [{ type: 'text', text: 'done' }] }, toolResults: [] },
       {
         type: 'turn_complete',
-        response: { content: [{ type: 'text', text: 'done' }], model: 'gemini-3-flash-preview' },
+        response: { content: [{ type: 'text', text: 'done' }], model: proModel },
         totalUsage: { inputTokens: 1000, outputTokens: 200, cacheReadTokens: 5000 },
       },
     ])
@@ -1523,7 +1526,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
       userId: 'owner-1',
       assistantId: 'callee-1',
       sessionId: 'sess-1',
-      model: 'gemini-3-flash-preview',
+      model: proModel,
       modelTier: 'pro',
       inputTokens: 1000,
       outputTokens: 200,
@@ -1542,7 +1545,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
       { type: 'assistant_turn', response: { content: [{ type: 'text', text: 'ok' }] }, toolResults: [] },
       {
         type: 'turn_complete',
-        response: { content: [], model: 'gemini-3-flash-preview' },
+        response: { content: [], model: proModel },
         totalUsage: { inputTokens: 10, outputTokens: 5 },
       },
     ])
@@ -1658,7 +1661,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
       { type: 'assistant_turn', response: { content: [{ type: 'text', text: 'ok' }] }, toolResults: [] },
       {
         type: 'turn_complete',
-        response: { content: [], model: 'gemini-3-flash-preview' },
+        response: { content: [], model: proModel },
         totalUsage: { inputTokens: 10, outputTokens: 5 },
       },
     ])

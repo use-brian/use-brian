@@ -2,10 +2,9 @@ import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import pg from 'pg'
 import { tmpdir } from 'node:os'
 import { isDeepStrictEqual } from 'node:util'
-import { createAcceptanceReport, mergeAcceptanceReports, parseShard, suitesForShard } from './testing/department-isolation-report.mjs'
+import { createAcceptanceReport, fixtureChecksForSuites, mergeAcceptanceReports, parseShard, suitesForShard } from './testing/department-isolation-report.mjs'
 import {
   DEPARTMENT_ISOLATION_BOUNDARIES,
   DEPARTMENT_ISOLATION_CASES,
@@ -42,6 +41,7 @@ const relevantPaths = new Set([
   'scripts/test-department-isolation.mjs',
   'scripts/testing/department-isolation-report.mjs',
   'scripts/crm/local-fixture.mjs',
+  'scripts/crm/runtime-role.mjs',
   'apps/api/src/__tests__/prepared-pglite.ts',
   'apps/api/src/__tests__/context-scope-migration-upgrade.ts',
   'apps/api/src/migrate-pglite.ts',
@@ -50,7 +50,10 @@ const relevantPaths = new Set([
   'packages/api/scripts/migrate.ts',
   'packages/api/scripts/migration-diagnostics.ts',
   'scripts/__tests__/migration-diagnostics.integration.test.mjs',
+  'scripts/__tests__/prepared-fixture.integration.test.mjs',
   'packages/shared/src/department-isolation-coverage.ts',
+  'packages/shared/src/model-registry.ts',
+  'packages/api/src/__tests__/fixtures/standard-gemini.ts',
   ...DEPARTMENT_ISOLATION_BOUNDARIES.flatMap(boundary => boundary.sourcePaths),
   ...DEPARTMENT_ISOLATION_SUITES.flatMap(suite => suite.testFiles.map(file => relTest(suite,file))),
 ])
@@ -110,6 +113,7 @@ async function migrationRevision(url) {
     const rows = (await readdir(join(root, 'packages/api/migrations'))).filter(name => name.endsWith('.sql')).sort()
     return { latest: rows.at(-1), count: rows.length, ledgerHash: sha256(rows.join('\n')) }
   }
+  const { default: pg } = await import('pg')
   const client=new pg.Client({connectionString:url})
   await client.connect()
   try {
@@ -155,7 +159,8 @@ async function run() {
   const selectedSuites=foundation
     ? DEPARTMENT_ISOLATION_SUITES.filter(suite=>!['review-lifecycle','ui','compatibility'].includes(suite.id))
     : suitesForShard(shard, profile)
-  const native = selectedSuites.some(suite => suite.packageDir !== 'apps/api')
+  const fixtureChecks = fixtureChecksForSuites(selectedSuites)
+  const native = fixtureChecks.length > 0
   const preparationStarted = Date.now()
   console.log(`Preparing ${native ? 'native PostgreSQL' : 'embedded acceptance'} fixture`)
   // Every native suite shares the ordinary-owner fixture that migration 8274 requires.
@@ -173,8 +178,7 @@ async function run() {
       ...runtime,...fixture.env,...(fixture.adminUrl ? { CONTEXT_SCOPE_TEST_DATABASE_URL:fixture.adminUrl } : {}),
       CI:'true',GEMINI_API_KEY:'',OPENAI_API_KEY:'',ANTHROPIC_API_KEY:'',BRIAN_TEST_NO_PAID:'1',
     }
-    if (native) await runCommand('node', ['--test', 'scripts/__tests__/prepared-fixture.integration.test.mjs',
-      'scripts/__tests__/migration-diagnostics.integration.test.mjs'], { cwd: root, env, inherit: true })
+    if (native) await runCommand('node', ['--test', ...fixtureChecks], { cwd: root, env, inherit: true })
     const suiteResults=[]
     const assertions=[]
     for (const suite of selectedSuites) {

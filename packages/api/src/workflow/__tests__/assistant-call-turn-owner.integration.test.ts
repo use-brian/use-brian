@@ -1,4 +1,5 @@
 /** Actual boot consult transport, Workflow executor and durable owner receiving. [COMP:api/inter-assistant-executor] */
+import { chatTierDefaults } from '@use-brian/shared/model-registry'
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { LLMProvider, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
@@ -12,6 +13,8 @@ import { createDbMemoryStore } from '../../db/memory-store.js'
 import { createOssUsageStore } from '../../db/oss-usage-store.js'
 import { createDbWorkflowRunStore, createDbWorkflowStore } from '../../db/workflow-store.js'
 import { persistentContextFixture } from '../../application-platform/__tests__/fixtures/persistent-context.js'
+
+const proModel = chatTierDefaults().pro
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -31,7 +34,7 @@ describe('[COMP:api/inter-assistant-executor] actual workflow and A2A receiving'
       let providerCalls = 0
       async function* response(): AsyncGenerator<StreamChunk> {
         providerCalls++
-        yield { type: 'message_start', model: 'gemini-3.6-flash-pro' }
+        yield { type: 'message_start', model: proModel }
         yield { type: 'text_delta', text: `Message body:\n${expectedText} (Word count: ~3)` }
         yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 5, outputTokens: 3 } }
       }

@@ -172,6 +172,8 @@ type ModelRegistryBase = {
   /** `legacy` rows exist for classification/pricing of historical rows only —
    * they are never callable and never appear in menus. */
   status: 'active' | 'legacy'
+  /** Successor for a saved selector. Historical classification and pricing use the original row. */
+  servingSuccessor?: string
   /** Marks this row as the chat selector default: `MODEL_MAP[chatTierKey] = alias`. */
   chatTierKey?: ChatTierKey
   /** Offered in selection menus (workspace/assistant/session pickers). False
@@ -260,6 +262,12 @@ const PRO31_RATES: ModelRates = {
   cacheWritePerMTok: 2.00,
 }
 
+const HYDROGEN_RATES: ModelRates = {
+  brackets: [{ upToInputTokens: Infinity, inPerMTok: 1.50, outPerMTok: 7.50 }],
+  cacheReadPerMTok: 0.075,
+  cacheWritePerMTok: 0, // Implicit caching only.
+}
+
 const ARGON_RATES: ModelRates = {
   brackets: [{ upToInputTokens: Infinity, inPerMTok: 4.00, outPerMTok: 20.00 }],
   cacheReadPerMTok: 0.20,
@@ -294,7 +302,58 @@ const FREE_RATES: ModelRates = {
 
 export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   // ── Chat tiers (Gemini incumbents — every class's default, L10) ──
-  // 2026-10-17 defaults. New recorded ids preserve the old rows' pricing.
+  // Pro and Max share Hydrogen. Each tier has its own recording id.
+  {
+    alias: 'gemini-3.8-flash-standard',
+    displayName: 'Gemini 3.8 Flash',
+    provider: 'gemini',
+    apiModelId: 'gemini-3.8-flash',
+    class: 'standard-pro',
+    tier: 'standard',
+    status: 'active',
+    chatTierKey: 'standard',
+    menu: true,
+    recordAlias: true,
+    fallbackAlias: 'claude-haiku-4-5',
+    rates: FLASH38_RATES,
+    contextWindow: 1_048_576,
+    maxOutput: 65_536,
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: true },
+  },
+  {
+    alias: 'gemini-4-hydrogen-pro',
+    displayName: 'Gemini 4 Hydrogen',
+    provider: 'gemini',
+    apiModelId: 'gemini-4-hydrogen',
+    class: 'standard-pro',
+    tier: 'pro',
+    status: 'active',
+    chatTierKey: 'pro',
+    menu: true,
+    recordAlias: true,
+    fallbackAlias: 'claude-haiku-4-5',
+    rates: HYDROGEN_RATES,
+    contextWindow: 1_048_576,
+    maxOutput: 65_536,
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: true },
+  },
+  {
+    alias: 'gemini-3.8-flash-pro',
+    displayName: 'Gemini 3.8 Flash',
+    provider: 'gemini',
+    apiModelId: 'gemini-3.8-flash',
+    class: 'standard-pro',
+    tier: 'pro',
+    status: 'legacy',
+    servingSuccessor: 'gemini-4-hydrogen-pro',
+    menu: false,
+    recordAlias: true,
+    fallbackAlias: 'claude-haiku-4-5',
+    rates: FLASH38_RATES,
+    contextWindow: 1_048_576,
+    maxOutput: 65_536,
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: true },
+  },
   {
     alias: 'gemini-3.6-flash-standard',
     displayName: 'Gemini 3.6 Flash',
@@ -302,9 +361,9 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     apiModelId: 'gemini-3.6-flash',
     class: 'standard-pro',
     tier: 'standard',
-    status: 'active',
-    chatTierKey: 'standard',
-    menu: true,
+    status: 'legacy',
+    servingSuccessor: 'gemini-3.8-flash-standard',
+    menu: false,
     recordAlias: true,
     fallbackAlias: 'claude-haiku-4-5',
     rates: FLASH36_RATES,
@@ -319,9 +378,9 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     apiModelId: 'gemini-3.6-flash',
     class: 'standard-pro',
     tier: 'pro',
-    status: 'active',
-    chatTierKey: 'pro',
-    menu: true,
+    status: 'legacy',
+    servingSuccessor: 'gemini-4-hydrogen-pro',
+    menu: false,
     recordAlias: true,
     fallbackAlias: 'claude-haiku-4-5',
     rates: FLASH36_RATES,
@@ -398,16 +457,30 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     capabilities: { tools: true, vision: true, thinking: true, nativePdf: true },
   },
   {
-    // Max tier default — Gemini Flash 3.8 (GA 2026-09-02).
+    alias: 'gemini-4-hydrogen',
+    displayName: 'Gemini 4 Hydrogen',
+    provider: 'gemini',
+    apiModelId: 'gemini-4-hydrogen',
+    class: 'max',
+    tier: 'max',
+    status: 'active',
+    chatTierKey: 'max',
+    menu: true,
+    rates: HYDROGEN_RATES,
+    contextWindow: 1_048_576,
+    maxOutput: 65_536,
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: true },
+  },
+  {
     alias: 'gemini-3.8-flash',
     displayName: 'Gemini 3.8 Flash',
     provider: 'gemini',
     apiModelId: 'gemini-3.8-flash',
     class: 'max',
     tier: 'max',
-    status: 'active',
-    chatTierKey: 'max',
-    menu: true,
+    status: 'legacy',
+    servingSuccessor: 'gemini-4-hydrogen',
+    menu: false,
     idAliases: ['max'],
     rates: FLASH38_RATES,
     contextWindow: 1_048_576,
@@ -1134,6 +1207,11 @@ for (const row of MODEL_REGISTRY) {
 /** Row a selector/recorded id classifies to (alias + idAliases). */
 export function registryRow(id: string): ModelRegistryRow | undefined {
   return byClassifierId.get(id)
+}
+
+/** Resolve a retired selector only when preparing a new request or reading a saved preference. */
+export function servingModelAlias(id: string): string {
+  return registryRow(id)?.servingSuccessor ?? id
 }
 
 /** Row an id prices at (alias + idAliases + priceAliases + apiModelId). */

@@ -11,7 +11,7 @@ import type { HttpRetryWindow } from './types.js'
  */
 import { debugDocumentFlow } from '../engine/document-flow-debug.js'
 import { Agent } from 'undici'
-import { providerAliasMap, recordedAliasIds, providerModelIds, registryRow } from '@use-brian/shared/model-registry'
+import { servingModelAlias, providerAliasMap, recordedAliasIds, providerModelIds, registryRow } from '@use-brian/shared/model-registry'
 import type { LLMProvider, ProviderRequest, ProviderSession, SendOptions, SessionOptions, StreamChunk, Message, ContentBlock, ThinkingLevel, ToolDefinition, ToolSchemaRegistration, StopReason, TokenUsage } from './types.js'
 import type { GoogleTransport } from './google-transport.js'
 import { aiStudioTransport } from './google-transport.js'
@@ -29,7 +29,8 @@ const PREFILL_DISPATCHERS = new Map<number, Agent>()
  * tier but must stay billable-distinct in `usage_tracking`. They run the real
  * model on the wire (via MODEL_ALIASES above) but we **record** the synthetic
  * id in `message_start` so the row classifies as the right tier:
- *   - `gemini-3.6-flash-standard` (MODEL_MAP.standard) — Flash 3.6, vs Pro.
+ *   - `gemini-3.8-flash-standard` (MODEL_MAP.standard) — Flash 3.8.
+ *   - `gemini-4-hydrogen-pro` (MODEL_MAP.pro) — Hydrogen, shared with Max.
  *   - `gemini-4-argon-research` (MODEL_MAP.research) — Argon, vs historical Research.
  * Standard/Pro both use synthetic ids; historical synthetic ids also remain.
  * Every other model records its resolved provider id unchanged. Derived from
@@ -139,7 +140,7 @@ function messagesToGeminiParts(messages: Message[]): GeminiPart[] {
     for (const block of blocks) {
       switch (block.type) {
         case 'text':
-          parts.push({ text: block.text })
+          parts.push({ text: block.text, ...(msg.role === 'assistant' && block.providerSignature ? { thoughtSignature: block.providerSignature } : {}) })
           break
         case 'image':
           parts.push({ inlineData: { mimeType: block.mimeType, data: block.data } })
@@ -662,7 +663,7 @@ async function* streamGeminiSSE(
  * this 2-level is intentional; extend only when a caller actually needs it.
  */
 function supportsGeminiThinkingConfig(modelId: string): boolean {
-  return /(^|\/)gemini-(?:3(?:\.\d+)?-(?:pro|flash)|4-argon(?:$|-))/.test(modelId.toLowerCase())
+  return /(^|\/)gemini-(?:3(?:\.\d+)?-(?:pro|flash)|4-(?:argon|hydrogen)(?:$|-))/.test(modelId.toLowerCase())
 }
 
 export function resolveGeminiThinkingLevel(
@@ -683,6 +684,7 @@ function buildRequest(
   // session path) is assembled here, so enforce the input-part contract once,
   // for all of them. Drops reasoning / content-less parts that would 400.
   const safeContents = normalizeGeminiRequestContents(contents, modelId)
+  const outputLimit = modelId === 'gemini-4-hydrogen' ? registryRow(modelId)?.maxOutput : undefined
   const systemParts = systemContextParts(options)
   const discoveryInstructions = toolDiscoveryInstructions(options, 'dynamic')
   if (discoveryInstructions) systemParts.push(discoveryInstructions)
@@ -711,7 +713,7 @@ function buildRequest(
       toolConfig: { functionCallingConfig: { mode: 'AUTO' } },
     } : {}),
     generationConfig: {
-      maxOutputTokens: options.maxTokens,
+      maxOutputTokens: outputLimit && options.maxTokens !== undefined ? Math.min(options.maxTokens, outputLimit) : options.maxTokens,
       ...geminiSamplingConfig(modelId, options.temperature),
       // JSON output. Only when the caller asked for it AND no tools are
       // declared — Gemini rejects responseMimeType together with function
@@ -732,12 +734,11 @@ function buildRequest(
           }
         : {}),
       ...(() => {
-        // Gemini 3 and Argon think on every turn regardless; `includeThoughts: true`
+        // Gemini 3 and supported Gemini 4 models think on every turn regardless; `includeThoughts: true`
         // asks it to also return a streamable SUMMARY of that reasoning (a
         // few extra output tokens, not extra thinking) so the engine can
         // surface it as `thinking_delta` → SSE `reasoning`. Without it, the
-        // reasoning stream is empty even though the plumbing exists. Gemini 3 and
-        // Argon support this config; older models get nothing.
+        // reasoning stream is empty even though the plumbing exists. Older models omit this config.
         // See docs/architecture/engine/live-streaming.md.
         if (!supportsGeminiThinkingConfig(modelId)) return {}
         const tl = resolveGeminiThinkingLevel(modelId, options.thinkingLevel)
@@ -749,6 +750,21 @@ function buildRequest(
         }
       })(),
     },
+  }
+}
+
+// Hydrogen signs the first call in a parallel batch. Link later calls to
+// their signed sibling so transcript repair preserves the whole batch.
+function parallelCallMetadata(model: string) {
+  let firstCall: string | undefined
+  let signedFirst: string | undefined
+  return (id: string, signature?: string) => {
+    if (!firstCall) {
+      firstCall = id
+      if (signature && resolveModel(model) === 'gemini-4-hydrogen') signedFirst = id
+    }
+    if (signature) return { providerSignature: signature }
+    return signedFirst ? { parallelWith: signedFirst } : {}
   }
 }
 
@@ -774,6 +790,7 @@ async function* convertStreamChunks(
   let hasToolCalls = false
   let hasAnyContent = false
   let chunkCount = 0
+  const callMetadata = parallelCallMetadata(modelId)
   let firstTextSeen = false  // strip a leaked `model\n` role token from the turn's first text part
 
   for await (const data of sseStream) {
@@ -803,13 +820,13 @@ async function* convertStreamChunks(
         // Verbatim reasoning — stream live so the user can watch the model
         // think. Body is never persisted (stateless path keeps no history).
         if (part.text) yield { chunk: { type: 'thinking_delta', text: part.text } }
-      } else if (part.text) {
-        let text = part.text
+      } else if (part.text !== undefined || (part.thoughtSignature && !part.functionCall && !part.inlineData)) {
+        let text = part.text ?? ''
         if (!firstTextSeen) {
           firstTextSeen = true
           text = stripLeadingEnvelopeLeak(stripLeadingRoleToken(text))
         }
-        if (text) yield { chunk: { type: 'text_delta', text } }
+        if (text || part.thoughtSignature) yield { chunk: { type: 'text_delta', text, ...(part.thoughtSignature ? { providerSignature: part.thoughtSignature } : {}) } }
       }
       if (part.functionCall) {
         hasToolCalls = true
@@ -821,7 +838,7 @@ async function* convertStreamChunks(
           chunk: {
             type: 'tool_use_end',
             id,
-            ...(part.thoughtSignature ? { providerSignature: part.thoughtSignature } : {}),
+            ...callMetadata(id, part.thoughtSignature),
           },
           rawParts,
         }
@@ -896,8 +913,9 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
 
     // Stateless single-shot
     async *stream(request: ProviderRequest): AsyncIterable<StreamChunk> {
-      const modelId = resolveModel(request.model)           // real Google model name (URL + thinking config)
-      const recordId = recordedModelId(request.model, modelId) // billing/tier key recorded on the turn
+      const selector = servingModelAlias(request.model)
+      const modelId = resolveModel(selector)           // real Google model name (URL + thinking config)
+      const recordId = recordedModelId(selector, modelId) // billing/tier key recorded on the turn
       const contents = toGeminiContents(request.messages)
       // System-role rows (compaction summary, budget breadcrumb) are skipped
       // by toGeminiContents; deliver them through systemInstruction instead.
@@ -915,8 +933,9 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
 
     // Stateful session preserving raw Gemini parts (incl. thoughtSignature)
     createSession(options: SessionOptions): ProviderSession {
-      const modelId = resolveModel(options.model)              // real Google model name (URL + thinking config)
-      const recordId = recordedModelId(options.model, modelId) // billing/tier key recorded on each turn
+      const selector = servingModelAlias(options.model)
+      const modelId = resolveModel(selector)              // real Google model name (URL + thinking config)
+      const recordId = recordedModelId(selector, modelId) // billing/tier key recorded on each turn
       // Raw history preserving thoughtSignature — NOT converted from our format
       const rawHistory: GeminiContent[] = []
       // System-role rows from the first send (the full transcript: compaction
@@ -991,6 +1010,7 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
           let hasAnyContent = false
           let chunkCount = 0
           let modelRole: string | undefined
+          const callMetadata = parallelCallMetadata(modelId)
           let firstTextSeen = false  // strip a leaked `model\n` role token from the turn's first text part
           // Accumulated model-turn parts in arrival order. Consecutive text and
           // thought deltas are merged into one part each so the assembled turn
@@ -1027,19 +1047,20 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
                     ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
                   })
                 }
-              } else if (part.text) {
-                let text = part.text
+              } else if (part.text !== undefined || (part.thoughtSignature && !part.functionCall && !part.inlineData)) {
+                let text = part.text ?? ''
                 if (!firstTextSeen) {
                   firstTextSeen = true
                   text = stripLeadingEnvelopeLeak(stripLeadingRoleToken(text))
                 }
-                if (text) {
-                  yield { type: 'text_delta', text }
+                if (text || part.thoughtSignature) {
+                  yield { type: 'text_delta', text, ...(part.thoughtSignature ? { providerSignature: part.thoughtSignature } : {}) }
                   const tail = accumulatedParts[accumulatedParts.length - 1]
-                  if (tail && tail.text !== undefined && !tail.thought && !tail.functionCall) {
+                  if (tail && tail.text !== undefined && !tail.thought && !tail.functionCall && !tail.thoughtSignature) {
                     tail.text += text
+                    if (part.thoughtSignature) tail.thoughtSignature = part.thoughtSignature
                   } else {
-                    accumulatedParts.push({ text })
+                    accumulatedParts.push({ text, ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}) })
                   }
                 }
               }
@@ -1056,7 +1077,7 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
                 yield {
                   type: 'tool_use_end',
                   id,
-                  ...(part.thoughtSignature ? { providerSignature: part.thoughtSignature } : {}),
+                  ...callMetadata(id, part.thoughtSignature),
                 }
                 const fcPart: GeminiPart = {
                   functionCall: { ...part.functionCall, id },
