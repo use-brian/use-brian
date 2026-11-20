@@ -949,8 +949,15 @@ test('[COMP:api/migration-owner-role] Historical function defaults upgrade throu
     assert.equal(calls, 1)
     assert.equal((await owner.query(`SELECT count(*)::int AS count FROM _migrations WHERE name IN (
       '81110_legacy_function_execute_privileges.sql','8111_native_memory_statement_visitor.sql',
-      '8133_native_history_transcript_read.sql')`)).rows[0].count, 3)
-    assert.equal((await owner.query('SELECT application_memory_statement_helpers_current() AS current')).rows[0].current, true)
+      '8133_native_history_transcript_read.sql','8269_canonical_conversation_publication.sql',
+      '82775_legacy_page_authority_privileges.sql')`)).rows[0].count, 5)
+    for (const reader of ['read_native_session_query_cohort_nodes(uuid,jsonb)', 'read_page_event_authority(uuid,uuid,uuid)']) {
+      assert.equal((await owner.query("SELECT has_function_privilege('app_user',$1,'EXECUTE') AS allowed",
+        [`public.${reader}`])).rows[0].allowed, false, reader)
+    }
+    assert.deepEqual((await owner.query(`SELECT native_turn_helpers_current() AS current,
+      to_regprocedure('public.application_memory_statement_helpers_current()') AS retired`)).rows,
+    [{ current: true, retired: null }])
     assert.deepEqual((await owner.query(`SELECT has_function_privilege('app_user',
       'public.application_memory_statement_state(uuid,uuid,text[],jsonb)','EXECUTE') AS private,
       has_function_privilege('app_user','public.read_admitted_native_scope_snapshot(uuid,text,uuid)','EXECUTE') AS facade`)).rows,

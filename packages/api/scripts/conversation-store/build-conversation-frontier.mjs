@@ -10,7 +10,7 @@ import { executableProjection } from './executable-record.mjs'
 import { currentInstallationAuthenticationSource as previousSource } from './installation-authentication-8327.mjs'
 import { assertAuthenticationReadOnly } from './installation-authentication-8315.mjs'
 
-export const frontierMigration = '8328_conversation_graph_frontier.sql'
+const frontierMigration = '8328_conversation_graph_frontier.sql'
 const predecessor = '8327_conversation_graph_set_verification.sql'
 const defaultSourceRoot = fileURLToPath(new URL('../../', import.meta.url))
 const prefix = 'a8314_'

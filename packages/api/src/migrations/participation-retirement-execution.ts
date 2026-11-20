@@ -1,4 +1,6 @@
 /** Exact historical ACL accommodation for 8290. [COMP:api/migration-execution-sql] */
+import { historicalFunctionExecuteAcl } from './historical-function-acl.js'
+
 const archivedProfile = [
   {
     signature: 'create_source_derived_entity_before_capture(jsonb,jsonb)',
@@ -48,8 +50,8 @@ DECLARE p pg_proc; installed pg_proc; reference pg_proc; repaired pg_proc; profi
  owner_grant aclitem:=makeaclitem(owner_id,owner_id,'EXECUTE',false);
  app_grant aclitem:=makeaclitem(runtime_id,owner_id,'EXECUTE',false);
  public_grant aclitem:=makeaclitem(0,owner_id,'EXECUTE',false);
- ordinary_legacy aclitem[]:=ARRAY[public_grant,app_grant,owner_grant];
- task_legacy aclitem[]:=ARRAY[app_grant,owner_grant];
+ ordinary_legacy aclitem[]:=${historicalFunctionExecuteAcl('runtime_id', true)};
+ task_legacy aclitem[]:=${historicalFunctionExecuteAcl('runtime_id', false)};
  archived boolean:=false;
  identity_fields constant text[]:=ARRAY['oid','proname','pronamespace','proowner','proacl','prosrc'];
 BEGIN`)
@@ -80,9 +82,10 @@ BEGIN`)
   const drops = archivedProfile.map(profile => ` DROP FUNCTION pg_temp.${profile.lookup};`).join('\n')
   const repair = `
  SELECT EXISTS (SELECT 1 FROM pg_proc q WHERE q.oid=ANY(ARRAY[${names}])
-  AND (q.proacl IS NOT DISTINCT FROM ordinary_legacy OR q.proacl IS NOT DISTINCT FROM task_legacy)) INTO archived;
+  AND (q.proacl IS NOT DISTINCT FROM ordinary_legacy OR
+   (task_legacy<>ARRAY[owner_grant,app_grant] AND q.proacl IS NOT DISTINCT FROM task_legacy))) INTO archived;
  IF NOT archived THEN RETURN;END IF;
- IF current_user::regrole::oid<>owner_id OR runtime_id IS NULL OR runtime_id>=owner_id
+ IF current_user::regrole::oid<>owner_id OR runtime_id IS NULL OR runtime_id=owner_id
   OR NOT EXISTS(SELECT 1 FROM public._migrations WHERE name='81110_legacy_function_execute_privileges.sql')
   OR EXISTS(SELECT 1 FROM pg_default_acl d WHERE d.defaclrole=owner_id AND d.defaclobjtype='f'
     AND d.defaclnamespace IN(0,'public'::regnamespace))
@@ -100,6 +103,7 @@ ${references}
  END LOOP;
  FOR profile IN SELECT * FROM (VALUES ${profiles}) AS v(signature,target,prototype,task) LOOP
   SELECT * INTO STRICT installed FROM pg_proc q WHERE q.oid=profile.target;
+  IF profile.task AND installed.proacl=ARRAY[owner_grant,app_grant] THEN CONTINUE;END IF;
   EXECUTE format('REVOKE EXECUTE ON FUNCTION public.%s FROM app_user',profile.signature);
   IF profile.task THEN EXECUTE format('GRANT EXECUTE ON FUNCTION public.%s TO app_user',profile.signature);END IF;
   SELECT * INTO STRICT repaired FROM pg_proc q WHERE q.oid=installed.oid;

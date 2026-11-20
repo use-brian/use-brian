@@ -8,7 +8,7 @@ import { executableProjection } from './executable-record.mjs'
 import { currentInstallationAuthenticationSource as previousSource } from './installation-authentication-8326.mjs'
 import { assertAuthenticationReadOnly } from './installation-authentication-8315.mjs'
 
-export const graphSetMigration = '8327_conversation_graph_set_verification.sql'
+const graphSetMigration = '8327_conversation_graph_set_verification.sql'
 const predecessor = '8326_native_memory_query_write_contract.sql'
 const defaultSourceRoot = fileURLToPath(new URL('../../', import.meta.url))
 const prefix = 'a8314_'

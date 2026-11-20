@@ -1,4 +1,6 @@
 /** Historical predecessor compatibility for immutable 8296. [COMP:api/migration-execution-sql] */
+import { historicalFunctionExecuteAcl } from './historical-function-acl.js'
+
 export function configuredTaskPublicationExecutionSql(sql: string): string {
   const members = [
     { signature: 'application_recheck_native_task_sources()', acl: "ARRAY[makeaclitem(owner_id,owner_id,'EXECUTE',false)]", publicGrant: false },
@@ -17,10 +19,7 @@ export function configuredTaskPublicationExecutionSql(sql: string): string {
     if (!block.includes(`to_regprocedure('public.${member.signature}')`) || block.split(expected).length !== 2) {
       throw new Error('8296: unexpected historical predecessor ACL check')
     }
-    const app = "makeaclitem((SELECT oid FROM pg_roles WHERE rolname='app_user'),owner_id,'EXECUTE',false)"
-    const owner = "makeaclitem(owner_id,owner_id,'EXECUTE',false)"
-    const publicGrant = member.publicGrant ? "makeaclitem(0,owner_id,'EXECUTE',false)," : ''
-    const older = `ARRAY[${publicGrant}${app},${owner}]`
+    const older = historicalFunctionExecuteAcl("(SELECT oid FROM pg_roles WHERE rolname='app_user')", member.publicGrant)
     sql = sql.slice(0, start)
       + block.replace(expected, `  OR (actual.proacl IS DISTINCT FROM ${member.acl} AND actual.proacl IS DISTINCT FROM ${older})\n`)
       + sql.slice(end)
@@ -36,8 +35,6 @@ DECLARE
  owner_id oid:=(SELECT relowner FROM pg_class WHERE oid='public.workspaces'::regclass);
  runtime_id oid:=(SELECT oid FROM pg_roles WHERE rolname='app_user');
  owner_grant aclitem:=makeaclitem(owner_id,owner_id,'EXECUTE',false);
- app_grant aclitem:=makeaclitem(runtime_id,owner_id,'EXECUTE',false);
- public_grant aclitem:=makeaclitem(0,owner_id,'EXECUTE',false);
  task_before pg_proc; task_after pg_proc; intake pg_proc;
 BEGIN
  SELECT * INTO STRICT task_before FROM pg_proc
@@ -45,9 +42,9 @@ BEGIN
  SELECT * INTO STRICT intake FROM pg_proc
   WHERE oid='public.check_programmatic_publication_commit()'::regprocedure;
  IF task_before.proacl IS NOT DISTINCT FROM ARRAY[owner_grant] AND intake.proacl IS NULL THEN RETURN;END IF;
- IF current_user::regrole::oid<>owner_id OR runtime_id IS NULL OR runtime_id>=owner_id
-  OR task_before.proacl IS DISTINCT FROM ARRAY[app_grant,owner_grant]
-  OR intake.proacl IS DISTINCT FROM ARRAY[public_grant,app_grant,owner_grant]
+ IF current_user::regrole::oid<>owner_id OR runtime_id IS NULL OR runtime_id=owner_id
+  OR task_before.proacl IS DISTINCT FROM ${historicalFunctionExecuteAcl('runtime_id', false)}
+  OR intake.proacl IS DISTINCT FROM ${historicalFunctionExecuteAcl('runtime_id', true)}
   OR NOT EXISTS(SELECT 1 FROM public._migrations WHERE name='81110_legacy_function_execute_privileges.sql')
   OR EXISTS(SELECT 1 FROM pg_default_acl WHERE defaclrole=owner_id AND defaclobjtype='f'
     AND defaclnamespace IN(0,'public'::regnamespace))
