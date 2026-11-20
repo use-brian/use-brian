@@ -73,7 +73,9 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
       const indexes = acceptanceShards(profile)
       const partitions = indexes.map(index => suitesForShard(parseShard(`${index}/${indexes.length}`), profile))
       const matrix = acceptanceMatrix(profile).include
-      assert.deepEqual(matrix.map(entry => entry.shard), indexes)
+      assert.deepEqual(matrix.map(entry => entry.shard).toSorted((a, b) => a - b), indexes)
+      assert.deepEqual(matrix.slice(0, 2).flatMap(entry => partitions[entry.shard - 1].map(suite => suite.id)),
+        ['recovered-calendar-history', 'retained-conversation'])
       assert.deepEqual(matrix.filter(entry => entry.timeoutMinutes === 45)
         .flatMap(entry => partitions[entry.shard - 1].map(suite => suite.id)).sort(),
       ['recovered-calendar-history', 'retained-conversation'])

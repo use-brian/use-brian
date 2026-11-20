@@ -49,8 +49,10 @@ describe('[COMP:ci/execution-topology] historical coverage selection', () => {
         assert.equal(output.historical, String(profile === 'full'))
         assert.deepEqual(JSON.parse(output.shards), shards)
         assert.equal(Number(output.total), shards.length)
-        assert.deepEqual(JSON.parse(output.matrix), { include: shards.map(shard => ({
-          shard, timeoutMinutes: (profile === 'full' ? [9, 11] : [6, 8]).includes(shard) ? 45 : 20,
+        const longest = profile === 'full' ? [11, 9] : [8, 6]
+        const order = [...longest, ...shards.filter(shard => !longest.includes(shard))]
+        assert.deepEqual(JSON.parse(output.matrix), { include: order.map(shard => ({
+          shard, timeoutMinutes: longest.includes(shard) ? 45 : 20,
         })) })
       }
     } finally { rmSync(directory, { recursive: true, force: true }) }

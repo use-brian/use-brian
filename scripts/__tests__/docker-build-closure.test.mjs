@@ -59,7 +59,7 @@ for (const app of ['api', 'doc-sync', 'browser-relay']) {
 test('[COMP:ci/execution-topology] CI compilation heap budget reaches Turbo child tasks', () => {
   const workflow = readFileSync(resolve(root, '.github/workflows/ci.yml'), 'utf8')
   const compilationSteps = workflow.split(/\n      - /).filter(step =>
-    /run: pnpm (?:build|typecheck)\n|run: pnpm exec turbo run build --filter="@use-brian\/api-open\^\.\.\."|run: >-\n          pnpm exec turbo run test\n/.test(step))
+    /run: pnpm (?:build|typecheck)\n|run: pnpm exec turbo run build --filter='\.\/packages\/\*'|run: >-\n          pnpm exec turbo run test\n/.test(step))
   assert.ok(compilationSteps.length >= 4, 'locate the API compilation steps before checking their budgets')
   for (const step of compilationSteps) {
     assert.match(step, /\n        env:\n          NODE_OPTIONS: --max-old-space-size=6144\n/)
