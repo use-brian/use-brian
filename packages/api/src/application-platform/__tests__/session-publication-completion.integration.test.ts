@@ -71,7 +71,8 @@ describe.sequential('[COMP:api/session-publication-completion] real deferred tim
         return {completed:true}
       },{measure})
       if(outcome==='committed')await expect(publication).resolves.toEqual({completed:true})
-      else await expect(publication).rejects.toMatchObject({message:'fixture_commit_acknowledgement_lost',retrySafe:false,operationMayHaveExecuted:true})
+      else await expect(publication).rejects.toMatchObject({message:'fixture_commit_acknowledgement_lost',retrySafe:false,
+        operationMayHaveExecuted:false,publicationOutcome:'rolled_back'})
       expect(writes).toBe(1)
       expect(commits).toBe(1)
       expect((await f.pool.query('SELECT count(*)::integer AS n FROM session_messages WHERE session_id=$1',[f.session.id])).rows[0].n)
