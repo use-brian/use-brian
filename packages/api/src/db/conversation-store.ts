@@ -20,7 +20,7 @@ import {boundScopeSource} from '@use-brian/agent-runtime/security/source-evidenc
 import {addSessionMessage,readSessionMessageScopeSource,type SessionMessage,type SessionMessageAttachment} from './sessions.js'
 import {publicConversationScope,readPublicConversationFloor,type PublicTurnConversationBinding} from './public-conversation.js'
 import {channelEvidenceFitsEnvelope,pinVerifiedChannelPublication,selectVerifiedChannelHistory,type ChannelRecordPublication} from './verified-channel-record.js'
-import {assertSessionMessagePublicationFrame,acceptSessionMessagePublicationAnnotation,withSessionMessagePublication,readJointSessionQueryFrame,readRetainedContextFrame} from './session-context-revisions.js'
+import {assertSessionMessagePublicationFrame,acceptSessionMessagePublicationAnnotation,withSessionMessagePublication,readJointSessionQueryFrame,readRetainedContextFrame,readSessionQueryFrame} from './session-context-revisions.js'
 
 export type ConversationSelection=Readonly<{sessionId:string;throughSequence:number;topicThroughSequence:number}>
 const source=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nullable(),assistantId:z.string().uuid().nullable(),
@@ -60,14 +60,18 @@ export async function captureConversationQuery(client:Pick<PoolClient,'query'>,w
 }
 export type SessionQueryAnnotation=z.infer<typeof conversationAnnotationSchema>
 function changed():never{throw new DerivedScopeError('scope_source_changed')}
-/** Annotation-only capture uses the same operation and retains its query obligation. */
-export async function captureSessionTopics(client:Pick<PoolClient,'query'>,workspaceId:string,sessionId:string,through:number):Promise<SessionQueryAnnotation[]>{
+async function captureSessionTopicRows(client:Pick<PoolClient,'query'>,workspaceId:string,sessionId:string,through:number):Promise<ConversationCaptures['annotations']>{
  const raw=(await client.query<{value:unknown}>('SELECT capture_conversation_query($1,$2,NULL,$3) AS value',[workspaceId,sessionId,through])).rows[0]?.value
  const value=captures.extend({history:z.array(capture).length(0)}).parse(raw)
  const rows=value.annotations
  if(rows[0].row!==null||rows.slice(1).some(row=>row.row===null)
   ||rows.some(row=>row.sources[0].resourceKind!=='application_field'||row.sources.some(source=>source.workspaceId!==workspaceId)))changed()
- return bindScopeSources(rows.slice(1).map(row=>bindScopeSources(conversationAnnotationSchema.parse(row.row),row.sources)),rows.flatMap(row=>row.sources))
+ return rows
+}
+/** Annotation-only capture uses the same operation and retains its query obligation. */
+export async function captureSessionTopics(client:Pick<PoolClient,'query'>,workspaceId:string,sessionId:string,through:number):Promise<SessionQueryAnnotation[]>{
+ const rows=await captureSessionTopicRows(client,workspaceId,sessionId,through)
+ return bindScopeSources(rows.slice(1).map(row=>bindScopeSources(row.row!,row.sources)),rows.flatMap(row=>row.sources))
 }
 /** Immutable root metadata for fresh independent-source preparation, never payload admission. */
 export async function sessionQueryRootMetadata(workspaceId:string,sessionId:string,throughSequence:number,topicThrough:number):Promise<ScopeSource[]>{
@@ -82,17 +86,18 @@ export async function sessionQueryRootMetadata(workspaceId:string,sessionId:stri
 }
 /** One invocation's detached data. Every consumer still admits its complete
  * original sources at dispatch; none of these methods returns an allow receipt. */
+type CurrentConversationInput={id:string;sequence:number;annotationRevisionId?:string}
 export type ConversationFrame={
  history:SessionMessage[];annotations:SessionQueryAnnotation[]
  assemble:(authority:SessionContextAuthority,fromSequence?:number|null)=>SessionMessage[]
  privateTranscript:(authority:SessionContextAuthority)=>SessionMessage[]|null
- current:(authority:SessionContextAuthority,topicThroughSequence?:number,currentInput?:{id:string;sequence:number})=>Promise<ConversationFrame>
+ current:(authority:SessionContextAuthority,topicThroughSequence?:number,currentInput?:CurrentConversationInput)=>Promise<ConversationFrame>
 }
 function copyConversationRows<T extends object>(rows:readonly T[]):T[]{
  return rows.map(row=>bindScopeSources(structuredClone(row),structuredClone(boundScopeSources(row))))
 }
 function ownConversationFrame(authority:SessionContextAuthority,selection:ConversationSelection,
- data:{history:SessionMessage[];annotations:SessionQueryAnnotation[]},privateDialogue:boolean,originalRoots:readonly ScopeSource[]=[]):ConversationFrame{
+ data:{history:SessionMessage[];annotations:SessionQueryAnnotation[]},privateDialogue:boolean,originalRoots:readonly ScopeSource[]=[],body?:ConversationCaptures['history']):ConversationFrame{
  const execution=authority.execution,sources=structuredClone(boundScopeSources(data))
  const rootKey=(roots:readonly ScopeSource[])=>JSON.stringify(roots.map(source=>JSON.stringify(source)).sort())
  const originalRootKey=rootKey(originalRoots)
@@ -116,18 +121,44 @@ function ownConversationFrame(authority:SessionContextAuthority,selection:Conver
   annotations:bindScopeSources(copyConversationRows(annotations),boundScopeSources(data.annotations)),assemble,
   privateTranscript(current){use(current);return privateDialogue?assemble(current):null},
   async current(current,topicThroughSequence,currentInput){
+   const workspaceId=current.execution.security.access.workspaceId
    const high=(await getPool().query<{sequence:number}>(
     'SELECT coalesce(max(sequence_num),0)::int AS sequence FROM session_messages WHERE (workspace_id=$1 OR workspace_id IS NULL) AND session_id=$2',
-    [current.execution.security.access.workspaceId,selection.sessionId])).rows[0].sequence
+    [workspaceId,selection.sessionId])).rows[0].sequence
    const topicThrough=topicThroughSequence??high
-   let unchanged=current.execution===execution&&high===selection.throughSequence&&topicThrough===selection.topicThroughSequence
-   if(unchanged&&!privateDialogue)unchanged=rootKey(await sessionQueryRootMetadata(execution.security.access.workspaceId,selection.sessionId,high,topicThrough))===originalRootKey
+   const sameBodySelection=current.execution===execution&&high===selection.throughSequence
+   let unchanged=sameBodySelection&&topicThrough===selection.topicThroughSequence
+   const canRefreshTopics=!!body&&sameBodySelection&&!!currentInput?.annotationRevisionId&&currentInput.sequence===topicThrough
+    &&topicThrough===selection.topicThroughSequence+1&&body.some(({row})=>row?.id===currentInput.id&&row.sequenceNum===currentInput.sequence&&row.role==='user')
+   const roots=!privateDialogue&&(unchanged||canRefreshTopics)?await sessionQueryRootMetadata(workspaceId,selection.sessionId,high,topicThrough):null
+   if(unchanged&&roots)unchanged=rootKey(roots)===originalRootKey
    if(unchanged){
     // Metadata is never permission. This is a new complete source operation;
     // dispatch and completion still perform their own independent checks.
     await admitModelInput({...executionToolContext(execution,{appId:'native-conversation-assembly'}),
      scopeAccumulator:new ContextScopeAccumulator({sources:structuredClone(sources)})})
     use(current);return frame
+   }
+   if(canRefreshTopics&&roots&&body){
+    const prior=roots.filter(root=>root.resourceKind!=='session_context_revision'||root.resourceId!==currentInput?.annotationRevisionId)
+    if(roots.length===prior.length+1&&rootKey(prior)===originalRootKey){
+     let captured:ConversationCaptures|undefined
+     try{
+      // Independently validate the original body domain and exact values
+      // together with the newly observed topic domain on the app transaction.
+      captured=await readSessionQueryFrame(current,roots,async client=>{
+       const value={history:body,annotations:await captureSessionTopicRows(client,workspaceId,selection.sessionId,topicThrough)}
+       return{value,sources:conversationCaptureSources(value,workspaceId)}
+      })
+     }catch(error){
+      if(!(error instanceof DerivedScopeError)||error.code!=='scope_source_changed')throw error
+      await execution.security.authority.assertCurrent()
+     }
+     if(captured){
+      if(current.execution!==execution)changed()
+      return projectConversationFrame(current,{...selection,topicThroughSequence:topicThrough},captured,roots,currentInput?.id)
+     }
+    }
    }
    return readAdmittedSessionQuery({authority:current,sessionId:selection.sessionId,throughSequence:high,topicThroughSequence:topicThrough,
     ...(currentInput&&current.execution===execution?{currentMessageId:currentInput.id,currentMessageSequence:currentInput.sequence}:{})})
@@ -189,9 +220,15 @@ export async function readAdmittedSessionQuery(input:{sessionId:string;throughSe
  // an authorization decision; the non-owner projection admits every candidate.
  const roots=await sessionQueryRootMetadata(workspaceId,sessionId,throughSequence,topicThrough)
  const captured=await readJointSessionQueryFrame(authority,roots,{sessionId,throughSequence,topicThroughSequence:topicThrough})
+ return projectConversationFrame(authority,{sessionId,throughSequence,topicThroughSequence:topicThrough},captured,roots,input.currentMessageId)
+}
+
+async function projectConversationFrame(authority:SessionContextAuthority,selection:ConversationSelection,captured:ConversationCaptures,
+ roots:readonly ScopeSource[],currentMessageId?:string):Promise<ConversationFrame>{
+ const {execution}=authority,{sessionId}=selection
  const candidates=captured.history.slice(1)
  const selected=await selectVerifiedChannelHistory(execution,candidates.map(item=>item.row!.id))
- if(selected&&input.currentMessageId&&!selected.has(input.currentMessageId))changed()
+ if(selected&&currentMessageId&&!selected.has(currentMessageId))changed()
  const history=candidates.filter(item=>!selected||selected.has(item.row!.id)).map(row=>{
   const value=row.row!
   return bindScopeSources<SessionMessage>({...value,sessionId,createdAt:new Date(value.createdAt),replyToText:null,topicLabel:null,topicConfidence:null},row.sources)
@@ -201,7 +238,7 @@ export async function readAdmittedSessionQuery(input:{sessionId:string;throughSe
   .map(row=>bindScopeSources(row.row!,row.sources)),captured.annotations.flatMap(row=>row.sources))
  const result=bindScopeSources({history,annotations},[...boundScopeSources(history),...boundScopeSources(annotations)])
  authority.accumulator.note({sources:boundScopeSources(result)})
- return ownConversationFrame(authority,{sessionId,throughSequence,topicThroughSequence:topicThrough},result,false,roots)
+ return ownConversationFrame(authority,selection,result,false,roots,structuredClone(captured.history))
 }
 
 /** Canonical publication shares the same native conversation owner. */

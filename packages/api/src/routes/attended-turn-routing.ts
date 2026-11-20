@@ -409,7 +409,7 @@ export async function assessAttendedSessionMessage(input:{
  if(!ephemeral&&!annotation)throw new DerivedScopeError('scope_source_changed')
  await authority.execution.security.authority.assertCurrent()
  return{classification,reply,history,readHistory:async(current,from)=>{
-  const frame=await query.current(current,undefined,{id:messageId,sequence})
+  const frame=await query.current(current,undefined,{id:messageId,sequence,annotationRevisionId:annotation?.revisionId})
   return prepareAdmittedSessionHistory(current,session.id,frame,from)
  }}
  }}

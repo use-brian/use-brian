@@ -47,7 +47,7 @@ describe.sequential('[COMP:api/native-chat-read-cost] complete retained native c
    content:[{type:'text',text:`Fictional native capacity request ${index}.`}],scope:fixture.envelope})
   expect(input.sequenceNum).toBe(retainedRows+index*2-1)
   const current=await authority()
-  await readAdmittedSessionQuery({sessionId:fixture.session.id,throughSequence:input.sequenceNum,
+  const captured=await readAdmittedSessionQuery({sessionId:fixture.session.id,throughSequence:input.sequenceNum,
    topicThroughSequence:input.sequenceNum-1,currentMessageId:input.id,currentMessageSequence:input.sequenceNum,authority:current})
   const annotation=await writeSessionContextRevision({sessionId:fixture.session.id,parentId:input.id,kind:'message_annotation',
    content:{topicLabel:'Fictional native capacity',topicConfidence:1,replyToText:null},authority:current,
@@ -61,8 +61,8 @@ describe.sequential('[COMP:api/native-chat-read-cost] complete retained native c
   expect(parents).toEqual([{source_kind:'session_context_revision',frame:expect.any(String)}])
   // The answer reads the newly retained annotation under its current query
   // domain, retaining both earlier and current immutable capture versions.
-  await readAdmittedSessionQuery({sessionId:fixture.session.id,throughSequence:input.sequenceNum,
-   topicThroughSequence:input.sequenceNum,currentMessageId:input.id,currentMessageSequence:input.sequenceNum,authority:current})
+  const refreshed=await captured.current(current,input.sequenceNum,{id:input.id,sequence:input.sequenceNum,annotationRevisionId:annotation!.id})
+  expect(refreshed.annotations.at(-1)?.id).toBe(input.id)
   const [reply]=await publishNativeSessionMessageBatch({sessionId:fixture.session.id,
    messages:[{role:'assistant',senderAssistantId:fixture.assistantId,content:[{type:'text',text:`Fictional native capacity answer ${index}.`}]}],
    authority:current,derivationTarget:fixture.envelope,

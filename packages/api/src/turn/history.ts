@@ -56,7 +56,7 @@ export type TurnHistoryRequest = {
   fromSequence?: number | null
   /** Native only: the highest sequence to read. */
   throughSequence?: number
-  /** Native only (web): the topic classifier's captured read continuation. */
+  /** Native only: the topic classifier's captured read continuation. */
   classified?: { readHistory(authority: SessionContextAuthority, fromSequence?: number | null): Promise<PreparedAttendedSessionHistory> }
   /** Stored only (channel): the adapter's declared audience projection. */
   projectStored?: (rows: SessionMessage[]) => Promise<SessionMessage[]>

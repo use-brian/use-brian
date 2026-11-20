@@ -63,6 +63,7 @@ export const DEPARTMENT_ISOLATION_SUITES: readonly DepartmentIsolationSuite[] = 
     'src/__tests__/native-query-capture-capacity.integration.test.ts']},
   {id:'retained-conversation',packageDir:'packages/api',integration:true,testFiles:[
     'src/__tests__/native-retained-conversation.integration.test.ts',
+    'src/application-platform/__tests__/committed-topic-history.integration.test.ts',
     'src/__tests__/session-annotation-scan.integration.test.ts',
     'src/application-platform/__tests__/native-retained-acquisition.integration.test.ts',
     'src/application-platform/__tests__/native-retained-edge-parity.integration.test.ts',

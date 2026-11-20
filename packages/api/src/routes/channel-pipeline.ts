@@ -2006,7 +2006,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
   if(params.conversationContext)await assertTelegramConversationCurrent(params.conversationContext)
   // The original turn owner selects and performs the main-turn history read;
   // the channel declares only its stored-history audience projection.
-  let dbMessages = privateRecording ? [] : (await turnOwner.prepareHistory({ native: nativeTranscriptAuthority ?? null,
+  let dbMessages = privateRecording ? [] : (await turnOwner.prepareHistory({ native: nativeTranscriptAuthority ?? null, classified: nativeClassification,
     // A public audience cannot trust the durable summary because it has no
     // per-source audience evidence. Rebuild from filtered provider history.
     fromSequence: isolatedAudience || room ? null : session.compactBoundarySequence,
