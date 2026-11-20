@@ -463,3 +463,26 @@ for every other node. Any disagreement discards the candidate and reruns the
 canonical closure and adjacency. The evaluator still applies the same graph
 limits, source and privacy checks, deadlines, and before/after materialization
 proofs. The migration changes no persistent relation or execution grant.
+
+`8328_conversation_graph_frontier.sql` authenticates 8327 and replaces the
+same private graph body. Its first observation expands supported native
+frontiers in sets, with canonical edges for supported mixed families. An
+independent SQL statement checks every seed and edge. Mixed observations
+also require an unchanged snapshot because they call volatile edge readers.
+Unknown families, a bound failure, or disagreement rerun the 8327 path.
+The graph uses the verified ordinal edges to build the dependency queue and
+the source child lists. The evidence entry point sends an exact directly
+requested native annotation query observation to the canonical owner. The
+compiled evaluator may finish graph setup before declining the annotation
+point. Both routes retain the original authorization checks and proof response.
+
+A closed native capture can check its revision roots with one bounded
+canonical lineage walk. The empty Page result is usable only at the original
+Page check with the same fresh PostgreSQL snapshot. If the snapshot changes,
+the graph can refresh the proof once at that check. Each capture pass obtains
+its own proof. The graph runs the original revision visibility and lock
+checks. A Page result or unusable proof takes the original per-root path.
+The portable authenticator pins the unchanged canonical revision routine used
+to render these checks. Run
+`node packages/api/scripts/conversation-store/build-conversation-frontier.mjs --check`
+to verify the numbered SQL.
