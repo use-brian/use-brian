@@ -255,11 +255,11 @@ export async function resolveTurnScopeMetadataSystem(
   return resolveScope(input, deps, scope => scope)
 }
 
-/** Authority metadata only: lease renewal must not mistake inherited narrowing for revocation. */
-export async function resolveLiveAccessCeilingSystem(
+/** Strict live actor metadata, never a replacement execution/source scope. */
+export async function resolveLiveTurnScopeSystem(
   input: ResolveTurnScopeInput,
   deps: ResolveTurnScopeDeps = {},
-): Promise<AccessCeiling> {
+): Promise<ResolvedTurnScope> {
   const strictDeps: ResolveTurnScopeDeps = {
     ...deps,
     resolveReadCeilings: deps.resolveReadCeilings ?? ((userId, workspaceId, clearance, compartments) =>
@@ -268,7 +268,15 @@ export async function resolveLiveAccessCeilingSystem(
   const memberMode = input.memberMode === 'assistant' || input.memberMode === 'external'
     ? input.memberMode
     : 'member'
-  return pinAccessCeiling((await resolveScope({ ...input, memberMode }, strictDeps, scope => scope)).access)
+  return resolveScope({ ...input, memberMode }, strictDeps, scope => scope)
+}
+
+/** Authority metadata only: lease renewal must not mistake inherited narrowing for revocation. */
+export async function resolveLiveAccessCeilingSystem(
+  input: ResolveTurnScopeInput,
+  deps: ResolveTurnScopeDeps = {},
+): Promise<AccessCeiling> {
+  return pinAccessCeiling((await resolveLiveTurnScopeSystem(input, deps)).access)
 }
 
 async function resolveScope(
@@ -540,7 +548,7 @@ export function automaticContextAccess<T extends Pick<ResolvedTurnScope, 'access
  * floor. A person who needs a Department source uses a private chat. Only
  * ever narrows.
  */
-export function projectRoomAudienceCeiling<T extends Pick<ResolvedTurnScope, 'access'>['access']>(
+export function projectRoomAudienceCeiling<T extends Pick<AccessCeiling, 'departmentRead'>>(
   access: T,
   room: { contextCompartments?: readonly string[] | null; effectiveClearance?: string | null } | null | undefined,
 ): T {

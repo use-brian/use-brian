@@ -7,6 +7,7 @@ import {
   formatActiveWorkspaceContext,
   resolveTurnScopeSystem,
   resolveLiveAccessCeilingSystem,
+  resolveLiveTurnScopeSystem,
   sessionMessageInputScope,
   turnOutputWrite,
   noteAutomaticScopeEvidence,
@@ -157,6 +158,11 @@ describe('[COMP:api/context-scope-resolver] resolveTurnScopeSystem', () => {
       expect(await resolveLiveAccessCeilingSystem(input, deps)).toMatchObject({
         clearance: 'confidential', compartments: null, projectIds: null, visibilityAssistantIds: null,
       })
+      const metadata = await resolveLiveTurnScopeSystem(input, deps)
+      expect(metadata.access).toMatchObject({ userId: 'user-1', workspaceId: 'workspace-1',
+        clearance: 'confidential', compartments: null, mutationCompartments: null, projectIds: null })
+      expect(metadata.effectiveCompartments).toBeNull()
+      expect(metadata.effectiveProjectIds).toBeNull()
       expect((await resolveTurnScopeSystem(input, deps)).access).toMatchObject({
         clearance: 'public', compartments: [], projectIds: [], visibilityAssistantIds: [],
       })
