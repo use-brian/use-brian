@@ -22,6 +22,10 @@ describe('[COMP:api/connector-context] common native runtime admission', () => {
     expect(conflict.allows(binding)).toBe(false); expect(conflict.allows(general)).toBe(false)
     await expect(conflict.execute(async () => 'never')).rejects.toMatchObject({ reason: 'authority_changed' })
   })
+  it.each([{ userId: randomUUID() }, { workspaceId: randomUUID() }])('retains ambient identity checks before reading unprojected metadata: %j', async mismatch => {
+    await expect(runWithAgentAccess({ workspaceId, userId, clearance: 'internal', compartments: [], ...mismatch },
+      () => createConnectorRuntimeAuthority(facts))).rejects.toMatchObject({ reason: 'authority_changed', operationMayHaveExecuted: false })
+  })
   it('denies labelled connectors to a verified non-member while retaining explicit General classification', async () => {
     let calls = 0
     const authority = await createConnectorRuntimeAuthority(facts, async () => { calls++; return { scope: null } })
