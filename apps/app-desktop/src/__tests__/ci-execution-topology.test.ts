@@ -92,16 +92,19 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     expect(workflow.jobs['embedded-current-tests']['timeout-minutes']).toBe(20);
     expect(embedded.if).toBe("needs.ci-scope.outputs.historical == 'true'");
     expect(workflow.on.schedule).toHaveLength(1);
-    expect(workflow.on).toHaveProperty('workflow_dispatch');
+    expect(workflow.on.workflow_dispatch.inputs.compare_calendar_arm).toMatchObject({ type: 'boolean', default: false });
     expect(workflow.concurrency.group).toContain('nightly');
     expect(acceptance.strategy['fail-fast']).toBe(false);
+    expect(acceptance['runs-on']).toBe('${{ matrix.runner }}');
     expect(acceptance.steps.find((step: { name?: string }) => step.name === 'Run no-credential acceptance').run)
       .toContain('--shard ${{ matrix.shard }}/${{ needs.ci-scope.outputs.total }}');
     expect(acceptance.steps.find((step: { uses?: string }) => step.uses === 'actions/upload-artifact@v4').with.name)
-      .toContain('${{ matrix.shard }}');
+      .toBe('${{ matrix.artifactName }}');
     const aggregate = workflow.jobs['department-isolation'];
     expect(aggregate.needs).toEqual(['ci-scope', 'department-isolation-shards']);
     expect(aggregate.if).toContain('always()');
+    expect(aggregate.steps.find((step: { uses?: string }) => step.uses === 'actions/download-artifact@v4').with.pattern)
+      .toBe('department-isolation-shard-*');
     expect(aggregate.steps.map((step: { uses?: string; run?: string }) => step.uses ?? step.run).join('\n'))
       .not.toContain('pnpm');
     expect(aggregate.steps.find((step: { name?: string }) => step.name === 'Verify complete acceptance evidence').run)
