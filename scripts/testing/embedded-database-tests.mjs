@@ -27,10 +27,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
   const files = readdirSync(new URL('../../apps/api/src/__tests__/', import.meta.url))
   const group = process.argv[2]
   if (group === 'current') {
-    process.exit(withPreparedPglite((env, prepared) =>
-      runEmbeddedTests([ownerFile], { ...prepared, BRIAN_TEST_MIGRATION_OWNER_GROUP: 'fresh' })
-      || runEmbeddedTests([contextFile], { ...prepared, BRIAN_TEST_HISTORY: '0' })
-      || runEmbeddedTests(embeddedTestFiles(files, 3).filter(file => file !== 'migration-publication-privileges.test.ts'), env)))
+    process.exit(await withPreparedPglite(async (env, prepared) =>
+      await runEmbeddedTests([ownerFile], { ...prepared, BRIAN_TEST_MIGRATION_OWNER_GROUP: 'fresh' })
+      || await runEmbeddedTests([contextFile], { ...prepared, BRIAN_TEST_HISTORY: '0' })
+      || await runEmbeddedTests(embeddedTestFiles(files, 3).filter(file => file !== 'migration-publication-privileges.test.ts'), env)))
   }
   const ownerGroup = group?.startsWith('owner-') ? group.slice('owner-'.length) : undefined
   if (ownerGroup && !MIGRATION_OWNER_GROUPS.includes(ownerGroup)) throw new Error('Unknown migration owner group')
@@ -45,5 +45,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
   }
   if (!selectedFiles.length) throw new Error('Embedded database shard has no tests')
   console.log(`Embedded database group ${group}: ${selectedFiles.join(', ')}`)
-  process.exitCode = runEmbeddedTests(selectedFiles, { ...process.env, ...(ownerGroup ? { BRIAN_TEST_MIGRATION_OWNER_GROUP: ownerGroup } : {}) })
+  process.exitCode = await runEmbeddedTests(selectedFiles, { ...process.env, ...(ownerGroup ? { BRIAN_TEST_MIGRATION_OWNER_GROUP: ownerGroup } : {}) })
 }
