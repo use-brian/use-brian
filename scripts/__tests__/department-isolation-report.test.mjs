@@ -45,9 +45,10 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
       }
     }
   })
-  it('requires migration diagnostics once and clone checks on every native shard in both profiles', () => {
+  it('requires migration diagnostics and retries once and clone checks on every native shard in both profiles', () => {
     const clones = 'scripts/__tests__/prepared-fixture.integration.test.mjs'
     const locks = 'scripts/__tests__/migration-diagnostics.integration.test.mjs'
+    const retries = 'scripts/__tests__/migration-retries.integration.test.mjs'
     for (const profile of ['full', 'current']) {
       const shards = acceptanceShards(profile)
       const checks = shards.map(index => {
@@ -57,7 +58,8 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
         return files
       })
       assert.equal(checks.flat().filter(file => file === locks).length, 1)
-      assert.deepEqual(fixtureChecksForSuites(suitesForShard(null, profile)), [clones, locks])
+      assert.equal(checks.flat().filter(file => file === retries).length, 1)
+      assert.deepEqual(fixtureChecksForSuites(suitesForShard(null, profile)), [clones, locks, retries])
     }
   })
   it('merges verified receipts in a checkout without installed packages', t => {

@@ -36,6 +36,7 @@ export function fixtureChecksForSuites(suites) {
   // All native fixtures check their own clones. Exercise migration lock waits once per matrix.
   if (suites.some(suite => suite.id === 'derived-store')) {
     checks.push('scripts/__tests__/migration-diagnostics.integration.test.mjs')
+    checks.push('scripts/__tests__/migration-retries.integration.test.mjs')
   }
   return checks
 }

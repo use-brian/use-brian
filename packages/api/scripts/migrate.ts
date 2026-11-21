@@ -8,7 +8,8 @@ import { findAppliedMigrationRenames } from '../src/migrations/renames.js'
 import { nativePageCompletionRecoverySql } from './migration-recovery.js'
 import { toMigrationExecutionSql } from '../src/migrations/execution-sql.js'
 import { memoryPublicationMigration, memoryWriteSuccessorMigration } from '../src/migrations/memory-lineage-publication-execution.js'
-import { withoutOuterTransaction } from '../src/migrations/transaction-sql.js'
+import { atomicMigrationSql, isNewMigration, withoutOuterTransaction } from '../src/migrations/transaction-sql.js'
+import { concurrentIndexMigration, readConcurrentIndex, verifyConcurrentIndex } from '../src/migrations/concurrent-index.js'
 import { performance } from 'node:perf_hooks'
 import { MigrationDiagnostics } from './migration-diagnostics.js'
 
@@ -22,6 +23,9 @@ export type MigrationOptions = {
 export async function runMigrations({ databaseUrl, migrationDirs = [], beforeApply }: MigrationOptions) {
   if (!databaseUrl) throw new Error('DATABASE_URL is required')
   const client = new pg.Client({ connectionString: databaseUrl })
+  let connectionError: Error | undefined
+  // node-postgres emits a connection error as well as rejecting active queries.
+  client.on('error', (error) => { connectionError = error })
   const started = performance.now()
   let diagnostics: MigrationDiagnostics | undefined
   let failed = false
@@ -122,51 +126,44 @@ export async function runMigrations({ databaseUrl, migrationDirs = [], beforeApp
       diagnostics.finish()
       diagnostics.start('apply', file)
       console.log(`  apply: ${file}`)
-      // `CREATE INDEX CONCURRENTLY` cannot run inside a transaction block. The
-      // node-postgres simple-query protocol wraps a MULTI-statement string in an
-      // implicit transaction, so a file with several CONCURRENTLY statements (e.g.
-      // 139_hnsw_indexes.sql) fails with 25001 even though it has no BEGIN/COMMIT.
-      // For such files (CONCURRENTLY present, no explicit BEGIN — they are plain
-      // index DDL, never dollar-quoted bodies), send each statement on its own so
-      // none is implicitly transaction-wrapped. All other files keep the single
-      // batched query (preserves dollar-quoted functions + explicit BEGIN/COMMIT).
-      const bindLineageReceipt = file === memoryPublicationMigration || file === memoryWriteSuccessorMigration
-        || file === '8330_memory_prompt_candidates.sql'
-        || file === '8331_workspace_mcp_dispatch.sql'
-        || file === '8332_conversation_context_cost.sql'
-      if (bindLineageReceipt) {
-        // A lost COMMIT acknowledgement may safely resume using the same
-        // receipt. Do not leave an authenticated schema change unrecorded.
-        const body = withoutOuterTransaction(sql, file)
-        if (body === sql) throw new Error(`${file}: expected an explicit transaction`)
-        await client.query('BEGIN')
-        await client.query(body)
-        await client.query('INSERT INTO public._migrations (name) VALUES ($1)', [file])
-        await client.query('COMMIT')
-      } else if (/concurrently/i.test(sql) && !/^\s*BEGIN/im.test(sql)) {
-        // Strip comments BEFORE splitting on `;` — a `--` comment can itself
-        // contain a literal `;` (139's "...no embedding column; episode..."),
-        // which a naive split would slice into invalid SQL. These CONCURRENTLY
-        // index files have no string/dollar-quoted bodies, so comment-stripping
-        // then `;`-splitting is safe.
-        const statements = sql
-          .replace(/\/\*[\s\S]*?\*\//g, '') // block comments
-          .replace(/--[^\n]*/g, '') // line comments
-          .split(';')
-          .map((s) => s.trim())
-          .filter(Boolean)
-        for (const stmt of statements) {
-          await client.query(stmt)
-        }
+      if (isNewMigration(file)) {
+        await applyNewMigration(client, file, sql)
       } else {
-        await client.query(sql)
+        // Keep the previously registered receipt boundaries for shipped files.
+        const bindLineageReceipt = file === memoryPublicationMigration || file === memoryWriteSuccessorMigration
+          || file === '8330_memory_prompt_candidates.sql'
+          || file === '8331_workspace_mcp_dispatch.sql'
+          || file === '8332_conversation_context_cost.sql'
+        if (bindLineageReceipt) {
+          const body = withoutOuterTransaction(sql, file)
+          if (body === sql) throw new Error(`${file}: expected an explicit transaction`)
+          await client.query('BEGIN')
+          await client.query(body)
+          await client.query('INSERT INTO public._migrations (name) VALUES ($1)', [file])
+          await client.query('COMMIT')
+        } else if (/concurrently/i.test(sql) && !/^\s*BEGIN/im.test(sql)) {
+          // Historical concurrent statements must be separate top-level queries.
+          // These files have no quoted bodies. Strip comments before splitting.
+          const statements = sql
+            .replace(/\/\*[\s\S]*?\*\//g, '')
+            .replace(/--[^\n]*/g, '')
+            .split(';')
+            .map((s) => s.trim())
+            .filter(Boolean)
+          for (const stmt of statements) {
+            await client.query(stmt)
+          }
+        } else {
+          await client.query(sql)
+        }
+        if (!bindLineageReceipt) await client.query('INSERT INTO public._migrations (name) VALUES ($1)', [file])
       }
-      if (!bindLineageReceipt) await client.query('INSERT INTO public._migrations (name) VALUES ($1)', [file])
       diagnostics.finish('applied')
       appliedSet.add(file)
       count++
     }
 
+    if (connectionError) throw connectionError
     if (count === 0) {
       console.log('No new migrations to apply.')
     } else {
@@ -177,13 +174,35 @@ export async function runMigrations({ databaseUrl, migrationDirs = [], beforeApp
     return { appliedCount: count, edition: migrationEdition }
   } catch (error) {
     failed = true
-    diagnostics?.fail(error)
-    throw error
+    const failure = connectionError ?? error
+    diagnostics?.fail(failure)
+    throw failure
   } finally {
     await diagnostics?.stop()
     if (failed) await client.end().catch(() => {})
     else await client.end()
   }
+}
+
+async function applyNewMigration(client: pg.Client, file: string, sql: string): Promise<void> {
+  const index = concurrentIndexMigration(sql, file)
+  const body = index ? index.sql : atomicMigrationSql(sql, file)
+  if (index && !await readConcurrentIndex(client, index)) {
+    await client.query('SET standard_conforming_strings = on')
+    await client.query(body)
+  }
+  await client.query('BEGIN')
+  if (index) {
+    // Exclude competing concurrent builds until the verified completion is recorded.
+    await client.query(`LOCK TABLE ONLY ${index.schema}.${index.table} IN SHARE UPDATE EXCLUSIVE MODE`)
+    await client.query('SET LOCAL search_path = pg_catalog')
+    await verifyConcurrentIndex(client, index)
+  } else {
+    await client.query('SET LOCAL standard_conforming_strings = on')
+    await client.query(body)
+  }
+  await client.query('INSERT INTO public._migrations (name) VALUES ($1)', [file])
+  await client.query('COMMIT')
 }
 
 async function main() {
