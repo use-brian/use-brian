@@ -10,6 +10,7 @@ import { toMigrationExecutionSql } from '../src/migrations/execution-sql.js'
 import { memoryPublicationMigration, memoryWriteSuccessorMigration } from '../src/migrations/memory-lineage-publication-execution.js'
 import { atomicMigrationSql, isNewMigration, withoutOuterTransaction } from '../src/migrations/transaction-sql.js'
 import { concurrentIndexMigration, readConcurrentIndex, verifyConcurrentIndex } from '../src/migrations/concurrent-index.js'
+import { projectHarnessCandidateBoundarySql } from '../src/migrations/project-harness-candidate-boundary.js'
 import { performance } from 'node:perf_hooks'
 import { MigrationDiagnostics } from './migration-diagnostics.js'
 
@@ -45,6 +46,7 @@ export async function runMigrations({ databaseUrl, migrationDirs = [], beforeApp
     lockWaitMs = diagnostics.finish('acquired')
     diagnostics.start('ledger')
     // Create migrations tracking table if it doesn't exist
+    await client.query(projectHarnessCandidateBoundarySql)
     await client.query(`
       CREATE TABLE IF NOT EXISTS public._migrations (
         name TEXT PRIMARY KEY,

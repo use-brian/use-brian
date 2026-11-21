@@ -2,6 +2,7 @@
 import { createHash } from 'node:crypto'
 import { pinAccessCeiling, type AccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { findAssistantById } from '../db/users.js'
+import { currentAgentAccess } from '../db/agent-access-context.js'
 import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
 import { connectorExposureAllowed, resolveConnectorNativeTurnScopeSystem, type ConnectorContextBinding } from '../context-scope/connector-exposure.js'
 import { resolveTurnScopeMetadataSystem, withinExecutingCaller, type ResolvedTurnScope } from '../context-scope/resolve-turn-scope.js'
@@ -20,6 +21,10 @@ type NativeActorState = { scope: ResolvedTurnScope | null }
 type ConnectorNativeActorReader = (facts: Readonly<ConnectorRuntimeActorFacts> & { initiatingUserId: string }) => Promise<NativeActorState | null>
 
 async function readNativeActorSystem(facts: Readonly<ConnectorRuntimeActorFacts> & { initiatingUserId: string }): Promise<NativeActorState | null> {
+  const parent = currentAgentAccess()
+  // Metadata ignores inherited label narrowing, never inherited identity.
+  if (parent && (parent.workspaceId !== undefined && parent.workspaceId !== facts.workspaceId
+    || parent.userId !== undefined && parent.userId !== facts.initiatingUserId)) throw new AuthorityChangedError()
   const assistant = await findAssistantById(facts.assistantId)
   if (!assistant || assistant.workspaceId !== facts.workspaceId) return null
   const role = await getWorkspaceRoleSystem(facts.initiatingUserId, facts.workspaceId, true)

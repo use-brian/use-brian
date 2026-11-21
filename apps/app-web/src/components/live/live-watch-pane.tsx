@@ -41,7 +41,8 @@ import type {
 import type { ClassifiedTurnFrame } from "@/lib/chat/turn-frames";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
-import { requestApprovalsRefresh } from "@/lib/approvals-events";
+import { createVisibleRecoveryLoop } from "@/lib/visible-recovery-loop";
+import { APPROVALS_REFRESH_EVENT, requestApprovalsRefresh } from "@/lib/approvals-events";
 import {
   extractMessageText,
   fetchSessionMessages,
@@ -200,6 +201,35 @@ export function LiveWatchPane({
     document.addEventListener("visibilitychange", report);
     return () => document.removeEventListener("visibilitychange", report);
   }, [controller, presentationId]);
+
+  // Read recovery delegates all interaction state and stream ownership to the
+  // shared controller. This presentation never replays a consent mutation.
+  useEffect(() => {
+    if (!controller) return;
+    const visible = () => document.visibilityState !== "hidden";
+    const recovery = createVisibleRecoveryLoop({
+      isVisible: visible,
+      recover: () => controller.refreshPendingInput(),
+    });
+    // Attach already probes once; begin periodic recovery after that snapshot.
+    const initial = setTimeout(recovery.wake, 5_000);
+    const visibility = () => { if (visible()) recovery.wake(); else recovery.pause(); };
+    const online = () => { if (visible()) { controller.notifyOnline(); recovery.wake(); } };
+    const approvals = (event: Event) => {
+      const scope = (event as CustomEvent<{ workspaceId?: string }>).detail?.workspaceId;
+      if (!scope || scope === workspaceId) recovery.wake();
+    };
+    document.addEventListener("visibilitychange", visibility);
+    window.addEventListener("online", online);
+    window.addEventListener(APPROVALS_REFRESH_EVENT, approvals);
+    return () => {
+      clearTimeout(initial);
+      recovery.dispose();
+      document.removeEventListener("visibilitychange", visibility);
+      window.removeEventListener("online", online);
+      window.removeEventListener(APPROVALS_REFRESH_EVENT, approvals);
+    };
+  }, [controller, workspaceId]);
 
   useEffect(() => {
     if (watch.ended) setStopping(false);

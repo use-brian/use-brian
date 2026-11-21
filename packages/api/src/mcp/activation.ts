@@ -353,9 +353,16 @@ export async function createTurnAuthority(params: TurnAuthorityParams): Promise<
       await Promise.all([...pinnedBindings].map(async ([key, expected]) => {
         const current = await connectorInstanceStore!.getSystem(expected.instanceId)
         if (!current || instanceBindingFingerprint(current as unknown as Record<string, unknown>) !== expected.instance) throw new AuthorityChangedError(mayHaveExecuted)
+        let binding: ConnectorContextBinding = current
         if (expected.grant) {
           const grant = grants.find(grant => `grant:${grant.id}` === key)
           if (!grant || exposureBindingFingerprint(grant as unknown as Record<string, unknown>) !== expected.grant) throw new AuthorityChangedError(mayHaveExecuted)
+          binding = grant
+        }
+        // Fingerprints prove metadata identity, not the current reader/audience.
+        // Recheck exposure at invocation and return, including ambient narrowing.
+        if (!(runtimeAuthority?.allows(binding) ?? true) || !connectorExposureAllowed(contextScope, binding)) {
+          throw new AuthorityChangedError(mayHaveExecuted)
         }
       }))
       await Promise.all([...pinnedAuth].map(async ([id, expected]) => {

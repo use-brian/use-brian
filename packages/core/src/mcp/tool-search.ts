@@ -1404,11 +1404,8 @@ async function dispatchLocal(params: {
       ? targetTool.inputSchema.safeParse(args)
       : { success: true as const, data: args }
   if (!parsedArgs.success) {
-    const issues = parsedArgs.error.issues
-      .map((i) => `${i.path.join('.') || '(args)'}: ${i.message}`)
-      .join('; ')
     return {
-      data: `ERROR: invalid arguments for "${tool}": ${issues}. Re-check this tool's parameter names and types in its mcp_search entry, then retry.`,
+      data: mcpArgumentError(tool, parsedArgs.error),
       isError: true,
     }
   }

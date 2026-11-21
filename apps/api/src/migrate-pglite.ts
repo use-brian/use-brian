@@ -1,3 +1,4 @@
+import { projectHarnessCandidateBoundarySql } from '@use-brian/api/migrations/project-harness-candidate-boundary.js'
 import { previousMigrationNames } from '@use-brian/api/migrations/renames.js'
 import type { PGlite } from '@electric-sql/pglite'
 import { createHash } from 'node:crypto'
@@ -12,6 +13,7 @@ const migrationRuns = new WeakMap<PGlite, Promise<void>>()
 
 /** Restricted role bootstrap for embedded product boot. [COMP:api/migration-owner-role] */
 export async function preparePgliteRuntimeRole(db: PGlite): Promise<void> {
+  await db.exec(projectHarnessCandidateBoundarySql)
   await db.transaction(async tx => {
     await tx.exec(`DO $bootstrap$
       DECLARE empty_chain boolean:=true; runtime_id oid;
@@ -87,6 +89,7 @@ async function migratePgliteExclusive(
   migrationsDir: string,
   options?: { through?: string },
 ): Promise<number> {
+  await db.exec(projectHarnessCandidateBoundarySql)
   await db.exec(
     `CREATE TABLE IF NOT EXISTS public._migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
   )

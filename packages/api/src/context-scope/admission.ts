@@ -94,33 +94,47 @@ export function createTurnDeliveryAdmission(
       || execution.lifecycle.channelType !== destination.channelType
       || context.abortSignal?.aborted || execution.lifecycle.abortSignal.aborted) refuse()
   }
+  const superseded = (footprint: string, admitted?: ScopeEvidence) => {
+    if (JSON.stringify(accumulator.evidence) === footprint) return false
+    if (admitted) {
+      const { sensitivity, compartments, projectIds } = admitted
+      accumulator.note({ sensitivity, compartments, projectIds })
+    }
+    return true
+  }
   const dispose=()=>{closed=true;execution.lifecycle.abortSignal.removeEventListener('abort',dispose)}
   const admission: TurnDeliveryAdmission = Object.freeze({ [deliveryBrand]:true as const,
     dispose,
     ...(pageRecipient ? { async readPageAnchor(context: ToolContext, pageId: string) {
       try {
+        for (let candidate = 0; candidate < 32; candidate++) {
         assertIdentity(context)
         const footprint = JSON.stringify(accumulator.evidence)
         const captured = await tryReadNativePageTurnAnchor(execution, pageRecipient, pageId)
         assertIdentity(context)
-        if (JSON.stringify(accumulator.evidence) !== footprint) refuse()
+        if (superseded(footprint, captured?.evidence)) continue
         if (!captured) return null
         accumulator.note(captured.evidence)
         return captured.page
+        }
+        return refuse()
       } catch (error) {
         invalid = true
         throw error
       }
     }, async authorizePageModelInput(context: ToolContext) {
       try {
+        for (let candidate = 0; candidate < 32; candidate++) {
         assertIdentity(context)
         const evidence = accumulator.evidence, footprint = JSON.stringify(evidence)
         const admitted = await tryAdmitNativePageTurnDelivery(execution, evidence, pageRecipient, 'dispatch')
         assertIdentity(context)
-        if (JSON.stringify(accumulator.evidence) !== footprint) refuse()
+        if (superseded(footprint, admitted ?? undefined)) continue
         if (!admitted) return false
         accumulator.note(admitted)
         return true
+        }
+        return refuse()
       } catch (error) {
         invalid = true
         throw error
@@ -144,6 +158,7 @@ export function createTurnDeliveryAdmission(
     },
     async authorizeDelivery(context: ToolContext) {
       try {
+        for (let candidate = 0; candidate < 32; candidate++) {
         assertIdentity(context)
         const evidence = accumulator.evidence, footprint = JSON.stringify(evidence)
         const admitted = page && pageRecipient
@@ -151,8 +166,11 @@ export function createTurnDeliveryAdmission(
           : await admitAttendedAudienceEvidence(execution, evidence, recipient,
             { directHumanSource: !shared,turnDestinationSessionId:destination.sessionId })
         assertIdentity(context)
-        if (JSON.stringify(accumulator.evidence) !== footprint) refuse()
+        if (superseded(footprint, admitted)) continue
         accumulator.note(admitted)
+        return
+        }
+        refuse()
       } catch (error) {
         invalid = true
         throw error

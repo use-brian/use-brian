@@ -1,4 +1,5 @@
 import { debugDocumentFlow } from '../../engine/document-flow-debug.js'
+import {toolInputTextProblem,isRejectedToolInputPreview} from '../../engine/rejected-tool-input.js'
 import { Buffer } from 'node:buffer'
 import { MODEL_REGISTRY, providerAliasMap } from '@use-brian/shared/model-registry'
 import { renderSystemContext } from '../system-context.js'
@@ -650,6 +651,12 @@ class CodexProviderSession implements ProviderSession {
     const args = ToolArgumentsSchema.safeParse(call.arguments)
     if (!args.success) {
       throw new CodexProviderProtocolError('Codex dynamic tool arguments must be an object')
+    }
+    if(toolInputTextProblem(args.data)){
+      // Registered tool identity only, never arguments, paths or credentials.
+      // This locates contamination before Brian's executor without rewriting it.
+      console.warn('[tool-input] rejected input',{boundary:'codex.dynamic_call',tool:call.tool,
+        reason:isRejectedToolInputPreview(args.data)?'non_executable_diagnostic':'unsupported_json_text'})
     }
     // A call made after exec yielded arrives with no send open: park it
     // unsurfaced and hand its tool_use to the next send.

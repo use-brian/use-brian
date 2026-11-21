@@ -7,7 +7,7 @@ import { readPersistentSessionContextAncestors } from '../db/session-context-anc
 import { beginClosureAdmission } from '../context-scope/admission-closure.js'
 /** Fresh source permission at model input/output boundaries. [COMP:api/external-source-access] */
 import { isConversationEvidenceRoot } from './conversation-evidence.js'
-import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import { ContextScopeAccumulator, type ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
 import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
@@ -20,6 +20,20 @@ import { getSharedRetainedSourceAuthority } from './source-runtime.js'
 import { readApplicationFieldAncestors } from './field-evidence.js'
 import { applyApplicationRLSContext, getApplicationExecutionBinding, releaseApplicationTransactionBinding } from './execution-context.js'
 
+const invalid = new WeakSet<ExecutionContext>()
+const MAX_ADMISSION_CANDIDATES = 32
+function assertAdmissionCurrent(context: ToolContext): void {
+  if (context.executionContext && invalid.has(context.executionContext)) denied()
+  context.abortSignal?.throwIfAborted()
+  context.executionContext?.lifecycle.abortSignal.throwIfAborted()
+}
+function supersededAdmission(accumulator: ContextScopeAccumulator, original: string, admitted: ScopeEvidence): boolean {
+  if (JSON.stringify(accumulator.evidence) === original) return false
+  // A successful old proof may raise labels, but cannot regress source pointers.
+  const { sensitivity, compartments, projectIds } = admitted
+  accumulator.note({ sensitivity, compartments, projectIds })
+  return true
+}
 function denied(): never { throw new SourceProtocolError('source_access_denied') }
 
 /** Keep the private exception chain for server logs, never JSON/wire output. */
@@ -36,6 +50,8 @@ export async function admitModelSourceEvidence(context: ToolContext, action: 'co
   const validate = action === 'deliver' ? validateAudienceScopeEvidence : validateCallerScopeEvidence
   const execution = context.executionContext
   try {
+    for (let candidate = 0; candidate < MAX_ADMISSION_CANDIDATES; candidate++) {
+    assertAdmissionCurrent(context)
     const accumulated = context.scopeAccumulator?.evidence
     let evidence = new ContextScopeAccumulator(execution?.security.provenance)
     evidence.note(accumulated)
@@ -44,7 +60,8 @@ export async function admitModelSourceEvidence(context: ToolContext, action: 'co
       if(narrowingGuard)denied()
       const before=JSON.stringify(context.scopeAccumulator?.evidence)
       await context.authority?.assertCurrent()
-      if(JSON.stringify(context.scopeAccumulator?.evidence)!==before)denied()
+      assertAdmissionCurrent(context)
+      if(JSON.stringify(context.scopeAccumulator?.evidence)!==before)continue
       return
     }
     const accumulator = context.scopeAccumulator
@@ -60,21 +77,26 @@ export async function admitModelSourceEvidence(context: ToolContext, action: 'co
       const recordFrame=recordParts
         ?await admitTurnConversationRecords(execution,recordParts.records,'dispatch')
         :undefined
-      if(JSON.stringify(accumulator.evidence)!==originalEvidence)denied()
-      if(!recordFrame){accumulator.note(current);return}
+      assertAdmissionCurrent(context)
+      if(!recordFrame){
+        if(supersededAdmission(accumulator,originalEvidence,current))return false
+        accumulator.note(current);return true
+      }
       const combined=new ContextScopeAccumulator(current)
       combined.note({sources:recordFrame.sources})
       assertConversationFloor(combined.evidence,recordFrame.destination)
+      if(supersededAdmission(accumulator,originalEvidence,combined.evidence))return false
       accumulator.note(combined.evidence)
+      return true
     }
     if(recordParts){
       evidence=new ContextScopeAccumulator(recordParts.fresh)
       sources=evidence.evidence.sources??[]
-      if(!sources.length){await note(evidence.evidence);return}
+      if(!sources.length){if(await note(evidence.evidence))return;continue}
     }
     const native=await tryNativeInvocationEvidence(execution,evidence.evidence,execution.security.ceiling,action==='deliver'?'audience':'caller',narrowingGuard)
     if(native){
-      await note(native);return
+      if(await note(native))return;continue
     }
 
     // This admission's view of its turn's admission closure (one witness read).
@@ -120,7 +142,6 @@ export async function admitModelSourceEvidence(context: ToolContext, action: 'co
     if (!external && !fields.length && !persistent && !cohort.independent && !needsConversationProof) {
       if(narrowingGuard)denied()
       const current = await validate(evidence.evidence, execution.security.ceiling)
-      if (JSON.stringify(accumulator.evidence) !== originalEvidence) denied()
       return current
     }
     // Native delegated consumers keep their original host actor, assistant,
@@ -167,11 +188,14 @@ export async function admitModelSourceEvidence(context: ToolContext, action: 'co
     } finally { releaseApplicationTransactionBinding(client); await rollbackAndRelease(client) }
     if (contextProof) await assertPreparedExternalSourceAuthorityCurrent(execution, contextProof)
     if (prepared) await assertPreparedExternalSourceAuthorityCurrent(execution, prepared)
-    if (wiring && getSharedRetainedSourceAuthority() !== wiring || JSON.stringify(accumulator.evidence) !== originalEvidence) denied()
+    if (wiring && getSharedRetainedSourceAuthority() !== wiring) denied()
     return raised
     })
-    await note(admitted)
+    if(await note(admitted))return
+    }
+    denied()
   } catch (error) {
+    if(execution)invalid.add(execution)
     throw Object.assign(sourceAuthorityError(error), {
       reason: 'authority_changed' as const,retrySafe: false,
     })

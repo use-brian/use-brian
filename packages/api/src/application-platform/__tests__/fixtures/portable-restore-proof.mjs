@@ -36,7 +36,15 @@ async function migrationSnapshot(){
 }
 
 async function receivingSources(pinnedAssets){
- const store='packages/api/scripts/conversation-store/',files=[
+ const store='packages/api/scripts/conversation-store/'
+ // Pin every source-owned profile, compiler, reviewed catalog/classification,
+ // roster and review input (including the immutable 8334 predecessor).
+ const reviewInputs=(await readdir(join(ossRoot,store))).filter(name=>/\.(mjs|json|sql)$/.test(name)).sort().map(name=>store+name)
+ const files=[
+  'packages/api/src/application-platform/__tests__/fixtures/portable-restore-proof.mjs',
+  'packages/api/src/application-platform/__tests__/fixtures/portable-harness-history.ts',
+  'packages/api/src/application-platform/__tests__/fixtures/portable-restore-families.ts',
+  ...reviewInputs,
   'packages/api/src/application-platform/__tests__/portable-restore.integration.test.ts',
   'packages/api/src/db/__tests__/programmatic-intake-ready.integration.test.ts','packages/api/src/migrations/execution-sql.ts',
   ...pinnedAssets.map(file=>'packages/api/'+file),
@@ -46,7 +54,7 @@ async function receivingSources(pinnedAssets){
    'installation-authentication-8333.mjs','installation-authentication-8334.mjs',
    'build-conversation-context-cost.mjs','conversation-context-cost.mjs','conversation-memory-lineage-cost.mjs'].map(name=>store+name),
  ]
- return Object.fromEntries(await Promise.all(files.map(async file=>[file,sha(await readFile(join(ossRoot,file)))])))
+ return Object.fromEntries(await Promise.all([...new Set(files)].map(async file=>[file,sha(await readFile(join(ossRoot,file)))])))
 }
 
 async function main(){

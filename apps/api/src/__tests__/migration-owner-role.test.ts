@@ -961,7 +961,26 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
       assert.deepEqual(repairedTriggers.routines.map(row => ({ ...row, acl: row.acl.slice().sort() })),
         legacyTriggers.routines.map(row => ({ ...row, acl: [ownerGrant, publicGrant].sort() })))
       assert.deepEqual(repairedTriggers.defaults, legacyTriggers.defaults)
+      await migratePglite(db, migrationsDir, { through: '8336_project_harness_verification.sql' })
+      // Compare the actual full-chain predecessor against 8331's source-owned
+      // metadata predicates without executing or enrolling its observed body.
+      const chatSql = await readFile(`${migrationsDir}/8337_project_chat_creation_admission.sql`, 'utf8')
+      const metadataPredicate = chatSql.slice(chatSql.indexOf(' IF encode(') + 4, chatSql.indexOf("\n THEN RAISE EXCEPTION 'project_chat_creation_predecessor_changed'"))
+        .replaceAll("convert_to(original,", "convert_to(routine.prosrc,")
+      const chatProfile = (await db.query<{ metadata_matches: boolean; acl: string[] }>(`SELECT NOT (${metadataPredicate}) metadata_matches,
+        routine.proacl::text[] acl FROM pg_proc routine WHERE oid='public.require_session_creation_admission()'::regprocedure`)).rows[0]!
+      t.diagnostic('project_chat_creation_metadata_predicate ' + JSON.stringify(chatProfile))
+      assert.equal(chatProfile.metadata_matches, true)
+      assert.deepEqual(chatProfile.acl.slice().sort(), [ownerGrant, appGrant].sort())
+      const chatBefore = await finalUpgradeState(['require_session_creation_admission()'])
+      const chatTrigger = (await db.query(`SELECT to_jsonb(t) record FROM pg_trigger t WHERE tgname='zzzz_session_creation_admission'`)).rows
       await migratePglite(db, migrationsDir)
+      const chatAfter = await finalUpgradeState(['require_session_creation_admission()'])
+      assert.deepEqual(chatAfter.routines.map(row => ({...row, body: chatBefore.routines[0].body, acl: chatBefore.routines[0].acl})), chatBefore.routines)
+      assert.deepEqual(chatAfter.routines[0].acl, [ownerGrant])
+      assert.notEqual(chatAfter.routines[0].body, chatBefore.routines[0].body)
+      assert.deepEqual(chatAfter.defaults, chatBefore.defaults)
+      assert.deepEqual((await db.query(`SELECT to_jsonb(t) record FROM pg_trigger t WHERE tgname='zzzz_session_creation_admission'`)).rows, chatTrigger)
       await t.test('records the interstitial migration on a canonical 8314 ledger without changing the functions', async () => {
         const canonical = await finalUpgradeState([...triggerMembers,...ordinaryRoutines])
         const canonicalPolicies = await exactPolicies()

@@ -448,6 +448,9 @@ describe("[COMP:app-web/conversation-controller] resume follow without re-probe"
   });
   it("loads the committed resumed reply when its whole running interval fell between connections", async () => {
     const t = setup({ sessionId: "s-1" });
+    // Finish the initial empty hydrate before changing the server snapshot;
+    // overlapping refresh signals intentionally share that in-flight read.
+    await settle();
     t.net.pending.current = { pending: null, toolConfirmation: { toolCallId: "approval:ap-fast", approvalId: "ap-fast", restored: true, toolName: "fileWrite", input: {}, sessionId: "s-1", status: "pending" } };
     await t.controller.refreshPendingInput(); await settle();
     const old = t.net.lastFollow().sse!;

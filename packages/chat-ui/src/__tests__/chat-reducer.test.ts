@@ -219,6 +219,16 @@ describe('[COMP:chat-ui/chat-reducer] chat reducer', () => {
     expect(aborted.messages).toEqual([])
   })
 
+  it('removes only the observed card without changing another card or manufacturing a decision', () => {
+    const old: PendingConfirmation = { toolCallId: 'old', toolName: 'write', input: {}, sessionId: 's1', status: 'pending' }
+    const current: PendingConfirmation = { ...old, toolCallId: 'current', status: 'approving' }
+    const state = { ...initialChatState, pendingConfirmations: [old, current] }
+    const next = chatReducer(state, { type: 'confirmation/remove', toolCallId: 'old' })
+    expect(next.pendingConfirmations).toEqual([current])
+    expect(next.pendingConfirmations[0]).toBe(current)
+    expect(chatReducer(next, { type: 'confirmation/remove', toolCallId: 'missing' })).toBe(next)
+  })
+
   it('tracks pending confirmations and updates by toolCallId', () => {
     const confirmation: PendingConfirmation = {
       toolCallId: 'tc1',

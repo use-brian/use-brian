@@ -63,6 +63,7 @@ export async function admitSessionCreate<T extends Input>(client: PoolClient, pa
   }
   // Provenance is required by SQL independently of the permission-model flag.
   if (!policy || policy.setupState === 'legacy') return params
+  const classic = usesClassicModeAdmission(policy)
   if (!human || !isPersonalChatRoot(params)) {
     throw new WorkspaceAccessError('session_admission_unsupported', 409)
   }
@@ -89,9 +90,8 @@ export async function admitSessionCreate<T extends Input>(client: PoolClient, pa
   if (sharedProject && params.contextGroupId) throw new WorkspaceAccessError('project_context_department_conflict', 409)
   const groupId = params.contextGroupId !== undefined ? params.contextGroupId
     : sharedProject ? null
-    : policy.departmentReadV2 ? assistant.defaultWorkspaceGroupId
-    : policy.mode === 'simple' ? policy.defaultDepartmentId : assistant.defaultWorkspaceGroupId
-  if (!policy.departmentReadV2 && params.contextGroupId === undefined && !groupId && !sharedProject) {
+    : classic && policy.mode === 'simple' ? policy.defaultDepartmentId : assistant.defaultWorkspaceGroupId
+  if (classic && params.contextGroupId === undefined && !groupId && !sharedProject) {
     throw new WorkspaceAccessError(policy.mode === 'simple' ? 'access_mode_default_invalid' : 'context_selection_required', 409)
   }
   const execute: typeof query = (sql, values) => client.query(sql, values)
