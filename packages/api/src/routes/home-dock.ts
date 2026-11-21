@@ -16,8 +16,9 @@
  */
 
 import { Router, type Request, type Response } from 'express'
-import { mergeHomeDock, type ResolvedDock } from '@use-brian/core/home/merge.js'
+import { mergeHomeDock } from '@use-brian/core/home/merge.js'
 import type { HomeDockStore, HomeSignals } from '@use-brian/core/home/types.js'
+import type { HomeDockResponse } from '@use-brian/shared/home-dock'
 
 export type HomeDockRoutesDeps = {
   homeDockStore: HomeDockStore
@@ -30,12 +31,17 @@ export type HomeDockRoutesDeps = {
 export function homeDockRoutes(deps: HomeDockRoutesDeps): Router {
   const router = Router()
 
-  async function resolve(userId: string, workspaceId: string): Promise<ResolvedDock> {
-    const [layout, signals] = await Promise.all([
-      deps.homeDockStore.get(userId, workspaceId),
-      deps.assembleSignals(userId, workspaceId),
-    ])
-    return mergeHomeDock(layout, signals)
+  async function sendDock(res: Response, userId: string, workspaceId: string, failure: string): Promise<void> {
+    try {
+      const [layout, signals] = await Promise.all([
+        deps.homeDockStore.get(userId, workspaceId),
+        deps.assembleSignals(userId, workspaceId),
+      ])
+      res.json({ dock: mergeHomeDock(layout, signals) } satisfies HomeDockResponse)
+    } catch (err) {
+      console.error(failure, err)
+      res.status(500).json({ error: 'Failed to load home dock' })
+    }
   }
 
   async function gate(
@@ -64,12 +70,7 @@ export function homeDockRoutes(deps: HomeDockRoutesDeps): Router {
   router.get('/', async (req, res) => {
     const ok = await gate(req, res)
     if (!ok) return
-    try {
-      res.json({ dock: await resolve(ok.userId, ok.workspaceId) })
-    } catch (err) {
-      console.error('[home-dock] resolve failed:', err)
-      res.status(500).json({ error: 'Failed to load home dock' })
-    }
+    await sendDock(res, ok.userId, ok.workspaceId, '[home-dock] resolve failed:')
   })
 
   router.post('/refresh', async (req, res) => {
@@ -81,12 +82,7 @@ export function homeDockRoutes(deps: HomeDockRoutesDeps): Router {
       // Best-effort: fall through to the deterministic dock.
       console.error('[home-dock] refresh failed:', err)
     }
-    try {
-      res.json({ dock: await resolve(ok.userId, ok.workspaceId) })
-    } catch (err) {
-      console.error('[home-dock] resolve after refresh failed:', err)
-      res.status(500).json({ error: 'Failed to load home dock' })
-    }
+    await sendDock(res, ok.userId, ok.workspaceId, '[home-dock] resolve after refresh failed:')
   })
 
   return router

@@ -42,6 +42,10 @@
       "types": "./dist/home-apps.d.ts",
       "default": "./dist/home-apps.js"
     },
+    "./home-dock": {
+      "types": "./dist/home-dock.d.ts",
+      "default": "./dist/home-dock.js"
+    },
     "./teamspaces": {
       "types": "./dist/teamspaces.d.ts",
       "default": "./dist/teamspaces.js"
