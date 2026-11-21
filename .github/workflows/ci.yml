@@ -105,6 +105,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Run focused checks from source
+        run: pnpm check:fast --all
+
+      - name: Verify fast check selection and hook feedback
+        run: node --test scripts/__tests__/run-fast-checks.test.mjs scripts/__tests__/after-edit-fast-checks.test.mjs
+
       - name: Verify canonical conversation migration source
         run: |
           node packages/api/scripts/conversation-store/build.mjs --check

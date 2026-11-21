@@ -65,6 +65,19 @@ commit rights are not the price of a good patch.
    identically, and this is a public repo: a real value publishes someone's
    identity.
 
+### Fast feedback while editing
+
+From the project root, run `pnpm check:fast --check teamspaces-contract` to
+exercise the browser SDK against the Teamspaces route. To select checks for an
+edit, run `pnpm check:fast --changed-file <path>`. Repeat `--changed-file` for
+each edited file. CI runs the same checks with `pnpm check:fast --all`.
+
+Start Codex or Claude Code in this checkout with Node on your PATH. Trust the
+workspace when prompted. In Codex, review and trust the hook in `/hooks`.
+Claude Code lists the active project hook in `/hooks`. Codex patches and
+Claude Edit or Write operations on registered files run the check automatically.
+A failure gives the agent the test diagnostic and rerun command.
+
 ## Reporting security issues
 
 See [`SECURITY.md`](./SECURITY.md): please do **not** file security reports as

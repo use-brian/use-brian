@@ -3,21 +3,20 @@
  * Spec: docs/architecture/features/teamspaces.md.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, expectTypeOf, vi, beforeEach } from "vitest";
 
 vi.mock("@/lib/auth-fetch", () => ({ authFetch: vi.fn() }));
 
 import { authFetch } from "@/lib/auth-fetch";
 import {
   listTeamspaces,
-  createTeamspace,
   updateTeamspace,
   deleteTeamspace,
   listTeamspaceMembers,
   addTeamspaceMember,
   removeTeamspaceMember,
   TeamspaceApiError,
-  type Teamspace,
+  type TeamspaceMetadata,
 } from "../teamspaces";
 
 const mockAuthFetch = vi.mocked(authFetch);
@@ -33,64 +32,14 @@ beforeEach(() => {
   vi.resetAllMocks();
 });
 
-const TS: Teamspace = {
-  id: "ts-1",
-  workspaceId: "w-1",
-  name: "Engineering",
-  icon: null,
-  description: null,
-  sensitivity: "internal",
-  workspaceGroupId: null,
-  isDefault: false,
-  position: 0,
-  memberCount: 3,
-  canManage: true,
-  createdAt: "2026-07-09T00:00:00Z",
-  updatedAt: "2026-07-09T00:00:00Z",
-};
-
-describe("[COMP:app-web/teamspaces-sdk] list + create", () => {
-  it("lists the caller's teamspaces and unwraps the envelope", async () => {
-    mockAuthFetch.mockResolvedValueOnce(json({ teamspaces: [TS] }));
-    const out = await listTeamspaces("w-1");
-    expect(out).toEqual([TS]);
-    expect(mockAuthFetch).toHaveBeenCalledWith(
-      expect.stringContaining("/api/workspaces/w-1/teamspaces"),
-    );
-  });
-
+describe("[COMP:app-web/teamspaces-sdk] list compatibility", () => {
   it("tolerates a missing `teamspaces` array (older/empty body)", async () => {
     mockAuthFetch.mockResolvedValueOnce(json({}));
     await expect(listTeamspaces("w-1")).resolves.toEqual([]);
   });
-
-  it("POSTs create with the body and returns the row", async () => {
-    mockAuthFetch.mockResolvedValueOnce(json(TS, 201));
-    const out = await createTeamspace("w-1", { name: "Eng", sensitivity: "internal" });
-    expect(out.id).toBe("ts-1");
-    const [, init] = mockAuthFetch.mock.calls[0];
-    expect(init?.method).toBe("POST");
-    expect(JSON.parse(String(init?.body))).toEqual({ name: "Eng", sensitivity: "internal" });
-  });
 });
 
-describe("[COMP:app-web/teamspace-context] patch + Team binding", () => {
-  it("PATCHes only the provided fields", async () => {
-    mockAuthFetch.mockResolvedValueOnce(json({ ...TS, name: "Renamed" }));
-    await updateTeamspace("ts-1", { name: "Renamed" });
-    const [url, init] = mockAuthFetch.mock.calls[0];
-    expect(String(url)).toContain("/api/teamspaces/ts-1");
-    expect(init?.method).toBe("PATCH");
-    expect(JSON.parse(String(init?.body))).toEqual({ name: "Renamed" });
-  });
-
-  it("links a Teamspace through a stable Team id", async () => {
-    mockAuthFetch.mockResolvedValueOnce(json({ ...TS, workspaceGroupId: "team-1" }));
-    await updateTeamspace("ts-1", { workspaceGroupId: "team-1" });
-    const [, init] = mockAuthFetch.mock.calls[0];
-    expect(JSON.parse(String(init?.body))).toEqual({ workspaceGroupId: "team-1" });
-  });
-
+describe("[COMP:app-web/teamspaces-sdk] delete", () => {
   it("DELETEs a teamspace", async () => {
     mockAuthFetch.mockResolvedValueOnce(json({ ok: true }));
     await deleteTeamspace("ts-1");
@@ -98,6 +47,10 @@ describe("[COMP:app-web/teamspace-context] patch + Team binding", () => {
     expect(String(url)).toContain("/api/teamspaces/ts-1");
     expect(init?.method).toBe("DELETE");
   });
+});
+
+it("types the PATCH acknowledgement as saved metadata", () => {
+  expectTypeOf<Awaited<ReturnType<typeof updateTeamspace>>>().toEqualTypeOf<TeamspaceMetadata>();
 });
 
 describe("[COMP:app-web/teamspaces-sdk] members", () => {

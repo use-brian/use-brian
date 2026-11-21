@@ -13,36 +13,17 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
  */
 
 import { authFetch } from "@/lib/auth-fetch";
+import {
+  teamspaceMetadataSchema,
+  teamspaceSchema,
+  type Teamspace,
+  type TeamspaceMetadata,
+} from "@use-brian/shared/teamspaces";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
-export type TeamspaceSensitivity = "public" | "internal" | "confidential";
-
-/** One teamspace as returned by the list/create/patch routes. */
-export type Teamspace = {
-  id: string;
-  workspaceId: string;
-  name: string;
-  /** Optional emoji, same convention as `saved_views.icon`. */
-  icon: string | null;
-  description: string | null;
-  sensitivity: TeamspaceSensitivity;
-  /** Optional cross-brain Team whose membership becomes this roster. */
-  workspaceGroupId: string | null;
-  /** The General teamspace — cannot be deleted or left. */
-  isDefault: boolean;
-  /** Sidebar section order (General first). */
-  position: number;
-  memberCount: number;
-  /**
-   * Whether the CALLER may manage this teamspace (rename / settings /
-   * members / delete). The single gate for management affordances —
-   * derived from clearance server-side, never recomputed client-side.
-   */
-  canManage: boolean;
-  createdAt: string;
-  updatedAt: string;
-};
+export type { Teamspace, TeamspaceMetadata };
+export type TeamspaceSensitivity = TeamspaceMetadata["sensitivity"];
 
 /** One roster row from `GET /teamspaces/:id/members`. */
 export type TeamspaceMember = {
@@ -98,8 +79,8 @@ export async function listTeamspaces(workspaceId: string): Promise<Teamspace[]> 
   const res = await authFetch(
     `${API_URL}/api/workspaces/${workspaceId}/teamspaces`,
   );
-  const data = await json<{ teamspaces: Teamspace[] }>(res);
-  return data.teamspaces ?? [];
+  const data = await json<{ teamspaces?: unknown }>(res);
+  return teamspaceSchema.array().parse(data.teamspaces ?? []);
 }
 
 /** Create a teamspace; the creator is auto-joined server-side. */
@@ -120,7 +101,7 @@ export async function createTeamspace(
       body: JSON.stringify(params),
     },
   );
-  return json<Teamspace>(res);
+  return teamspaceSchema.parse(await json<unknown>(res));
 }
 
 /** Patch metadata or link/unlink a Team (clearance-gated). */
@@ -133,13 +114,13 @@ export async function updateTeamspace(
     sensitivity?: TeamspaceSensitivity;
     workspaceGroupId?: string | null;
   },
-): Promise<Teamspace> {
+): Promise<TeamspaceMetadata> {
   const res = await authFetch(`${API_URL}/api/teamspaces/${teamspaceId}`, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(patch),
   });
-  return json<Teamspace>(res);
+  return teamspaceMetadataSchema.parse(await json<unknown>(res));
 }
 
 /** Delete a non-default teamspace — its pages move to General. */

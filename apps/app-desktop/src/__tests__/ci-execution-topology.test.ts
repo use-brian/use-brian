@@ -125,9 +125,18 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     expect(workflow.jobs['build-test'].if).toContain('always()');
   });
 
-  it('keeps offline regressions mandatory and executable in the focused lane', async () => {
+  it('keeps suites excluded from ordinary shards mandatory in their focused lanes', async () => {
     const { OFFLINE_CONTINUITY_FILES, unitTestExclusions } = await import(new URL('../../../../scripts/testing/unit-partition.mjs', import.meta.url).href);
     const workflow = yaml.load(readFileSync(join(sourceRoot, '.github/workflows/ci.yml'), 'utf8'));
+    const build = workflow.jobs['build-typecheck'];
+    const fast = build.steps.find((step: { run?: string }) => step.run === 'pnpm check:fast --all');
+    expect(fast).toBeDefined();
+    expect(fast.if).toBeUndefined();
+    expect(fast['continue-on-error']).not.toBe(true);
+    const buildIndex = build.steps.findIndex((step: { run?: string }) => step.run === 'pnpm build');
+    expect(build.steps.indexOf(fast)).toBeLessThan(buildIndex);
+    expect(unitTestExclusions('packages/api', 'ordinary')).toContain('src/routes/__tests__/teamspaces-contract.test.mjs');
+    expect(unitTestExclusions('packages/api', '')).toEqual([]);
     const lane = workflow.jobs['offline-continuity'];
     expect(lane.env?.BRIAN_TEST_PARTITION).toBeUndefined();
     expect(workflow.jobs['department-isolation-shards'].env?.BRIAN_TEST_PARTITION).toBeUndefined();
