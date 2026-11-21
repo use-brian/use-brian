@@ -8,9 +8,12 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import { copiedSources, imageMatrix, selectDockerScope, workspaceClosure, workspacePackages } from '../testing/docker-scope.mjs'
+import { expression } from '../testing/preflight-workflow.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const packages = workspacePackages(root)
+const yaml = createRequire(new URL('../../apps/app-desktop/package.json', import.meta.url))('js-yaml')
+const dockerWorkflow = yaml.load(readFileSync(resolve(root, '.github/workflows/docker-images.yml'), 'utf8'))
 
 for (const app of ['api', 'doc-sync', 'browser-relay']) {
   test(`[COMP:ci/execution-topology] ${app} Docker build copies its workspace compilation closure`, () => {
@@ -49,12 +52,15 @@ test('[COMP:ci/execution-topology] selects actual Docker contexts and workspace 
   const event = { before: 'a'.repeat(40), after: 'b'.repeat(40), ref: 'refs/heads/develop' }
   const selected = (...paths) => selectDockerScope('push', event, () => paths.join('\0'))
   const names = scope => scope.matrix.include.map(item => item.image)
+  assert.deepEqual(names(selected('README.md', 'CONTRIBUTING.md', 'CLA.md', 'SECURITY.md', 'docs/example.md', 'docs/nested/example.md')), [])
+  assert.deepEqual(names(selected('README.md', 'apps/wa-connector/src/index.ts')), ['app-web', 'auth-web', 'wa-connector'])
   assert.deepEqual(names(selected('apps/wa-connector/src/index.ts')), ['app-web', 'auth-web', 'wa-connector'])
   assert.deepEqual(names(selected('apps/wechat-desktop-bridge/src/index.ts')), ['app-web', 'auth-web', 'wechat-desktop-bridge'])
   assert.deepEqual(names(selected('packages/shared/src/model-registry.ts')),
     ['api', 'app-web', 'auth-web', 'browser-relay', 'discord-connector', 'doc-sync', 'feishu-connector', 'wechat-connector'])
   assert.deepEqual(names(selected('packages/api/migrations/9000_fictional.sql')), ['api', 'app-web', 'auth-web', 'browser-relay', 'doc-sync'])
-  for (const path of ['pnpm-lock.yaml', 'patches/library.patch', 'apps/doc-sync/package.json', 'unrecognized-input.yml', 'apps/unrecognized/src/index.ts']) {
+  for (const path of ['pnpm-lock.yaml', 'patches/library.patch', 'apps/doc-sync/package.json', 'unrecognized-input.yml',
+    'apps/unrecognized/src/index.ts', '.dockerignore', 'docs/fixture.html', 'docs/fixtures/test.mjs', 'RELEASE-NOTES.md']) {
     assert.deepEqual(selected(path).matrix.include, imageMatrix, path)
   }
   const unavailable = () => { throw new Error('Missing base') }
@@ -63,6 +69,28 @@ test('[COMP:ci/execution-topology] selects actual Docker contexts and workspace 
   assert.deepEqual(selectDockerScope('workflow_dispatch', {}, unavailable).matrix.include, imageMatrix)
   assert.throws(() => copiedSources('COPY ["source", "."]'), /Unknown Docker copy input/)
   assert.throws(() => copiedSources('RUN --network=none --mount=type=bind,source=other echo hello'), /Unknown Docker context input/)
+})
+
+test('[COMP:ci/execution-topology] skips prose only when the real context excludes each supported pattern', t => {
+  const context = mkdtempSync(join(tmpdir(), 'docker-ignore-'))
+  t.after(() => rmSync(context, { recursive: true, force: true }))
+  const ignorePath = join(context, '.dockerignore')
+  const ignore = readFileSync(resolve(root, '.dockerignore'), 'utf8')
+  const scope = () => selectDockerScope('push', { before: 'a'.repeat(40), after: 'b'.repeat(40) }, () => 'docs/example.md', context)
+  writeFileSync(ignorePath, ignore)
+  assert.equal(scope().mode, 'none')
+  writeFileSync(ignorePath, `${ignore}\n!docs/example.md\n`)
+  assert.equal(scope().mode, 'full')
+  writeFileSync(ignorePath, ignore)
+  mkdirSync(join(context, 'apps/app-web'), { recursive: true })
+  writeFileSync(join(context, 'apps/app-web/Dockerfile.dockerignore'), 'node_modules\n')
+  assert.equal(scope().mode, 'full')
+  for (const { context, dockerfile } of imageMatrix) {
+    if (context === '.') {
+      const sources = copiedSources(readFileSync(resolve(root, dockerfile), 'utf8'))
+      for (const source of sources) assert.doesNotMatch(source, /^(?:\.\/)?(?:(?:README|CONTRIBUTING|CLA|SECURITY)\.md|docs\/.+\.md)$/)
+    }
+  }
 })
 
 test('[COMP:ci/execution-topology] the workflow scope step selects a changed app, unknown input, and both sides of renames', t => {
@@ -89,8 +117,9 @@ test('[COMP:ci/execution-topology] the workflow scope step selects a changed app
     rmSync(outputs, { force: true })
     execFileSync(process.execPath, [resolve(root, 'scripts/testing/docker-scope.mjs')], { cwd: repository, env: { ...process.env,
       GITHUB_EVENT_NAME: name, GITHUB_EVENT_PATH: eventPath, GITHUB_OUTPUT: outputs } })
-    const matrix = JSON.parse(readFileSync(outputs, 'utf8').trim().slice('matrix='.length))
-    return matrix.include.map(item => item.image)
+    const [matrixLine, modeLine] = readFileSync(outputs, 'utf8').trim().split('\n')
+    const matrix = JSON.parse(matrixLine.slice('matrix='.length))
+    return { mode: modeLine.slice('mode='.length), images: matrix.include.map(item => item.image) }
   }
   const push = (before, after) => scopeStep('push', { before, after, ref: 'refs/heads/develop' })
   writeFileSync(old, 'example')
@@ -98,20 +127,29 @@ test('[COMP:ci/execution-topology] the workflow scope step selects a changed app
   const before = commit()
   writeFileSync(old, 'example application update')
   const wa = commit()
-  assert.deepEqual(push(before, wa), ['app-web', 'auth-web', 'wa-connector'])
+  assert.deepEqual(push(before, wa).images, ['app-web', 'auth-web', 'wa-connector'])
+  writeFileSync(fixture('README.md'), '# Fictional instructions\n')
+  writeFileSync(fixture('docs/guide/example.md'), '# Example\n')
+  const prose = commit()
+  const docsOnly = scopeStep('pull_request', { pull_request: { head: { sha: prose }, base: { sha: wa } } })
+  assert.deepEqual(docsOnly, { mode: 'none', images: [] })
+  assert.equal(push(wa, prose).mode, 'none')
+  assert.deepEqual(scopeStep('push', { before: wa, after: prose, ref: 'refs/tags/v1.2.3' }).images, imageMatrix.map(item => item.image))
+  assert.deepEqual(scopeStep('workflow_dispatch', {}).images, imageMatrix.map(item => item.image))
   writeFileSync(fixture('.npmrc'), 'strict-peer-dependencies=true\n')
   const unknown = commit()
-  assert.deepEqual(push(wa, unknown), imageMatrix.map(item => item.image))
+  assert.deepEqual(push(wa, unknown).images, imageMatrix.map(item => item.image))
   renameSync(old, moved)
   rmSync(removed)
   const after = commit()
-  assert.deepEqual(scopeStep('pull_request', { pull_request: { head: { sha: after }, base: { sha: unknown } } }),
+  assert.deepEqual(scopeStep('pull_request', { pull_request: { head: { sha: after }, base: { sha: unknown } } }).images,
     ['app-web', 'auth-web', 'discord-connector', 'feishu-connector', 'wa-connector'])
+  renameSync(moved, fixture('docs/former-source.md'))
+  assert.deepEqual(push(after, commit()).images, ['app-web', 'auth-web', 'feishu-connector'])
 })
 
 test('[COMP:ci/execution-topology] validation and publication share the matrix without exposing registry writes on PRs', () => {
-  const yaml = createRequire(new URL('../../apps/app-desktop/package.json', import.meta.url))('js-yaml')
-  const workflow = yaml.load(readFileSync(resolve(root, '.github/workflows/docker-images.yml'), 'utf8'))
+  const workflow = dockerWorkflow
   const { validate, build, publish, scope } = workflow.jobs
   assert.equal(workflow.on.pull_request, null)
   assert.deepEqual(workflow.on.push, { branches: ['main', 'develop'], tags: ['v*'] })
@@ -119,13 +157,18 @@ test('[COMP:ci/execution-topology] validation and publication share the matrix w
   assert.deepEqual(workflow.permissions, { contents: 'read' })
   assert.equal(validate.permissions, undefined)
   assert.equal(scope.permissions, undefined)
-  assert.equal(validate.if, "github.event_name == 'pull_request'")
   assert.equal(scope.outputs.matrix, '${{ steps.images.outputs.matrix }}')
+  assert.equal(scope.outputs.mode, '${{ steps.images.outputs.mode }}')
   assert.equal(scope.steps.find(step => step.id === 'images').run, 'node scripts/testing/docker-scope.mjs')
   for (const job of [validate, build, publish]) {
     assert.equal(job.strategy.matrix, '${{ fromJSON(needs.scope.outputs.matrix) }}')
   }
-  for (const job of [build, publish]) assert.equal(job.if, "github.event_name != 'pull_request'")
+  for (const eventName of ['pull_request', 'push', 'workflow_dispatch']) {
+    const when = (job, mode) => expression(job.if, { github: { event_name: eventName }, needs: { scope: { outputs: { mode } } } })
+    for (const job of [validate, build, publish]) assert.equal(when(job, 'none'), false)
+    assert.equal(when(validate, 'affected'), eventName === 'pull_request')
+    for (const job of [build, publish]) assert.equal(when(job, 'full'), eventName !== 'pull_request')
+  }
   assert.deepEqual(publish.needs, ['scope', 'build'])
   assert.match(build.steps.find(step => step.id === 'build').with.outputs, /push-by-digest=true/)
   assert.equal(build.steps.find(step => step.uses === 'actions/upload-artifact@v4').with.name, 'digest-${{ matrix.image }}')

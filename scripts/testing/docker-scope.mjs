@@ -55,12 +55,27 @@ export function copiedSources(dockerfile) {
 }
 
 const under = (path, prefix) => prefix === '.' || path === prefix || path.startsWith(`${prefix}/`)
+const rootProse = ['README.md', 'CONTRIBUTING.md', 'CLA.md', 'SECURITY.md']
+const isProse = path => rootProse.includes(path) || /^docs\/.+\.md$/s.test(path)
+
+function withoutExcludedProse(paths, directory) {
+  if (!paths.some(isProse)) return paths
+  const ignores = readFileSync(join(directory, '.dockerignore'), 'utf8').split(/\r?\n/).map(line => line.trim())
+  if ([...rootProse, 'docs/**/*.md'].every(pattern => ignores.includes(pattern))
+    && !ignores.some(pattern => pattern.startsWith('!'))
+    && !imageMatrix.some(({ dockerfile, context }) => context === '.' && existsSync(join(directory, `${dockerfile}.dockerignore`)))) {
+    return paths.filter(path => !isProse(path))
+  }
+  return paths
+}
 
 export function selectDockerScope(eventName, event, git, directory = root) {
   const full = reason => ({ mode: 'full', reason, matrix: { include: imageMatrix } })
   if (eventName === 'workflow_dispatch' || event?.ref?.startsWith('refs/tags/')) return full('release-or-manual')
   try {
-    const { paths } = compareChangedPaths(eventName, event, git)
+    const comparison = compareChangedPaths(eventName, event, git)
+    const paths = withoutExcludedProse(comparison.paths, directory)
+    if (comparison.paths.length && !paths.length) return { mode: 'none', reason: 'excluded-prose', matrix: { include: [] } }
     const packages = workspacePackages(directory)
     const owners = new Map([...packages].map(([name, item]) => [item.path, name]))
     const sharedInput = path => /(^|\/)(?:package\.json|pnpm-(?:workspace|lock)\.yaml|tsconfig(?:\.[\w-]+)?\.json|turbo\.json|[^/]*\.dockerignore)$/.test(path)
@@ -86,5 +101,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
   const scope = selectDockerScope(process.env.GITHUB_EVENT_NAME, event,
     args => execFileSync('git', args, { encoding: 'utf8' }))
   console.log(JSON.stringify({ mode: scope.mode, reason: scope.reason, images: scope.matrix.include.map(item => item.image) }))
-  if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify(scope.matrix)}\n`)
+  if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify(scope.matrix)}\nmode=${scope.mode}\n`)
 }
