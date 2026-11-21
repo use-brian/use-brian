@@ -1,11 +1,7 @@
-import { once } from 'node:events'
-import { createServer, request } from 'node:http'
-import { duplexPair } from 'node:stream'
-import { text } from 'node:stream/consumers'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createTeamspace, listTeamspaces, updateTeamspace } from '../../../../../apps/app-web/src/lib/api/teamspaces'
 import { teamspacesRoutes } from '../teamspaces.js'
-import { createTestApp } from './helpers.js'
+import { createInProcessRequester, createTestApp } from './helpers.js'
 
 const { authFetch } = vi.hoisted(() => ({ authFetch: vi.fn() }))
 vi.mock('@/lib/auth-fetch', () => ({ authFetch }))
@@ -64,36 +60,15 @@ describe('[COMP:api/teamspaces-route] [COMP:app-web/teamspaces-sdk] [COMP:app-we
     const workspaceGroupStore = {
       listGroups: vi.fn(async () => [{ id: teamId, kind: 'team', status: 'active' }]),
     }
-    const server = createServer(createTestApp('/api', teamspacesRoutes({
+    const send = createInProcessRequester(createTestApp('/api', teamspacesRoutes({
       teamspaceStore: store,
       workspaceGroupStore,
     }), { userId: 'u-1' }))
     let patchResponse
     authFetch.mockImplementation(async (input, init) => {
-      const sdkRequest = new Request(input, init)
-      const body = sdkRequest.body ? await sdkRequest.text() : undefined
-      // Connect native HTTP parsing and serialization over streams, without a port.
-      const [client, peer] = duplexPair()
-      server.emit('connection', peer)
-      try {
-        const outgoing = request(sdkRequest.url, {
-          method: sdkRequest.method,
-          headers: Object.fromEntries(sdkRequest.headers),
-          createConnection: () => client,
-        })
-        const received = once(outgoing, 'response')
-        outgoing.end(body)
-        const [incoming] = await received
-        const payload = await text(incoming)
-        if (sdkRequest.method === 'PATCH') patchResponse = JSON.parse(payload)
-        return new Response(payload, {
-          status: incoming.statusCode,
-          headers: { 'content-type': incoming.headers['content-type'] ?? '' },
-        })
-      } finally {
-        client.destroy()
-        peer.destroy()
-      }
+      const response = await send(input, init)
+      if (init?.method === 'PATCH') patchResponse = await response.clone().json()
+      return response
     })
 
     const fullRow = { ...metadata, memberCount: 1, canManage: true }

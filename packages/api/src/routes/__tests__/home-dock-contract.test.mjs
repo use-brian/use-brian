@@ -1,14 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import request from 'supertest'
 import { fetchHomeDock } from '../../../../../apps/app-web/src/lib/api/home-dock'
 import { homeDockRoutes } from '../home-dock.js'
-import { createTestApp } from './helpers.js'
+import { createInProcessRequester, createTestApp } from './helpers.js'
 
 const { authFetch } = vi.hoisted(() => ({ authFetch: vi.fn() }))
 vi.mock('@/lib/auth-fetch', () => ({ authFetch }))
 vi.mock('@/lib/runtime-public-config', () => ({
   publicRuntimeConfig: () => ({ apiUrl: 'http://api.example.test' }),
 }))
+
+// Load the real implementations from source before workspace packages are built.
+vi.mock('@use-brian/core/home/merge.js', () => import('../../../../core/src/home/merge.js'))
+vi.mock('@use-brian/shared/home-dock', () => import('../../../../shared/src/home-dock.js'))
 
 const signals = {
   brainReviewCount: 2,
@@ -37,8 +40,8 @@ const workspaceId = 'w+1 & notes'
 const query = `?workspaceId=${encodeURIComponent(workspaceId)}`
 const mountPath = '/api/home-dock'
 const endpoints = [
-  ['get', mountPath],
-  ['post', `${mountPath}/refresh`],
+  ['GET', mountPath],
+  ['POST', `${mountPath}/refresh`],
 ]
 
 function fixture(userId) {
@@ -51,13 +54,8 @@ function fixture(userId) {
     assembleSignals,
     refresh,
   })
-  const api = request(createTestApp(mountPath, router, { userId }))
-  authFetch.mockImplementation(async (input, init) => {
-    const { pathname, search } = new URL(input)
-    expect(init?.method ?? 'GET').toBe('GET')
-    const response = await api.get(pathname + search)
-    return new Response(response.text, { status: response.status })
-  })
+  const api = createInProcessRequester(createTestApp(mountPath, router, { userId }))
+  authFetch.mockImplementation(api)
   return { api, homeDockStore, assembleSignals, refresh }
 }
 
@@ -66,7 +64,7 @@ beforeEach(() => { authFetch.mockReset() })
 describe('[COMP:api/home-dock-routes] [COMP:app-web/home-dock] [COMP:shared/home-dock] Home Dock HTTP contract', () => {
   it.each(endpoints)('%s %s refuses anonymous requests before accessing workspace data', async (method, path) => {
     const { api, homeDockStore, assembleSignals, refresh } = fixture()
-    expect((await api[method](path + query)).status).toBe(401)
+    expect((await api(path + query, { method })).status).toBe(401)
     expect(homeDockStore.get).not.toHaveBeenCalled()
     expect(assembleSignals).not.toHaveBeenCalled()
     expect(refresh).not.toHaveBeenCalled()
@@ -74,9 +72,9 @@ describe('[COMP:api/home-dock-routes] [COMP:app-web/home-dock] [COMP:shared/home
 
   it.each(endpoints)('%s %s conceals the workspace from nonmembers', async (method, path) => {
     const { api, homeDockStore, assembleSignals, refresh } = fixture('u2')
-    const response = await api[method](path + query)
+    const response = await api(path + query, { method })
     expect(response.status).toBe(404)
-    expect(response.body).toEqual({ error: 'Not found' })
+    expect(await response.json()).toEqual({ error: 'Not found' })
     expect(homeDockStore.get).not.toHaveBeenCalled()
     expect(assembleSignals).not.toHaveBeenCalled()
     expect(refresh).not.toHaveBeenCalled()
@@ -84,7 +82,7 @@ describe('[COMP:api/home-dock-routes] [COMP:app-web/home-dock] [COMP:shared/home
 
   it('requires a workspaceId query parameter', async () => {
     const { api } = fixture('u1')
-    expect((await api.get(mountPath)).status).toBe(400)
+    expect((await api(mountPath)).status).toBe(400)
   })
 
   it('reads the complete dock through the SDK and drops a handled item on the next read', async () => {
@@ -127,17 +125,17 @@ describe('[COMP:api/home-dock-routes] [COMP:app-web/home-dock] [COMP:shared/home
         generatedAt: '2026-07-08T10:00:00.000Z', generatedByAssistantId: null,
       })
     })
-    const response = await api.post(`${mountPath}/refresh${query}`)
+    const response = await api(`${mountPath}/refresh${query}`, { method: 'POST' })
     expect(response.status).toBe(200)
     expect(refresh).toHaveBeenCalledExactlyOnceWith('u1', workspaceId)
-    expect(response.body.dock).toMatchObject({ source: 'assistant', note: 'New layout' })
+    expect((await response.json()).dock).toMatchObject({ source: 'assistant', note: 'New layout' })
   })
 
   it('still serves the dock when refresh fails', async () => {
     const { api, refresh } = fixture('u1')
     refresh.mockRejectedValueOnce(new Error('curation failed'))
-    const response = await api.post(`${mountPath}/refresh${query}`)
+    const response = await api(`${mountPath}/refresh${query}`, { method: 'POST' })
     expect(response.status).toBe(200)
-    expect(response.body.dock).toMatchObject({ source: 'default', brain: { entryCount: 42 } })
+    expect((await response.json()).dock).toMatchObject({ source: 'default', brain: { entryCount: 42 } })
   })
 })

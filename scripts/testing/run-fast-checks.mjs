@@ -5,6 +5,20 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
+const sharedInputs = [
+  'apps/app-web/package.json',
+  'package.json',
+  'packages/api/package.json',
+  'packages/api/src/routes/__tests__/helpers.ts',
+  'packages/api/vitest.config.ts',
+  'packages/api/vitest.setup.ts',
+  'packages/shared/package.json',
+  'pnpm-lock.yaml',
+  'pnpm-workspace.yaml',
+  'scripts/hooks/after-edit-fast-checks.mjs',
+  'scripts/testing/run-fast-checks.mjs',
+  'scripts/testing/unit-partition.mjs',
+]
 const checks = new Map([
   ['teamspaces-contract', {
     packageDir: 'packages/api',
@@ -14,17 +28,21 @@ const checks = new Map([
       'apps/app-web/src/components/doc/teamspace-settings-modal.tsx',
       'apps/app-web/src/lib/api/teamspaces.ts',
       'packages/agent-runtime/src/security/sensitivity.ts',
-      'packages/api/package.json',
       'packages/api/src/db/teamspace-store.ts',
       'packages/api/src/routes/teamspaces.ts',
-      'packages/api/src/routes/__tests__/helpers.ts',
-      'packages/api/vitest.config.ts',
-      'packages/api/vitest.setup.ts',
-      'packages/shared/package.json',
       'packages/shared/src/teamspaces.ts',
-      'scripts/hooks/after-edit-fast-checks.mjs',
-      'scripts/testing/run-fast-checks.mjs',
-      'scripts/testing/unit-partition.mjs',
+    ],
+  }],
+  ['home-dock-contract', {
+    packageDir: 'packages/api',
+    suite: 'src/routes/__tests__/home-dock-contract.test.mjs',
+    inputs: [
+      'apps/app-web/src/lib/api/home-dock.ts',
+      'packages/api/src/routes/home-dock.ts',
+      'packages/core/package.json',
+      'packages/core/src/home/merge.ts',
+      'packages/core/src/home/types.ts',
+      'packages/shared/src/home-dock.ts',
     ],
   }],
 ])
@@ -36,6 +54,7 @@ export function fastCheckTestFiles(packageDir) {
 
 export function selectFastChecks(changedFiles) {
   const paths = new Set(changedFiles.map(file => relative(root, resolve(root, file)).split(sep).join('/')))
+  if (sharedInputs.some(file => paths.has(file))) return [...checks.keys()]
   return [...checks].filter(([, check]) =>
     paths.has(`${check.packageDir}/${check.suite}`) || check.inputs.some(file => paths.has(file)),
   ).map(([id]) => id)
@@ -45,7 +64,7 @@ const usage = `Usage: pnpm check:fast --all
        pnpm check:fast --check <${[...checks.keys()].join('|')}>
        pnpm check:fast --changed-file <OSS-relative or absolute path> [--changed-file <path> ...]`
 
-function runCheck(id, { writeOutput, writeError, timeoutMs }) {
+function runCheck(id, { writeOutput, writeError, deadline, timeoutMs }) {
   const check = checks.get(id)
   if (!check) throw new Error(`Unknown fast check ${JSON.stringify(id)}.`)
   const { packageDir, suite } = check
@@ -64,13 +83,13 @@ function runCheck(id, { writeOutput, writeError, timeoutMs }) {
     env: { ...process.env, BRIAN_TEST_PARTITION: '' },
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: timeoutMs,
+    timeout: deadline === undefined ? undefined : Math.max(1, deadline - Date.now()),
     killSignal: 'SIGKILL',
   })
   if (result.stdout) writeOutput(result.stdout)
   if (result.stderr) writeError(result.stderr)
   if (result.error?.code === 'ETIMEDOUT') {
-    throw new Error(`${id} timed out after ${timeoutMs} ms. Rerun pnpm check:fast --check ${id}.`)
+    throw new Error(`${id} timed out within the ${timeoutMs} ms fast-check budget. Rerun pnpm check:fast --check ${id}.`)
   }
   if (result.error) throw result.error
   if (result.status !== 0) {
@@ -85,9 +104,10 @@ export function runFastChecks(selected, {
   writeError = text => process.stderr.write(text),
   timeoutMs,
 } = {}) {
+  const deadline = timeoutMs === undefined ? undefined : Date.now() + timeoutMs
   for (const id of selected) {
     try {
-      const status = runCheck(id, { writeOutput, writeError, timeoutMs })
+      const status = runCheck(id, { writeOutput, writeError, deadline, timeoutMs })
       if (status !== 0) return status
     } catch (error) {
       writeError(`${error.message}\n`)

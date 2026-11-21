@@ -67,10 +67,11 @@ commit rights are not the price of a good patch.
 
 ### Fast feedback while editing
 
-From the project root, run `pnpm check:fast --check teamspaces-contract` to
-exercise the browser SDK against the Teamspaces route. To select checks for an
-edit, run `pnpm check:fast --changed-file <path>`. Repeat `--changed-file` for
-each edited file. CI runs the same checks with `pnpm check:fast --all`.
+From the project root, run `pnpm check:fast --check home-dock-contract` or
+`pnpm check:fast --check teamspaces-contract` to exercise the browser SDK
+against the corresponding HTTP route. To select checks for an edit, run
+`pnpm check:fast --changed-file <path>`. Repeat `--changed-file` for each edited
+file. CI runs every check before the build with `pnpm check:fast --all`.
 
 Start Codex or Claude Code in this checkout with Node on your PATH. Trust the
 workspace when prompted. In Codex, review and trust the hook in `/hooks`.
