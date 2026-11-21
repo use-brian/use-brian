@@ -11,6 +11,7 @@ import { withSessionMessagePublication } from '../../db/session-context-revision
 import { addSessionMessage, claimTurnLeaseOutcome, createWorkspaceChatSession, findOrCreateSession, releaseTurnOutcome, type Session } from '../../db/sessions.js'
 import { pinVerifiedChannelPublication, readVerifiedChannelEnvelope } from '../../db/verified-channel-record.js'
 import { prepareAttendedRecordTitle } from '../../routes/attended-session-title.js'
+import { seedContextChatMemory } from './fixtures/context-chat-memory.js'
 import { persistentContextFixture } from './fixtures/persistent-context.js'
 import type { PoolClient } from 'pg'
 
@@ -323,24 +324,30 @@ describe.sequential('[COMP:api/native-turn-frame] workspace publication lock com
 
   it('authenticates the installed writer order and refuses a changed room writer on portable restore', async () => {
     const { currentReleaseSource } = await import(new URL('../../../scripts/conversation-store/installation-release.mjs', import.meta.url).href)
-    const client = await getPool().connect()
+    const f = await persistentContextFixture('internal')
     try {
-      const head = (await client.query('SELECT name FROM public._migrations ORDER BY name COLLATE "C" DESC LIMIT 1')).rows[0].name
-      const profile = await currentReleaseSource(head)
-      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ')
-      const result = await client.query(profile.sql)
-      expect((Array.isArray(result) ? result.at(-1) : result)?.rows[0])
-        .toMatchObject({ functions: profile.functions, witness_current: true })
-      await client.query(profile.cleanup)
-      // The verifier also uses ON COMMIT DROP scratch tables.
-      await client.query('COMMIT')
-      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ')
-      const signature = 'public.lock_shared_room_resume_evidence(uuid,uuid,uuid,uuid,text,uuid,uuid,jsonb,boolean)'
-      const definition: string = (await client.query('SELECT pg_get_functiondef($1::regprocedure) AS definition', [signature])).rows[0].definition
-      const altered = definition.replace('native-session-publication:', 'fixture-independent-lock:')
-      expect(altered).not.toBe(definition)
-      await client.query(altered)
-      await expect(client.query(profile.sql)).rejects.toThrow('installation_shared_room_resume_evidence_changed')
-    } finally { await rollbackAndRelease(client) }
+      await seedContextChatMemory(f, true, 'fictional-restore-secret', 'Fictional restore Memory')
+      const client = await getPool().connect()
+      try {
+        const head = (await client.query('SELECT name FROM public._migrations ORDER BY name COLLATE "C" DESC LIMIT 1')).rows[0].name
+        const profile = await currentReleaseSource(head)
+        await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ')
+        const result = await client.query(profile.sql)
+        expect((Array.isArray(result) ? result.at(-1) : result)?.rows[0])
+          .toMatchObject({ functions: profile.functions, witness_current: true })
+        await client.query(profile.cleanup)
+        // The verifier also uses ON COMMIT DROP scratch tables.
+        await client.query('COMMIT')
+        await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ')
+        const signature = 'public.lock_shared_room_resume_evidence(uuid,uuid,uuid,uuid,text,uuid,uuid,jsonb,boolean)'
+        const definition: string = (await client.query('SELECT pg_get_functiondef($1::regprocedure) AS definition', [signature])).rows[0].definition
+        const altered = definition.replace('native-session-publication:', 'fixture-independent-lock:')
+        expect(altered).not.toBe(definition)
+        await client.query(altered)
+        await expect(client.query(profile.sql)).rejects.toThrow('installation_shared_room_resume_evidence_changed')
+      } finally { await rollbackAndRelease(client) }
+    } finally {
+      await f.cleanup()
+    }
   }, 45_000)
 })

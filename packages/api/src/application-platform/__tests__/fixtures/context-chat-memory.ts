@@ -98,6 +98,10 @@ export async function seedContextChatMemory(f: Fixture, dense: boolean, secret: 
           SELECT workspace_id,id,'session_message',md5('fictional-unrelated-source:'||edge)::uuid,'1'
           FROM roots CROSS JOIN generate_series(1,64) edge`, [workspaceId, ownerId, assistantId])
       })
+      // Re-enabling the same triggers still changes their catalog tuple identities.
+      const { rows: [witness] } = await bulk.query<{ current: boolean }>(
+        'SELECT public.native_turn_contract_witness_refresh() AS current')
+      expect(witness?.current, 'dense fixture catalog witness').toBe(true)
       await bulk.query('COMMIT')
     } catch (error) {
       await bulk.query('ROLLBACK')
@@ -111,4 +115,3 @@ export async function seedContextChatMemory(f: Fixture, dense: boolean, secret: 
   }
   return fact.id
 }
-

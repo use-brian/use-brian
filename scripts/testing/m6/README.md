@@ -217,6 +217,12 @@ checks the exact Memory, File index, attachment tool result, SSE reply and reope
 transcript. The fixture also checks each user's receipt for accidental inclusion
 of the other users' private inputs. Readback is outside the wave's timing window.
 
+The dense Memory seed suspends named derivation triggers only while inserting
+the unrelated synthetic graph. After restoring the triggers, the ordinary
+owner refreshes the native catalog witness in the same transaction. This keeps
+the guard on its normal fast path and lets the portable-restore check
+authenticate the same database with the installed trigger contract intact.
+
 The receipt records each turn's first text, terminal event, HTTP completion, and
 the route's query, checkout and publication timing fields when available. A
 fixture-only PostgreSQL observer samples heavyweight locks against active request
