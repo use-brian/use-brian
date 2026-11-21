@@ -170,7 +170,13 @@ test('[COMP:ci/execution-topology] validation and publication share the matrix w
     for (const job of [build, publish]) assert.equal(when(job, 'full'), eventName !== 'pull_request')
   }
   assert.deepEqual(publish.needs, ['scope', 'build'])
-  assert.match(build.steps.find(step => step.id === 'build').with.outputs, /push-by-digest=true/)
+  const validationBuild = validate.steps.find(step => step.uses === 'docker/build-push-action@v6').with
+  assert.equal(validationBuild.outputs, 'type=cacheonly')
+  assert.equal(validationBuild['cache-from'], 'type=gha,scope=${{ matrix.image }}')
+  assert.equal(validationBuild['cache-to'], undefined)
+  const trustedBuild = build.steps.find(step => step.id === 'build').with
+  assert.match(trustedBuild.outputs, /push-by-digest=true/)
+  assert.equal(trustedBuild['cache-to'], 'type=gha,mode=max,scope=${{ matrix.image }}')
   assert.equal(build.steps.find(step => step.uses === 'actions/upload-artifact@v4').with.name, 'digest-${{ matrix.image }}')
   assert.equal(publish.steps.find(step => step.uses === 'actions/download-artifact@v4').with.name, 'digest-${{ matrix.image }}')
   assert.match(publish.steps.find(step => step.name === 'Publish image tags').run, /docker buildx imagetools create[\s\S]*\$IMAGE@sha256:\$digest/)

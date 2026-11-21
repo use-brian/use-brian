@@ -56,7 +56,6 @@ jobs:
           outputs: type=cacheonly
           build-args: ${{ matrix.image == 'app-web' && format('OSS_GIT_COMMIT_SHA={0}', github.sha) || '' }}
           cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
 
   build:
     needs: scope
