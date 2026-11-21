@@ -1185,7 +1185,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
 
       await assertOperationCurrent()
-      owner.bindModelPreparation({ kind: 'execution', toolProfile: 'callee', execution: executionContext, assertCurrent: assertOperationCurrent },
+      owner.bindModelPreparation({ kind: 'execution', toolProfile: 'callee', execution: executionContext, scopeAccumulator, assertCurrent: assertOperationCurrent },
         { provider: options.provider, configuredProviders: turnOptions.configuredProviders,
           resolveWorkspaceCustomLlm: turnOptions.resolveWorkspaceCustomLlm?.bind(turnOptions) ?? null,
           resolveLegacyByoKey: null,

@@ -1,6 +1,7 @@
 // [COMP:ci/execution-topology] Acceptance owns these files in CI. Local package
 // tests stay complete unless the caller explicitly selects the ordinary partition.
 import { DEPARTMENT_ISOLATION_SUITES } from '../../packages/shared/src/department-isolation-coverage.ts'
+import { fastCheckTestFiles } from './run-fast-checks.mjs'
 
 // The workflow topology test requires exact agreement with its mandatory offline commands.
 /** @type {Record<string, string[]>} */
@@ -46,5 +47,6 @@ export function unitTestExclusions(packageDir, partition = process.env.BRIAN_TES
   return [...new Set([
     ...DEPARTMENT_ISOLATION_SUITES.filter(suite => suite.packageDir === packageDir).flatMap(suite => suite.testFiles),
     ...(OFFLINE_CONTINUITY_FILES[packageDir] ?? []),
+    ...fastCheckTestFiles(packageDir),
   ])]
 }

@@ -261,14 +261,20 @@ describe('[COMP:api/execution-context] trusted execution resolution', () => {
       // the canonical access wrapper, Brief, and refusal of an unprepared run.
       'packages/api/src/turn/kernel.ts': [
         'captureTurnModelPreparation(invocation', 'prepareRun(input: TurnRunPreparationInput)',
-        'this.modelPreparation.captureRun(input, model)', "throw new Error('The original run has not been prepared.')",
+        'private retainedPreparationAccumulator: ContextScopeAccumulator | undefined',
+        'this.retainedPreparationAccumulator = invocation.scopeAccumulator',
+        'this.modelPreparation.captureRun(input, model, this.retainedPreparationAccumulator)',
+        "throw new Error('The original run has not been prepared.')",
         "throw new Error('The original owner supplies the prepared run.')",
         'this.modelPreparation.assertLoopContext(supplied.context)',
       ],
       'packages/api/src/turn/prepare.ts': [
         "{ kind: 'execution'; toolProfile: 'web' | 'channel' | 'public' | 'callee' | 'resume'; execution: ExecutionContext;",
         'bindToolsToAgentAccess(unbound, projection', 'captureBriefRunPreparation()',
-        'captureRun(input: TurnRunPreparationInput, model: PreparedTurnModel)',
+        'captureRun(input: TurnRunPreparationInput, model: PreparedTurnModel, accumulator?: ContextScopeAccumulator)',
+        'retainedRunAccumulator = accumulator',
+        'harnessPreparation.apply(execution, brief.tools, accumulator)',
+        'candidate.executionContext !== execution || harnessRun && candidate.scopeAccumulator !== retainedRunAccumulator',
       ],
       'packages/api/src/brain-mcp/tools.ts': [
         'resolveExecutionContextSystem', 'executionToolContext',

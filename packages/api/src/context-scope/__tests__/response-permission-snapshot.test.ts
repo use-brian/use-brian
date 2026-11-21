@@ -273,16 +273,78 @@ describe('[COMP:api/private-transcript] native web delivery admission', () => {
     expect(fallback).not.toHaveBeenCalled()
   })
 
-  it.each(['native', 'external'] as const)('refuses evidence mutation during async %s admission and stays invalid', async kind => {
-    const f = fixture({ evidence: { sources: [source('a', kind === 'native' ? 'memory' : 'external_source')] } })
+  it.each(['native', 'external'] as const)('re-admits current evidence after successful superseded async %s admission', async kind => {
+    const initial = source('a', kind === 'native' ? 'memory' : 'external_source')
+    const arrived = source('arrived-while-awaiting')
+    const staleAncestry = source('superseded-ancestry', 'external_source')
+    const f = fixture({ evidence: { sources: [initial] } })
     const gate = deferred<void>()
-    admit.mockImplementationOnce(async (_execution, evidence) => { await gate.promise; return evidence })
+    admit.mockImplementationOnce(async () => {
+      await gate.promise
+      return { sensitivity: 'confidential', compartments: ['finance'], projectIds: ['project'], sources: [initial, staleAncestry] }
+    })
     const pending = f.snapshot!.authorizeDelivery(f.context)
+    f.accumulator.note({ sources: [arrived] })
+    gate.resolve()
+    await expect(pending).resolves.toBeUndefined()
+    expect(admit).toHaveBeenCalledTimes(2)
+    expect(admit.mock.calls[1][1]).toEqual({ sensitivity: 'confidential', compartments: ['finance'],
+      projectIds: ['project'], sources: [initial, arrived] })
+    expect(admit.mock.calls[1][3]).toEqual({ directHumanSource: true, turnDestinationSessionId: 'session' })
+    await expect(f.snapshot!.authorizeDelivery(f.context)).resolves.toBeUndefined()
+    expect(admit).toHaveBeenCalledTimes(3)
+    expect(admit.mock.calls[2][1]).toEqual(f.accumulator.evidence)
+    expect(fallback).not.toHaveBeenCalled()
+  })
+
+  it.each(['superseded attempt', 'fresh retry'] as const)('keeps a genuine error sticky from the %s', async phase => {
+    const f = fixture({ evidence: { sources: [source('a')] } })
+    const gate = deferred<void>(), denied = new Error('source revoked')
+    admit.mockImplementationOnce(async (_execution, evidence) => {
+      await gate.promise
+      if (phase === 'superseded attempt') throw denied
+      return evidence
+    })
+    if (phase === 'fresh retry') admit.mockRejectedValueOnce(denied)
+    const pending = expect(f.snapshot!.authorizeDelivery(f.context)).rejects.toBe(denied)
     f.accumulator.note({ sources: [source('arrived-while-awaiting')] })
     gate.resolve()
-    await expect(pending).rejects.toThrow()
+    await pending
     await expect(f.snapshot!.authorizeDelivery(f.context)).rejects.toThrow()
-    expect(admit.mock.calls.length + fallback.mock.calls.length).toBe(1)
+    expect(admit).toHaveBeenCalledTimes(phase === 'superseded attempt' ? 1 : 2)
+    expect(fallback).not.toHaveBeenCalled()
+  })
+
+  it('bounds successful superseded retries and permanently refuses after exhaustion', async () => {
+    const f = fixture()
+    admit.mockImplementation(async (_execution, evidence) => {
+      f.accumulator.note({ sources: [source(`arrived-${admit.mock.calls.length}`)] })
+      return evidence
+    })
+    await expect(f.snapshot!.authorizeDelivery(f.context)).rejects.toThrow()
+    expect(admit).toHaveBeenCalledTimes(32)
+    await expect(f.snapshot!.authorizeDelivery(f.context)).rejects.toThrow()
+    expect(admit).toHaveBeenCalledTimes(32)
+    expect(fallback).not.toHaveBeenCalled()
+  })
+
+  it.each(['access', 'identity', 'cancel', 'dispose'] as const)('does not retry past a changed %s guard', async kind => {
+    const controller = new AbortController(), input = facts(true), gate = deferred<void>()
+    input.lifecycle.abortSignal = controller.signal
+    const f = fixture({ shared: true, input })
+    const context = { ...f.context }
+    admit.mockImplementationOnce(async (_execution, evidence) => { await gate.promise; return evidence })
+    const pending = expect(f.snapshot!.authorizeDelivery(context)).rejects.toThrow()
+    f.accumulator.note({ sources: [source('arrived-while-awaiting')] })
+    if (kind === 'access') (f.execution.security.ceiling.compartments as string[]).push('finance')
+    else if (kind === 'identity') context.authority = facts().authority
+    else if (kind === 'cancel') controller.abort()
+    else f.snapshot!.dispose()
+    gate.resolve()
+    await pending
+    await expect(f.snapshot!.authorizeDelivery(f.context)).rejects.toThrow()
+    expect(admit).toHaveBeenCalledTimes(1)
+    expect(fallback).not.toHaveBeenCalled()
   })
 
   it.each(['execution', 'context'] as const)('honors %s cancellation with unchanged evidence', async kind => {

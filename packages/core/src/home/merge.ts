@@ -17,43 +17,10 @@
  * [COMP:home/merge]
  */
 
-import {
-  URGENT_NEED_KINDS,
-  type ApprovalGroupCounts,
-  type HomeDockLayout,
-  type HomeSignals,
-  type NeedCardKind,
-} from './types.js'
+import type { NeedCardKind, ResolvedDock, ResolvedNeed } from '@use-brian/shared/home-dock'
+import { URGENT_NEED_KINDS, type HomeDockLayout, type HomeSignals } from './types.js'
 
-export type ResolvedNeed = {
-  kind: NeedCardKind
-  count: number
-  caption: string | null
-}
-
-export type ResolvedDock = {
-  /** 'assistant' when a curation artifact drove the ordering, else 'default'. */
-  source: 'assistant' | 'default'
-  /** When the artifact was generated (null for the deterministic fallback). */
-  generatedAt: string | null
-  /** The assistant's freeform note, or null to render none. */
-  note: string | null
-  /** "Needs you" action cards — ordered, live-counted, dead cards dropped. */
-  needsYou: ResolvedNeed[]
-  /** Live pending-approval rows grouped for the expanded approvals card. */
-  approvalGroups: ApprovalGroupCounts
-  /** "Pick up where you left off" — recent drafts. */
-  pickUp: { id: string; name: string; updatedAt: string }[]
-  /** "Coming up" — upcoming scheduled workflow runs. */
-  comingUp: { id: string; name: string; nextRunAt: string }[]
-  /** "Your brain" — growth stat + sparkline + connector nudge state. */
-  brain: {
-    entryCount: number
-    growth7d: number
-    sparkline: number[]
-    hasConnector: boolean
-  }
-}
+export type { ResolvedDock, ResolvedNeed } from '@use-brian/shared/home-dock'
 
 /** Deterministic ordering when no assistant artifact exists. Attention-class
  *  kinds (broken connector, failed runs) lead: they block everything else. */

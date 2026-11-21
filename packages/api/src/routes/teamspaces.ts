@@ -29,7 +29,8 @@
 import { Router } from 'express'
 import { z } from 'zod'
 import { canRead, type Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
-import type { TeamspaceStore, Teamspace } from '../db/teamspace-store.js'
+import { teamspaceMetadataSchema, type Teamspace, type TeamspaceMetadata } from '@use-brian/shared/teamspaces'
+import type { TeamspaceStore, Teamspace as StoredTeamspace } from '../db/teamspace-store.js'
 import type { WorkspaceGroupStore } from '../db/workspace-group-store.js'
 import { ensureDefaultTeamspaceSystem, joinDefaultTeamspacesSystem } from '../db/teamspace-store.js'
 import {
@@ -42,7 +43,7 @@ export type TeamspacesRouteOptions = {
   workspaceGroupStore: WorkspaceGroupStore
 }
 
-const sensitivitySchema = z.enum(['public', 'internal', 'confidential'])
+const sensitivitySchema = teamspaceMetadataSchema.shape.sensitivity
 
 const createBodySchema = z.object({
   name: z.string().trim().min(1).max(80),
@@ -83,7 +84,7 @@ function zodMessage(error: z.ZodError): string {
   return error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')
 }
 
-function teamspaceJson(t: Teamspace, extras: { memberCount?: number; canManage?: boolean } = {}) {
+function teamspaceJson(t: StoredTeamspace): TeamspaceMetadata {
   return {
     id: t.id,
     workspaceId: t.workspaceId,
@@ -96,7 +97,6 @@ function teamspaceJson(t: Teamspace, extras: { memberCount?: number; canManage?:
     position: t.position,
     createdAt: t.createdAt.toISOString(),
     updatedAt: t.updatedAt.toISOString(),
-    ...extras,
   }
 }
 
@@ -122,7 +122,7 @@ export function teamspacesRoutes(opts: TeamspacesRouteOptions): Router {
   async function requireManage(
     req: import('express').Request,
     res: import('express').Response,
-  ): Promise<{ userId: string; teamspace: Teamspace; clearance: Sensitivity } | null> {
+  ): Promise<{ userId: string; teamspace: StoredTeamspace; clearance: Sensitivity } | null> {
     const userId = (req as { userId?: string }).userId
     if (!userId) {
       unauthorized(res)
@@ -168,12 +168,11 @@ export function teamspacesRoutes(opts: TeamspacesRouteOptions): Router {
     const teamspaces = await store.listForUser(userId, workspaceId)
     const counts = await store.memberCountsSystem(teamspaces.map((t) => t.id))
     res.json({
-      teamspaces: teamspaces.map((t) =>
-        teamspaceJson(t, {
-          memberCount: counts.get(t.id) ?? 1,
-          canManage: canRead(clearance, t.sensitivity),
-        }),
-      ),
+      teamspaces: teamspaces.map((t): Teamspace => ({
+        ...teamspaceJson(t),
+        memberCount: counts.get(t.id) ?? 1,
+        canManage: canRead(clearance, t.sensitivity),
+      })),
     })
   })
 
@@ -203,7 +202,7 @@ export function teamspacesRoutes(opts: TeamspacesRouteOptions): Router {
       sensitivity,
       createdBy: userId,
     })
-    res.status(201).json(teamspaceJson(teamspace, { memberCount: 1, canManage: true }))
+    res.status(201).json({ ...teamspaceJson(teamspace), memberCount: 1, canManage: true } satisfies Teamspace)
   })
 
   // PATCH /teamspaces/:id — rename / icon / description / sensitivity

@@ -49,4 +49,14 @@ describe('[COMP:api/external-source-access] immutable ancestry metadata contract
     f.query.mockRejectedValueOnce(new Error('private ancestry storage detail'))
     await expect(readExternalSourceAncestors(f.workspaceId,[f.root])).rejects.toMatchObject({ code: 'source_access_denied' })
   })
+  it('preserves a known infrastructure cancellation with its ancestry phase and cause', async () => {
+    const f = fixture()
+    const cause = Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' })
+    f.query.mockRejectedValueOnce(cause)
+    await expect(readExternalSourceAncestors(f.workspaceId,[f.root])).rejects.toMatchObject({
+      code: 'context_verification_unavailable', retrySafe: false, verificationFailure: 'statement_timeout',
+      verificationSqlstateClass: '57', verificationPhase: 'ancestry', cause,
+    })
+    expect(f.query).toHaveBeenCalledOnce()
+  })
 })

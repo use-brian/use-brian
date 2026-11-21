@@ -16,7 +16,8 @@ import {
   turnSqlRecordingEnabled,
   withTurnFrame,
 } from '../turn-sql-accounting.js'
-import { instrumentPoolClient } from '../client.js'
+import { bindPoolConnectContext, instrumentPoolClient } from '../client.js'
+import { chatDatabaseTimingSnapshot, withChatDatabaseTiming } from '../chat-database-timing.js'
 
 /**
  * Spec: docs/architecture/platform/database-schema.md → "Per-turn SQL
@@ -26,6 +27,62 @@ import { instrumentPoolClient } from '../client.js'
 
 const record = (text: string, extra: Partial<Parameters<typeof recordTurnSqlStatement>[0]> = {}) =>
   recordTurnSqlStatement({ text, paramCount: 0, pool: 'app', elapsedMs: 1, ok: true, ...extra })
+
+describe('[COMP:api/turn-timings] request database waits', () => {
+  it('attributes queued checkouts and SQL to the caller when another request releases the connection', async () => {
+    const pending: Array<() => void> = []
+    class Pool {
+      connect(callback: (err: Error | null) => void) { pending.push(() => callback(null)) }
+    }
+    class Client {
+      query(_sql: string, callback: (err: Error | null) => void) { pending.push(() => callback(null)) }
+    }
+    const pool = new Pool(), client = new Client()
+    bindPoolConnectContext(pool as unknown as Parameters<typeof bindPoolConnectContext>[0], 'app')
+    instrumentPoolClient(client as unknown as Parameters<typeof instrumentPoolClient>[0], 'app')
+    const request = () => withChatDatabaseTiming(async () => {
+      await new Promise<void>(resolve => pool.connect(() => client.query('SELECT private_value', () => resolve())))
+      return chatDatabaseTimingSnapshot()
+    })
+    const first = request(), second = request()
+    await withChatDatabaseTiming(async () => {
+      while (pending.length) pending.shift()!()
+      expect(chatDatabaseTimingSnapshot()).toEqual({})
+    })
+    for (const snapshot of await Promise.all([first, second])) {
+      expect(snapshot).toEqual({
+        db_app_checkout_count: 1, db_app_query_count: 1, db_app_checkout_failed_count: 0, db_app_query_failed_count: 0,
+        db_app_checkout_ms: expect.any(Number), db_app_query_ms: expect.any(Number),
+        db_app_checkout_max_ms: expect.any(Number), db_app_query_max_ms: expect.any(Number),
+      })
+    }
+  })
+
+  it('counts rejected, callback and synchronous failures once without changing the error', async () => {
+    const failure = new Error('private detail')
+    class Pool { connect() { return Promise.reject(failure) } }
+    class Client {
+      query(_sql: string, callback?: (err: Error) => void) {
+        if (callback) { callback(failure); return }
+        throw failure
+      }
+    }
+    const pool = new Pool(), client = new Client()
+    bindPoolConnectContext(pool as unknown as Parameters<typeof bindPoolConnectContext>[0], 'system')
+    instrumentPoolClient(client as unknown as Parameters<typeof instrumentPoolClient>[0], 'system')
+    await withChatDatabaseTiming(async () => {
+      await expect(pool.connect()).rejects.toBe(failure)
+      client.query('SELECT private_value', err => expect(err).toBe(failure))
+      expect(() => client.query('SELECT private_value')).toThrow(failure)
+      const snapshot = chatDatabaseTimingSnapshot()
+      expect(snapshot).toMatchObject({ db_system_checkout_count: 1, db_system_checkout_failed_count: 1,
+        db_system_query_count: 2, db_system_query_failed_count: 2 })
+      expect(Object.values(snapshot).every(Number.isInteger)).toBe(true)
+      expect(JSON.stringify(snapshot)).not.toContain('private')
+    })
+    expect(chatDatabaseTimingSnapshot()).toEqual({})
+  })
+})
 
 describe('[COMP:api/db-turn-sql-accounting] Per-turn SQL accounting', () => {
   beforeEach(() => {

@@ -1,59 +1,11 @@
-import { publicRuntimeConfig } from "@/lib/runtime-public-config";
-/**
- * Home dock SDK (app-web) — the assistant-curated "Suggested for you" surface.
- *
- *   GET  /api/home-dock?workspaceId=X          → the resolved dock
- *   POST /api/home-dock/refresh?workspaceId=X  → re-curate, then return it
- *
- * The backend already merges the assistant's layout artifact over live signals
- * (mergeHomeDock) and drops dead cards, so the frontend renders `ResolvedDock`
- * directly. The wire type mirrors `ResolvedDock` in `@use-brian/core`
- * (app-web deliberately does not depend on core — same reason the views SDK is
- * duplicated). See docs/architecture/features/home-dock.md.
- */
+/** Home Dock SDK. See docs/architecture/features/home-dock.md. */
+import type { CompatibleResolvedDock, HomeDockResponse } from "@use-brian/shared/home-dock";
 import { authFetch } from "@/lib/auth-fetch";
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
-type ResolvedNeed = {
-  kind:
-    | "brain_review"
-    | "approvals"
-    | "autopilot"
-    | "task_triage"
-    | "task_cleanup"
-    | "deal_attention"
-    | "connector_attention"
-    | "workflow_attention";
-  count: number;
-  caption: string | null;
-};
-
-export type ResolvedDock = {
-  /** 'assistant' when a curation artifact drove the ordering, else 'default'. */
-  source: "assistant" | "default";
-  generatedAt: string | null;
-  note: string | null;
-  needsYou: ResolvedNeed[];
-  /** Pending approvals grouped for the expanded home card. Optional so a web
-   *  deploy remains compatible with an older API response during rollout. */
-  approvalGroups?: {
-    externalActions: number;
-    contentReview: number;
-    systemImprovements: number;
-    questionsAndAccess: number;
-  };
-  pickUp: { id: string; name: string; updatedAt: string }[];
-  comingUp: { id: string; name: string; nextRunAt: string }[];
-  brain: {
-    entryCount: number;
-    growth7d: number;
-    /** Daily new-entry counts, oldest first. Optional: a pre-sparkline API
-     *  response simply renders the flat fallback line. */
-    sparkline?: number[];
-    hasConnector: boolean;
-  };
-};
+export type ResolvedDock = CompatibleResolvedDock;
 
 /**
  * Total items across the "Needs you" cards — the sidebar badge number (every
@@ -79,7 +31,7 @@ export async function fetchHomeDock(workspaceId: string): Promise<ResolvedDock |
       `${API_URL}/api/home-dock?workspaceId=${encodeURIComponent(workspaceId)}`,
     );
     if (!res.ok) return null;
-    const data = (await res.json()) as { dock?: ResolvedDock };
+    const data = (await res.json()) as Partial<HomeDockResponse<ResolvedDock>>;
     return data.dock ?? null;
   } catch {
     return null;

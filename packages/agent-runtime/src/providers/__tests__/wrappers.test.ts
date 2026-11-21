@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { wrapProvider, wrapIdleTimeout, wrapLog } from '../wrappers.js'
 import { collectStream } from '../accumulator.js'
+import { markProviderStreamPhase, withProviderStreamTiming } from '../stream-timing.js'
 import type { LLMProvider, StreamChunk, ProviderRequest, ProviderSession, SessionOptions, SendOptions, Message } from '../types.js'
 
 function makeChunks(text: string): StreamChunk[] {
@@ -65,6 +66,71 @@ describe('[COMP:providers/wrappers] stream latency accounting', () => {
     expect(log).toHaveBeenCalledWith('[stream] cancelled: 1 chunks in 100ms', {
       model: 'other', upstream_wait_ms: 10, consumer_wait_ms: 90, first_chunk_ms: 10,
     })
+  })
+
+  it('joins repeated session sends and auxiliary streams to the correct concurrent run', async () => {
+    const log = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    const provider = wrapProvider(makeFakeProvider({}))
+    const options = { model: 'private alias', systemPrompt: 'private prompt' }
+    const messages: Message[] = [{ role: 'user', content: 'private request' }]
+    const run = () => withProviderStreamTiming(async traceId => {
+      await collectStream(provider.stream({ ...options, messages }))
+      markProviderStreamPhase('loop')
+      const session = provider.createSession(options)
+      await collectStream(session.send(messages))
+      await collectStream(session.send(messages))
+      markProviderStreamPhase('post_loop')
+      await collectStream(provider.stream({ ...options, messages }))
+      return traceId
+    })
+    const traces = await Promise.all([run(), run()])
+    expect(new Set(traces).size).toBe(2)
+    expect(log.mock.calls).toHaveLength(8)
+    expect(log.mock.calls.every(args => args.length === 1 && typeof args[0] === 'string' && !args[0].includes('\n'))).toBe(true)
+    const parsed = log.mock.calls.map(([line]) => JSON.parse(line))
+    for (const trace of traces) {
+      expect(trace).toMatch(/^pt-[0-9a-f-]{36}$/)
+      const rows = parsed.filter(row => row.provider_trace_id === trace)
+      expect(rows.map(row => [row.provider_stream_ordinal, row.provider_phase])).toEqual([
+        [1, 'pre_loop'], [2, 'loop'], [3, 'loop'], [4, 'post_loop'],
+      ])
+      expect(rows.every(row => Number.isInteger(row.upstream_wait_ms) && Number.isInteger(row.consumer_wait_ms))).toBe(true)
+    }
+    expect(JSON.stringify(log.mock.calls)).not.toContain('private')
+  })
+
+  it('keeps the trace on failed and cancelled streams and omits it from detached work after the run', async () => {
+    const log = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    const providerError = new Error('private error details')
+    const request = { model: 'fake', systemPrompt: 'private prompt', messages: [] }
+    let startDetached!: () => void
+    const gate = new Promise<void>(resolve => { startDetached = resolve })
+    let detached!: Promise<unknown>
+    let trace!: string
+    const stream = wrapLog()(async function* () { yield makeChunks('private text')[0] })
+    const failure = wrapLog()(async function* () { throw providerError })
+    await expect(withProviderStreamTiming(async traceId => {
+      trace = traceId
+      detached = gate.then(() => collectStream(stream(request)))
+      const iterator = stream(request)[Symbol.asyncIterator]()
+      await iterator.next()
+      await iterator.return?.()
+      await collectStream(failure(request))
+    })).rejects.toBe(providerError)
+    startDetached()
+    await detached
+    expect(log.mock.calls).toHaveLength(3)
+    expect(JSON.parse(log.mock.calls[0][0])).toMatchObject({
+      message: expect.stringContaining('cancelled'),
+      provider_trace_id: trace, provider_stream_ordinal: 1, provider_phase: 'pre_loop',
+    })
+    expect(JSON.parse(log.mock.calls[1][0])).toMatchObject({
+      message: expect.stringContaining('error'),
+      provider_trace_id: trace, provider_stream_ordinal: 2, provider_phase: 'pre_loop',
+    })
+    expect(log.mock.calls[2][1]).not.toHaveProperty('provider_trace_id')
+    expect(log.mock.calls[2][1]).not.toHaveProperty('provider_stream_ordinal')
+    expect(log.mock.calls[2][1]).not.toHaveProperty('provider_phase')
   })
 })
 

@@ -19,13 +19,14 @@ vi.mock('../lease.js', async importOriginal => ({ ...await importOriginal<typeof
 import { openAssistantTurn, type AssistantTurn } from '../kernel.js'
 import { abortLocalTurn } from '../lease.js'
 import { configureTurnHistoryReaders, type TurnHistoryReaders } from '../history.js'
+import { configureHarnessTurnContext } from '../../project-harness/turn-context.js'
 import { currentTurnFrame, setTurnSqlRecording } from '../../db/turn-sql-accounting.js'
 import type { SessionMessage } from '../../db/sessions.js'
 
 const identity = { workspace: '00000000-0000-4000-8000-000000000050', assistant: 'history-assistant', user: 'history-user', session: 'history-session' }
 const provider = { name: 'unused', models: [], stream() { throw new Error('unused') } } as unknown as LLMProvider
 const owners: AssistantTurn[] = []
-afterEach(async () => { for (const owner of owners.splice(0)) await owner.finish('failed'); configureTurnHistoryReaders(null); setTurnSqlRecording(undefined) })
+afterEach(async () => { for (const owner of owners.splice(0)) await owner.finish('failed'); configureTurnHistoryReaders(null); configureHarnessTurnContext(null); setTurnSqlRecording(undefined) })
 beforeEach(() => vi.clearAllMocks())
 
 const source = (id: string): ScopeSource => ({ workspaceId: identity.workspace, userId: null, assistantId: identity.assistant, sensitivity: 'internal',
@@ -45,8 +46,8 @@ async function fixture(lane: 'web' | 'resume' = 'web') {
   owners.push(owner)
   const services = { provider, configuredProviders: undefined, resolveWorkspaceCustomLlm: null, resolveLegacyByoKey: null, buildLegacyByoProvider: null }
   // Durable resume binds its canonical execution under its own lane; its stored read carries no native authority.
-  owner.bindModelPreparation({ kind: 'execution', toolProfile: lane, execution, assertCurrent: async () => {} }, services)
   const accumulator = new ContextScopeAccumulator()
+  owner.bindModelPreparation({ kind: 'execution', toolProfile: lane, execution, scopeAccumulator: accumulator, assertCurrent: async () => {} }, services)
   return { owner, abort, execution, native: { execution, accumulator }, accumulator }
 }
 
@@ -124,4 +125,39 @@ describe('[COMP:api/turn-kernel] owner prepareHistory', () => {
     expect(frames).toEqual(['preparation'])
     expect(currentTurnFrame()).toBeUndefined()
   })
+})
+
+it('[COMP:api/turn-kernel] harness retains the bound accumulator on lanes that do not read history', async () => {
+  const f = await fixture()
+  await f.owner.prepareMainModel({ kind: 'web', plan: 'max_5x', budgetStatus: 'ok', researchMode: false, metered: null, hasImage: false })
+  const resolver = vi.fn(async () => ({ name: 'project_harness' as const, content: 'contract' }))
+  configureHarnessTurnContext(resolver)
+  await f.owner.prepareRun({ systemPrompt: 'policy', messages: [], candidateTools: new Map() })
+  expect(resolver).toHaveBeenCalledExactlyOnceWith(f.execution, expect.any(Map), f.accumulator)
+})
+
+it('[COMP:api/turn-kernel] history cannot replace the accumulator adopted with the original invocation', async () => {
+  const r = readers(), f = await fixture()
+  expect(() => f.owner.prepareHistory({ native: null, evidence: new ContextScopeAccumulator() })).toThrow('original turn accumulator')
+  expect(r.stored).not.toHaveBeenCalled()
+  expect(r.native).not.toHaveBeenCalled()
+  await f.owner.prepareHistory({ native: f.native })
+  expect(r.native).toHaveBeenCalledOnce()
+})
+
+it('[COMP:api/turn-kernel] harness receives the privately retained history accumulator, never adapter assembly data', async () => {
+  readers()
+  const f = await fixture()
+  const original = f.accumulator, foreign = new ContextScopeAccumulator()
+  const reading = f.owner.prepareHistory({ native: f.native })
+  await reading
+  f.native.accumulator = foreign
+  await f.owner.prepareMainModel({ kind: 'web', plan: 'max_5x', budgetStatus: 'ok', researchMode: false, metered: null, hasImage: false })
+  const resolver = vi.fn(async () => ({ name: 'project_harness' as const, content: 'contract' }))
+  configureHarnessTurnContext(resolver)
+  const result = await f.owner.prepareRun({ systemPrompt: 'policy', messages: [], candidateTools: new Map(),
+    // Even an untyped old adapter cannot substitute its own accumulator.
+    scopeAccumulator: foreign } as Parameters<AssistantTurn['prepareRun']>[0])
+  expect(resolver).toHaveBeenCalledExactlyOnceWith(f.execution, expect.any(Map), original)
+  expect(result.grounding.runtimeContext).toBe('')
 })

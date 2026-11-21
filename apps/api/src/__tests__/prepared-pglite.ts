@@ -8,11 +8,20 @@ import { vector } from '@electric-sql/pglite-pgvector'
 export async function preparedIdentity(): Promise<string> {
   const root = new URL('../../../../', import.meta.url)
   const migrations = (await readdir(new URL('packages/api/migrations/', root))).filter(name => name.endsWith('.sql')).sort()
-  const hash = createHash('sha256')
-  for (const path of ['pnpm-lock.yaml', 'apps/api/src/migrate-pglite.ts',
-    'packages/api/src/migrations/pglite-sql.ts', 'packages/api/src/migrations/renames.ts', 'packages/api/src/migrations/execution-sql.ts', 'apps/api/src/__tests__/prepared-pglite.ts',
-    'apps/api/src/__tests__/migration-owner-role.test.ts', 'apps/api/src/__tests__/migration-owner-groups.ts', ...migrations.map(name => `packages/api/migrations/${name}`)]) {
+  const adapters = ['concurrent-index', 'execution-sql', 'migration-sql-tokens', 'pglite-sql', 'renames', 'transaction-sql']
+  const hash = createHash('sha256').update(`${process.version}/${process.platform}/${process.arch}\0`)
+  for (const path of ['pnpm-lock.yaml', 'apps/api/package.json', 'packages/api/package.json',
+    'apps/api/src/__tests__/run-embedded-tests.mjs', 'apps/api/src/migrate-pglite.ts',
+    'apps/api/src/__tests__/prepared-pglite.ts', 'apps/api/src/__tests__/ordinary-owner-pglite.ts',
+    'apps/api/src/__tests__/migration-owner-role.test.ts', 'apps/api/src/__tests__/migration-owner-groups.ts',
+    ...adapters.map(name => `packages/api/src/migrations/${name}.ts`),
+    ...migrations.map(name => `packages/api/migrations/${name}`)]) {
     hash.update(path).update('\0').update(await readFile(new URL(path, root))).update('\0')
+  }
+  // The runner imports the built workspace exports, which may lag the source.
+  for (const name of adapters) {
+    const specifier = `@use-brian/api/migrations/${name}.js`
+    hash.update(specifier).update('\0').update(await readFile(new URL(import.meta.resolve(specifier)))).update('\0')
   }
   return hash.digest('hex')
 }

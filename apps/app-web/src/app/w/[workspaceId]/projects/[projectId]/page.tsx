@@ -2,6 +2,7 @@
 
 import { ProjectContent } from "@/components/projects/project-content";
 import { ProjectAccessPanel } from "@/components/projects/project-access-panel";
+import { ProjectHarness } from "@/components/projects/project-harness";
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Project home with canonical records and a fresh contextual chat. [COMP:app-web/project-detail]
@@ -181,6 +182,11 @@ export default function ProjectDetailPage({
 
 
         <ProjectContent key={project.id} project={project} assistants={assistants} />
+
+        {roster ? <ProjectHarness key={`${workspaceId}:${project.id}:${me.id}`} workspaceId={workspaceId} projectId={project.id}
+          viewerId={me.id} owner={roster.myRole === "owner"}
+          participant={roster.myRole === "owner" || roster.myRole === "participant"}
+          archived={project.status === "archived" || roster.status !== "active"} /> : null}
 
         <ProjectAccessPanel workspaceId={workspaceId} projectId={project.id} roster={roster}
           people={members.map(member => ({ userId: member.userId, name: member.userName ?? member.email ?? member.userId }))}

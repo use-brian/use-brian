@@ -162,11 +162,15 @@ export async function fetchPendingSessionInput(
   const res = await authFetch(
     `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/pending`,
   );
-  if (!res.ok) return {
-    pending: null,
-    toolConfirmation: null,
-    ...([401, 403, 404].includes(res.status) ? { externalConfirmations: [] } : {}),
-  };
+  if (!res.ok) {
+    // An unavailable reader is not an authoritative empty result. Callers
+    // already catch transport failures to preserve mounted interactions; HTTP
+    // failures must take the same path, including for native Ask cards.
+    if (![401, 403, 404].includes(res.status)) {
+      throw new Error(`Pending session input unavailable (${res.status})`);
+    }
+    return { pending: null, toolConfirmation: null, externalConfirmations: [] };
+  }
   const body = (await res.json()) as Partial<PendingSessionInput>;
   return {
     pending: parsePendingQuestion(body.pending),

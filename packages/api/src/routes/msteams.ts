@@ -32,8 +32,6 @@ import { findAssistantById } from '../db/users.js'
 import { withChatLock } from '../db/chat-lock.js'
 import { resolveChannelUser, type ChannelUserStore } from '../db/channel-user-store.js'
 import { resolveRoutingForSurface, resolveAssistantForSurface, getChannelForWebhook } from '../db/channels-store.js'
-import { parseFileContent } from '@use-brian/core/files/parsers.js'
-import type { ContentBlock } from '@use-brian/agent-runtime/providers/types.js'
 import type { AnalyticsLogger } from '@use-brian/core/analytics/logger.js'
 import type { MemoryStore } from '@use-brian/core/memory/types.js'
 import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
@@ -46,12 +44,12 @@ import type {
   MsTeamsCredentials,
 } from '../db/channel-integrations.js'
 import type { ConnectorStore } from '../db/connector-store.js'
-import { humanizeToolName, describeToolInput } from '@use-brian/shared'
 import { processChannelMessage } from './channel-pipeline.js'
 import { channelConfirmations, confirmationMessage, roomInteractionScope, type ChannelInteractionScope } from './channel-interactions.js'
 import { isWorkspaceAdmin, postPassiveChannelMessage, resolveRoomBinding } from '../channel-room/room.js'
 import { channelUserErrorText } from './_channel-error-text.js'
-import { cacheInboundImageTag } from './channel-file-cache.js'
+import { buildDownloadedChannelContent } from './channel-file-cache.js'
+import { createEditableChannelStatus } from './channel-editable-status.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 
 /**
@@ -136,8 +134,6 @@ export type MsTeamsRouteOptions = {
    */
   msteamsWebhookIngestor?: MsTeamsWebhookIngestor
 }
-
-const STATUS_THROTTLE_MS = 1200
 
 /**
  * Per-integration allow/block gate on the Teams sender id. Pure + exported so
@@ -382,106 +378,26 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
     const { adapter, incoming, assistant, channelUserId, ownerId, isIdentified, routing } = params
     const channelId = incoming.channelId
 
-    // ── Build content blocks (text + downloaded attachments) ──
-    // Teams `file.download.info` attachments carry a pre-authorized downloadUrl,
-    // so no auth header is needed (same as Discord's pre-signed CDN URLs).
-    const userContentBlocks: ContentBlock[] = []
-    if (incoming.files?.length) {
-      const downloads = await Promise.all(
-        incoming.files.map(async (file) => {
-          try {
-            const resp = await fetch(file.url)
-            if (!resp.ok) {
-              console.error(`[msteams] file download failed (${resp.status}): ${file.name}`)
-              return null
-            }
-            return { ...file, buffer: Buffer.from(await resp.arrayBuffer()) }
-          } catch (err) {
-            console.error(`[msteams] failed to download file: ${file.name}`, err)
-            return null
-          }
-        }),
-      )
-      for (const dl of downloads) {
-        if (!dl) continue
-        if (dl.mimeType.startsWith('image/') || dl.mimeType === 'application/pdf') {
-          userContentBlocks.push({ type: 'image', mimeType: dl.mimeType, data: dl.buffer.toString('base64') })
-          // Save-on-request seam — without the tag the model can SEE the
-          // image but holds no reference to it, so "keep this" / "attach
-          // this to the email" dead-ends. `channelUserId` MUST match the
-          // session key the pipeline uses below. Empty string on any miss
-          // keeps the pre-existing block-only turn.
-          const tag = options.fileStore
-            ? await cacheInboundImageTag({
-                fileStore: options.fileStore,
-                channelType: 'msteams',
-                channelId: incoming.channelId,
-                userId: channelUserId,
-                assistant,
-                file: { buffer: dl.buffer, mime: dl.mimeType, fileName: dl.name },
-              })
-            : ''
-          if (tag) userContentBlocks.push({ type: 'text', text: tag })
-        } else {
-          const parsedFile = await parseFileContent(dl.buffer, dl.mimeType, dl.name)
-          if (
-            parsedFile.mediaMimeType === 'application/pdf' ||
-            parsedFile.mediaMimeType?.startsWith('image/')
-          ) {
-            userContentBlocks.push({
-              type: 'image',
-              mimeType: parsedFile.mediaMimeType,
-              data: dl.buffer.toString('base64'),
-            })
-          } else {
-            userContentBlocks.push({
-              type: 'text',
-              text: `<attached_file name="${dl.name}" type="${dl.mimeType}">\n${parsedFile.text}\n</attached_file>`,
-            })
-          }
-        }
-      }
-    }
-    if (incoming.text.trim()) {
-      userContentBlocks.unshift({ type: 'text', text: incoming.text })
-    } else if (userContentBlocks.length === 0) {
-      return
-    }
-
-    // ── Status: one message, edited in place (Teams has no native indicator) ──
-    let statusMessageId: string | undefined
-    let lastStatusUpdate = 0
-    type ToolEntry = { id: string; name: string; description?: string; done: boolean }
-    const toolTimeline: ToolEntry[] = []
-
-    function formatToolStatus(): string {
-      const active = toolTimeline.filter((t) => !t.done)
-      if (active.length > 0) {
-        const current = active[active.length - 1]
-        return current.description ?? humanizeToolName(current.name)
-      }
-      if (toolTimeline.length > 0) {
-        const last = toolTimeline[toolTimeline.length - 1]
-        return `Done: ${last.description ?? humanizeToolName(last.name)}`
-      }
-      return 'Thinking...'
-    }
-
-    async function setStatus(text: string, force = false): Promise<void> {
-      const now = Date.now()
-      if (!force && now - lastStatusUpdate < STATUS_THROTTLE_MS) return
-      lastStatusUpdate = now
+    // Teams file.download.info provides pre-authorized URLs. Fetch directly without credentials.
+    const downloads = await Promise.all((incoming.files ?? []).map(async (file) => {
       try {
-        if (!statusMessageId) {
-          statusMessageId = await adapter.sendStatus(channelId, text)
-        } else {
-          await adapter.editMessage(channelId, statusMessageId, { text })
+        const resp = await fetch(file.url)
+        if (!resp.ok) {
+          console.error(`[msteams] file download failed (${resp.status}): ${file.name}`)
+          return null
         }
-      } catch {
-        // Non-critical.
+        return { ...file, buffer: Buffer.from(await resp.arrayBuffer()) }
+      } catch (err) {
+        console.error(`[msteams] failed to download file: ${file.name}`, err)
+        return null
       }
-    }
+    }))
+    const userContentBlocks = await buildDownloadedChannelContent(incoming.text, downloads, {
+      fileStore: options.fileStore, channelType: 'msteams', channelId, userId: channelUserId, assistant,
+    })
+    if (!userContentBlocks.length) return
 
+    const progress = createEditableChannelStatus(adapter, channelId)
     const abortController = new AbortController()
 
     await processChannelMessage({
@@ -544,35 +460,7 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
         async postNotice(text) {
           await adapter.sendMessage(incoming.channelId, { text })
         },
-        async onProcessingStart() {
-          await setStatus('Thinking...', true)
-        },
-        async onStatus(message) {
-          await setStatus(message, true)
-        },
-        async onToolStart(id, name) {
-          toolTimeline.push({ id, name, done: false })
-          await setStatus(formatToolStatus())
-        },
-        async onToolInput(id, name, input) {
-          const desc = describeToolInput(name, input)
-          if (desc) {
-            const entry = toolTimeline.find((t) => t.id === id)
-            if (entry) entry.description = desc
-            await setStatus(formatToolStatus())
-          }
-        },
-        async onToolResult(results) {
-          for (const block of results) {
-            if (block.type === 'tool_result') {
-              const entry = toolTimeline.find(
-                (t) => t.id === (block as ContentBlock & { toolUseId?: string }).toolUseId,
-              )
-              if (entry) entry.done = true
-            }
-          }
-          await setStatus(formatToolStatus())
-        },
+        ...progress.hooks,
         async onGoalAccepted(message) {
           await adapter.sendMessage(channelId, { text: message })
         },
@@ -588,15 +476,15 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
           // fits one Teams activity; otherwise send fresh (chunked).
           // A reply carrying documents always sends fresh — an edit cannot
           // attach uploads, so the edit path would silently drop them.
-          if (statusMessageId && !hasDocuments && reply.length <= adapter.maxMessageLength) {
-            await adapter.editMessage(channelId, statusMessageId, { text: reply, format: 'markdown', actions })
-            channelMessageId = statusMessageId
-            statusMessageId = undefined
+          if (progress.messageId && !hasDocuments && reply.length <= adapter.maxMessageLength) {
+            await adapter.editMessage(channelId, progress.messageId, { text: reply, format: 'markdown', actions })
+            channelMessageId = progress.messageId
+            progress.clear()
           } else {
             channelMessageId = await adapter.sendMessage(channelId, { text: reply, format: 'markdown', documents, actions })
-            if (statusMessageId) {
-              await adapter.editMessage(channelId, statusMessageId, { text: '…' }).catch(() => {})
-              statusMessageId = undefined
+            if (progress.messageId) {
+              await adapter.editMessage(channelId, progress.messageId, { text: '…' }).catch(() => {})
+              progress.clear()
             }
           }
           return { channelMessageId }
@@ -611,13 +499,13 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
           return null
         },
         async sendError(err) {
-          statusMessageId = undefined
+          progress.clear()
           await adapter.sendMessage(channelId, {
             text: channelUserErrorText(err),
           })
         },
         async onCleanup() {
-          statusMessageId = undefined
+          progress.clear()
         },
       },
     })

@@ -100,7 +100,17 @@ SELECT jsonb_build_object(
  'triggers',(SELECT jsonb_agg(to_jsonb(t) ORDER BY t.relation COLLATE "C",t.name COLLATE "C") FROM triggers t)
 )::text AS catalog;`
 
-async function readReviewedInstallationCatalog(owner, scope) {
+export async function readReviewedCrmCatalog(owner, scope) {
+  if (scope.closedPrefixes) {
+    const unexpected = (await owner.query(`SELECT p.proname name FROM pg_proc p
+      WHERE p.pronamespace='public'::regnamespace
+      AND EXISTS(SELECT 1 FROM unnest($1::text[]) prefix WHERE starts_with(p.proname,prefix))
+      AND NOT(p.proname=ANY($2::text[]))
+      UNION ALL SELECT c.relname FROM pg_class c WHERE c.relnamespace='public'::regnamespace AND c.relkind IN('r','p')
+      AND EXISTS(SELECT 1 FROM unnest($3::text[]) prefix WHERE starts_with(c.relname,prefix))
+      AND NOT(c.relname=ANY($4::text[]))`, [scope.closedPrefixes.functions, scope.functions, scope.closedPrefixes.tables, scope.tables])).rows
+    if (unexpected.length) throw Error('portable_successor_unknown_catalog_object')
+  }
   const value = (await owner.query(CATALOG, [scope.functions,scope.tables,scope.types,scope.triggers])).rows[0]?.catalog
   if (typeof value !== 'string') throw Error('crm_installation_catalog_unavailable')
   const valueJson = JSON.parse(value)
@@ -129,13 +139,21 @@ export async function authenticateCrmSuccessor(owner, source) {
       throw Error('installation_authentication_receipt_malformed')
     await owner.query(source.cleanup)
     await owner.query('SET LOCAL search_path=pg_catalog,public')
-    const actual = await readReviewedInstallationCatalog(owner, source.crmScope)
+    const actual = await readReviewedCrmCatalog(owner, source.crmScope)
     const { scopeSha256, ...expected } = source.crmInventory
     if (Object.entries(actual).some(([key,value])=>expected[key]!==value)) throw Error('crm_installation_catalog_changed')
     let localDigests = row.local_digest + actual.sha256
     if (source.additionalCatalog) {
-      const catalog = await readReviewedInstallationCatalog(owner, source.additionalCatalog.scope)
+      const catalog = await readReviewedCrmCatalog(owner, source.additionalCatalog.scope)
       if (catalog.sha256 !== source.additionalCatalog.sha256) throw Error('installation_additional_catalog_changed')
+      localDigests += catalog.sha256
+    }
+    if (source.portableSuccessor) {
+      const { scope, inventory, migrations } = source.portableSuccessor
+      const receipts = (await owner.query('SELECT name FROM public._migrations WHERE name=ANY($1::text[]) ORDER BY name COLLATE "C"', [migrations])).rows.map(row => row.name)
+      if (JSON.stringify(receipts) !== JSON.stringify(migrations)) throw Error('portable_successor_migration_tail_missing')
+      const catalog = await readReviewedCrmCatalog(owner, scope)
+      if (Object.entries(catalog).some(([key, value]) => inventory[key] !== value)) throw Error('portable_successor_catalog_changed')
       localDigests += catalog.sha256
     }
     await owner.query('COMMIT')

@@ -5,6 +5,10 @@
  * route test can mount a single router with injected dependencies.
  */
 
+import { once } from 'node:events'
+import { createServer, request } from 'node:http'
+import { duplexPair } from 'node:stream'
+import { text } from 'node:stream/consumers'
 import express, { type Router } from 'express'
 
 /**
@@ -45,6 +49,34 @@ export function createTestApp(
 
   app.use(mountPath, router)
   return app
+}
+
+/** Send HTTP requests through the mounted app without opening a listening socket. */
+export function createInProcessRequester(app: express.Express) {
+  const server = createServer(app)
+  return async (input: string, init?: RequestInit): Promise<Response> => {
+    const incomingRequest = new Request(new URL(input, 'http://api.example.test'), init)
+    const body = incomingRequest.body ? await incomingRequest.text() : undefined
+    const [client, peer] = duplexPair()
+    server.emit('connection', peer)
+    try {
+      const outgoing = request(incomingRequest.url, {
+        method: incomingRequest.method,
+        headers: Object.fromEntries(incomingRequest.headers),
+        createConnection: () => client,
+      })
+      const received = once(outgoing, 'response')
+      outgoing.end(body)
+      const [incoming] = await received
+      return new Response(await text(incoming) || null, {
+        status: incoming.statusCode,
+        headers: { 'content-type': incoming.headers['content-type'] ?? '' },
+      })
+    } finally {
+      client.destroy()
+      peer.destroy()
+    }
+  }
 }
 
 /**

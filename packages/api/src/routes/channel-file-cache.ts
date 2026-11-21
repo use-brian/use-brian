@@ -9,6 +9,8 @@
 // docs/architecture/engine/file-handling.md → "Save-on-request".
 
 import type { FileStore } from '@use-brian/core/files/types.js'
+import type { ContentBlock } from '@use-brian/agent-runtime/providers/types.js'
+import type { IncomingFile } from '@use-brian/channels'
 import { findOrCreateSession } from '../db/sessions.js'
 
 export type CacheInboundImageInput = {
@@ -68,14 +70,7 @@ export async function cacheInboundImage(input: CacheInboundImageInput): Promise<
  * Cache an inbound image AND render the `<attached_file id="…">` envelope for
  * it — the whole save-on-request seam in one call.
  *
- * The Telegram routes get this for free because they hand their downloads to
- * `buildFileContentBlocks`, which stamps the tag. Slack, Discord, MS Teams and
- * WeChat build their content blocks by hand and pushed a bare `image` block
- * with **no tag at all**, so on those channels a photo was not merely
- * unsaveable — the model had no identifier for it in any form. This helper is
- * what makes wiring them a two-line change instead of four hand-rolled
- * re-implementations of an envelope that has to match byte for byte (the
- * model is matching on the tag shape it sees in web chat).
+ * The envelope matches the one `buildFileContentBlocks` stamps in web chat.
  *
  * Returns `''` when there is nothing to reference (non-image, no store,
  * workspace-less assistant, or a cache failure) — every caller can append
@@ -85,4 +80,41 @@ export async function cacheInboundImageTag(input: CacheInboundImageInput): Promi
   const id = await cacheInboundImage(input)
   if (!id) return ''
   return `<attached_file id="${id}" name="${input.file.fileName}" type="${input.file.mime}">[image]</attached_file>`
+}
+
+/** Convert files in provider order after the route attempts each download. */
+export async function buildDownloadedChannelContent(
+  text: string,
+  downloads: readonly (Pick<IncomingFile, 'name' | 'mimeType'> & { buffer: Buffer } | null)[],
+  context: Omit<CacheInboundImageInput, 'fileStore' | 'file'> & { fileStore?: FileStore },
+): Promise<ContentBlock[]> {
+  const blocks: ContentBlock[] = text.trim() ? [{ type: 'text', text }] : []
+  const { fileStore, ...session } = context
+  for (const file of downloads) {
+    if (!file) continue
+    const { buffer, mimeType, name } = file
+    if (mimeType.startsWith('image/') || mimeType === 'application/pdf') {
+      blocks.push({ type: 'image', mimeType, data: buffer.toString('base64') })
+      if (fileStore) {
+        const tag = await cacheInboundImageTag({
+          ...session,
+          fileStore,
+          file: { buffer, mime: mimeType, fileName: name },
+        })
+        if (tag) blocks.push({ type: 'text', text: tag })
+      }
+      continue
+    }
+    const { parseFileContent } = await import('@use-brian/core/files/parsers.js')
+    const parsed = await parseFileContent(buffer, mimeType, name)
+    if (parsed.mediaMimeType === 'application/pdf' || parsed.mediaMimeType?.startsWith('image/')) {
+      blocks.push({ type: 'image', mimeType: parsed.mediaMimeType, data: buffer.toString('base64') })
+    } else {
+      blocks.push({
+        type: 'text',
+        text: `<attached_file name="${name}" type="${mimeType}">\n${parsed.text}\n</attached_file>`,
+      })
+    }
+  }
+  return blocks
 }

@@ -129,6 +129,8 @@ const server = createServer((req, res) => {
     const last = messages[messages.length - 1]
     const wantsJson = json.response_format && json.response_format.type !== 'text'
     const entry = { n: ++seq, model, stream: json.stream === true, tools: tools.length, offered: tools.filter((t) => t === 'askQuestion' || CONFIRM_TOOLS.includes(t)), lastRole: last?.role ?? null, directive: d, userTail: userText.slice(-160) }
+    const priorAssistant = messages.findLast(message => message?.role === 'assistant')
+    entry.priorScriptedTag = /^Scripted reply #([\w-]+) to:/.exec(textOf(priorAssistant?.content))?.[1] ?? null
     let aborted = false
     res.on('close', () => { aborted = true })
 

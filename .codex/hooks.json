@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "repo_root=\"$(git rev-parse --show-toplevel)\" && node \"$repo_root/scripts/hooks/after-edit-fast-checks.mjs\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

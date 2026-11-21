@@ -22,12 +22,14 @@ import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/atten
 import { bindScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { runTurnSessionStateDiff } from '../turn/session-state.js'
 import { RESEARCH_EFFORT_BUDGETS, researchEffortInstruction, type ResearchEffort } from '@use-brian/core/workers/research-effort.js'
+import { withChatDatabaseTiming, chatDatabaseTimingSnapshot } from '../db/chat-database-timing.js'
 import { withTurnInference } from '../turn/runtime.js'
 import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
 import { dispatchPersistedWebInput } from './_incoming-chat-event.js'
 import { filterCoordinatorTools, COORDINATOR_DOCUMENT_WORKFLOW_ADDENDUM } from './chat-coordinator-tools.js'
 import { debugDocumentFlow } from '@use-brian/agent-runtime/engine/document-flow-debug.js'
 import { summarizeProviderError } from '@use-brian/agent-runtime/providers/provider-error-summary.js'
+import { markProviderStreamPhase, withProviderStreamTiming } from '@use-brian/agent-runtime/providers/stream-timing.js'
 import { pinAccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { closeProviderError } from './chat-provider-error.js'
@@ -86,7 +88,7 @@ import { runPreflight, buildPreflightPrompt } from '@use-brian/core/workers/pref
 import { detectOperateSiteIntent } from '@use-brian/core/workers/research-classifier.js'
 import { latestWorkflowProposalReceipt } from '@use-brian/core/workflow/tools.js'
 import { AttachmentCollector } from '@use-brian/core/workspace-files/attachments.js'
-import { buildWorkspaceFilesContext } from '@use-brian/core/workspace-files/context-builder.js'
+import { buildWorkspaceFilesContext, selectWorkspaceFilesContextRows } from '@use-brian/core/workspace-files/context-builder.js'
 import { buildUploadPolicyBlock } from '@use-brian/core/workspace-files/upload-policy-block.js'
 import { calculateCost } from '@use-brian/agent-runtime/billing/cost-tracker.js'
 import { modelToCompactionTier } from '@use-brian/agent-runtime/compaction/compact.js'
@@ -235,6 +237,8 @@ import {
   type OfficeLaneDeps,
 } from './office-chat-lane.js'
 import { isAuthorityChangedError } from '../context-scope/authority-lease.js'
+import { DerivedScopeError } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { deliveryFailureAnalytics, isContextVerificationReadFailure } from '../context-scope/delivery-failure.js'
 import { beginResearchActivity, captureResearchFollowupForMessage, createResearchDeliveryDeps } from '../research/runtime.js'
 import { createResearchTurnObserver, recordResearchDelivery } from '../research/delivery.js'
 import type { ResearchActivity } from '../db/research-store.js'
@@ -1657,6 +1661,12 @@ export function chatTurnErrorEvent(
     // without learning which hidden axis refused: the diagnostic stays here.
     return { code: err.reason, error: err.message, ...(turn.sharedAudience ? { sharedChat: true } : {}) }
   }
+  if (isContextVerificationReadFailure(err)) {
+    return { code: err.code, error: err.message, retrySafe: err.retrySafe }
+  }
+  if (err instanceof DerivedScopeError && err.code === 'scope_source_changed') {
+    return { code: err.code, error: 'The source context changed or is no longer available.', retrySafe: false }
+  }
   if (err instanceof ChatTurnRefusal) {
     return { code: err.code, error: err.message, ...err.detail }
   }
@@ -2022,7 +2032,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
   const getTitleChannelPrefix = options.getTitleChannelPrefix ?? (() => null)
   const router = Router()
 
-  const runFramedTurn = async (req: NativeChatRequest, res: NativeChatSink, programmatic: WorkspaceTurnBinding | undefined, sqlScope: TurnSqlScope) => {
+  const runFramedTurn = async (req: NativeChatRequest, res: NativeChatSink, programmatic: WorkspaceTurnBinding | undefined, sqlScope: TurnSqlScope, providerTraceId: string) => {
     const maximum = programmatic ? new Set(programmatic.consent.operationNames) : undefined
     const options = maximum ? { ...baseOptions, tools: new Map([...baseOptions.tools].filter(([name]) => maximum.has(name))) } : baseOptions
     // Inference wiring through the turn kernel's boot registration.
@@ -3686,7 +3696,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       const originalLegacyKeyStore = options.llmProviderSettingsStore?.getPlaintextKeySystem.bind(options.llmProviderSettingsStore)
       const resolveOriginalLegacyKey = options.buildWorkspaceProvider && (originalLegacyResolver || originalLegacyKeyStore)
         ? originalLegacyResolver ?? ((workspaceId: string) => originalLegacyKeyStore!({ workspaceId, provider: 'gemini' })) : null
-      ownedTurn.bindModelPreparation({ kind: 'execution', toolProfile: 'web', execution: executionContext, assertCurrent: assertDeliveryAudience },
+      ownedTurn.bindModelPreparation({ kind: 'execution', toolProfile: 'web', execution: executionContext, scopeAccumulator, assertCurrent: assertDeliveryAudience },
         { provider: options.provider, configuredProviders: turnOptions.configuredProviders,
           resolveWorkspaceCustomLlm: turnOptions.resolveWorkspaceCustomLlm?.bind(turnOptions) ?? null,
           resolveLegacyByoKey: resolveOriginalLegacyKey,
@@ -4762,17 +4772,29 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         || requestedViewingBrainEntry || requestedKbSourceId || requestedResearchActivityId || turnScope.activeProjectId
       const continuedPromptContext = truncateFromMessageId || requestedSteer || requestedMidTurn || requestedRoomResponseGroup
         || prePersistedUserMsg || workflowProposalReceipt
-      const barePersonalGreeting = typeof rawMessage === 'string' && userMessageText === rawMessage && isBareChatGreeting(rawMessage)
-        && nativeTranscriptAuthority && privatePromptShape && pendingQuestionChecked
-        && !programmatic && !pageBoundTurn && !officeLane && !feedTurnContext
-        && (!requestedAppOrigin || requestedAppOrigin === 'chat') && !researchMode && !requestedCustom
-        && !isExplicitMeteredModelSelection(requestedModel) && !explicitPromptContext && !continuedPromptContext
+      const fullContextReason = (() => {
+        if (typeof rawMessage !== 'string' || userMessageText !== rawMessage || !isBareChatGreeting(rawMessage)) return 'message'
+        if (!nativeTranscriptAuthority) return 'transcript_authority'
+        if (!privatePromptShape) return 'audience'
+        if (!pendingQuestionChecked) return 'pending_question'
+        if (programmatic || pageBoundTurn || officeLane || feedTurnContext || (requestedAppOrigin && requestedAppOrigin !== 'chat')) return 'surface'
+        if (researchMode || requestedCustom || isExplicitMeteredModelSelection(requestedModel)) return 'model_or_mode'
+        if (explicitPromptContext) return 'supplied_context'
+        if (continuedPromptContext) return 'continuation'
+        return null
+      })()
       turnTiming.mark('admission')
-      const earlyTaskContext = barePersonalGreeting ? await turnTiming.time('prompt_task_context', readTaskContext) : undefined
+      const earlyTaskContext = !fullContextReason ? await turnTiming.time('prompt_task_context', readTaskContext) : undefined
       const earlyPinnedContext = earlyTaskContext?.available && !earlyTaskContext.sessionStateBlock && !earlyTaskContext.planBlock
         ? await turnTiming.time('prompt_pins', readPinnedPromptContext) : undefined
       const deferAmbientIndexes = earlyPinnedContext?.block === null
       if (deferAmbientIndexes) turnTiming.count('prompt_ambient_indexes_deferred')
+      else {
+        const reason = fullContextReason ?? (!earlyTaskContext?.available ? 'task_context_unavailable'
+          : earlyTaskContext.sessionStateBlock || earlyTaskContext.planBlock ? 'ongoing_work'
+          : earlyPinnedContext ? 'pins' : 'pins_unavailable')
+        turnTiming.count(`prompt_ambient_full_${reason}`)
+      }
       const auxiliaryPrompt = nativeTranscriptAuthority && privatePromptShape && options.memoryStore.getPromptAuxiliaryContext
         ? turnTiming.time('prompt_identity_context', () => options.memoryStore.getPromptAuxiliaryContext!(viewerCtx, 'Use Brian', nativeTranscriptAuthority!))
         : undefined
@@ -4958,26 +4980,29 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         activeCapabilities.has('files')
       ) {
         try {
-          const rows = await turnTiming.time('prompt_workspace_files', () => optionalContext(() => options.workspaceFilesStore!.listIndexRanked(
-            {
-              workspaceId: assistant.workspaceId!,
-              userId: user.id,
-              assistantId: assistant.id,
-              assistantKind: assistant.kind,
-              // Read ceiling = min(member, assistant) — see readClearance above.
-              clearance: readClearance,
-              compartments: readCompartments,
-              mutationCompartments: turnScope.access.mutationCompartments,
-              projectIds: turnScope.effectiveProjectIds,
+          let scopedIndexEmpty = false
+          const admittedRows = await turnTiming.time('prompt_workspace_files', () => optionalContext(async () => {
+            const indexed = await options.workspaceFilesStore!.listIndexRanked({
+              workspaceId: assistant.workspaceId!, userId: user.id, assistantId: assistant.id, assistantKind: assistant.kind,
+              clearance: readClearance, compartments: readCompartments,
+              mutationCompartments: turnScope.access.mutationCompartments, projectIds: turnScope.effectiveProjectIds,
               sharedAudience: turnScope.access.sharedAudience,
               ...(viewerCtx.departmentRead ? { departmentRead: viewerCtx.departmentRead } : {}),
-            },
-            PER_TURN_FILES_INDEX_CAP,
-          ), []))
-          noteAutomaticScopeEvidence(scopeAccumulator, rows)
+            }, PER_TURN_FILES_INDEX_CAP)
+            return selectWorkspaceFilesContextRows(indexed, PER_TURN_FILES_INDEX_CAP)
+          }, null, undefined, (rows) => {
+            // An empty scoped read has no source rows to admit. The shared
+            // reader checks current invocation authority before this callback.
+            scopedIndexEmpty = rows?.length === 0
+            return Boolean(rows?.length)
+          }))
+          const rows = admittedRows ?? (scopedIndexEmpty ? [] : null)
+          if (rows) noteAutomaticScopeEvidence(scopeAccumulator, rows)
           workspaceFilesContext = buildWorkspaceFilesContext(rows)
         } catch (err) {
+          if (isAuthorityChangedError(err)) throw err
           console.error('[chat] workspace-files index fetch failed:', err)
+          workspaceFilesContext = buildWorkspaceFilesContext(null)
         }
       }
 
@@ -7326,6 +7351,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         if (storedUserSource) selectionScope.noteSource(storedUserSource)
         turnTiming.mark('prompt')
         turnTiming.observe('loop_started')
+        markProviderStreamPhase('loop')
         // Tool executions arrive as `tool_start` per call and ONE `tool_result`
         // per batch; the batch's wall-clock is what the turn waited for.
         let toolBatchStartedAt: number | null = null
@@ -8380,6 +8406,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         })
         turnTiming.observe('loop_returned')
         turnTiming.mark('loop')
+        markProviderStreamPhase('post_loop')
 
         // Happy-path flush: the loop completed without throwing. Any
         // tool_use without a result at this point means the executor
@@ -9023,8 +9050,14 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // its own sentence; the whole point is that the user reads THAT and
       // not the generic banner, so it must not be flattened into one.
       const refusal = err instanceof ChatTurnRefusal ? err : null
+      const interruptedVerification = isContextVerificationReadFailure(err) ? err : null
+      const verificationAnalytics = interruptedVerification ? {
+        verification_failure: interruptedVerification.verificationFailure,
+        ...deliveryFailureAnalytics(interruptedVerification),
+      } : {}
       if (postReplyNotice) console.info('[chat] post-reply processing stopped: authority_changed')
       else if (stoppedByUser) console.info('[chat] turn stopped by user before completion')
+      else if (interruptedVerification) console.warn('[chat] context verification interrupted', verificationAnalytics)
       else if (!refusal) console.error('Chat error:', err)
       // When the inner catch already delivered a context-aware recovery
       // message, surface a clean `done` so the client treats the turn
@@ -9087,7 +9120,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           eventName: 'chat_route_error', channelType: 'web',
           metadata: {
             error_type: sanitize((err as Error)?.name ?? 'unknown'),
-            error_message: sanitize(((err as Error)?.message ?? '').slice(0, 200)),
+            error_message: sanitize(interruptedVerification?.code ?? ((err as Error)?.message ?? '').slice(0, 200)),
+            ...verificationAnalytics,
             // Internal refusal reason: which rule refused, or that the check
             // itself failed. Never sent to the client (chatTurnErrorEvent).
             ...(isDeliveryAudienceUnverifiedError(err) && err.diagnostic
@@ -9103,21 +9137,23 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       res.end()
     } finally {
       requestPermissions?.dispose()
-      // The turn's per-phase wall-clock, once per request. Only a request that
-      // reached the query loop is a turn (queued mid-turn input, 409s and
-      // pre-flight refusals are not); those still surface through
-      // chat_route_error. Emitted from `finally` so error paths report too.
-      if (turnTimingIdentity && 'prompt_ms' in turnTiming.snapshot()) {
+      // Include started turns that fail during preparation. Queued input and
+      // requests refused before a turn starts have their own route telemetry.
+      const phases = turnTiming.snapshot()
+      const interrupted = turnTimingOutcome !== 'completed'
+        && ('admission_ms' in phases || 'authored_input_saved_at_ms' in phases)
+      if (turnTimingIdentity && ('prompt_ms' in phases || interrupted)) {
         markTurnEnd(turnTiming)
-        const timings = turnTiming.snapshot()
+        const timings = { ...turnTiming.snapshot(), ...chatDatabaseTimingSnapshot() }
         console.log(
           `[chat] turn timings session ${turnTimingIdentity.sessionId} ${turnTimingOutcome}: `
-          + Object.entries(timings).map(([k, v]) => `${k}=${v}`).join(' '),
+          + Object.entries(timings).map(([k, v]) => `${k}=${v}`).join(' ')
+          + ` provider_trace_id=${providerTraceId}`,
         )
         options.analytics?.logEvent({
           ...turnTimingIdentity,
           eventName: 'turn_timings', channelType: 'web',
-          metadata: { outcome: sanitize(turnTimingOutcome), ...timings },
+          metadata: { outcome: sanitize(turnTimingOutcome), provider_trace_id: sanitize(providerTraceId), ...timings },
         })
       }
       // Stop the lease heartbeat before anything else — a tick that fires
@@ -9153,7 +9189,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
    * "Per-turn SQL accounting phases"); recording off, it enters no frame. */
   const runTurn = (req: NativeChatRequest, res: NativeChatSink, programmatic?: WorkspaceTurnBinding) => {
     const sqlScope = openTurnSqlScope()
-    return sqlScope.run(() => runFramedTurn(req, res, programmatic, sqlScope))
+    return withProviderStreamTiming(providerTraceId => withChatDatabaseTiming(() =>
+      sqlScope.run(() => runFramedTurn(req, res, programmatic, sqlScope, providerTraceId))))
   }
   router.post('/', (req, res) => runTurn(req, res))
 

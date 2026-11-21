@@ -8,6 +8,8 @@ import type { DecisionRouteConfig, DecisionRuntimeAttempt } from '../../decision
 import { CUSTOM_MODEL_IMAGE_REJECTION } from '../_channel-error-text.js'
 import { AuthorityChangedError } from '../../context-scope/authority-lease.js'
 import { DeliveryAudienceUnverifiedError } from '../../context-scope/delivery-authority.js'
+import { ContextVerificationUnavailableError } from '../../context-scope/delivery-failure.js'
+import { DerivedScopeError } from '@use-brian/agent-runtime/security/derived-scope.js'
 
 describe('[COMP:api/chat-route] workspace provider precedence', () => {
   it('uses a valid custom endpoint without touching stale legacy BYO settings', async () => {
@@ -87,6 +89,16 @@ describe('[COMP:api/chat-route] post-SSE turn refusals', () => {
       code: 'delivery_audience_unverified',
       error: 'The current destination is not authorized for this response.',
     })
+  })
+
+  it('distinguishes interrupted context verification from a genuine source change', () => {
+    const timeout = new ContextVerificationUnavailableError('statement_timeout', new Error('PRIVATE SQL'), 'native_proof')
+    expect(chatTurnErrorEvent(timeout)).toEqual({ code: 'context_verification_unavailable',
+      error: 'We couldn’t finish checking the context for this reply.', retrySafe: false })
+    expect(chatTurnErrorEvent(new DerivedScopeError('scope_source_changed'))).toEqual({ code: 'scope_source_changed',
+      error: 'The source context changed or is no longer available.', retrySafe: false })
+    expect(chatTurnErrorEvent(Object.assign(timeout, { publicationOutcome: 'unknown', operationMayHaveExecuted: true })))
+      .toEqual({ error: 'Something went wrong' })
   })
 
   it('marks a refused delivery in a shared chat without exposing the refusing axis', () => {

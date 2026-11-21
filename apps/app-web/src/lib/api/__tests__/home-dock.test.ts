@@ -3,7 +3,7 @@
  * fetch + the sidebar badge count. Spec: docs/architecture/features/home-dock.md.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 
 vi.mock("@/lib/auth-fetch", () => ({ authFetch: vi.fn() }));
 
@@ -15,31 +15,12 @@ import {
   type ResolvedDock,
 } from "../home-dock";
 
-const mockAuthFetch = vi.mocked(authFetch);
-
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-}
-
-beforeEach(() => {
-  vi.resetAllMocks();
-});
-
 function dockWith(needsYou: ResolvedDock["needsYou"]): ResolvedDock {
   return {
     source: "default",
     generatedAt: null,
     note: null,
     needsYou,
-    approvalGroups: {
-      externalActions: 0,
-      contentReview: 0,
-      systemImprovements: 0,
-      questionsAndAccess: 0,
-    },
     pickUp: [],
     comingUp: [],
     brain: { entryCount: 0, growth7d: 0, hasConnector: false },
@@ -94,23 +75,14 @@ describe("[COMP:app-web/home-dock] pendingApprovalTotal", () => {
 });
 
 describe("[COMP:app-web/home-dock] fetchHomeDock", () => {
-  it("returns the resolved dock from GET /api/home-dock", async () => {
+  it("accepts older servers without approval groups or a sparkline", async () => {
     const dock = dockWith([{ kind: "approvals", count: 2, caption: null }]);
-    mockAuthFetch.mockResolvedValueOnce(json({ dock }));
-    const got = await fetchHomeDock("ws-1");
-    expect(got).toEqual(dock);
-    expect(mockAuthFetch).toHaveBeenCalledWith(
-      expect.stringContaining("/api/home-dock?workspaceId=ws-1"),
-    );
-  });
-
-  it("returns null on a non-OK response (caller renders the quiet fallback)", async () => {
-    mockAuthFetch.mockResolvedValueOnce(json({ error: "nope" }, 500));
-    expect(await fetchHomeDock("ws-1")).toBeNull();
+    vi.mocked(authFetch).mockResolvedValueOnce(Response.json({ dock }));
+    await expect(fetchHomeDock("ws-1")).resolves.toEqual(dock);
   });
 
   it("returns null when the request throws (offline)", async () => {
-    mockAuthFetch.mockRejectedValueOnce(new Error("network down"));
+    vi.mocked(authFetch).mockRejectedValueOnce(new Error("network down"));
     expect(await fetchHomeDock("ws-1")).toBeNull();
   });
 });

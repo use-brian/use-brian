@@ -10,6 +10,7 @@ import {readAdmittedSessionQuery} from '../../db/conversation-store.js'
 import {publishNativeSessionMessage,publishNativeSessionMessageBatch} from '../../db/conversation-store.js'
 import {withSessionMessagePublication} from '../../db/session-context-revisions.js'
 import {validateCallerScopeEvidence,readValidatedNativePublicationCohorts} from '../../context-scope/caller-evidence.js'
+import {connectBootstrap} from '../../__tests__/fixtures/bootstrap-role.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
 
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
@@ -119,6 +120,31 @@ describe.sequential('[COMP:api/native-turn-frame] exact independent publication 
   await operation(client,'body',{id:plain[2].id})
   await expect(acquired(client,[querySources.map(identity),[plain[0]]])).rejects.toMatchObject({code:'42501'})
  }),90_000)
+ it('routes declared Memory roots once and preserves both cohort proofs',async()=>{
+  const memory=await f.memory('Fictional retained cohort memory')
+  const {rows:[root]}=await f.pool.query(`SELECT 'memory' kind,id,scope_version::text version FROM memories WHERE id=$1`,[memory.id])
+  const {rows:[{owner,allowed}]}=await f.pool.query(`SELECT quote_ident(current_user) owner,
+   has_parameter_privilege(current_user,'track_functions','SET') allowed`)
+  const bootstrap=await connectBootstrap()
+  try{
+   if(!allowed)await bootstrap.query(`GRANT SET ON PARAMETER track_functions TO ${owner}`)
+   await frame(async client=>{
+    await operation(client,'trace')
+    const before=await operation(client,'stats'),inputs=[[root],[plain[0],root]]
+    const joint=await acquired(client,inputs),after=await operation(client,'stats')
+    expect((after.fused_f_capture??0)-(before.fused_f_capture??0)).toBe(0)
+    expect((after.conversation_dag??0)-(before.conversation_dag??0)).toBe(1)
+    expect(joint).toEqual(await equal(client,inputs))
+    await expect(acquired(client,[[{...root,extra:true}],[plain[0]]])).rejects.toMatchObject({code:'22023'})
+   })
+  }finally{
+   try{if(!allowed)await bootstrap.query(`REVOKE SET ON PARAMETER track_functions FROM ${owner}`)}
+   finally{await bootstrap.end()}
+  }
+  await frame(async client=>{
+   await expect(acquired(client,[[root],[plain[0]],[root]])).rejects.toMatchObject({code:'22023'})
+  })
+ })
  it('associates multiple original versions with the same changed current descriptor without deduplicating it',async()=>frame(async client=>{
   const changed=await operation(client,'version',{id:messageId});expect(changed.version).not.toBe(plain[0].version)
   const newer={...plain[0],version:changed.version},joint=await equal(client,[[plain[0],newer],[plain[0]]])

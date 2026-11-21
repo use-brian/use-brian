@@ -10,7 +10,7 @@ import { embeddedTestFiles } from '../testing/embedded-database-tests.mjs'
 import {
   DEPARTMENT_ISOLATION_BOUNDARIES, DEPARTMENT_ISOLATION_CASES, DEPARTMENT_ISOLATION_SUITES,
 } from '../../packages/shared/src/department-isolation-coverage.ts'
-import { acceptanceMatrix, acceptanceShards, createAcceptanceReport, fixtureChecksForSuites, mergeAcceptanceReports, parseShard, suitesForShard } from '../testing/department-isolation-report.mjs'
+import { acceptanceMatrices, acceptanceShards, createAcceptanceReport, fixtureChecksForSuites, mergeAcceptanceReports, parseShard, suitesForShard } from '../testing/department-isolation-report.mjs'
 
 const metadata = { revision: 'fixture-revision', sourceHashes: { 'fixture.ts': 'hash' }, dirtySourceHashes: {},
   migration: { latest: 'fixture.sql', count: 1, ledgerHash: 'fixture-ledger' } }
@@ -45,9 +45,10 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
       }
     }
   })
-  it('requires migration diagnostics once and clone checks on every native shard in both profiles', () => {
+  it('requires migration diagnostics and retries once and clone checks on every native shard in both profiles', () => {
     const clones = 'scripts/__tests__/prepared-fixture.integration.test.mjs'
     const locks = 'scripts/__tests__/migration-diagnostics.integration.test.mjs'
+    const retries = 'scripts/__tests__/migration-retries.integration.test.mjs'
     for (const profile of ['full', 'current']) {
       const shards = acceptanceShards(profile)
       const checks = shards.map(index => {
@@ -57,7 +58,8 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
         return files
       })
       assert.equal(checks.flat().filter(file => file === locks).length, 1)
-      assert.deepEqual(fixtureChecksForSuites(suitesForShard(null, profile)), [clones, locks])
+      assert.equal(checks.flat().filter(file => file === retries).length, 1)
+      assert.deepEqual(fixtureChecksForSuites(suitesForShard(null, profile)), [clones, locks, retries])
     }
   })
   it('merges verified receipts in a checkout without installed packages', t => {
@@ -82,14 +84,17 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
     const revision = git(['rev-parse', 'HEAD'])
     const directory = join(root, 'receipts')
     mkdirSync(directory)
+    const timing = { platform: 'linux', arch: 'x64', node: 'v22.23.5', fixturePreparationMs: 1000, fixtureChecksMs: 200 }
     for (const part of receipts('current')) {
       writeFileSync(join(directory, `department-isolation-${part.shard.index}.json`),
-        JSON.stringify({ ...part, revision, sourceHashes, dirtySourceHashes: {} }))
+        JSON.stringify({ ...part, revision, sourceHashes, dirtySourceHashes: {}, timing }))
     }
     const report = join(root, 'merged.json')
     const args = [cli, '--profile', 'current', '--merge', directory, '--report', report]
     execFileSync(process.execPath, args, options)
-    assert.equal(JSON.parse(readFileSync(report, 'utf8')).profileAccepted, true)
+    const merged = JSON.parse(readFileSync(report, 'utf8'))
+    assert.equal(merged.profileAccepted, true)
+    assert.deepEqual(merged.shardTimings, acceptanceShards('current').map(shard => ({ shard, ...timing })))
     rmSync(join(directory, 'department-isolation-1.json'))
     const missing = spawnSync(process.execPath, args, options)
     assert.equal(missing.status, 1)
@@ -121,14 +126,16 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
 
   it('benchmarks the same Calendar shard on ARM without adding a receipt to the acceptance merge', () => {
     for (const profile of ['current', 'full']) {
-      const normal = acceptanceMatrix(profile).include
-      const [arm, ...canonical] = acceptanceMatrix(profile, { compareCalendarArm: true }).include
-      assert.deepEqual(canonical, normal)
+      const normal = acceptanceMatrices(profile)
+      const comparison = acceptanceMatrices(profile, { compareCalendarArm: true })
+      const [arm, ...canonical] = comparison.calendar.include
+      assert.deepEqual(canonical, normal.calendar.include)
+      assert.deepEqual(comparison.remaining, normal.remaining)
       assert.equal(arm.runner, 'ubuntu-24.04-arm')
       assert.doesNotMatch(arm.artifactName, /^department-isolation-shard-/)
-      assert.deepEqual(suitesForShard({ index: arm.shard, total: normal.length }, profile)
+      assert.deepEqual(suitesForShard({ index: arm.shard, total: acceptanceShards(profile).length }, profile)
         .map(suite => suite.id), ['recovered-calendar-history'])
-      const baseline = normal.find(entry => entry.shard === arm.shard)
+      const [baseline] = normal.calendar.include
       assert.equal(baseline.runner, 'ubuntu-latest')
       assert.equal(arm.timeoutMinutes, baseline.timeoutMinutes)
       assert.equal(baseline.artifactName, `department-isolation-shard-${arm.shard}`)
@@ -143,10 +150,11 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
     for (const profile of ['current', 'full']) {
       const indexes = acceptanceShards(profile)
       const partitions = indexes.map(index => suitesForShard(parseShard(`${index}/${indexes.length}`), profile))
-      const matrix = acceptanceMatrix(profile).include
+      const { calendar, remaining } = acceptanceMatrices(profile)
+      const matrix = [...calendar.include, ...remaining.include]
       assert.deepEqual(matrix.map(entry => entry.shard).toSorted((a, b) => a - b), indexes)
-      assert.deepEqual(matrix.slice(0, 2).flatMap(entry => partitions[entry.shard - 1].map(suite => suite.id)),
-        ['recovered-calendar-history', 'retained-conversation'])
+      assert.deepEqual(calendar.include.flatMap(entry => partitions[entry.shard - 1].map(suite => suite.id)), ['recovered-calendar-history'])
+      assert.deepEqual(partitions[remaining.include[0].shard - 1].map(suite => suite.id), ['retained-conversation'])
       assert.deepEqual(matrix.filter(entry => entry.timeoutMinutes === 45)
         .flatMap(entry => partitions[entry.shard - 1].map(suite => suite.id)).sort(),
       ['recovered-calendar-history', 'retained-conversation'])

@@ -18,9 +18,12 @@ describe('[COMP:tooling/test-evidence] discovery does not overclaim execution', 
     assert.throws(() => unitTestExclusions('packages/api', 'typo'), /Unknown test partition/)
   })
   it('separates mixed Node/Vitest commands and refuses to execute custom shell text', () => {
-    const parsed = runnerSegments('node --import tsx --test src/__tests__/*.test.ts && vitest run src/runtime.test.ts')
-    assert.deepEqual(parsed.map(entry => entry.runner), ['node', 'vitest'])
-    assert.deepEqual(parsed[1].args, ['src/runtime.test.ts'])
+    for (const nodeCommand of ['node --import tsx --test src/__tests__/*.test.ts', 'node src/__tests__/run-embedded-tests.mjs']) {
+      const parsed = runnerSegments(`${nodeCommand} && vitest run src/runtime.test.ts`)
+      assert.deepEqual(parsed.map(entry => entry.runner), ['node', 'vitest'])
+      assert.deepEqual(parsed[0].patterns, ['src/__tests__/*.test.ts'])
+      assert.deepEqual(parsed[1].args, ['src/runtime.test.ts'])
+    }
     assert.equal(runnerSegments('vitest run; curl https://fixture.example')[0].runner, 'manual')
     assert.equal(runnerSegments('vitest run $(cat .env)')[0].runner, 'manual')
     assert.equal(runnerSegments('vitest run --config')[0].runner, 'manual')

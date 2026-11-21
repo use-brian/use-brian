@@ -38,12 +38,63 @@ function ownerOnly(){
  }}
 }
 
+describe('[COMP:api/portable-restore] reviewed harness extension',()=>{
+ it('extends only the pinned reviewed baseline with seven durable facts',async()=>{
+  const review=await import(new URL('portable-harness-review.mjs',directory).href)
+  const text=await readFile(new URL('portable-restore-roster-8334.json',directory),'utf8')
+  const input=review.harnessClassificationFrom8334(text)
+  expect(input.ledgerCount).toBe(813)
+  expect(input.tables).toHaveLength(604)
+  expect(input.tables.filter((entry:{table:string})=>review.harnessTables.includes(entry.table))).toEqual(
+   [...review.harnessTables].sort().map(table=>({schema:'public',table,ownership:'durable',
+    generatedColumns:table==='project_harness_revisions'?['scope_id']:[],identityColumns:[],forceRls:false,namedSlots:[]})))
+  expect(()=>review.harnessClassificationFrom8334(text+' ')).toThrow('portable_harness_reviewed_baseline_changed')
+  expect(review.harnessTriggerReview['project_harness_runs.harness_run_audit']).toBe('suspended:derived-effect')
+ })
+ it('refuses unknown harness catalog names before reading the expected digest',async()=>{
+  const {readReviewedCrmCatalog}=await import(new URL('crm-release-catalog.mjs',directory).href)
+  const owner={query:async()=>({rows:[{name:'project_harness_unreviewed'}]})}
+  await expect(readReviewedCrmCatalog(owner,{closedPrefixes:{functions:['project_harness_'],tables:['project_harness_']},functions:[],tables:[]}))
+   .rejects.toThrow('portable_successor_unknown_catalog_object')
+ })
+ it('checks every extension receipt inside the authentication snapshot and rolls back refusal',async()=>{
+  const {authenticateCrmSuccessor}=await import(new URL('crm-release-catalog.mjs',directory).href)
+  const catalog=JSON.stringify({routines:null,relations:null,types:null,triggers:null})
+  const inventory={sha256:sha(catalog),routines:0,relations:0,types:0,triggers:0}
+  const scope={functions:[],tables:[],types:[],triggers:[]}
+  const migrations=['8335_project_harnesses.sql','8336_project_harness_verification.sql','8337_project_chat_creation_admission.sql']
+  for(const missing of [undefined,...migrations]){
+   const queries:string[]=[]
+   const owner={getTransactionStatus:()=>'I',async query(sql:string,args?:string[][]){
+    queries.push(sql)
+    if(sql.includes('SELECT name FROM public._migrations'))return{rows:args![0].filter(name=>name!==missing).map(name=>({name}))}
+    if(sql==='reviewed proof')return{rows:[{witness_current:true,functions:1,local_digest:'a'.repeat(64)}]}
+    if(sql.includes('WITH runtime AS'))return{rows:[{catalog}]}
+    return{rows:[]}
+   }}
+   const attempt=authenticateCrmSuccessor(owner,{sql:'reviewed proof',cleanup:'reviewed cleanup',functions:1,sourceDigest:'proof',
+    crmScope:scope,crmInventory:inventory,portableSuccessor:{scope,inventory,migrations}})
+   if(missing){await expect(attempt).rejects.toThrow('portable_successor_migration_tail_missing');expect(queries.at(-1)).toBe('ROLLBACK')}
+   else{await expect(attempt).resolves.toMatchObject({witnessCurrent:true});expect(queries.at(-1)).toBe('COMMIT')}
+   expect(queries[0]).toBe('BEGIN ISOLATION LEVEL REPEATABLE READ')
+  }
+ })
+ it('binds the 8337 source profile rather than aliasing 8334', { timeout: 15_000 }, async()=>{
+  const profile=await import(new URL('installation-authentication-8337.mjs',directory).href)
+  const source=await profile.currentInstallationAuthenticationSource()
+  expect(source.portableSuccessor.inventory).toMatchObject({routines:23,relations:8,types:0,triggers:11})
+  expect(source.portableSuccessor.migrations).toEqual(Object.keys(profile.harnessMigrationPins))
+  const releases=await import(new URL('installation-release.mjs',directory).href)
+  expect(releases.hasInstallationRelease('8337_project_chat_creation_admission.sql')).toBe(true)
+ })
+})
+
 describe('[COMP:api/portable-restore] finite portable restore roster',()=>{
  it('classifies every inventoried table exactly once with a reviewed rule',async()=>{
   const roster=await restore.loadPortableRoster()
   const entries=Object.entries(roster.tables) as [string,{class:string;rule:string;slots?:string[];forceRls?:unknown;generated?:string[];identity?:string[]}][]
-  expect(entries).toHaveLength(597)
-  expect(roster.counts).toMatchObject({tables:597,derived:20,rederived:1,rebound:2,durable:574,regprocedureSlots:4,forceRls:11,generatedTables:4,identityTables:4,sequences:6})
+  expect(entries).toHaveLength(604)
+  expect(roster.counts).toMatchObject({tables:604,derived:20,rederived:1,rebound:2,durable:581,regprocedureSlots:4,forceRls:11,generatedTables:5,identityTables:4,sequences:6})
   expect(roster.tables.workspace_mcp_dispatch).toEqual({class:'durable',rule:'F1-durable-fact'})
   expect(roster.triggers['workspace_mcp_runs.workspace_mcp_dispatch_sync']).toMatchObject({class:'suspended:derived-effect'})
   for(const [,entry] of entries)expect(Object.keys(roster.rules)).toContain(entry.rule)
@@ -73,7 +124,9 @@ describe('[COMP:api/portable-restore] finite portable restore roster',()=>{
    'conversation_envelope_backfill_checkpoint','conversation_envelopes','conversation_legacy_history_enrollments',
    'conversation_message_quarantine','conversation_participants','conversation_settings_transitions',
    'conversation_visibility_audit','conversation_visibility_notices','native_memory_query_write_intents','native_turn_completions','native_turn_contract_witness','workspace_mcp_dispatch',
-   ...crmSummaryProjections,...crmSummaryDurableFacts,...crmSummaryEpochs,crmSummaryCredentials].sort())
+   ...crmSummaryProjections,...crmSummaryDurableFacts,...crmSummaryEpochs,crmSummaryCredentials,
+   'project_harness_products','project_harness_components','project_harness_revisions','project_harness_approvals',
+   'project_harness_runs','project_harness_evidence','project_harness_execution_audit'].sort())
   const forcedAtCohortOnly=['page_link_aliases','realtime_thread_targets','task_candidates','task_rules','task_tombstones','workspace_brand_versions','workspace_brands','workspace_link_aliases']
   const changed=[...forcedAtCohortOnly,...Object.keys(portableOwnerPolicies),'episode_extraction_items',...portableLegacyConversionTables].sort()
   expect(Object.keys(cohort.tables).filter(name=>JSON.stringify(cohort.tables[name])!==JSON.stringify(head.tables[name])).sort()).toEqual(changed)
@@ -127,7 +180,7 @@ describe('[COMP:api/portable-restore] finite portable restore roster',()=>{
    for(const key of builder.fixpointStamps)expect(triggers[key].class).not.toBe('suspended:origin-stamp')
    for(const key of expectedStamps)expect(triggers[key].events).toContain('insert')
   }
-  expect(head.counts.suspendedTriggers).toBe(394);expect(cohort.counts.suspendedTriggers).toBe(344)
+  expect(head.counts.suspendedTriggers).toBe(395);expect(cohort.counts.suspendedTriggers).toBe(344)
   expect(head.originStamps).toHaveLength(65);expect(builder.originStamps).toHaveLength(62);expect(builder.fixpointStamps).toHaveLength(17)
   expect(new Set([...builder.originStamps,...builder.fixpointStamps]).size).toBe(79)
   expect(cohort.inventory).toMatchObject({ledgerCount:756,ledgerHead:embedded.embeddedTransferCohort.through})

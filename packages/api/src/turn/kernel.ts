@@ -30,6 +30,7 @@
  *
  * [COMP:api/turn-kernel]
  */
+import type { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import { queryLoop } from '@use-brian/core/engine/query-loop-defaults.js'
 import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
 import type { QueryOutputProvenance } from '@use-brian/agent-runtime/engine/output-provenance.js'
@@ -273,6 +274,7 @@ class AssistantTurnOwner {
       {sessionId:this.params.sessionId,assistantId:invocation.execution.assistant.id,token:this.token})
     const recovery = this.params.resumeRecovery
     const execution = invocation.execution
+    this.retainedPreparationAccumulator = invocation.scopeAccumulator
     if (recovery && invocation.toolProfile === 'resume' && execution.identity.kind === 'system'
       && execution.identity.purpose === 'session_resume' && execution.identity.jobId === recovery.approvalId
       && execution.security.access.workspaceId === recovery.workspaceId
@@ -360,6 +362,7 @@ class AssistantTurnOwner {
     if (!this.modelPreparation || this.ran || this.closed) throw new Error('Tool preparation requires the original prepared turn.')
     return this.modelPreparation.tools(candidates)
   }
+  private retainedPreparationAccumulator: ContextScopeAccumulator | undefined
   private historyPreparationStarted = false
   /** The main-turn history read under the original invocation: once per owner,
    * before run preparation. Returns one captured admitted history frame (data,
@@ -370,6 +373,13 @@ class AssistantTurnOwner {
       throw new Error('History preparation is unavailable or already started.')
     }
     preparation.assertHistoryAuthority(request.native)
+    // History may confirm the original binding, never replace it. Lanes without
+    // history retain the accumulator adopted with their model invocation.
+    const accumulator = request.native?.accumulator ?? request.evidence
+    if (accumulator && this.retainedPreparationAccumulator && accumulator !== this.retainedPreparationAccumulator) {
+      throw new Error('History must retain the original turn accumulator.')
+    }
+    this.retainedPreparationAccumulator ??= accumulator
     this.historyPreparationStarted = true
     const read = captureTurnHistory(preparation.sessionId, request), native = request.native
     const prepared = this.frame('preparation', () => Promise.resolve().then(read).then(history => {
@@ -390,7 +400,7 @@ class AssistantTurnOwner {
     const model = this.preparedMainModel
     if (!model) throw new Error('The original main model has not been prepared.')
     this.runPreparationStarted = true
-    const assemble = this.modelPreparation.captureRun(input, model)
+    const assemble = this.modelPreparation.captureRun(input, model, this.retainedPreparationAccumulator)
     const prepared = this.frame('preparation', () => Promise.resolve().then(assemble).then((run): PreparedTurnRunView => {
       this.preparedRun = run
       return Object.freeze({ grounding: run.grounding,

@@ -5,6 +5,7 @@ import {ContextScopeAccumulator, type ScopeEvidence} from '@use-brian/agent-runt
 import type {ExecutionContext} from '@use-brian/agent-runtime/security/execution-context.js'
 import type {CurrentAuthorityBoundary} from '@use-brian/agent-runtime/tools/types.js'
 import {getAppPool,applyRLSGucs,rlsGucSettings,rollbackAndRelease,runWithAgentAccess,withRLSTransaction} from '../db/client.js'
+import {nativeInvocationReadCeiling} from './native-invocation-ceiling.js'
 import {getApplicationExecutionBinding} from '../application-platform/execution-context.js'
 import {hasWorkspaceMcpRetainedAuthority} from '../db/session-context-revisions.js'
 import {assertScopeEvidenceFitsCeiling,tryValidateNativeScopeEvidence,validateAudienceScopeEvidence} from './caller-evidence.js'
@@ -180,7 +181,7 @@ export async function tryNativeInvocationEvidence(execution:ExecutionContext,evi
   ||!roots.length||roots.length>4096
   ||roots.some(root=>!['application_field','session_message','session_context_revision','memory','workspace_file','private_transcript'].includes(root.resourceKind)))return null
  const anonymous=recipient.userId===''
- const ceiling=intersectAccessCeilings(execution.security.ceiling,{...recipient,userId:actor,mutationCompartments:[],visibilityAssistantIds:execution.security.ceiling.visibilityAssistantIds})
+ const ceiling=nativeInvocationReadCeiling(execution.security.ceiling,recipient)
  const access={...execution.security.access,...ceiling,sharedAudience:anonymous||execution.security.access.sharedAudience}
  const assistantId=nativeDelegated||nativeVerifiedAttended||nativeProgrammatic||nativeResume?execution.assistant.id:undefined
  // A source-only operation has no host work between capture and release.

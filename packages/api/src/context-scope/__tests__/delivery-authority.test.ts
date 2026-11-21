@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { AccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
-import { createdRowEvidence, scopeEvidenceFromRows } from '@use-brian/agent-runtime/security/context-scope.js'
+import { createdRowEvidence, scopeEvidenceFromRows, type ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
 import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { bindScopeSource } from '@use-brian/agent-runtime/security/source-evidence.js'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
@@ -13,6 +13,7 @@ import {
 } from '../delivery-authority.js'
 import { deliveryFailureAnalytics } from '../delivery-failure.js'
 import { connectorExposureAllowed } from '../connector-exposure.js'
+import { validateAudienceScopeEvidence } from '../caller-evidence.js'
 
 const WS = '11111111-1111-4111-8111-111111111111'
 const USER = '22222222-2222-4222-8222-222222222222'
@@ -372,6 +373,66 @@ describe('[COMP:api/delivery-authority] destination-bound output policy', () => 
       .resolves.toMatchObject({ allowed: true })
     await expect(authorize({ ...input, scopeEvidence: scopeEvidenceFromRows([note]) }))
       .resolves.toMatchObject({ allowed: false, diagnostic: 'user_visibility' })
+  })
+})
+
+describe('[COMP:api/delivery-authority] exact shared Project room audience', () => {
+  const room = session({ visibility: 'workspace', effectiveClearance: 'internal', contextProjectId: PROJECT, contextCompartments: [`project:${PROJECT}`] })
+  const live = ceiling({ compartments: null, projectIds: null, departmentRead: {
+    workspaceId: WS, userId: USER, assistantId: ASSISTANT, base: 'confidential', departments: { finance: 'confidential' },
+    binding: null, contextDepartment: null, cap: null, projects: { [PROJECT]: 'member', [OTHER_USER]: 'member' },
+  } })
+  const input = { workspaceId: WS, assistantId: ASSISTANT, userId: USER, channelType: 'web', channelId: 'room', sessionId: room.id }
+  const evidence = { sensitivity: 'internal' as const, compartments: [`project:${PROJECT}`], projectIds: [PROJECT] }
+  it('checks both current boundaries, keeping the sink anonymous, room-capped and Project-only', async () => {
+    const recipients: AccessCeiling[] = []
+    const resolveLiveAccess = vi.fn(async () => live)
+    const authorize = createDeliveryAudienceAuthorizer({
+      findSession: async () => room, findAssistant: async () => ({ id: ASSISTANT, workspaceId: WS }) as never,
+      resolveLiveAccess, validateEvidence: async (value, recipient) => {
+        recipients.push(recipient); return validateAudienceScopeEvidence(value, recipient)
+      },
+    })
+    expect(await authorize({ ...input, scopeEvidence: evidence })).toMatchObject({ allowed: true })
+    expect(resolveLiveAccess).toHaveBeenCalledTimes(2)
+    expect(recipients[0]).toMatchObject({ userId: '', clearance: 'internal', projectIds: [PROJECT],
+      departmentRead: { base: 'internal', departments: {}, projects: { [PROJECT]: 'member' } } })
+    expect(recipients[0]!.departmentRead!.projects).not.toHaveProperty(OTHER_USER)
+    expect(recipients[1]!.userId).toBe(USER)
+  })
+  it.each<[NonNullable<AccessCeiling['departmentRead']>['projects']]>([[undefined], [{}], [{ [PROJECT]: 'oversight' }]])('never treats stored labels, ownership or oversight as roster admission: %j', async projects => {
+    const admitted = { ...live, departmentRead: { ...live.departmentRead!, projects } }
+    expect(await authorizer({ originSession: room, live: admitted })({ ...input, scopeEvidence: evidence }))
+      .toMatchObject({ allowed: false, diagnostic: 'projects' })
+  })
+  it.each<[ScopeEvidence, string]>([
+    [{ ...evidence, compartments: [`project:${OTHER_USER}`], projectIds: [OTHER_USER] }, 'projects'],
+    [{ ...evidence, compartments: ['team:finance'] }, 'teams'],
+    [{ ...evidence, sensitivity: 'confidential' }, 'clearance'],
+    [{ ...evidence, sources: [source('private-project-memory', null)] }, 'user_visibility'],
+  ])('retains independent sibling, Department, clearance and private-source denials (%s)', async (value, diagnostic) => {
+    expect(await authorizer({ originSession: room, live })({ ...input, scopeEvidence: value }))
+      .toMatchObject({ allowed: false, diagnostic })
+  })
+  it.each([null, 'invalid'])('retains the normalized internal room cap when stored clearance is %j', async effectiveClearance => {
+    const authorize = authorizer({ originSession: { ...room, effectiveClearance }, live })
+    expect(await authorize({ ...input, scopeEvidence: { ...evidence, sensitivity: 'confidential' } }))
+      .toMatchObject({ allowed: false, diagnostic: 'clearance' })
+    expect(await authorize({ ...input, scopeEvidence: evidence })).toMatchObject({ allowed: true })
+  })
+  it('rechecks recipient admission after a successful sink proof', async () => {
+    const resolveLiveAccess = vi.fn().mockResolvedValueOnce(live).mockResolvedValueOnce({ ...live, departmentRead: { ...live.departmentRead!, projects: {} } })
+    const authorize = createDeliveryAudienceAuthorizer({ findSession: async () => room,
+      findAssistant: async () => ({ id: ASSISTANT, workspaceId: WS }) as never, resolveLiveAccess })
+    expect(await authorize({ ...input, scopeEvidence: evidence })).toMatchObject({ allowed: false, diagnostic: 'teams' })
+    expect(resolveLiveAccess).toHaveBeenCalledTimes(2)
+  })
+  it.each([
+    { contextProjectId: null }, { contextGroupId: OTHER_USER },
+    { contextCompartments: [`project:${PROJECT}`, `project:${OTHER_USER}`] },
+  ])('rejects inconsistent immutable room envelopes: %j', async patch => {
+    expect(await authorizer({ originSession: { ...room, ...patch }, live })({ ...input, scopeEvidence: evidence }))
+      .toMatchObject({ allowed: false, diagnostic: 'projects' })
   })
 })
 

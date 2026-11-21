@@ -1,18 +1,19 @@
 import { expectMentionMatches } from './incoming-event-assertions.js'
 import { dispatchIncomingMessageEvent } from '../../message-events.js'
 vi.mock('../../message-events.js', () => ({ dispatchIncomingMessageEvent: vi.fn(async () => {}) }))
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { afterEach, describe, it, expect, vi, beforeEach } from 'vitest'
 import request from 'supertest'
 import { createTestApp } from './helpers.js'
 
 // ── Mock @use-brian/channels (adapter + verifier) ──────────────
-vi.mock('@use-brian/channels', () => {
+vi.mock('@use-brian/channels', async (original) => {
   const parseIncoming = vi.fn()
   const sendMessage = vi.fn().mockResolvedValue('act-out')
   const sendStatus = vi.fn().mockResolvedValue('status-1')
   const editMessage = vi.fn().mockResolvedValue(undefined)
   const verifyAuthHeader = vi.fn()
   return {
+    ...(await original<typeof import('@use-brian/channels')>()),
     createMsTeamsAdapter: vi.fn(() => ({ parseIncoming, sendMessage, sendStatus, editMessage, maxMessageLength: 17000 })),
     createMsTeamsVerifier: vi.fn(() => ({ verifyAuthHeader, verifyToken: vi.fn() })),
     __mocks: { parseIncoming, sendMessage, sendStatus, editMessage, verifyAuthHeader },
@@ -35,19 +36,18 @@ vi.mock('../../channel-room/room.js', () => ({
   isWorkspaceAdmin: vi.fn(async (userId: string) => userId === 'owner'),
   postPassiveChannelMessage: vi.fn(async () => {}),
 }))
-vi.mock('@use-brian/core/files/parsers.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@use-brian/core/files/parsers.js')>()),
-  parseFileContent: vi.fn(async () => ({ text: '' })),
+vi.mock('../../db/sessions.js', async (original) => ({
+  ...(await original<typeof import('../../db/sessions.js')>()),
+  findOrCreateSession: vi.fn(async () => ({ id: 'attachment-session' })),
 }))
 vi.mock('@use-brian/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@use-brian/shared')>()),
   getToolDisplayName: vi.fn(() => 'Tool'),
-  humanizeToolName: vi.fn(() => 'Tool'),
-  describeToolInput: vi.fn(() => null),
   formatConfirmationInput: vi.fn(() => []),
 }))
 
 import { msteamsRoutes, msteamsUserAllowed } from '../msteams.js'
+import { discordRoutes } from '../discord.js'
 import * as channels from '@use-brian/channels'
 import { processChannelMessage } from '../channel-pipeline.js'
 import { channelConfirmations, roomInteractionScope } from '../channel-interactions.js'
@@ -56,8 +56,10 @@ import { withChatLock } from '../../db/chat-lock.js'
 import { getChannelForWebhook, resolveRoutingForSurface, resolveAssistantForSurface } from '../../db/channels-store.js'
 import { findAssistantById } from '../../db/users.js'
 import { resolveChannelUser } from '../../db/channel-user-store.js'
+import { findOrCreateSession } from '../../db/sessions.js'
 
 const mocks = (channels as unknown as { __mocks: Record<string, ReturnType<typeof vi.fn>> }).__mocks
+const realChannels = await vi.importActual<typeof import('@use-brian/channels')>('@use-brian/channels')
 
 /** Let the fire-and-forget post-ack processing resolve before asserting. */
 async function flush() {
@@ -99,21 +101,140 @@ const ACTIVITY = {
   text: 'hello',
 }
 
-describe('[COMP:api/msteams-route] webhook', () => {
-  beforeEach(() => {
-    vi.clearAllMocks()
-    vi.mocked(resolveRoomBinding).mockResolvedValue(null)
-    mocks.verifyAuthHeader.mockResolvedValue({ valid: true })
-    mocks.parseIncoming.mockReturnValue({
-      userId: '29:user', channelId: 'conv-1', text: 'hello',
-      isGroupChat: false, isMentioned: false, messageId: 'a1', timestamp: 1700000000000,
-    })
-    vi.mocked(getChannelForWebhook).mockResolvedValue({ status: 'active', enabledCapabilities: ['chat'] } as never)
-    vi.mocked(resolveRoutingForSurface).mockResolvedValue({ assistantId: 'a-1', modelAlias: 'pro' } as never)
-    vi.mocked(findAssistantById).mockResolvedValue({ id: 'a-1', ownerUserId: 'owner', workspaceId: 'ws-1' } as never)
-    vi.mocked(resolveChannelUser).mockResolvedValue({ user: { id: 'cu-1' }, isIdentified: false } as never)
+beforeEach(() => {
+  vi.clearAllMocks()
+  vi.mocked(channels.createMsTeamsAdapter).mockReset()
+  vi.mocked(resolveRoomBinding).mockResolvedValue(null)
+  mocks.verifyAuthHeader.mockResolvedValue({ valid: true })
+  mocks.parseIncoming.mockReturnValue({
+    userId: '29:user', channelId: 'conv-1', text: 'hello',
+    isGroupChat: false, isMentioned: false, messageId: 'a1', timestamp: 1700000000000,
+  })
+  vi.mocked(getChannelForWebhook).mockResolvedValue({ status: 'active', enabledCapabilities: ['chat'] } as never)
+  vi.mocked(resolveRoutingForSurface).mockResolvedValue({ assistantId: 'a-1', modelAlias: 'pro' } as never)
+  vi.mocked(findAssistantById).mockResolvedValue({ id: 'a-1', ownerUserId: 'owner', workspaceId: 'ws-1' } as never)
+  vi.mocked(resolveChannelUser).mockResolvedValue({ user: { id: 'cu-1' }, isIdentified: false } as never)
+})
+
+describe('[COMP:api/channel-editable-status] Discord and Teams attachment turns', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    for (const spy of [Date.now, console.error]) {
+      if (vi.isMockFunction(spy)) spy.mockRestore()
+    }
   })
 
+  it.each(['discord', 'msteams'] as const)('converts mixed %s downloads and delivers progress and replies', async (channelType) => {
+    const discord = channelType === 'discord'
+    const store = makeIntegrationStore()
+    if (discord) store.getByChannelForWebhook.mockResolvedValue({
+      id: 'int-1', config: {}, credentials: { bot_token: 'token' }, botUserId: 'bot',
+    })
+    else vi.mocked(channels.createMsTeamsAdapter).mockImplementation(realChannels.createMsTeamsAdapter)
+    const cache = vi.fn(async () => ({ id: 'cached-image' }))
+    const ingestChannelMediaRef = vi.fn(async () => ({ status: 'skipped' }))
+    const options = { ...baseOptions(store), fileStore: { cache } as never }
+    const router = discord
+      ? discordRoutes({ ...options, connectorSecret: 'secret', ingestChannelMediaRef: ingestChannelMediaRef as never })
+      : msteamsRoutes(options)
+    const files = [
+      { name: 'photo.png', mime: 'image/png', extension: 'png', body: 'pixels' },
+      { name: 'denied.txt', mime: 'text/plain', extension: 'txt' },
+      { name: 'note.txt', mime: 'text/plain', extension: 'txt', body: 'Document text' },
+      { name: 'offline.txt', mime: 'text/plain', extension: 'txt' },
+      { name: 'scan.pdf', mime: 'application/octet-stream', extension: 'bin', body: '%PDF-1.7' },
+      { name: 'voice.mp3', mime: 'audio/mpeg', extension: 'mp3', body: 'voice' },
+    ].map((file) => ({ ...file, url: `https://files.example.test/${file.name}` }))
+    const delivery: Array<{ method?: string; url: string; body: Record<string, unknown>; upload?: FormData }> = []
+    const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+      const file = files.find((entry) => entry.url === url)
+      if (file?.name === 'offline.txt') throw new Error('download unavailable')
+      if (file?.name === 'photo.png') await new Promise((resolve) => setImmediate(resolve))
+      if (file) return file.body ? new Response(file.body) : new Response(null, { status: 403 })
+      if (url.startsWith('https://login.microsoftonline.com/')) return Response.json({ access_token: 'teams-token' })
+      expect(new Headers(init?.headers).get('authorization')).toBe(discord ? 'Bot token' : 'Bearer teams-token')
+      const body = typeof init?.body === 'string' ? JSON.parse(init.body) as Record<string, unknown> : {}
+      const upload = init?.body instanceof FormData ? init.body : undefined
+      if (body.type !== 'typing') delivery.push({ method: init?.method, url, body, upload })
+      if (init?.method === 'DELETE') return new Response(null, { status: 204 })
+      return Response.json({ id: 'progress-id' })
+    })
+    vi.stubGlobal('fetch', fetcher)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const app = request(createTestApp('/', router))
+    if (discord) {
+      const message = realChannels.createDiscordAdapter({ token: 'token', botUserId: 'bot' }).parseIncoming({
+        id: 'a1', channel_id: 'conv-1', author: { id: 'user', username: 'User' },
+        timestamp: '2026-01-01T00:00:00Z', content: ACTIVITY.text,
+        attachments: files.map(({ url, name, mime }) => ({ url, filename: name, content_type: mime })),
+      })
+      await app.post('/inbound').set('X-Connector-Secret', 'secret').send({ channelId: 'ch-1', message }).expect(200)
+    } else {
+      await app.post('/ch-1').set('Authorization', 'Bearer good.jwt.token').send({ ...ACTIVITY,
+        attachments: files.map(({ name, url, extension }) => ({
+          name, contentType: 'application/vnd.microsoft.teams.file.download.info',
+          content: { downloadUrl: url, fileType: extension },
+        })),
+      }).expect(200)
+    }
+    await vi.waitFor(() => expect(processChannelMessage).toHaveBeenCalledOnce())
+    for (const file of files.filter(({ name }) => !discord || name !== 'voice.mp3')) {
+      expect(fetcher).toHaveBeenCalledWith(file.url)
+    }
+    if (discord) {
+      expect(fetcher).not.toHaveBeenCalledWith(files.at(-1)!.url)
+      expect(ingestChannelMediaRef).toHaveBeenCalledWith(expect.objectContaining({ mime: 'audio/mpeg', conversationId: 'conv-1' }))
+    }
+    const { userContentBlocks, hooks } = vi.mocked(processChannelMessage).mock.calls[0][0]
+    expect(findOrCreateSession).toHaveBeenCalledExactlyOnceWith({ assistantId: 'a-1', userId: 'cu-1', channelType, channelId: 'conv-1' })
+    expect(cache).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ sessionId: 'attachment-session', workspaceId: 'ws-1' }))
+    expect(userContentBlocks).toEqual([
+      { type: 'text', text: ACTIVITY.text },
+      { type: 'image', mimeType: 'image/png', data: Buffer.from('pixels').toString('base64') },
+      { type: 'text', text: '<attached_file id="cached-image" name="photo.png" type="image/png">[image]</attached_file>' },
+      { type: 'text', text: '<attached_file name="note.txt" type="text/plain">\nDocument text\n</attached_file>' },
+      { type: 'image', mimeType: 'application/pdf', data: Buffer.from('%PDF-1.7').toString('base64') },
+      ...(discord ? [] : [{ type: 'text', text: '<attached_file name="voice.mp3" type="audio/mpeg">\n\n</attached_file>' }]),
+    ])
+    let now = Date.now()
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
+    await hooks.onProcessingStart!()
+    await hooks.onToolStart!('search', 'webSearch')
+    await hooks.onStatus!('Researching...')
+    now += 1200
+    await hooks.onToolInput!('search', 'webSearch', { query: 'project notes' })
+    now += 1200
+    await hooks.onToolResult!([{ type: 'tool_result', toolUseId: 'search', name: 'webSearch', content: 'Found' }])
+    expect(await hooks.sendResponse('Ready')).toEqual({ channelMessageId: 'progress-id' })
+    const edit = discord ? 'PATCH' : 'PUT'
+    expect(delivery.map(({ method, body }) => [method, body.content ?? body.text])).toEqual([
+      ['POST', 'Thinking...'], [edit, 'Researching...'], [edit, 'Searching "project notes"'],
+      [edit, 'Done: Searching "project notes"'], [edit, 'Ready'],
+    ])
+    expect(delivery.slice(1).every(({ url }) => url.endsWith('/progress-id'))).toBe(true)
+    await hooks.onProcessingStart!()
+    delivery.length = 0
+    const documents = [{ filename: 'reply.txt', mime: 'text/plain', data: new Uint8Array([65]) }]
+    const actions = [{ id: '0', label: 'Choose', data: 'ask:token:0', replyText: 'Alpha' }]
+    await hooks.sendResponse('With file', documents, undefined, actions)
+    if (discord) {
+      expect(delivery.map(({ method }) => method)).toEqual(['DELETE', 'POST', 'POST'])
+      expect(delivery[1].body.message_reference).toMatchObject({ message_id: 'a1' })
+      expect(delivery[1].body.components).toMatchObject([{ components: [{ custom_id: 'ask:token:0' }] }])
+      const upload = delivery[2].upload?.get('files[0]')
+      expect(upload).toBeInstanceOf(File)
+      expect((upload as File).name).toBe('reply.txt')
+      expect(await (upload as File).text()).toBe('A')
+    } else {
+      expect(delivery.map(({ method, body }) => [method, body.text])).toEqual([
+        ['POST', 'With file\n\nChoose — reply: Alpha'],
+        ['POST', 'Could not attach reply.txt here - open it in the web app.'], ['PUT', '…'],
+      ])
+    }
+  })
+})
+
+describe('[COMP:api/msteams-route] webhook', () => {
   it.each([false, true])('dispatches passive/media messages with chat disabled (blocked=%s)', async blocked => {
     vi.mocked(getChannelForWebhook).mockResolvedValue({ workspaceId: 'ws', status: 'active', enabledCapabilities: [] } as never)
     mocks.parseIncoming.mockReturnValue({ userId: '29:user', channelId: 'conv-1', messageId: 'a1', text: '', files: [{ url: 'https://example.com/file', name: 'f', mimeType: 'audio/mpeg' }] })
@@ -127,64 +248,48 @@ describe('[COMP:api/msteams-route] webhook', () => {
     expect(channels.createMsTeamsAdapter).toHaveBeenCalledWith(expect.objectContaining({ config: expect.objectContaining({ requireMention: false }) }))
   })
 
-  it('uses real normalization for passive messages without enabling a reply', async () => {
-    const actual = await vi.importActual<typeof import('@use-brian/channels')>('@use-brian/channels')
-    vi.mocked(channels.createMsTeamsAdapter).mockImplementationOnce(actual.createMsTeamsAdapter).mockImplementationOnce(actual.createMsTeamsAdapter)
-    const app = createTestApp('/webhook/msteams', msteamsRoutes(baseOptions(makeIntegrationStore())))
-    await request(app).post('/webhook/msteams/ch-1').send({ ...ACTIVITY, conversation: { id: 'conv-1', conversationType: 'channel' } })
-    await flush()
-    expect(dispatchIncomingMessageEvent).toHaveBeenCalledOnce()
-    expect(processChannelMessage).not.toHaveBeenCalled()
-  })
-
   it.each([
     { ...ACTIVITY, from: { id: '28:app' } },
     { ...ACTIVITY, type: 'invoke' },
     { ...ACTIVITY, from: {} },
   ])('rejects self, callbacks, and missing senders', async activity => {
-    const actual = await vi.importActual<typeof import('@use-brian/channels')>('@use-brian/channels')
-    // Restore at the end: non-message activities do not construct adapters.
-    const factory = vi.mocked(channels.createMsTeamsAdapter).getMockImplementation()!
-    vi.mocked(channels.createMsTeamsAdapter).mockImplementation(actual.createMsTeamsAdapter)
-    try {
-      const app = createTestApp('/webhook/msteams', msteamsRoutes(baseOptions(makeIntegrationStore())))
-      await request(app).post('/webhook/msteams/ch-1').send(activity)
-      await flush()
-      expect(dispatchIncomingMessageEvent).not.toHaveBeenCalled()
-      expect(processChannelMessage).not.toHaveBeenCalled()
-    } finally { vi.mocked(channels.createMsTeamsAdapter).mockImplementation(factory) }
+    vi.mocked(channels.createMsTeamsAdapter).mockImplementation(realChannels.createMsTeamsAdapter)
+    const app = createTestApp('/webhook/msteams', msteamsRoutes(baseOptions(makeIntegrationStore())))
+    await request(app).post('/webhook/msteams/ch-1').send(activity)
+    await flush()
+    expect(dispatchIncomingMessageEvent).not.toHaveBeenCalled()
+    expect(processChannelMessage).not.toHaveBeenCalled()
   })
 
-  it('matches Teams mentioned account IDs independently of the bot mention gate', async () => {
-    const actual = await vi.importActual<typeof import('@use-brian/channels')>('@use-brian/channels')
-    vi.mocked(channels.createMsTeamsAdapter).mockImplementationOnce(actual.createMsTeamsAdapter).mockImplementationOnce(actual.createMsTeamsAdapter)
-    const app = createTestApp('/webhook/msteams', msteamsRoutes(baseOptions(makeIntegrationStore())))
-    await request(app).post('/webhook/msteams/ch-1').send({ ...ACTIVITY,
-      conversation: { id: 'conv-1', conversationType: 'channel' },
-      text: '<at>Human</at> hello', entities: [
+  it.each([
+    { text: 'hello', entities: [], mentions: [], normalizedText: 'hello' },
+    {
+      text: '<at>Human</at> hello',
+      entities: [
         { type: 'mention', mentioned: { id: '29:human', name: 'Human' } },
         { type: 'mention', mentioned: { id: '29:human' } },
         { type: 'other', mentioned: { id: 'not-mentioned' } },
       ],
-    })
-    await flush()
-    expect(dispatchIncomingMessageEvent).toHaveBeenCalledOnce()
-    await expectMentionMatches(vi.mocked(dispatchIncomingMessageEvent).mock.calls[0][0], ['29:human'])
-    expect(processChannelMessage).not.toHaveBeenCalled()
-  })
-
-  it.each(['28:app', '29:human'])('dispatches real mention-only Teams activity for %s without replying', async mentionedId => {
-    const actual = await vi.importActual<typeof import('@use-brian/channels')>('@use-brian/channels')
-    vi.mocked(channels.createMsTeamsAdapter).mockImplementationOnce(actual.createMsTeamsAdapter).mockImplementationOnce(actual.createMsTeamsAdapter)
+      mentions: ['29:human'],
+      normalizedText: 'hello',
+    },
+    ...['28:app', '29:human'].map((id) => ({
+      text: `<at>${id}</at>`,
+      entities: [{ type: 'mention', mentioned: { id } }],
+      mentions: [id],
+      normalizedText: '',
+    })),
+  ])('dispatches passive or mention-only Teams activity ($text) without replying', async ({ text, entities, mentions, normalizedText }) => {
+    vi.mocked(channels.createMsTeamsAdapter).mockImplementation(realChannels.createMsTeamsAdapter)
     const app = createTestApp('/webhook/msteams', msteamsRoutes(baseOptions(makeIntegrationStore())))
-    await request(app).post('/webhook/msteams/ch-1').send({ ...ACTIVITY,
-      conversation: { id: 'conv-1', conversationType: 'channel' },
-      text: '<at>Mentioned</at>', entities: [{ type: 'mention', mentioned: { id: mentionedId } }],
+    await request(app).post('/webhook/msteams/ch-1').send({
+      ...ACTIVITY, conversation: { id: 'conv-1', conversationType: 'channel' }, text, entities,
     })
     await flush()
     expect(dispatchIncomingMessageEvent).toHaveBeenCalledOnce()
-    expect(vi.mocked(dispatchIncomingMessageEvent).mock.calls[0][0].incoming.text).toBe('')
-    await expectMentionMatches(vi.mocked(dispatchIncomingMessageEvent).mock.calls[0][0], [mentionedId])
+    const [event] = vi.mocked(dispatchIncomingMessageEvent).mock.calls[0]
+    expect(event.incoming.text).toBe(normalizedText)
+    await expectMentionMatches(event, mentions)
     expect(processChannelMessage).not.toHaveBeenCalled()
     expect(mocks.sendMessage).not.toHaveBeenCalled()
   })
@@ -304,17 +409,6 @@ describe('[COMP:api/msteams-route] webhook', () => {
       expect(withChatLock).not.toHaveBeenCalled()
       expect(processChannelMessage).not.toHaveBeenCalled()
     } finally { dispose() }
-  })
-
-  it('forwards response actions and documents to the adapter', async () => {
-    const app = createTestApp('/webhook/msteams', msteamsRoutes(baseOptions(makeIntegrationStore())))
-    await request(app).post('/webhook/msteams/ch-1').set('Authorization', 'Bearer good.jwt.token').send(ACTIVITY)
-    await flush()
-    const hooks = vi.mocked(processChannelMessage).mock.calls[0]![0].hooks
-    const actions = [{ id: '0', label: 'Alpha', data: 'ask:token:0', replyText: 'Alpha' }]
-    const documents = [{ filename: 'a.txt', mime: 'text/plain', data: new Uint8Array([65]) }]
-    await hooks.sendResponse('Choose', documents, undefined, actions)
-    expect(mocks.sendMessage).toHaveBeenLastCalledWith('conv-1', { text: 'Choose', format: 'markdown', documents, actions })
   })
 
   it('rejects an invalid JWT with 401 and never processes', async () => {

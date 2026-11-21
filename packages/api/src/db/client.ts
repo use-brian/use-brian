@@ -3,6 +3,7 @@ import { currentAgentAccess,currentAgentClearance,currentAgentCompartments,curre
 export { runWithAgentAccess,runWithAgentClearance,currentAgentAccess,currentAgentClearance,currentAgentCompartments,currentAgentProjectIds } from './agent-access-context.js'
 export type { AgentClearance } from './agent-access-context.js'
 import { AsyncResource } from 'node:async_hooks'
+import { startChatDatabaseTiming } from './chat-database-timing.js'
 import { captureTurnSqlScope, recordTurnSqlStatement, type SqlPoolLabel } from './turn-sql-accounting.js'
 
 let systemPool: pg.Pool | null = null
@@ -283,7 +284,7 @@ function markCommitUncertain(client: object, err: unknown): void {
 function attachClientInstrumentation(pool: pg.Pool, label: SqlPoolLabel): void {
   pool.on('connect', (client) => instrumentPoolClient(client, label))
   pool.on('acquire', (client) => { uncertainCommits.delete(client) })
-  bindPoolConnectContext(pool)
+  bindPoolConnectContext(pool, label)
 }
 
 /**
@@ -296,14 +297,29 @@ function attachClientInstrumentation(pool: pg.Pool, label: SqlPoolLabel): void {
  * whose `connect` is an own property (a test double) is left alone.
  * Exported for tests.
  */
-export function bindPoolConnectContext(pool: pg.Pool): void {
+export function bindPoolConnectContext(pool: pg.Pool, label: SqlPoolLabel): void {
   const target = pool as unknown as Record<PropertyKey, unknown>
   if (Object.prototype.hasOwnProperty.call(target, 'connect') || target[INSTRUMENTED]) return
   target[INSTRUMENTED] = true
   target.connect = function (this: pg.Pool, ...args: unknown[]): unknown {
     const original = Object.getPrototypeOf(pool).connect as (...a: unknown[]) => unknown
-    if (typeof args[0] === 'function') args[0] = AsyncResource.bind(args[0] as (...a: unknown[]) => unknown)
-    return Reflect.apply(original, this, args)
+    const settle = startChatDatabaseTiming(label, 'checkout')
+    const callback = args[0]
+    if (typeof callback === 'function') {
+      args[0] = AsyncResource.bind(settle ? function (this: unknown, ...values: unknown[]) {
+        settle(values[0])
+        return Reflect.apply(callback, this, values)
+      } : callback as (...a: unknown[]) => unknown)
+    }
+    if (!settle) return Reflect.apply(original, this, args)
+    try {
+      const result = Reflect.apply(original, this, args)
+      if (typeof callback !== 'function') void (result as Promise<pg.PoolClient>).then(() => settle(null), settle)
+      return result
+    } catch (error) {
+      settle(error)
+      throw error
+    }
   }
 }
 
@@ -336,14 +352,16 @@ export function instrumentPoolClient(client: pg.PoolClient | pg.Client, pool: Sq
     // the connection's socket, in whatever async context opened it.
     const scope = typeof text === 'string' ? captureTurnSqlScope() : undefined
     const record = scope !== undefined
-    if (!commit && !record) return forward()
+    const dbTiming = typeof text === 'string' ? startChatDatabaseTiming(pool, 'query') : undefined
+    if (!commit && !record && !dbTiming) return forward()
     const paramCount = Array.isArray(args[1]) ? args[1].length
       : first !== null && typeof first === 'object' && Array.isArray(first.values) ? first.values.length : 0
-    const startedAt = performance.now()
+    const startedAt = record ? performance.now() : 0
     let settled = false
     const settle = (err: unknown) => {
       if (settled) return
       settled = true
+      dbTiming?.(err)
       if (commit && err) markCommitUncertain(client, err)
       if (record) {
         try {
@@ -358,9 +376,7 @@ export function instrumentPoolClient(client: pg.PoolClient | pg.Client, pool: Sq
         settle(values[0])
         return Reflect.apply(callback, this, values)
       }
-      return forward()
-    }
-    if (first !== null && typeof first === 'object' && typeof first.callback === 'function') {
+    } else if (first !== null && typeof first === 'object' && typeof first.callback === 'function') {
       const callback = first.callback as (this: unknown, ...values: unknown[]) => unknown
       args[0] = {
         ...first,
@@ -369,7 +385,6 @@ export function instrumentPoolClient(client: pg.PoolClient | pg.Client, pool: Sq
           return Reflect.apply(callback, this, values)
         },
       }
-      return forward()
     }
     let result: unknown
     try {
