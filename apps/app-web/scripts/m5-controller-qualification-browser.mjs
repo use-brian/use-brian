@@ -3,7 +3,7 @@
 // Receipt: brian-platform docs/plans/evidence/oss-chat-replacement/canonical-publication/m5-browser-qualification/README.md
 // Usage: node m5-controller-qualification-browser.mjs <journey> <width> <outDir>
 // Requires a running local stack (API 4100, app 3003) whose model provider is m5-scripted-provider.mjs,
-// and M5_WORK_DIR/fixtures.json from the receipt's fixture steps. Journeys: new-chat-reload, composer-accept,
+// and M5_WORK_DIR/fixtures.json from the receipt's fixture steps. Journeys: session-latency, new-chat-reload, composer-accept,
 // stop, network-loss, question, switch, approval, room, uploads, workbench-stop, dock, identity, restart, restart2.
 import { settle, mention, keyFrames, launch, send, frames, reqs, ensure, writeJson, waitFrame, stopBtn, sendBtn, composer, summarizeFrames, providerCalls, token, api, APP, bodyText } from './m5-qualification-harness.mjs'
 const [, , name, widthArg, outRoot] = process.argv
@@ -19,6 +19,71 @@ const pages = []
 import * as lib from './m5-qualification-harness.mjs'
 const _newCtx = lib.newCtx
 const newCtxT = async (...a) => { const r = await _newCtx(...a); pages.push(r); return r }
+
+// The fixture's greeting and follow-up use the normal SDK, rendered chat, and stored messages.
+J['session-latency'] = async (browser) => {
+  const start = Date.now()
+  const { page } = await newCtxT(browser, { width, height })
+  await composer(page).waitFor({ state: 'visible' })
+  const freshEntryMs = Date.now() - start
+  if (new URL(page.url()).searchParams.has('s')) throw new Error('Expected a new conversation')
+  const { accessToken } = await token()
+  const turns = []
+  let sessionId, priorTag = null
+  for (const [session, prompt] of [
+    ['fresh', 'Hello'],
+    ['established', 'Summarize our previous exchange and suggest a next step for the fictional project.'],
+  ]) {
+    const marker = tag(session)
+    await stopBtn(page).waitFor({ state: 'hidden' })
+    await composer(page).fill(prompt + ' #' + marker)
+    // Install before the click. Sample the first rendered frame containing new model text.
+    await sendBtn(page).evaluate(button => {
+      const previous = new Set([...document.querySelectorAll('[data-message-id]')].map(el => el.dataset.messageId))
+      const newReplyInView = () => [...document.querySelectorAll('[data-message-id] p')].some(el => {
+        if (previous.has(el.closest('[data-message-id]').dataset.messageId) || !el.textContent.startsWith('Scripted')) return false
+        const box = el.getBoundingClientRect()
+        return el.checkVisibility() && box.bottom > 0 && box.top < innerHeight
+      })
+      button.addEventListener('click', () => {
+        const t = window.__m5latency = { click: Date.now(), from: window.__m5frames.length }
+        function observe() {
+          if (newReplyInView()) t.visible = Date.now()
+          else requestAnimationFrame(observe)
+        }
+        requestAnimationFrame(observe)
+      }, { capture: true, once: true })
+    })
+    await sendBtn(page).click()
+    await page.waitForFunction(() => window.__m5latency?.visible, null, { timeout: 120000 })
+    const { click, from, visible } = await page.evaluate(() => window.__m5latency)
+    const done = await waitFrame(page, (f, i) => i >= from && f.stream === 'direct' && f.type === 'done', 120000, 'direct done')
+    const calls = providerCalls(marker)
+    if (calls.length !== 1 || calls[0].priorScriptedTag !== priorTag) throw new Error('Unexpected provider calls or conversation history')
+    priorTag = marker
+    const reply = (await frames(page)).slice(from)
+      .filter(f => f.stream === 'direct' && f.ev === 'text_delta').map(f => JSON.parse(f.d).text).join('')
+    if (!reply.startsWith('Scripted reply #' + marker + ' to:')) throw new Error('Unexpected scripted reply')
+    await page.getByText(reply, { exact: true }).waitFor()
+    await page.waitForURL(/[?&]s=/)
+    const id = new URL(page.url()).searchParams.get('s')
+    if (sessionId && id !== sessionId) throw new Error('Follow-up changed conversation')
+    sessionId = id
+    const history = await api(accessToken, 'GET', '/api/sessions/' + id + '/messages')
+    if (history.status !== 200) throw new Error('Saved history returned HTTP ' + history.status)
+    const messages = Array.isArray(history.body) ? history.body : history.body.messages
+    const saved = messages.at(-1)
+    const text = Array.isArray(saved?.content) ? saved.content.filter(p => p.type === 'text').map(p => p.text).join('') : saved?.content
+    if (saved?.role !== 'assistant' || text !== reply) throw new Error('Saved assistant reply differs from stream')
+    const readAt = Date.now()
+    await page.reload({ waitUntil: 'commit' })
+    await page.getByText(reply, { exact: true }).waitFor({ timeout: 60000 })
+    if (new URL(page.url()).searchParams.get('s') !== id) throw new Error('Reopened another conversation')
+    turns.push({ session, firstVisibleMs: visible - click, doneMs: done.t - click,
+      savedReadMs: readAt - click, reopenMs: Date.now() - readAt })
+  }
+  return { freshEntryMs, turns }
+}
 
 // J1: new chat, first send adopts the session, reload mid-turn re-attaches, follow-up works.
 J['new-chat-reload'] = async (b) => {
@@ -941,3 +1006,4 @@ try {
 } finally { await b.close() }
 writeJson(`${out}/result.json`, result)
 console.log('RESULT', name, width, result.pass ? 'PASS' : 'FAIL')
+if (!result.pass) process.exitCode = 1
