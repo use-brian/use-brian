@@ -29,6 +29,7 @@ import { dispatchPersistedWebInput } from './_incoming-chat-event.js'
 import { filterCoordinatorTools, COORDINATOR_DOCUMENT_WORKFLOW_ADDENDUM } from './chat-coordinator-tools.js'
 import { debugDocumentFlow } from '@use-brian/agent-runtime/engine/document-flow-debug.js'
 import { summarizeProviderError } from '@use-brian/agent-runtime/providers/provider-error-summary.js'
+import { markProviderStreamPhase, withProviderStreamTiming } from '@use-brian/agent-runtime/providers/stream-timing.js'
 import { pinAccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { closeProviderError } from './chat-provider-error.js'
@@ -2031,7 +2032,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
   const getTitleChannelPrefix = options.getTitleChannelPrefix ?? (() => null)
   const router = Router()
 
-  const runFramedTurn = async (req: NativeChatRequest, res: NativeChatSink, programmatic: WorkspaceTurnBinding | undefined, sqlScope: TurnSqlScope) => {
+  const runFramedTurn = async (req: NativeChatRequest, res: NativeChatSink, programmatic: WorkspaceTurnBinding | undefined, sqlScope: TurnSqlScope, providerTraceId: string) => {
     const maximum = programmatic ? new Set(programmatic.consent.operationNames) : undefined
     const options = maximum ? { ...baseOptions, tools: new Map([...baseOptions.tools].filter(([name]) => maximum.has(name))) } : baseOptions
     // Inference wiring through the turn kernel's boot registration.
@@ -7350,6 +7351,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         if (storedUserSource) selectionScope.noteSource(storedUserSource)
         turnTiming.mark('prompt')
         turnTiming.observe('loop_started')
+        markProviderStreamPhase('loop')
         // Tool executions arrive as `tool_start` per call and ONE `tool_result`
         // per batch; the batch's wall-clock is what the turn waited for.
         let toolBatchStartedAt: number | null = null
@@ -8404,6 +8406,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         })
         turnTiming.observe('loop_returned')
         turnTiming.mark('loop')
+        markProviderStreamPhase('post_loop')
 
         // Happy-path flush: the loop completed without throwing. Any
         // tool_use without a result at this point means the executor
@@ -9144,12 +9147,13 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         const timings = { ...turnTiming.snapshot(), ...chatDatabaseTimingSnapshot() }
         console.log(
           `[chat] turn timings session ${turnTimingIdentity.sessionId} ${turnTimingOutcome}: `
-          + Object.entries(timings).map(([k, v]) => `${k}=${v}`).join(' '),
+          + Object.entries(timings).map(([k, v]) => `${k}=${v}`).join(' ')
+          + ` provider_trace_id=${providerTraceId}`,
         )
         options.analytics?.logEvent({
           ...turnTimingIdentity,
           eventName: 'turn_timings', channelType: 'web',
-          metadata: { outcome: sanitize(turnTimingOutcome), ...timings },
+          metadata: { outcome: sanitize(turnTimingOutcome), provider_trace_id: sanitize(providerTraceId), ...timings },
         })
       }
       // Stop the lease heartbeat before anything else — a tick that fires
@@ -9185,7 +9189,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
    * "Per-turn SQL accounting phases"); recording off, it enters no frame. */
   const runTurn = (req: NativeChatRequest, res: NativeChatSink, programmatic?: WorkspaceTurnBinding) => {
     const sqlScope = openTurnSqlScope()
-    return withChatDatabaseTiming(() => sqlScope.run(() => runFramedTurn(req, res, programmatic, sqlScope)))
+    return withProviderStreamTiming(providerTraceId => withChatDatabaseTiming(() =>
+      sqlScope.run(() => runFramedTurn(req, res, programmatic, sqlScope, providerTraceId))))
   }
   router.post('/', (req, res) => runTurn(req, res))
 

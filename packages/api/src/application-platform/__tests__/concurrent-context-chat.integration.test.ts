@@ -9,6 +9,7 @@ import pg from 'pg'
 import request from 'supertest'
 import { expect, it, vi } from 'vitest'
 import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
+import { wrapLog } from '@use-brian/agent-runtime/providers/wrappers.js'
 import type { BootResult } from '../../boot.js'
 import { connectBootstrap } from '../../__tests__/fixtures/bootstrap-role.js'
 import { createDbCapabilityStore } from '../../db/capability-store.js'
@@ -38,10 +39,12 @@ type Fixture = Awaited<ReturnType<typeof persistentContextFixture>>
 type Session = Awaited<ReturnType<typeof openContextChatSession>>
 type Actor = { userId: string; fact: string }
 type Driver = { count: number; elapsedMs: number; maxMs: number }
+type ProviderTiming = { provider_trace_id: string; provider_stream_ordinal: number; provider_phase: string }
 type Turn = {
   slot: number; sessionId: string; question: string; attachmentId: string; answer: string
   inputs: string[]; active: boolean; driver: Driver; lockSamples: number; lockEvents: Record<string, number>
   blockingOperations: Record<string, number>; lockedRelations: Record<string, number>
+  providerTimings: ProviderTiming[]
   timings?: Record<string, number>
 }
 type Physical = {
@@ -59,7 +62,7 @@ const provider: LLMProvider = {
     yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 } }
   },
   createSession(options) {
-    return { async *send(messages) {
+    const send = wrapLog()(async function* ({ messages }) {
       const input = JSON.stringify({ options, messages })
       const tracked = currentTurn.getStore()
       const turn = tracked ?? [...activeTurns.values()].find(candidate => candidate.active
@@ -80,7 +83,8 @@ const provider: LLMProvider = {
         yield { type: 'text_delta', text: 'Fictional maintenance reply' }
       }
       yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 } }
-    } }
+    })
+    return { send: messages => send({ model: options.model, systemPrompt: options.systemPrompt, messages }) }
   },
 }
 
@@ -118,6 +122,7 @@ function traceDriver(active: Map<number, Turn>) {
   const lastTurnByPid = new Map<number, Turn>()
   const original = pg.Client.prototype.query
   const log = console.log.bind(console)
+  const debug = console.debug.bind(console)
   const timings = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
     if (typeof args[0] === 'string') {
       for (const turn of active.values()) {
@@ -129,6 +134,13 @@ function traceDriver(active: Map<number, Turn>) {
       }
     }
     log(...args)
+  })
+  const providerLogs = vi.spyOn(console, 'debug').mockImplementation((...args: unknown[]) => {
+    const turn = currentTurn.getStore()
+    if (turn?.active && typeof args[0] === 'string' && args[0].startsWith('{"message":"[stream] ')) {
+      turn.providerTimings.push(JSON.parse(args[0]) as ProviderTiming)
+    }
+    debug(...args)
   })
   let workerCalls = 0
   const queries = vi.spyOn(pg.Client.prototype, 'query').mockImplementation(function (this: pg.Client, ...args: unknown[]) {
@@ -171,7 +183,7 @@ function traceDriver(active: Map<number, Turn>) {
     }
   } as typeof original)
   return { pending, lastTurnByPid, reset: () => { workerCalls = 0; lastTurnByPid.clear() }, workerCalls: () => workerCalls,
-    restore: () => { queries.mockRestore(); timings.mockRestore() } }
+    restore: () => { queries.mockRestore(); timings.mockRestore(); providerLogs.mockRestore() } }
 }
 
 // Classify on the database side. SQL text, role names and backend PIDs stay out of the receipt.
@@ -351,6 +363,7 @@ it.skipIf(process.env.BRIAN_CONTEXT_CHAT_LOAD !== '1')('reopens concurrent worke
     observer = await connectBootstrap()
     await observer.query("SET statement_timeout='1500ms'")
     const tracing = connectTracing(boot.app, active), driver = traceDriver(active)
+    const seenProviderTraces = new Set<string>()
     let observedWork = 0
     try {
       for (const width of widths) {
@@ -372,7 +385,7 @@ it.skipIf(process.env.BRIAN_CONTEXT_CHAT_LOAD !== '1')('reopens concurrent worke
             question: `For fixture reader ${index + 1}'s ${phase} launch, read my note and tell me its window, badge shade and checklist.`,
             answer: `Fictional verified launch answer for ${phase} reader ${index + 1}.`,
             active: false, inputs: [], driver: { count: 0, elapsedMs: 0, maxMs: 0 }, lockSamples: 0, lockEvents: {},
-            blockingOperations: {}, lockedRelations: {},
+            blockingOperations: {}, lockedRelations: {}, providerTimings: [],
           }))
           tracing.reset()
           driver.reset()
@@ -412,12 +425,13 @@ it.skipIf(process.env.BRIAN_CONTEXT_CHAT_LOAD !== '1')('reopens concurrent worke
                 && actual.doneMs !== undefined && actual.firstTextMs <= actual.doneMs && actual.doneMs <= actual.completionMs
                 && actual.terminal.length === 1 && actual.terminal[0] === 'done' && actual.text === turn.answer),
               inputsVerified: Object.values(inputChecks).every(Boolean), inputChecks, providerRounds: turn.inputs.length,
-              reopened: false, driverQueries: turn.driver, lockSamples: turn.lockSamples, lockEvents: turn.lockEvents,
+              reopened: false, providerTraceVerified: false, driverQueries: turn.driver, lockSamples: turn.lockSamples, lockEvents: turn.lockEvents,
               turnTimings: turn.timings ?? null, blockingOperations: turn.blockingOperations, lockedRelations: turn.lockedRelations,
             }
           })
           reports.push({ width, phase, startedAt, finishedAt, waveMs, peakRequests: tracing.peak(),
             workerConversionCalls: workerCalls, lockObserver, eventLoopDelayP95Ms: loop.percentile(95) / 1e6, turns: turnReports })
+          await boot.ctx.analytics.flush()
           for (const [index, turn] of turns.entries()) {
             const reopened = await request(boot.app).get('/api/sessions/' + turn.sessionId + '/messages')
               .set('Authorization', 'Bearer ' + sessions[index].token)
@@ -426,12 +440,20 @@ it.skipIf(process.env.BRIAN_CONTEXT_CHAT_LOAD !== '1')('reopens concurrent worke
             turnReports[index].reopened = reopened.status === 200 && last?.role === 'assistant'
               && JSON.stringify(last.content) === JSON.stringify([{ type: 'text', text: turn.answer }])
               && turns.every(other => other === turn || !JSON.stringify(messages).includes(other.answer))
+            const { rows: [analytics] } = await f.pool.query<{ trace: string }>(`SELECT metadata->>'provider_trace_id' AS trace
+              FROM analytics_events WHERE session_id=$1 AND event_name='turn_timings' ORDER BY created_at DESC LIMIT 1`, [turn.sessionId])
+            const ordinals = turn.providerTimings.map(timing => timing.provider_stream_ordinal)
+            turnReports[index].providerTraceVerified = /^pt-[0-9a-f-]{36}$/.test(analytics?.trace ?? '')
+              && !seenProviderTraces.has(analytics.trace) && ordinals.length === 2
+              && Number.isInteger(ordinals[0]) && ordinals[0] > 0 && ordinals[1] > ordinals[0]
+              && turn.providerTimings.every(timing => timing.provider_trace_id === analytics.trace && timing.provider_phase === 'loop')
+            if (analytics?.trace) seenProviderTraces.add(analytics.trace)
             prior.set(turn.slot, turn.answer)
           }
           expect.soft(tracing.peak(), `overlap for width ${width}, ${phase}`).toBe(width)
           for (const turn of turnReports) {
             expect.soft(turn, `width ${width}, ${phase}, slot ${turn.slot}`)
-              .toMatchObject({ sseVerified: true, inputsVerified: true, reopened: true, turnTimings: expect.any(Object) })
+              .toMatchObject({ sseVerified: true, inputsVerified: true, reopened: true, providerTraceVerified: true, turnTimings: expect.any(Object) })
           }
         }
       }

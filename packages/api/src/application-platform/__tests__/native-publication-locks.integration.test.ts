@@ -25,7 +25,7 @@ function gate() {
 
 type Fixture = Awaited<ReturnType<typeof persistentContextFixture>>
 
-async function turn(f: Fixture, session: Session, actor: string, text: string) {
+async function turn(f: Fixture, session: Session, actor: Fixture['firstId'], text: string) {
   const input = await addSessionMessage({ sessionId: session.id, role: 'user', senderUserId: actor,
     content: [{ type: 'text', text }], scope: f.envelope })
   const createAuthority = async () => ({ execution: await f.execution(actor, session), accumulator: new ContextScopeAccumulator() })

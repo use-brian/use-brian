@@ -3,6 +3,7 @@ import { debugDocumentFlow } from '../engine/document-flow-debug.js'
 import type { LLMProvider, ProviderSession, SessionOptions, SendOptions, Message, StreamChunk, StreamFn, TokenUsage } from './types.js'
 import { fitMessagesToBudget, resolveInputTokenLimit, isContextOverflowError, MODEL_CONTEXT_FIT_RATIO } from './context-budget.js'
 import { assertInputAuthority, ownsInputAdmission, registerInputAdmissionOwner, captureInputAdmissionProvider } from './input-authority.js'
+import { startProviderStreamTiming } from './stream-timing.js'
 
 /**
  * Composable stream wrappers.
@@ -177,6 +178,7 @@ export function wrapIdleTimeout(timeoutMs: number, firstChunkTimeoutMs?: number)
  */
 export function wrapLog(options?: { verbose?: boolean }): StreamWrapper {
   return (inner) => async function* (request) {
+    const timings = startProviderStreamTiming()
     const start = performance.now()
     let chunkCount = 0
     let consumerMs = 0
@@ -204,14 +206,18 @@ export function wrapLog(options?: { verbose?: boolean }): StreamWrapper {
       throw error
     } finally {
       const elapsed = performance.now() - start
-      console.debug(`[stream] ${outcome === 'completed' ? 'complete' : outcome}: ${chunkCount} chunks in ${Math.round(elapsed)}ms`, {
+      const message = `[stream] ${outcome === 'completed' ? 'complete' : outcome}: ${chunkCount} chunks in ${Math.round(elapsed)}ms`
+      const details = {
         model: registryRow(request.model) ? request.model : 'other',
+        ...timings,
         upstream_wait_ms: Math.round(Math.max(0, elapsed - consumerMs)),
         consumer_wait_ms: Math.round(consumerMs),
         ...(firstChunkMs === undefined ? {} : { first_chunk_ms: Math.round(firstChunkMs) }),
         ...(firstThinkingMs === undefined ? {} : { first_thinking_ms: Math.round(firstThinkingMs) }),
         ...(firstTextMs === undefined ? {} : { first_text_ms: Math.round(firstTextMs) }),
-      })
+      }
+      if (timings) console.debug(JSON.stringify({ message, ...details }))
+      else console.debug(message, details)
     }
   }
 }
