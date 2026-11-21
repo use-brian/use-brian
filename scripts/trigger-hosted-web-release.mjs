@@ -69,17 +69,36 @@ export async function verifyServingRevision(sha, {
   throw new Error(`Production did not serve OSS ${sha} within ${timeoutMs / 1000}s (${last}). Check Vercel before retrying.`);
 }
 
+/** Join a recorded first edit to an exact serving observation. */
+export async function measureServingReleaseLeadTime(sha, firstEditAt, options = {}) {
+  const firstEditMs = typeof firstEditAt === 'string' ? Date.parse(firstEditAt) : NaN;
+  const normalized = Number.isFinite(firstEditMs) ? new Date(firstEditMs).toISOString() : '';
+  if (!/^\d{4}-/.test(normalized) ||
+      (firstEditAt !== normalized && firstEditAt !== normalized.replace(/\.000Z$/, 'Z'))) {
+    throw new Error('First edit must be a UTC timestamp ending in Z, with seconds or milliseconds.');
+  }
+  const now = options.now ?? Date.now;
+  if (firstEditMs > now()) throw new Error('First edit cannot be in the future.');
+
+  const verifiedAt = await verifyServingRevision(sha, options);
+  const elapsedMs = Date.parse(verifiedAt) - firstEditMs;
+  if (elapsedMs < 0) throw new Error('The verification clock was earlier than the first edit.');
+  return { ossSha: sha, firstEditAt: normalized, verifiedAt, elapsedMs };
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     const args = process.argv.slice(2);
     if (args.length === 2 && args[0] === '--verify') {
       const observed = await verifyServingRevision(args[1]);
       console.log(`Production served OSS ${args[1]} at ${observed}.`);
+    } else if (args.length === 4 && args[0] === '--verify' && args[2] === '--first-edit-at') {
+      console.log(JSON.stringify(await measureServingReleaseLeadTime(args[1], args[3])));
     } else if (args.length === 0) {
       const job = await triggerHostedWebRelease();
       console.log(`Vercel accepted app-web production build job ${job.id} (${job.state}) at ${new Date().toISOString()}.`);
     } else {
-      throw new Error('Usage: trigger-hosted-web-release.mjs [--verify <full-oss-sha>]');
+      throw new Error('Usage: trigger-hosted-web-release.mjs [--verify <full-oss-sha> [--first-edit-at <utc-timestamp>]]');
     }
   } catch (error) {
     console.error(error.message);
