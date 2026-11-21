@@ -28,6 +28,23 @@ agree to the CLA on their behalf.
 These are deliberately strict (the "xz" lesson): trust is earned over time, and
 commit rights are not the price of a good patch.
 
+## Long-term maintenance goals
+
+- **Deliver the same features with less code to maintain.** Prefer one
+  implementation of a shared rule and remove superseded paths and duplicate
+  tests when their replacements cover the same behavior. Compare handwritten
+  implementation and test lines over time. Track generated output separately.
+- **Use session performance as the primary measure of product performance.**
+  Measure how long a user waits to open or resume a session, see the first
+  reply text after sending, and have the complete reply saved and available
+  on reopen. Include established sessions with history and report failures
+  alongside median and p95 timings.
+- **Shorten the time from starting a fix to verifying it in a release.**
+  Align local implementation checks, builds, CI and release on the same source,
+  dependency versions and migration behavior. Release the build that passed
+  verification. Track elapsed time across the whole change, including queues,
+  retries and migration repairs, to identify where iteration slows down.
+
 ## Making a change
 
 1. Open an issue first for anything non-trivial so we can align on approach.
