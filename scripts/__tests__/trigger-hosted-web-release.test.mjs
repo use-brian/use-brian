@@ -1,11 +1,45 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { triggerHostedWebRelease } from '../trigger-hosted-web-release.mjs';
+import { triggerHostedWebRelease, verifyServingRevision } from '../trigger-hosted-web-release.mjs';
 
 const hook = 'https://api.vercel.com/v1/integrations/deploy/prj_example/secretExample';
 const env = { GITHUB_REPOSITORY: 'use-brian/use-brian', GITHUB_REF: 'refs/heads/main', HOSTED_APP_WEB_DEPLOY_HOOK: hook };
 
 describe('[COMP:infra/hosted-web-release] Hosted frontend release trigger', () => {
+  const candidate = 'a'.repeat(40);
+  const previous = 'b'.repeat(40);
+
+  it('observes the exact build at the public alias after a stale build and a temporary outage', async () => {
+    let clock = 0;
+    const probes = [];
+    const result = await verifyServingRevision(candidate, {
+      now: () => clock, wait: async ms => { clock += ms; },
+      request: async (url, init) => {
+        assert.equal(url.origin + url.pathname, 'https://app.usebrian.ai/site.webmanifest');
+        assert.equal(init.method ?? 'GET', 'GET');
+        assert.equal(init.redirect, 'error');
+        assert.equal(init.cache, 'no-store');
+        probes.push(url.href);
+        if (probes.length === 2) throw new Error('temporary outage');
+        return Response.json({ brian_oss_revision: probes.length === 1 ? previous : candidate });
+      },
+    });
+    assert.equal(new Set(probes).size, 3);
+    assert.equal(result, new Date(30_000).toISOString());
+  });
+
+  it('leaves wrong, partial and unavailable builds unverified at the deadline', async () => {
+    for (const [status, stamp] of [[200, previous], [200, candidate.slice(0, 7)], [200, ''], [503, candidate]]) {
+      let clock = 0;
+      await assert.rejects(verifyServingRevision(candidate, {
+        now: () => clock, timeoutMs: 100, wait: async ms => { clock += ms; },
+        request: async () => Response.json({ brian_oss_revision: stamp }, { status }),
+      }), /Production did not serve OSS/);
+      assert.equal(clock, 100);
+    }
+    await assert.rejects(verifyServingRevision('main'), /full OSS commit SHA/);
+  });
+
   it('enqueues one bounded POST without redirects and reports only the accepted job', async () => {
     const calls = [];
     const result = await triggerHostedWebRelease({ env, request: async (...args) => {

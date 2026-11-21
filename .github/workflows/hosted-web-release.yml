@@ -8,13 +8,12 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: hosted-web-production
-  cancel-in-progress: false
-
 jobs:
   deploy:
     if: github.repository == 'use-brian/use-brian' && github.ref == 'refs/heads/main'
+    concurrency:
+      group: hosted-web-production
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
@@ -28,3 +27,20 @@ jobs:
         env:
           HOSTED_APP_WEB_DEPLOY_HOOK: ${{ secrets.HOSTED_APP_WEB_DEPLOY_HOOK }}
         run: node scripts/trigger-hosted-web-release.mjs
+
+  verify:
+    needs: deploy
+    concurrency:
+      group: hosted-web-production-verification
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify the OSS revision served by the production alias
+        run: node scripts/trigger-hosted-web-release.mjs --verify "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
