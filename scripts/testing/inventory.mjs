@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
+import { localTestGlob } from '../../apps/api/src/__tests__/run-embedded-tests.mjs'
 
 const execute = promisify(execFile)
 const ossRoot = fileURLToPath(new URL('../../', import.meta.url))
@@ -50,6 +51,9 @@ export function runnerSegments(script) {
       if ((prefix.length === 0 || prefix.join(' ') === '--import tsx') && patterns.length && patterns.every(value => /^[\w./*?-]+$/.test(value) && !value.startsWith('-'))) {
         return { runner: 'node', patterns, command: segment }
       }
+    }
+    if (tokens.join(' ') === 'node src/__tests__/run-embedded-tests.mjs') {
+      return { runner: 'node', patterns: [localTestGlob], command: segment }
     }
     return { runner: 'manual', command: segment, reason: 'Build prerequisite or custom runner; not executed by discovery' }
   })

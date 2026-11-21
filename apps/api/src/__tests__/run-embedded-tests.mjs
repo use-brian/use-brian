@@ -1,14 +1,15 @@
 // [COMP:ci/execution-topology] Prepare the current-schema fixture once per run.
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs'
+import { globSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const cwd = fileURLToPath(new URL('../../', import.meta.url))
 export const ownerFile = 'migration-owner-role.test.ts'
 export const contextFile = 'context-scope-security-matrix.test.ts'
+export const localTestGlob = 'src/__tests__/*.test.ts'
 
 export async function runEmbeddedTests(testFiles, env = process.env, flags = ['--test-concurrency=1']) {
   const child = spawn(process.execPath, ['--import', 'tsx', '--test', ...flags,
@@ -31,8 +32,8 @@ export async function withPreparedPglite(run) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
-  const others = readdirSync(new URL('./', import.meta.url))
-    .filter(file => file.endsWith('.test.ts') && file !== ownerFile && file !== contextFile)
+  const others = globSync(localTestGlob, { cwd }).map(file => basename(file)).sort()
+    .filter(file => file !== ownerFile && file !== contextFile)
   process.exitCode = await withPreparedPglite(async (env, prepared) => {
     const ownerAndContext = runEmbeddedTests([ownerFile], prepared).then(async ownerStatus => {
       const contextStatus = await runEmbeddedTests([contextFile], ownerStatus === 0 ? prepared : env)
