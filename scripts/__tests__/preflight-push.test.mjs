@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { git, identity, command, environment, snapshot, resetSnapshot } from '../testing/preflight-source.mjs'
 import { compileWorkflow, executeWorkflow, expression, workflowContext } from '../testing/preflight-workflow.mjs'
 import { publicationPlan, runPreflight, verifyReceipt, validateContainerBuild } from '../testing/preflight-push.mjs'
-import { acceptanceMatrix, acceptanceShards } from '../testing/department-isolation-report.mjs'
+import { acceptanceMatrices, acceptanceShards } from '../testing/department-isolation-report.mjs'
 
 const owned = []
 afterEach(async () => { for (const path of owned.splice(0)) await rm(path, { recursive: true, force: true }) })
@@ -171,7 +171,9 @@ describe('[COMP:tooling/push-preflight] actual local publication boundary', () =
       assert.equal(jobs.flatMap(job => job.variants).length, count)
       assert.ok(jobs.some(job => job.id === 'build-test'))
       const profile = historical ? 'full' : 'current'
-      assert.deepEqual(jobs.find(job => job.id === 'department-isolation-shards').variants, acceptanceMatrix(profile).include)
+      const matrices = acceptanceMatrices(profile)
+      assert.deepEqual(jobs.find(job => job.id === 'department-isolation-shards').variants, matrices.remaining.include)
+      assert.deepEqual(jobs.find(job => job.id === 'calendar-isolation').variants, matrices.calendar.include)
       assert.deepEqual(JSON.parse(context.needs['ci-scope'].outputs.shards), acceptanceShards(profile))
     }
   })

@@ -48,27 +48,26 @@ export function acceptanceShards(profile = 'full') {
 }
 
 /** Whole-job budgets include setup and every serialized case, not slower reads. */
-export function acceptanceMatrix(profile = 'full', { compareCalendarArm = false } = {}) {
+export function acceptanceMatrices(profile = 'full', { compareCalendarArm = false } = {}) {
   const shards = acceptanceShards(profile)
-  // Submit the slowest measured suites first while keeping shard IDs stable for receipts.
-  const longSuites = ['recovered-calendar-history', 'retained-conversation']
   const matrix = shards.map(shard => {
     const suites = suitesForShard({ index: shard, total: shards.length }, profile)
-    const priority = longSuites.findIndex(id => suites.some(suite => suite.id === id))
-    return { shard, rank: priority < 0 ? longSuites.length : priority, timeoutMinutes: priority < 0 ? 20 : 45 }
+    const calendar = suites.some(suite => suite.id === 'recovered-calendar-history')
+    const retained = suites.some(suite => suite.id === 'retained-conversation')
+    const entry = {
+      shard, timeoutMinutes: calendar || retained ? 45 : 20, runner: 'ubuntu-latest', labelSuffix: '',
+      artifactName: `department-isolation-shard-${shard}`,
+    }
+    return { calendar, retained, entry }
   })
-  matrix.sort((a, b) => a.rank - b.rank)
-  const include = matrix.map(({ shard, timeoutMinutes }) => ({
-    shard, timeoutMinutes, runner: 'ubuntu-latest', labelSuffix: '',
-    artifactName: `department-isolation-shard-${shard}`,
-  }))
+  const calendar = [matrix.find(item => item.calendar).entry]
+  const remaining = matrix.filter(item => !item.calendar)
+    .sort((a, b) => Number(b.retained) - Number(a.retained)).map(item => item.entry)
   if (compareCalendarArm) {
-    const calendar = include.find(({ shard }) => suitesForShard({ index: shard, total: shards.length }, profile)
-      .some(suite => suite.id === 'recovered-calendar-history'))
-    include.unshift({ ...calendar, runner: 'ubuntu-24.04-arm', labelSuffix: ' ARM64 comparison',
+    calendar.unshift({ ...calendar[0], runner: 'ubuntu-24.04-arm', labelSuffix: ' ARM64 comparison',
       artifactName: 'calendar-comparison-arm64' })
   }
-  return { include }
+  return { remaining: { include: remaining }, calendar: { include: calendar } }
 }
 
 export function suitesForShard(shard, profile = 'full') {
@@ -185,7 +184,8 @@ export function mergeAcceptanceReports(reports, expectedMetadata, profile = 'ful
   }
   const ordered = [...reports].sort((a, b) => a.shard.index - b.shard.index)
   return createAcceptanceReport({
-    metadata: { ...expectedMetadata, migration: reports[0].migration, shards: ordered.map(report => report.shard) },
+    metadata: { ...expectedMetadata, migration: reports[0].migration, shards: ordered.map(report => report.shard),
+      shardTimings: ordered.filter(report => report.timing).map(report => ({ shard: report.shard.index, ...report.timing })) },
     suites: ordered.flatMap(report => report.suites), assertions: ordered.flatMap(report => report.assertions), profile,
   })
 }
