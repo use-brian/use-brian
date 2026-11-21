@@ -3,6 +3,7 @@ import { appendFileSync, readFileSync, realpathSync, writeFileSync } from 'node:
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { acceptanceMatrices, acceptanceShards } from './department-isolation-report.mjs'
+import { compareChangedPaths } from './git-changes.mjs'
 
 // [COMP:ci/execution-topology] Unknown comparison inputs select more coverage.
 export function needsHistoricalTests(paths) {
@@ -23,21 +24,9 @@ function proposedCoverage(paths) {
 
 export function selectCiScope(eventName, event, git) {
   const exhaustive = reason => ({ historical: true, reason, proposed: proposedCoverage([]), changedPathCount: null })
-  const isRevision = value => /^[a-f0-9]{40}$/.test(value ?? '') && !/^0+$/.test(value)
   if (['schedule', 'workflow_dispatch'].includes(eventName)) return exhaustive(eventName)
   try {
-    let base, head
-    if (eventName === 'pull_request') {
-      head = event.pull_request.head.sha
-      const target = event.pull_request.base.sha
-      if (![target, head].every(isRevision)) throw new Error('Missing pull request revision')
-      base = git(['merge-base', target, head]).trim()
-    } else if (eventName === 'push') {
-      base = event.before; head = event.after
-    }
-    if (![base, head].every(isRevision)) throw new Error('Missing revision')
-    // --no-renames includes both sides of a rename; -z preserves unusual paths.
-    const paths = git(['diff', '--name-only', '--no-renames', '-z', base, head]).split('\0').filter(Boolean)
+    const { base, head, paths } = compareChangedPaths(eventName, event, git)
     const historical = needsHistoricalTests(paths)
     return { historical, reason: historical ? 'database-inputs-changed' : 'current-schema-only', base, head,
       proposed: proposedCoverage(paths), changedPathCount: paths.length }
