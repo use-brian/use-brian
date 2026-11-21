@@ -4762,17 +4762,29 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         || requestedViewingBrainEntry || requestedKbSourceId || requestedResearchActivityId || turnScope.activeProjectId
       const continuedPromptContext = truncateFromMessageId || requestedSteer || requestedMidTurn || requestedRoomResponseGroup
         || prePersistedUserMsg || workflowProposalReceipt
-      const barePersonalGreeting = typeof rawMessage === 'string' && userMessageText === rawMessage && isBareChatGreeting(rawMessage)
-        && nativeTranscriptAuthority && privatePromptShape && pendingQuestionChecked
-        && !programmatic && !pageBoundTurn && !officeLane && !feedTurnContext
-        && (!requestedAppOrigin || requestedAppOrigin === 'chat') && !researchMode && !requestedCustom
-        && !isExplicitMeteredModelSelection(requestedModel) && !explicitPromptContext && !continuedPromptContext
+      const fullContextReason = (() => {
+        if (typeof rawMessage !== 'string' || userMessageText !== rawMessage || !isBareChatGreeting(rawMessage)) return 'message'
+        if (!nativeTranscriptAuthority) return 'transcript_authority'
+        if (!privatePromptShape) return 'audience'
+        if (!pendingQuestionChecked) return 'pending_question'
+        if (programmatic || pageBoundTurn || officeLane || feedTurnContext || (requestedAppOrigin && requestedAppOrigin !== 'chat')) return 'surface'
+        if (researchMode || requestedCustom || isExplicitMeteredModelSelection(requestedModel)) return 'model_or_mode'
+        if (explicitPromptContext) return 'supplied_context'
+        if (continuedPromptContext) return 'continuation'
+        return null
+      })()
       turnTiming.mark('admission')
-      const earlyTaskContext = barePersonalGreeting ? await turnTiming.time('prompt_task_context', readTaskContext) : undefined
+      const earlyTaskContext = !fullContextReason ? await turnTiming.time('prompt_task_context', readTaskContext) : undefined
       const earlyPinnedContext = earlyTaskContext?.available && !earlyTaskContext.sessionStateBlock && !earlyTaskContext.planBlock
         ? await turnTiming.time('prompt_pins', readPinnedPromptContext) : undefined
       const deferAmbientIndexes = earlyPinnedContext?.block === null
       if (deferAmbientIndexes) turnTiming.count('prompt_ambient_indexes_deferred')
+      else {
+        const reason = fullContextReason ?? (!earlyTaskContext?.available ? 'task_context_unavailable'
+          : earlyTaskContext.sessionStateBlock || earlyTaskContext.planBlock ? 'ongoing_work'
+          : earlyPinnedContext ? 'pins' : 'pins_unavailable')
+        turnTiming.count(`prompt_ambient_full_${reason}`)
+      }
       const auxiliaryPrompt = nativeTranscriptAuthority && privatePromptShape && options.memoryStore.getPromptAuxiliaryContext
         ? turnTiming.time('prompt_identity_context', () => options.memoryStore.getPromptAuxiliaryContext!(viewerCtx, 'Use Brian', nativeTranscriptAuthority!))
         : undefined
@@ -9103,11 +9115,12 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       res.end()
     } finally {
       requestPermissions?.dispose()
-      // The turn's per-phase wall-clock, once per request. Only a request that
-      // reached the query loop is a turn (queued mid-turn input, 409s and
-      // pre-flight refusals are not); those still surface through
-      // chat_route_error. Emitted from `finally` so error paths report too.
-      if (turnTimingIdentity && 'prompt_ms' in turnTiming.snapshot()) {
+      // Include started turns that fail during preparation. Queued input and
+      // requests refused before a turn starts have their own route telemetry.
+      const phases = turnTiming.snapshot()
+      const interrupted = turnTimingOutcome !== 'completed'
+        && ('admission_ms' in phases || 'authored_input_saved_at_ms' in phases)
+      if (turnTimingIdentity && ('prompt_ms' in phases || interrupted)) {
         markTurnEnd(turnTiming)
         const timings = turnTiming.snapshot()
         console.log(

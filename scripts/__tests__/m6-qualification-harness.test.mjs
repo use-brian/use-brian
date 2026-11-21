@@ -18,7 +18,7 @@ describe('[COMP:tooling/m6-qualification] M6 qualification harness', () => {
   it('maps every row to registered steps and every full-profile step to a row', () => {
     const ids = ROWS.map(r => r.id)
     assert.equal(new Set(ids).size, ids.length)
-    assert.equal(ROWS.length, 57)
+    assert.equal(ROWS.length, 59)
     for (const row of ROWS) for (const step of row.steps) assert.ok(STEPS[step], `${row.id} names unknown step ${step}`)
     for (const row of ROWS) if (!row.steps.length) assert.ok(row.unmeasured, `${row.id} has no step and no unmeasured reason`)
     for (const id of PROFILES.full) assert.ok(ROWS.some(r => r.steps.includes(id)), `${id} feeds no row`)
@@ -115,6 +115,9 @@ describe('[COMP:tooling/m6-qualification] M6 qualification harness', () => {
     const row = (id) => ROWS.find(r => r.id === id)
     assert.deepEqual(row('A7').steps, ['fixed20-oss-cold'])
     assert.deepEqual(row('A8').steps, ['fixed20-oss-lookup'])
+    assert.deepEqual(row('A12').steps, ['context-aware-chat'])
+    assert.deepEqual(row('A13').steps, ['context-aware-chat-hosted'])
+    assert.ok(STEPS['context-aware-chat-hosted'].needs.includes('platform'))
     assert.equal(row('A7').unmeasured, undefined)
     assert.equal(row('A8').unmeasured, undefined)
     assert.equal(BUDGETS.foreground.limit, 50)
@@ -125,7 +128,7 @@ describe('[COMP:tooling/m6-qualification] M6 qualification harness', () => {
       assert.ok(PROFILES.full.includes(id))
       assert.ok(STEPS[id].needs.includes('pgStatStatements'), `${id} needs nested statistics`)
     }
-    assert.equal(Object.keys(STEPS).length, 61)
+    assert.equal(Object.keys(STEPS).length, 63)
     assert.ok(!PROFILES['dry-run'].includes('fixed20-oss-cold'))
     assert.ok(selectSteps(parseArgs(['--profile', 'dry-run', '--cold'])).includes('fixed20-oss-cold'))
     assert.deepEqual(selectSteps(parseArgs(['--steps', 'fixed20-oss-cold', '--cold'])), ['fixed20-oss-cold'])
@@ -151,6 +154,11 @@ describe('[COMP:tooling/m6-qualification] M6 qualification harness', () => {
       sample({ permissionModel: 'department-v2', queries: 101, workload: 'one-lookup', lookup: { calls: 2, statements: 6, providerRounds: 3 } }),
     ] }))
     const step = (stepId, rows, harness) => writeFileSync(join(run, 'steps', `${stepId}.json`), JSON.stringify({ stepId, rows, status: 'completed', reason: 'exit 0', outputs: { harness } }))
+    const chat = join(run, 'context-aware-chat.json')
+    writeFileSync(chat, JSON.stringify({ dense: [
+      { firstTextMs: 850, completionMs: 5000 }, { firstTextMs: 900, completionMs: 5000.2 },
+    ] }))
+    step('context-aware-chat', ['A12'], chat)
     step('fixed20-oss-cold', ['A7'], cold)
     step('fixed20-oss-lookup', ['A8'], lookup)
     writeFileSync(join(run, 'run.json'), JSON.stringify({ runId: 't', profile: 'explicit', plumbing: true, steps: ['fixed20-oss-cold', 'fixed20-oss-lookup'], startedAt: 'x', node: process.version, source: {} }))
@@ -158,6 +166,11 @@ describe('[COMP:tooling/m6-qualification] M6 qualification harness', () => {
     assert.equal(r.status, 0, r.stderr)
     const { lines, qualification } = JSON.parse(readFileSync(join(run, 'results.json'), 'utf8'))
     const pick = (row, cell, metric, variant) => lines.find(l => l.row === row && l.cell === cell && l.metric === metric && (variant === undefined || l.metricVariant === variant))
+    assert.equal(pick('A13', 'dense', 'first turn').verdict, 'unmeasured')
+    assert.equal(pick('A12', 'dense', 'first turn').verdict, 'pass')
+    assert.equal(pick('A12', 'dense', 'first turn').afterDetail, 'first text at 850 ms')
+    assert.equal(pick('A12', 'dense', 'follow-up').verdict, 'fail')
+    assert.equal(pick('A12', 'sparse', 'first turn').verdict, 'unmeasured')
     assert.equal(pick('A7', 'empty-private/legacy', 'sharedReads', 'cold, median').after, 1300)
     assert.equal(pick('A7', 'empty-private/legacy', 'sharedReads', 'warm, median').after, 0)
     assert.equal(pick('A7', 'empty-private/legacy', 'preparationMs', 'cold, median / max').after, '900 / 900')

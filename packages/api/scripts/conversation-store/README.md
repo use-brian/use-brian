@@ -498,3 +498,13 @@ metadata and uses the original complete ancestry reader for every
 eligible root. The canonical Memory evaluator still qualifies the
 historical selection, successors, held rows, current rights and
 independent source grants at each consuming boundary.
+
+### Current conversation context cost
+
+The 8332 installer authenticates the prior conversation definitions and
+changes the reviewed evidence and lineage routines. It updates the enrolled
+fingerprints and refreshes the native witness in the migration transaction.
+The portable verifier applies the same reviewed body replacements and checks
+the compiled fused routines against their historical inputs. Verify the
+numbered SQL with
+`node packages/api/scripts/conversation-store/build-conversation-context-cost.mjs --check`.

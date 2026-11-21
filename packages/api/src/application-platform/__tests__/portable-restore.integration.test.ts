@@ -23,6 +23,7 @@ import {seedRefusedFamilies,type SeededFamilies} from './fixtures/portable-resto
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 const {sealJson,unsealJson,unsealFile}=await import(new URL('../../../../../scripts/operations/recovery-common.mjs',import.meta.url).href)
 const restore=await import(new URL('../../../scripts/conversation-store/portable-restore.mjs',import.meta.url).href)
+const {authenticateConversationInstallation}=await import(new URL('../../../scripts/conversation-store/installation-release.mjs',import.meta.url).href)
 const phase=process.env.BRIAN_PORTABLE_RESTORE_PHASE,stateDirectory=process.env.BRIAN_PORTABLE_RESTORE_STATE
 // The driver pins the shipped migration set it applied to both chains.
 const sourceRoot=process.env.BRIAN_PORTABLE_RESTORE_SOURCE_ROOT
@@ -197,6 +198,29 @@ describe.skipIf(phase!=='target').sequential('[COMP:api/portable-restore] authen
    erasureCheckpoint:{path:join(stateDirectory!,'checkpoint.enc'),expectedSha256:s.checkpoint.checkpointSha256},...options})}
   finally{await client.end()}
  }
+
+ it('authenticates the lineage display pin and inherited workspace MCP dispatch catalog',async()=>{
+  await assertLocalFixture()
+  const client=await ownerClient()
+  try{
+   const lineage='public.application_scope_lineage(uuid,text[],uuid[],text[])'
+   const {rows:[display]}=await client.query<{fingerprint:string}>(
+    'SELECT fingerprint FROM public.private_session_display_contract WHERE signature=$1',[lineage])
+   if(!display)throw Error('Fixture lacks the application lineage display pin')
+   await client.query('UPDATE public.private_session_display_contract SET fingerprint=$2 WHERE signature=$1',[lineage,'0'.repeat(64)])
+   try{
+    await expect(authenticateConversationInstallation(client,{sourceRoot})).rejects.toThrow('conversation_context_cost_display_pin_changed')
+   }finally{
+    await client.query('UPDATE public.private_session_display_contract SET fingerprint=$2 WHERE signature=$1',[lineage,display.fingerprint])
+   }
+   await client.query('ALTER TABLE public.workspace_mcp_runs DISABLE TRIGGER workspace_mcp_dispatch_sync')
+   try{
+    await expect(authenticateConversationInstallation(client,{sourceRoot})).rejects.toThrow('installation_additional_catalog_changed')
+   }finally{
+    await client.query('ALTER TABLE public.workspace_mcp_runs ENABLE TRIGGER workspace_mcp_dispatch_sync')
+   }
+  }finally{await client.end()}
+ },300_000)
 
  it('refuses tampered, foreign, drifted and unknown inputs before any durable import',async()=>{
   await assertLocalFixture()

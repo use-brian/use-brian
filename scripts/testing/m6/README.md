@@ -119,6 +119,7 @@ provisioning (fresh 759-file migration chain).
 | `fixed20-oss-lookup` | A8 | as `fixed20-oss-counts` | 10 to 20 min: the warm samples of each scenario (`--warm-samples`, default 31), since A8 carries the per-scenario p50 latency budget (2026-11-17); the one-sample plumbing run took 24 s plus provisioning |
 | `admission` | B1 | PostgreSQL 18 | dry run: see the receipt (9 requests) |
 | `doc-thread-32` | A11 | PostgreSQL 18 | 10 to 60 min (32 dock turns on one Page; cost grows with the thread until M7) |
+| `context-aware-chat`, `context-aware-chat-hosted` | A12, A13 | PostgreSQL 18, built core and agent-runtime packages. The hosted-schema step also requires the platform root. | 3 to 6 min per schema, including fixture provisioning |
 | `model-calls` | C1 | PostgreSQL 18 | 3 to 6 min (13 turns) |
 | `import-graph-chat` | D1 | none | dry run: seconds |
 | `import-graph-m4` | D2 | platform root (hosted entry) | dry run: seconds |
@@ -211,7 +212,7 @@ The no-tool scenarios are unchanged when the variable is unset.
 
 ## Safety
 
-Timed warm and one-lookup steps require a task-owned quiescence handshake. Use a
+Timed warm, one-lookup and context-aware chat steps require a task-owned quiescence handshake. Use a
 fresh freeze ID for each coordinated measurement window. Each active owner wraps
 their final build/test/browser/fixture command with `quiescence.mjs run --dir
 /abs/quiet --freeze-id final-1 --owner backend [--fixture /owned/fixture/path]

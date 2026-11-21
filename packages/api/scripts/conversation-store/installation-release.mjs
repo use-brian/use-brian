@@ -26,6 +26,7 @@ import * as release8328 from './installation-authentication-8328.mjs'
 import * as release8329 from './installation-authentication-8329.mjs'
 import * as release8330 from './installation-authentication-8330.mjs'
 import * as release8331 from './installation-authentication-8331.mjs'
+import * as release8332 from './installation-authentication-8332.mjs'
 
 const profiles=new Map([
  ['8294_fused_admission_plan_size.sql',release8294],
@@ -53,6 +54,7 @@ const profiles=new Map([
  ['8329_conversation_memory_query_candidates.sql',release8329],
  ['8330_memory_prompt_candidates.sql',release8330],
  ['8331_workspace_mcp_dispatch.sql',release8331],
+ ['8332_conversation_context_cost.sql',release8332],
 ])
 export const hasInstallationRelease=head=>profiles.has(head)
 function profileForRelease(head){

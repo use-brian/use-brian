@@ -86,10 +86,14 @@ export function createTurnTiming(now: () => number = () => performance.now()): T
  * reaches its `mark('loop')`, so without this the whole model run was booked
  * as `post_ms` (2026-10-12: a 277 s research turn logged `post_ms=275957`,
  * pointing an investigation at post-processing that took under a second).
- * A turn that started its loop and never closed it ends that phase as `loop`.
+ * An interrupted preparation records the interval since its last phase mark.
  */
 export function markTurnEnd(timing: TurnTiming): void {
   const phases = timing.snapshot()
-  if ('prompt_ms' in phases && !('loop_ms' in phases)) timing.mark('loop')
+  if (!('prompt_ms' in phases) && !('loop_ms' in phases)) {
+    timing.mark('preparation_interrupted')
+    return
+  }
+  if (!('loop_ms' in phases)) timing.mark('loop')
   timing.mark('post')
 }

@@ -70,6 +70,18 @@ describe('[COMP:api/turn-timings] per-phase turn accounting', () => {
     expect(snap.post_ms).toBe(0)
   })
 
+  it('records interrupted preparation before model entry and preserves the last completed phase', () => {
+    const c = clock()
+    const timing = createTurnTiming(c.now)
+    c.tick(400); timing.mark('admission')
+    timing.count('prompt_ambient_full_supplied_context')
+    c.tick(5100); markTurnEnd(timing)
+    expect(timing.snapshot()).toEqual({
+      total_ms: 5500, admission_ms: 400, preparation_interrupted_ms: 5100,
+      prompt_ambient_full_supplied_context_count: 1,
+    })
+  })
+
   it('keeps post time separate once the loop closed normally', () => {
     const c = clock()
     const timing = createTurnTiming(c.now)

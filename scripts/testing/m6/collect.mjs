@@ -284,6 +284,21 @@ function admissionLines(row, ctx) {
   return out
 }
 
+function contextAwareChatLines(row, ctx) {
+  const [source] = row.steps, step = ctx.steps[source]
+  return row.cells.flatMap(cell => ['first turn', 'follow-up'].map((phase, index) => {
+    const sample = step?.harness?.[cell]?.[index]
+    const first = sample?.firstTextMs, done = sample?.completionMs
+    if (!Number.isFinite(first) || !Number.isFinite(done) || first < 0 || done < first) {
+      return line(row, cell, phase, { verdict: 'unmeasured', note: stepNote(step, cell), source })
+    }
+    return line(row, cell, phase, {
+      after: Math.round(done), unit: 'ms', afterDetail: `first text at ${Math.round(first)} ms`,
+      budget: '<=5000 ms', verdict: step.status === 'completed' && done <= 5000 ? 'pass' : 'fail', source,
+    })
+  }))
+}
+
 /** Row A11: one 32-turn doc thread; the interim budget applies at turn 32. */
 function docThreadLines(row, ctx) {
   const s = ctx.steps['doc-thread-32'], results = s?.harness?.results ?? []
@@ -415,6 +430,8 @@ function buildLines(ctx) {
       case 'A7': lines.push(...coldLines(row, ctx)); break
       case 'A8': lines.push(...lookupLines(row, ctx)); break
       case 'A9': lines.push(...scalingLines(row, ctx)); break
+      case 'A12':
+      case 'A13': lines.push(...contextAwareChatLines(row, ctx)); break
       case 'A11': lines.push(...docThreadLines(row, ctx)); break
       case 'B1': lines.push(...admissionLines(row, ctx)); break
       case 'C1': lines.push(...modelCallLines(row, ctx)); break
