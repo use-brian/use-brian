@@ -27,7 +27,8 @@
     "test": {
       "dependsOn": ["^build"],
       "env": ["BRIAN_TEST_PARTITION"],
-      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/scripts/testing/unit-partition.mjs", "$TURBO_ROOT$/packages/shared/src/department-isolation-coverage.ts"]
+      "passThroughEnv": ["VITEST_MIN_FORKS", "VITEST_MAX_FORKS", "VITEST_MIN_THREADS", "VITEST_MAX_THREADS"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/scripts/testing/unit-partition.mjs", "$TURBO_ROOT$/scripts/testing/run-fast-checks.mjs", "$TURBO_ROOT$/packages/shared/src/department-isolation-coverage.ts"]
     },
     "test:integration": {
       "cache": false,

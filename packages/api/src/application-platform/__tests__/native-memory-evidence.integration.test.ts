@@ -39,6 +39,31 @@ describe.sequential('[COMP:api/application-persistence] actual native memory and
   const context={...executionToolContext(authority.execution,{appId:'fixture'}),scopeAccumulator:authority.accumulator}
   return{f,authority,memory,sources,context}
  }
+ it('keeps the exact Memory scope envelope, current row lock and source-table fallback',async()=>{
+  fixture=await persistentContextFixture()
+  const f=fixture,memory=await f.memory('Fictional retained scope metadata',f.ownerId)
+  await f.pool.query('UPDATE public.memories SET valid_to=now(),scope_held=true WHERE id=$1',[memory.id])
+  const owner=await f.pool.connect(),writer=await f.pool.connect()
+  try{
+   await owner.query('BEGIN')
+   const expected=await owner.query(`SELECT jsonb_build_object('workspaceId',m.workspace_id,'userId',m.user_id,
+    'assistantId',m.assistant_id,'sensitivity',m.sensitivity,'compartments',m.compartments,'projectIds',m.project_ids,
+    'resourceKind','memory','resourceId',m.id,'version',m.scope_version::text,
+    'held',m.scope_held,'validTo',m.valid_to,'retractedAt',m.retracted_at) AS value FROM public.memories m WHERE id=$1`,[memory.id])
+   expect(expected.rows[0]?.value).toMatchObject({held:true,validTo:expect.any(String),version:expect.any(String)})
+   const lookup='SELECT read_scope_source($1,\'memory\',$2) AS value'
+   expect((await owner.query(lookup,[f.workspaceId,memory.id])).rows).toEqual(expected.rows)
+   expect((await owner.query(lookup,[crypto.randomUUID(),memory.id])).rows).toEqual([{value:null}])
+   await expect(writer.query('SELECT id FROM public.memories WHERE id=$1 FOR UPDATE NOWAIT',[memory.id])).rejects.toMatchObject({code:'55P03'})
+   await owner.query(`CREATE TEMP TABLE fixture_memory_scope_override ON COMMIT DROP AS
+    SELECT id,workspace_id,user_id,assistant_id,sensitivity,compartments,project_ids,987::bigint scope_version,
+           false scope_held,valid_to,retracted_at FROM public.memories WHERE id=$1`,[memory.id])
+   await owner.query(`CREATE OR REPLACE FUNCTION public.scope_source_table(k text) RETURNS text
+    LANGUAGE sql IMMUTABLE AS 'SELECT ''fixture_memory_scope_override''::text'`)
+   expect((await owner.query(lookup,[f.workspaceId,memory.id])).rows).toEqual(
+    [{value:{...expected.rows[0].value,held:false,version:'987'}}])
+  }finally{await rollbackAndRelease(writer);await rollbackAndRelease(owner)}
+ })
  it('admits real mixed native evidence while preserving the original RPC fallback contract',async()=>{
   const {authority,sources,context}=await setup()
   expect(await rpc(authority.execution,sources,true)).toBeNull()

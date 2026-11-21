@@ -1,7 +1,37 @@
 import { describe, expect, it } from 'vitest'
-import { deliveryAudienceFailureKind, deliveryFailureAnalytics, deliveryFailureMetadata } from '../delivery-failure.js'
+import { contextVerificationUnavailable, deliveryAudienceFailureKind, deliveryFailureAnalytics, deliveryFailureMetadata } from '../delivery-failure.js'
 
 describe('[COMP:api/delivery-authority] safe failure diagnostics', () => {
+  it.each([
+    ['57014', 'canceling statement due to statement timeout', 'statement_timeout', '57', 'native_proof'],
+    ['57014', 'canceling statement due to user request', 'statement_canceled', '57', 'native_proof'],
+    ['55P03', 'canceling statement due to lock timeout', 'lock_timeout', '55', 'native_proof'],
+    ['55P03', 'could not obtain lock on fictional relation', 'lock_unavailable', '55', 'native_proof'],
+    [undefined, 'timeout exceeded when trying to connect', 'pool_timeout', undefined, 'native_proof'],
+  ])('keeps read availability separate for %s %s', (code, message, verificationFailure, sqlstateClass, phase) => {
+    const database = Object.assign(new Error(message), { code, query: 'PRIVATE SQL' })
+    const caller = Object.assign(new Error('PRIVATE scope', { cause: database }), {
+      reason: 'caller_evidence_unavailable', diagnostic: 'source_unverifiable', verificationPhase: phase,
+    })
+    const outcome = contextVerificationUnavailable(caller, 'retained_context')
+    expect(outcome).toMatchObject({ code: 'context_verification_unavailable', retrySafe: false, verificationFailure })
+    expect(deliveryFailureAnalytics(outcome)).toEqual({ verification_phase: phase,
+      ...(sqlstateClass ? { verification_sqlstate_class: sqlstateClass } : {}) })
+    expect(outcome?.message).not.toContain('PRIVATE')
+    expect(outcome?.cause).toBe(caller)
+  })
+
+  it('does not reinterpret a verified refusal or publication outcome', () => {
+    const timeout = Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' })
+    const changed = Object.assign(new Error('scope_source_changed', { cause: timeout }), { diagnostic: 'source_changed' })
+    const publication = Object.assign(timeout, { publicationOutcome: 'unknown', operationMayHaveExecuted: true })
+    expect(contextVerificationUnavailable(changed, 'retained_context')).toBeUndefined()
+    expect(contextVerificationUnavailable(publication, 'retained_context')).toBeUndefined()
+    expect(contextVerificationUnavailable(new Error('Connection terminated due to connection timeout'), 'retained_context'))
+      .toMatchObject({ verificationFailure: 'pool_timeout', verificationPhase: 'pool_checkout' })
+    expect(contextVerificationUnavailable(new Error('unexpected operation timeout'), 'retained_context')).toBeUndefined()
+  })
+
   it('retains only recognized phase and SQLSTATE class through nested causes', () => {
     const database = Object.assign(new Error('PRIVATE query and source'), { code: '57014', detail: 'PRIVATE labels', query: 'PRIVATE SQL' })
     const scoped = Object.assign(new Error('PRIVATE scope', { cause: database }), { verificationPhase: 'native_proof' })

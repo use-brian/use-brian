@@ -44,6 +44,7 @@ import {
 import { applyRLSGucs, getAppPool, getPool, rollbackAndRelease, runWithAgentAccess } from './client.js'
 import { recordDerivedResource, validateDerivedWriteInputs } from './derived-scope-store.js'
 import { assertPreparedConversationCohortEvidence, scopeEvidenceFailureOf, validateCallerScopeEvidence,readValidatedNativeTitleGroup,readValidatedNativePublicationCohorts } from '../context-scope/caller-evidence.js'
+import { ContextVerificationUnavailableError, contextVerificationUnavailable } from '../context-scope/delivery-failure.js'
 import type {NativeTitleHead} from '../application-platform/native-title-group-evidence.js'
 import { readConversationPreparation } from '../application-platform/conversation-evidence.js'
 import {captureConversationQuery,conversationCaptureSources,type ConversationSelection,type ConversationCaptures} from './conversation-store.js'
@@ -328,6 +329,10 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
       // become a normal storage failure. Preserve their code and retry policy.
       throw Object.assign(error, { reason: 'authority_changed' as const })
     }
+    if (action === 'context') {
+      const unavailable = contextVerificationUnavailable(error, 'retained_context')
+      if (unavailable) throw unavailable
+    }
     if (typeof error === 'object' && error !== null && 'reason' in error
       && error.reason === 'caller_evidence_unavailable') changed(error)
     throw error
@@ -393,13 +398,32 @@ export function writeMemoryCreateFrame<T>(authority: SessionContextAuthority, so
   }, undefined, undefined, undefined, true)
 }
 
-async function needsIndividualExternalChecks(workspaceId: string, roots: readonly ScopeSource[]): Promise<boolean> {
-  if (roots.some(root => root.resourceKind === 'external_source')) return true
-  try {
-    return (await readExternalSourceAncestors(workspaceId, roots)).length > 0
-  } catch {
-    // Mixed or unavailable batches preserve the original per-root decisions.
-    return true
+// The ancestry owner accepts 100 inputs. Narrow a mixed group before doing
+// individual source admission, keeping the caller's order and live reader.
+async function* externalQueryRoots(workspaceId: string, roots: readonly ScopeSource[]): AsyncGenerator<ScopeSource> {
+  if (roots.length > 100) {
+    for (let start = 0; start < roots.length; start += 100)
+      yield* externalQueryRoots(workspaceId, roots.slice(start, start + 100))
+    return
+  }
+  if (roots.length > 1 && !roots.some(root => root.resourceKind === 'external_source')) {
+    try {
+      if (!(await readExternalSourceAncestors(workspaceId, roots)).length) return
+    } catch (error) {
+      if (error instanceof ContextVerificationUnavailableError) throw error
+      // Conflicting versions or a shape the batch cannot resolve still get
+      // the owner's independent checks. A singleton failure propagates.
+    }
+  }
+  if (roots.length > 8) {
+    const middle = Math.ceil(roots.length / 2)
+    yield* externalQueryRoots(workspaceId, roots.slice(0, middle))
+    yield* externalQueryRoots(workspaceId, roots.slice(middle))
+    return
+  }
+  for (const root of roots) {
+    if (root.resourceKind === 'external_source' || (await readExternalSourceAncestors(workspaceId, [root])).length)
+      yield root
   }
 }
 
@@ -415,9 +439,7 @@ export async function readRetainedQueryFrame<T>(authority:SessionContextAuthorit
  const wiring=getSharedRetainedSourceAuthority(),host=retainedHosts.get(execution)
  const prepare=host??(wiring?((e:ExecutionContext,s:readonly ScopeSource[],a:'context'|'retain')=>wiring.coordinator.prepare(e,s,a)):undefined)
  const admitted:ScopeSource[]=[]
- const externalCandidates=await needsIndividualExternalChecks(execution.security.access.workspaceId,roots)?roots:[]
- for(const root of externalCandidates){
-  if(root.resourceKind!=='external_source'&&!(await readExternalSourceAncestors(root.workspaceId,[root])).length)continue
+ for await(const root of externalQueryRoots(execution.security.access.workspaceId,roots)){
   if(!prepare)changed()
   try{await prepare(execution,[root],'context');admitted.push(root)}
   catch(error){if(!(error instanceof SourceProtocolError)||error.code!=='source_access_denied')throw error}
@@ -497,10 +519,7 @@ async function sessionQueryFrame<T>(authority:SessionContextAuthority,rawRoots:r
  // floor transaction; their acquisition frame applies it before any payload.
  const externalRoots:ScopeSource[]=[]
  if(roots.some(root=>root.workspaceId!==execution.security.access.workspaceId))changed()
- const externalCandidates=await needsIndividualExternalChecks(execution.security.access.workspaceId,roots)?roots:[]
- for(const root of externalCandidates){
-  if(root.resourceKind==='external_source'||(await readExternalSourceAncestors(root.workspaceId,[root])).length)externalRoots.push(root)
- }
+ for await(const root of externalQueryRoots(execution.security.access.workspaceId,roots))externalRoots.push(root)
  const floor=externalRoots.length?await transaction(authority,[],'context',client=>pinNativeSessionQueryFloor(authority,client)):null
  const admittedRoots:ScopeSource[]=[]
  for(const root of externalRoots){

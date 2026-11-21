@@ -38,6 +38,31 @@ values and immutable observations. Portable restore carries the durable
 source edges. The intent table is installation-local and must be empty in a
 committed snapshot.
 
+## Complete Memory ancestry
+
+The shared lineage reader expands immediate Memory predecessors as it walks
+the graph. It follows every derivation attached to each resource identity,
+including derivations recorded at earlier versions. Predecessors inherit the
+requested version and enter the walk only when the current node exists in
+that workspace. The recursive union deduplicates exact kind, ID and version
+tuples and terminates cycles. The complete set still has a 4,096-node bound.
+
+The optimized branch verifies the installed source-edge routines before it
+reads direct Memory edges. Other source families continue through their
+canonical handlers. Helper drift or a changed transaction snapshot sends the
+reader through the canonical edge walk. This is an operation-local graph read
+under the original owner and admission contract.
+
+Readers of the transitive Memory edge set still expand every predecessor.
+Their ancestor walk looks up each predecessor through the existing
+workspace-and-successor index.
+
+The Memory scope reader and both ancestor walks locate each exact anchor
+through the globally unique Memory ID. The requested workspace must match
+that row before the scope reader locks it with `FOR SHARE`.
+This shape keeps point reads bounded when fresh workspace data has not yet
+been analyzed.
+
 ## Regression coverage
 
 The private-transcript integration suite exercises populated and empty indexes, immediate constraints, repeated writes in the same turn, final reply publication, fresh-index visibility, independent source changes, credential withdrawal, cross-projection separation, selector permissions/cleanup, and rollback after late SQL rejection. The Memory tool suite also verifies explicit learning after a ranked-index read.

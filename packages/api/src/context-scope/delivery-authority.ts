@@ -14,7 +14,7 @@ import { providerChannelIdFromSession } from '../db/session-channel-id.js'
 import { policyFor } from '../session-kind.js'
 import { findAssistantById } from '../db/users.js'
 import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
-import { resolveLiveAccessCeilingSystem } from './resolve-turn-scope.js'
+import { projectRoomAudienceCeiling, resolveLiveAccessCeilingSystem } from './resolve-turn-scope.js'
 import { scopeEvidenceFailureOf, validateAudienceScopeEvidence, type ScopeEvidenceFailure } from './caller-evidence.js'
 import { roomAudienceCeiling } from '../routes/_room-binding.js'
 import { isWebTransport } from '../session-kind.js'
@@ -471,6 +471,23 @@ export function createDeliveryAudienceAuthorizer(dependencies: Dependencies = {}
       let ceiling: AccessCeiling
       if (policyFor(session).deliveryCeiling.ceiling === 'audience') {
         ceiling = roomAudienceCeiling(input.workspaceId, session)
+        const projectId = session.contextProjectId
+        if (session.contextCompartments?.some(label => label.startsWith('project:'))) {
+          // A stored Project label is a sink restriction, never admission.
+          // Resolve the original (person, answering assistant) pair afresh,
+          // then retain only the exact room Project and no Departments.
+          if (!projectId || session.contextGroupId || session.contextCompartments.length !== 1
+            || session.contextCompartments[0] !== `project:${projectId}`) return denied(undefined, 'projects')
+          const member = await memberCeiling(input.workspaceId, input.assistantId, input.userId, deps, input.recipientMode)
+          if (!member.ceiling) return denied(undefined, member.diagnostic)
+          const grant = projectRoomAudienceCeiling(member.ceiling, { ...session, effectiveClearance: ceiling.clearance }).departmentRead
+          // Owner oversight reads do not authorize speaking into the room;
+          // both live roster edges must still admit this pair as a member.
+          if (grant?.projects?.[projectId] !== 'member') return denied(undefined, 'projects')
+          // Anonymous destination metadata only, not a replacement SQL actor
+          // or a reusable principal grant. Source proofs retain the invocation.
+          ceiling = { ...ceiling, departmentRead: { ...grant, userId: '' } }
+        }
       } else {
         if (session.userId !== input.userId) return denied(undefined, 'session_not_owner')
         // An owner's personal thread (decision D2): its audience is the owner,

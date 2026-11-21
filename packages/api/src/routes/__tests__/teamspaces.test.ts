@@ -14,13 +14,10 @@ vi.mock('../../db/workspace-store.js', async (importOriginal) => {
 })
 
 // The lazy General-teamspace heal touches the DB — stub it out.
-vi.mock('../../db/teamspace-store.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../db/teamspace-store.js')>()
-  return {
-    ...actual,
-    ensureDefaultTeamspaceSystem: vi.fn(async () => 'ts-general'),
-  }
-})
+vi.mock('../../db/teamspace-store.js', () => ({
+  ensureDefaultTeamspaceSystem: vi.fn(async () => 'ts-general'),
+  joinDefaultTeamspacesSystem: vi.fn(async () => undefined),
+}))
 
 import { getWorkspaceMembershipWithClearanceSystem } from '../../db/workspace-store.js'
 import { teamspacesRoutes } from '../teamspaces.js'

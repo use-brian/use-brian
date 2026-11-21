@@ -1,51 +1,12 @@
-# Build every deployable container on pull requests and publish images from
-# trusted refs to the GitHub Container Registry.
+# Validate affected images and publish from trusted refs to the GitHub Container Registry.
 name: Docker images
 
 on:
   workflow_dispatch:
   pull_request:
-    paths:
-      - ".dockerignore"
-      - ".github/workflows/docker-images.yml"
-      - "apps/api/**"
-      - "apps/app-web/**"
-      - "apps/auth-web/**"
-      - "apps/browser-relay/**"
-      - "apps/discord-connector/**"
-      - "apps/doc-sync/**"
-      - "apps/feishu-connector/**"
-      - "apps/wa-connector/**"
-      - "apps/wechat-connector/**"
-      - "apps/wechat-desktop-bridge/**"
-      - "packages/**"
-      - "package.json"
-      - "pnpm-lock.yaml"
-      - "pnpm-workspace.yaml"
-      - "tsconfig.base.json"
-      - "turbo.json"
   push:
     branches: [main, develop]
     tags: ["v*"]
-    paths:
-      - ".dockerignore"
-      - ".github/workflows/docker-images.yml"
-      - "apps/api/**"
-      - "apps/app-web/**"
-      - "apps/auth-web/**"
-      - "apps/browser-relay/**"
-      - "apps/discord-connector/**"
-      - "apps/doc-sync/**"
-      - "apps/feishu-connector/**"
-      - "apps/wa-connector/**"
-      - "apps/wechat-connector/**"
-      - "apps/wechat-desktop-bridge/**"
-      - "packages/**"
-      - "package.json"
-      - "pnpm-lock.yaml"
-      - "pnpm-workspace.yaml"
-      - "tsconfig.base.json"
-      - "turbo.json"
 
 concurrency:
   group: docker-images-${{ github.ref }}
@@ -55,44 +16,31 @@ permissions:
   contents: read
 
 jobs:
+  scope:
+    name: Select deployable images
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.images.outputs.matrix }}
+      mode: ${{ steps.images.outputs.mode }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: images
+        run: node scripts/testing/docker-scope.mjs
+
   validate:
+    needs: scope
     name: Validate ${{ matrix.image }}
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && needs.scope.outputs.mode != 'none'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - image: api
-            context: .
-            dockerfile: apps/api/Dockerfile
-          - image: app-web
-            context: .
-            dockerfile: apps/app-web/Dockerfile
-          - image: auth-web
-            context: .
-            dockerfile: apps/auth-web/Dockerfile
-          - image: browser-relay
-            context: .
-            dockerfile: apps/browser-relay/Dockerfile
-          - image: discord-connector
-            context: .
-            dockerfile: apps/discord-connector/Dockerfile
-          - image: doc-sync
-            context: .
-            dockerfile: apps/doc-sync/Dockerfile
-          - image: feishu-connector
-            context: .
-            dockerfile: apps/feishu-connector/Dockerfile
-          - image: wa-connector
-            context: .
-            dockerfile: apps/wa-connector/Dockerfile
-          - image: wechat-connector
-            context: .
-            dockerfile: apps/wechat-connector/Dockerfile
-          - image: wechat-desktop-bridge
-            context: apps/wechat-desktop-bridge
-            dockerfile: apps/wechat-desktop-bridge/Dockerfile
+      matrix: ${{ fromJSON(needs.scope.outputs.matrix) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -108,49 +56,18 @@ jobs:
           outputs: type=cacheonly
           build-args: ${{ matrix.image == 'app-web' && format('OSS_GIT_COMMIT_SHA={0}', github.sha) || '' }}
           cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
 
   build:
+    needs: scope
     name: Build ${{ matrix.image }}
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && needs.scope.outputs.mode != 'none'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - image: api
-            context: .
-            dockerfile: apps/api/Dockerfile
-          - image: app-web
-            context: .
-            dockerfile: apps/app-web/Dockerfile
-          - image: auth-web
-            context: .
-            dockerfile: apps/auth-web/Dockerfile
-          - image: browser-relay
-            context: .
-            dockerfile: apps/browser-relay/Dockerfile
-          - image: discord-connector
-            context: .
-            dockerfile: apps/discord-connector/Dockerfile
-          - image: doc-sync
-            context: .
-            dockerfile: apps/doc-sync/Dockerfile
-          - image: feishu-connector
-            context: .
-            dockerfile: apps/feishu-connector/Dockerfile
-          - image: wa-connector
-            context: .
-            dockerfile: apps/wa-connector/Dockerfile
-          - image: wechat-connector
-            context: .
-            dockerfile: apps/wechat-connector/Dockerfile
-          - image: wechat-desktop-bridge
-            context: apps/wechat-desktop-bridge
-            dockerfile: apps/wechat-desktop-bridge/Dockerfile
+      matrix: ${{ fromJSON(needs.scope.outputs.matrix) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -204,26 +121,15 @@ jobs:
 
   publish:
     name: Publish ${{ matrix.image }}
-    if: github.event_name != 'pull_request'
-    needs: build
+    if: github.event_name != 'pull_request' && needs.scope.outputs.mode != 'none'
+    needs: [scope, build]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     strategy:
       fail-fast: false
-      matrix:
-        image:
-          - api
-          - app-web
-          - auth-web
-          - browser-relay
-          - discord-connector
-          - doc-sync
-          - feishu-connector
-          - wa-connector
-          - wechat-connector
-          - wechat-desktop-bridge
+      matrix: ${{ fromJSON(needs.scope.outputs.matrix) }}
 
     steps:
       - name: Download image digest

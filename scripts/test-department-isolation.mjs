@@ -161,14 +161,15 @@ async function run() {
     : suitesForShard(shard, profile)
   const fixtureChecks = fixtureChecksForSuites(selectedSuites)
   const native = fixtureChecks.length > 0
-  const preparationStarted = Date.now()
+  const preparationStarted = performance.now()
   console.log(`Preparing ${native ? 'native PostgreSQL' : 'embedded acceptance'} fixture`)
   // Every native suite shares the ordinary-owner fixture that migration 8274 requires.
   const fixture = native ? await createLocalFixture({ pgBin, prepareTemplate: true, migrationProgress: true }) : {
     directory: await mkdtemp(join(tmpdir(), 'brian-isolation-report-')), env: {},
     async dispose() { await rm(this.directory, { recursive: true, force: true }) },
   }
-  console.log(`Prepared fixture in ${Math.round((Date.now() - preparationStarted) / 1000)}s`)
+  const fixturePreparationMs = Math.round(performance.now() - preparationStarted)
+  console.log(`Prepared fixture in ${Math.round(fixturePreparationMs / 1000)}s`)
   try {
     if(reportPath&&resolve(reportPath).startsWith(`${resolve(fixture.directory)}/`))throw new Error('--report must be outside the disposable fixture')
     const reports = join(fixture.directory, 'reports')
@@ -178,7 +179,9 @@ async function run() {
       ...runtime,...fixture.env,...(fixture.adminUrl ? { CONTEXT_SCOPE_TEST_DATABASE_URL:fixture.adminUrl } : {}),
       CI:'true',GEMINI_API_KEY:'',OPENAI_API_KEY:'',ANTHROPIC_API_KEY:'',BRIAN_TEST_NO_PAID:'1',
     }
+    const fixtureChecksStarted = performance.now()
     if (native) await runCommand('node', ['--test', ...fixtureChecks], { cwd: root, env, inherit: true })
+    const fixtureChecksMs = native ? Math.round(performance.now() - fixtureChecksStarted) : 0
     const suiteResults=[]
     const assertions=[]
     for (const suite of selectedSuites) {
@@ -238,7 +241,8 @@ async function run() {
     }
     if (!isDeepStrictEqual(metadata, await currentMetadata(env))) throw new Error('Source changed during acceptance execution')
     const finalReport = createAcceptanceReport({
-      metadata: { ...metadata, migration: await migrationRevision(fixture.adminUrl) },
+      metadata: { ...metadata, migration: await migrationRevision(fixture.adminUrl),
+        timing: { platform: process.platform, arch: process.arch, node: process.version, fixturePreparationMs, fixtureChecksMs } },
       suites: suiteResults, assertions, foundation, shard, profile,
     })
     await saveReport(finalReport)

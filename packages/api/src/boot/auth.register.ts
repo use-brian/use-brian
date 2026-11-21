@@ -30,6 +30,7 @@ import { createDbLinkedAccountStore } from '../db/linked-accounts.js'
 import { createLinkedIdentityStore } from '../db/linked-identity-store.js'
 import { createChannelRouteStore } from '../db/channel-route-store.js'
 import { createDbLinkCodeStore } from '../db/link-codes.js'
+import { configureHarnessTurnContext, resolveHarnessTurn } from '../project-harness/turn-context.js'
 import { configureBriefTurnContext, resolveBriefTurn } from '../briefs/context.js'
 import { createDbCompartmentStore } from '../db/compartment-store.js'
 import { createDbOAuthClientStore } from '../db/oauth-client-store.js'
@@ -47,6 +48,7 @@ export async function registerAuth(scope: AuthScope) {
   })
   // Accepted Brief grounding + revision boundary for every runner's prepare stage.
   configureBriefTurnContext(resolveBriefTurn)
+  configureHarnessTurnContext(resolveHarnessTurn)
   const resolveBackgroundRuntime = async (workspaceId: string | null | undefined) => {
     if (!workspaceId) return null
     // A denial must not look like a missing custom route. That would let

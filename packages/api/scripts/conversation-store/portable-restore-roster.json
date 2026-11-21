@@ -2,8 +2,8 @@
   "format": 1,
   "status": "reviewed contract; fail closed on any unknown table, sequence, trigger, policy or reference",
   "inventory": {
-    "ledgerCount": 807,
-    "ledgerHead": "8331_workspace_mcp_dispatch.sql"
+    "ledgerCount": 813,
+    "ledgerHead": "8337_project_chat_creation_admission.sql"
   },
   "rules": {
     "D1-ledger": "Migration ledger. The target ledger is produced by the shipped installer; the archived source ledger is retained as original proof and must name the same shipped release.",
@@ -289,22 +289,22 @@
     "native_conversation_conversion_pending": "D6-enrollment-maintenance"
   },
   "counts": {
-    "tables": 597,
-    "durable": 574,
+    "tables": 604,
+    "durable": 581,
     "derived": 20,
     "rebound": 2,
     "rederived": 1,
-    "durableOrRebound": 576,
+    "durableOrRebound": 583,
     "regprocedureSlots": 4,
     "forceRls": 11,
     "seededTables": 4,
-    "generatedTables": 4,
+    "generatedTables": 5,
     "identityTables": 4,
     "authorityEpochTables": 6,
     "transactionBoundTables": 13,
     "sequences": 6,
-    "triggers": 1436,
-    "suspendedTriggers": 394,
+    "triggers": 1444,
+    "suspendedTriggers": 395,
     "deferredReferences": 23
   },
   "tables": {
@@ -2172,6 +2172,37 @@
       "rule": "F1-durable-fact"
     },
     "programmatic_capture_receipts": {
+      "class": "durable",
+      "rule": "F1-durable-fact"
+    },
+    "project_harness_approvals": {
+      "class": "durable",
+      "rule": "F1-durable-fact"
+    },
+    "project_harness_components": {
+      "class": "durable",
+      "rule": "F1-durable-fact"
+    },
+    "project_harness_evidence": {
+      "class": "durable",
+      "rule": "F1-durable-fact"
+    },
+    "project_harness_execution_audit": {
+      "class": "durable",
+      "rule": "F1-durable-fact"
+    },
+    "project_harness_products": {
+      "class": "durable",
+      "rule": "F1-durable-fact"
+    },
+    "project_harness_revisions": {
+      "class": "durable",
+      "rule": "F1-durable-fact",
+      "generated": [
+        "scope_id"
+      ]
+    },
+    "project_harness_runs": {
       "class": "durable",
       "rule": "F1-durable-fact"
     },
@@ -11420,6 +11451,71 @@
       "class": "fires:recovery-capture",
       "events": [
         "insert",
+        "update"
+      ]
+    },
+    "project_harness_approvals.harness_approval_immutable": {
+      "function": "harness_execution_immutable()",
+      "tgtype": 27,
+      "class": "fires",
+      "events": [
+        "update"
+      ]
+    },
+    "project_harness_components.project_harness_component_parent": {
+      "function": "project_harness_immutable_parent()",
+      "tgtype": 19,
+      "class": "fires",
+      "events": [
+        "update"
+      ]
+    },
+    "project_harness_evidence.harness_evidence_immutable": {
+      "function": "harness_execution_immutable()",
+      "tgtype": 27,
+      "class": "fires",
+      "events": [
+        "update"
+      ]
+    },
+    "project_harness_execution_audit.harness_audit_immutable": {
+      "function": "harness_execution_immutable()",
+      "tgtype": 27,
+      "class": "fires",
+      "events": [
+        "update"
+      ]
+    },
+    "project_harness_products.project_harness_product_parent": {
+      "function": "project_harness_immutable_parent()",
+      "tgtype": 19,
+      "class": "fires",
+      "events": [
+        "update"
+      ]
+    },
+    "project_harness_revisions.project_harness_revision_immutable": {
+      "function": "project_harness_history_immutable()",
+      "tgtype": 27,
+      "class": "fires",
+      "events": [
+        "update"
+      ]
+    },
+    "project_harness_runs.harness_run_audit": {
+      "function": "harness_execution_audit_run()",
+      "tgtype": 21,
+      "class": "suspended:derived-effect",
+      "events": [
+        "insert",
+        "update"
+      ]
+    },
+    "project_harness_runs.harness_run_guard": {
+      "function": "harness_execution_run_guard()",
+      "tgtype": 27,
+      "class": "fires",
+      "events": [
         "update"
       ]
     },

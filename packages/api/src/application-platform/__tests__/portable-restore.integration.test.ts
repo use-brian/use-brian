@@ -18,11 +18,13 @@ import {readAdmittedSessionQuery,publishNativeSessionMessageBatch} from '../../d
 import {resolveSessionTitleAuthority} from '../../routes/session-title-authority.js'
 import {captureCrmErasure} from '../../crm-operations/erasure-journal.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
+import {seedHarnessHistory,verifyHarnessHistory,harnessInstalled,harnessRows,type HarnessHistory} from './fixtures/portable-harness-history.js'
 import {seedRefusedFamilies,type SeededFamilies} from './fixtures/portable-restore-families.js'
 
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 const {sealJson,unsealJson,unsealFile}=await import(new URL('../../../../../scripts/operations/recovery-common.mjs',import.meta.url).href)
 const restore=await import(new URL('../../../scripts/conversation-store/portable-restore.mjs',import.meta.url).href)
+const {authenticateConversationInstallation}=await import(new URL('../../../scripts/conversation-store/installation-release.mjs',import.meta.url).href)
 const phase=process.env.BRIAN_PORTABLE_RESTORE_PHASE,stateDirectory=process.env.BRIAN_PORTABLE_RESTORE_STATE
 // The driver pins the shipped migration set it applied to both chains.
 const sourceRoot=process.env.BRIAN_PORTABLE_RESTORE_SOURCE_ROOT
@@ -32,7 +34,7 @@ const sha=(value:string)=>createHash('sha256').update(value).digest('hex')
 type Claims={userId:string;sessionId:string;authVersion:number}
 type Saved={workspaceId:string;sessionId:string;assistantId:string;private:boolean;ownerClaims:Claims;through:number;turnToken:string}
 type Observation=Record<string,unknown>
-type State={sessions:Saved[];actors:Record<string,Claims>;workspaces:string[];observations:Record<string,Observation>;
+type State={harness?:HarnessHistory;sessions:Saved[];actors:Record<string,Claims>;workspaces:string[];observations:Record<string,Observation>;
  export:{manifestSha256:string;transactionHorizon:string;rows:number;populatedTables:number};moduleExport:{manifestSha256:string};
  checkpoint:{checkpointSha256:string;records:number};erasedAfterExport:string;erasedBeforeExport:string;
  compiledRecordCount?:number;contractModule:string;contractSlots:string[];oids:{metadata:string;catalog:string;root:string};families:SeededFamilies}
@@ -116,6 +118,7 @@ describe.skipIf(phase!=='source').sequential('[COMP:api/portable-restore] portab
    [contractModule,...contractSlots])
   // One admitted row per validator family that refused historical rows before the validator audit.
   const families=await seedRefusedFamilies()
+  const harness=await seedHarnessHistory()
   const observations=await observe({sessions,actors,workspaces})
   expect(Object.values(observations).filter(value=>value.admitted===true).length).toBeGreaterThanOrEqual(3)
   expect(Object.values(observations).filter(value=>value.admitted===false).length).toBeGreaterThanOrEqual(3)
@@ -162,7 +165,7 @@ describe.skipIf(phase!=='source').sequential('[COMP:api/portable-restore] portab
    const checkpoint=await restore.exportErasureCheckpoint({ownerClient:client,destination:join(stateDirectory!,'checkpoint.enc'),key,roster:reviewedRoster})
    expect(checkpoint.records).toBeGreaterThan(0)
    const oids=(await client.query(`SELECT $1::regprocedure::oid::text metadata,$2::regprocedure::oid::text catalog,'public.native_turn_helpers_current()'::regprocedure::oid::text root`,contractSlots)).rows[0]
-   const state:State={sessions,actors,workspaces,observations,export:exported,moduleExport,checkpoint,erasedAfterExport,erasedBeforeExport,compiledRecordCount,contractModule,contractSlots,oids,families}
+   const state:State={sessions,actors,workspaces,observations,export:exported,moduleExport,checkpoint,erasedAfterExport,erasedBeforeExport,compiledRecordCount,contractModule,contractSlots,oids,families,harness}
    await writeFile(join(stateDirectory!,'state.json'),JSON.stringify(state),{mode:0o600})
   }finally{await client.end()}
  },300_000)
@@ -198,6 +201,29 @@ describe.skipIf(phase!=='target').sequential('[COMP:api/portable-restore] authen
   finally{await client.end()}
  }
 
+ it('authenticates the lineage display pin and inherited workspace MCP dispatch catalog',async()=>{
+  await assertLocalFixture()
+  const client=await ownerClient()
+  try{
+   const lineage='public.application_scope_lineage(uuid,text[],uuid[],text[])'
+   const {rows:[display]}=await client.query<{fingerprint:string}>(
+    'SELECT fingerprint FROM public.private_session_display_contract WHERE signature=$1',[lineage])
+   if(!display)throw Error('Fixture lacks the application lineage display pin')
+   await client.query('UPDATE public.private_session_display_contract SET fingerprint=$2 WHERE signature=$1',[lineage,'0'.repeat(64)])
+   try{
+    await expect(authenticateConversationInstallation(client,{sourceRoot})).rejects.toThrow('conversation_context_cost_display_pin_changed')
+   }finally{
+    await client.query('UPDATE public.private_session_display_contract SET fingerprint=$2 WHERE signature=$1',[lineage,display.fingerprint])
+   }
+   await client.query('ALTER TABLE public.workspace_mcp_runs DISABLE TRIGGER workspace_mcp_dispatch_sync')
+   try{
+    await expect(authenticateConversationInstallation(client,{sourceRoot})).rejects.toThrow('installation_additional_catalog_changed')
+   }finally{
+    await client.query('ALTER TABLE public.workspace_mcp_runs ENABLE TRIGGER workspace_mcp_dispatch_sync')
+   }
+  }finally{await client.end()}
+ },300_000)
+
  it('refuses tampered, foreign, drifted and unknown inputs before any durable import',async()=>{
   await assertLocalFixture()
   const s=await state()
@@ -218,6 +244,38 @@ describe.skipIf(phase!=='target').sequential('[COMP:api/portable-restore] authen
   await refuses('unshipped-regprocedure-module','portable_restore_schema_drift',()=>importWith({archiveDirectory:join(stateDirectory!,'module-archive'),expectedManifestSha256:s.moduleExport.manifestSha256}))
   const client=await ownerClient()
   try{
+   if(await harnessInstalled()){
+    const {authenticateConversationInstallation}=await import(new URL('../../../scripts/conversation-store/installation-authentication-8337.mjs',import.meta.url).href)
+    const snapshot=async()=>JSON.stringify({rows:await harnessRows(client),ledger:(await client.query('SELECT to_jsonb(t)::text row FROM _migrations t ORDER BY name')).rows,
+     sessions:(await client.query('SELECT to_jsonb(t)::text row FROM sessions t ORDER BY id')).rows,
+     catalog:(await client.query(`SELECT p.oid::text,pg_get_functiondef(p.oid) definition,p.proacl::text FROM pg_proc p WHERE p.pronamespace='public'::regnamespace AND (p.proname LIKE 'project_harness_%' OR p.proname LIKE 'harness_execution_%') ORDER BY p.oid`)).rows,
+     triggers:(await client.query(`SELECT t.oid::text,pg_get_triggerdef(t.oid) definition,t.tgenabled FROM pg_trigger t WHERE t.tgrelid IN (SELECT oid FROM pg_class WHERE relnamespace='public'::regnamespace AND relname LIKE 'project_harness_%') ORDER BY t.oid`)).rows})
+    const mutations=[
+     ['function',`ALTER FUNCTION public.harness_execution_human(uuid,uuid) COST 101`,'portable_successor_catalog_changed'],
+     ['acl',`GRANT EXECUTE ON FUNCTION public.harness_execution_human(uuid,uuid) TO app_user`,'portable_successor_catalog_changed'],
+     ['trigger',`ALTER TABLE public.project_harness_runs DISABLE TRIGGER harness_run_audit`,'portable_successor_catalog_changed'],
+     ['unknown-prefix',`CREATE FUNCTION public.harness_execution_unreviewed() RETURNS int LANGUAGE sql AS 'SELECT 1'`,'portable_successor_unknown_catalog_object'],
+     ...['8335_project_harnesses.sql','8336_project_harness_verification.sql','8337_project_chat_creation_admission.sql'].map(name=>['receipt:'+name,`DELETE FROM public._migrations WHERE name='${name}'`,'portable_successor_migration_tail_missing']),
+    ]
+    for(const [name,sql,error] of mutations){
+     const before=await snapshot()
+     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ')
+     try{
+      await client.query(sql)
+      // Preserve the caller's rollback boundary while exercising the real
+      // source-owned authenticator, including its transaction cleanup.
+      const owner={getTransactionStatus:()=> 'I',query:async(text:string,values?:unknown[])=>{
+       if(text==='BEGIN ISOLATION LEVEL REPEATABLE READ')return client.query('SAVEPOINT authentication_probe')
+       if(text==='COMMIT')return client.query('RELEASE SAVEPOINT authentication_probe')
+       if(text==='ROLLBACK')return client.query('ROLLBACK TO SAVEPOINT authentication_probe')
+       return client.query(text,values)
+      }}
+      await expect(authenticateConversationInstallation(owner,{sourceRoot})).rejects.toThrow(error)
+     }finally{await client.query('ROLLBACK')}
+     expect(await snapshot()).toBe(before)
+     results.push({name:'8337-authentication-'+name,passed:true,detail:error+'; transaction rolled back, state unchanged'})
+    }
+   }
    await client.query('CREATE TABLE public.fictional_unreviewed_target(id uuid PRIMARY KEY)')
    try{await refuses('unknown-target-table','portable_restore_unknown_table',()=>importWith())}
    finally{await client.query('DROP TABLE public.fictional_unreviewed_target')}
@@ -257,6 +315,7 @@ describe.skipIf(phase!=='target').sequential('[COMP:api/portable-restore] authen
    // Each conversation's 8277 completion header arrives exactly and stays committed for its old token.
    const completions=(await client.query('SELECT session_id,turn_token FROM native_turn_completions ORDER BY session_id')).rows
    expect(completions.map(row=>row.session_id).sort()).toEqual(s.sessions.map(session=>session.sessionId).sort())
+   if(s.harness)await verifyHarnessHistory(s.harness,client)
    // Every seeded validator family arrives (record digests already proved each table exact).
    for(const row of s.families.rows)expect((await client.query(`SELECT count(*)::int n FROM public.${row.table} WHERE ${row.column}=$1`,[row.id])).rows[0].n,row.family+' '+row.table).toBe(row.count)
    // Regression: the 8063 lease stamp is suspended during import, so the archived last token survives.
@@ -287,6 +346,7 @@ describe.skipIf(phase!=='target').sequential('[COMP:api/portable-restore] authen
    await expect(restore.admitRestoredInstallation({ownerClient:client,importReceipt:receipt,receivingProof:{status:'passed',checks:[]}})).rejects.toThrow('portable_restore_activation_withheld')
   }finally{await client.end()}
   const checks:{name:string;passed:boolean}[]=configuredTaskProof?[{name:'configured-task-origin-seal-archive-and-cleared-import',passed:true}]:[]
+  if(s.harness)checks.push({name:'8337-seven-table-exact-history-digests-audit-and-live-guards',passed:true})
   if(s.compiledRecordCount)checks.push({name:'compiled-record-copy-rederived',passed:true})
   const expected=s.observations
   const actual=await observe(s)

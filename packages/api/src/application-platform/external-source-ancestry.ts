@@ -4,6 +4,7 @@ import { resourceScopeKey, type ScopeSource } from '@use-brian/agent-runtime/sec
 import { SourceProtocolError } from '@use-brian/brian-app/connector'
 import type { PoolClient } from 'pg'
 import { getPool } from '../db/client.js'
+import { contextVerificationUnavailable } from '../context-scope/delivery-failure.js'
 
 const observationSource = z.object({ workspaceId: z.string().uuid(), userId: z.null(), assistantId: z.null(),
   resourceKind: z.literal('external_source'), resourceId: z.string().uuid(), version: z.string().min(1),
@@ -24,7 +25,11 @@ export async function readExternalSourceAncestors(workspaceId: string, rawRoots:
     let rows: Array<{ nodeVersion: string; source: ScopeSource | null }>
     try {
       rows = (await (client ?? getPool()).query<{ nodeVersion: string; source: ScopeSource | null }>(`SELECT node_version AS "nodeVersion",source FROM ${client ? 'read_admitted_external_source_dependencies' : 'read_external_source_dependencies'}($1,$2,$3,$4)`, [workspaceId,part.map(source => source.resourceKind),part.map(source => source.resourceId),part.map(source => source.version)])).rows
-    } catch { denied() }
+    } catch (error) {
+      const unavailable = contextVerificationUnavailable(error, 'ancestry')
+      if (unavailable) throw unavailable
+      denied()
+    }
     for (const row of rows) {
       const source = observationSource.safeParse(row.source)
       if (!source.success || source.data.workspaceId !== workspaceId || source.data.version !== row.nodeVersion) denied()

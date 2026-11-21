@@ -35,10 +35,8 @@ import { findAssistantById } from '../db/users.js'
 import { withChatLock } from '../db/chat-lock.js'
 import { resolveChannelUser, type ChannelUserStore } from '../db/channel-user-store.js'
 import { resolveRoutingForSurface, getChannelForWebhook } from '../db/channels-store.js'
-import { parseFileContent } from '@use-brian/core/files/parsers.js'
 import { buildTool } from '@use-brian/agent-runtime/tools/types.js'
 import { z } from 'zod'
-import type { ContentBlock } from '@use-brian/agent-runtime/providers/types.js'
 import type { AnalyticsLogger } from '@use-brian/core/analytics/logger.js'
 import type { MemoryStore } from '@use-brian/core/memory/types.js'
 import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
@@ -47,10 +45,10 @@ import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
 import type { Tool } from '@use-brian/agent-runtime/tools/types.js'
 import type { ChannelIntegrationStore, ChannelIntegrationConfig, DiscordCredentials } from '../db/channel-integrations.js'
 import type { ConnectorStore } from '../db/connector-store.js'
-import { humanizeToolName, describeToolInput } from '@use-brian/shared'
 import { processChannelMessage } from './channel-pipeline.js'
 import { channelUserErrorText } from './_channel-error-text.js'
-import { cacheInboundImageTag } from './channel-file-cache.js'
+import { buildDownloadedChannelContent } from './channel-file-cache.js'
+import { createEditableChannelStatus } from './channel-editable-status.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import { classifyMedia, buildDocumentFiledReply, buildOversizeDocReply } from '../ingest/channel-media-intake.js'
 
@@ -120,8 +118,6 @@ export type DiscordRouteOptions = {
   }) => Promise<import('../ingest/channel-media-intake.js').ChannelMediaIntakeResult>
   capabilityStore: import('@use-brian/core/authorization/types.js').CapabilityStore
 }
-
-const STATUS_THROTTLE_MS = 1200
 
 const interactionSchema = z.object({
   // Internal channels row id: the common interaction integration identity.
@@ -615,70 +611,24 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
     // Documents ride BOTH paths — only AV is excluded from this turn's blocks.
     const contentBlockFiles = (incoming.files ?? []).filter((f) => !isAv(f.mimeType))
 
-    // ── Build content blocks (text + downloaded attachments) ──
-    const userContentBlocks: ContentBlock[] = []
-    if (contentBlockFiles.length) {
-      const downloads = await Promise.all(
-        contentBlockFiles.map(async (file) => {
-          try {
-            // Discord CDN URLs are pre-signed — fetch directly, no auth header.
-            const resp = await fetch(file.url)
-            if (!resp.ok) {
-              console.error(`[discord] file download failed (${resp.status}): ${file.name}`)
-              return null
-            }
-            return { ...file, buffer: Buffer.from(await resp.arrayBuffer()) }
-          } catch (err) {
-            console.error(`[discord] failed to download file: ${file.name}`, err)
-            return null
-          }
-        }),
-      )
-      for (const dl of downloads) {
-        if (!dl) continue
-        if (dl.mimeType.startsWith('image/') || dl.mimeType === 'application/pdf') {
-          userContentBlocks.push({ type: 'image', mimeType: dl.mimeType, data: dl.buffer.toString('base64') })
-          // Save-on-request seam — without the tag the model can SEE the
-          // image but holds no reference to it, so "keep this" / "attach
-          // this to the email" dead-ends. `channelUserId` MUST match the
-          // session key the pipeline uses below. Empty string on any miss
-          // keeps the pre-existing block-only turn.
-          const tag = options.fileStore
-            ? await cacheInboundImageTag({
-                fileStore: options.fileStore,
-                channelType: 'discord',
-                channelId: incoming.channelId,
-                userId: channelUserId,
-                assistant,
-                file: { buffer: dl.buffer, mime: dl.mimeType, fileName: dl.name },
-              })
-            : ''
-          if (tag) userContentBlocks.push({ type: 'text', text: tag })
-        } else {
-          const parsedFile = await parseFileContent(dl.buffer, dl.mimeType, dl.name)
-          if (
-            parsedFile.mediaMimeType === 'application/pdf' ||
-            parsedFile.mediaMimeType?.startsWith('image/')
-          ) {
-            userContentBlocks.push({
-              type: 'image',
-              mimeType: parsedFile.mediaMimeType,
-              data: dl.buffer.toString('base64'),
-            })
-          } else {
-            userContentBlocks.push({
-              type: 'text',
-              text: `<attached_file name="${dl.name}" type="${dl.mimeType}">\n${parsedFile.text}\n</attached_file>`,
-            })
-          }
+    // Discord CDN URLs are pre-signed. Fetch directly without credentials.
+    const downloads = await Promise.all(contentBlockFiles.map(async (file) => {
+      try {
+        const resp = await fetch(file.url)
+        if (!resp.ok) {
+          console.error(`[discord] file download failed (${resp.status}): ${file.name}`)
+          return null
         }
+        return { ...file, buffer: Buffer.from(await resp.arrayBuffer()) }
+      } catch (err) {
+        console.error(`[discord] failed to download file: ${file.name}`, err)
+        return null
       }
-    }
-    if (incoming.text.trim()) {
-      userContentBlocks.unshift({ type: 'text', text: incoming.text })
-    } else if (userContentBlocks.length === 0 && !params.workflowCallback) {
-      return
-    }
+    }))
+    const userContentBlocks = await buildDownloadedChannelContent(incoming.text, downloads, {
+      fileStore: options.fileStore, channelType: 'discord', channelId, userId: channelUserId, assistant,
+    })
+    if (!userContentBlocks.length && !params.workflowCallback) return
 
     // ── reactToMessage tool ──
     const extraTools = new Map(options.tools)
@@ -689,40 +639,7 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
     })
     extraTools.set('reactToMessage', reactToMessage)
 
-    // ── Status: one message, edited in place (Discord has no native indicator) ──
-    let statusMessageId: string | undefined
-    let lastStatusUpdate = 0
-    type ToolEntry = { id: string; name: string; description?: string; done: boolean }
-    const toolTimeline: ToolEntry[] = []
-
-    function formatToolStatus(): string {
-      const active = toolTimeline.filter((t) => !t.done)
-      if (active.length > 0) {
-        const current = active[active.length - 1]
-        return current.description ?? humanizeToolName(current.name)
-      }
-      if (toolTimeline.length > 0) {
-        const last = toolTimeline[toolTimeline.length - 1]
-        return `Done: ${last.description ?? humanizeToolName(last.name)}`
-      }
-      return 'Thinking...'
-    }
-
-    async function setStatus(text: string, force = false): Promise<void> {
-      const now = Date.now()
-      if (!force && now - lastStatusUpdate < STATUS_THROTTLE_MS) return
-      lastStatusUpdate = now
-      try {
-        if (!statusMessageId) {
-          statusMessageId = await adapter.sendStatus(channelId, text)
-        } else {
-          await adapter.editMessage(channelId, statusMessageId, { text })
-        }
-      } catch {
-        // Non-critical.
-      }
-    }
-
+    const progress = createEditableChannelStatus(adapter, channelId)
     const abortController = new AbortController()
 
     await processChannelMessage({
@@ -796,35 +713,7 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
         async postNotice(text) {
           await adapter.sendMessage(channelId, { text })
         },
-        async onProcessingStart() {
-          await setStatus('Thinking...', true)
-        },
-        async onStatus(message) {
-          await setStatus(message, true)
-        },
-        async onToolStart(id, name) {
-          toolTimeline.push({ id, name, done: false })
-          await setStatus(formatToolStatus())
-        },
-        async onToolInput(id, name, input) {
-          const desc = describeToolInput(name, input)
-          if (desc) {
-            const entry = toolTimeline.find((t) => t.id === id)
-            if (entry) entry.description = desc
-            await setStatus(formatToolStatus())
-          }
-        },
-        async onToolResult(results) {
-          for (const block of results) {
-            if (block.type === 'tool_result') {
-              const entry = toolTimeline.find(
-                (t) => t.id === (block as ContentBlock & { toolUseId?: string }).toolUseId,
-              )
-              if (entry) entry.done = true
-            }
-          }
-          await setStatus(formatToolStatus())
-        },
+        ...progress.hooks,
         async onGoalAccepted(message) {
           await adapter.sendMessage(channelId, { text: message })
         },
@@ -841,14 +730,14 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
           // A reply carrying documents always sends fresh — an edit cannot
           // attach uploads, so the edit path would silently drop them.
           const renderedLength = denormalizeActions({ text: reply, actions }).text.length
-          if (statusMessageId && !hasDocuments && renderedLength <= adapter.maxMessageLength) {
-            await adapter.editMessage(channelId, statusMessageId, { text: reply, format: 'markdown', actions })
-            channelMessageId = statusMessageId
-            statusMessageId = undefined
+          if (progress.messageId && !hasDocuments && renderedLength <= adapter.maxMessageLength) {
+            await adapter.editMessage(channelId, progress.messageId, { text: reply, format: 'markdown', actions })
+            channelMessageId = progress.messageId
+            progress.clear()
           } else {
-            if (statusMessageId) {
-              await adapter.deleteMessage?.(channelId, statusMessageId).catch(() => {})
-              statusMessageId = undefined
+            if (progress.messageId) {
+              await adapter.deleteMessage?.(channelId, progress.messageId).catch(() => {})
+              progress.clear()
             }
             channelMessageId = await adapter.sendMessage(
               channelId,
@@ -868,9 +757,9 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
           return null
         },
         async sendError(err) {
-          if (statusMessageId) {
-            await adapter.deleteMessage?.(channelId, statusMessageId).catch(() => {})
-            statusMessageId = undefined
+          if (progress.messageId) {
+            await adapter.deleteMessage?.(channelId, progress.messageId).catch(() => {})
+            progress.clear()
           }
           await adapter.sendMessage(channelId, {
             text: channelUserErrorText(err),
@@ -878,9 +767,9 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
         },
         async onCleanup() {
           // A leftover status message means we errored before sending a reply.
-          if (statusMessageId) {
-            await adapter.deleteMessage?.(channelId, statusMessageId).catch(() => {})
-            statusMessageId = undefined
+          if (progress.messageId) {
+            await adapter.deleteMessage?.(channelId, progress.messageId).catch(() => {})
+            progress.clear()
           }
         },
       },

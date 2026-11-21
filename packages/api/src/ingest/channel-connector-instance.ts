@@ -1,10 +1,10 @@
 /**
  * Shared channel -> connector_instance provisioning.
  *
- * Slack, WhatsApp, and Feishu all keep channel credentials exclusively on
+ * Slack, WhatsApp, Feishu, and Teams keep channel credentials on
  * `channel_integrations` while Pipeline C rules live on a metadata-only
  * workspace `connector_instance`. This helper owns that common lifecycle so a
- * new channel source does not copy the same insert/seed/link transaction.
+ * new channel source can reuse the insert, optional rule seed, and link steps.
  *
  * [COMP:api/channel-connector-instance]
  */
@@ -15,7 +15,7 @@ import { query, queryWithRLS } from '../db/client.js'
 export type EnsureChannelConnectorInstanceInput = {
   channelIntegrationId: string
   actingUserId: string
-  provider: Extract<IngestSourceProvider, 'slack' | 'whatsapp' | 'feishu'>
+  provider: Extract<IngestSourceProvider, 'slack' | 'whatsapp' | 'feishu'> | 'msteams'
   fallbackLabel: string
   /** Feishu is default-off until an observed group is explicitly enabled. */
   initialIngestionEnabled?: boolean
@@ -34,9 +34,8 @@ export async function ensureChannelConnectorInstance(
   )
   const row = linked.rows[0]
   if (!row) {
-    throw new Error(
-      `ensureChannelConnectorInstance: no channel_integrations row for id=${input.channelIntegrationId}`,
-    )
+    const operation = input.provider === 'msteams' ? 'ensureMsTeamsConnectorInstance' : 'ensureChannelConnectorInstance'
+    throw new Error(`${operation}: no channel_integrations row for id=${input.channelIntegrationId}`)
   }
   if (row.id) return row.id
 
@@ -84,7 +83,7 @@ export async function ensureChannelConnectorInstance(
   )
   const connectorInstanceId = ci.rows[0].id
 
-  const templates = DEFAULT_INGEST_RULES[input.provider]
+  const templates = input.provider === 'msteams' ? [] : DEFAULT_INGEST_RULES[input.provider]
   if (templates.length > 0) {
     // The rules table is a hosted Pipeline-C overlay. OSS still creates the
     // metadata CI so channel state stays edition-neutral, but skips seeding

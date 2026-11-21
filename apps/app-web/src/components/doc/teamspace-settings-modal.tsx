@@ -49,6 +49,7 @@ import {
   updateTeamspace,
   type Teamspace,
   type TeamspaceMember,
+  type TeamspaceMetadata,
   type TeamspaceSensitivity,
 } from "@/lib/api/teamspaces";
 import { teamspaceErrorCopyKey } from "@/lib/teamspace-errors";
@@ -96,7 +97,7 @@ type TeamspaceSettingsPatch = {
   workspaceGroupId?: string | null;
 };
 
-function teamspaceDraftFrom(teamspace: Teamspace): TeamspaceSettingsDraft {
+function teamspaceDraftFrom(teamspace: TeamspaceMetadata): TeamspaceSettingsDraft {
   return {
     name: teamspace.name,
     icon: teamspace.icon,
@@ -483,7 +484,7 @@ function GeneralTab({
       setError("");
     }
     let failed = false;
-    let updated: Teamspace | null = null;
+    let updated: TeamspaceMetadata | null = null;
     try {
       updated = await updateTeamspace(id, patch);
       if (teamspaceIdRef.current === id) {

@@ -30,7 +30,7 @@ permissions:
 
 jobs:
   ci-scope:
-    if: >-
+    if: &skip-duplicate-release-pr >-
       github.event_name != 'pull_request' ||
       github.head_ref != 'develop' ||
       github.event.pull_request.head.repo.full_name != github.repository
@@ -41,6 +41,7 @@ jobs:
       shards: ${{ steps.scope.outputs.shards }}
       total: ${{ steps.scope.outputs.total }}
       matrix: ${{ steps.scope.outputs.matrix }}
+      calendar: ${{ steps.scope.outputs.calendar }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,6 +51,79 @@ jobs:
           node-version: 22
       - id: scope
         run: node scripts/testing/ci-scope.mjs
+      - name: Retain proposed change impact (report-only)
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-change-impact
+          path: ${{ runner.temp }}/ci-change-impact.json
+          if-no-files-found: warn
+
+  # Calendar was the last suite in five measured runs. Let its own API test
+  # dependency closure build independently of the shared package build.
+  calendar-isolation:
+    if: *skip-duplicate-release-pr
+    needs: ci-scope
+    name: Department isolation (${{ matrix.shard }}/${{ needs.ci-scope.outputs.total }})${{ matrix.labelSuffix }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeoutMinutes }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.ci-scope.outputs.calendar) }}
+    steps:
+      - &isolation-checkout
+        uses: actions/checkout@v4
+      - &isolation-pnpm
+        uses: pnpm/action-setup@v4
+      - &isolation-node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - &isolation-postgres
+        name: Install PostgreSQL 18 with required extensions
+        if: needs.ci-scope.outputs.profile == 'current' || matrix.shard > 3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl
+          sudo install -d /usr/share/postgresql-common/pgdg
+          # Retry transient TLS/read failures with verification enabled.
+          sudo curl --fail --show-error --location \
+            --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 180 \
+            --connect-timeout 15 --max-time 60 \
+            --output /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $VERSION_CODENAME-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-18 postgresql-18-pgvector
+
+      - &isolation-install
+        name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Calendar test dependencies
+        run: pnpm exec turbo run build --filter='@use-brian/api^...'
+
+      - &isolation-acceptance
+        name: Run no-credential acceptance
+        run: >-
+          node scripts/test-department-isolation.mjs
+          --pg-bin /usr/lib/postgresql/18/bin
+          --profile ${{ needs.ci-scope.outputs.profile }}
+          --shard ${{ matrix.shard }}/${{ needs.ci-scope.outputs.total }}
+          --report /tmp/department-isolation-${{ matrix.shard }}.json
+
+      - &isolation-receipt
+        name: Upload acceptance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifactName }}
+          path: /tmp/department-isolation-${{ matrix.shard }}.json
+          if-no-files-found: error
 
   database-test-dependencies:
     if: >-
@@ -105,6 +179,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Run focused checks from source
+        run: pnpm check:fast --all
+
+      - name: Verify fast check selection and hook feedback
+        run: node --test scripts/__tests__/run-fast-checks.test.mjs scripts/__tests__/after-edit-fast-checks.test.mjs
+
       - name: Verify canonical conversation migration source
         run: |
           node packages/api/scripts/conversation-store/build.mjs --check
@@ -128,7 +208,16 @@ jobs:
         run: pnpm smoke
 
       - name: Test build config and release-evidence checks
-        run: node --test scripts/__tests__/api-build-config.test.mjs scripts/__tests__/test-evidence.test.mjs scripts/__tests__/department-isolation-report.test.mjs scripts/__tests__/ci-scope.test.mjs scripts/__tests__/migration-owner-groups.test.mjs scripts/__tests__/preflight-push.test.mjs scripts/__tests__/docker-build-closure.test.mjs
+        run: >-
+          node --test
+          scripts/__tests__/api-build-config.test.mjs
+          scripts/__tests__/test-evidence.test.mjs
+          scripts/__tests__/department-isolation-report.test.mjs
+          scripts/__tests__/ci-scope.test.mjs
+          scripts/__tests__/migration-owner-groups.test.mjs
+          scripts/__tests__/preflight-push.test.mjs
+          scripts/__tests__/docker-build-closure.test.mjs
+          scripts/__tests__/trigger-hosted-web-release.test.mjs
 
       # Discovery is report-only until complete journeys qualify ten candidates.
       # The required build-test gate depends on complete selected-scope coverage.
@@ -413,35 +502,11 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.ci-scope.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: pnpm/action-setup@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-
-      - name: Install PostgreSQL 18 with required extensions
-        if: needs.ci-scope.outputs.profile == 'current' || matrix.shard > 3
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ca-certificates curl
-          sudo install -d /usr/share/postgresql-common/pgdg
-          # Retry transient TLS/read failures without weakening verification.
-          sudo curl --fail --show-error --location \
-            --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 180 \
-            --connect-timeout 15 --max-time 60 \
-            --output /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
-            https://www.postgresql.org/media/keys/ACCC4CF8.asc
-          . /etc/os-release
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $VERSION_CODENAME-pgdg main" \
-            | sudo tee /etc/apt/sources.list.d/pgdg.list
-          sudo apt-get update
-          sudo apt-get install -y postgresql-18 postgresql-18-pgvector
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+      - *isolation-checkout
+      - *isolation-pnpm
+      - *isolation-node
+      - *isolation-postgres
+      - *isolation-install
 
       - name: Download database test dependencies
         uses: actions/download-artifact@v4
@@ -452,21 +517,8 @@ jobs:
       - name: Restore database test dependencies
         run: tar -xzf "$RUNNER_TEMP/database-test-dependencies.tgz"
 
-      - name: Run no-credential acceptance
-        run: >-
-          node scripts/test-department-isolation.mjs
-          --pg-bin /usr/lib/postgresql/18/bin
-          --profile ${{ needs.ci-scope.outputs.profile }}
-          --shard ${{ matrix.shard }}/${{ needs.ci-scope.outputs.total }}
-          --report /tmp/department-isolation-${{ matrix.shard }}.json
-
-      - name: Upload acceptance report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifactName }}
-          path: /tmp/department-isolation-${{ matrix.shard }}.json
-          if-no-files-found: error
+      - *isolation-acceptance
+      - *isolation-receipt
 
   department-isolation:
     if: >-
@@ -475,7 +527,7 @@ jobs:
       github.head_ref != 'develop' ||
       github.event.pull_request.head.repo.full_name != github.repository)
     name: Department isolation acceptance
-    needs: [ci-scope, department-isolation-shards]
+    needs: [ci-scope, calendar-isolation, department-isolation-shards]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -504,7 +556,8 @@ jobs:
         if: always()
         env:
           SHARD_RESULT: ${{ needs.department-isolation-shards.result }}
-        run: test "$SHARD_RESULT" = success
+          CALENDAR_RESULT: ${{ needs.calendar-isolation.result }}
+        run: test "$SHARD_RESULT" = success && test "$CALENDAR_RESULT" = success
 
   # Preserve the historical required-check context while making it depend on
   # every parallel lane. `always()` turns a failed dependency into a red

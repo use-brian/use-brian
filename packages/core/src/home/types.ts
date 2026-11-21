@@ -20,18 +20,11 @@
  */
 
 import { z } from 'zod'
+import { NEED_CARD_KINDS, type ApprovalGroupCounts, type NeedCardKind } from '@use-brian/shared/home-dock'
+
+export { NEED_CARD_KINDS, type ApprovalGroupCounts, type NeedCardKind } from '@use-brian/shared/home-dock'
 
 // ── Live signals (assembled in packages/api/src/home/signals.ts) ──────────
-
-/** Presentation groups for the unified approval queue on Suggested for you.
- * These are not new approval kinds: every canonical backend kind maps into
- * exactly one of these four user-facing concerns. */
-export type ApprovalGroupCounts = {
-  externalActions: number
-  contentReview: number
-  systemImprovements: number
-  questionsAndAccess: number
-}
 
 export type HomeSignals = {
   /** Unverified brain-inbox rows awaiting review. */
@@ -87,19 +80,6 @@ export type HomeSignals = {
 }
 
 // ── Layout artifact (what `setHomeDock` writes) ───────────────────────────
-
-/** The action-card kinds the assistant may order in the "Needs you" group. */
-export const NEED_CARD_KINDS = [
-  'brain_review',
-  'approvals',
-  'autopilot',
-  'task_triage',
-  'task_cleanup',
-  'deal_attention',
-  'connector_attention',
-  'workflow_attention',
-] as const
-export type NeedCardKind = (typeof NEED_CARD_KINDS)[number]
 
 /** Kinds the merge ALWAYS surfaces while their signal is live, even when the
  *  artifact omits them. Two classes belong here: attention kinds

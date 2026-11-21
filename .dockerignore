@@ -7,3 +7,10 @@
 **/.next
 **/.turbo
 **/coverage
+
+# Repository prose excluded from the Docker image build context.
+README.md
+CONTRIBUTING.md
+CLA.md
+SECURITY.md
+docs/**/*.md

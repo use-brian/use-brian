@@ -85,6 +85,7 @@ import { createResearchTools } from '../research/tools.js'
 import { createOrganizationTools, createWorkspaceAccessTools } from '../workspace-access/tools.js'
 import { createDepartmentTools } from '../workspace-access/department-tools.js'
 import { createProjectAccessTools } from '../workspace-access/project-access-tools.js'
+import { createProjectHarnessTools } from '../project-harness/tools.js'
 import { createBriefTools } from '../briefs/tools.js'
 import { createWorkspaceMigrationTools } from '../workspace-access/migration-tools.js'
 import { getBrandStore } from '../db/brand-store.js'
@@ -470,7 +471,7 @@ export function registerPrimitives(scope: PrimitivesScope) {
   )
 
   allTools.set('listWorkspaceMembers', createWorkspaceTools(workspaceDirectoryStore).listWorkspaceMembers)
-  for (const tool of [...createOrganizationTools(),...createWorkspaceAccessTools(),...createWorkspaceMigrationTools(),...createDepartmentTools(),...createProjectAccessTools(),...createBriefTools()]) allTools.set(tool.name,tool)
+  for (const tool of [...createOrganizationTools(),...createWorkspaceAccessTools(),...createWorkspaceMigrationTools(),...createDepartmentTools(),...createProjectAccessTools(),...createBriefTools(),...createProjectHarnessTools()]) allTools.set(tool.name,tool)
 
   for (const tool of Object.values(createInternalLinkTools(internalLinkService))) {
     allTools.set(tool.name, tool)

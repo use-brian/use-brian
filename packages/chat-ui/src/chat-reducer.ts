@@ -50,6 +50,7 @@ export type ChatAction =
   | { type: 'reply/set'; replyTo: ReplyTo | null }
   | { type: 'confirmation/add'; confirmation: PendingConfirmation }
   | { type: 'confirmation/update'; toolCallId: string; patch: Partial<PendingConfirmation> }
+  | { type: 'confirmation/remove'; toolCallId: string }
   | { type: 'confirmation/clear' }
 
 /** Compare detached transcript snapshots, including host-owned attachment fields. */
@@ -199,6 +200,11 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           c.toolCallId === action.toolCallId ? { ...c, ...action.patch } : c,
         ),
       }
+
+    case 'confirmation/remove': {
+      const pendingConfirmations = state.pendingConfirmations.filter(item => item.toolCallId !== action.toolCallId)
+      return pendingConfirmations.length === state.pendingConfirmations.length ? state : { ...state, pendingConfirmations }
+    }
 
     case 'confirmation/clear':
       return { ...state, pendingConfirmations: [] }

@@ -18,6 +18,7 @@
     "typecheck": "turbo run typecheck",
     "test": "turbo run test --concurrency=1",
     "test:scripts": "node --test scripts/__tests__/*.test.mjs scripts/crm/__tests__/commercial-contract-check.test.mjs scripts/crm/__tests__/reference-erp-adapter.test.mjs",
+    "check:fast": "node scripts/testing/run-fast-checks.mjs",
     "test:integration": "turbo run test:integration",
     "smoke": "pnpm --filter @use-brian/core smoke",
     "release:browser-extension": "scripts/publish-browser-extension.sh",

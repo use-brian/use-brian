@@ -415,6 +415,8 @@ export function createConversationController(options: ConversationControllerOpti
   let roomState: ConversationState["room"] = { typers: [], pinsEpoch: 0, assistantId: null };
   let historyEpoch = 0;
   let historyAccessRevocation = 0;
+  let pendingReadEpoch = 0;
+  let pendingRead: Promise<void> | null = null;
   let researchPhase: ResearchPhase | null = null;
   /** The hydrate follow has not answered its first status yet. */
   let hydrating = false;
@@ -882,6 +884,7 @@ export function createConversationController(options: ConversationControllerOpti
   };
   /** Completion ends any approve/deny card; a suspended question survives. */
   const clearConfirmations = (identity: ChatControllerIdentity) => {
+    pendingReadEpoch++;
     const pending = coordinator.getSnapshot().interaction.pending;
     if (pending?.kind === "tool-confirmation") coordinator.resolveInteraction(identity, pending.approvalId);
     dispatch({ type: "confirmation/clear" });
@@ -1442,6 +1445,7 @@ export function createConversationController(options: ConversationControllerOpti
       }
       case "done": {
         if (current.reason === "room") break;
+        pendingReadEpoch++;
         // M5Q-21: a resume follow that has not seen a turn run yet (the dead
         // turn's reclaim, or an idle answer before the server holds) reopens
         // inside its window so the later resumed turn is still followed.
@@ -1487,25 +1491,52 @@ export function createConversationController(options: ConversationControllerOpti
     if (admitted) dispatch({ type: "confirmation/add", confirmation: source === "restored" ? { ...confirmation, restored: true } : confirmation });
     return admitted;
   }
-  async function refreshPending(owner: string, identity: ChatControllerIdentity) {
+  function refreshPending(owner: string, identity: ChatControllerIdentity): Promise<void> {
+    // Every presentation, reconnect and approval signal shares one read. A
+    // transient failure is not an empty result and never clears mounted input.
+    if (pendingRead) return pendingRead;
+    if (disposed || sessionId !== owner || !coordinator.isCurrent(identity)) return Promise.resolve();
     const revocation = historyAccessRevocation;
+    const epoch = pendingReadEpoch;
     const shownBefore = coordinator.getSnapshot().interaction.pending;
-    const staleQuestion = shownBefore?.kind === "question" ? shownBefore.approvalId : null;
-    let probe: PendingInputProbe;
-    try { probe = await transport.fetchPending(owner); } catch { return; }
-    if (disposed || historyAccessRevocation !== revocation || !coordinator.isCurrent(identity) || sessionId !== owner) return;
-    if (probe.externalConfirmations) pendingInput = { sessionId: owner, externalConfirmations: probe.externalConfirmations };
-    // An empty answer clears a question card that was already shown when the
-    // probe started; one presented during the probe is newer and stays.
-    const current = coordinator.getSnapshot().interaction.pending;
-    if (!probe.pending && staleQuestion && current?.kind === "question" && current.approvalId === staleQuestion) {
-      coordinator.resolveInteraction(identity, staleQuestion);
-    }
-    if (probe.pending) {
-      presentQuestionFor(identity, { approvalId: probe.pending.approvalId, question: probe.pending.question ?? "", expiresAt: probe.pending.expiresAt, sessionId: owner }, "restored");
-    }
-    if (probe.toolConfirmation) presentConfirmationFor(identity, probe.toolConfirmation, "restored");
-    publishNow();
+    const confirmationsBefore = transcript.pendingConfirmations;
+    const operation = (async () => {
+      let probe: PendingInputProbe;
+      try { probe = await transport.fetchPending(owner); } catch { return; }
+      if (disposed || historyAccessRevocation !== revocation || pendingReadEpoch !== epoch
+        || !coordinator.isCurrent(identity) || sessionId !== owner) return;
+      if (probe.externalConfirmations) pendingInput = { sessionId: owner, externalConfirmations: probe.externalConfirmations };
+      const current = coordinator.getSnapshot().interaction.pending;
+      // Only retire the exact snapshot this read observed. A newer live card
+      // or an in-flight human response must not be erased by an old read.
+      if (shownBefore?.kind === "question" && current === shownBefore
+        && probe.pending?.approvalId !== shownBefore.approvalId) {
+        coordinator.resolveInteraction(identity, shownBefore.approvalId);
+      }
+      for (const previous of confirmationsBefore) {
+        const shown = transcript.pendingConfirmations.find(item => item.toolCallId === previous.toolCallId);
+        const incoming = probe.toolConfirmation;
+        const same = incoming && (incoming.toolCallId === previous.toolCallId
+          || !!incoming.approvalId && incoming.approvalId === previous.approvalId);
+        if (shown !== previous || shown.status !== "pending" || same) continue;
+        coordinator.resolveInteraction(identity, previous.approvalId ?? `tool:${previous.toolCallId}`);
+        dispatch({ type: "confirmation/remove", toolCallId: previous.toolCallId });
+      }
+      if (probe.pending) {
+        presentQuestionFor(identity, { approvalId: probe.pending.approvalId, question: probe.pending.question ?? "", expiresAt: probe.pending.expiresAt, sessionId: owner }, "restored");
+      }
+      const latest = coordinator.getSnapshot().interaction.pending;
+      if (probe.toolConfirmation && (!latest || latest === shownBefore
+        || latest.approvalId === probe.toolConfirmation.approvalId
+        || latest.toolCallId === probe.toolConfirmation.toolCallId
+        || latest.kind === "question" && latest.approvalId === probe.pending?.approvalId)) {
+        presentConfirmationFor(identity, probe.toolConfirmation, "restored");
+      }
+      publishNow();
+    })();
+    const tracked = operation.finally(() => { if (pendingRead === tracked) pendingRead = null; });
+    pendingRead = tracked;
+    return tracked;
   }
 
   async function respondConfirmation(toolCallId: string, decision: "approve" | "always_allow" | "deny", comment?: string): Promise<"resolved" | "forbidden" | "failed" | "invalid" | "none"> {

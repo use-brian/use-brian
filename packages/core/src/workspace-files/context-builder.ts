@@ -6,10 +6,8 @@
  * Folder-grouped, capped at the per-turn cap (50 by default — kept in
  * sync with `PER_TURN_FILES_INDEX_CAP` in chat.ts + channel-pipeline.ts).
  *
- * Always emits the block when called (with a "no files yet…" fallback)
- * — matches the memory-block "always emit if non-empty" semantics. The
- * caller decides whether to call this at all (gated on the `files`
- * capability for the assistant).
+ * The caller decides whether to include the block. A failed or unadmitted
+ * lookup supplies null, while an empty array records a successful scoped read.
  */
 
 import type { WorkspaceFileIndexRow } from './types.js'
@@ -17,10 +15,21 @@ import type { WorkspaceFileIndexRow } from './types.js'
 const HEADER = '# Workspace Files'
 
 const EMPTY_BODY =
-  '(No files yet — they appear here as workspace members or assistants create them. Use fileWrite to save shared artifacts.)'
+  'The workspace file index returned no entries within this turn’s access. Use an available file search tool to check for a specific file.'
+
+const UNAVAILABLE_BODY =
+  'The workspace file index is unavailable for this turn. Use an available file tool to verify a file’s existence or contents.'
 
 const PROLOGUE =
-  'Files are workspace-shared. Every member can read them. Use the fileSearch / fileRead tools to access content beyond this index. Call fileSetMeta to label files you create or learn about.'
+  'Recent workspace files available to this turn. Use an available file search tool to look beyond the index and a file read tool to verify content.'
+
+/** Preserve the original row references so evidence matches the rendered index. */
+export function selectWorkspaceFilesContextRows(
+  rows: readonly WorkspaceFileIndexRow[], limit = rows.length,
+): readonly WorkspaceFileIndexRow[] {
+  const selected = rows.filter(row => row.purpose !== 'engineering_archive').slice(0, limit)
+  return selected.length === rows.length ? rows : selected
+}
 
 /**
  * Render one row. The format is intentionally compact:
@@ -41,7 +50,7 @@ function renderRow(row: WorkspaceFileIndexRow): string {
  * within a folder, rows preserve the input order (caller controls
  * ranking — typically `updated_at DESC`).
  */
-function groupByFolder(rows: WorkspaceFileIndexRow[]): Map<string, WorkspaceFileIndexRow[]> {
+function groupByFolder(rows: readonly WorkspaceFileIndexRow[]): Map<string, WorkspaceFileIndexRow[]> {
   const groups = new Map<string, WorkspaceFileIndexRow[]>()
   for (const row of rows) {
     const folder = row.parentPath || '/'
@@ -55,13 +64,12 @@ function groupByFolder(rows: WorkspaceFileIndexRow[]): Map<string, WorkspaceFile
   return new Map([...groups.entries()].sort(([a], [b]) => a.localeCompare(b)))
 }
 
-export function buildWorkspaceFilesContext(rows: WorkspaceFileIndexRow[]): string {
-  rows=rows.filter(row=>row.purpose!=='engineering_archive')
-  if (rows.length === 0) {
-    return `${HEADER}\n${PROLOGUE}\n\n${EMPTY_BODY}`
-  }
+export function buildWorkspaceFilesContext(rows: readonly WorkspaceFileIndexRow[] | null): string {
+  if (rows === null) return `${HEADER}\n${UNAVAILABLE_BODY}`
+  const selected = selectWorkspaceFilesContextRows(rows)
+  if (!selected.length) return `${HEADER}\n${EMPTY_BODY}`
 
-  const grouped = groupByFolder(rows)
+  const grouped = groupByFolder(selected)
   const sections: string[] = []
   for (const [folder, folderRows] of grouped) {
     const head = folder === '/' ? '/' : folder

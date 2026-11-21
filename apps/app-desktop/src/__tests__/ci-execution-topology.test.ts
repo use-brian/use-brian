@@ -23,6 +23,7 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
       workflow.jobs['remaining-tests'],
       workflow.jobs['ci-scope'],
       workflow.jobs['department-isolation-shards'],
+      workflow.jobs['calendar-isolation'],
       workflow.jobs['department-isolation'],
     ];
     for (const job of executionJobs) {
@@ -101,7 +102,7 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     expect(acceptance.steps.find((step: { uses?: string }) => step.uses === 'actions/upload-artifact@v4').with.name)
       .toBe('${{ matrix.artifactName }}');
     const aggregate = workflow.jobs['department-isolation'];
-    expect(aggregate.needs).toEqual(['ci-scope', 'department-isolation-shards']);
+    expect(aggregate.needs).toEqual(['ci-scope', 'calendar-isolation', 'department-isolation-shards']);
     expect(aggregate.if).toContain('always()');
     expect(aggregate.steps.find((step: { uses?: string }) => step.uses === 'actions/download-artifact@v4').with.pattern)
       .toBe('department-isolation-shard-*');
@@ -109,6 +110,12 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
       .not.toContain('pnpm');
     expect(aggregate.steps.find((step: { name?: string }) => step.name === 'Verify complete acceptance evidence').run)
       .toContain('--merge');
+    const requireShards = aggregate.steps.find((step: { name?: string }) => step.name === 'Require every acceptance shard').run;
+    for (const [SHARD_RESULT, CALENDAR_RESULT, status] of [
+      ['success', 'success', 0], ['failure', 'success', 1], ['success', 'failure', 1], ['success', 'skipped', 1],
+    ] as const) {
+      expect(spawnSync('bash', ['-c', requireShards], { env: { ...process.env, SHARD_RESULT, CALENDAR_RESULT } }).status).toBe(status);
+    }
     expect(workflow.jobs['build-test'].needs).toEqual([
       'ci-scope',
       'database-test-dependencies',
@@ -125,9 +132,18 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     expect(workflow.jobs['build-test'].if).toContain('always()');
   });
 
-  it('keeps offline regressions mandatory and executable in the focused lane', async () => {
+  it('keeps suites excluded from ordinary shards mandatory in their focused lanes', async () => {
     const { OFFLINE_CONTINUITY_FILES, unitTestExclusions } = await import(new URL('../../../../scripts/testing/unit-partition.mjs', import.meta.url).href);
     const workflow = yaml.load(readFileSync(join(sourceRoot, '.github/workflows/ci.yml'), 'utf8'));
+    const build = workflow.jobs['build-typecheck'];
+    const fast = build.steps.find((step: { run?: string }) => step.run === 'pnpm check:fast --all');
+    expect(fast).toBeDefined();
+    expect(fast.if).toBeUndefined();
+    expect(fast['continue-on-error']).not.toBe(true);
+    const buildIndex = build.steps.findIndex((step: { run?: string }) => step.run === 'pnpm build');
+    expect(build.steps.indexOf(fast)).toBeLessThan(buildIndex);
+    expect(unitTestExclusions('packages/api', 'ordinary')).toContain('src/routes/__tests__/teamspaces-contract.test.mjs');
+    expect(unitTestExclusions('packages/api', '')).toEqual([]);
     const lane = workflow.jobs['offline-continuity'];
     expect(lane.env?.BRIAN_TEST_PARTITION).toBeUndefined();
     expect(workflow.jobs['department-isolation-shards'].env?.BRIAN_TEST_PARTITION).toBeUndefined();
@@ -217,6 +233,22 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
       rmSync(join(runnerTemp, 'database-test-dependencies.tgz'));
       expect(run(restore, consumer).status).not.toBe(0);
     } finally { rmSync(directory, { recursive: true, force: true }); }
+  });
+
+  it('starts Calendar after scope using its API test dependencies and the shared acceptance contract', () => {
+    const workflow = yaml.load(readFileSync(join(sourceRoot, '.github/workflows/ci.yml'), 'utf8'));
+    const calendar = workflow.jobs['calendar-isolation'];
+    const acceptance = workflow.jobs['department-isolation-shards'];
+    const step = (job: any, name: string) => job.steps.find((item: { name?: string }) => item.name === name);
+    expect(calendar.needs).toBe('ci-scope');
+    expect(calendar.strategy.matrix).toContain('fromJSON(needs.ci-scope.outputs.calendar)');
+    expect(workflow.jobs['ci-scope'].outputs.calendar).toBe('${{ steps.scope.outputs.calendar }}');
+    expect(step(calendar, 'Build Calendar test dependencies').run).toBe("pnpm exec turbo run build --filter='@use-brian/api^...'");
+    expect(step(calendar, 'Download database test dependencies')).toBeUndefined();
+    for (const name of ['Install PostgreSQL 18 with required extensions', 'Install dependencies', 'Run no-credential acceptance', 'Upload acceptance report']) {
+      expect(step(calendar, name)).toEqual(step(acceptance, name));
+    }
+    expect(step(workflow.jobs['ci-scope'], 'Retain proposed change impact (report-only)')['continue-on-error']).toBe(true);
   });
 
   it('fails the aggregate for every unsuccessful selected lane and unknown selection', () => {

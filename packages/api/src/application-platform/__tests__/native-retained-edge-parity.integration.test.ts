@@ -1,5 +1,6 @@
 /** [COMP:api/native-chat-read-cost] Compiled metadata adjacency agrees with the original canonical readers. */
 import {randomUUID} from 'node:crypto'
+import {readFile} from 'node:fs/promises'
 import {afterAll,beforeAll,describe,expect,it} from 'vitest'
 import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
 import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
@@ -113,6 +114,51 @@ describe.sequential('[COMP:api/native-chat-read-cost] canonical conversation adj
   const domainPrivacy=await equalEdges([{kind:'application_field',id:domainField.id}],true)
   expect(domainPrivacy.some(edge=>edge.child.kind==='session_message'&&edge.child.id===domainField.resourceId)).toBe(true)
   await equalEdges(currentNodes.filter(node=>node.tag==='source').map(node=>({kind:node.kind,id:node.id})),true)
+ })
+
+ it('preserves the complete recording privacy closure and its limit',async()=>{
+  const [predecessor,fused]=await Promise.all([
+   readFile(new URL('../../../scripts/conversation-store/privacy.sql',import.meta.url),'utf8'),
+   readFile(new URL('../../../scripts/conversation-store/fused-admission.sql',import.meta.url),'utf8'),
+  ])
+  const body=predecessor.split('$body$')[1]
+  const fusedBody=fused.split('CREATE FUNCTION fused_f_privacy(')[1].split('$fa$')[1]
+  const client=await f.pool.connect()
+  try{
+   await client.query('BEGIN')
+   await client.query(`CREATE FUNCTION pg_temp.original_capture_privacy(w uuid,nodes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $body$${body}$body$`)
+   await client.query(`CREATE FUNCTION pg_temp.original_fused_privacy(w uuid,nodes jsonb)
+    RETURNS TABLE(node_count bigint,denied jsonb,session_ids jsonb,archive_count bigint,archive_denied jsonb)
+    LANGUAGE sql STABLE AS $body$${fusedBody}$body$`)
+   async function compare(nodes:Node[]){
+    const {rows:[{original,current,originalFused,currentFused}]}=await client.query(`
+     SELECT pg_temp.original_capture_privacy($1,$2) original,public.conversation_capture_privacy($1,$2) current,
+      (SELECT to_jsonb(p) FROM pg_temp.original_fused_privacy($1,$2) p) AS "originalFused",
+      (SELECT to_jsonb(p) FROM public.fused_f_privacy($1,$2) p) AS "currentFused"`,[f.workspaceId,JSON.stringify(nodes)])
+    expect(current).toEqual(original)
+    expect(currentFused).toEqual(originalFused)
+    return current
+   }
+   expect((await compare(currentNodes)).denied).toEqual({})
+   await client.query('UPDATE sessions SET recording_privacy_held=true WHERE id=$1',[f.session.id])
+   expect((await compare(currentNodes)).denied).toHaveProperty(`session_message:${editedReply}`,true)
+   const {rows:[{version}]}=await client.query<{version:string}>(`SELECT version FROM application_field_observations
+    WHERE workspace_id=$1 AND resource_id=$2 AND source_id=$3`,[f.workspaceId,annotationResource,newRevision])
+   const {denied}=await compare([source('application_field',annotationResource,version)])
+   expect(denied).toMatchObject({
+    [`application_field:${annotationResource}`]:true,
+    [`session_context_revision:${oldRevision}`]:true,
+    [`session_context_revision:${newRevision}`]:true,
+   })
+   const {rows:[{allowed}]}=await client.query<{allowed:boolean}>(`SELECT
+    public.recording_source_read_allowed($1,'application_field',$2) allowed`,[f.workspaceId,annotationResource])
+   expect(allowed).toBe(false)
+   const roots=Array.from({length:4097},()=>source('memory',randomUUID(),'1'))
+   expect((await compare(roots.slice(1))).denied).toEqual({})
+   await expect(client.query('SELECT public.conversation_capture_privacy($1,$2)',[f.workspaceId,JSON.stringify(roots)]))
+    .rejects.toMatchObject({code:'42501',message:'scope_ancestry_unavailable'})
+  }finally{await client.query('ROLLBACK');client.release()}
  })
 
  it('keeps both predecessor hops and the root requested version independently of stored predecessor versions',async()=>{

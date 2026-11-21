@@ -5,6 +5,7 @@ import type { PoolClient } from 'pg'
 import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
+import { withTableTriggersSuspended } from '../../__tests__/fixtures/bootstrap-role.js'
 import { getAppPool, getPool, rollbackAndRelease } from '../../db/client.js'
 import { readAdmittedSessionQuery } from '../../db/conversation-store.js'
 import { addSessionMessage } from '../../db/sessions.js'
@@ -12,11 +13,16 @@ import { persistentContextFixture } from './fixtures/persistent-context.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
+const { executableProjection } = await import(new URL('../../../scripts/conversation-store/executable-record.mjs', import.meta.url).href)
 const dispatcher = 'application_native_source_edges_dispatch(uuid,text,uuid,text)'
 const originalSql = await readFile(new URL('../../../migrations/8069_native_metadata_extension_contract.sql', import.meta.url), 'utf8')
 const originalDefinition = originalSql.match(/CREATE OR REPLACE FUNCTION application_scope_source_edges\([\s\S]*?^\$\$;/m)?.[0]
 if (!originalDefinition) throw new Error('Original SQL edge definition missing')
 const reference = originalDefinition.replace('application_scope_source_edges(', 'pg_temp.original_source_edges(')
+const lineageSql = await readFile(new URL('../../../migrations/8011_application_derivation_and_fields.sql', import.meta.url), 'utf8')
+const lineageDefinition = lineageSql.match(/CREATE FUNCTION application_scope_lineage\([\s\S]*?^END \$\$;/m)?.[0]
+if (!lineageDefinition) throw new Error('Original SQL lineage definition missing')
+const lineageReference = lineageDefinition.replace('application_scope_lineage(', 'pg_temp.original_scope_lineage(')
 let f: Awaited<ReturnType<typeof persistentContextFixture>>
 let fileIds: string[], segmentId: string, runId: string, replyId: string
 let fieldRoots: ScopeSource[]
@@ -34,6 +40,12 @@ async function outcome(client: PoolClient, sql: string, args: unknown[]) {
 async function equalEdges(client: PoolClient, args: unknown[]) {
   const actual = await outcome(client, 'SELECT * FROM application_scope_source_edges_before_knowledge_versions($1,$2,$3,$4) ORDER BY kind,id,version', args)
   expect(actual).toEqual(await outcome(client, 'SELECT * FROM pg_temp.original_source_edges($1,$2,$3,$4) ORDER BY kind,id,version', args))
+  return actual
+}
+async function equalLineage(client: PoolClient, args: unknown[]) {
+  const ordered = '($1,$2,$3,$4) ORDER BY kind,id,version'
+  const actual = await outcome(client, 'SELECT * FROM application_scope_lineage' + ordered, args)
+  expect(actual).toEqual(await outcome(client, 'SELECT * FROM pg_temp.original_scope_lineage' + ordered, args))
   return actual
 }
 async function guards(client: PoolClient) {
@@ -103,6 +115,115 @@ describe.sequential('[COMP:api/application-persistence] native source-edge dispa
     expect(await equalEdges(client, [randomUUID(), 'workspace_file', fileIds[0], '1'])).toEqual({ rows: [] })
   }))
 
+  it('matches the original complete walk across Memory versions, branches, cycles and later source handlers', async () => {
+    const root = await f.memory('Fictional Memory lineage root')
+    const prior = await f.memory('Fictional Memory lineage predecessor')
+    const sibling = await f.memory('Fictional Memory lineage sibling')
+    const extra = await f.memory('Fictional Memory lineage derivation')
+    const missing = randomUUID(), external = randomUUID(), office = randomUUID()
+    await transaction(async client => {
+      await client.query(lineageReference)
+      await client.query(`UPDATE memories SET valid_to=now(),superseded_by=CASE WHEN id=$1 THEN $2 ELSE $1 END
+        WHERE id=ANY($3::uuid[])`, [root.id, prior.id, [root.id, prior.id, sibling.id]])
+      // Model stored derivations whose input snapshots predate the live Memory
+      // versions, including polymorphic records no longer found at their IDs.
+      await withTableTriggersSuspended(client, ['scope_derivations', 'scope_derivation_sources'], async () => {
+        await client.query(`WITH recorded AS (
+          INSERT INTO scope_derivations(workspace_id,resource_kind,resource_id,resource_version,producer,user_id,
+            assistant_id,sensitivity,compartments,project_ids,source_policy_revision)
+          SELECT m.workspace_id,'memory',s.id,s.version,'fixture:memory-lineage',m.user_id,m.assistant_id,
+            m.sensitivity,m.compartments,m.project_ids,1
+          FROM memories m JOIN unnest($2::uuid[],$3::text[]) s(id,version)
+            ON m.id=CASE WHEN s.id=$8::uuid THEN $9::uuid ELSE s.id END
+          WHERE m.workspace_id=$1 RETURNING id,resource_id,resource_version
+        ) INSERT INTO scope_derivation_sources(workspace_id,derivation_id,source_kind,source_id,source_version)
+          SELECT $1,d.id,s.kind,s.id,s.version FROM recorded d
+          JOIN unnest($4::text[],$5::text[],$6::uuid[],$7::text[]) s(recorded_version,kind,id,version)
+            ON s.recorded_version=d.resource_version`, [f.workspaceId, [prior.id, prior.id, sibling.id, missing],
+          ['old-1', 'old-2', 'old-3', 'old-4'], ['old-1', 'old-1', 'old-2', 'old-2', 'old-3', 'old-4'],
+          ['memory', 'file_segment', 'external_source', 'office_observation', 'session_message', 'memory'],
+          [extra.id, segmentId, external, office, replyId, extra.id], ['historic', '1', 'retained', '1', '1', 'retained'],
+          missing, root.id])
+      })
+      const args = [f.workspaceId, ['memory', 'memory', 'memory', 'memory'], [root.id, missing, root.id, root.id], ['current', 'missing', 'historic', 'current']]
+      expect(await equalLineage(client, args)).toMatchObject({ rows: expect.arrayContaining([
+        { kind: 'memory', id: root.id, version: 'historic' },
+        { kind: 'memory', id: prior.id, version: 'current' },
+        { kind: 'memory', id: sibling.id, version: 'historic' },
+        { kind: 'memory', id: extra.id, version: 'historic' },
+        { kind: 'memory', id: extra.id, version: 'retained' },
+        { kind: 'memory', id: missing, version: 'missing' },
+        { kind: 'external_source', id: external, version: 'retained' },
+        { kind: 'office_observation', id: office, version: '1' },
+        { kind: 'session_message', id: replyId, version: '1' },
+        { kind: 'workspace_file', id: fileIds[0], version: '1' },
+      ]) })
+      expect(await equalLineage(client, [randomUUID(), ['memory'], [root.id], ['1']]))
+        .toEqual({ rows: [{ kind: 'memory', id: root.id, version: '1' }] })
+      expect(await equalLineage(client, [f.workspaceId, ['application_field'], [missing], ['1']]))
+        .toEqual({ code: '22023', message: 'scope_ancestry_unavailable' })
+      expect(await equalLineage(client, [f.workspaceId, ['memory'], [], ['1']]))
+        .toEqual({ code: '22023', message: 'scope_evidence_missing' })
+    })
+  })
+
+  it('keeps the inclusive 4,096-node limit on the complete closure', async () => {
+    const root = await f.memory('Fictional Memory lineage boundary')
+    await transaction(async client => {
+      await client.query(lineageReference)
+      const args = [f.workspaceId, ['memory'], [root.id], ['1']]
+      await withTableTriggersSuspended(client, ['scope_derivations', 'scope_derivation_sources'], async () => {
+        const header = (await client.query(`INSERT INTO scope_derivations(workspace_id,resource_kind,resource_id,resource_version,
+          producer,user_id,assistant_id,sensitivity,compartments,project_ids,source_policy_revision)
+          SELECT workspace_id,'memory',id,scope_version::text,'fixture:lineage-bound',user_id,assistant_id,
+            sensitivity,compartments,project_ids,1 FROM memories WHERE workspace_id=$1 AND id=$2 RETURNING id`, [f.workspaceId, root.id])).rows[0].id
+        const insert = `INSERT INTO scope_derivation_sources(workspace_id,derivation_id,source_kind,source_id,source_version)
+          SELECT $1,$2,'memory',gen_random_uuid(),'fixture' FROM generate_series(1,$3::integer)`
+        await client.query(insert, [f.workspaceId, header, 4095])
+        expect((await equalLineage(client, args)).rows).toHaveLength(4096)
+        await client.query(insert, [f.workspaceId, header, 1])
+        expect(await equalLineage(client, args)).toEqual({ code: '22023', message: 'scope_ancestry_unavailable' })
+      })
+    })
+  })
+
+  it('locks the exact Memory scope row only for its own workspace', async () => {
+    const memory = await f.memory('Fictional Memory row lock')
+    const writer = await f.pool.connect()
+    const reader = await f.pool.connect()
+    try {
+      await writer.query('BEGIN')
+      await writer.query('SELECT id FROM public.memories WHERE id=$1 FOR UPDATE', [memory.id])
+      await reader.query('BEGIN')
+      await reader.query("SET LOCAL lock_timeout='100ms'")
+      const scope = 'SELECT public.read_scope_source($1,\'memory\',$2) AS source'
+      expect((await reader.query(scope, [randomUUID(), memory.id])).rows).toEqual([{ source: null }])
+      expect((await reader.query(scope, [null, memory.id])).rows).toEqual([{ source: null }])
+      await expect(reader.query(scope, [f.workspaceId, memory.id])).rejects.toMatchObject({ code: '55P03' })
+    } finally {
+      await rollbackAndRelease(reader)
+      await rollbackAndRelease(writer)
+    }
+  })
+
+  it('follows canonical Memory edge extensions even after the installed registry is repinned', async () => {
+    const root = await f.memory('Fictional Memory lineage extension root')
+    const edge = randomUUID()
+    await transaction(async client => {
+      await client.query(lineageReference)
+      const signature = 'application_scope_source_edges_before_knowledge_versions(uuid,text,uuid,text)'
+      const routine = (await client.query('SELECT prosrc,pg_get_functiondef(oid) definition FROM pg_proc WHERE oid=$1::regprocedure', [signature])).rows[0]
+      const extended = routine.prosrc + `\nUNION SELECT 'office_observation'::text,'${edge}'::uuid,'1'::text
+        WHERE k='memory' AND i='${root.id}'::uuid`
+      await client.query(routine.definition.replace(routine.prosrc, () => extended))
+      await client.query(`UPDATE public.native_turn_contract_helpers h SET contract=${executableProjection('p')}
+        FROM pg_proc p WHERE h.signature=$1 AND p.oid=to_regprocedure('public.'||h.signature)`, [signature])
+      expect(await equalLineage(client, [f.workspaceId, ['memory'], [root.id], ['historic']])).toMatchObject({
+        rows: expect.arrayContaining([{ kind: 'office_observation', id: edge, version: '1' }]),
+      })
+    })
+  })
+
   it('preserves NULL, unknown, missing and malformed workflow outcomes', async () => transaction(async client => {
     for (const kind of [null, 'fictional_unknown_kind', 'application_field', 'workspace_file', 'file_segment', 'workflow_run', 'memory', 'session_message']) {
       for (const workspace of [null, f.workspaceId, randomUUID()]) await equalEdges(client, [workspace, kind, randomUUID(), null])
@@ -132,9 +253,12 @@ describe.sequential('[COMP:api/application-persistence] native source-edge dispa
     expect(await guards(client)).toEqual({ memory: false, worklist: false, covered: false })
   }))
 
-  it('keeps the dispatcher owner-only for the restricted application role', async () => {
+  it('keeps the dispatcher and complete lineage owner-only for the restricted application role', async () => {
     const app = await getAppPool().connect()
-    try { await expect(app.query('SELECT * FROM application_native_source_edges_dispatch($1,$2,$3,$4)', [f.workspaceId, 'workspace_file', fileIds[0], '1'])).rejects.toMatchObject({ code: '42501' }) }
+    try {
+      await expect(app.query('SELECT * FROM application_native_source_edges_dispatch($1,$2,$3,$4)', [f.workspaceId, 'workspace_file', fileIds[0], '1'])).rejects.toMatchObject({ code: '42501' })
+      await expect(app.query('SELECT * FROM application_scope_lineage($1,$2,$3,$4)', [f.workspaceId, ['workspace_file'], [fileIds[0]], ['1']])).rejects.toMatchObject({ code: '42501' })
+    }
     finally { app.release() }
   })
 })

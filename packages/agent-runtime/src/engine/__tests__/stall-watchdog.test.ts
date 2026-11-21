@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { NOOP_TURN_LEDGER } from '../turn-ledger.js'
 import { z } from 'zod'
 import {
@@ -17,11 +17,14 @@ import { DEFAULT_FIRST_CHUNK_MS, DEFAULT_STREAM_IDLE_MS } from '../../providers/
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 describe('[COMP:engine/stall-watchdog] progress-based liveness primitive', () => {
-  it('fires after the idle window with no touches, aborting its signal with a StalledError', async () => {
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => { vi.useRealTimers() })
+
+  it('fires after the idle window with no touches, aborting its signal with a StalledError', () => {
     const onStall = vi.fn()
     const dog = createStallWatchdog({ idleMs: 40, onStall })
     expect(dog.stalled).toBeNull()
-    await sleep(80)
+    vi.advanceTimersByTime(80)
     expect(dog.stalled).toMatchObject({ idleMs: 40, lastProgress: 'start' })
     expect(dog.signal.aborted).toBe(true)
     expect(isStalledError(dog.signal.reason)).toBe(true)
@@ -31,60 +34,62 @@ describe('[COMP:engine/stall-watchdog] progress-based liveness primitive', () =>
     dog.dispose()
   })
 
-  it('every touch restarts the window - steady progress never stalls', async () => {
+  it('every touch restarts the window - steady progress never stalls', () => {
     const dog = createStallWatchdog({ idleMs: 60 })
     for (let i = 0; i < 5; i++) {
-      await sleep(30)
+      vi.advanceTimersByTime(30)
       dog.touch(`model:text_delta#${i}`)
     }
     expect(dog.stalled).toBeNull()
-    await sleep(100)
+    vi.advanceTimersByTime(100)
     expect(dog.stalled).toMatchObject({ lastProgress: 'model:text_delta#4' })
     dog.dispose()
   })
 
-  it('pause() holds the clock (a wait on a human is not a stall) and resume() re-arms it', async () => {
+  it('pause() holds the clock (a wait on a human is not a stall) and resume() re-arms it', () => {
     const dog = createStallWatchdog({ idleMs: 40 })
     dog.pause()
-    await sleep(100)
+    vi.advanceTimersByTime(100)
     expect(dog.stalled).toBeNull()
     dog.resume()
-    await sleep(80)
+    vi.advanceTimersByTime(80)
     expect(dog.stalled).not.toBeNull()
     dog.dispose()
   })
 
-  it('touches and pauses propagate to the parent clock (nested loops keep their parent alive)', async () => {
+  it('touches and pauses propagate to the parent clock (nested loops keep their parent alive)', () => {
     const parent = createStallWatchdog({ idleMs: 50 })
     const child = createStallWatchdog({ idleMs: 500, parent })
     for (let i = 0; i < 4; i++) {
-      await sleep(30)
+      vi.advanceTimersByTime(30)
       child.touch('tool_end:patchPage')
     }
     expect(parent.stalled).toBeNull()
     child.pause()
-    await sleep(120)
+    vi.advanceTimersByTime(120)
     expect(parent.stalled).toBeNull()
     child.resume()
-    await sleep(120)
+    vi.advanceTimersByTime(49)
+    expect(parent.stalled).toBeNull()
+    vi.advanceTimersByTime(1)
     expect(parent.stalled).not.toBeNull()
     child.dispose()
     parent.dispose()
   })
 
-  it('dispose() stops the timer for good', async () => {
+  it('dispose() stops the timer for good', () => {
     const dog = createStallWatchdog({ idleMs: 30 })
     dog.dispose()
-    await sleep(80)
+    vi.advanceTimersByTime(80)
     expect(dog.stalled).toBeNull()
     expect(dog.signal.aborted).toBe(false)
   })
 
-  it('withStallSignal merges the parent abort with the watchdog and keeps the stall reason', async () => {
+  it('withStallSignal merges the parent abort with the watchdog and keeps the stall reason', () => {
     const parent = new AbortController()
     const dog = createStallWatchdog({ idleMs: 30 })
     const merged = withStallSignal(parent.signal, dog)
-    await sleep(70)
+    vi.advanceTimersByTime(70)
     expect(merged.aborted).toBe(true)
     expect(isStalledError(merged.reason)).toBe(true)
     dog.dispose()

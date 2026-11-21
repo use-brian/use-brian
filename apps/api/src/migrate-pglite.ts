@@ -1,14 +1,19 @@
+import { projectHarnessCandidateBoundarySql } from '@use-brian/api/migrations/project-harness-candidate-boundary.js'
 import { previousMigrationNames } from '@use-brian/api/migrations/renames.js'
 import type { PGlite } from '@electric-sql/pglite'
 import { createHash } from 'node:crypto'
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { toPgliteMigrationSql } from '@use-brian/api/migrations/pglite-sql.js'
+import { toMigrationExecutionSql } from '@use-brian/api/migrations/execution-sql.js'
+import { atomicMigrationSql, isNewMigration } from '@use-brian/api/migrations/transaction-sql.js'
+import { concurrentIndexMigration, readConcurrentIndex, verifyConcurrentIndex } from '@use-brian/api/migrations/concurrent-index.js'
 
 const migrationRuns = new WeakMap<PGlite, Promise<void>>()
 
 /** Restricted role bootstrap for embedded product boot. [COMP:api/migration-owner-role] */
 export async function preparePgliteRuntimeRole(db: PGlite): Promise<void> {
+  await db.exec(projectHarnessCandidateBoundarySql)
   await db.transaction(async tx => {
     await tx.exec(`DO $bootstrap$
       DECLARE empty_chain boolean:=true; runtime_id oid;
@@ -57,10 +62,9 @@ function concurrentIndexStatements(sql: string): string[] | null {
  *
  * Each ordinary file and its `_migrations` row commit atomically in one
  * runner-owned transaction. Outer BEGIN/COMMIT wrappers are removed before
- * execution. `CREATE INDEX CONCURRENTLY` files are the deliberate exception:
- * PostgreSQL and PGLite reject those statements inside a transaction, so the
- * runner applies their idempotent statements one at a time and records the
- * file afterwards. The
+ * execution. New concurrent-index declarations are installed without CONCURRENTLY
+ * inside that transaction. Historical concurrent files keep their individual
+ * top-level statements and separate ledger entry. The
  * squash separates schema from seed rows with a `-- Seed data` marker (see
  * `000_open_schema_v1.sql`); its DDL runs in one exec and each seed INSERT in a
  * separate exec inside that same transaction. Calls sharing a PGlite instance
@@ -85,6 +89,7 @@ async function migratePgliteExclusive(
   migrationsDir: string,
   options?: { through?: string },
 ): Promise<number> {
+  await db.exec(projectHarnessCandidateBoundarySql)
   await db.exec(
     `CREATE TABLE IF NOT EXISTS public._migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
   )
@@ -158,11 +163,9 @@ async function migratePgliteExclusive(
       continue
     }
 
-    // Match the node-postgres migration runner: concurrent indexes must be
-    // separate, top-level statements. The repository's concurrent-index
-    // migrations use IF NOT EXISTS, so a process crash between statements is
-    // safe to resume before the ledger row is written.
-    const concurrentStatements = concurrentIndexStatements(sql)
+    // Retain the historical top-level split and ledger order for these files.
+    const newProtocol = isNewMigration(file)
+    const concurrentStatements = newProtocol ? null : concurrentIndexStatements(sql)
     if (concurrentStatements) {
       const existing = await db.query<{ name: string }>(
         'SELECT name FROM public._migrations WHERE name = $1',
@@ -178,14 +181,27 @@ async function migratePgliteExclusive(
       continue
     }
 
-    const [ddl, seedRaw = ''] = sql.split('-- Seed data')
     const applied = await db.transaction(async (tx) => {
       const existing = await tx.query<{ name: string }>('SELECT name FROM public._migrations WHERE name = $1', [file])
       if (existing.rows.length > 0) return false
 
-      await tx.exec(toPgliteMigrationSql(ddl, file))
-      for (const insert of seedRaw.split('\n').filter((l) => l.trimStart().startsWith('INSERT'))) {
-        await tx.exec(insert)
+      if (newProtocol) {
+        const executionSql = toMigrationExecutionSql(sql, file)
+        const index = concurrentIndexMigration(executionSql, file)
+        await tx.exec('SET LOCAL standard_conforming_strings = on')
+        if (index) {
+          if (!await readConcurrentIndex(tx, index)) await tx.exec(index.embeddedSql)
+          await tx.exec('SET LOCAL search_path = pg_catalog')
+          await verifyConcurrentIndex(tx, index)
+        } else {
+          await tx.exec(atomicMigrationSql(executionSql, file))
+        }
+      } else {
+        const [ddl, seedRaw = ''] = sql.split('-- Seed data')
+        await tx.exec(toPgliteMigrationSql(ddl, file))
+        for (const insert of seedRaw.split('\n').filter((l) => l.trimStart().startsWith('INSERT'))) {
+          await tx.exec(insert)
+        }
       }
       await tx.query('INSERT INTO public._migrations (name) VALUES ($1)', [file])
       return true

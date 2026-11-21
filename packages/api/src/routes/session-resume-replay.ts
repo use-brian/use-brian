@@ -569,7 +569,7 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
         }
       }
       if (!roomRecipient) bindFailureOutcome()
-      owner.bindModelPreparation({ kind: 'execution', toolProfile: 'resume', execution, assertCurrent: assertReplayCurrent }, {
+      owner.bindModelPreparation({ kind: 'execution', toolProfile: 'resume', execution, scopeAccumulator: context.scopeAccumulator, assertCurrent: assertReplayCurrent }, {
         provider: deps.provider, configuredProviders: turnDeps.configuredProviders,
         resolveWorkspaceCustomLlm: turnDeps.resolveWorkspaceCustomLlm?.bind(turnDeps) ?? null,
         resolveLegacyByoKey: deps.resolveWorkspaceByoGeminiKey?.bind(deps) ?? null,

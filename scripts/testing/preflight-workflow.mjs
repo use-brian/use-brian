@@ -4,7 +4,7 @@ import { globSync } from 'node:fs'
 import { cp, mkdir, readFile, readdir, lstat } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { command, cleanOutputs, cleanupDatabases, resetSnapshot } from './preflight-source.mjs'
-import { acceptanceMatrix, acceptanceShards } from './department-isolation-report.mjs'
+import { acceptanceMatrices, acceptanceShards } from './department-isolation-report.mjs'
 
 // Reuse the declared YAML dependency of the existing CI topology tooling.
 const yaml = createRequire(new URL('../../apps/app-desktop/package.json', import.meta.url))('js-yaml')
@@ -56,10 +56,11 @@ export function expand(value, context) {
 export function workflowContext({ historical = true, sha = 'local-snapshot', branch = 'develop', runnerTemp = '/tmp/local-preflight' } = {}) {
   const profile = historical ? 'full' : 'current'
   const shards = acceptanceShards(profile)
+  const matrices = acceptanceMatrices(profile)
   return { github: { event_name: 'push', head_ref: '', repository: 'local/snapshot', ref: `refs/heads/${branch}`, sha,
     event: { pull_request: { head: { repo: { full_name: 'local/snapshot' } } } } }, runner: { temp: runnerTemp }, matrix: {},
     needs: { 'ci-scope': { result: 'success', outputs: { historical: String(historical), profile,
-      shards: JSON.stringify(shards), total: String(shards.length), matrix: JSON.stringify(acceptanceMatrix(profile)) } } } }
+      shards: JSON.stringify(shards), total: String(shards.length), matrix: JSON.stringify(matrices.remaining), calendar: JSON.stringify(matrices.calendar) } } } }
 }
 
 function jobBudgetMs(id, definition, context) {
@@ -214,7 +215,7 @@ export async function executeWorkflow({ source, root, context, env, directory, l
               stepRecord.provisioning = 'local PostgreSQL 18 with required extensions'
             } else if (typeof step.run === 'string') {
               let script = expand(step.run, local)
-              if (job.id === 'department-isolation-shards') script = script.replace('--pg-bin /usr/lib/postgresql/18/bin', pgBin ? `--pg-bin '${pgBin.replaceAll("'", "'\\''")}'` : '')
+              if (['department-isolation-shards', 'calendar-isolation'].includes(job.id)) script = script.replace('--pg-bin /usr/lib/postgresql/18/bin', pgBin ? `--pg-bin '${pgBin.replaceAll("'", "'\\''")}'` : '')
               // Absolute CI receipt paths live inside this job's private runner directory.
               script = script.replaceAll('/tmp/department-isolation-', `${temp}/department-isolation-`)
               stepRecord.command = ['bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', script]

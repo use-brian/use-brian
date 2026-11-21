@@ -192,11 +192,11 @@ before(async () => {
   if (process.env.BRIAN_TEST_PGLITE_SNAPSHOT) {
     db = await loadPreparedPglite(process.env.BRIAN_TEST_PGLITE_SNAPSHOT)
   } else {
-    // The chain runs as the ordinary owner 8274 requires. The suite then reads in
-    // the bootstrap session, exactly like the prepared-image path above.
+    // The standalone test still prepares its own installation as the ordinary owner.
     db = await openOrdinaryOwnerPglite()
     await migratePglite(db, fileURLToPath(new URL('../../../../packages/api/migrations', import.meta.url)))
-    await db.exec('RESET ROLE')
+    // Match the fresh bootstrap session on the restored image.
+    await db.exec('RESET ROLE; RESET ALL')
   }
   await db.exec(`
     CREATE TABLE context_matrix_rows (
