@@ -36,11 +36,12 @@ describe('[COMP:ci/execution-topology] historical coverage selection', () => {
     try {
       for (const [event, profile, shards] of [
         ['schedule', 'full', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]],
+        ['workflow_dispatch', 'full', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]],
         ['push', 'current', [1, 2, 3, 4, 5, 6, 7, 8]],
       ]) {
         const eventPath = join(directory, `${event}-event.json`)
         const outputPath = join(directory, `${event}-output`)
-        writeFileSync(eventPath, JSON.stringify({ before: head, after: head }))
+        writeFileSync(eventPath, JSON.stringify({ before: head, after: head, inputs: { compare_calendar_arm: 'true' } }))
         execFileSync(process.execPath, [script], { cwd, env: { ...process.env,
           GITHUB_EVENT_NAME: event, GITHUB_EVENT_PATH: eventPath, GITHUB_OUTPUT: outputPath,
         } })
@@ -51,9 +52,13 @@ describe('[COMP:ci/execution-topology] historical coverage selection', () => {
         assert.equal(Number(output.total), shards.length)
         const longest = profile === 'full' ? [11, 9] : [8, 6]
         const order = [...longest, ...shards.filter(shard => !longest.includes(shard))]
-        assert.deepEqual(JSON.parse(output.matrix), { include: order.map(shard => ({
-          shard, timeoutMinutes: longest.includes(shard) ? 45 : 20,
-        })) })
+        const expected = order.map(shard => ({
+          shard, timeoutMinutes: longest.includes(shard) ? 45 : 20, runner: 'ubuntu-latest',
+          labelSuffix: '', artifactName: `department-isolation-shard-${shard}`,
+        }))
+        if (event === 'workflow_dispatch') expected.unshift({ ...expected[0], runner: 'ubuntu-24.04-arm',
+          labelSuffix: ' ARM64 comparison', artifactName: 'calendar-comparison-arm64' })
+        assert.deepEqual(JSON.parse(output.matrix).include, expected)
       }
     } finally { rmSync(directory, { recursive: true, force: true }) }
   })

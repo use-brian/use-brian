@@ -48,7 +48,7 @@ export function acceptanceShards(profile = 'full') {
 }
 
 /** Whole-job budgets include setup and every serialized case, not slower reads. */
-export function acceptanceMatrix(profile = 'full') {
+export function acceptanceMatrix(profile = 'full', { compareCalendarArm = false } = {}) {
   const shards = acceptanceShards(profile)
   // Submit the slowest measured suites first while keeping shard IDs stable for receipts.
   const longSuites = ['recovered-calendar-history', 'retained-conversation']
@@ -58,7 +58,17 @@ export function acceptanceMatrix(profile = 'full') {
     return { shard, rank: priority < 0 ? longSuites.length : priority, timeoutMinutes: priority < 0 ? 20 : 45 }
   })
   matrix.sort((a, b) => a.rank - b.rank)
-  return { include: matrix.map(({ shard, timeoutMinutes }) => ({ shard, timeoutMinutes })) }
+  const include = matrix.map(({ shard, timeoutMinutes }) => ({
+    shard, timeoutMinutes, runner: 'ubuntu-latest', labelSuffix: '',
+    artifactName: `department-isolation-shard-${shard}`,
+  }))
+  if (compareCalendarArm) {
+    const calendar = include.find(({ shard }) => suitesForShard({ index: shard, total: shards.length }, profile)
+      .some(suite => suite.id === 'recovered-calendar-history'))
+    include.unshift({ ...calendar, runner: 'ubuntu-24.04-arm', labelSuffix: ' ARM64 comparison',
+      artifactName: 'calendar-comparison-arm64' })
+  }
+  return { include }
 }
 
 export function suitesForShard(shard, profile = 'full') {
