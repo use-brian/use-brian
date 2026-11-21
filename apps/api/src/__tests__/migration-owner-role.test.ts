@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url'
 import { readFile, readdir } from 'node:fs/promises'
 import { toPgliteMigrationSql } from '@use-brian/api/migrations/pglite-sql.js'
 import { migratePglite, preparePgliteRuntimeRole } from '../migrate-pglite.js'
+import { openOrdinaryOwnerPglite } from './ordinary-owner-pglite.js'
 
 const migrationsDir = fileURLToPath(
   new URL('../../../../packages/api/migrations', import.meta.url),
@@ -1129,7 +1130,7 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
   it('replays the whole chain from empty without a superuser', async (t) => {
     const snapshot = process.env.BRIAN_TEST_PGLITE_SNAPSHOT
     const identity = snapshot ? await preparedIdentity() : undefined
-    const db = await openAsOwner({ prepareRuntime: true })
+    const db = await openOrdinaryOwnerPglite()
     try {
       // One connection for every file, so the baseline's row_security = off
       // is still in force when the later data-rewriting migrations run.
