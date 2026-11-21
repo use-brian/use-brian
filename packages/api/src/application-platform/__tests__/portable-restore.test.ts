@@ -79,7 +79,7 @@ describe('[COMP:api/portable-restore] reviewed harness extension',()=>{
    expect(queries[0]).toBe('BEGIN ISOLATION LEVEL REPEATABLE READ')
   }
  })
- it('binds the 8337 source profile rather than aliasing 8334',async()=>{
+ it('binds the 8337 source profile rather than aliasing 8334', { timeout: 15_000 }, async()=>{
   const profile=await import(new URL('installation-authentication-8337.mjs',directory).href)
   const source=await profile.currentInstallationAuthenticationSource()
   expect(source.portableSuccessor.inventory).toMatchObject({routines:23,relations:8,types:0,triggers:11})

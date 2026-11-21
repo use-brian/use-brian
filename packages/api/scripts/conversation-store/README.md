@@ -214,6 +214,10 @@ extra overloads, altered actor ACLs, policies, columns, constraints, indexes and
 triggers refuse. The scope includes the altered Project scope and admission
 function/trigger, not only newly created harness tables.
 
+The source-profile unit test renders the full predecessor proof before checking
+the 8337 catalog binding. It has a 15-second timeout because rendering can
+exceed Vitest's five-second default on the CI runner.
+
 Reproduce or check both artifacts ONLY on a newly created disposable fixture:
 
 ```sh
