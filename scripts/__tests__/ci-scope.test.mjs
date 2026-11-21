@@ -109,7 +109,7 @@ describe('[COMP:ci/execution-topology] historical coverage selection', () => {
     const at = seconds => new Date(Date.UTC(2026, 10, 21, 0, 0, seconds)).toISOString()
     const run = { id: 15, run_attempt: 2, status: 'completed', conclusion: 'success', created_at: at(0), run_started_at: at(10) }
     const job = (name, eligible, start, end, extra) => ({ name, run_id: 15, run_attempt: 2,
-      created_at: at(eligible), started_at: at(start), completed_at: at(end), conclusion: 'success', ...extra })
+      status: 'completed', created_at: at(eligible), started_at: at(start), completed_at: at(end), conclusion: 'success', ...extra })
     const jobs = [job('database-test-dependencies', 10, 20, 30),
       job('Department isolation (6/8)', 30, 31, 52),
       job('Department isolation (8/8)', 12, 14, 55, { steps: [{ name: 'Run no-credential acceptance', started_at: at(20), completed_at: at(54) }] }),
@@ -129,5 +129,7 @@ describe('[COMP:ci/execution-topology] historical coverage selection', () => {
     assert.equal(calendar.steps[0].seconds, 34)
     assert.throws(() => summarizeCiTiming(run, { total_count: jobs.length + 1, jobs }), /complete job list/)
     assert.throws(() => summarizeCiTiming({ ...run, run_attempt: 3 }, { total_count: jobs.length, jobs }), /complete job list/)
+    const staleSnapshot = jobs.map(item => item.name === 'build-test' ? { ...item, status: 'queued' } : item)
+    assert.throws(() => summarizeCiTiming(run, { total_count: staleSnapshot.length, jobs: staleSnapshot }), /complete job list/)
   })
 })

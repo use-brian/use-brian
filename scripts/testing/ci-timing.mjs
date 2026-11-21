@@ -10,7 +10,7 @@ function secondsBetween(from, to) {
 // [COMP:ci/execution-topology] Summarize a completed Actions attempt from its timestamps.
 export function summarizeCiTiming(run, listing) {
   if (run.status !== 'completed' || !Array.isArray(listing.jobs) || listing.jobs.length !== listing.total_count
-    || listing.jobs.some(job => job.run_id !== run.id || job.run_attempt !== run.run_attempt)) {
+    || listing.jobs.some(job => job.status !== 'completed' || job.run_id !== run.id || job.run_attempt !== run.run_attempt)) {
     throw new Error('Expected a completed CI attempt and its complete job list')
   }
   const attemptStart = run.run_started_at ?? run.created_at
