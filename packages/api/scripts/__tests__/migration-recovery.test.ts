@@ -1,7 +1,8 @@
+import { EventEmitter } from 'node:events'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const db = vi.hoisted(() => ({ connect: vi.fn(), query: vi.fn(), end: vi.fn() }))
-vi.mock('pg', () => ({ default: { Client: class {
+vi.mock('pg', () => ({ default: { Client: class extends EventEmitter {
   connect = db.connect
   query = db.query
   end = db.end
