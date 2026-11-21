@@ -202,7 +202,7 @@ describe('[COMP:tooling/push-preflight] actual local publication boundary', () =
       'ci-scope': { steps: [{ run: 'node scripts/testing/ci-scope.mjs' }] },
       'build-test': { needs: 'ci-scope', steps: [{ run: 'true' }] },
     } })
-    for (const path of ['scripts/testing/ci-scope.mjs', 'scripts/testing/department-isolation-report.mjs',
+    for (const path of ['scripts/testing/ci-scope.mjs', 'scripts/testing/git-changes.mjs', 'scripts/testing/department-isolation-report.mjs',
       'packages/shared/src/department-isolation-coverage.ts']) {
       await put(root, path, await readFile(new URL(`../../${path}`, import.meta.url)))
     }
