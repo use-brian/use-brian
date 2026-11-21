@@ -10,6 +10,8 @@ vi.mock('../../db/client.js', () => ({
   queryWithRLS,
   query,
   getPool: () => ({ query: poolQuery }),
+  withRLSTransaction: vi.fn(async (_userId: string, run: (client: { query: typeof poolQuery }) => Promise<unknown>) =>
+    run({ query: poolQuery })),
 }))
 
 import {
@@ -52,9 +54,10 @@ describe('[COMP:api/office-pdf-sessions] PDF session discovery boundary', () => 
     await searchWorkspaceFiles(context, { query: 'agreement' })
     await listWorkspaceFilesIndexRanked(context, 10)
 
-    expect(queryWithRLS).toHaveBeenCalledTimes(3)
-    for (const call of queryWithRLS.mock.calls) {
-      const sql = String(call[1])
+    expect(queryWithRLS).toHaveBeenCalledTimes(2)
+    const catalogStatements = poolQuery.mock.calls.filter(([statement]) => String(statement).includes('FROM workspace_files'))
+    expect(catalogStatements).toHaveLength(1)
+    for (const sql of [...queryWithRLS.mock.calls.map(call => String(call[1])), String(catalogStatements[0][0])]) {
       expect(sql).toContain("path NOT LIKE '/office/sessions/%'")
       expect(sql).toContain("NOT COALESCE((metadata->>'noIndex')::boolean, false)")
     }

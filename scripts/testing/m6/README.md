@@ -197,6 +197,52 @@ jobs. `BRIAN_CHAT_COST_TOOL=catalog` wires the same catalog without a call, to
 separate catalog preparation from the call (diagnostic only; no matrix step).
 The no-tool scenarios are unchanged when the variable is unset.
 
+### Concurrent context-aware Chat (A14 and A15)
+
+The `concurrent-context-chat` and `concurrent-context-chat-hosted` steps start the
+open API composition with its normal background workers and a deterministic,
+in-process model provider. The latter step also applies the hosted schema
+overlay. The results cover database and API work on local loopback. Hosted
+ingress, live model calls and the separate hosted worker service need their own
+measurement.
+
+The default diagnostic compares one, two, and four simultaneous requests on a
+four-connection application pool. Each width uses two waves in the same dense
+workspace, with distinct users, devices and personal sessions. Each user has
+private Memory, a real session attachment and a shared indexed File to look up.
+The full fixture has 232 Memory rows, including eight live rows per user,
+65,925 derivation edges and 24 indexed Files. The second wave uses each user's
+durable conversation from the first. Every turn
+checks the exact Memory, File index, attachment tool result, SSE reply and reopened
+transcript. The fixture also checks each user's receipt for accidental inclusion
+of the other users' private inputs. Readback is outside the wave's timing window.
+
+The receipt records each turn's first text, terminal event, HTTP completion, and
+the route's query, checkout and publication timing fields when available. A
+fixture-only PostgreSQL observer samples heavyweight locks against active request
+backends. Rows show fixed operation names, the blocking request slot or pool role,
+and whether the blocker was active or idle in a transaction. These samples can
+miss short waits and show the top-level operation rather than its nested statement.
+The receipt also counts observed conversation-conversion worker calls during
+each wave. SQL and checkout time are sums that can include overlapping work.
+The matrix marks each width and phase against the five-second target for every
+turn to reach its verified terminal SSE `done` event. First text, HTTP response
+close and the count of turns over target appear alongside that verdict. Compare
+matching source identities, pool sizes, widths and worker settings, and inspect
+per-turn attribution before assigning a slow wave to lock contention.
+
+For a shorter direct run use the marker-verified local fixture command below.
+`BRIAN_CONTEXT_CHAT_LOAD_WIDTHS=2` selects a two-user wave and its follow-up.
+
+```sh
+BRIAN_CONTEXT_CHAT_LOAD=1 BRIAN_CONTEXT_CHAT_LOAD_WIDTHS=2 \
+BRIAN_CONTEXT_CHAT_LOAD_OUTPUT=/abs/concurrent-context-chat.json \
+node scripts/crm/local-fixture.mjs --pg-bin /path/to/postgresql-18/bin -- \
+env PG_POOL_MAX=4 PG_STATEMENT_TIMEOUT_MS=15000 \
+pnpm --filter @use-brian/api exec vitest run --config vitest.integration.config.ts \
+src/application-platform/__tests__/concurrent-context-chat.integration.test.ts
+```
+
 ## Prerequisites outside the repository
 
 - PostgreSQL 18 with pgvector, pg_trgm and `pg_stat_statements` (Homebrew
@@ -212,7 +258,7 @@ The no-tool scenarios are unchanged when the variable is unset.
 
 ## Safety
 
-Timed warm, one-lookup and context-aware chat steps require a task-owned quiescence handshake. Use a
+Timed warm, one-lookup and context-aware Chat steps, including the concurrent waves, require a task-owned quiescence handshake. Use a
 fresh freeze ID for each coordinated measurement window. Each active owner wraps
 their final build/test/browser/fixture command with `quiescence.mjs run --dir
 /abs/quiet --freeze-id final-1 --owner backend [--fixture /owned/fixture/path]

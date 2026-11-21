@@ -60,7 +60,7 @@ import {
 import { runPreflight, buildPreflightPrompt } from '@use-brian/core/workers/preflight.js'
 import { latestWorkflowProposalReceipt } from '@use-brian/core/workflow/tools.js'
 import { AttachmentCollector } from '@use-brian/core/workspace-files/attachments.js'
-import { buildWorkspaceFilesContext } from '@use-brian/core/workspace-files/context-builder.js'
+import { buildWorkspaceFilesContext, selectWorkspaceFilesContextRows } from '@use-brian/core/workspace-files/context-builder.js'
 import { buildUploadPolicyBlock } from '@use-brian/core/workspace-files/upload-policy-block.js'
 import { calculateCost } from '@use-brian/agent-runtime/billing/cost-tracker.js'
 import { modelToCompactionTier } from '@use-brian/agent-runtime/compaction/compact.js'
@@ -2196,7 +2196,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     activeCapabilities.has('files')
   ) {
     try {
-      const rows = await workspaceFilesStore.listIndexRanked(
+      const indexed = await workspaceFilesStore.listIndexRanked(
         {
           workspaceId: assistant.workspaceId,
           userId,
@@ -2210,10 +2210,12 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
         },
         PER_TURN_FILES_INDEX_CAP,
       )
+      const rows = selectWorkspaceFilesContextRows(indexed, PER_TURN_FILES_INDEX_CAP)
       noteAutomaticScopeEvidence(scopeAccumulator, rows)
       workspaceFilesContext = buildWorkspaceFilesContext(rows)
     } catch (err) {
       console.error(`[${channelType}] workspace-files index fetch failed:`, err)
+      workspaceFilesContext = buildWorkspaceFilesContext(null)
     }
   }
 

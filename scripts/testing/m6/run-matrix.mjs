@@ -263,6 +263,16 @@ function contextAwareChatStep(edition) {
   }) }
 }
 
+function concurrentContextChatStep(edition) {
+  const hosted = edition === 'hosted'
+  return { group: 'baseline', estimate: '3 to 8 min', ...vitestStep({
+    test: HARNESSES.concurrentContextChat, outputEnv: 'BRIAN_CONTEXT_CHAT_LOAD_OUTPUT', outputName: 'concurrent-context-chat.json',
+    extraEnv: () => ({ BRIAN_CONTEXT_CHAT_LOAD: '1', PG_POOL_MAX: '4', PG_STATEMENT_TIMEOUT_MS: '15000' }), timeoutMs: 15 * MIN,
+    migrationDirs: hosted ? ctx => [join(ctx.platformRoot, 'packages/api-platform/migrations')] : [],
+    needs: hosted ? ['packageDist', 'platform'] : ['packageDist'],
+  }) }
+}
+
 export const SCALING_CELLS = [
   ...[10, 100, 1000].map(messages => ({ cell: `messages:${messages}`, messages, dependencies: 1 })),
   ...[1, 10, 100].map(dependencies => ({ cell: `dependencies:${dependencies}`, messages: 10, dependencies })),
@@ -399,6 +409,8 @@ export const STEPS = {
   'fixed20-scaling': { group: 'fixed20', estimate: 'one migrated template and six serial owned clones; canonical seeding included separately, up to 20 min per cell', ...scalingStep() },
   'context-aware-chat': contextAwareChatStep('oss'),
   'context-aware-chat-hosted': contextAwareChatStep('hosted'),
+  'concurrent-context-chat': concurrentContextChatStep('oss'),
+  'concurrent-context-chat-hosted': concurrentContextChatStep('hosted'),
   'doc-thread-32': { group: 'baseline', estimate: '10 to 60 min (fixture, then 32 dock turns whose cost grows with the thread)', ...vitestStep({ test: HARNESSES.docThread, outputEnv: 'BRIAN_DOC_THREAD_OUTPUT', outputName: 'doc-thread.json', extraEnv: () => ({ BRIAN_DOC_THREAD_TURNS: '32' }), timeoutMs: 240 * MIN }) },
   admission: { group: 'baseline', estimate: '3 to 6 min (9 requests)', ...vitestStep({ test: HARNESSES.admission, outputEnv: 'BRIAN_TURN_ADMISSION_OUTPUT', outputName: 'turn-admission.json', extraEnv: () => ({}), timeoutMs: 30 * MIN }) },
   'model-calls': { group: 'model', estimate: '3 to 6 min (13 turns)', ...vitestStep({ test: HARNESSES.routing, outputEnv: 'BRIAN_TURN_ROUTING_OUTPUT', outputName: 'turn-routing.json', extraEnv: () => ({}), timeoutMs: 30 * MIN }) },
@@ -617,7 +629,8 @@ async function main() {
     const step = { id, ...STEPS[id], timeoutMs: Math.round((STEPS[id].timeoutMs ?? 0) * o.timeoutScale) }
     const receipt = { tool: TOOL, schema: 1, stepId: id, group: step.group, rows: rowsFor(id), plumbing: o.plumbing,
       ...(o.plumbing ? { note: 'plumbing proof, not a qualification result' } : {}), estimate: step.estimate, startedAt: new Date().toISOString() }
-    const timedWindow = ['fixed20-oss-warm', 'fixed20-oss-lookup', 'context-aware-chat', 'context-aware-chat-hosted'].includes(id)
+    const timedWindow = ['fixed20-oss-warm', 'fixed20-oss-lookup', 'context-aware-chat', 'context-aware-chat-hosted',
+      'concurrent-context-chat', 'concurrent-context-chat-hosted'].includes(id)
     const handshake = timedWindow && o.quiescenceDir ? checkQuiescence({ dir: o.quiescenceDir, freezeId: o.freezeId, owners: o.quiescenceOwners }) : null
     const missing = (step.needs ?? []).filter(need => !probes[need]?.ok)
     if (interrupted) Object.assign(receipt, { status: 'skipped', reason: 'run interrupted before this step' })

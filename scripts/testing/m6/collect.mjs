@@ -299,6 +299,43 @@ function contextAwareChatLines(row, ctx) {
   }))
 }
 
+function concurrentContextChatLines(row, ctx) {
+  const [source] = row.steps, step = ctx.steps[source]
+  const receipt = step?.harness
+  const budget = '<=5000 ms to verified terminal SSE done for every turn'
+  const waves = receipt?.schema === 1 && receipt.workers === true && receipt.poolSize === 4 && Array.isArray(receipt.waves)
+    ? receipt.waves : []
+  const workerCalls = waves.reduce((n, wave) => n + (Number.isInteger(wave?.workerConversionCalls) ? wave.workerConversionCalls : 0), 0)
+  return row.cells.flatMap(cell => ['first', 'follow-up'].map(phase => {
+    const matches = waves.filter(wave => wave?.width === Number(cell) && wave.phase === phase)
+    const wave = matches[0], turns = Array.isArray(wave?.turns) ? wave.turns : []
+    const complete = matches.length === 1 && turns.length === Number(cell) && wave.peakRequests === Number(cell)
+      && turns.every(turn => Number.isInteger(turn?.slot) && turn.slot >= 1 && turn.slot <= Number(cell))
+      && new Set(turns.map(turn => turn.slot)).size === turns.length
+    if (!complete) {
+      return line(row, cell, phase, { budget, verdict: matches.length ? 'fail' : 'unmeasured', note: stepNote(step, cell), source })
+    }
+    const timings = key => turns.map(turn => turn[key]).filter(ms => Number.isFinite(ms) && ms >= 0)
+    const first = timings('firstTextMs'), closed = timings('completionMs')
+    const verified = turns.filter(turn => turn.httpStatus === 200 && turn.sseVerified === true && turn.inputsVerified === true && turn.reopened === true
+      && Number.isFinite(turn.firstTextMs) && turn.firstTextMs >= 0 && Number.isFinite(turn.doneMs) && turn.doneMs >= turn.firstTextMs
+      && Number.isFinite(turn.completionMs) && turn.completionMs >= turn.doneMs)
+    const done = verified.map(turn => turn.doneMs)
+    const lockSamples = turns.reduce((n, turn) => n + (turn.lockSamples ?? 0), 0)
+    const misses = done.filter(ms => ms > 5000).length
+    const range = values => {
+      if (!values.length) return 'unavailable'
+      const from = Math.ceil(Math.min(...values)), to = Math.ceil(Math.max(...values))
+      return from === to ? `${to} ms` : `${from}–${to} ms`
+    }
+    return line(row, cell, phase, {
+      after: done.length ? Math.ceil(Math.max(...done)) : null, unit: 'ms',
+      afterDetail: `verified SSE done ${range(done)}, first text ${range(first)}, HTTP close ${range(closed)}, ${misses}/${turns.length} over budget, ${turns.length - verified.length}/${turns.length} unverified, ${lockSamples} lock samples, worker conversion calls ${wave.workerConversionCalls ?? 0}`,
+      budget, verdict: step.status === 'completed' && workerCalls > 0 && verified.length === turns.length && misses === 0 ? 'pass' : 'fail', source,
+    })
+  }))
+}
+
 /** Row A11: one 32-turn doc thread; the interim budget applies at turn 32. */
 function docThreadLines(row, ctx) {
   const s = ctx.steps['doc-thread-32'], results = s?.harness?.results ?? []
@@ -432,6 +469,8 @@ function buildLines(ctx) {
       case 'A9': lines.push(...scalingLines(row, ctx)); break
       case 'A12':
       case 'A13': lines.push(...contextAwareChatLines(row, ctx)); break
+      case 'A14':
+      case 'A15': lines.push(...concurrentContextChatLines(row, ctx)); break
       case 'A11': lines.push(...docThreadLines(row, ctx)); break
       case 'B1': lines.push(...admissionLines(row, ctx)); break
       case 'C1': lines.push(...modelCallLines(row, ctx)); break

@@ -8,6 +8,7 @@ import {readApplicationFieldAncestors} from '../application-platform/field-evide
 import {z} from 'zod'
 import {readRetainedContextFrame,readRetainedQueryFrame} from './session-context-revisions.js'
 import {assertPreparedConversationCohortEvidence,scopeEvidenceFailureOf,validateCallerScopeEvidence} from '../context-scope/caller-evidence.js'
+import { contextVerificationUnavailable } from '../context-scope/delivery-failure.js'
 import {decodeConversationPreparationCohort,readConversationPreparation,type PreparationCohortEvidence} from '../application-platform/conversation-evidence.js'
 import {captureSessionAuthority} from '../context-scope/authority-lease.js'
 import {sessionAuthorityFactsParameters} from '../context-scope/session-authority-facts.js'
@@ -748,14 +749,14 @@ async function readNativeMemoryFrame<T>(ctx: AccessContext, authority: SessionCo
   if(rows.length>4096)throw new DerivedScopeError('scope_evidence_missing')
   return rows.map(row=>memoryQuerySource.parse(row.source))
  }
- const roots=await discover()
+ const roots=await discover().catch(error=>{throw contextVerificationUnavailable(error,'prompt_memory_metadata')??error})
  return readRetainedQueryFrame(authority,roots,async client=>{
    const requested=pinAccessCeiling({...authority.execution.security.access,...Object.fromEntries(Object.entries(ctx).filter(([,v])=>v!==undefined))})
    const ceiling=intersectAccessCeilings(authority.execution.security.ceiling,requested)
    await runWithAgentAccess({...authority.execution.security.access,...ceiling},()=>applyRLSGucs(client,ctx.userId))
    if(JSON.stringify(await discover(client))!==JSON.stringify(roots))throw new DerivedScopeError('scope_source_changed')
    return capture(client,ceiling)
- })
+ }).catch(error=>{throw contextVerificationUnavailable(error,'retained_context')??error})
 }
 
 function parseMemoryProjection(raw: unknown[], workspaceId: string): MemoryProjection {

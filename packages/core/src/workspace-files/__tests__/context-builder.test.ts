@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildWorkspaceFilesContext } from '../context-builder.js'
+import { buildWorkspaceFilesContext, selectWorkspaceFilesContextRows } from '../context-builder.js'
 import type { WorkspaceFileIndexRow } from '../types.js'
 
 function row(partial: Partial<WorkspaceFileIndexRow>): WorkspaceFileIndexRow {
@@ -20,10 +20,27 @@ function row(partial: Partial<WorkspaceFileIndexRow>): WorkspaceFileIndexRow {
 }
 
 describe('[COMP:files/prompt-context] buildWorkspaceFilesContext', () => {
-  it('emits a fallback body when no rows', () => {
+  it('reports an empty scoped index after a successful read', () => {
     const out = buildWorkspaceFilesContext([])
     expect(out).toContain('# Workspace Files')
-    expect(out).toContain('No files yet')
+    expect(out).toContain('returned no entries within this turn’s access')
+  })
+
+  it('reports unavailability without claiming the index is empty', () => {
+    const out = buildWorkspaceFilesContext(null)
+    expect(out).toContain('# Workspace Files')
+    expect(out).toContain('is unavailable for this turn')
+    expect(out).not.toContain('returned no entries')
+  })
+
+  it('preserves selected row identities and applies the cap to usable rows', () => {
+    const visible = row({ id: 'visible', path: '/visible.txt' })
+    const archive = { ...row({ id: 'protected', path: '/protected.txt' }), purpose: 'engineering_archive' as const }
+    const original = [visible]
+    expect(selectWorkspaceFilesContextRows(original, 1)).toBe(original)
+    const selected = selectWorkspaceFilesContextRows([archive, visible, row({ id: 'older' })], 1)
+    expect(selected).toHaveLength(1)
+    expect(selected[0]).toBe(visible)
   })
 
   it('renders title/name + mime + summary', () => {

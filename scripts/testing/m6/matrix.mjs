@@ -11,6 +11,7 @@
 /** Existing harnesses, by invocation only. Paths are OSS-relative unless `plat:`. */
 export const HARNESSES = {
   contextAwareChat: 'packages/api/src/application-platform/__tests__/context-aware-chat-latency.integration.test.ts',
+  concurrentContextChat: 'packages/api/src/application-platform/__tests__/concurrent-context-chat.integration.test.ts',
   fixed20: 'packages/api/src/application-platform/__tests__/chat-architecture-cost.integration.test.ts',
   admission: 'packages/api/src/turn/__tests__/turn-admission-measurement.integration.test.ts',
   routing: 'packages/api/src/turn/__tests__/turn-routing-route.integration.test.ts',
@@ -105,6 +106,8 @@ export const ROWS = [
   { id: 'A10', section: 'A', title: 'Shifted costs: idle polling, held-lock waits, revision N+1, conversion, high-fanout invalidation', cells: ['idle-polling', 'lock-waits', 'revision-n+1', 'conversion', 'fanout'], steps: [], unmeasured: 'No maintained harness; the 2026-11-16 baseline took these from development-database logs (756 SQL calls per idle 10 s, 4.7 s lock waits).' },
   { id: 'A12', section: 'A', title: 'Context-aware mounted chat on the OSS schema through durable completion with an immediate provider', cells: ['sparse', 'dense'], steps: ['context-aware-chat'] },
   { id: 'A13', section: 'A', title: 'Context-aware mounted chat on the hosted schema through durable completion with an immediate provider', cells: ['sparse', 'dense'], steps: ['context-aware-chat-hosted'] },
+  { id: 'A14', section: 'A', title: 'Concurrent context-aware Chat on the OSS schema with workers on', cells: ['1', '2', '4'], steps: ['concurrent-context-chat'] },
+  { id: 'A15', section: 'A', title: 'Concurrent context-aware Chat on the hosted schema with workers on', cells: ['1', '2', '4'], steps: ['concurrent-context-chat-hosted'] },
   // B. One-turn baseline re-run
   { id: 'B1', section: 'B', title: 'One-request admission re-measurement (audience checks, admission, owner frames)', cells: ['empty-private', 'populated-private', 'shared-room'], steps: ['admission'] },
   { id: 'B2', section: 'B', title: 'Original development-data, live-provider one-turn scenario', cells: ['dev-turn'], steps: [], unmeasured: 'The original was one turn on development data with a live provider read from turn_timings and PostgreSQL logs; no maintained harness reproduces it on a disposable brain, and a personal brain is out of bounds.' },

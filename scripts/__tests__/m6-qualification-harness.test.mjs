@@ -18,7 +18,7 @@ describe('[COMP:tooling/m6-qualification] M6 qualification harness', () => {
   it('maps every row to registered steps and every full-profile step to a row', () => {
     const ids = ROWS.map(r => r.id)
     assert.equal(new Set(ids).size, ids.length)
-    assert.equal(ROWS.length, 59)
+    assert.equal(ROWS.length, 61)
     for (const row of ROWS) for (const step of row.steps) assert.ok(STEPS[step], `${row.id} names unknown step ${step}`)
     for (const row of ROWS) if (!row.steps.length) assert.ok(row.unmeasured, `${row.id} has no step and no unmeasured reason`)
     for (const id of PROFILES.full) assert.ok(ROWS.some(r => r.steps.includes(id)), `${id} feeds no row`)
@@ -118,6 +118,9 @@ describe('[COMP:tooling/m6-qualification] M6 qualification harness', () => {
     assert.deepEqual(row('A12').steps, ['context-aware-chat'])
     assert.deepEqual(row('A13').steps, ['context-aware-chat-hosted'])
     assert.ok(STEPS['context-aware-chat-hosted'].needs.includes('platform'))
+    assert.deepEqual(row('A14').steps, ['concurrent-context-chat'])
+    assert.deepEqual(row('A15').steps, ['concurrent-context-chat-hosted'])
+    assert.ok(STEPS['concurrent-context-chat-hosted'].needs.includes('platform'))
     assert.equal(row('A7').unmeasured, undefined)
     assert.equal(row('A8').unmeasured, undefined)
     assert.equal(BUDGETS.foreground.limit, 50)
@@ -128,7 +131,7 @@ describe('[COMP:tooling/m6-qualification] M6 qualification harness', () => {
       assert.ok(PROFILES.full.includes(id))
       assert.ok(STEPS[id].needs.includes('pgStatStatements'), `${id} needs nested statistics`)
     }
-    assert.equal(Object.keys(STEPS).length, 63)
+    assert.equal(Object.keys(STEPS).length, 65)
     assert.ok(!PROFILES['dry-run'].includes('fixed20-oss-cold'))
     assert.ok(selectSteps(parseArgs(['--profile', 'dry-run', '--cold'])).includes('fixed20-oss-cold'))
     assert.deepEqual(selectSteps(parseArgs(['--steps', 'fixed20-oss-cold', '--cold'])), ['fixed20-oss-cold'])
@@ -137,6 +140,36 @@ describe('[COMP:tooling/m6-qualification] M6 qualification harness', () => {
     assert.throws(() => parseArgs(['--cold-samples', '0']), /--cold-samples/)
     assert.throws(() => parseArgs(['--barrier-before', 'fixed20-oss-warm']), /supplied together/)
     assert.equal(parseArgs(['--barrier-before', 'fixed20-oss-warm', '--barrier-file', '/tmp/m6-release']).barrierBefore, 'fixed20-oss-warm')
+  })
+
+  it('applies the terminal SSE latency budget to each verified concurrent wave', () => {
+    const run = mkdtempSync(join(tmpdir(), 'm6-concurrent-chat-'))
+    mkdirSync(join(run, 'steps'))
+    const harness = join(run, 'concurrent.json'), id = 'concurrent-context-chat'
+    const turn = { slot: 1, firstTextMs: 300, doneMs: 690, completionMs: 700,
+      httpStatus: 200, sseVerified: true, inputsVerified: true, reopened: true, lockSamples: 1 }
+    const wave = { width: 2, phase: 'first', peakRequests: 2, workerConversionCalls: 1,
+      turns: [turn, { ...turn, slot: 2, doneMs: 5000, completionMs: 5500 }] }
+    writeFileSync(harness, JSON.stringify({ schema: 1, workers: true, poolSize: 4, waves: [wave,
+      { ...wave, phase: 'follow-up', turns: [turn, { ...turn, slot: 2, doneMs: 5000.2, completionMs: 5500 }] },
+      { ...wave, width: 1, phase: 'follow-up', peakRequests: 1, turns: [{ ...turn, reopened: false }] },
+      { ...wave, width: 4, peakRequests: 2 },
+    ] }))
+    writeFileSync(join(run, 'steps', `${id}.json`), JSON.stringify({ stepId: id, status: 'completed', outputs: { harness } }))
+    writeFileSync(join(run, 'run.json'), JSON.stringify({ runId: 'concurrent-fixture', profile: 'explicit', steps: [id], source: {} }))
+    const result = spawnSync(process.execPath, [join(M6, 'collect.mjs'), '--run', run], { encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+    const lines = JSON.parse(readFileSync(join(run, 'results.json'), 'utf8')).lines.filter(line => line.row === 'A14')
+    assert.deepEqual(lines.map(({cell, metric, verdict}) => [cell, metric, verdict]), [
+      ['1', 'first', 'unmeasured'], ['1', 'follow-up', 'fail'],
+      ['2', 'first', 'pass'], ['2', 'follow-up', 'fail'],
+      ['4', 'first', 'fail'], ['4', 'follow-up', 'unmeasured'],
+    ])
+    assert.equal(lines[2].after, 5000)
+    assert.match(lines[2].afterDetail, /SSE done 690–5000 ms.*HTTP close 700–5500 ms.*0\/2 over budget.*2 lock samples.*worker conversion calls 1/)
+    assert.equal(lines[3].after, 5001)
+    assert.match(lines[3].afterDetail, /1\/2 over budget/)
+    assert.match(lines[1].afterDetail, /verified SSE done unavailable.*HTTP close 700 ms.*1\/1 unverified/)
   })
 
   it('reports indicative overruns for cold, paired warm and one-lookup counts', () => {

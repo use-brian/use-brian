@@ -21,7 +21,7 @@ import { bindScopeSource } from '@use-brian/agent-runtime/security/source-eviden
 import { assertExecutionResourceScope, buildAccessPredicate, buildCurrentMemberSourcePredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { currentAgentAccess } from './agent-access-context.js'
-import { applyRLSGucs, getAppPool, query, queryWithRLS, rollbackAndRelease } from './client.js'
+import { applyRLSGucs, getAppPool, query, queryWithRLS, rollbackAndRelease, withRLSTransaction } from './client.js'
 import { emitDocumentedByEdges } from './edge-hooks.js'
 import { admitDerivedFile, expandDerivedFileEvidence } from '../workspace-access/file-derived-admission.js'
 import { admitFileCreate } from '../workspace-access/file-create-admission.js'
@@ -823,24 +823,28 @@ export async function listWorkspaceFilesIndexRanked(
   limit: number,
 ): Promise<WorkspaceFileIndexRow[]> {
   const cap = Math.min(Math.max(limit, 1), 200)
-  const ap = buildAccessPredicate(ctx, { startIdx: 1 })
+  // Files always have a workspace. The exact prefix also makes the catalog's
+  // recency order available with the legacy access predicate.
+  const ap = buildAccessPredicate(ctx, { startIdx: 2 })
   // Doc-block media (reserved `/doc/` path prefix — see
   // packages/api/src/routes/doc-files.ts) is excluded from the ranked
   // index that backs the L1 `# Workspace Files` prompt block, so embedded
   // page decoration never surfaces in the assistant's working context. Custom
   // Home app bundles (`/apps/`) are excluded for the same reason: an app's
   // source is program text, not workspace knowledge.
-  const result = await queryWithRLS<IndexRow>(
-    ctx.userId,
-    `SELECT ${INDEX_SELECT} FROM workspace_files
-     WHERE ${ap.sql} AND purpose='operational' AND valid_to IS NULL
-       AND (path NOT LIKE '/doc/%' OR (upload_identity IS NOT NULL AND source_episode_id IS NOT NULL)) AND path NOT LIKE '/apps/%'
-       AND path NOT LIKE '/office/sessions/%'
-       AND NOT COALESCE((metadata->>'noIndex')::boolean, false)
-     ORDER BY updated_at DESC
-     LIMIT $${ap.nextIdx}`,
-    [...ap.params, cap],
-  )
+  const result = await withRLSTransaction(ctx.userId, async client => {
+    // RLS selectivity estimates can favor authorizing the entire workspace
+    // before sorting. Prefer the ordered catalog index for this one read.
+    await client.query('SET LOCAL enable_sort=off')
+    return client.query<IndexRow>(`SELECT ${INDEX_SELECT} FROM workspace_files
+      WHERE workspace_id=$1 AND (${ap.sql}) AND purpose='operational' AND valid_to IS NULL
+        AND (path NOT LIKE '/doc/%' OR (upload_identity IS NOT NULL AND source_episode_id IS NOT NULL)) AND path NOT LIKE '/apps/%'
+        AND path NOT LIKE '/office/sessions/%'
+        AND (metadata->>'noIndex') IS DISTINCT FROM 'true'
+        AND NOT COALESCE((metadata->>'noIndex')::boolean, false)
+      ORDER BY updated_at DESC
+      LIMIT $${ap.nextIdx}`, [ctx.workspaceId, ...ap.params, cap])
+  })
   return result.rows.map(toIndexRow)
 }
 

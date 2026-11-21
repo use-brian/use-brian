@@ -43,6 +43,7 @@ async function receivingSources(pinnedAssets){
   ...['portable-restore.mjs','portable-restore-seals.mjs','installation-release.mjs','build-portable-restore-roster.mjs',
    'installation-authentication-8297.mjs','installation-authentication-8298.mjs','installation-authentication-8300.mjs',
    'installation-authentication-8301.mjs','installation-authentication-8331.mjs','installation-authentication-8332.mjs',
+   'installation-authentication-8333.mjs','installation-authentication-8334.mjs',
    'build-conversation-context-cost.mjs','conversation-context-cost.mjs','conversation-memory-lineage-cost.mjs'].map(name=>store+name),
  ]
  return Object.fromEntries(await Promise.all(files.map(async file=>[file,sha(await readFile(join(ossRoot,file)))])))

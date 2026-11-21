@@ -1,20 +1,17 @@
 /** [COMP:api/native-chat-read-cost] Full-context send, durable reply and follow-up. */
-import { randomUUID } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import { writeFile } from 'node:fs/promises'
+import pg from 'pg'
 import request from 'supertest'
 import { afterAll, beforeAll, expect, it, vi } from 'vitest'
 import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
-import { createTokens } from '../../auth/jwt.js'
 import type { BootResult } from '../../boot.js'
-import { withTableTriggersSuspended } from '../../__tests__/fixtures/bootstrap-role.js'
 import { authSessionStore } from '../../db/auth-session-store.js'
 import { createDbCapabilityStore } from '../../db/capability-store.js'
 import { createDbFileStore } from '../../db/file-store.js'
-import { createMemory } from '../../db/memories.js'
-import { createPersonalWebSession } from '../../db/sessions.js'
 import { createDbWorkspaceFilesStore } from '../../db/workspace-files-store.js'
 import { persistentContextFixture } from './fixtures/persistent-context.js'
+import { openContextChatSession, seedContextChatMemory } from './fixtures/context-chat-memory.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -41,7 +38,6 @@ let requestedFileId: string | undefined
 type Sample = { firstTextMs: number; completionMs: number }
 const measurements: Record<string, Sample[]> = {}
 let beforeOutput: (() => Promise<void>) | undefined
-type Fixture = Awaited<ReturnType<typeof persistentContextFixture>>
 
 beforeAll(async () => {
   providerState.provider = {
@@ -83,119 +79,17 @@ afterAll(async () => {
   if (output) await writeFile(output, JSON.stringify(measurements), { mode: 0o600 })
 })
 
-async function openSession({ ownerId, assistantId, workspaceId }: Fixture) {
-  const device = await authSessionStore.create(ownerId, {
-    deviceLabel: 'Fictional budget fixture', userAgent: null, ipAddress: null,
-  })
-  if (!device) throw new Error('Could not create fixture session')
-  const session = await createPersonalWebSession({ assistantId, userId: ownerId, workspaceId,
-    channelType: 'web', channelId: randomUUID(), appOrigin: 'chat' },
-    { actorUserId: ownerId, authSessionId: device.id, authVersion: device.authVersion })
-  return { session, deviceId: device.id, token: createTokens(ownerId, secret, device).accessToken }
-}
-
-async function seedMemory(f: Fixture, dense: boolean) {
-  const { workspaceId, assistantId, ownerId } = f
-  const sourceSession = await openSession(f)
-  const linkedIds: string[] = []
-  const fact = await f.memory(colorFact, ownerId)
-  for (const summary of ['Unlinked fixture fact A', 'Unlinked fixture fact B', 'Unlinked fixture fact C']) {
-    await f.memory(summary, ownerId)
-  }
-  const setup = await f.pool.connect()
-  try {
-    await setup.query('BEGIN')
-    for (let linked = dense ? 0 : 200; linked < 204; linked++) {
-      const memory = await createMemory({
-        workspaceId, assistantId, userId: ownerId, createdByUserId: ownerId, sourceSessionId: sourceSession.session.id,
-        summary: 'Synthetic memory from an unrelated personal conversation ' + linked, sensitivity: 'internal',
-      }, undefined, setup)
-      linkedIds.push(memory.id)
-    }
-    await setup.query('COMMIT')
-  } catch (error) {
-    await setup.query('ROLLBACK')
-    throw error
-  } finally {
-    setup.release()
-  }
-  if (!dense) return fact.id
-  {
-    await f.pool.query(`WITH snapshots AS (
-      INSERT INTO scope_derivations(workspace_id,resource_kind,resource_id,resource_version,producer,user_id,assistant_id,
-        sensitivity,compartments,project_ids,source_policy_revision)
-      SELECT workspace_id,'memory',id,scope_version::text,'fixture:synthetic-linked-memory',user_id,assistant_id,
-        sensitivity,compartments,project_ids,1 FROM memories WHERE id=ANY($1::uuid[])
-      RETURNING id,workspace_id,resource_id
-    ) INSERT INTO scope_derivation_sources(workspace_id,derivation_id,source_kind,source_id,source_version)
-      SELECT d.workspace_id,d.id,'memory',m.id,m.scope_version::text
-      FROM snapshots d JOIN unnest($2::uuid[],$3::uuid[]) edge(target,source) ON edge.target=d.resource_id
-      JOIN memories m ON m.id=edge.source`,
-    [ [linkedIds[0], linkedIds[71], linkedIds[95], linkedIds[201]],
-      [linkedIds[0], linkedIds[71], linkedIds[95], linkedIds[201], linkedIds[201]],
-      [linkedIds[160], linkedIds[161], linkedIds[162], linkedIds[163], linkedIds[164]] ])
-  }
-  const supersessionStarts = linkedIds.slice(0, 114)
-  await f.pool.query('UPDATE memories SET valid_to=now() WHERE id=ANY($1::uuid[])', [linkedIds.slice(0, 200)])
-  const heads = (await f.pool.query<{ id: string }>(`SELECT id FROM memories WHERE workspace_id=$1
-    AND valid_to IS NULL ORDER BY source_session_id NULLS LAST,id`, [workspaceId])).rows.map(row => row.id)
-  expect(heads).toHaveLength(8)
-  const connectedEnds = supersessionStarts.map((_, index) => {
-    if (index < 30) return linkedIds[index + 1]
-    if (index === 30) return heads[0]
-    if (index < 71) return linkedIds[71 + index % 43]
-    return heads[1 + index % 7]
-  })
-  await f.pool.query(`UPDATE memories m SET superseded_by=edges.successor
-    FROM unnest($1::uuid[],$2::uuid[]) AS edges(predecessor,successor) WHERE m.id=edges.predecessor`,
-  [supersessionStarts, connectedEnds])
-  const supersessionShape = (await f.pool.query(`SELECT count(*)::int AS items,
-    count(source_session_id)::int AS linked, count(superseded_by)::int AS superseded,
-    count(*) FILTER (WHERE valid_to IS NULL)::int AS current FROM memories WHERE workspace_id=$1`, [workspaceId])).rows[0]
-  expect(supersessionShape).toEqual({ items: 208, linked: 204, superseded: 114, current: 8 })
-  {
-    const bulk = await f.pool.connect()
-    try {
-      await bulk.query('BEGIN')
-      await bulk.query("SET LOCAL statement_timeout='120s'")
-      // Fixture-only unrelated roots shape table density and index pages. The
-      // eight live Memory heads and their five reachable edges are genuine.
-      await withTableTriggersSuspended(bulk, ['scope_derivations', 'scope_derivation_sources'], async () => {
-        await bulk.query(`WITH roots AS (
-          INSERT INTO scope_derivations(workspace_id,resource_kind,resource_id,resource_version,producer,user_id,assistant_id,
-            sensitivity,compartments,project_ids,source_policy_revision)
-          SELECT $1,'session_message',md5('fictional-unrelated-target:'||root)::uuid,'1',
-            'fixture:unrelated-graph-density',$2,$3,'internal','{}','{}',1
-          FROM generate_series(1,1030) root RETURNING workspace_id,id
-        ) INSERT INTO scope_derivation_sources(workspace_id,derivation_id,source_kind,source_id,source_version)
-          SELECT workspace_id,id,'session_message',md5('fictional-unrelated-source:'||edge)::uuid,'1'
-          FROM roots CROSS JOIN generate_series(1,64) edge`, [workspaceId, ownerId, assistantId])
-      })
-      await bulk.query('COMMIT')
-    } catch (error) {
-      await bulk.query('ROLLBACK')
-      throw error
-    } finally {
-      bulk.release()
-    }
-    const density = (await f.pool.query(`SELECT count(*)::int AS edges,count(*) FILTER(WHERE source_kind='memory')::int AS memory_edges
-      FROM scope_derivation_sources WHERE workspace_id=$1`, [workspaceId])).rows[0]
-    expect(density).toEqual({ edges: 65925, memory_edges: 5 })
-  }
-  return fact.id
-}
-
 it.each(['sparse', 'dense'] as const)('finishes two context-aware turns within five seconds each with %s history', async history => {
   const f = await persistentContextFixture('internal')
   try {
     const { workspaceId, assistantId, ownerId } = f
     await f.pool.query("UPDATE workspaces SET plan='pro', department_read_v2=true WHERE id=$1", [workspaceId])
-    const factId = await seedMemory(f, history === 'dense')
+    const factId = await seedContextChatMemory(f, history === 'dense', secret, colorFact)
     await createDbCapabilityStore().grant({ assistantId, capability: 'files', grantedByUserId: ownerId })
     await createDbWorkspaceFilesStore().create(ownerId, { workspaceId, path: '/' + reference,
       parentPath: '/', name: reference, mime: 'text/plain', sizeBytes: 10, storageUri: 'fixture://' + reference,
       summary: 'Fictional release reference', createdByUserId: ownerId, sensitivity: 'internal' })
-    const { session, token, deviceId } = await openSession(f)
+    const { session, token, deviceId } = await openContextChatSession(f, secret)
     const attachmentText = 'The fictional launch window opens on Thursday.'
     const attachment = await createDbFileStore().cache({
       sessionId: session.id, workspaceId, assistantId, userId: ownerId, fileName: 'launch-note.txt',
@@ -267,6 +161,83 @@ it.each(['sparse', 'dense'] as const)('finishes two context-aware turns within f
   } finally {
     beforeOutput = undefined
     requestedFileId = undefined
+    await boot.ctx.analytics.flush()
+    await f.cleanup()
+  }
+}, 120_000)
+
+it.each(['native_proof','ancestry'] as const)('reports a PostgreSQL proof timeout in %s during paired prompt preparation', async phase => {
+  const f = await persistentContextFixture('internal')
+  try {
+    await f.pool.query("UPDATE workspaces SET plan='pro', department_read_v2=true WHERE id=$1", [f.workspaceId])
+    // The packed reader falls back when its metadata bound exceeds 100 roots.
+    for (let index = 0; index < 101; index++) await f.memory(`Fictional retained context ${index}`, f.ownerId)
+    const { session, token } = await openContextChatSession(f, secret)
+    const requestText = 'What is the retained context for this request?'
+    const originalQuery = pg.Client.prototype.query
+    let pairedClient: pg.Client | undefined
+    let observedSqlstate: unknown
+    let timedProofs = 0
+    const ancestryBatches: number[] = []
+    providerInputs = []
+    const spy = vi.spyOn(pg.Client.prototype, 'query').mockImplementation(function (this: pg.Client, ...args: unknown[]) {
+      // Only the actual paired SQL and its following application-role proof
+      // participate. All other checkout, storage, and delivery operations run normally.
+      const run = (queryArgs: unknown[]) => Reflect.apply(originalQuery, this, queryArgs)
+      const [sql, params] = args
+      if (typeof sql !== 'string') return run(args)
+      if (sql.includes("SELECT 'ranked' AS cohort,value,ordinality FROM read_native_memory_query_projection")) pairedClient = this
+      const kinds = Array.isArray(params) ? params[1] : undefined
+      const memoryBatch = sql.includes('FROM read_external_source_dependencies($1,$2,$3,$4)')
+        && Array.isArray(kinds) && kinds.length > 0 && kinds.every(kind => kind === 'memory')
+      if (memoryBatch) ancestryBatches.push(kinds.length)
+      const chosen = phase === 'native_proof' ? this === pairedClient && sql === 'SELECT capture_conversation_evidence($1,$2) AS value'
+        : memoryBatch && kinds.length === 100
+      if (!chosen || timedProofs) return run(args)
+      timedProofs++
+      const interrupted = (async () => {
+        await run([phase === 'native_proof' ? "SET LOCAL statement_timeout='25ms'" : "SET statement_timeout='25ms'"])
+        try {
+          return await run([`WITH pause AS MATERIALIZED (SELECT $1::uuid AS workspace_id,pg_sleep(0.2))
+            SELECT protected.* FROM pause CROSS JOIN LATERAL (${sql.replace('$1', 'pause.workspace_id')}) protected`, params])
+        } catch (error) {
+          observedSqlstate = (error as { code?: unknown }).code
+          throw error
+        } finally {
+          if (phase === 'ancestry') await run(['RESET statement_timeout'])
+        }
+      })()
+      const callback = args.at(-1)
+      if (typeof callback === 'function') {
+        void interrupted.then(result => callback(null, result), error => callback(error))
+        return undefined
+      }
+      return interrupted
+    } as typeof originalQuery)
+    let response
+    try {
+      response = await request(boot.app).post('/api/chat').set('Authorization', 'Bearer ' + token)
+        .send({ sessionId: session.id, assistantId: f.assistantId, workspaceId: f.workspaceId, appOrigin: 'chat', model: 'pro', message: requestText })
+        .expect(200)
+    } finally { spy.mockRestore() }
+    expect(observedSqlstate).toBe('57014')
+    expect(timedProofs).toBe(1)
+    if (phase === 'ancestry') expect(ancestryBatches).toEqual([100])
+    expect(providerInputs).toEqual([])
+    const errors = [...response.text.matchAll(/^event: error\r?\ndata: ([^\r\n]+)/gm)].map(frame => JSON.parse(frame[1]))
+    expect(errors).toEqual([{ code: 'context_verification_unavailable',
+      error: 'We couldn’t finish checking the context for this reply.', retrySafe: false, turnId: expect.stringMatching(/^[0-9a-f]{64}$/) }])
+    expect(response.text).not.toMatch(/statement_timeout|57014|capture_conversation_evidence|event: text_delta|event: done/)
+    const messages = await request(boot.app).get('/api/sessions/' + session.id + '/messages')
+      .set('Authorization', 'Bearer ' + token).expect(200)
+    expect(messages.body.map((message: { role: string }) => message.role)).toEqual(['user'])
+    expect(messages.body[0].content).toEqual([{ type: 'text', text: requestText }])
+    expect((await f.pool.query('SELECT status FROM sessions WHERE id=$1', [session.id])).rows).toEqual([{ status: 'failed' }])
+    await boot.ctx.analytics.flush()
+    const { rows } = await f.pool.query(`SELECT metadata FROM analytics_events WHERE session_id=$1 AND event_name='chat_route_error'`, [session.id])
+    expect(rows).toEqual([{ metadata: { error_type: 'ContextVerificationUnavailableError', error_message: 'context_verification_unavailable',
+      verification_failure: 'statement_timeout', verification_phase: phase, verification_sqlstate_class: '57', stage: 'post_session' } }])
+  } finally {
     await boot.ctx.analytics.flush()
     await f.cleanup()
   }

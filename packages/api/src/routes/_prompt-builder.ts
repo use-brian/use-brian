@@ -212,9 +212,9 @@ export type BuildPromptParams = {
    * `# Workspace Files` index — the L1 ambient awareness block for the
    * Q3 filesystem primitive (company-brain §10). Built by
    * `buildWorkspaceFilesContext()` from `@use-brian/core`. Sits in the
-   * stable prefix right after `# Memories`. Pass `null` / empty string
-   * to omit (e.g. assistant lacks the `files` capability, or no
-   * workspace bound to the assistant).
+   * stable prefix right after `# Memories`, including the trusted status of
+   * a successful empty or unavailable index. Omit this when the assistant
+   * lacks the capability or this turn does not acquire the index.
    */
   workspaceFilesContext?: string | null
   /**

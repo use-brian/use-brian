@@ -1,5 +1,6 @@
 /** Fixed internal diagnostics and coarse copy classification. [COMP:api/delivery-authority] */
-const phases = ['native_proof', 'ancestry', 'anonymous_field_proof', 'current_source', 'ancestry_recheck'] as const
+const phases = ['native_proof', 'ancestry', 'anonymous_field_proof', 'current_source', 'ancestry_recheck',
+  'retained_context', 'prompt_memory_metadata', 'pool_checkout'] as const
 export type DeliveryVerificationPhase = typeof phases[number]
 export type DeliveryFailureMetadata = {
   verificationPhase?: DeliveryVerificationPhase
@@ -49,6 +50,58 @@ export function deliveryFailureAnalytics(error: unknown): Record<string, string>
     ...(metadata.verificationPhase ? { verification_phase: metadata.verificationPhase } : {}),
     ...(metadata.verificationSqlstateClass ? { verification_sqlstate_class: metadata.verificationSqlstateClass } : {}),
   }
+}
+
+type ContextVerificationFailure = 'statement_timeout' | 'statement_canceled' | 'lock_timeout' | 'lock_unavailable' | 'pool_timeout'
+
+/** An interrupted required read has no authority to continue or replay. */
+export class ContextVerificationUnavailableError extends Error {
+  readonly code = 'context_verification_unavailable'
+  readonly retrySafe = false
+  constructor(readonly verificationFailure: ContextVerificationFailure, cause: unknown, phase: DeliveryVerificationPhase) {
+    super('We couldn’t finish checking the context for this reply.', { cause })
+    this.name = 'ContextVerificationUnavailableError'
+    Object.assign(this, deliveryFailureMetadata(cause, phase))
+  }
+}
+
+function hasPublicationOutcome(error: Error): boolean {
+  return 'publicationOutcome' in error || 'operationMayHaveExecuted' in error && error.operationMayHaveExecuted === true
+}
+
+export function isContextVerificationReadFailure(error: unknown): error is ContextVerificationUnavailableError {
+  return error instanceof ContextVerificationUnavailableError && !hasPublicationOutcome(error)
+}
+
+/** Call only at the failed read boundary. An authoritative refusal stays a refusal. */
+export function contextVerificationUnavailable(error: unknown, phase: DeliveryVerificationPhase): ContextVerificationUnavailableError | undefined {
+  const seen = new Set<Error>()
+  let cause = error
+  while (cause instanceof Error && seen.size < 8 && !seen.has(cause)) {
+    seen.add(cause)
+    try {
+      // COMMIT uncertainty and a verified authorization decision take priority
+      // over any availability error nested inside them.
+      if (hasPublicationOutcome(cause)
+        || 'reason' in cause && cause.reason === 'authority_changed'
+        || 'diagnostic' in cause && typeof cause.diagnostic === 'string'
+          && !['source_unverifiable', 'verification_error'].includes(cause.diagnostic)) return undefined
+      if (cause instanceof ContextVerificationUnavailableError) return cause
+      const code = (cause as Error & { code?: unknown }).code
+      let failure: ContextVerificationFailure | undefined
+      if (code === '57014') {
+        failure = cause.message === 'canceling statement due to statement timeout' ? 'statement_timeout' : 'statement_canceled'
+      } else if (code === '55P03') {
+        failure = cause.message === 'canceling statement due to lock timeout' ? 'lock_timeout' : 'lock_unavailable'
+      } else if (code === undefined && (cause.message === 'timeout exceeded when trying to connect'
+        || cause.message === 'Connection terminated due to connection timeout')) {
+        failure = 'pool_timeout'
+      }
+      if (failure) return new ContextVerificationUnavailableError(failure, error, failure === 'pool_timeout' ? 'pool_checkout' : phase)
+      cause = cause.cause
+    } catch { return undefined }
+  }
+  return undefined
 }
 
 const restrictions = new Set(['workspace', 'user_visibility', 'assistant_visibility', 'clearance', 'teams', 'projects', 'source_reclassified'])

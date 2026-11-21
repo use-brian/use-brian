@@ -22,6 +22,7 @@ import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/atten
 import { bindScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { runTurnSessionStateDiff } from '../turn/session-state.js'
 import { RESEARCH_EFFORT_BUDGETS, researchEffortInstruction, type ResearchEffort } from '@use-brian/core/workers/research-effort.js'
+import { withChatDatabaseTiming, chatDatabaseTimingSnapshot } from '../db/chat-database-timing.js'
 import { withTurnInference } from '../turn/runtime.js'
 import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
 import { dispatchPersistedWebInput } from './_incoming-chat-event.js'
@@ -86,7 +87,7 @@ import { runPreflight, buildPreflightPrompt } from '@use-brian/core/workers/pref
 import { detectOperateSiteIntent } from '@use-brian/core/workers/research-classifier.js'
 import { latestWorkflowProposalReceipt } from '@use-brian/core/workflow/tools.js'
 import { AttachmentCollector } from '@use-brian/core/workspace-files/attachments.js'
-import { buildWorkspaceFilesContext } from '@use-brian/core/workspace-files/context-builder.js'
+import { buildWorkspaceFilesContext, selectWorkspaceFilesContextRows } from '@use-brian/core/workspace-files/context-builder.js'
 import { buildUploadPolicyBlock } from '@use-brian/core/workspace-files/upload-policy-block.js'
 import { calculateCost } from '@use-brian/agent-runtime/billing/cost-tracker.js'
 import { modelToCompactionTier } from '@use-brian/agent-runtime/compaction/compact.js'
@@ -235,6 +236,8 @@ import {
   type OfficeLaneDeps,
 } from './office-chat-lane.js'
 import { isAuthorityChangedError } from '../context-scope/authority-lease.js'
+import { DerivedScopeError } from '@use-brian/agent-runtime/security/derived-scope.js'
+import { deliveryFailureAnalytics, isContextVerificationReadFailure } from '../context-scope/delivery-failure.js'
 import { beginResearchActivity, captureResearchFollowupForMessage, createResearchDeliveryDeps } from '../research/runtime.js'
 import { createResearchTurnObserver, recordResearchDelivery } from '../research/delivery.js'
 import type { ResearchActivity } from '../db/research-store.js'
@@ -1656,6 +1659,12 @@ export function chatTurnErrorEvent(
     // `sharedChat` lets the client say what to do (ask in a personal chat)
     // without learning which hidden axis refused: the diagnostic stays here.
     return { code: err.reason, error: err.message, ...(turn.sharedAudience ? { sharedChat: true } : {}) }
+  }
+  if (isContextVerificationReadFailure(err)) {
+    return { code: err.code, error: err.message, retrySafe: err.retrySafe }
+  }
+  if (err instanceof DerivedScopeError && err.code === 'scope_source_changed') {
+    return { code: err.code, error: 'The source context changed or is no longer available.', retrySafe: false }
   }
   if (err instanceof ChatTurnRefusal) {
     return { code: err.code, error: err.message, ...err.detail }
@@ -4970,26 +4979,29 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         activeCapabilities.has('files')
       ) {
         try {
-          const rows = await turnTiming.time('prompt_workspace_files', () => optionalContext(() => options.workspaceFilesStore!.listIndexRanked(
-            {
-              workspaceId: assistant.workspaceId!,
-              userId: user.id,
-              assistantId: assistant.id,
-              assistantKind: assistant.kind,
-              // Read ceiling = min(member, assistant) — see readClearance above.
-              clearance: readClearance,
-              compartments: readCompartments,
-              mutationCompartments: turnScope.access.mutationCompartments,
-              projectIds: turnScope.effectiveProjectIds,
+          let scopedIndexEmpty = false
+          const admittedRows = await turnTiming.time('prompt_workspace_files', () => optionalContext(async () => {
+            const indexed = await options.workspaceFilesStore!.listIndexRanked({
+              workspaceId: assistant.workspaceId!, userId: user.id, assistantId: assistant.id, assistantKind: assistant.kind,
+              clearance: readClearance, compartments: readCompartments,
+              mutationCompartments: turnScope.access.mutationCompartments, projectIds: turnScope.effectiveProjectIds,
               sharedAudience: turnScope.access.sharedAudience,
               ...(viewerCtx.departmentRead ? { departmentRead: viewerCtx.departmentRead } : {}),
-            },
-            PER_TURN_FILES_INDEX_CAP,
-          ), []))
-          noteAutomaticScopeEvidence(scopeAccumulator, rows)
+            }, PER_TURN_FILES_INDEX_CAP)
+            return selectWorkspaceFilesContextRows(indexed, PER_TURN_FILES_INDEX_CAP)
+          }, null, undefined, (rows) => {
+            // An empty scoped read has no source rows to admit. The shared
+            // reader checks current invocation authority before this callback.
+            scopedIndexEmpty = rows?.length === 0
+            return Boolean(rows?.length)
+          }))
+          const rows = admittedRows ?? (scopedIndexEmpty ? [] : null)
+          if (rows) noteAutomaticScopeEvidence(scopeAccumulator, rows)
           workspaceFilesContext = buildWorkspaceFilesContext(rows)
         } catch (err) {
+          if (isAuthorityChangedError(err)) throw err
           console.error('[chat] workspace-files index fetch failed:', err)
+          workspaceFilesContext = buildWorkspaceFilesContext(null)
         }
       }
 
@@ -9035,8 +9047,14 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // its own sentence; the whole point is that the user reads THAT and
       // not the generic banner, so it must not be flattened into one.
       const refusal = err instanceof ChatTurnRefusal ? err : null
+      const interruptedVerification = isContextVerificationReadFailure(err) ? err : null
+      const verificationAnalytics = interruptedVerification ? {
+        verification_failure: interruptedVerification.verificationFailure,
+        ...deliveryFailureAnalytics(interruptedVerification),
+      } : {}
       if (postReplyNotice) console.info('[chat] post-reply processing stopped: authority_changed')
       else if (stoppedByUser) console.info('[chat] turn stopped by user before completion')
+      else if (interruptedVerification) console.warn('[chat] context verification interrupted', verificationAnalytics)
       else if (!refusal) console.error('Chat error:', err)
       // When the inner catch already delivered a context-aware recovery
       // message, surface a clean `done` so the client treats the turn
@@ -9099,7 +9117,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           eventName: 'chat_route_error', channelType: 'web',
           metadata: {
             error_type: sanitize((err as Error)?.name ?? 'unknown'),
-            error_message: sanitize(((err as Error)?.message ?? '').slice(0, 200)),
+            error_message: sanitize(interruptedVerification?.code ?? ((err as Error)?.message ?? '').slice(0, 200)),
+            ...verificationAnalytics,
             // Internal refusal reason: which rule refused, or that the check
             // itself failed. Never sent to the client (chatTurnErrorEvent).
             ...(isDeliveryAudienceUnverifiedError(err) && err.diagnostic
@@ -9122,7 +9141,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         && ('admission_ms' in phases || 'authored_input_saved_at_ms' in phases)
       if (turnTimingIdentity && ('prompt_ms' in phases || interrupted)) {
         markTurnEnd(turnTiming)
-        const timings = turnTiming.snapshot()
+        const timings = { ...turnTiming.snapshot(), ...chatDatabaseTimingSnapshot() }
         console.log(
           `[chat] turn timings session ${turnTimingIdentity.sessionId} ${turnTimingOutcome}: `
           + Object.entries(timings).map(([k, v]) => `${k}=${v}`).join(' '),
@@ -9166,7 +9185,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
    * "Per-turn SQL accounting phases"); recording off, it enters no frame. */
   const runTurn = (req: NativeChatRequest, res: NativeChatSink, programmatic?: WorkspaceTurnBinding) => {
     const sqlScope = openTurnSqlScope()
-    return sqlScope.run(() => runFramedTurn(req, res, programmatic, sqlScope))
+    return withChatDatabaseTiming(() => sqlScope.run(() => runFramedTurn(req, res, programmatic, sqlScope)))
   }
   router.post('/', (req, res) => runTurn(req, res))
 

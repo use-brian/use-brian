@@ -33,7 +33,7 @@ import {
 } from '@use-brian/core/memory/context-builder.js'
 import { buildSessionStateBlock } from '@use-brian/core/memory/session-state-context.js'
 import { createMemoryTools } from '@use-brian/core/memory/tools.js'
-import { buildWorkspaceFilesContext } from '@use-brian/core/workspace-files/context-builder.js'
+import { buildWorkspaceFilesContext, selectWorkspaceFilesContextRows } from '@use-brian/core/workspace-files/context-builder.js'
 import { calculateCost } from '@use-brian/agent-runtime/billing/cost-tracker.js'
 import { modelToCompactionTier } from '@use-brian/agent-runtime/compaction/compact.js'
 import {
@@ -185,9 +185,8 @@ export type PublicTurnDeps = {
   maxTurns?: number
   checkCreditBudget?: CreditBudgetGate
   /**
-   * Ambient `# Workspace Files` index. Only read on an `assistant-full`
-   * turn (see `PublicTurnContextScope`); the keyed API never builds the
-   * block, so leaving this unset keeps that path byte-identical.
+   * Ambient `# Workspace Files` index for `assistant-full` and
+   * `internal-member` turns. The `external-client` lane omits discovery.
    */
   workspaceFilesStore?: import('@use-brian/core/workspace-files/types.js').WorkspaceFilesStore
   /**
@@ -1276,7 +1275,7 @@ async function executePublicTurnInScope(
     if (fullScope || internalScope) {
       if (deps.workspaceFilesStore && assistant.workspaceId && activeCapabilities.has('files')) {
         try {
-          const rows = await deps.workspaceFilesStore.listIndexRanked(
+          const indexed = await deps.workspaceFilesStore.listIndexRanked(
             {
               workspaceId: assistant.workspaceId,
               userId: user.id,
@@ -1290,10 +1289,12 @@ async function executePublicTurnInScope(
             },
             PER_TURN_FILES_INDEX_CAP,
           )
+          const rows = selectWorkspaceFilesContextRows(indexed, PER_TURN_FILES_INDEX_CAP)
           noteAutomaticScopeEvidence(scopeAccumulator, rows)
           workspaceFilesContext = buildWorkspaceFilesContext(rows)
         } catch (err) {
           console.error('[public-turn] workspace-files index fetch failed:', err)
+          workspaceFilesContext = buildWorkspaceFilesContext(null)
         }
       }
 
