@@ -424,6 +424,7 @@ export type KnowledgeRelatedRef = {
   id: string;
   title: string;
   path: string;
+  sourceId?: string | null;
 };
 
 /** Provenance of a synced entry (null for manual entries). */

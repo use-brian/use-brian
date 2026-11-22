@@ -1,7 +1,7 @@
 /**
  * Knowledge store — team-scoped knowledge entries + team knowledge sources.
  *
- * Entries are deduplicated at (workspace_id, path). Viewer-facing reads
+ * Entries are deduplicated at (workspace_id, source_id, path). Viewer-facing reads
  * take an `AccessContext` (WU-4.2b) and filter on workspace_id +
  * sensitivity_rank() (migration 065). The per-assistant dimension is gone
  * — an assistant sees its team's canonical entries subset to its
@@ -21,7 +21,7 @@
  * `updateManualEntryContent` / `deleteByTeamAndPath`), so it is where
  * knowledge lifecycle events are published for the `knowledge` workflow event
  * source. Best-effort and fire-and-forget — see knowledge-event-fanout.ts.
- * Bulk teardown paths (`deleteBySource`, `deleteByTeamAndPathPrefix`) and the
+ * Bulk teardown paths (`deleteSource`, `deleteByTeamAndPathPrefix`) and the
  * id-only `delete` deliberately do NOT emit: source disconnection would fire
  * one event per entry for a change the user made at the source level, not the
  * entry level.
@@ -38,6 +38,7 @@ import {deriveWriteScope, resourceScopeKey, type DerivedWriteEvidence, DerivedSc
 import type {Sensitivity} from '@use-brian/agent-runtime/security/sensitivity.js'
 import {bindScopeSources, boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import type { KnowledgeLifecycleAction, KnowledgeWriteActor } from '@use-brian/core/workflow/knowledge-event-trigger.js'
+import type { SyncLinkEntry } from '@use-brian/core/knowledge/sync-worker.js'
 import { query, getPool, getAppPool, applyRLSGucs, rollbackAndRelease } from './client.js'
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
@@ -478,6 +479,24 @@ function sourceNotDisabled(assistantIdx: number, alias = 'ke'): string {
   )`
 }
 
+/** Omitted scope means all visible sources, including the manual namespace. */
+function knowledgeSourceFilter(params: unknown[], sourceId: string | null | undefined): string {
+  if (sourceId === undefined) return ''
+  params.push(sourceId)
+  return `AND ke.source_id IS NOT DISTINCT FROM $${params.length}::uuid`
+}
+
+/** Bind both the children counted and the visible peers that constrain the count. */
+function knowledgeBrowseChildProjection(visible: string, sourceScoped: boolean) {
+  const inWorkspace = `ke2.workspace_id = ke.workspace_id AND ${visible}`
+  const duplicate = `${inWorkspace} AND ke2.path = ke.path AND ke2.id <> ke.id`
+  const sameSource = 'ke2.source_id IS NOT DISTINCT FROM ke.source_id'
+  const sourcePredicate = sourceScoped ? sameSource
+    : `(${sameSource} OR NOT EXISTS (SELECT 1 FROM knowledge_entries ke2 WHERE ${duplicate}))`
+  const children = `${inWorkspace} AND ke2.path LIKE ke.path || '/%' AND ${sourcePredicate}`
+  return { children, contributors: sourceScoped ? children : `(${children}) OR (${duplicate})` }
+}
+
 /**
  * Whether the per-assistant source denylist applies to this read. Primary /
  * reflector contexts (the workspace coordinator, and the brain explorer — which
@@ -515,10 +534,10 @@ export type KnowledgeStore = {
   syncRequiresFullReconciliation(authority: object): boolean
   // Viewer-facing entry reads — gated by ctx (workspace + clearance).
   // `ctx.clearance === undefined` is treated as passthrough ('confidential').
-  search(ctx: AccessContext, queryStr: string, limit?: number, authority?:SessionContextAuthority): Promise<KnowledgeEntry[]>
-  listByPath(ctx: AccessContext, pathPrefix: string, authority?:SessionContextAuthority): Promise<KnowledgeEntry[]>
+  search(ctx: AccessContext, queryStr: string, limit?: number, authority?:SessionContextAuthority, sourceId?: string | null): Promise<KnowledgeEntry[]>
+  listByPath(ctx: AccessContext, pathPrefix: string, authority?:SessionContextAuthority, sourceId?: string | null): Promise<Array<KnowledgeEntry & { childCount: number }>>
   getById(ctx: AccessContext, id: string, authority?: SessionContextAuthority): Promise<KnowledgeEntry | null>
-  getByPath(ctx: AccessContext, path: string, authority?:SessionContextAuthority): Promise<KnowledgeEntry | null>
+  getByPath(ctx: AccessContext, path: string, authority?:SessionContextAuthority, sourceId?: string | null): Promise<KnowledgeEntry | null>
   listSummaries(ctx: AccessContext, authority?:SessionContextAuthority): Promise<Array<{ id: string; path: string; summary: string | null; sensitivity: Sensitivity; compartments: string[]; projectIds: string[] }>>
   /**
    * Brain list-view projection: id + title + path + sensitivity, capped at
@@ -553,7 +572,7 @@ export type KnowledgeStore = {
     authority?:SessionContextAuthority,
   ): Promise<Array<{ id: string; title: string; path: string; sensitivity: Sensitivity; compartments: string[]; projectIds: string[]; relatedIds: string[] }>>
   /**
-   * Resolve a set of entry ids to their display refs (id + title + path),
+   * Resolve a set of entry IDs to display refs and source identity,
    * workspace- and clearance-scoped. Backs the brain knowledge detail's
    * `related` projection (wikilink targets in the entry reader). Order
    * follows `path` for a stable rail list.
@@ -562,15 +581,16 @@ export type KnowledgeStore = {
     ctx: AccessContext,
     ids: string[],
     authority?:SessionContextAuthority,
-  ): Promise<Array<{ id: string; title: string; path: string; sensitivity: Sensitivity; compartments: string[]; projectIds: string[] }>>
+  ): Promise<Array<{ id: string; title: string; path: string; sourceId: string | null; sensitivity: Sensitivity; compartments: string[]; projectIds: string[] }>>
   listPaths(ctx: AccessContext, authority?:SessionContextAuthority): Promise<string[]>
   hasEntries(ctx: AccessContext, authority?:SessionContextAuthority): Promise<boolean>
 
   // System-level reads — privileged-service callers (sync worker,
   // audit) that bypass per-viewer projection. See permissions.md
   // § Privileged-service exception.
-  getByPathSystem(workspaceId: string, path: string): Promise<KnowledgeEntry | null>
-  listPathsSystem(workspaceId: string): Promise<string[]>
+  getByPathSystem(workspaceId: string, path: string, sourceId?: string | null): Promise<KnowledgeEntry | null>
+  listPathsSystem(workspaceId: string, sourceId?: string | null): Promise<string[]>
+  listSyncLinkEntries(workspaceId: string, sourceId: string): Promise<SyncLinkEntry[]>
 
   create(params: {
     expectedPolicyRevision?: string
@@ -705,15 +725,19 @@ async function knowledgeWrite<T>(workspaceId: string, actorId: string | null | u
 }
 
 // Legacy/status writers also lock the workspace before touching the source row.
-async function sourceQuery<T extends QueryResultRow = QueryResultRow>(id: string, sql: string, values: unknown[]) {
+async function withSourceWrite<T>(id: string, write: (client: PoolClient) => Promise<T>): Promise<T> {
   const client = await getPool().connect()
   try {
     await client.query('BEGIN')
     await client.query('SELECT id FROM workspaces WHERE id=(SELECT workspace_id FROM workspace_knowledge_sources WHERE id=$1) FOR UPDATE', [id])
-    const result = await client.query<T>(sql, values)
+    const result = await write(client)
     await client.query('COMMIT')
     return result
   } finally { await rollbackAndRelease(client) }
+}
+
+function sourceQuery<T extends QueryResultRow = QueryResultRow>(id: string, sql: string, values: unknown[]) {
+  return withSourceWrite(id, client => client.query<T>(sql, values))
 }
 
 async function syncMutation(authority: object, operation: string, details: Record<string, unknown>) {
@@ -721,7 +745,7 @@ async function syncMutation(authority: object, operation: string, details: Recor
   return knowledgeWrite(source.workspaceId, source.configuredByUserId, async client => {
     let path = details.path as string | undefined
     if (operation === 'related') {
-      const row = (await client.query<{ path: string }>('SELECT path FROM knowledge_entries WHERE workspace_id=$1 AND id=$2', [source.workspaceId, details.targetId])).rows[0]
+      const row = (await client.query<{ path: string }>('SELECT path FROM knowledge_entries WHERE workspace_id=$1 AND id=$2 AND source_id=$3', [source.workspaceId, details.targetId, source.id])).rows[0]
       if (!row) throw new Error('knowledge_source_target_conflict')
       path = row.path
     }
@@ -799,13 +823,14 @@ export function createDbKnowledgeStore(): KnowledgeStore {
     },
     // ── Entries ──────────────────────────────────────────────
 
-    async search(ctx, queryStr, limit = 10, authority?:SessionContextAuthority) {
+    async search(ctx, queryStr, limit = 10, authority, sourceId) {
       const clearance = ctx.clearance ?? DEFAULT_CLEARANCE
       const deny = appliesDenylist(ctx) ? `AND ${sourceNotDisabled(5)}` : ''
       const params: unknown[] = [ctx.workspaceId, queryStr, limit, clearance]
       if (appliesDenylist(ctx)) params.push(ctx.assistantId)
       const scope = contentScopeProjection(ctx, params.length + 1)
       params.push(...scope.params)
+      const sourceFilter = knowledgeSourceFilter(params, sourceId)
       const result = await queryKnowledgeCollection<KnowledgeEntry>(ctx,authority,KNOWLEDGE_FIELDS,
         `SELECT ${entryColumnsClearanceScoped(4, scope.sql('ke2'))},
                 ts_rank_cd(ke.search_vector, plainto_tsquery('english', $2)) AS rank
@@ -815,14 +840,15 @@ export function createDbKnowledgeStore(): KnowledgeStore {
            AND sensitivity_rank(ke.sensitivity) <= sensitivity_rank($4)
            ${deny}
            ${scope.sql('ke')}
-         ORDER BY rank DESC
+           ${sourceFilter}
+         ORDER BY rank DESC, ke.id
          LIMIT $3`,
         params,
       )
       return result.rows
     },
 
-    async listByPath(ctx, pathPrefix, authority?:SessionContextAuthority) {
+    async listByPath(ctx, pathPrefix, authority, sourceId) {
       const clearance = ctx.clearance ?? DEFAULT_CLEARANCE
       // List direct children at a path with child counts for directory detection.
       // If pathPrefix is empty, list top-level entries (no '/' in path).
@@ -834,17 +860,21 @@ export function createDbKnowledgeStore(): KnowledgeStore {
         if (appliesDenylist(ctx)) params.push(ctx.assistantId)
         const scope = contentScopeProjection(ctx, params.length + 1)
         params.push(...scope.params)
-        const childPredicate=`ke2.workspace_id = ke.workspace_id AND ke2.path LIKE ke.path || '/%'
-          AND sensitivity_rank(ke2.sensitivity) <= sensitivity_rank($2) ${denyKe2} ${scope.sql('ke2')}`
+        const sourceFilter = knowledgeSourceFilter(params, sourceId)
+        const childProjection = knowledgeBrowseChildProjection(
+          `sensitivity_rank(ke2.sensitivity) <= sensitivity_rank($2) ${denyKe2} ${scope.sql('ke2')}`,
+          sourceId !== undefined,
+        )
         const result = await queryKnowledgeCollection<KnowledgeEntry & { childCount: string }>(ctx,authority,KNOWLEDGE_FIELDS,
-          `SELECT ${entryColumnsClearanceScoped(2, scope.sql('ke2'),knowledgeProjectedSources(childPredicate))},
-                  (SELECT COUNT(*) FROM knowledge_entries ke2 WHERE ${childPredicate}) AS "childCount"
+          `SELECT ${entryColumnsClearanceScoped(2, scope.sql('ke2'),knowledgeProjectedSources(childProjection.contributors))},
+                  (SELECT COUNT(*) FROM knowledge_entries ke2 WHERE ${childProjection.children}) AS "childCount"
            FROM knowledge_entries ke
            WHERE ke.workspace_id = $1 AND ke.path NOT LIKE '%/%'
              AND sensitivity_rank(ke.sensitivity) <= sensitivity_rank($2)
              ${denyKe}
              ${scope.sql('ke')}
-           ORDER BY ke.path ASC`,
+             ${sourceFilter}
+           ORDER BY ke.path ASC, ke.id`,
           params,
         )
         return bindScopeSources(result.rows.map((r) => bindScopeSources({ ...r, childCount: Number(r.childCount) },boundScopeSources(r))),boundScopeSources(result.rows))
@@ -857,11 +887,14 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       if (appliesDenylist(ctx)) childParams.push(ctx.assistantId)
       const childScope = contentScopeProjection(ctx, childParams.length + 1)
       childParams.push(...childScope.params)
-      const childPredicate=`ke2.workspace_id = ke.workspace_id AND ke2.path LIKE ke.path || '/%'
-        AND sensitivity_rank(ke2.sensitivity) <= sensitivity_rank($3) ${denyKe2} ${childScope.sql('ke2')}`
+      const childFilter = knowledgeSourceFilter(childParams, sourceId)
+      const childProjection = knowledgeBrowseChildProjection(
+        `sensitivity_rank(ke2.sensitivity) <= sensitivity_rank($3) ${denyKe2} ${childScope.sql('ke2')}`,
+        sourceId !== undefined,
+      )
       const result = await queryKnowledgeCollection<KnowledgeEntry & { childCount: string }>(ctx,authority,KNOWLEDGE_FIELDS,
-        `SELECT ${entryColumnsClearanceScoped(3, childScope.sql('ke2'),knowledgeProjectedSources(childPredicate))},
-                (SELECT COUNT(*) FROM knowledge_entries ke2 WHERE ${childPredicate}) AS "childCount"
+        `SELECT ${entryColumnsClearanceScoped(3, childScope.sql('ke2'),knowledgeProjectedSources(childProjection.contributors))},
+                (SELECT COUNT(*) FROM knowledge_entries ke2 WHERE ${childProjection.children}) AS "childCount"
          FROM knowledge_entries ke
          WHERE ke.workspace_id = $1
            AND ke.path LIKE $2 || '%'
@@ -869,7 +902,8 @@ export function createDbKnowledgeStore(): KnowledgeStore {
            AND sensitivity_rank(ke.sensitivity) <= sensitivity_rank($3)
            ${denyKe}
            ${childScope.sql('ke')}
-         ORDER BY ke.path ASC`,
+           ${childFilter}
+         ORDER BY ke.path ASC, ke.id`,
         childParams,
       )
       const children = result.rows.map((r) => bindScopeSources({ ...r, childCount: Number(r.childCount) },boundScopeSources(r)))
@@ -878,12 +912,15 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       if (appliesDenylist(ctx)) indexParams.push(ctx.assistantId)
       const indexScope = contentScopeProjection(ctx, indexParams.length + 1)
       indexParams.push(...indexScope.params)
+      const indexFilter = knowledgeSourceFilter(indexParams, sourceId)
       const indexEntry = await queryKnowledgeCollection<KnowledgeEntry>(ctx,authority,KNOWLEDGE_FIELDS,
         `SELECT ${entryColumnsClearanceScoped(3, indexScope.sql('ke2'))} FROM knowledge_entries ke
          WHERE ke.workspace_id = $1 AND ke.path = $2
            AND sensitivity_rank(ke.sensitivity) <= sensitivity_rank($3)
            ${denyKe}
-           ${indexScope.sql('ke')}`,
+           ${indexScope.sql('ke')}
+           ${indexFilter}
+         ORDER BY ke.id`,
         indexParams,
       )
       return bindScopeSources([...indexEntry.rows.map((r) => bindScopeSources({ ...r, childCount: 0 },boundScopeSources(r))), ...children],[...boundScopeSources(indexEntry.rows),...boundScopeSources(result.rows)])
@@ -909,31 +946,37 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       return result.rows[0] ?? null
     },
 
-    async getByPath(ctx, path, authority?:SessionContextAuthority) {
+    async getByPath(ctx, path, authority?:SessionContextAuthority, sourceId?: string | null) {
       const clearance = ctx.clearance ?? DEFAULT_CLEARANCE
       const deny = appliesDenylist(ctx) ? `AND ${sourceNotDisabled(4)}` : ''
       const params: unknown[] = [ctx.workspaceId, path, clearance]
       if (appliesDenylist(ctx)) params.push(ctx.assistantId)
       const scope = contentScopeProjection(ctx, params.length + 1)
       params.push(...scope.params)
+      const sourceFilter = knowledgeSourceFilter(params, sourceId)
       const result = await queryKnowledgeCollection<KnowledgeEntry>(ctx,authority,KNOWLEDGE_FIELDS,
         `SELECT ${entryColumnsClearanceScoped(3, scope.sql('ke2'))} FROM knowledge_entries ke
          WHERE ke.workspace_id = $1 AND ke.path = $2
            AND sensitivity_rank(ke.sensitivity) <= sensitivity_rank($3)
            ${deny}
-           ${scope.sql('ke')}`,
+           ${scope.sql('ke')}
+           ${sourceFilter}
+         LIMIT 2`,
         params,
       )
-      return result.rows[0] ?? null
+      return result.rows.length === 1 ? result.rows[0] : null
     },
 
-    async getByPathSystem(workspaceId, path) {
+    async getByPathSystem(workspaceId, path, sourceId) {
+      const params: unknown[] = [workspaceId, path]
+      const sourceFilter = knowledgeSourceFilter(params, sourceId)
       const result = await query<KnowledgeEntry>(
-        `SELECT ${ENTRY_COLUMNS} FROM knowledge_entries
-         WHERE workspace_id = $1 AND path = $2`,
-        [workspaceId, path],
+        `SELECT ${ENTRY_COLUMNS} FROM knowledge_entries ke
+         WHERE workspace_id = $1 AND path = $2 ${sourceFilter}
+         LIMIT 2`,
+        params,
       )
-      return result.rows[0] ?? null
+      return result.rows.length === 1 ? result.rows[0] : null
     },
 
     async create(params,authority) {
@@ -1002,7 +1045,7 @@ export function createDbKnowledgeStore(): KnowledgeStore {
         const source = knowledgeSyncCapture(syncAuthority)
         const outcome = await knowledgeWrite(params.workspaceId, source.configuredByUserId, async client => {
           const admitted = await admitKnowledgeSync(client, syncAuthority, params)
-          const existed = (await client.query('SELECT id FROM knowledge_entries WHERE workspace_id=$1 AND path=$2', [params.workspaceId,params.path])).rows.length > 0
+          const existed = (await client.query('SELECT id FROM knowledge_entries WHERE workspace_id=$1 AND path=$2 AND source_id=$3', [params.workspaceId,params.path,source.id])).rows.length > 0
           const result = await client.query<KnowledgeEntry>(`SELECT ${ENTRY_COLUMNS} FROM ${source.configuredByUserId ? 'apply_knowledge_source_refresh' : 'apply_knowledge_source_sync_worker'}($1::jsonb,$2::jsonb)`,
             [JSON.stringify(admitted), JSON.stringify(source)])
           return { row:result.rows[0], existed }
@@ -1026,7 +1069,7 @@ export function createDbKnowledgeStore(): KnowledgeStore {
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
                    COALESCE($13::text[], ARRAY[]::text[]),
                    COALESCE($14::uuid[], ARRAY[]::uuid[]))
-           ON CONFLICT (workspace_id, path) DO UPDATE SET
+           ON CONFLICT (workspace_id, source_id, path) DO UPDATE SET
              title = EXCLUDED.title,
              summary = EXCLUDED.summary,
              content = EXCLUDED.content,
@@ -1035,7 +1078,6 @@ export function createDbKnowledgeStore(): KnowledgeStore {
              sensitivity = EXCLUDED.sensitivity,
              sensitivity_explicit = EXCLUDED.sensitivity_explicit,
              metadata = EXCLUDED.metadata,
-             source_id = EXCLUDED.source_id,
              source_sha = EXCLUDED.source_sha,
              compartments = CASE WHEN $13::text[] IS NULL THEN knowledge_entries.compartments ELSE ARRAY(
                SELECT DISTINCT unnest(knowledge_entries.compartments || EXCLUDED.compartments) ORDER BY 1
@@ -1269,13 +1311,13 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       const params: unknown[] = [ctx.workspaceId, ids, clearance]
       const scope = contentScopeProjection(ctx, 4)
       params.push(...scope.params)
-      const result = await queryKnowledgeCollection<{ id: string; title: string; path: string; sensitivity: Sensitivity; compartments: string[]; projectIds: string[] }>(ctx,authority,['id','title','path'],
-        `SELECT ${knowledgeSourceColumns()}, id, title, path, sensitivity, compartments, project_ids AS "projectIds" FROM knowledge_entries
+      const result = await queryKnowledgeCollection<{ id: string; title: string; path: string; sourceId: string | null; sensitivity: Sensitivity; compartments: string[]; projectIds: string[] }>(ctx,authority,['id','title','path','sourceId'],
+        `SELECT ${knowledgeSourceColumns()}, id, title, path, source_id AS "sourceId", sensitivity, compartments, project_ids AS "projectIds" FROM knowledge_entries
          WHERE workspace_id = $1
            AND id = ANY($2::uuid[])
            AND sensitivity_rank(sensitivity) <= sensitivity_rank($3)
            ${scope.sql()}
-         ORDER BY path ASC`,
+         ORDER BY path ASC, id`,
         params,
       )
       return result.rows
@@ -1297,14 +1339,34 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       return bindScopeSources(result.rows.map((r) => r.path),boundScopeSources(result.rows))
     },
 
-    async listPathsSystem(workspaceId) {
+    async listPathsSystem(workspaceId, sourceId) {
+      const params: unknown[] = [workspaceId]
+      const sourceFilter = knowledgeSourceFilter(params, sourceId)
       const result = await query<{ path: string }>(
-        `SELECT path FROM knowledge_entries
-         WHERE workspace_id = $1
+        `SELECT DISTINCT path FROM knowledge_entries ke
+         WHERE workspace_id = $1 ${sourceFilter}
          ORDER BY path ASC`,
-        [workspaceId],
+        params,
       )
       return result.rows.map((r) => r.path)
+    },
+
+    async listSyncLinkEntries(workspaceId, sourceId) {
+      const result = await query<SyncLinkEntry>(
+        `SELECT id, path, source_id AS "sourceId", sensitivity, compartments,
+                project_ids AS "projectIds", scope_held AS "scopeHeld",
+                CASE WHEN source_id = $2 THEN metadata->'_rawRelated' END AS "rawRelated",
+                CASE WHEN source_id = $2 THEN related_ids ELSE '{}'::uuid[] END AS "relatedIds"
+         FROM knowledge_entries
+         WHERE workspace_id = $1
+           AND EXISTS (
+             SELECT 1 FROM knowledge_entries
+             WHERE workspace_id = $1 AND source_id = $2 AND NOT scope_held
+               AND (related_ids <> '{}'::uuid[] OR metadata->'_rawRelated' <> '[]'::jsonb)
+           )`,
+        [workspaceId, sourceId],
+      )
+      return result.rows
     },
 
     async hasEntries(ctx, authority?:SessionContextAuthority) {
@@ -1398,11 +1460,12 @@ export function createDbKnowledgeStore(): KnowledgeStore {
     },
 
     async deleteSource(id) {
-      const result = await sourceQuery(id,
-        `DELETE FROM workspace_knowledge_sources WHERE id = $1`,
-        [id],
-      )
-      return (result.rowCount ?? 0) > 0
+      return withSourceWrite(id, async client => {
+        await client.query(`DELETE FROM knowledge_entries ke USING workspace_knowledge_sources source
+          WHERE source.id = $1 AND ke.source_id = source.id AND ke.workspace_id = source.workspace_id`, [id])
+        const result = await client.query('DELETE FROM workspace_knowledge_sources WHERE id = $1', [id])
+        return (result.rowCount ?? 0) > 0
+      })
     },
 
     async updateSourceSync(id, sha, error = null, syncAuthority) {

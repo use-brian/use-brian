@@ -5717,6 +5717,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
                 '# Knowledge maintenance scope',
                 'The user is on the workspace knowledge management surface, focused on MANUALLY CREATED knowledge entries (entries not synced from any repository).',
                 'Treat knowledge-base questions and edit requests in this conversation as scoped to those manual entries unless the user says otherwise.',
+                'Use the manual namespace (sourceId: null) when finding entries. Identify a particular entry by its entry ID.',
                 'Read the relevant entries from the knowledge base before answering about them or proposing a change.',
               ].join('\n'),
             )
@@ -5730,6 +5731,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
                   kbSource.sourceType === 'local'
                     ? `- Source: local directory ${kbSource.repo}${kbSource.rootPath ? ` (root path ${kbSource.rootPath})` : ''}`
                     : `- Source: ${kbSource.repo} (branch ${kbSource.branch}${kbSource.rootPath ? `, root path ${kbSource.rootPath}` : ''})`,
+                  `- Source ID: ${kbSource.id}. Use this source ID when finding entries, then identify a particular entry by its entry ID.`,
                   kbSource.lastSyncedAt
                     ? `- Last synced: ${kbSource.lastSyncedAt.toISOString()}`
                     : '- Never synced yet.',

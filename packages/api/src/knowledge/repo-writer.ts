@@ -117,6 +117,13 @@ type ResolvedTarget =
   | { ok: true; kind: 'local'; source: NonNullable<Awaited<ReturnType<RepoWriterStore['getSource']>>>; root: string }
   | { ok: false; result: KnowledgeRepoWriteResult }
 
+function isRepoPathConflict(error: unknown): boolean {
+  return error instanceof Error && (
+    error.message === 'knowledge_source_target_conflict'
+    || ('constraint' in error && error.constraint === 'knowledge_entries_workspace_source_path_key')
+  )
+}
+
 export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): KnowledgeRepoWriter {
   const ops = deps.githubOps ?? DEFAULT_GITHUB_OPS
 
@@ -294,7 +301,7 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
    * for this file, so the DB row equals what the next tick would produce.
    * `related_ids` resets like a worker upsert; the next incremental sync
    * (which will see this commit — `last_synced_sha` stays untouched)
-   * re-resolves wikilinks workspace-wide.
+   * re-resolves wikilinks from the selected source.
    */
   async function writeThrough(
     source: NonNullable<Awaited<ReturnType<RepoWriterStore['getSource']>>>,
@@ -476,6 +483,9 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
           }, authority, {}, requestedBy, { compartments: compartments ?? [], projectIds: projectIds ?? [] })
           row = published.row
         } catch (err) {
+          if (!dispatched && isRepoPathConflict(err)) {
+            return { ok: false, reason: 'file_exists', message: `An entry already exists at "${entryPath}" in this source. Select its entry ID to update it.` }
+          }
           return sourceWriteCompleted ? mirrorFailure(source.sourceType, commitSha, err) : classifyWriteError(source, err, dispatched)
         }
       } else {
@@ -498,6 +508,9 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
         } catch (err) {
           if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
             return { ok: false, reason: 'file_exists', message: `An entry already exists at "${entryPath}". Use updateKnowledgeEntry to change it.` }
+          }
+          if (!dispatched && isRepoPathConflict(err)) {
+            return { ok: false, reason: 'file_exists', message: `An entry already exists at "${entryPath}" in this source. Select its entry ID to update it.` }
           }
           return sourceWriteCompleted ? mirrorFailure(source.sourceType, null, err) : classifyLocalWriteError(source, err, dispatched)
         }

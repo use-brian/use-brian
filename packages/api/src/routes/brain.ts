@@ -1521,7 +1521,7 @@ export function brainRoutes(deps: {
         navigationUrl: knowledgeNavigationUrl(entry.metadata),
         createdAt: entry.createdAt,
         updatedAt: entry.updatedAt,
-        related: related.map((r) => ({ id: r.id, title: r.title, path: r.path })),
+        related: related.map((r) => ({ id: r.id, title: r.title, path: r.path, sourceId: r.sourceId })),
         source: source && source.workspaceId === ctx.workspaceId
           ? {
               id: source.id,

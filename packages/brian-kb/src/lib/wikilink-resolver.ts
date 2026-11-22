@@ -14,17 +14,21 @@
 import * as posixPath from 'node:path/posix'
 
 /**
- * Build a filename → path index from all known KB paths.
- * When multiple paths share the same filename, first wins.
+ * Index filename aliases. Strict lookup also includes every exact path
+ * and only accepts aliases that refer to one path.
  */
-export function buildPathIndex(paths: string[]): Map<string, string> {
-  const index = new Map<string, string>()
-  for (const p of paths) {
-    const filename = p.split('/').pop()
-    if (filename && !index.has(filename)) {
-      index.set(filename, p)
-    }
+export function buildPathIndex(paths: string[], options?: { uniqueAliases: boolean }): Map<string, string> {
+  const exact = new Set(paths)
+  const strict = options?.uniqueAliases === true
+  const index = new Map<string, string>(strict ? [...exact].map(path => [path, path]) : [])
+  const ambiguousAliases = new Set<string>()
+  for (const path of exact) {
+    const filename = path.split('/').pop()
+    if (!filename || (strict && exact.has(filename))) continue
+    if (!index.has(filename)) index.set(filename, path)
+    else if (strict) ambiguousAliases.add(filename)
   }
+  for (const alias of ambiguousAliases) index.delete(alias)
   return index
 }
 
@@ -36,25 +40,16 @@ export function resolveWikilink(
   let cleaned = link.trim().replace(/\.md$/i, '')
   cleaned = cleaned.replace(/\/index$/i, '')
 
-  if (index.has(cleaned) || [...index.values()].includes(cleaned)) {
-    if ([...index.values()].includes(cleaned)) return cleaned
-    return index.get(cleaned) ?? null
-  }
+  const indexedPath = index.get(cleaned)
+  if (indexedPath !== undefined) return indexedPath
 
   if (cleaned.startsWith('.')) {
-    const resolved = posixPath.normalize(posixPath.join(currentPath, cleaned))
-      .replace(/\/index$/i, '')
-    if ([...index.values()].includes(resolved)) return resolved
-    return resolved
+    return posixPath.normalize(posixPath.join(currentPath, cleaned)).replace(/\/index$/i, '')
   }
 
   if (cleaned.includes('/')) {
-    if ([...index.values()].includes(cleaned)) return cleaned
-    const stripped = cleaned.replace(/^\/+/, '')
-    if ([...index.values()].includes(stripped)) return stripped
-    return stripped
+    return cleaned.replace(/^\/+/, '')
   }
 
-  if (index.has(cleaned)) return index.get(cleaned)!
   return null
 }

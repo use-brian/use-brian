@@ -89,10 +89,14 @@ describe('[COMP:search/workspace-service] Real PostgreSQL search authority and s
     const f=await fixture()
     const memory=(await createMemory({assistantId:f.assistant,workspaceId:f.workspaceId,userId:f.userId,summary:'Memory title',detail:'needle memory',createdByUserId:f.userId,sensitivity:'internal'})).id
     const entry=(await q("INSERT INTO knowledge_entries(workspace_id,path,title,content,created_by) VALUES($1,'fixture.md','Entry title','needle entry',$2) RETURNING id",[f.workspaceId,f.userId])).rows[0].id
-    for(let i=0;i<3;i++)await q("INSERT INTO kb_chunks(workspace_id,source_path,chunk_index,chunk_text,title,created_by_user_id,user_id,source) VALUES($1,'fixture.md',$2,'needle chunk','Entry title',$3,$3,'user')",[f.workspaceId,i,f.userId])
+    const source = (await q("INSERT INTO workspace_knowledge_sources(workspace_id,source_type,repo) VALUES($1,'github','example/handbook') RETURNING id",[f.workspaceId])).rows[0].id
+    const sibling = (await q("INSERT INTO knowledge_entries(workspace_id,source_id,path,title,content) VALUES($1,$2,'fixture.md','Entry title','Independent body') RETURNING id",[f.workspaceId,source])).rows[0].id
+    for(let i=0;i<3;i++)await q("INSERT INTO kb_chunks(workspace_id,knowledge_entry_id,source_path,chunk_index,chunk_text,title,created_by_user_id,user_id,source) VALUES($1,$4,'fixture.md',$2,'needle chunk','Entry title',$3,$3,'user')",[f.workspaceId,i,f.userId,entry])
     const found=await run(f,'knowledge')
     expect(found.map(row=>row.id).sort()).toEqual([memory,entry].sort())
     expect(found.find(row=>row.id===entry)?.target).toEqual({type:'knowledge',id:entry,path:'fixture.md'})
+    expect((await run(f,'knowledge','chunk')).map(row=>row.id)).toEqual([entry])
+    expect(await readSearchItem(f,'knowledge',`knowledge:${sibling}`,new AbortController().signal)).toMatchObject({id:sibling,text:'Independent body'})
   })
 
   it('searches people, companies, deals and custom/operator record text without collapsing equal titles',async()=>{
@@ -100,7 +104,7 @@ describe('[COMP:search/workspace-service] Real PostgreSQL search authority and s
     for(const kind of ['person','company','deal','project'])ids.push((await q(`INSERT INTO entities(workspace_id,kind,display_name,attributes,source,created_by_user_id)
       VALUES($1,$2,'Same title','{"description":"needle body"}','user',$3) RETURNING id`,[f.workspaceId,kind,f.userId])).rows[0].id)
     const type=(await q(`INSERT INTO entity_types(workspace_id,name,properties,created_by)
-      VALUES($1,'Fixture records','[{"name":"title","config":{"kind":"text"}}]',$2) RETURNING id`,[f.workspaceId,f.userId])).rows[0].id
+      VALUES($1,'Fixture records','[{"name":"title","config":{"kind":"text"}},{"name":"body","config":{"kind":"text"}}]',$2) RETURNING id`,[f.workspaceId,f.userId])).rows[0].id
     ids.push((await q(`INSERT INTO entity_instances(workspace_id,entity_type_id,data,created_by,last_edited_by)
       VALUES($1,$2,'{"title":{"kind":"text","value":"Same title"},"body":{"kind":"text","value":"needle body"}}',$3,$3) RETURNING id`,[f.workspaceId,type,f.userId])).rows[0].id)
     expect((await run(f,'records')).map(row=>row.id).sort()).toEqual(ids.sort())

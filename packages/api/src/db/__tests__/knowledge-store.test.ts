@@ -69,7 +69,7 @@ describe('[COMP:api/knowledge-store] entries', () => {
   })
 
   describe('upsertByPath', () => {
-    it('uses INSERT ON CONFLICT (workspace_id, path) DO UPDATE', async () => {
+    it('upserts on the workspace, source and path key', async () => {
       mockQuery.mockResolvedValueOnce({
         rows: [{ id: 'e1', path: 'test', title: 'Test' }],
         rowCount: 1,
@@ -85,7 +85,7 @@ describe('[COMP:api/knowledge-store] entries', () => {
       })
 
       const sql = mockQuery.mock.calls[0][0] as string
-      expect(sql).toContain('ON CONFLICT (workspace_id, path) DO UPDATE')
+      expect(sql).toContain('ON CONFLICT (workspace_id, source_id, path) DO UPDATE')
     })
   })
 

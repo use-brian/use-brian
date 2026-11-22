@@ -67,6 +67,18 @@ const UPDATE_PARAMS = {
 }
 
 describe('[COMP:knowledge/repo-writer] createKnowledgeRepoWriter', () => {
+  it('reports a same-source reservation conflict without dispatching a repo write', async () => {
+    const store = makeStore({ publishRepoWrite: vi.fn(async () => { throw new Error('knowledge_source_target_conflict') }) })
+    const githubOps = makeOps()
+    const writer = createKnowledgeRepoWriter({ store, syncCredentials, githubOps })
+
+    const result = await writer.commitEntryCreate({ workspaceId: 'w1', sourceId: 'src1', path: 'docs/new-entry',
+      fileContent: '# New entry\n', changeSummary: 'add documentation' })
+
+    expect(result).toMatchObject({ ok: false, reason: 'file_exists' })
+    expect(githubOps.createOrUpdateFile).not.toHaveBeenCalled()
+  })
+
   describe.each(['create', 'update'] as const)('uncertainty for %s', (operation) => {
     const invoke = (writer: ReturnType<typeof createKnowledgeRepoWriter>) => operation === 'update'
       ? writer.commitEntryUpdate(UPDATE_PARAMS)

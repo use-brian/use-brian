@@ -21,8 +21,11 @@ import type {
   KnowledgeRepoWriteResult,
 } from '../../knowledge/types.js'
 import { unifiedDiffLines } from '../../knowledge/text-diff.js'
+import type { SessionContextAuthority } from '../../memory/session-state-types.js'
 import { RANK, researchWriteFloor, type Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { ContextScopeAccumulator, resolveWriteScope, scopeEvidenceFromRows } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import type { KnowledgeSearchResult } from '../../knowledge/types.js'
 
 export type KnowledgeToolOptions = {
   /** Whether any sync source is connected for this workspace. */
@@ -65,6 +68,46 @@ export type KnowledgeWriteCaptureRule = {
  */
 const NO_WORKSPACE_KB =
   'This assistant is not attached to a workspace, and the knowledge base is a workspace resource — so there is no knowledge base to read here (this is not an empty result). Nothing you pass will change that in this conversation: do not retry searchKnowledge / browseKnowledge / readKnowledgeEntry. Answer from what you already know and tell the user this assistant has no knowledge base.'
+
+const knowledgeSourceSelection = z.string().uuid().nullable().optional().describe(
+  'Select a source by its UUID, or use null for manual entries. Omit to include all accessible sources.',
+)
+
+function knowledgeCollectionArgs(context: ToolContext, sourceId?: string | null): [authority?: SessionContextAuthority, sourceId?: string | null] {
+  const authority = context.executionContext && context.scopeAccumulator
+    ? { execution: context.executionContext, accumulator: context.scopeAccumulator }
+    : undefined
+  if (sourceId !== undefined) return [authority, sourceId]
+  return authority ? [authority] : []
+}
+
+async function knowledgeSourceLabels(
+  store: KnowledgeStoreInterface,
+  access: AccessContext,
+  rows: KnowledgeSearchResult[],
+  authority?: SessionContextAuthority,
+) {
+  const pathCounts = new Map<string, number>()
+  for (const row of rows) pathCounts.set(row.path, (pathCounts.get(row.path) ?? 0) + 1)
+  const duplicates = rows.filter(row => (pathCounts.get(row.path) ?? 0) > 1)
+  const ids = new Set(duplicates.flatMap(row => row.sourceId ? [row.sourceId] : []))
+  const sources = new Map<string, { id: string; repo: string }>()
+  if (authority && store.getSourceForViewer) {
+    // Source names are optional. A denied source card never falls back to
+    // the privileged source registry or discards the authorized entry IDs.
+    const getSource = store.getSourceForViewer.bind(store)
+    for (const result of await Promise.allSettled([...ids].map(id => getSource(access, id, authority)))) {
+      if (result.status === 'fulfilled' && result.value) sources.set(result.value.id, result.value)
+    }
+  }
+  return {
+    evidence: scopeEvidenceFromRows([rows, ...sources.values()]),
+    label(row: KnowledgeSearchResult) {
+      if ((pathCounts.get(row.path) ?? 0) < 2) return undefined
+      return row.sourceId === null ? 'Manual entries' : row.sourceId ? sources.get(row.sourceId)?.repo : undefined
+    },
+  }
+}
 
 function captureRuleDescription(rules: readonly KnowledgeWriteCaptureRule[]): string {
   if (rules.length === 0) {
@@ -176,6 +219,7 @@ export function createKnowledgeTools(
       'Search the workspace knowledge base (KB) by keyword. Returns matching entries with titles, paths, and summaries. Use this when you need to find specific information in the team\'s knowledge base.',
     inputSchema: z.object({
       query: z.string().describe('Search keywords (e.g. "vault fee structure", "deployment architecture").'),
+      sourceId: knowledgeSourceSelection,
     }),
     isConcurrencySafe: true,
     isReadOnly: true,
@@ -186,32 +230,37 @@ export function createKnowledgeTools(
         return { data: NO_WORKSPACE_KB, isError: true }
       }
       try {
+        const access = {
+          workspaceId: context.workspaceId,
+          userId: context.userId,
+          assistantId: context.assistantId,
+          assistantKind: context.assistantKind ?? 'standard',
+          clearance: context.clearance,
+          compartments: context.compartments,
+          projectIds: context.projectIds,
+        } as const
+        const args = knowledgeCollectionArgs(context, input.sourceId)
         const results = await store.search(
-          {
-            workspaceId: context.workspaceId,
-            userId: context.userId,
-            assistantId: context.assistantId,
-            assistantKind: context.assistantKind ?? 'standard',
-            clearance: context.clearance,
-            compartments: context.compartments,
-            projectIds: context.projectIds,
-          },
+          access,
           input.query,
           10,
-          ...(context.executionContext&&context.scopeAccumulator?[{execution:context.executionContext,accumulator:context.scopeAccumulator}] as const:[] as const),
+          ...args,
         )
         if (results.length === 0) {
           return { data: 'No knowledge entries found for this query. Try browseKnowledge to explore the knowledge base structure.',scopeEvidence:scopeEvidenceFromRows([results]) }
         }
+        const sources = await knowledgeSourceLabels(store, access, results, args[0])
         return {
           data: results.map((r) => ({
             id: r.id,
             path: r.path,
+            sourceId: r.sourceId,
+            sourceLabel: sources.label(r),
             title: r.title,
             summary: r.summary,
             tags: r.tags,
           })),
-          scopeEvidence: scopeEvidenceFromRows([results]),
+          scopeEvidence: sources.evidence,
         }
       } catch (err) {
         return toolFailure(err, {
@@ -229,6 +278,7 @@ export function createKnowledgeTools(
       'Browse the knowledge base by navigating its directory structure. Returns entries at the given path with summaries. Start with no path to see top-level domains, then drill into specific areas.',
     inputSchema: z.object({
       path: z.string().optional().describe('Path to browse (e.g. "products/vault"). Omit for top-level listing.'),
+      sourceId: knowledgeSourceSelection,
     }),
     isConcurrencySafe: true,
     isReadOnly: true,
@@ -239,30 +289,37 @@ export function createKnowledgeTools(
         return { data: NO_WORKSPACE_KB, isError: true }
       }
       try {
+        const access = {
+          workspaceId: context.workspaceId,
+          userId: context.userId,
+          assistantId: context.assistantId,
+          assistantKind: context.assistantKind ?? 'standard',
+          clearance: context.clearance,
+          compartments: context.compartments,
+          projectIds: context.projectIds,
+        } as const
+        const args = knowledgeCollectionArgs(context, input.sourceId)
         const entries = await store.listByPath(
-          {
-            workspaceId: context.workspaceId,
-            userId: context.userId,
-            assistantId: context.assistantId,
-            assistantKind: context.assistantKind ?? 'standard',
-            clearance: context.clearance,
-            compartments: context.compartments,
-            projectIds: context.projectIds,
-          },
+          access,
           input.path ?? '',
-          ...(context.executionContext&&context.scopeAccumulator?[{execution:context.executionContext,accumulator:context.scopeAccumulator}] as const:[] as const),
+          ...args,
         )
         if (entries.length === 0) {
-          return { data: input.path ? `No entries found at path "${input.path}".` : 'The knowledge base is empty.',scopeEvidence:scopeEvidenceFromRows([entries]) }
+          const data = input.path ? `No entries found at path "${input.path}".`
+            : input.sourceId === undefined ? 'The knowledge base is empty.' : 'No accessible entries in the selected source.'
+          return { data, scopeEvidence: scopeEvidenceFromRows([entries]) }
         }
+        const sources = await knowledgeSourceLabels(store, access, entries, args[0])
         return {
           data: entries.map((r) => ({
             id: r.id,
             path: r.path,
+            sourceId: r.sourceId,
+            sourceLabel: sources.label(r),
             title: r.title,
             summary: r.summary,
           })),
-          scopeEvidence: scopeEvidenceFromRows([entries]),
+          scopeEvidence: sources.evidence,
         }
       } catch (err) {
         return toolFailure(err, {

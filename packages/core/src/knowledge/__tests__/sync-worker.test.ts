@@ -16,6 +16,7 @@ const mockStore: SyncStore = {
   upsertByPath: vi.fn(),
   deleteByTeamAndPath: vi.fn(),
   listPathsSystem: vi.fn(),
+  listSyncLinkEntries: vi.fn(async () => []),
   updateRelatedIds: vi.fn(),
   getByPathSystem: vi.fn(),
   updateSourceSync: vi.fn(),
@@ -283,12 +284,12 @@ describe('[COMP:knowledge/sync-worker] createKnowledgeSyncWorker', () => {
           lastSyncedSha: 'old-hash',
         }])
         vi.mocked(mockStore.listPathsSystem).mockResolvedValue(['removed'])
-        vi.mocked(mockStore.getByPathSystem).mockResolvedValue({ id: 'entry-1', sourceId: 'src1' })
         vi.mocked(mockStore.deleteByTeamAndPath).mockResolvedValue(true)
 
         const worker = createKnowledgeSyncWorker({ store: mockStore, api: mockApi, credentials: mockCreds })
         await worker.tick()
 
+        expect(mockStore.listPathsSystem).toHaveBeenCalledWith('t1', 'src1')
         expect(mockStore.deleteByTeamAndPath).toHaveBeenCalledWith('t1', 'removed', undefined)
         expect(mockStore.updateSourceSync).toHaveBeenCalledWith('src1', expect.stringMatching(/^[a-f0-9]{40}$/), null, undefined)
       } finally {
@@ -336,8 +337,12 @@ it('passes the same opaque authority to deletion, wikilinks, probe and checkpoin
   vi.mocked(mockApi.compareCommits).mockResolvedValueOnce({ headSha: 'new', files: [
     { filename: 'docs/removed.md', status: 'removed' }, { filename: 'docs-private/payroll.md', status: 'removed' },
   ] })
-  vi.mocked(store.listPathsSystem).mockResolvedValue(['link', 'target', 'manual'])
-  vi.mocked(store.getByPathSystem).mockImplementation(async (_, path) => ({ id: path, sourceId: path === 'manual' ? null : 'src1', metadata: { _rawRelated: ['target'] } }))
+  const linkScope = { sensitivity: 'internal' as const, compartments: [], projectIds: [], scopeHeld: false, relatedIds: [] }
+  vi.mocked(store.listSyncLinkEntries).mockResolvedValueOnce([
+    { ...linkScope, id: 'link', path: 'link', sourceId: 'src1', rawRelated: ['target'] },
+    { ...linkScope, id: 'target', path: 'target', sourceId: 'src1', rawRelated: null },
+    { ...linkScope, id: 'manual', path: 'manual', sourceId: null, rawRelated: null },
+  ])
   await createKnowledgeSyncWorker({ store, api: mockApi, credentials: mockCreds }).tick()
   expect(store.deleteByTeamAndPath).toHaveBeenCalledExactlyOnceWith('t1', 'removed', authority)
   expect(store.updateRelatedIds).toHaveBeenCalledWith('link', ['target'], authority)

@@ -17,9 +17,8 @@
  *      in it is genuinely unresolvable for this viewer (broken link, or
  *      a target above their clearance) and renders as plain text.
  *
- * Mirrors the server resolver's order (exact path → relative → basename;
- * see packages/core/src/knowledge/wikilink-resolver.ts) without
- * re-shipping the path index — the related list is tiny.
+ * Within each source scope, look for exact paths, relative paths and
+ * basenames in the same order as the sync resolver.
  *
  * Spec: docs/architecture/features/knowledge-base.md → "Reader surface".
  */
@@ -34,6 +33,20 @@ export function knowledgeEntryHref(workspaceId: string, entryId: string): string
 
 const WIKILINK_RE = /\[\[([^\]]+)\]\]/g;
 const FENCE_RE = /^(```|~~~)/;
+
+/** Collect link URLs from the same rewritten Markdown supplied to the reader. */
+export function collectKnowledgeLinks(rewritten: string): string[] {
+  let inFence = false;
+  const links = new Set<string>();
+  for (const line of rewritten.split("\n")) {
+    if (FENCE_RE.test(line.trimStart())) { inFence = !inFence; continue; }
+    if (inFence) continue;
+    for (const link of line.matchAll(/\]\(<?([^\s)>]+)>?/g)) {
+      if (readLinkTarget(link[1])) links.add(link[1]);
+    }
+  }
+  return [...links];
+}
 
 /** `[[products/vault|Vault]]` → `[Vault](kbwiki:products%2Fvault)`. */
 export function rewriteWikilinks(content: string): string {
@@ -69,15 +82,36 @@ function normaliseTarget(raw: string): string {
 
 /** Resolve `..` / `.` segments of `target` against the directory of
  *  `currentPath` (an entry path like `products/vault`). */
-function resolveRelative(target: string, currentPath: string): string {
-  const baseSegments = currentPath.split("/").slice(0, -1);
-  const segments = [...baseSegments];
+function resolveRelative(target: string, basePath: string): string {
+  const segments = basePath.split("/").filter(Boolean);
   for (const part of target.split("/")) {
     if (part === "" || part === ".") continue;
     if (part === "..") segments.pop();
     else segments.push(part);
   }
   return segments.join("/");
+}
+
+function readLinkTarget(href: string): string | null {
+  if (href.startsWith(KB_WIKILINK_SCHEME)) {
+    try {
+      return decodeURIComponent(href.slice(KB_WIKILINK_SCHEME.length));
+    } catch {
+      return null;
+    }
+  }
+  return /\.md(#.*)?$/i.test(href) && !/^[a-z][a-z0-9+.-]*:/i.test(href) ? href : null;
+}
+
+function pathCandidates(raw: string, currentPath: string): string[] {
+  const target = normaliseTarget(raw);
+  if (raw.startsWith("./") || raw.startsWith("../")) {
+    // The sync resolver uses the normalized entry path as its base. Legacy
+    // regular-file links also use the entry's parent directory.
+    const parent = currentPath.split("/").slice(0, -1).join("/");
+    return [resolveRelative(target, currentPath), resolveRelative(target, parent)];
+  }
+  return [target.replace(/^\/+/, "")];
 }
 
 /**
@@ -88,37 +122,40 @@ export function resolveWikilinkTarget(
   href: string,
   currentPath: string,
   related: KnowledgeRelatedRef[],
+  currentSourceId?: string | null,
+  entryLinks: string[] = [],
 ): KnowledgeRelatedRef | null {
-  let raw: string;
-  if (href.startsWith(KB_WIKILINK_SCHEME)) {
-    raw = decodeURIComponent(href.slice(KB_WIKILINK_SCHEME.length));
-  } else if (/\.md(#.*)?$/i.test(href) && !/^[a-z][a-z0-9+.-]*:/i.test(href)) {
-    raw = href;
-  } else {
-    return null;
-  }
-
+  const raw = readLinkTarget(href);
+  if (!raw) return null;
   const target = normaliseTarget(raw);
-  if (target.length === 0) return null;
+  if (!target) return null;
 
-  // 1. Exact path match.
-  const exact = related.find((r) => r.path === target);
-  if (exact) return exact;
-
-  // 2. Relative to the current entry's directory.
-  if (target.includes("..") || raw.startsWith("./") || !target.includes("/")) {
-    const resolved = resolveRelative(target, currentPath);
-    const rel = related.find((r) => r.path === resolved);
-    if (rel) return rel;
-  }
-
-  // 3. Basename match (`[[vault-spec]]` against `products/vault-spec`).
   const base = target.split("/").pop() ?? target;
-  const byBase = related.find((r) => (r.path.split("/").pop() ?? r.path) === base);
-  if (byBase) return byBase;
-
-  // 4. Title match — frontmatter `related:` entries sometimes name the
-  //    doc title rather than its path.
   const lower = target.toLowerCase();
-  return related.find((r) => r.title.toLowerCase() === lower) ?? null;
+  const direct = pathCandidates(raw, currentPath);
+  const matchers = direct.map(path => (ref: KnowledgeRelatedRef) => ref.path === path);
+  if (!raw.startsWith("/") && !raw.startsWith(".") && !target.includes("/")) {
+    matchers.push((ref) => (ref.path.split("/").pop() ?? ref.path) === base);
+    matchers.push((ref) => ref.title.toLowerCase() === lower);
+  }
+  const groups = currentSourceId === undefined
+    ? [related]
+    : [related.filter((ref) => ref.sourceId === currentSourceId), related];
+  for (const group of groups) {
+    for (const [index, matches] of matchers.entries()) {
+      const candidates = group.filter(matches);
+      if (candidates.length === 0) continue;
+      if (candidates.length > 1) return null;
+      const [candidate] = candidates;
+      // The related IDs do not record which reference produced each edge.
+      // A fuzzy alias cannot borrow the edge already proven by a different
+      // explicit link to the same entry.
+      if (index >= direct.length && entryLinks.some(link => {
+        const other = readLinkTarget(link);
+        return other && normaliseTarget(other) !== target && pathCandidates(other, currentPath).includes(candidate.path);
+      })) return null;
+      return candidate;
+    }
+  }
+  return null;
 }

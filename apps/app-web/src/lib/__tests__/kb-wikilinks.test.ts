@@ -8,6 +8,7 @@
 import { describe, it, expect } from "vitest";
 import {
   KB_WIKILINK_SCHEME,
+  collectKnowledgeLinks,
   knowledgeEntryHref,
   resolveWikilinkTarget,
   rewriteWikilinks,
@@ -58,6 +59,24 @@ describe("[COMP:app-web/kb-wikilinks] resolveWikilinkTarget", () => {
   it("falls back to a title match", () => {
     const hit = resolveWikilinkTarget(`${KB_WIKILINK_SCHEME}Fee%20schedule`, "x", RELATED);
     expect(hit?.id).toBe("2");
+  });
+
+  it("prefers a same-source target and allows only an unambiguous fallback", () => {
+    const manual = { id: "manual", title: "Guide", path: "guide", sourceId: null };
+    const source = { ...manual, id: "one", sourceId: "source-one" };
+    const href = `${KB_WIKILINK_SCHEME}guide`;
+
+    expect(resolveWikilinkTarget(href, "other", [manual, source], "source-one")).toBe(source);
+    expect(resolveWikilinkTarget(href, "other", [source, manual], null)).toBe(manual);
+    expect(resolveWikilinkTarget(href, "other", [manual, source], "source-two")).toBeNull();
+    expect(resolveWikilinkTarget(href, "other", [manual], "source-two")).toBe(manual);
+  });
+
+  it("does not infer a fuzzy alias from a related entry already selected by an explicit link", () => {
+    const target = { id: "explicit", title: "Note", path: "a/note", sourceId: "source-two" };
+    const links = collectKnowledgeLinks(rewriteWikilinks("See [[note]] and [[a/note]]."));
+    expect(resolveWikilinkTarget(`${KB_WIKILINK_SCHEME}note`, "intro", [target], "source-one", links)).toBeNull();
+    expect(resolveWikilinkTarget(`${KB_WIKILINK_SCHEME}a%2Fnote`, "intro", [target], "source-one", links)).toBe(target);
   });
 
   it("ignores external and unresolvable targets", () => {

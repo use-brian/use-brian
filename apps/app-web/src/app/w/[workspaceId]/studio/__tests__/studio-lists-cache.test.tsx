@@ -509,6 +509,54 @@ describe("[COMP:app-web/studio-lists-cache] the assistant Knowledge tab", () => 
     });
     expect(container.textContent).toContain("acme/runbooks");
   });
+
+  it("opens the chosen source at a shared folder path and reads its exact index entry", async () => {
+    const sourceId = "712567a7-385d-454e-80cc-37719f1d16d2";
+    const manual = { id: "manual-entry", path: "guide", title: "Guide", summary: null, tags: [], sensitivity: "internal" as const, sourceId: null };
+    const synced = { ...manual, id: "synced-entry", sourceId, childCount: 1 };
+    await loadSurfaceCache(kbTabCacheKey("a1"), async () => ({
+      sources: [{ ...SOURCE, id: sourceId }],
+      entries: [synced, manual],
+    }) satisfies KbTabSnapshot);
+    const scopedList = `/knowledge/entries?path=guide&sourceId=${sourceId}`;
+    api.authFetch.mockImplementation((url: string) => {
+      if (url.endsWith(scopedList)) return Promise.resolve(okJson({ entries: [{ ...synced, childCount: 0 }] }));
+      if (url.endsWith(`/knowledge/entries/${synced.id}`)) return Promise.resolve(okJson({ content: "Exact source guide" }));
+      return NEVER();
+    });
+    mount(<KnowledgeTab assistantId="a1" workspaceId="w1" />);
+    const buttons = () => [...container.querySelectorAll("button")];
+    const syncedFolder = buttons().find((button) => button.textContent?.includes("Guideacme/handbook"));
+    expect(buttons().some((button) => button.textContent?.includes("GuideManual entries"))).toBe(true);
+    expect(syncedFolder).toBeDefined();
+    await act(async () => syncedFolder!.click());
+    expect(api.authFetch).toHaveBeenCalledWith(expect.stringContaining(scopedList));
+    const indexEntry = buttons().find((button) => button.textContent === "Guide" && button.querySelector("span"));
+    expect(indexEntry).toBeDefined();
+    await act(async () => indexEntry!.click());
+    expect(api.authFetch).toHaveBeenCalledWith(expect.stringContaining(`/knowledge/entries/${synced.id}`));
+    expect(container.textContent).toContain("Exact source guide");
+  });
+
+  it("keeps a unique folder unfiltered so another source's index-less children are reachable", async () => {
+    const index = {
+      id: "source-index", path: "guide", sourceId: SOURCE.id, title: "Guide",
+      summary: null, tags: [], sensitivity: "internal" as const, childCount: 1,
+    };
+    const child = { ...index, id: "other-child", path: "guide/install", sourceId: "other-source", title: "Install", childCount: 0 };
+    await loadSurfaceCache(kbTabCacheKey("a1"), async () => ({ sources: [SOURCE], entries: [index] }) satisfies KbTabSnapshot);
+    api.authFetch.mockImplementation((url: string) => url.endsWith("/knowledge/entries?path=guide")
+      ? Promise.resolve(okJson({ entries: [{ ...index, childCount: 0 }, child] }))
+      : NEVER());
+
+    mount(<KnowledgeTab assistantId="a1" workspaceId="w1" />);
+    const folder = [...container.querySelectorAll("button")].find((button) => button.textContent === "Guide1");
+    expect(folder).toBeDefined();
+    await act(async () => folder!.click());
+
+    expect(api.authFetch).toHaveBeenCalledWith(expect.stringMatching(/\/knowledge\/entries\?path=guide$/));
+    expect([...container.querySelectorAll("button")].some((button) => button.textContent === "Install")).toBe(true);
+  });
 });
 
 describe("[COMP:app-web/studio-lists-cache] sidebar-cache merge into the rail", () => {

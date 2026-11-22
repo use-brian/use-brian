@@ -65,7 +65,7 @@ export async function lockKnowledgePrior(client: PoolClient, workspaceId: string
     NOT scope_held AND member_operation_scope_allows(workspace_id,sensitivity,compartments,true)
       AND agent_mutation_scope_allows(compartments)
       AND context_scope_allows_current_principal(workspace_id,sensitivity,compartments,project_ids) AS allowed
-    FROM knowledge_entries WHERE workspace_id=$1 AND ${byId ? 'id' : 'path'}=$2 FOR UPDATE`, [workspaceId, value])).rows[0]
+    FROM knowledge_entries WHERE workspace_id=$1 AND ${byId ? 'id=$2' : 'path=$2 AND source_id IS NULL'} FOR UPDATE`, [workspaceId, value])).rows[0]
   if (row && !row.allowed) throw new WorkspaceAccessError('context_not_available', 404)
   return row
 }

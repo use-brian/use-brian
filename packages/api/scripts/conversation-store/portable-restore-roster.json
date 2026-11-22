@@ -2,8 +2,8 @@
   "format": 1,
   "status": "reviewed contract; fail closed on any unknown table, sequence, trigger, policy or reference",
   "inventory": {
-    "ledgerCount": 814,
-    "ledgerHead": "8338_native_workspace_skill_receipts.sql"
+    "ledgerCount": 815,
+    "ledgerHead": "8339_knowledge_source_path_identity.sql"
   },
   "rules": {
     "D1-ledger": "Migration ledger. The target ledger is produced by the shipped installer; the archived source ledger is retained as original proof and must name the same shipped release.",

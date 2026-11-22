@@ -17,6 +17,7 @@
  */
 
 import { Router } from 'express'
+import { z } from 'zod'
 import { query, queryWithRLS } from '../db/client.js'
 import { resolveAssistantAccess } from '../db/users.js'
 import type { KnowledgeStore, KnowledgeSource } from '../db/knowledge-store.js'
@@ -48,6 +49,8 @@ import {
   type KnowledgeCaptureRuleInput,
   type KnowledgeCaptureRuleStore,
 } from '../knowledge/capture-rules.js'
+
+const KnowledgeBrowseSource = z.union([z.string().uuid(), z.literal('manual')]).optional()
 
 // Re-exported for existing consumers/tests; the implementations moved to
 // `../knowledge/repo-files.ts` so the assistant repo writer shares them.
@@ -686,14 +689,21 @@ export function knowledgeRoutes({
     if (!ctx) return
 
     const { q, path } = req.query as { q?: string; path?: string }
+    const selected = KnowledgeBrowseSource.safeParse(req.query.sourceId)
+    if (!selected.success) {
+      res.status(400).json({ error: 'sourceId must be a source UUID or manual' })
+      return
+    }
+    const sourceId = selected.data === 'manual' ? null : selected.data
 
     try {
       if (q) {
-        const results = await knowledgeStore.search(ctx, q, 20)
+        const results = await knowledgeStore.search(ctx, q, 20, undefined, sourceId)
         res.json({
           entries: results.map((e) => ({
             id: e.id,
             path: e.path,
+            sourceId: e.sourceId,
             title: e.title,
             summary: e.summary,
             tags: e.tags,
@@ -701,11 +711,12 @@ export function knowledgeRoutes({
           })),
         })
       } else {
-        const entries = await knowledgeStore.listByPath(ctx, path ?? '')
+        const entries = await knowledgeStore.listByPath(ctx, path ?? '', undefined, sourceId)
         res.json({
-          entries: entries.map((e: any) => ({
+          entries: entries.map((e) => ({
             id: e.id,
             path: e.path,
+            sourceId: e.sourceId,
             title: e.title,
             summary: e.summary,
             tags: e.tags,
@@ -920,8 +931,6 @@ export function knowledgeRoutes({
       if (!source || source.workspaceId !== ctx.workspaceId) {
         res.status(404).json({ error: 'Source not found' }); return
       }
-      // Delete derived entries first
-      await knowledgeStore.deleteBySource(sourceId)
       const deleted = await knowledgeStore.deleteSource(sourceId)
       if (!deleted) { res.status(404).json({ error: 'Source not found' }); return }
       res.status(204).end()
@@ -1694,7 +1703,6 @@ export function workspaceKnowledgeRoutes({
       // Retire the self-maintain agent first — the config row cascades with
       // the source FK, but its managed workflow would otherwise be orphaned.
       await teardownMaintenance(sourceId)
-      await knowledgeStore.deleteBySource(sourceId)
       const deleted = await knowledgeStore.deleteSource(sourceId)
       if (!deleted) { res.status(404).json({ error: 'Source not found' }); return }
       res.status(204).end()
