@@ -26,6 +26,8 @@
  */
 
 import { query, queryWithRLS } from './client.js'
+import { sha256 } from '@use-brian/core/skills/bundle.js'
+import { skillFilePath, type SkillFileKind } from './workspace-skill-files-store.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import type { SkillContent, SkillMeta } from '@use-brian/core/skills/types.js'
 import {
@@ -107,6 +109,7 @@ export type ExpectedSkillRevision = Pick<WorkspaceSkill, 'name' | 'description' 
 
 /** Full row including every V2 column — used by curator + admin paths. */
 export type WorkspaceSkillRow = {
+  runtimeFiles?: Array<{ kind: SkillFileKind; name: string; path: string | null; content: string; description: string | null; contentHash: string | null }>
   runtimeSource?: import('@use-brian/agent-runtime/security/derived-scope.js').ScopeSource | null
   id: string
   workspace_id: string
@@ -255,6 +258,12 @@ function rowToSkillContent(row: WorkspaceSkillRow): SkillContent {
     bundleVersion: row.bundle_version ?? 1,
     sourceDigest: row.source_digest ?? undefined,
   }
+  if (row.runtimeSource && row.runtimeFiles) {
+    content.resources = row.runtimeFiles.map(file => ({
+      kind: file.kind, name: file.name, path: file.path ?? skillFilePath(file.kind, file.name),
+      content: file.content, description: file.description ?? undefined, contentHash: file.contentHash ?? sha256(file.content),
+    }))
+  }
   return row.runtimeSource ? bindScopeSource(content, row.runtimeSource) : content
 }
 
@@ -343,6 +352,14 @@ const RUNTIME_SOURCE = `(SELECT jsonb_build_object(
   AND EXISTS (SELECT 1 FROM workspace_members sm WHERE sm.workspace_id=sr.workspace_id
     AND sm.user_id=NULLIF(current_setting('app.current_user_id',true),'')::uuid))`
 
+
+// Capture the root and the exact resource bytes in one statement snapshot.
+// A manual edit to a derived skill can preserve its provenance receipt.
+const RUNTIME_FILES = `CASE WHEN bundle_version=2 OR strpos(content,'{{')>0 THEN
+  (SELECT coalesce(jsonb_agg(jsonb_build_object('kind',f.kind,'name',f.name,'path',f.path,'content',f.content,
+    'description',f.description,'contentHash',f.content_hash) ORDER BY f.path NULLS LAST,f.kind,f.name),'[]'::jsonb)
+   FROM workspace_skill_files f WHERE f.workspace_skill_id=workspace_skills.id)
+  ELSE '[]'::jsonb END AS "runtimeFiles"`
 
 // ── Public store interface (V2 canonical) ──────────────────────────
 
@@ -466,7 +483,7 @@ export type WorkspaceSkillStore = {
  * primary workspace.
  */
 export type SkillStore = {
-  listOwned(userId: string): Promise<SkillContent[]>
+  listOwned(userId: string, options?: { includeResources: boolean }): Promise<SkillContent[]>
   /**
    * Workspace-scoped skill listing for runtime injection: every non-
    * superseded skill in `workspaceId` (any author), as `SkillContent`.
@@ -479,7 +496,7 @@ export type SkillStore = {
    * members (incident 2026-06-01). Per-assistant enablement still gates
    * which are offered.
    */
-  listForWorkspaceContent(workspaceId: string, actingUserId: string): Promise<SkillContent[]>
+  listForWorkspaceContent(workspaceId: string, actingUserId: string, options?: { includeResources: boolean }): Promise<SkillContent[]>
   create(userId: string, input: CreateSkillInput): Promise<SkillContent>
   update(userId: string, skillId: string, updates: UpdateSkillInput): Promise<SkillContent | null>
   delete(userId: string, skillId: string): Promise<boolean>
@@ -1198,11 +1215,11 @@ export function createDbSkillStore(): SkillStore {
   const ws = createDbWorkspaceSkillStore()
 
   return {
-    async listOwned(userId) {
+    async listOwned(userId, options) {
       const workspaceId = await resolvePrimaryWorkspace(userId)
       const result = await queryWithRLS<WorkspaceSkillRow>(
         userId,
-        `SELECT ${COLS_ALL}, ${RUNTIME_SOURCE} AS "runtimeSource" FROM workspace_skills
+        `SELECT ${COLS_ALL}, ${RUNTIME_SOURCE} AS "runtimeSource"${options?.includeResources ? `, ${RUNTIME_FILES}` : ''} FROM workspace_skills
          WHERE workspace_id = $1 AND author_id = $2 AND valid_to IS NULL
          ORDER BY created_at DESC`,
         [workspaceId, userId],
@@ -1210,7 +1227,7 @@ export function createDbSkillStore(): SkillStore {
       return result.rows.map(rowToSkillContent)
     },
 
-    async listForWorkspaceContent(workspaceId, actingUserId) {
+    async listForWorkspaceContent(workspaceId, actingUserId, options) {
       // Pins the GIVEN workspace (the assistant's), NOT the caller's primary
       // workspace, and does NOT filter author_id — every member's skills in
       // this workspace are eligible (per-assistant enablement gates the rest).
@@ -1220,7 +1237,7 @@ export function createDbSkillStore(): SkillStore {
         // out of the chat listing even though their row is still bi-temporally
         // current (valid_to IS NULL until delete()). Matches the spec resolver
         // ('state IN (active, stale)').
-        `SELECT ${COLS_ALL}, ${RUNTIME_SOURCE} AS "runtimeSource" FROM workspace_skills
+        `SELECT ${COLS_ALL}, ${RUNTIME_SOURCE} AS "runtimeSource"${options?.includeResources ? `, ${RUNTIME_FILES}` : ''} FROM workspace_skills
          WHERE workspace_id = $1 AND valid_to IS NULL
            AND state IN ('active', 'stale')
          ORDER BY created_at DESC`,

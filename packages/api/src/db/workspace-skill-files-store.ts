@@ -72,7 +72,7 @@ export type WorkspaceSkillFilesStore = {
     kind: SkillFileKind,
     opts?: { actingUserId?: string },
   ): Promise<WorkspaceSkillFileRow[]>
-  /** Bulk resource hydration for runtime injection / graph projection. */
+  /** Bulk resource hydration for graph projection. */
   listForSkills(
     workspaceSkillIds: readonly string[],
     opts?: { actingUserId?: string },
@@ -105,7 +105,7 @@ const COLS_PUBLIC = `
   updated_at         AS "updatedAt"
 `
 
-function defaultPath(kind: SkillFileKind, name: string): string {
+export function skillFilePath(kind: SkillFileKind, name: string): string {
   const normalizedName = normalizeSkillResourcePath(name)
   if (normalizedName && skillResourceKindFromPath(normalizedName)) return normalizedName
   const root = kind === 'reference' ? 'references' : kind === 'asset' ? 'assets' : kind === 'template' ? 'templates' : 'scripts'
@@ -185,7 +185,7 @@ export function createDbWorkspaceSkillFilesStore(
           params.workspaceSkillId,
           params.kind,
           params.name,
-          params.path ?? defaultPath(params.kind, params.name),
+          params.path ?? skillFilePath(params.kind, params.name),
           params.content,
           params.description ?? null,
           params.contentHash ?? sha256(params.content),

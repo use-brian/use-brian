@@ -6292,6 +6292,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           enforceSlugs: slashCommand ? [slashCommand.name] : undefined,
           skillStore: options.skillStore,
           executionContext, scopeAccumulator,
+          authorizeSkillAudience: executionContext.security.access.sharedAudience ? readLegacyDeliveryAudience : undefined,
           connectorUserId,
           assistantId: assistant.id,
           // §5.5 governance gate: the assistant's own clearance is the
