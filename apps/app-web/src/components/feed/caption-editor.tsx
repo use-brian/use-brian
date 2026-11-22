@@ -94,7 +94,6 @@ export function CaptionEditor({
   readOnly,
   placeholder,
   deferSave = false,
-  saveHint,
   onChange,
   onSave,
 }: {
@@ -104,7 +103,6 @@ export function CaptionEditor({
   placeholder?: string;
   /** Keep edits local until the parent commits the complete format payload. */
   deferSave?: boolean;
-  saveHint?: string;
   /** Every keystroke; the parent owns the text. */
   onChange: (next: string) => void;
   /** Debounced commit. Returns false to surface a save error. */
@@ -203,12 +201,12 @@ export function CaptionEditor({
   const counter = counterState(value, platform);
 
   return (
-    <div className="mx-auto w-full max-w-[72ch] space-y-5 py-2 md:space-y-6">
+    <div className="w-full space-y-3">
       {!readOnly ? (
         <div
           role="toolbar"
           aria-label={t.formattingToolbar}
-          className="inline-flex max-w-full items-center rounded-xl bg-muted/60 p-1"
+          className="inline-flex max-w-full items-center"
         >
           {([
             ["bold", t.formatBold, Bold],
@@ -223,7 +221,7 @@ export function CaptionEditor({
               onClick={() => applyFormatting(formatting)}
               aria-label={label}
               title={label}
-              className="inline-flex size-11 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-background hover:text-foreground focus-visible:text-foreground md:size-8"
+              className="inline-flex size-11 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:text-foreground md:size-8"
             >
               <Icon className="size-4" aria-hidden />
             </button>
@@ -271,18 +269,12 @@ export function CaptionEditor({
         {counter.over ? (
           <span className="text-destructive">{t.overLimit}</span>
         ) : null}
-        <span aria-hidden>·</span>
-        <span aria-live="polite">
-          {state === "saving"
-            ? t.saving
-            : state === "saved"
-              ? t.saved
-              : state === "error"
-                ? t.saveFailed
-                : deferSave
-                  ? (saveHint ?? t.saveWithVersion)
-                  : t.autosaveHint}
-        </span>
+        {!deferSave ? <>
+          <span aria-hidden>·</span>
+          <span aria-live="polite">
+            {state === "saving" ? t.saving : state === "saved" ? t.saved : state === "error" ? t.saveFailed : t.autosaveHint}
+          </span>
+        </> : null}
       </div>
     </div>
   );

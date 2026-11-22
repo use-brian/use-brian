@@ -28,7 +28,7 @@ describe('[COMP:app-web/feed-post-workflow] visible editorial workflow', () => {
     await act(async () => root.render(<FeedPostWorkflow {...handlers} status={status} hasEdits={hasEdits} actionDisabled={false} reviewOpen={false} />));
     expect(host.querySelector('[aria-current="step"]')?.textContent).toBe(en.feedPage.posts.status[status]);
     expect(host.querySelectorAll('[aria-current="step"]')).toHaveLength(1);
-    expect(host.querySelectorAll('li')).toHaveLength(4);
+    expect(host.textContent).not.toContain(en.feedPage.posts.status.posted);
     if (hasEdits) expect(button(te.approve)).toBeUndefined();
     await act(async () => button(label).click());
     for (const name of ['onCommit', 'onApprove', 'onPosted', 'onReview'] as const) {
