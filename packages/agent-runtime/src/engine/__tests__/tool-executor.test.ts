@@ -1461,6 +1461,36 @@ describe('[COMP:engine/tool-executor] renderToolResultData — failure-object un
 describe('[COMP:engine/tool-executor] liveness: per-tool timer vs abandonment', () => {
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
+  it('resumes the remaining execution budget after an inner confirmation', async () => {
+    vi.useFakeTimers()
+    try {
+      const observed: boolean[] = []
+      const tool = buildTool({
+        name: 'gateway', description: 'A connector with an inner confirmation',
+        inputSchema: z.record(z.unknown()), timeoutMs: 100,
+        async execute(_input, context) {
+          await sleep(60)
+          await context.parkForConfirmation!(() => sleep(500))
+          await sleep(30)
+          observed.push(context.abortSignal.aborted)
+          await sleep(20)
+          observed.push(context.abortSignal.aborted)
+          return { data: 'finished' }
+        },
+      })
+      const executor = createToolExecutor({
+        tools: new Map([[tool.name, tool]]), context: ctx, loopDetector: createLoopDetector(),
+      })
+      executor.addTool('call', tool.name, {})
+      const results = drainResults(executor)
+      await vi.runAllTimersAsync()
+      await results
+      expect(observed).toEqual([false, true])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('a finite timeoutMs aborts the tool signal but does NOT abandon the call - a slow tool that ignores the signal still returns its real result', async () => {
     let sawAbort = false
     const slow = buildTool({

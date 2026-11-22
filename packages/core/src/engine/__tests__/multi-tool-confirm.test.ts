@@ -233,7 +233,8 @@ describe('[COMP:engine/tool-executor] connector (mcp_call) sibling confirmation'
       inputSchema: z.object({ summary: z.string() }),
       isConcurrencySafe: false,
       requiresConfirmation: true,
-      async execute(input) {
+      async execute(input, context) {
+        context.abortSignal.throwIfAborted()
         created.push((input as { summary: string }).summary)
         return { data: 'created' }
       },
@@ -262,6 +263,32 @@ describe('[COMP:engine/tool-executor] connector (mcp_call) sibling confirmation'
     })
     return { executor, resolver, prompts, created }
   }
+
+  it.each(['allow', 'expire'] as const)('handles a delayed %s on an indexed write', async outcome => {
+    vi.useFakeTimers()
+    try {
+      const { executor, resolver, prompts, created } = makeExecutor()
+      executor.addTool('call_1', 'mcp_call', {
+        server: 'gcal', tool: 'googleCalendarCreateEvent', args: { summary: 'Team meeting' },
+      })
+      await vi.advanceTimersByTimeAsync(45_000)
+      expect(prompts).toHaveLength(1)
+      expect(created).toEqual([])
+      if (outcome === 'allow') resolver.resolve(prompts[0]!.toolCallId, 'allow')
+      else await vi.advanceTimersByTimeAsync(15_000)
+      const results: ContentBlock[] = []
+      for await (const batch of executor.getRemainingResults()) results.push(...batch.blocks)
+      if (outcome === 'allow') {
+        expect(results[0]).toMatchObject({ type: 'tool_result', content: 'created' })
+        expect(created).toEqual(['Team meeting'])
+      } else {
+        expect(results[0]).toMatchObject({ isError: true, content: expect.stringContaining('confirmation prompt expired') })
+        expect(created).toEqual([])
+      }
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 
   it('prompts for every sibling mcp_call before any decision is given', async () => {
     const { executor, resolver, prompts, created } = makeExecutor()
