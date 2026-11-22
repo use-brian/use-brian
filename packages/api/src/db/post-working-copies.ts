@@ -37,6 +37,11 @@ export type WorkingCopyInput = PostWorkingCopy & { baseTitle?: string; create?: 
 export class WorkingCopyError extends Error {
   constructor(public status: number) { super(`Working copy ${status}`) }
 }
+
+function displayedWorkingTitle(title: string): string {
+  return title.trim() || 'New draft'
+}
+
 export const postWorkingCopiesStore = {
   async get(assistantId: string, sessionId: string, userId: string): Promise<PostWorkingCopy | null> {
     const native = conversationAnchorWriteAdmissionActive()
@@ -105,18 +110,20 @@ export const postWorkingCopiesStore = {
       }
       const platformPrefix = session.title.match(/^\[(instagram|threads|twitter|xhs|linkedin|email)\]/)?.[0] ?? '[threads]'
       const oldTitle = session.title.replace(/^\[[^\]]+\]\s*/, '')
-      if (previous && input.content.title !== previous.content.title &&
-          oldTitle !== previous.content.title && input.content.title !== oldTitle) throw new WorkingCopyError(409)
+      const nextTitle = displayedWorkingTitle(input.content.title)
+      const previousTitle = previous && displayedWorkingTitle(previous.content.title)
+      const titleChanged = nextTitle !== previousTitle
+      if (previous && titleChanged && oldTitle !== previousTitle && oldTitle !== nextTitle) throw new WorkingCopyError(409)
       if (created) {
         const seed = seedFirstContentDraftMessage({ kind: 'freeform',
           format: input.content.postFormat, brief: input.content.privateBrief })
         if (seed) await insertFeedDraftSeed(client,actor,seed)
       }
       // Do not rewrite a legacy title just because caption text changed.
-      if (!previous || input.content.title !== previous.content.title) {
+      if (titleChanged) {
         await client.query(
           `UPDATE sessions SET title = $2, title_manually_set = true WHERE id = $1`,
-          [sessionId, `${platformPrefix} ${input.content.title.trim() || 'New draft'}`],
+          [sessionId, `${platformPrefix} ${nextTitle}`],
         )
       }
       input.content = { ...input.content, sourceSensitivity: maxSensitivity(previous?.content.sourceSensitivity ?? 'public', input.content.sourceSensitivity ?? 'public'),
