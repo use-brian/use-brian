@@ -5,7 +5,7 @@ import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { delimiter, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { pristineCache } from './pristine-fixture.mjs'
+import { pristineCache, pristineThrough } from './pristine-fixture.mjs'
 import { prepareRuntimeRole, activateRuntimeRole } from './runtime-role.mjs'
 
 const ossRoot = fileURLToPath(new URL('../../', import.meta.url))
@@ -199,7 +199,7 @@ export async function createLocalFixture({ pgBin, migrationDirs = [], env = proc
       const client = new pg.Client({ host: socket, port, database: 'postgres', user: bootstrapRole })
       await client.connect()
       try {
-        await client.query(`ALTER ROLE assurance_bootstrap PASSWORD '${password}'; ALTER ROLE assurance_owner PASSWORD '${password}'; ALTER ROLE app_user PASSWORD '${appPassword}'`)
+        await client.query(`ALTER ROLE assurance_bootstrap PASSWORD '${password}'; ALTER ROLE assurance_owner PASSWORD '${password}'`)
       } finally { await client.end() }
       console.log('Restored verified pristine PostgreSQL backup')
     } else {
@@ -229,46 +229,56 @@ export async function createLocalFixture({ pgBin, migrationDirs = [], env = proc
           COMMIT`)
         await prepareRuntimeRole(client)
       })
-      const connection = new pg.Client({ connectionString: adminUrl })
-      await connection.connect()
-      try {
-        if (ordinaryOwner) {
-          const role = (await connection.query('SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')).rows[0]
-          if (!role || role.rolsuper || role.rolbypassrls) throw new Error('Ordinary owner profile has elevated privileges')
+    }
+    const connection = new pg.Client({ connectionString: adminUrl })
+    await connection.connect()
+    try {
+      if (ordinaryOwner) {
+        const role = (await connection.query('SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')).rows[0]
+        if (!role || role.rolsuper || role.rolbypassrls) throw new Error('Ordinary owner profile has elevated privileges')
+      }
+      if (!restored) await prepareRuntimeRole(connection)
+      const activate = () => ordinaryOwner ? bootstrap(client => activateRuntimeRole(client, { password: appPassword })) : activateRuntimeRole(connection, { password: appPassword })
+      if (beforeApply || cache) {
+        const { tsImport } = await import('tsx/esm/api')
+        const { runMigrations } = await tsImport('../../packages/api/scripts/migrate.ts', import.meta.url)
+        let saved = restored
+        const savePrefix = async () => {
+          if (!cache || saved) return
+          saved = true
+          await cache.save({ ...fixtureEnv, PGUSER: bootstrapRole })
         }
-        await prepareRuntimeRole(connection)
-        const activate = () => ordinaryOwner ? bootstrap(client => activateRuntimeRole(client, { password: appPassword })) : activateRuntimeRole(connection, { password: appPassword })
-        if (beforeApply) {
-          let boundarySeen = false
-          const { tsImport } = await import('tsx/esm/api')
-          const { runMigrations } = await tsImport('../../packages/api/scripts/migrate.ts', import.meta.url)
-          await runMigrations({ databaseUrl: adminUrl, migrationDirs, beforeApply: async migration => {
-            if (migration.file !== beforeApplyFile) return
+        let boundarySeen = false
+        await runMigrations({ databaseUrl: adminUrl, migrationDirs, beforeApply: async migration => {
+          if (cache) {
+            // The preceding migration has committed. Future files always execute
+            // on this run, both when recording the prefix and when restoring it.
+            if (migration.file > pristineThrough) await savePrefix()
+          } else if (migration.file === beforeApplyFile) {
             if (boundarySeen) throw new Error('Upgrade boundary executed twice')
             boundarySeen = true
-            // Only this explicit new-disposable upgrade boundary may activate early.
             await activate()
             await beforeApply({ ...migration, adminUrl, appUrl, env: fixtureEnv })
-          } })
-          if (!boundarySeen) throw new Error('Upgrade boundary missing or already applied: ' + beforeApplyFile)
-        } else {
-          let pending = ''
-          await runCommand(process.execPath, ['--import', import.meta.resolve('tsx'), 'packages/api/scripts/migrate.ts'], {
-            env: fixtureEnv, logPath: join(directory, 'migrations.log'),
-            onOutput: migrationProgress ? text => {
-              const lines = (pending + text).split('\n'); pending = lines.pop() ?? ''
-              for (const line of lines) {
-                const match = /^\s*apply: ([\w.-]+\.sql)$/.exec(line)
-                if (match) console.log(`Preparing database: ${match[1]}`)
-              }
-            } : undefined,
-          })
-        }
-        await activate()
-        if(executorProbe)await bootstrap(client=>client.query(['assurance_owner','app_user'].map(role=>`ALTER ROLE ${role} SET m6_probe.capture='${executorProbe.capture === false ? 'off' : 'on'}';ALTER ROLE ${role} SET m6_probe.output='${executorProbe.output}'`).join(';')))
-      } finally { await connection.end() }
-      if (cache) await cache.save({ ...fixtureEnv, PGUSER: bootstrapRole })
-    }
+          }
+        } })
+        if (beforeApply && !boundarySeen) throw new Error('Upgrade boundary missing or already applied: ' + beforeApplyFile)
+        await savePrefix()
+      } else {
+        let pending = ''
+        await runCommand(process.execPath, ['--import', import.meta.resolve('tsx'), 'packages/api/scripts/migrate.ts'], {
+          env: fixtureEnv, logPath: join(directory, 'migrations.log'),
+          onOutput: migrationProgress ? text => {
+            const lines = (pending + text).split('\n'); pending = lines.pop() ?? ''
+            for (const line of lines) {
+              const match = /^\s*apply: ([\w.-]+\.sql)$/.exec(line)
+              if (match) console.log(`Preparing database: ${match[1]}`)
+            }
+          } : undefined,
+        })
+      }
+      await activate()
+      if(executorProbe)await bootstrap(client=>client.query(['assurance_owner','app_user'].map(role=>`ALTER ROLE ${role} SET m6_probe.capture='${executorProbe.capture === false ? 'off' : 'on'}';ALTER ROLE ${role} SET m6_probe.output='${executorProbe.output}'`).join(';')))
+    } finally { await connection.end() }
     if (prepareTemplate) {
       const admin = new pg.Client({ connectionString: makeUrl(bootstrapRole, password, 'postgres') })
       await admin.connect()

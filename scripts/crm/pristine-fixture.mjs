@@ -8,6 +8,8 @@ import { promisify } from 'node:util'
 
 const exec = promisify(execFile)
 const root = fileURLToPath(new URL('../../', import.meta.url))
+// Advance this boundary when replay of newer migrations becomes material.
+export const pristineThrough = '8338_native_workspace_skill_receipts.sql'
 const inputs = [
   'packages/api/migrations', 'packages/api/scripts/migrat*.ts', 'packages/api/src/migrations',
   'scripts/crm/local-fixture.mjs', 'scripts/crm/pristine-fixture.mjs', 'scripts/crm/runtime-role.mjs',
@@ -34,6 +36,7 @@ export async function pristineKey(pgBin) {
   }
   const { stdout } = await exec('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', ...inputs], { cwd: root })
   for (const path of [...new Set(stdout.split('\0').filter(Boolean))].sort()) {
+    if (path.startsWith('packages/api/migrations/') && path.slice('packages/api/migrations/'.length) > pristineThrough) continue
     const bytes = await readFile(join(root, path)).catch(error => { if (error.code !== 'ENOENT') throw error })
     if (bytes) add(path, bytes)
   }

@@ -81,6 +81,8 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
     assert.match(first, /^key=calendar-pg-[a-f0-9]{64}$/)
     put('packages/api/src/__tests__/channel-calendar-recovery.integration.test.ts', 'new test')
     assert.equal(key(), first)
+    put('packages/api/migrations/9999_new_schema.sql', 'new migration always applied on this run')
+    assert.equal(key(), first)
     for (const [path, value] of [
       ['packages/api/migrations/000.sql', 'edited migration'], ['packages/api/migrations/001.sql', 'new migration'],
       ['scripts/rig-admin-role.sql', 'different role setup'], ['packages/api/src/migrations/execution-sql.ts', 'different adapter'],
