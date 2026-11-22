@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { preload } from "react-dom";
 import { ArrowDown, ArrowUp, Pencil, SmilePlus, Trash2, Upload } from "lucide-react";
 import { desktopBridge, type DesktopAccount } from "@/lib/desktop-auth-source";
 import { useT } from "@/lib/i18n/client";
@@ -56,7 +57,7 @@ export function resetDesktopAccountDirectory(): void {
  * in-flight read. An unchanged result does not notify, so an open menu does
  * not repaint when the shell repeats the same rows.
  */
-export function warmDesktopAccounts(): Promise<void> {
+function warmDesktopAccounts(): Promise<void> {
   const list = desktopBridge()?.listAccounts;
   if (!list) return Promise.resolve();
   if (directoryPending) return directoryPending;
@@ -74,6 +75,26 @@ export function warmDesktopAccounts(): Promise<void> {
   });
   directoryPending = task;
   return task;
+}
+
+/** Warm the menu's directory and photos for as long as workspace chrome is mounted. */
+export function useWarmDesktopAccounts(): void {
+  useEffect(() => {
+    if (!desktopBridge()?.listAccounts) return;
+
+    function warmPhotos() {
+      for (const account of directoryView.accounts) {
+        if (!account.icon && account.avatarUrl) {
+          preload(account.avatarUrl, { as: "image", fetchPriority: "low" });
+        }
+      }
+    }
+
+    const unsubscribe = subscribeDirectory(warmPhotos);
+    warmPhotos();
+    void warmDesktopAccounts();
+    return unsubscribe;
+  }, []);
 }
 
 function replaceDesktopAccounts(next: DesktopAccount[] | ((current: DesktopAccount[]) => DesktopAccount[])): void {
