@@ -250,9 +250,9 @@ function entityMutationAccess(actorUserId: string, access?: AccessContext): Acce
     projectIds: agent.projectIds, visibilityAssistantIds: agent.visibilityAssistantIds }
 }
 
-function entitySourceGuard(actorUserId: string, access: AccessContext | undefined, operation: 'read' | 'mutation', startIdx: number) {
-  const execution = access ? buildAccessPredicate(access, { operation, startIdx }) : { sql: 'TRUE', params: [], nextIdx: startIdx }
-  const member = buildCurrentMemberSourcePredicate(actorUserId, { alias: 'entities', startIdx: execution.nextIdx, operation })
+function entitySourceGuard(actorUserId: string, access: AccessContext | undefined, operation: 'read' | 'mutation', startIdx: number, alias?: string) {
+  const execution = access ? buildAccessPredicate(access, { alias, operation, startIdx }) : { sql: 'TRUE', params: [], nextIdx: startIdx }
+  const member = buildCurrentMemberSourcePredicate(actorUserId, { alias: alias ?? 'entities', startIdx: execution.nextIdx, operation })
   return { sql: `${execution.sql} AND ${member.sql}`, params: [...execution.params, ...member.params], nextIdx: member.nextIdx }
 }
 
@@ -1051,6 +1051,41 @@ export async function findCrossKindDuplicateClustersSystem(
 
 // ── Alias mutators ────────────────────────────────────────────────────
 
+/** Revalidate a frozen target; competing records are projected as booleans only. */
+export async function inspectExtractionEntityTarget(
+  access: AccessContext,
+  actorAccess: AccessContext,
+  input: { id: string; kind: EntityKind; canonicalId: string | null; normalizedName: string },
+  client: pg.PoolClient,
+): Promise<{ canonicalId: string | null; canonicalConflict: boolean; nameMatch: boolean; nameConflict: boolean } | undefined> {
+  const execution = entityMutationAccess(access.userId, access)
+  const target = entitySourceGuard(access.userId, execution, 'mutation', 6, 'target')
+  const replay = entitySourceGuard(actorAccess.userId, actorAccess, 'mutation', target.nextIdx, 'target')
+  const contenders = entitySourceGuard(access.userId, execution, 'read', replay.nextIdx)
+  const competing = `workspace_id = $2 AND kind = $3 AND id <> $1
+    AND valid_from <= now() AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
+    AND ${contenders.sql}`
+  const result = await client.query<{
+    canonicalId: string | null; canonicalConflict: boolean; nameMatch: boolean; nameConflict: boolean
+  }>(
+    `SELECT target.canonical_id AS "canonicalId",
+            EXISTS (
+               SELECT 1 FROM entities WHERE ${competing} AND canonical_id = $4
+            ) AS "canonicalConflict",
+            (lower(btrim(target.display_name)) = $5 OR $5 = ANY(target.aliases)) AS "nameMatch",
+            EXISTS (SELECT 1 FROM entities WHERE ${competing}
+                    AND (lower(btrim(display_name)) = $5 OR $5 = ANY(aliases))) AS "nameConflict"
+       FROM entities target
+      WHERE target.id = $1 AND target.workspace_id = $2 AND target.kind = $3
+        AND target.valid_from <= now() AND target.valid_to IS NULL
+        AND target.retracted_at IS NULL AND NOT target.scope_held AND ${target.sql} AND ${replay.sql}
+      FOR NO KEY UPDATE OF target`,
+    [input.id, access.workspaceId, input.kind, input.canonicalId, input.normalizedName,
+      ...target.params, ...replay.params, ...contenders.params],
+  )
+  return result.rows[0]
+}
+
 /**
  * Append a lowercased alias to an entity's `aliases`. Idempotent —
  * duplicate aliases are de-duped. Returns `conflict` (with the other
@@ -1429,9 +1464,10 @@ export async function supersedeEntity(
   id: string,
   patch: EntitySupersedePatch,
   transactionClient?: pg.PoolClient,
+  access?: AccessContext,
 ): Promise<EntityRecord | null> {
   assertEntityInputFrame(entitySuccessorInput,patch)
-  const access = entityMutationAccess(actorUserId)
+  access = entityMutationAccess(actorUserId, access)
   const ownedClient = transactionClient ? null : await getAppPool().connect()
   const client = transactionClient ?? ownedClient!
   try {

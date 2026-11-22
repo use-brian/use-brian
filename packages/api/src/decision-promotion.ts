@@ -103,7 +103,7 @@ export const OBSERVATION_ONLY_DECISION_OPERATION_IDS = new Set([
   'ingest.extraction-gate',
   'ingest.sensitivity',
   'feed.reply-classification',
-  'feed.draft-safety',
+  'feed.draft-safety', // Historical IDs still cannot be promoted to authoritative routing.
 ])
 
 export function isAuthorityBearingDecisionOperation(operationId: string): boolean {

@@ -1,26 +1,15 @@
-import { countDecisionEvidence } from '@use-brian/core/decision-learning/evidence.js'
 /**
- * Assistant playbook rules - the admission-gated learned layer of the
- * growth loop (docs/plans/assistant-growth-loop.md §3 Phase 3, migration
- * 419).
- *
- * Plain functions over the shared pool (no class), imported directly by
- * the chat routes (active-rule fetch for the `## Playbook` prompt
- * section), the assistants router (list + decision), and the reflection
- * worker (suggest + dedup corpus). Access control is the caller's job:
- * routes gate through `resolveAssistantAccess`; the worker and prompt
- * paths are system reads.
- *
- * Status machine: 'suggested' → 'active' (owner approve) | 'rejected'
- * (owner reject); 'active' → 'retired' (owner retire). Rejected rules are
- * kept as the reflection worker's do-not-repropose corpus.
+ * Shared storage for existing assistant-wide rules and scoped decision rules.
+ * Prompt reads are system reads, and governance routes verify assistant access
+ * before the store authorizes an owner or a member acting on their own rule.
+ * The `reflection` source identifies rules written by the former transcript
+ * worker. Their provenance remains available for governance and history.
  *
  * [COMP:api/assistant-playbook]
  */
-
-import { sessionKindSql } from '../session-kind.js'
 import { createHash } from 'node:crypto'
 
+import { countDecisionEvidence } from '@use-brian/core/decision-learning/evidence.js'
 import { z } from 'zod'
 import type pg from 'pg'
 import type { FeedLearningScope } from '@use-brian/shared'
@@ -57,10 +46,6 @@ export type PlaybookRule = {
 /** Max rules an assistant may hold in 'active' at once - approval past this
  *  is refused so the injected block stays disciplined. */
 export const MAX_ACTIVE_PLAYBOOK_RULES = 12
-
-/** Max pending suggestions per assistant - the reflection worker skips an
- *  assistant at or above this so an unattended inbox never floods. */
-export const MAX_PENDING_PLAYBOOK_SUGGESTIONS = 5
 
 /** Decision-derived active cap per assistant/member pair. */
 export const MAX_ACTIVE_DECISION_PLAYBOOK_RULES = 6
@@ -185,70 +170,6 @@ export async function listActivePlaybookRules(assistantId: string): Promise<stri
     [assistantId],
   )
   return result.rows.map((r) => r.rule)
-}
-
-/** Pending-suggestion count - the worker's flood gate. */
-export async function countPendingPlaybookSuggestions(assistantId: string): Promise<number> {
-  const result = await query<{ count: string }>(
-    `SELECT COUNT(*)::text AS count FROM assistant_playbook_rules
-     WHERE assistant_id = $1 AND applies_to_user_id IS NULL AND status = 'suggested' AND applicability_kind <> 'research'`,
-    [assistantId],
-  )
-  return Number(result.rows[0]?.count ?? 0)
-}
-
-/** The do-not-repropose corpus: every non-retired rule text, any status. */
-export async function listPlaybookCorpus(assistantId: string): Promise<{ rule: string; status: PlaybookRuleStatus }[]> {
-  const result = await query<{ rule: string; status: PlaybookRuleStatus }>(
-    `SELECT rule, status FROM assistant_playbook_rules
-     WHERE assistant_id = $1 AND applies_to_user_id IS NULL AND applicability_kind <> 'research'
-     ORDER BY created_at DESC
-     LIMIT 100`,
-    [assistantId],
-  )
-  return result.rows
-}
-
-/**
- * Insert reflection output with auto-admission (founder decision
- * 2026-08-07: always auto-accept; the safety lives in golden-source
- * grounding + visibility + the cap, not an admission tap). Rules activate
- * immediately up to MAX_ACTIVE_PLAYBOOK_RULES; overflow lands as
- * 'suggested' so nothing is lost but nothing self-applies past the cap.
- * An auto-admitted rule is recognizable by `status='active'` +
- * `created_by='reflection'` + `decided_by_user_id IS NULL` - the UI badges
- * it and the owner can retire it any time.
- */
-export async function insertPlaybookRules(
-  assistantId: string,
-  rules: { rule: string; rationale: string | null; provenance: unknown }[],
-): Promise<{ activated: number; suggested: number }> {
-  const active = await query<{ count: string }>(
-    `SELECT COUNT(*)::text AS count FROM assistant_playbook_rules
-     WHERE assistant_id = $1 AND applies_to_user_id IS NULL AND status = 'active' AND applicability_kind <> 'research'`,
-    [assistantId],
-  )
-  let slots = MAX_ACTIVE_PLAYBOOK_RULES - Number(active.rows[0]?.count ?? 0)
-  let activated = 0
-  let suggested = 0
-  for (const s of rules) {
-    const rule = s.rule.trim().slice(0, 280)
-    if (!rule) continue
-    const status = slots > 0 ? 'active' : 'suggested'
-    await query(
-      `INSERT INTO assistant_playbook_rules
-         (assistant_id, rule, rationale, provenance, status, created_by, decided_at)
-       VALUES ($1, $2, $3, $4::jsonb, $5, 'reflection', CASE WHEN $5 = 'active' THEN now() END)`,
-      [assistantId, rule, s.rationale, s.provenance === undefined ? null : JSON.stringify(s.provenance), status],
-    )
-    if (status === 'active') {
-      slots--
-      activated++
-    } else {
-      suggested++
-    }
-  }
-  return { activated, suggested }
 }
 
 export const decisionRuleProposalSchema = z.object({
@@ -644,70 +565,6 @@ export async function decidePlaybookRule(params: {
   } finally {
     ownedClient?.release()
   }
-}
-
-/**
- * Worker enumeration: assistants eligible for reflection - a non-empty
- * `charter->>'success'` rubric, and an attribution user (the assistant
- * owner, else the workspace owner) for the usage row.
- */
-export async function listReflectableAssistants(): Promise<
-  { assistantId: string; workspaceId: string | null; attributionUserId: string; charter: unknown; name: string }[]
-> {
-  const result = await query<{
-    assistantId: string
-    workspaceId: string | null
-    attributionUserId: string
-    charter: unknown
-    name: string
-  }>(
-    `SELECT a.id AS "assistantId",
-            a.workspace_id AS "workspaceId",
-            COALESCE(a.owner_user_id, w.owner_user_id) AS "attributionUserId",
-            a.charter,
-            a.name
-     FROM assistants a
-     LEFT JOIN workspaces w ON w.id = a.workspace_id
-     WHERE NULLIF(btrim(a.charter->>'success'), '') IS NOT NULL
-       AND COALESCE(a.owner_user_id, w.owner_user_id) IS NOT NULL`,
-  )
-  return result.rows
-}
-
-/**
- * A bounded sample of the assistant's recent user-facing conversation - the
- * reflection worker's evidence. Cron/internal execution sessions are
- * excluded, and so are **external-principal sessions** (chat-link visitors,
- * public-API consumers, via the shared exclusion fragment): golden-source
- * grounding means rules derive from the team's own feedback - an external
- * customer's request is demand, never authority to change standing
- * behavior. Message bodies are truncated server-side so one long turn
- * can't blow the prompt budget.
- */
-export async function samplePlaybookEvidence(
-  assistantId: string,
-  windowDays: number,
-  maxMessages: number,
-): Promise<{ sessionId: string; role: string; content: string; createdAt: string }[]> {
-  const result = await query<{ sessionId: string; role: string; content: string; createdAt: string }>(
-    `SELECT sm.session_id AS "sessionId",
-            sm.role,
-            LEFT(sm.content::text, 600) AS content,
-            sm.created_at AS "createdAt"
-     FROM session_messages sm
-     JOIN sessions s ON s.id = sm.session_id
-     WHERE s.assistant_id = $1
-       AND ${sessionKindSql.conversationLane('s')}
-       -- File chats never feed an assistant-wide playbook: their audience is the file's.
-       AND ${sessionKindSql.surfacesBeyondAnchor('s')}
-       AND sm.role IN ('user', 'assistant')
-       AND sm.created_at > now() - ($2 || ' days')::interval
-       ${excludeExternalPrincipalsSql('s.user_id')}
-     ORDER BY sm.created_at DESC
-     LIMIT $3`,
-    [assistantId, String(windowDays), maxMessages],
-  )
-  return result.rows.reverse()
 }
 
 /** Native Feed applicability key is derived from server-owned source scope. */

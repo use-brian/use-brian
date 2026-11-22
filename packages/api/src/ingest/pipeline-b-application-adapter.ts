@@ -1,6 +1,9 @@
 /** Transaction-bound interpreter for frozen Pipeline B commands. */
 import type pg from 'pg'
 import { createHash } from 'node:crypto'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import type { ExtractionApplicationMutation } from '@use-brian/core/ingest/application.js'
+import type { FrozenExtractionPlan } from '@use-brian/core/ingest/extraction-plan.js'
 import { createCrmOperationsService } from '../crm-operations/service.js'
 import { createDbCrmOperationsStore } from '../db/crm-operations-store.js'
 import { runWithAgentAccess } from '../db/agent-access-context.js'
@@ -16,7 +19,7 @@ import { createEntityLink } from '../db/entity-links-store.js'
 import {
   addEntityAlias,
   createEntity,
-  getEntityByIdSystem,
+  inspectExtractionEntityTarget,
   supersedeEntity,
 } from '../db/entities-store.js'
 import { createMemory } from '../db/memories.js'
@@ -44,8 +47,9 @@ function command(value: unknown): PipelineBApplicationCommand {
 
 async function applyEntity(
   payload: PipelineBEntityApplication,
+  actorAccess: AccessContext,
   client: pg.PoolClient,
-): Promise<string> {
+): Promise<ExtractionApplicationMutation> {
   const actor = payload.createdByUserId
   const crmTransaction: CrmWriteTransaction = { client, afterCommit() {} }
   let id: string
@@ -104,37 +108,98 @@ async function applyEntity(
       id = entity.id
       break
     }
-    case 'supersede_entity': {
-      if (!payload.targetEntityId) throw Object.assign(new Error('missing entity target'), { code: 'application_target_missing', retryable: false })
-      const entity = await supersedeEntity(actor, payload.targetEntityId, {
-        attributes: payload.attributes,
-        sourceEpisodeId: payload.episodeId,
-        compartments: payload.compartments,
-        projectIds: payload.projectIds,
-      }, client)
-      if (!entity) throw Object.assign(new Error('entity target changed'), { code: 'application_target_changed', retryable: false })
-      id = entity.id
-      break
-    }
+    case 'supersede_entity':
     case 'reuse_entity': {
-      if (!payload.targetEntityId) throw Object.assign(new Error('missing entity target'), { code: 'application_target_missing', retryable: false })
-      const entity = await getEntityByIdSystem(actor, payload.targetEntityId, {}, client)
-      if (!entity) throw Object.assign(new Error('entity target changed'), { code: 'application_target_changed', retryable: false })
-      id = entity.id
-      break
+      return applyExistingEntity(payload, actorAccess, client)
     }
   }
-  if (payload.alias) {
-    const alias = await addEntityAlias(actor, id, payload.alias, undefined, client)
-    if (alias.kind === 'conflict') {
-      throw Object.assign(new Error('entity alias now conflicts'), { code: 'application_policy_changed', retryable: false })
+  return { targetRecordId: id }
+}
+
+async function applyExistingEntity(
+  payload: PipelineBEntityApplication,
+  actorAccess: AccessContext,
+  client: pg.PoolClient,
+): Promise<ExtractionApplicationMutation> {
+  if (!payload.targetEntityId) return { disposition: 'held', safeCode: 'application_target_missing' }
+  const actor = payload.createdByUserId
+  const access: AccessContext = {
+    workspaceId: payload.workspaceId,
+    userId: actor,
+    assistantId: payload.assistantId ?? '',
+    assistantKind: 'primary',
+    visibilityAssistantIds: payload.assistantId ? [payload.assistantId] : [],
+    sharedAudience: payload.userId === null,
+    clearance: payload.sensitivity,
+    compartments: payload.compartments,
+    mutationCompartments: payload.compartments,
+    projectIds: payload.projectIds,
+  }
+  const reuse = payload.action === 'reuse_entity'
+  const normalizedName = payload.displayName.trim().toLowerCase()
+  const alias = payload.alias?.trim().toLowerCase() ?? ''
+  const learnableAlias = alias === normalizedName && alias.length > 0 && alias.length <= 200
+  if (learnableAlias) {
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [
+      JSON.stringify(['pipeline-b-alias', payload.workspaceId, alias]),
+    ])
+  }
+  if (!reuse) {
+    // Match the canonical supersession writer's workspace-before-entity lock order.
+    await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [payload.workspaceId])
+  }
+  const target = await inspectExtractionEntityTarget(access, actorAccess, {
+    id: payload.targetEntityId, kind: payload.entityKind, canonicalId: payload.canonicalId, normalizedName,
+  }, client)
+  if (!target) return { disposition: 'held', safeCode: 'application_target_changed' }
+
+  const canonicalIdentity = payload.canonicalId !== null && target.canonicalId === payload.canonicalId
+    && !target.canonicalConflict
+  if (!canonicalIdentity && (target.nameConflict || target.canonicalConflict
+    || (payload.canonicalId !== null && target.canonicalId !== null)
+    || (!target.nameMatch && !learnableAlias))) {
+    return { disposition: 'held', safeCode: 'application_entity_identity_ambiguous' }
+  }
+
+  // An alias refusal on weak evidence must roll back the whole entity change.
+  // A savepoint retains the enclosing item transaction so it can write a held receipt.
+  const savepoint = !reuse && learnableAlias
+  if (savepoint) await client.query('SAVEPOINT extraction_entity_alias')
+  let id = payload.targetEntityId
+  if (!reuse) {
+    const entity = await supersedeEntity(actor, id, {
+      attributes: payload.attributes,
+      sourceEpisodeId: payload.episodeId,
+      compartments: payload.compartments,
+      projectIds: payload.projectIds,
+    }, client, access)
+    if (!entity) return { disposition: 'held', safeCode: 'application_target_changed' }
+    id = entity.id
+  }
+  if (learnableAlias) {
+    const result = await addEntityAlias(actor, id, alias, access, client)
+    if (result.kind === 'not_found' || (result.kind === 'conflict' && !canonicalIdentity)) {
+      if (savepoint) await client.query('ROLLBACK TO SAVEPOINT extraction_entity_alias')
+      return {
+        disposition: 'held',
+        safeCode: result.kind === 'conflict' ? 'application_entity_alias_conflict' : 'application_target_changed',
+      }
     }
   }
-  return id
+  if (savepoint) await client.query('RELEASE SAVEPOINT extraction_entity_alias')
+  return { targetRecordId: id }
+}
+
+function hasAmbiguousEdgeReference(plan: FrozenExtractionPlan, endpointIds: string[]): boolean {
+  const entities = plan.candidates.filter((candidate) => candidate.primitiveKind === 'entity')
+  return entities.some((endpoint) => endpointIds.includes(endpoint.candidateId)
+    && typeof endpoint.payload.displayName === 'string'
+    && entities.some((other) => other.candidateId !== endpoint.candidateId
+      && other.payload.displayName === endpoint.payload.displayName))
 }
 
 export function createPipelineBApplicationMutationPort(): ExtractionCandidateMutationPort {
-  return async ({ candidate, dependencies, transactionContext }) => {
+  return async ({ candidate, dependencies, transactionContext, actorAccess, plan }) => {
     const client = transaction(transactionContext)
     const payload = command(candidate.payload)
     switch (payload.command) {
@@ -163,7 +228,7 @@ export function createPipelineBApplicationMutationPort(): ExtractionCandidateMut
         }
       }
       case 'entity':
-        return { targetRecordId: await applyEntity(payload, client) }
+        return applyEntity(payload, actorAccess, client)
       case 'memory':
       case 'digest_memory': {
         const memory = await createMemory({
@@ -186,6 +251,9 @@ export function createPipelineBApplicationMutationPort(): ExtractionCandidateMut
       }
       case 'edge':
       case 'digest_edge': {
+        if (payload.command === 'edge' && hasAmbiguousEdgeReference(plan, candidate.dependencyIds)) {
+          return { disposition: 'held', safeCode: 'ambiguous_entity_reference' }
+        }
         const sourceDependencyId = candidate.dependencyIds[payload.sourceDependencyIndex]
         const targetDependencyId = payload.targetDependencyIndex === null
           ? null

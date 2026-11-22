@@ -2182,6 +2182,40 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     expect(entities.superseded).toHaveLength(0)
   })
 
+  it('binds canonical matches within the extracted kind and rejects an ambiguous relationship label', async () => {
+    const ep = baseEpisode({ scopeVersion: '1' })
+    const entities = spyEntities()
+    const canonicalId = 'example.test/fixture'
+    entities.findByCanonicalIdReturns.set(canonicalId, [
+      makeEntity({ id: 'product-id', kind: 'product', displayName: 'Fictional product', canonicalId }),
+      makeEntity({ id: 'project-id', kind: 'project', displayName: 'Fictional project', canonicalId }),
+    ])
+    const application = { apply: vi.fn(async (input: Parameters<PipelineBApplicationPort['apply']>[0]) => ({
+      id: 'fixture-run', workspaceId: input.workspaceId, episodeId: ep.id, attemptKey: input.attemptKey,
+      planHash: input.plan.planHash, extractionState: 'succeeded' as const, applicationState: 'complete' as const,
+      errorCode: null, counts: { pending: 0, committed: 0, already_applied: 0, held: 0, rejected: 0, failed: 0 }, items: [],
+    })) }
+    const output = JSON.stringify({
+      summary: 'A fictional project and product share a label.',
+      entities: [
+        { kind: 'project', display_name: 'Fictional name', canonical_id: canonicalId },
+        { kind: 'product', display_name: 'Fictional name' },
+        { kind: 'repository', display_name: 'Fictional repository' },
+      ],
+      edges: [{ source_ref: 'Fictional name', target_ref: 'Fictional repository', edge_type: 'mentioned' }],
+      memories: [], tags: [],
+    })
+    await processEpisode(ep, 'The project and product share a name.', makeDeps({
+      provider: sequencedProvider([output]), classifierModel: null, entities: entities.store, application,
+      episodes: { ...spyEpisodes().port, getEpisodeByIdSystem: async () => ({ ...ep, status: 'archived' as const }) },
+    }))
+    const candidates = application.apply.mock.calls[0][0].plan.candidates
+    expect(candidates[0].payload).toMatchObject({ entityKind: 'project', targetEntityId: 'project-id' })
+    expect(candidates.find((candidate) => candidate.primitiveKind === 'edge')).toMatchObject({
+      terminalDisposition: 'rejected', terminalReason: 'ambiguous_entity_reference', dependencyIds: [],
+    })
+  })
+
   it.each([false, true])('keeps room memories workspace-visible with author attribution (durable=%s)', async (durable) => {
     const ep = baseEpisode({ sourceKind: 'web_chat', userId: null, compartments: ['finance'], projectIds: ['project'] })
     const memories = spyMemories()

@@ -22,7 +22,7 @@ export function registerLifecycle(scope: LifecycleScope) {
     supportDiagnosticsManager, stopWatchCleanup, liveInteraction, officeSearchProjector, runQueueWorker,
     crmDomainEventWorker, campaignConversionWorker, crmRetentionWorker, crmIssueWorker, crmEntitlementWorker,
     crmFileCleanupWorker, pollWorker, sessionTitleWorker, sessionStateWorker, organizationUpgradeWorker,
-    consolidationWorker, skillReviewWorker, playbookReflectionWorker, feedEditorialWorker,
+    consolidationWorker, skillReviewWorker, feedEditorialWorker,
     decisionReflectionWorker, researchReflectionWorker, embeddingWorker, fileIngestWorker,
     gdriveEnrichmentWorker, gdriveCatalogWorker, linkedinImportWorker, recordingProcessWorker,
     recordingAutoTitleWorker, knowledgeSyncWorker, mailboxSyncWorker, mailboxIdleWatcher, externalSinkRelay,
@@ -55,7 +55,6 @@ export function registerLifecycle(scope: LifecycleScope) {
     await sessionStateWorker.stop()
     consolidationWorker.stop()
     skillReviewWorker.stop()
-    playbookReflectionWorker.stop()
     decisionReflectionWorker.stop()
     researchReflectionWorker.stop()
     feedEditorialWorker.stop()

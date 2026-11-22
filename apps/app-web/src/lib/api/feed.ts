@@ -1176,26 +1176,18 @@ export async function runFeedInspirationScan(
 // `use-brian/packages/api/src/routes/workspaces.ts`), which no other app-web
 // SDK module wraps (docs/plans/feed-web-consolidation.md §7.6).
 
-/** `distribution_profiles.auto_reply_mode` — how inbound replies are handled. */
-export type FeedAutoReplyMode = "disabled" | "draft-only" | "auto-whitelisted";
-
-/** The structured `reply_policy` JSON the policy editor round-trips. */
-export type FeedReplyPolicy = {
-  whitelistHandles?: string[];
-  blockedTopics?: string[];
+/** Policy may also carry keys managed outside the editor. */
+export type FeedReplyPolicy = Record<string, unknown> & {
+  topic_blocklist?: string[];
+  blockedTopics?: string[]; // Legacy editor field
 };
 
-/**
- * One per-assistant profile row with its policy fields — the
- * `GET /:assistantId` detail shape (the team profiles list omits
- * `autoReplyMode`/`replyPolicy`; this one carries them).
- */
+/** One profile with the moderation policy returned by `GET /:assistantId`. */
 export type FeedProfilePolicy = {
   assistantId: string;
   platform: FeedPlatform;
   platformHandle: string;
   enabled: boolean;
-  autoReplyMode: FeedAutoReplyMode;
   replyPolicy: FeedReplyPolicy;
 };
 
@@ -1223,14 +1215,13 @@ export async function fetchFeedAssistantProfiles(
 }
 
 /**
- * Update a profile's reply policy (`PATCH /:assistantId/:platform`, team
- * admin gated server-side). The body ships `autoReplyMode` + the whole
- * `replyPolicy` object verbatim (feed-web's save contract).
+ * Update a profile's moderation policy (`PATCH /:assistantId/:platform`,
+ * team admin gated server-side).
  */
 export async function updateFeedProfilePolicy(
   assistantId: string,
   platform: FeedPlatform,
-  body: { autoReplyMode: FeedAutoReplyMode; replyPolicy: FeedReplyPolicy },
+  body: { replyPolicy: FeedReplyPolicy },
 ): Promise<FeedSettingsMutationResult> {
   const res = await authFetch(
     `${API_URL}/api/distribution/${assistantId}/${platform}`,

@@ -7,8 +7,7 @@
  * platform stays in the loading-skeleton contract and the not-connected
  * empty state renders its feed-home setup link. The line-list
  * serialization pair (`parsePolicyList`/`formatPolicyList`) carries the
- * PATCH body contract and is asserted directly. Mode selection, save, and
- * the raw-JSON disclosure are web-QA.
+ * moderation policy payload and is asserted directly. Save is web QA.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -118,7 +117,7 @@ describe("[COMP:app-web/feed-policy] FeedPolicy", () => {
   });
 
   it("round-trip: format → parse is identity for clean lists", () => {
-    const list = ["trustedhandle1", "trustedhandle2"];
+    const list = ["weather", "pricing"];
     expect(parsePolicyList(formatPolicyList(list))).toEqual(list);
   });
 });

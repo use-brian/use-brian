@@ -5,9 +5,8 @@
  *
  * A profile is a **charter seed**: picking one in the create modal prefills
  * `{ mission, audience, success, instructions }` so a new assistant is born
- * with a mission and a success rubric - the two fields the growth loop
- * (reflection → playbook) cannot run without. The owner edits every field
- * afterwards; a profile is a starting point, never a lock.
+ * with a mission and criteria for a good result. The owner can edit every
+ * field afterwards.
  *
  * **Contributing a profile (open source):** add one `AssistantProfile`
  * entry here, keeping the charter seed tool-agnostic (never name a
@@ -42,8 +41,7 @@ export type AssistantProfile = {
   fallbackTitle: string
   /** One-line English card description - same fallback rule. */
   fallbackTagline: string
-  /** The charter seed. `mission` + `success` should always be present -
-   *  they are the growth loop's inputs. */
+  /** The charter seed. `mission` and `success` should always be present. */
   charter: AssistantCharter
 }
 

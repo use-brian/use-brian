@@ -2423,7 +2423,8 @@ async function planEntityApplication(
       episode.workspaceId,
       ex.canonical_id,
     )
-    if (existing[0]) return entityApplicationForExisting(envelope, ex, existing[0])
+    const sameKind = existing.find((entity) => entity.kind === ex.kind)
+    if (sameKind) return entityApplicationForExisting(envelope, ex, sameKind)
   }
   const named = await deps.entities.findByNameSystem(
     actorUserId,
@@ -2540,6 +2541,12 @@ async function processDurableExtractionApplication(input: {
   const drafts: Parameters<typeof freezeExtractionPlan>[0]['candidates'] = []
   const entityKeys = new Map<string, string>()
   const plannedEntities = new Map<string, ExtractedEntity>()
+  const seenEntityNames = new Set<string>()
+  const ambiguousEntityNames = new Set<string>()
+  for (const entity of input.payload.entities) {
+    if (seenEntityNames.has(entity.display_name)) ambiguousEntityNames.add(entity.display_name)
+    seenEntityNames.add(entity.display_name)
+  }
   const classificationAnalytics = createClassificationAnalytics(deps.analytics)
 
   for (const [index, raw] of input.payload.entities.entries()) {
@@ -2583,7 +2590,10 @@ async function processDurableExtractionApplication(input: {
     const validation = sourceEntity && targetEntity
       ? validateEdgeKindTriple(edge.edge_type as EdgeType, sourceEntity.kind, targetEntity.kind)
       : null
-    const terminalReason = !sourceKey || !targetKey
+    const ambiguousReference = ambiguousEntityNames.has(edge.source_ref) || ambiguousEntityNames.has(edge.target_ref)
+    const terminalReason = ambiguousReference
+      ? 'ambiguous_entity_reference'
+      : !sourceKey || !targetKey
       ? 'dangling_entity_reference'
       : validation && !validation.ok
         ? validation.rule_id
@@ -2591,7 +2601,7 @@ async function processDurableExtractionApplication(input: {
     drafts.push({
       key: `edge:${index}`,
       primitiveKind: 'edge',
-      dependencyKeys: sourceKey && targetKey ? [sourceKey, targetKey] : [],
+      dependencyKeys: !ambiguousReference && sourceKey && targetKey ? [sourceKey, targetKey] : [],
       payload: {
         ...envelope,
         command: 'edge',

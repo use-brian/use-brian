@@ -533,11 +533,8 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
     }
   })
 
-  // ── Playbook (growth loop Phase 3) ─────────────────────────────
-  // The reflection worker proposes rules as 'suggested'; the owner admits,
-  // rejects, or retires them here. Viewing is any-member (the playbook is
-  // standing behavior every member works with); deciding is owner-only,
-  // matching the charter identity fields. Spec:
+  // Owners govern existing assistant-wide rules. Members can view the shared
+  // active rules and decide their own scoped rules. Spec:
   // docs/architecture/context-engine/assistant-playbook.md.
 
   router.get<AssistantParams>('/:assistantId/playbook', async (req, res) => {

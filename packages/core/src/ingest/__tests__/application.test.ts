@@ -94,13 +94,10 @@ class MemoryApplicationStore implements ExtractionApplicationStorePort {
     }
     const counts = emptyApplicationCounts()
     for (const item of this.run.items) counts[item.disposition]++
-    const terminal = this.run.items.every((item) =>
-      ['committed', 'already_applied', 'held', 'rejected'].includes(item.disposition)
-      || (item.disposition === 'failed' && !item.retryable))
     const retryable = this.run.items.some((item) =>
       item.disposition === 'pending' || (item.disposition === 'failed' && item.retryable))
     this.run.counts = counts
-    this.run.applicationState = terminal ? 'complete' : retryable ? 'partial' : 'blocked'
+    this.run.applicationState = retryable ? 'partial' : counts.failed > 0 ? 'blocked' : 'complete'
     this.lease = null
     return structuredClone(this.run)
   }
@@ -194,5 +191,47 @@ describe('[COMP:brain/extraction-application] frozen application', () => {
     expect(order).toEqual(['entity', 'edge'])
     expect(run.applicationState).toBe('complete')
     expect(run.counts).toMatchObject({ committed: 2, held: 1, rejected: 1 })
+  })
+
+  it('I2 retries waiting descendants and holds only those with a permanent prerequisite', async () => {
+    const frozen = freezeExtractionPlan({
+      episodeId: '33333333-3333-4333-8333-333333333333',
+      sourceContentHash: 'b'.repeat(64), sourceScopeVersion: '1', extractorContractVersion: 'v1',
+      candidates: [
+        { key: 'temporary', primitiveKind: 'entity', payload: { name: 'Example Temp' } },
+        { key: 'unavailable', primitiveKind: 'entity', payload: { name: 'Example Unavailable' } },
+        { key: 'recoverable', primitiveKind: 'edge', payload: {}, dependencyKeys: ['temporary'] },
+        { key: 'unrecoverable', primitiveKind: 'edge', payload: {}, dependencyKeys: ['unavailable', 'temporary'] },
+        { key: 'unrecoverable-child', primitiveKind: 'edge', payload: {}, dependencyKeys: ['unrecoverable'] },
+        { key: 'unrelated', primitiveKind: 'memory', payload: {} },
+      ],
+    })
+    const store = new MemoryApplicationStore()
+    const [temporary, unavailable, recoverable, unrecoverable, child, unrelated] = frozen.candidates
+    const mutate = vi.fn(async ({ candidateId }: FrozenCandidate) => {
+      if (candidateId === temporary.candidateId && mutate.mock.calls.length === 1) {
+        throw new ExtractionApplicationError('temporary_store_failure', undefined, true)
+      }
+      if (candidateId === unavailable.candidateId) throw new ExtractionApplicationError('terminal_store_refusal')
+      return { targetRecordId: candidateId }
+    })
+    const args = {
+      store, workspaceId: '44444444-4444-4444-8444-444444444444',
+      attemptKey: initialExtractionAttemptKey(frozen.sourceContentHash, frozen.extractorContractVersion), plan: frozen, mutate,
+    }
+    const first = await applyFrozenExtractionPlan(args)
+    expect(first.applicationState).toBe('partial')
+    expect(first.items[2]).toMatchObject({ disposition: 'pending', attemptCount: 0 })
+    expect(first.items.slice(3, 5)).toMatchObject([unrecoverable, child].map(({ candidateId }) => ({
+      candidateId, disposition: 'held', failureCode: 'application_dependency_unavailable', targetRecordId: null,
+    })))
+    expect(first.items[5]).toMatchObject({ disposition: 'committed' })
+
+    const second = await applyFrozenExtractionPlan(args)
+    expect(second.applicationState).toBe('blocked')
+    expect(second.counts).toMatchObject({ pending: 0, committed: 3, held: 2, failed: 1 })
+    expect(mutate.mock.calls.map(([candidate]) => candidate.candidateId)).toEqual([
+      temporary.candidateId, unavailable.candidateId, unrelated.candidateId, temporary.candidateId, recoverable.candidateId,
+    ])
   })
 })

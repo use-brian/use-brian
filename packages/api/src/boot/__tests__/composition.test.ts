@@ -70,7 +70,7 @@ const LAZY: Readonly<Record<string, { routes?: readonly string[]; workers?: read
   'workflow': { routes: ['externalApprovalRoutes'] },
   'workflow-events': { workers: ['createCampaignConversionOutboxWorker', 'createCrmEntitlementWorker', 'createCrmImportFileCleanupWorker', 'createCrmRetentionWorker'] },
   'workers': { workers: ['createCleanupWorker', 'createOrganizationUpgradeWorker', 'createSessionStateWorker', 'createSessionTitleWorker'] },
-  'learning-workers': { workers: ['createFeedEditorialWorker', 'createPlaybookReflectionWorker', 'createSkillReviewWorker'] },
+  'learning-workers': { workers: ['createFeedEditorialWorker', 'createSkillReviewWorker'] },
   'memory-workers': { workers: ['createFileIngestWorker', 'createGDriveCatalogWorker', 'createGDriveEnrichmentWorker', 'createLinkedInImportWorker'] },
   'recording-workers': { routes: ['chatArchiveExtractRoutes'], workers: ['createOpenRecordingProcessWorker', 'createRecordingAutoTitleWorker'] },
   'sync-workers': { routes: ['ingestRoutes'], workers: ['createExternalSinkRelay', 'createGoalStallReaper', 'createStuckSessionSweeper', 'createViewsPruneWorker'] },

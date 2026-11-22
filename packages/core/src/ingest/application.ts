@@ -51,6 +51,7 @@ export type ExtractionApplicationClaim = {
   runId: string
   leaseToken: string
   planHash: string
+  alreadyComplete?: true
   authority?: {
     actorUserId: string
     workspaceId: string
@@ -139,8 +140,26 @@ function applicationFailure(error: unknown): { code: string; retryable: boolean 
   return { code, retryable: shaped?.retryable !== false }
 }
 
-function isSatisfied(item: ExtractionApplicationItem | undefined): boolean {
-  return item?.disposition === 'committed' || item?.disposition === 'already_applied'
+export function isRetryableExtractionItem(
+  item: Pick<ExtractionApplicationItem, 'disposition' | 'retryable' | 'primitiveKind' | 'failureCode'>,
+): boolean {
+  return item.disposition === 'pending' || (item.disposition === 'failed' && (item.retryable
+    // The old adapter used this code only for an entity alias collision.
+    || (item.primitiveKind === 'entity' && item.failureCode === 'application_policy_changed')))
+}
+
+export function extractionDependencyState(
+  dependencyIds: readonly string[],
+  receipts: ReadonlyMap<string, ExtractionApplicationItem>,
+): 'ready' | 'pending' | 'blocked' {
+  let waiting = false
+  for (const id of dependencyIds) {
+    const receipt = receipts.get(id)
+    if (receipt?.disposition === 'committed' || receipt?.disposition === 'already_applied') continue
+    if (!receipt || !isRetryableExtractionItem(receipt)) return 'blocked'
+    waiting = true
+  }
+  return waiting ? 'pending' : 'ready'
 }
 
 export async function applyFrozenExtractionPlan(
@@ -160,17 +179,18 @@ export async function applyFrozenExtractionPlan(
   if (run.applicationState === 'complete') return run
 
   const claim = await args.store.claim(run.id, args.plan.planHash, args.authority)
+  const currentRun = await args.store.getRun(run.id)
+  if (!currentRun) throw new ExtractionApplicationError('application_run_missing')
+  if (claim.alreadyComplete) return currentRun
+  run = currentRun
   const receipts = new Map(run.items.map((item) => [item.candidateId, item]))
 
   for (const candidate of args.plan.candidates) {
     const current = receipts.get(candidate.candidateId)
-    if (current && ['committed', 'already_applied', 'held', 'rejected'].includes(current.disposition)) {
-      continue
-    }
-    if (current?.disposition === 'failed' && !current.retryable) continue
+    if (current && !isRetryableExtractionItem(current)) continue
 
-    const missingDependency = candidate.dependencyIds.find((id) => !isSatisfied(receipts.get(id)))
-    if (missingDependency) continue
+    const dependencyState = extractionDependencyState(candidate.dependencyIds, receipts)
+    if (!candidate.terminalDisposition && dependencyState === 'pending') continue
 
     try {
       const item = await args.store.applyItem(claim, candidate, async (transactionContext) => {
@@ -179,6 +199,9 @@ export async function applyFrozenExtractionPlan(
             disposition: candidate.terminalDisposition,
             safeCode: candidate.terminalReason ?? candidate.terminalDisposition,
           }
+        }
+        if (dependencyState === 'blocked') {
+          return { disposition: 'held', safeCode: 'application_dependency_unavailable' }
         }
         return args.mutate(candidate, receipts, transactionContext)
       })

@@ -6,6 +6,7 @@
 import {
   applyFrozenExtractionPlan,
   ExtractionApplicationError,
+  isRetryableExtractionItem,
   type ExtractionApplicationItem,
   type ExtractionApplicationMutation,
   type ExtractionApplicationRun,
@@ -63,9 +64,16 @@ export type ExtractionCandidateMutationPort = (input: {
   dependencies: ReadonlyMap<string, ExtractionApplicationItem>
   transactionContext: unknown
   plan: FrozenExtractionPlan
+  actorAccess: AccessContext
 }) => Promise<ExtractionApplicationMutation>
 
 export type IngestApplicationService = ReturnType<typeof createIngestApplicationService>
+
+function canResume(run: ExtractionApplicationRun): boolean {
+  return run.applicationState !== 'complete'
+    && run.errorCode !== 'source_changed'
+    && run.items.some(isRetryableExtractionItem)
+}
 
 function projection(run: ExtractionApplicationRun): IngestApplicationProjection {
   return {
@@ -77,16 +85,14 @@ function projection(run: ExtractionApplicationRun): IngestApplicationProjection 
     applicationState: run.applicationState,
     errorCode: run.errorCode,
     counts: run.counts,
-    resumable: run.applicationState !== 'complete'
-      && run.items.some((item) => item.disposition === 'pending'
-        || (item.disposition === 'failed' && item.retryable)),
+    resumable: canResume(run),
     items: run.items.map((item) => ({
       candidateId: item.candidateId,
       primitiveKind: item.primitiveKind,
       disposition: item.disposition,
       attemptCount: item.attemptCount,
       failureCode: item.failureCode,
-      retryable: item.retryable,
+      retryable: isRetryableExtractionItem(item),
     })),
   }
 }
@@ -119,12 +125,19 @@ export function createIngestApplicationService(options: {
     attemptKey: string
     plan: FrozenExtractionPlan
     outboxJobId?: string | null
-  }): Promise<ExtractionApplicationRun> => {
+  }, replayAccess?: AccessContext): Promise<ExtractionApplicationRun> => {
     try {
-      const source=await options.episodes.getEpisodeById({workspaceId:input.workspaceId,userId:input.actorUserId,
-        assistantId:'',assistantKind:'primary',compartments:input.mutationCompartments,mutationCompartments:input.mutationCompartments,
-        projectIds:input.projectIds},input.plan.episodeId)
-      if(!source) throw new IngestApplicationServiceError('forbidden','The source is unavailable in the current native scope')
+      const actorAccess: AccessContext = replayAccess ?? {
+        workspaceId: input.workspaceId,
+        userId: input.actorUserId,
+        assistantId: '',
+        assistantKind: 'primary',
+        compartments: input.mutationCompartments,
+        mutationCompartments: input.mutationCompartments,
+        projectIds: input.projectIds,
+      }
+      const source = await options.episodes.getEpisodeById(actorAccess, input.plan.episodeId)
+      if (!source) throw new IngestApplicationServiceError('forbidden', 'The source is unavailable in the current native scope')
       return await applyFrozenExtractionPlan({
         store: options.store,
         workspaceId: input.workspaceId,
@@ -138,7 +151,7 @@ export function createIngestApplicationService(options: {
           projectIds: input.projectIds,
         },
         mutate: (candidate, dependencies, transactionContext) =>
-          options.mutateCandidate({ candidate, dependencies, transactionContext, plan: input.plan }),
+          options.mutateCandidate({ candidate, dependencies, transactionContext, plan: input.plan, actorAccess }),
       })
     } catch (error) {
       return translate(error)
@@ -184,7 +197,7 @@ export function createIngestApplicationService(options: {
           'mutation',
         )
         if (!visible) throw new IngestApplicationServiceError('not_found', 'Episode application not found')
-        if (visible.planHash !== input.expectedPlanHash || visible.applicationState === 'complete') {
+        if (visible.planHash !== input.expectedPlanHash || !canResume(visible)) {
           throw new IngestApplicationServiceError('conflict', 'The application plan is stale or not resumable')
         }
         const plan = await options.store.getFrozenPlan(input.runId)
@@ -198,7 +211,7 @@ export function createIngestApplicationService(options: {
           projectIds: input.ctx.projectIds ?? null,
           attemptKey: visible.attemptKey,
           plan,
-        })
+        }, input.ctx)
         return projection(run)
       } catch (error) {
         return translate(error)
