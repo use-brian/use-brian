@@ -1288,21 +1288,19 @@ function PostPane({
                     onChange={(next) => { setThreadSegments(next); void persist({ threadSegments: next }); }}
                   />
                 ) : (
-                  <div className="rounded-xl border border-border/60 bg-card p-5 shadow-xs transition focus-within:border-ring [&_:focus-visible]:shadow-none">
-                    <CaptionEditor
-                      value={selected?.text ?? ""}
-                      platform={platform}
-                      readOnly={readOnly}
-                      onChange={(next) => {
-                        setOwnText(next);
-                        setSelectedId("mine");
-                        void persist({ text: next });
-                      }}
-                      onSave={async () => true}
-                      deferSave
-                      saveHint={te.autosaveHint}
-                    />
-                  </div>
+                  <CaptionEditor
+                    value={selected?.text ?? ""}
+                    platform={platform}
+                    readOnly={readOnly}
+                    onChange={(next) => {
+                      setOwnText(next);
+                      setSelectedId("mine");
+                      void persist({ text: next });
+                    }}
+                    onSave={async () => true}
+                    deferSave
+                    saveHint={te.autosaveHint}
+                  />
                 )}
 
                 {postFormat === "thread" ? (
