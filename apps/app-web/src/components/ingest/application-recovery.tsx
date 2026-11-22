@@ -97,6 +97,9 @@ function ApplicationRecoveryPages({ workspaceId }: { workspaceId: string }) {
                     || candidate.failureCode === "application_entity_alias_conflict"
                     || candidate.failureCode === "ambiguous_entity_reference"
                   ) && <p className="mt-1 text-muted-foreground">{copy.ambiguousIdentity}</p>}
+                  {item.items.some(candidate => candidate.failureCode === "application_entity_scope_mismatch") && (
+                    <p className="mt-1 text-muted-foreground">{copy.scopeMismatch}</p>
+                  )}
                   {retryError === item.runId && <p role="alert" className="mt-1 text-destructive">{copy.error}</p>}
                   {item.errorCode && <p className="mt-1 text-destructive">{copy.lastError}: {item.errorCode}</p>}
                   {item.resumable && (

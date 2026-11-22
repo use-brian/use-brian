@@ -11515,6 +11515,7 @@ export const zh: Dictionary = {
       statusNote: "啟用來源後會立即暫存其路由規則。即時事件傳遞仍在逐一來源推出中；在功能上線前，已啟用的來源僅為暫存狀態，尚未從中擷取任何內容。",
       applicationRecovery: {
         ambiguousIdentity: "名稱可能指向多個對象，Brian 已略過相關紀錄或關聯。",
+        scopeMismatch: "為保留來源的分享限制，Brian 已暫緩更新。",
         finishedWithHolds: "已完成，部分項目暫緩處理",
         rejected: "已拒絕",
         newer: "較新的執行紀錄",

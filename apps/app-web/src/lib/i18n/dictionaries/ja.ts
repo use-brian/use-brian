@@ -11572,6 +11572,7 @@ export const ja: Dictionary = {
       statusNote: "ソースを有効にすると、ルーティングルールがすぐに準備されます。ソースごとのリアルタイム配信は順次対応中で、対応するまでは有効化しても取り込みはまだ行われません。",
       applicationRecovery: {
         ambiguousIdentity: "名前が複数の対象を指す可能性があるため、Brian は該当するレコードまたは関係の保存を見送りました。",
+        scopeMismatch: "元の情報の共有範囲を守るため、Brian は更新を保留しました。",
         finishedWithHolds: "一部を保留して完了",
         rejected: "却下",
         newer: "新しい実行履歴",

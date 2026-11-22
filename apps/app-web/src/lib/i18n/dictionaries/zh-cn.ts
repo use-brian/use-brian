@@ -11634,6 +11634,7 @@ export const zhCN: Dictionary = {
       statusNote: "激活来源后会立即暂存其路由规则。实时事件传递仍在逐一来源推出中；在功能上线前，已激活的来源仅为暂存状态，尚未从中截取任何内容。",
       applicationRecovery: {
         ambiguousIdentity: "名称可能指向多个对象，Brian 已跳过相关记录或关联。",
+        scopeMismatch: "为保留来源的共享限制，Brian 已暂缓更新。",
         finishedWithHolds: "已完成，部分项目暂缓处理",
         rejected: "已拒绝",
         newer: "较新的运行记录",

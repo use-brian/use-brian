@@ -11819,6 +11819,7 @@ export const en = {
       statusNote: "Enabling a source stages its routing rules now. Live event delivery is still rolling out per source. Until it lands, an enabled source is staged but nothing from it is ingested yet.",
       applicationRecovery: {
         ambiguousIdentity: "Brian skipped a record or relationship because the name could refer to more than one entity.",
+        scopeMismatch: "Brian held an update to keep the source’s sharing restrictions.",
         finishedWithHolds: "Finished with held items",
         rejected: "Rejected",
         newer: "Newer runs",

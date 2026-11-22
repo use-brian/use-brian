@@ -22,12 +22,13 @@ const store = createExtractionApplicationStore()
 
 type Fixture = Awaited<ReturnType<typeof fixture>>
 
-async function fixture() {
+async function fixture(options: { privateEpisode?: boolean } = {}) {
   const workspaceId = randomUUID()
   const sourceActorId = randomUUID()
   const replayActorId = randomUUID()
   const assistantId = randomUUID()
   const episodeId = randomUUID()
+  const episodeUserId = options.privateEpisode ? sourceActorId : null
 
   for (const userId of [sourceActorId, replayActorId]) {
     await pool.query(
@@ -51,8 +52,8 @@ async function fixture() {
     `INSERT INTO episodes(
        id,workspace_id,created_by_user_id,user_id,assistant_id,source_kind,
        source_ref,occurred_at,sensitivity,status,summary_text
-     ) VALUES($1,$2,$3,NULL,$4,'manual_paste','{}',now(),'internal','archived','fixture')`,
-    [episodeId, workspaceId, sourceActorId, assistantId],
+     ) VALUES($1,$2,$3,$5,$4,'manual_paste','{}',now(),'internal','archived','fixture')`,
+    [episodeId, workspaceId, sourceActorId, assistantId, episodeUserId],
   )
   const source = await pool.query<{ scopeVersion: string }>(
     'SELECT scope_version::text AS "scopeVersion" FROM episodes WHERE id=$1',
@@ -76,7 +77,7 @@ async function fixture() {
     plan,
     extractionState: 'succeeded',
   })
-  return { workspaceId, sourceActorId, replayActorId, assistantId, episodeId, plan, run }
+  return { workspaceId, sourceActorId, replayActorId, assistantId, episodeId, episodeUserId, plan, run }
 }
 
 function authority(input: Fixture) {
@@ -126,6 +127,7 @@ async function aliasFixture(input: Fixture, options: {
   independentLabel?: boolean
   duplicateCanonical?: boolean
   movedCanonical?: boolean
+  reuse?: boolean
 }) {
   const name = 'Fictional shared label'
   const canonicalId = 'example.test/fictional-project'
@@ -134,7 +136,7 @@ async function aliasFixture(input: Fixture, options: {
     createdByUserId: input.sourceActorId, createdByAssistantId: null,
     sensitivity: 'internal' as const, compartments: [], projectIds: [],
   }
-  const envelope: PipelineBSourceEnvelope = { ...scope, episodeId: input.episodeId }
+  const envelope: PipelineBSourceEnvelope = { ...scope, episodeId: input.episodeId, userId: input.episodeUserId }
   const target = await createEntity({
     ...scope, kind: 'project', displayName: 'Fictional canonical project',
     canonicalId: options.movedCanonical ? null : canonicalId,
@@ -153,7 +155,8 @@ async function aliasFixture(input: Fixture, options: {
     candidates: [
       {
         key: 'target', primitiveKind: 'entity', payload: {
-          ...envelope, command: 'entity', action: 'supersede_entity', entityKind: 'project', displayName: name,
+          ...envelope, command: 'entity', action: options.reuse ? 'reuse_entity' : 'supersede_entity',
+          entityKind: 'project', displayName: name,
           canonicalId: options.strongIdentity ? canonicalId : null, targetEntityId: target.id,
           attributes: { status: 'after' }, alias: ` ${name.toUpperCase()} `,
         } satisfies PipelineBEntityApplication,
@@ -334,5 +337,21 @@ describe('[COMP:brain/extraction-application-store] PostgreSQL receipt fencing',
     const entities = (await pool.query('SELECT id,aliases FROM entities WHERE id=ANY($1::uuid[])', [ids])).rows
     expect(entities.find((entity) => entity.id === target.id)?.aliases).toEqual([])
     expect(entities.find((entity) => entity.id === ids[1])?.aliases).toEqual(['fictional shared label'])
+  })
+
+  it.each([true, false])('keeps private Episode evidence off a shared entity (reuse=%s)', async (reuse) => {
+    const input = await fixture({ privateEpisode: true })
+    const { plan, target, attemptKey } = await aliasFixture(input, { strongIdentity: true, independentLabel: true, reuse })
+    const service = createDefaultIngestApplicationService()
+    const applied = await service.apply({ ...authority(input), actorUserId: input.sourceActorId, attemptKey, plan })
+
+    expect(applied.items[0]).toMatchObject(reuse
+      ? { disposition: 'committed', targetRecordId: target.id }
+      : { disposition: 'held', failureCode: 'application_entity_scope_mismatch', targetRecordId: null })
+    expect((await pool.query('SELECT id,aliases,attributes,valid_to FROM entities WHERE workspace_id=$1 AND canonical_id=$2',
+      [input.workspaceId, target.canonicalId])).rows)
+      .toEqual([{ id: target.id, aliases: [], attributes: { status: 'before' }, valid_to: null }])
+    expect((await pool.query('SELECT source_id,user_id FROM entity_links WHERE source_episode_id=$1', [input.episodeId])).rows)
+      .toEqual(reuse ? [{ source_id: target.id, user_id: input.sourceActorId }] : [])
   })
 })

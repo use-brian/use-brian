@@ -1051,13 +1051,25 @@ export async function findCrossKindDuplicateClustersSystem(
 
 // ── Alias mutators ────────────────────────────────────────────────────
 
-/** Revalidate a frozen target; competing records are projected as booleans only. */
+type ExtractionEntityTarget = {
+  canonicalId: string | null
+  canonicalConflict: boolean
+  nameMatch: boolean
+  nameConflict: boolean
+  userId: string | null
+  assistantId: string | null
+  sensitivity: string
+  compartments: string[]
+  projectIds: string[]
+}
+
+/** Revalidate a frozen target. Competing records are projected as booleans only. */
 export async function inspectExtractionEntityTarget(
   access: AccessContext,
   actorAccess: AccessContext,
   input: { id: string; kind: EntityKind; canonicalId: string | null; normalizedName: string },
   client: pg.PoolClient,
-): Promise<{ canonicalId: string | null; canonicalConflict: boolean; nameMatch: boolean; nameConflict: boolean } | undefined> {
+): Promise<ExtractionEntityTarget | undefined> {
   const execution = entityMutationAccess(access.userId, access)
   const target = entitySourceGuard(access.userId, execution, 'mutation', 6, 'target')
   const replay = entitySourceGuard(actorAccess.userId, actorAccess, 'mutation', target.nextIdx, 'target')
@@ -1065,10 +1077,10 @@ export async function inspectExtractionEntityTarget(
   const competing = `workspace_id = $2 AND kind = $3 AND id <> $1
     AND valid_from <= now() AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
     AND ${contenders.sql}`
-  const result = await client.query<{
-    canonicalId: string | null; canonicalConflict: boolean; nameMatch: boolean; nameConflict: boolean
-  }>(
-    `SELECT target.canonical_id AS "canonicalId",
+  const result = await client.query<ExtractionEntityTarget>(
+    `SELECT target.canonical_id AS "canonicalId", target.user_id AS "userId",
+            target.assistant_id AS "assistantId", target.sensitivity, target.compartments,
+            target.project_ids AS "projectIds",
             EXISTS (
                SELECT 1 FROM entities WHERE ${competing} AND canonical_id = $4
             ) AS "canonicalConflict",

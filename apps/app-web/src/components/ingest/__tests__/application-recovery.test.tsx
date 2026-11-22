@@ -17,7 +17,7 @@ vi.mock("@/lib/i18n/client", () => ({
     error: "Error", refresh: "Refresh", retry: "Retry unfinished", retrying: "Retrying",
     cancel: "Cancel", confirmTitle: "Confirm", confirmBody: "Only unfinished writes", older: "Older runs", newer: "Newer runs",
     committed: "Applied", failed: "Failed", held: "Held", rejected: "Rejected", finishedWithHolds: "Finished with held items", ambiguousIdentity: "Ambiguous record match", lastError: "Last error",
-    legacy: "Legacy", states: { complete: "Complete", partial: "Partially applied", blocked: "Blocked", not_started: "Not started" },
+    scopeMismatch: "Source sharing restrictions", legacy: "Legacy", states: { complete: "Complete", partial: "Partially applied", blocked: "Blocked", not_started: "Not started" },
   } } } }),
 }));
 
@@ -77,6 +77,15 @@ describe("[COMP:app-web/ingest-application] application recovery", () => {
     expect(container!.textContent).toContain("Held: 1 · Rejected: 2");
     expect(container!.textContent).toContain("Applied: 3");
     expect(container!.textContent).toContain("Applied: 9");
+  });
+
+  it("explains when source sharing restrictions hold an update", async () => {
+    const scopedItem = { candidateId: "entity", primitiveKind: "entity", disposition: "held",
+      failureCode: "application_entity_scope_mismatch", attemptCount: 1, retryable: false };
+    authFetch.mockResolvedValueOnce(Response.json({ applications: [{ ...item, items: [scopedItem] }], nextCursor: null }));
+    await mount();
+    expect(container!.textContent).toContain("Source sharing restrictions");
+    expect(container!.textContent).not.toContain("Ambiguous record match");
   });
 
   it("keeps persisted results across navigation and reuses the workspace cache", async () => {

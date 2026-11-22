@@ -161,6 +161,22 @@ async function applyExistingEntity(
     return { disposition: 'held', safeCode: 'application_entity_identity_ambiguous' }
   }
 
+  const acceptsSourceAudience = (payload.userId === null || target.userId === payload.userId)
+    && (payload.assistantId === null || target.assistantId === payload.assistantId)
+    && target.sensitivity === payload.sensitivity
+  if (!reuse && !acceptsSourceAudience) {
+    return { disposition: 'held', safeCode: 'application_entity_scope_mismatch' }
+  }
+  // Supersession joins the Episode's Teams and Projects into the successor.
+  // An in-place alias must fit the existing scope before it can carry that text.
+  if (reuse && learnableAlias && (!acceptsSourceAudience
+    || payload.compartments.some((compartment) => !target.compartments.includes(compartment))
+    || payload.projectIds.some((projectId) => !target.projectIds.includes(projectId)))) {
+    return canonicalIdentity || target.nameMatch
+      ? { targetRecordId: payload.targetEntityId }
+      : { disposition: 'held', safeCode: 'application_entity_scope_mismatch' }
+  }
+
   // An alias refusal on weak evidence must roll back the whole entity change.
   // A savepoint retains the enclosing item transaction so it can write a held receipt.
   const savepoint = !reuse && learnableAlias
