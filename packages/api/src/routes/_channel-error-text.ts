@@ -87,7 +87,7 @@ export const CONTEXT_NOT_AVAILABLE_MESSAGE =
   "This chat's Team or Project context is no longer available. Ask a workspace admin to restore it, or start a new chat in an available context."
 
 const DELIVERY_AUDIENCE_NOTICE =
-  "I couldn't share the reply in this chat because access to some information couldn't be verified. If you requested changes, they may already be saved. Check their status before repeating the request."
+  "I can't show the result in this chat. If you asked me to take an action, check whether it went through before asking again."
 
 export function channelUserErrorText(
   err: Error,

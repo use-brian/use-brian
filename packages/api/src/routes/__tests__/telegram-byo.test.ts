@@ -836,9 +836,9 @@ describe('[COMP:api/telegram-byo-route] safe error delivery', () => {
       diagnostic: 'source_held',
       message: 'Private fixture error',
     })
-    expect(text).toContain('access to some information')
-    expect(text).toContain('they may already be saved')
-    expect(text).toContain('Check their status before repeating the request')
+    expect(text).toContain('show the result in this chat')
+    expect(text).toContain('check whether it went through')
+    expect(text).toContain('before asking again')
     expect(text).not.toMatch(/Please send it again|Private fixture error|source_held/)
   })
 
@@ -870,8 +870,8 @@ describe('[COMP:api/telegram-byo-route] safe error delivery', () => {
           reason: 'delivery_audience_unverified', detail, diagnostic,
           message: 'PRIVATE SQL and source ids', verificationPhase: 'native_proof', verificationSqlstateClass: '57',
         })
-        expect(text).toContain("access to some information couldn't be verified")
-        expect(text).toContain('may already be saved')
+        expect(text).toContain("show the result in this chat")
+        expect(text).toContain('check whether it went through')
         expect(text).not.toMatch(/not approved|Group reply access|try again|PRIVATE|native_proof|57/)
       }
     },
@@ -879,7 +879,7 @@ describe('[COMP:api/telegram-byo-route] safe error delivery', () => {
 
   it('does not assert missing group approval when the coarse reason and diagnostic are absent', () => {
     expect(telegramIncomingFailureText('-1002000000001', { reason: 'delivery_audience_unverified' }))
-      .toContain("access to some information couldn't be verified")
+      .toContain("show the result in this chat")
   })
 
   it.each(['binding_expired', 'binding_audience_mismatch', 'binding_approver_not_admin'])(

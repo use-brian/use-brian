@@ -98,7 +98,7 @@ describe('[COMP:api/channel-pipeline-audience-refusal] processing feedback lifet
     const { params, hooks } = turn()
     await processChannelMessage(params)
     expect(hooks.sendError).toHaveBeenCalledExactlyOnceWith(refusal)
-    expect(channelUserErrorText(hooks.sendError.mock.calls[0][0])).toContain('Check their status before repeating')
+    expect(channelUserErrorText(hooks.sendError.mock.calls[0][0])).toContain('before asking again')
     expect(channelUserErrorText(refusal)).not.toContain('PRIVATE')
     expect(hooks.sendResponse).not.toHaveBeenCalled()
     expect(hooks.onCleanup).toHaveBeenCalledOnce()
@@ -149,7 +149,7 @@ describe('[COMP:api/channel-pipeline-audience-refusal] processing feedback lifet
     expect(hooks.sendError).toHaveBeenCalledOnce()
     const error = hooks.sendError.mock.calls[0][0]
     expect(error).toMatchObject({ reason: 'delivery_audience_unverified', retrySafe: false, detail: undefined })
-    expect(channelUserErrorText(error)).toContain("access to some information couldn't be verified")
+    expect(channelUserErrorText(error)).toContain("show the result in this chat")
     expect(hooks.sendResponse).not.toHaveBeenCalled()
     expect(hooks.onProcessingStart).not.toHaveBeenCalled()
     expect(hooks.onCleanup).toHaveBeenCalledOnce()

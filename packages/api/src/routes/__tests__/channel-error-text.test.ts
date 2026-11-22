@@ -25,7 +25,7 @@ describe('[COMP:api/channel-error-text] channel sendError text', () => {
   it('explains a delivery refusal and asks users to check saved changes before repeating a request', () => {
     const error = new DeliveryAudienceUnverifiedError(undefined, 'source_held')
     const text = channelUserErrorText(error)
-    expect(text).toBe("I couldn't share the reply in this chat because access to some information couldn't be verified. If you requested changes, they may already be saved. Check their status before repeating the request.")
+    expect(text).toBe("I can't show the result in this chat. If you asked me to take an action, check whether it went through before asking again.")
     expect(text).not.toContain('Please try again')
   })
 
@@ -34,8 +34,8 @@ describe('[COMP:api/channel-error-text] channel sendError text', () => {
       const error = new DeliveryAudienceUnverifiedError('evidence_exceeds_audience', diagnostic)
       error.message = 'Private fixture source at restricted.example with record 00000000-0000-0000-0000-000000000001; usage limit'
       const text = channelUserErrorText(error, 'Channel-specific retry advice')
-      expect(text).toContain('access to some information')
-      expect(text).toContain('may already be saved')
+      expect(text).toContain('show the result in this chat')
+      expect(text).toContain('check whether it went through')
       expect(text).not.toMatch(/source_held|verification_error|member_not_found|evidence_exceeds_audience|restricted\.example|00000000|usage limit|Channel-specific/)
     },
   )

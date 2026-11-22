@@ -564,6 +564,7 @@ export function createMailboxTools(
       'The email account is connected through IMAP/SMTP and may be hosted by Gmail/Google Workspace (including an address ending in gmail.com), AliMail, or another provider; the recipient sees the exact bound address as the sender. ' +
       'This is the ONLY tool that sends as that bound address: if it is unavailable, say so — never silently substitute another email identity for it (or it for them). ' +
       'Call this tool directly — the user will see an Approve/Deny prompt. ' +
+      'After the tool returns a successful send result, briefly confirm in the user’s language that the email was sent. ' +
       'To reply on an existing thread, pass the original message\'s id as `inReplyTo` so the reply threads correctly. ' +
       'A reply goes out from the address the original was sent to when that is one of the account\'s configured send-as aliases (otherwise from the account itself); pass `from` only to pick a specific configured alias - any other address is refused. ' +
       'Copy additional people with `cc` (visible to every recipient) or `bcc` (hidden from the others); put an internal colleague you are looping in on `cc` unless the user asks to keep them hidden. ' +

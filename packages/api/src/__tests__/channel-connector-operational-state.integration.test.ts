@@ -39,7 +39,7 @@ const integrationStore=createDbChannelIntegrationStore(key),capabilityStore=crea
 const retainedMarker='The fictional observatory visit remains planned for Friday.'
 const resultMarker='Fictional archive evidence: observatory meeting at ten.'
 const finalText='I reviewed the three archive searches and found the mailbox search capability.'
-const safeNotice="I couldn't share the reply in this chat because access to some information couldn't be verified. If you requested changes, they may already be saved. Check their status before repeating the request."
+const safeNotice="I can't show the result in this chat. If you asked me to take an action, check whether it went through before asking again."
 let sessionId:string,mailbox:ConnectorInstance,history:unknown,bindings:unknown
 const historySnapshot=async()=>(await query(`SELECT id,role,content,sequence_num,channel_message_id,sender_user_id,
  sensitivity,compartments,project_ids,scope_version,scope_held FROM session_messages
