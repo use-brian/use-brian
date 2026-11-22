@@ -223,24 +223,30 @@ describe('[COMP:providers/codex-app-server] Codex app-server provider bridge', (
     } finally { await iterator.return?.(); harness.peer.close() }
   })
 
-  it.each(['gpt-6.1-sol', 'gpt-6-sol'])('maps the Pro Sol alias and validates the returned wire model (%s)', async (returnedModel) => {
+  it.each([
+    ['gpt-6.1-sol', 'gpt-6.1-sol'],
+    ['gpt-6.1-sol', 'gpt-6-sol'],
+    ['gpt-6.2-sol', 'gpt-6.2-sol'],
+    ['gpt-6.2-sol', 'gpt-6.1-sol'],
+  ])('maps the Pro alias for %s and validates the returned wire model %s', async (wireModel, returnedModel) => {
+    const selector = `${wireModel}-pro`
     const harness = createHarness()
     const provider = createCodexAppServerProvider({
       transport: { rpc: harness.peer, cwd: '/tmp/brian-codex-test' },
-      models: ['gpt-6.1-sol-pro', 'gpt-6.1-sol'],
+      models: [selector, wireModel],
     })
     try {
       const chunks = collect(provider.stream({
-        model: 'gpt-6.1-sol-pro', systemPrompt: 'You are Brian.',
+        model: selector, systemPrompt: 'You are Brian.',
         messages: [{ role: 'user', content: 'Hello' }], assertInputAuthority: async () => {},
       }))
-      const result = returnedModel === 'gpt-6.1-sol'
-        ? expect(chunks).resolves.toEqual(expect.arrayContaining([{ type: 'message_start', model: 'gpt-6.1-sol-pro' }]))
+      const result = returnedModel === wireModel
+        ? expect(chunks).resolves.toEqual(expect.arrayContaining([{ type: 'message_start', model: selector }]))
         : expect(chunks).rejects.toThrow('Codex silently substituted the requested model')
       const thread = await waitForMethod(harness, 'thread/start')
-      expect(thread.params).toMatchObject({ model: 'gpt-6.1-sol' })
+      expect(thread.params).toMatchObject({ model: wireModel })
       respond(harness, thread, { thread: { id: 'thread-1' }, model: returnedModel, modelProvider: 'openai' })
-      if (returnedModel === 'gpt-6.1-sol') {
+      if (returnedModel === wireModel) {
         respondToTurnStart(harness, await waitForMethod(harness, 'turn/start'))
         complete(harness, 'thread-1', 'turn-1')
         respond(harness, await waitForMethod(harness, 'thread/unsubscribe'), { status: 'unsubscribed' })
@@ -1243,6 +1249,7 @@ describe('[COMP:providers/codex-app-server] Codex app-server provider bridge', (
   it.each([
     'gpt-5.5', 'gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra',
     'gpt-6-astra', 'gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6.1-sol-pro',
+    'gpt-6.2-sol', 'gpt-6.2-sol-pro', 'gpt-6.2-astra',
   ])('retains registry-reviewed native deferred registration for %s', model => {
     expect(codexToolSchemaMode(model)).toBe('native-deferred')
   })

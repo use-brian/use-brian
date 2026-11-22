@@ -68,10 +68,10 @@ describe('[COMP:providers/codex-process] managed Codex app-server process', () =
   it('resolves the exact pinned package entry instead of a global binary', async () => {
     const command = await resolvePinnedCodexCommand()
 
-    expect(PINNED_CODEX_VERSION).toBe('0.165.0')
+    expect(PINNED_CODEX_VERSION).toBe('0.171.0')
     expect(command.command).toBe(process.execPath)
     expect(command.argsPrefix).toHaveLength(1)
-    expect(command.argsPrefix?.[0]).toContain('@openai+codex@0.165.0')
+    expect(command.argsPrefix?.[0]).toContain('@openai+codex@0.171.0')
     expect(command.argsPrefix?.[0]).toMatch(/bin[/\\]codex\.js$/)
   })
 
@@ -80,7 +80,7 @@ describe('[COMP:providers/codex-process] managed Codex app-server process', () =
     const manifest = JSON.parse(await readFile(new URL('../../../../package.json', import.meta.url), 'utf8'))
     expect(manifest.dependencies['@openai/codex']).toBe(PINNED_CODEX_VERSION)
     expect(manifest.dependencies['@openai/codex-catalog']).toBe(`npm:@openai/codex@${PINNED_CODEX_VERSION}`)
-    expect(command.argsPrefix?.[0]).toContain('@openai+codex@0.165.0')
+    expect(command.argsPrefix?.[0]).toContain('@openai+codex@0.171.0')
     expect((await resolvePinnedCodexCommand('image')).argsPrefix).toEqual((await resolvePinnedCodexCommand('inference')).argsPrefix)
   })
 

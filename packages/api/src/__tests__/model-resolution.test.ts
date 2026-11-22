@@ -329,15 +329,16 @@ describe('[COMP:api/model-resolution] ensureServableModel — default falls to a
 
   it('serves every current Codex tier when only current models are entitled', () => {
     const codex = new MutableProviderAvailability()
-    codex.setModelCatalog('openai-codex', new Set(['gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-terra', 'gpt-6.1-sol', 'gpt-6-astra']))
+    const models = ['gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-terra', 'gpt-6.1-sol', 'gpt-6-astra', 'gpt-6.2-sol', 'gpt-6.2-astra']
+    codex.setModelCatalog('openai-codex', new Set(models))
     expect(ensureServableModel('gemini-3.8-flash-standard', codex)).toBe('gpt-6-luna')
     expect(ensureServableModel('gemini-4-hydrogen-pro', codex)).toBe('gpt-6.1-terra')
-    expect(ensureServableModel('gemini-4-hydrogen', codex)).toBe('gpt-6.1-sol')
-    expect(ensureServableModel('gemini-4-argon-research', codex)).toBe('gpt-6-astra')
+    expect(ensureServableModel('gemini-4-hydrogen', codex)).toBe('gpt-6.2-sol')
+    expect(ensureServableModel('gemini-4-argon-research', codex)).toBe('gpt-6.2-astra')
     codex.setPreferredProvider('openai-codex')
     expect(backgroundModelFor(codex)).toBe('gpt-6-luna')
     expect(providerVisionModelFor(codex, 'openai-codex')).toBe('gpt-6-luna')
-    for (const model of ['gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-terra', 'gpt-6.1-sol', 'gpt-6-astra']) {
+    for (const model of models) {
       expect(ensureServableModel(model, codex)).toBe(model)
     }
   })
@@ -356,11 +357,11 @@ describe('[COMP:api/model-resolution] ensureServableModel — default falls to a
     expect(ensureServableModel('gpt-6.1-terra', codex)).toBe('gpt-6.1-terra')
   })
 
-  it('uses GPT-6.1 Sol for Pro when Terra is absent without changing the Max identity', () => {
+  it.each(['gpt-6.1-sol', 'gpt-6.2-sol'])('selects the newest entitled Sol for Pro and Max when Terra is absent (%s)', model => {
     const codex = new MutableProviderAvailability()
-    codex.setModelCatalog('openai-codex', new Set(['gpt-6-luna', 'gpt-5.6-terra', 'gpt-6-sol', 'gpt-6.1-sol']))
-    expect(ensureServableModel('gemini-4-hydrogen-pro', codex)).toBe('gpt-6.1-sol-pro')
-    expect(ensureServableModel('gemini-4-hydrogen', codex)).toBe('gpt-6.1-sol')
+    codex.setModelCatalog('openai-codex', new Set(['gpt-6-luna', 'gpt-5.6-terra', 'gpt-6-sol', 'gpt-6.1-sol', model]))
+    expect(ensureServableModel('gemini-4-hydrogen-pro', codex)).toBe(`${model}-pro`)
+    expect(ensureServableModel('gemini-4-hydrogen', codex)).toBe(model)
     expect(ensureServableModel('gpt-6.1-sol-pro', codex)).toBe('gpt-6.1-sol-pro')
     expect(ensureServableModel('gpt-6.1-sol', codex)).toBe('gpt-6.1-sol')
   })

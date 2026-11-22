@@ -228,7 +228,10 @@ surfaces as an actionable error instead of falling through to Gemini. Existing
 custom tier defaults are migrated in place. On the first Models load, an owner
 or admin with no workspace routes has any non-`auto` legacy preference promoted
 to the corresponding exact provider models; the migration is idempotent and
-the workspace routes are authoritative afterward.
+the workspace routes are authoritative afterward. For a legacy Codex preference,
+promotion selects the first entitled Codex model in each tier. A tier with no
+visible candidate keeps its historical migration target: GPT-5.6 Luna
+(Standard), GPT-6.1 Terra (Pro), GPT-5.6 Sol (Max), or GPT-5.5 (Research).
 
 The pinned runtime's reviewed 2026-07-27 public catalog establishes the initial
 OSS auto-routing map: Luna → Standard, Terra → Pro, Sol → Max, and GPT-5.5 →
@@ -243,7 +246,7 @@ Supported.
 ### 3. Query-loop bridge
 
 Inference, images, and account discovery use the same reviewed Codex version,
-`0.165.0`. The `@openai/codex-catalog` alias remains account-only and cannot
+`0.171.0`. The `@openai/codex-catalog` alias remains account-only and cannot
 start a thread or turn. Keeping both pins equal prevents incompatible cache
 formats from sharing Brian's isolated credential home. The account catalog
 is a discovery list, not proof of inference access: a successful authenticated
@@ -261,21 +264,15 @@ returns their result. The wire-capture test must prove that only Brian's
 supplied tools are exposed. The separate image surface permits only its
 image generation tool.
 A real inference capture covers every active reviewed model and
-checks the selected wire model as well as the tool surface. The reviewed
-catalog adds GPT-6 Luna (Standard), GPT-6.1 Terra and GPT-6.1 Sol (Pro),
-GPT-6.1 Sol (Max), and GPT-6 Astra (Research). Pro Auto routing prefers Terra
-when entitled, then Sol, before older Pro models. Terra is present in the
-updated bundled catalog; it is offered only when account discovery returns
-it, and an authenticated turn verifies access. The Pro Sol selector is `gpt-6.1-sol-pro`, which
-sends the provider's canonical `gpt-6.1-sol` wire id while retaining the Pro
-alias in Brian's stream and usage identity. The existing `gpt-6.1-sol` selector
-remains Max, so saved Max routes and historical classification keep working.
-GPT-6 Sol and GPT-5.6 Terra remain valid exact selections; the other tiers
-retain their existing Auto priority. Older selections remain valid;
-new models remain intersected with picker-visible account discovery. Their
-context budget is the subscription client's conservative 272K default, with
-Brian's existing 32,768-token output cap. Hidden internal and unreviewed models
-are never promoted into Brian's registry automatically.
+checks the selected wire model as well as the tool surface. Among the picker-visible models, GPT-6.2 Sol is available
+in Pro and Max, and GPT-6.2 Astra in Research. The Codex Pro order starts
+with GPT-6.1 Terra, then GPT-6.2 Sol, then GPT-6.1 Sol. Max and Research
+prefer the new Sol and Astra respectively when the account advertises them.
+Each Pro Sol selector (for example, `gpt-6.2-sol-pro`) sends the canonical
+wire ID (`gpt-6.2-sol`) and records its Pro alias. The canonical selector
+records Max usage. Older exact selections retain their identity. These models
+use Brian's conservative 272K context budget and 32,768-token output cap.
+Only reviewed, picker-visible IDs from the connected account can be selected.
 
 Codex app-server dynamic tools are request/response RPC, while Brian's query
 loop consumes a streamed tool call, executes it under Brian policy, then calls

@@ -89,7 +89,7 @@ function inspectSchema(root: Schema, questions: DecisionQuestion[], format: LlmD
 
 describe('[COMP:providers/codex-classifier-schema] offline pinned runtime', () => {
   it('accepts strict common decisions with shared ranked enums and unavailable uncertainty', async () => {
-    expect(PINNED_CODEX_VERSION).toBe('0.165.0')
+    expect(PINNED_CODEX_VERSION).toBe('0.171.0')
     const plan = buildToolSelectionQuestions(Array.from({ length: 357 }, (_, index) => ({
       name: `fictional_tool_${index}`, description: `Fictional capability ${index}`,
     })))!

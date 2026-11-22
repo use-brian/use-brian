@@ -55,7 +55,7 @@ Gemini uses `dynamic` mode. Its common request builder reads `active` on **every
 
 An optional initial classifier runs only for dynamic drivers. Trusted preparation preselection can seed either capable mode, subject to the existing initial-schema budget and direct-tool rules. Native search and eager drivers do not incur a separate engine-side selection model call.
 
-## Codex app-server 0.165.0
+## Codex app-server
 
 For verified models, Codex uses `native-deferred` mode:
 
@@ -66,7 +66,7 @@ For verified models, Codex uses `native-deferred` mode:
 
 The normal hardened process arguments and RPC method boundaries are unchanged. No shell, browser, native MCP server, filesystem or other built-in capability is enabled to make schema search work. Offline tests assert the complete model-visible surface, not merely the presence of one desired tool.
 
-Support is model-specific even within one pinned binary. With 0.165.0, GPT-5.5 uses top-level Responses tools while newer tested models use `additional_tools` input items; both support deferred search. GPT-5.2 accepts deferred registration but exposes **no** `tool_search`, so deferring its schemas would strand them. It therefore remains eager. An explicit verified model allowlist in `codexToolSchemaMode` also keeps unknown/future model IDs eager. Adding a model or upgrading the runtime requires rerunning the offline wire contract before expanding that allowlist. This capability table does not change account-scoped model entitlement checks.
+Support is model-specific even within one pinned binary. GPT-5.5 uses top-level Responses tools while newer tested models use `additional_tools` input items; both support deferred search. GPT-5.2 accepts deferred registration but exposes **no** `tool_search`, so deferring its schemas would strand them. It therefore remains eager. An explicit verified model allowlist in `codexToolSchemaMode` also keeps unknown/future model IDs eager. Adding a model or upgrading the runtime requires rerunning the offline wire contract before expanding that allowlist. This capability table does not change account-scoped model entitlement checks.
 
 Native search can make several physical model requests inside one Brian send. Usage is accumulated from fresh increments of the runtime's cumulative **thread** totals, including internal search and detached activity. Duplicate notifications do not double count, and totals are not reset between turns on the same thread. Decreasing totals fail as a redacted protocol error rather than silently misaccounting.
 
