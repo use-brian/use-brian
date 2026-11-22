@@ -961,6 +961,20 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
       assert.deepEqual(repairedTriggers.routines.map(row => ({ ...row, acl: row.acl.slice().sort() })),
         legacyTriggers.routines.map(row => ({ ...row, acl: [ownerGrant, publicGrant].sort() })))
       assert.deepEqual(repairedTriggers.defaults, legacyTriggers.defaults)
+      // The receipt repair authenticates the function bodies present at 8314.
+      const canonicalTriggerRecoveryHead = '8314_conversation_settings_readiness.sql'
+      await migratePglite(db, migrationsDir, { through: canonicalTriggerRecoveryHead })
+      await t.test('records the interstitial migration on a canonical 8314 ledger without changing the functions', async () => {
+        const canonical = await finalUpgradeState([...triggerMembers,...ordinaryRoutines])
+        const canonicalPolicies = await exactPolicies()
+        await rejectsFinalUpgrade(triggerRepair, triggerMembers,
+          `GRANT EXECUTE ON FUNCTION ${triggerMembers.map(signature => 'public.' + signature).join(', ')} TO app_user`,
+          /conversation_trigger_acl_unverified_historical_profile/)
+        await db.query('DELETE FROM _migrations WHERE name=$1', [triggerRepair])
+        assert.equal(await migratePglite(db, migrationsDir, { through: canonicalTriggerRecoveryHead }), 1)
+        assert.deepEqual(await finalUpgradeState([...triggerMembers,...ordinaryRoutines]), canonical)
+        assert.deepEqual(await exactPolicies(),canonicalPolicies)
+      })
       await migratePglite(db, migrationsDir, { through: '8336_project_harness_verification.sql' })
       // Compare the actual full-chain predecessor against 8331's source-owned
       // metadata predicates without executing or enrolling its observed body.
@@ -981,17 +995,6 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
       assert.notEqual(chatAfter.routines[0].body, chatBefore.routines[0].body)
       assert.deepEqual(chatAfter.defaults, chatBefore.defaults)
       assert.deepEqual((await db.query(`SELECT to_jsonb(t) record FROM pg_trigger t WHERE tgname='zzzz_session_creation_admission'`)).rows, chatTrigger)
-      await t.test('records the interstitial migration on a canonical 8314 ledger without changing the functions', async () => {
-        const canonical = await finalUpgradeState([...triggerMembers,...ordinaryRoutines])
-        const canonicalPolicies = await exactPolicies()
-        await rejectsFinalUpgrade(triggerRepair, triggerMembers,
-          `GRANT EXECUTE ON FUNCTION ${triggerMembers.map(signature => 'public.' + signature).join(', ')} TO app_user`,
-          /conversation_trigger_acl_unverified_historical_profile/)
-        await db.query('DELETE FROM _migrations WHERE name=$1', [triggerRepair])
-        assert.equal(await migratePglite(db, migrationsDir), 1)
-        assert.deepEqual(await finalUpgradeState([...triggerMembers,...ordinaryRoutines]), canonical)
-        assert.deepEqual(await exactPolicies(),canonicalPolicies)
-      })
       await noWriteTitleRepair()
       assert.equal(await migratePglite(db, migrationsDir), 0)
       assert.deepEqual((await db.query(`SELECT
