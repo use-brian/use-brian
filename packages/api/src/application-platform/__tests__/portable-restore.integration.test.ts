@@ -24,7 +24,7 @@ import {seedRefusedFamilies,type SeededFamilies} from './fixtures/portable-resto
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 const {sealJson,unsealJson,unsealFile}=await import(new URL('../../../../../scripts/operations/recovery-common.mjs',import.meta.url).href)
 const restore=await import(new URL('../../../scripts/conversation-store/portable-restore.mjs',import.meta.url).href)
-const {authenticateConversationInstallation}=await import(new URL('../../../scripts/conversation-store/installation-release.mjs',import.meta.url).href)
+const {authenticateConversationInstallation,releaseAuthentication}=await import(new URL('../../../scripts/conversation-store/installation-release.mjs',import.meta.url).href)
 const phase=process.env.BRIAN_PORTABLE_RESTORE_PHASE,stateDirectory=process.env.BRIAN_PORTABLE_RESTORE_STATE
 // The driver pins the shipped migration set it applied to both chains.
 const sourceRoot=process.env.BRIAN_PORTABLE_RESTORE_SOURCE_ROOT
@@ -245,7 +245,8 @@ describe.skipIf(phase!=='target').sequential('[COMP:api/portable-restore] authen
   const client=await ownerClient()
   try{
    if(await harnessInstalled()){
-    const {authenticateConversationInstallation}=await import(new URL('../../../scripts/conversation-store/installation-authentication-8337.mjs',import.meta.url).href)
+    const head=(await client.query('SELECT name FROM _migrations ORDER BY name COLLATE "C" DESC LIMIT 1')).rows[0].name
+    const authenticatePinnedRelease=releaseAuthentication(head,sourceRoot)
     const snapshot=async()=>JSON.stringify({rows:await harnessRows(client),ledger:(await client.query('SELECT to_jsonb(t)::text row FROM _migrations t ORDER BY name')).rows,
      sessions:(await client.query('SELECT to_jsonb(t)::text row FROM sessions t ORDER BY id')).rows,
      catalog:(await client.query(`SELECT p.oid::text,pg_get_functiondef(p.oid) definition,p.proacl::text FROM pg_proc p WHERE p.pronamespace='public'::regnamespace AND (p.proname LIKE 'project_harness_%' OR p.proname LIKE 'harness_execution_%') ORDER BY p.oid`)).rows,
@@ -255,6 +256,9 @@ describe.skipIf(phase!=='target').sequential('[COMP:api/portable-restore] authen
      ['acl',`GRANT EXECUTE ON FUNCTION public.harness_execution_human(uuid,uuid) TO app_user`,'portable_successor_catalog_changed'],
      ['trigger',`ALTER TABLE public.project_harness_runs DISABLE TRIGGER harness_run_audit`,'portable_successor_catalog_changed'],
      ['unknown-prefix',`CREATE FUNCTION public.harness_execution_unreviewed() RETURNS int LANGUAGE sql AS 'SELECT 1'`,'portable_successor_unknown_catalog_object'],
+     ...(head==='8338_native_workspace_skill_receipts.sql'?[
+      ['skill-receipt',`DELETE FROM public._migrations WHERE name='8338_native_workspace_skill_receipts.sql'`,'skill_scope_release_missing'],
+     ]:[]),
      ...['8335_project_harnesses.sql','8336_project_harness_verification.sql','8337_project_chat_creation_admission.sql'].map(name=>['receipt:'+name,`DELETE FROM public._migrations WHERE name='${name}'`,'portable_successor_migration_tail_missing']),
     ]
     for(const [name,sql,error] of mutations){
@@ -270,10 +274,10 @@ describe.skipIf(phase!=='target').sequential('[COMP:api/portable-restore] authen
        if(text==='ROLLBACK')return client.query('ROLLBACK TO SAVEPOINT authentication_probe')
        return client.query(text,values)
       }}
-      await expect(authenticateConversationInstallation(owner,{sourceRoot})).rejects.toThrow(error)
+      await expect(authenticatePinnedRelease(owner)).rejects.toThrow(error)
      }finally{await client.query('ROLLBACK')}
      expect(await snapshot()).toBe(before)
-     results.push({name:'8337-authentication-'+name,passed:true,detail:error+'; transaction rolled back, state unchanged'})
+     results.push({name:head.slice(0,4)+'-authentication-'+name,passed:true,detail:error+'; transaction rolled back, state unchanged'})
     }
    }
    await client.query('CREATE TABLE public.fictional_unreviewed_target(id uuid PRIMARY KEY)')

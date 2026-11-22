@@ -78,7 +78,9 @@ describe('[COMP:api/caller-scope-evidence] canonical consult evidence and memory
     if(change==='hold')await pool.query('UPDATE memories SET scope_held=true WHERE id=$1',[f.source.id])
     if(change==='delete')await pool.query('DELETE FROM memories WHERE id=$1',[f.source.id])
     // Context use (decision D1): an edit or delete alone never blocks; a hold does.
-    if(change==='hold')await expect(validateCallerScopeEvidence(validated,f.ceiling)).rejects.toMatchObject({reason:'caller_evidence_unavailable',diagnostic:'source_held'})
+    if(change==='hold')await expect(validateCallerScopeEvidence(validated,f.ceiling)).rejects.toMatchObject({
+      reason:'caller_evidence_unavailable', diagnostic:'source_held', cause:{sourceKind:'memory'},
+    })
     else await expect(validateCallerScopeEvidence(validated,f.ceiling)).resolves.toMatchObject({sensitivity:'internal'})
     // Lineage for a derived WRITE stays exact-version.
     await expect(runWithAgentAccess(f.ceiling,()=>f.save.execute({summary:'Refused output',scope:'user'},f.context(validated)))).rejects.toThrow('scope_source_changed')

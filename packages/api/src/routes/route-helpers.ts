@@ -1,10 +1,13 @@
 import { z } from 'zod'
-import type { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ContextScopeAccumulator, ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
 import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
+import { isAudienceScopeRestriction } from '../context-scope/delivery-failure.js'
+import { isAuthorityChangedError } from '../context-scope/authority-lease.js'
+import { runApplicationTransaction } from '../application-platform/execution-context.js'
 import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { buildTool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
-import { validateCallerScopeEvidence, validateAudienceScopeEvidence } from '../context-scope/caller-evidence.js'
+import { scopeEvidenceFailureOf, validateCallerScopeEvidence, validateAudienceScopeEvidence } from '../context-scope/caller-evidence.js'
 /**
  * Shared route helpers — extracted from duplicated patterns across route files.
  *
@@ -12,12 +15,12 @@ import { validateCallerScopeEvidence, validateAudienceScopeEvidence } from '../c
  */
 
 import { findOrCreateUser, findUserById } from '../db/users.js'
-import { query, runWithAgentAccess } from '../db/client.js'
+import { getAppPool, query, runWithAgentAccess } from '../db/client.js'
 import { shouldInline } from '@use-brian/core/files/inline-content.js'
 import { isTabular, profileWorkbook, renderWorkbookProfile } from '@use-brian/core/files/tabular-profile.js'
-import { formatSkillInstructions, sha256 } from '@use-brian/core/skills/bundle.js'
+import { formatSkillInstructions } from '@use-brian/core/skills/bundle.js'
 import { formatSkillListing } from '@use-brian/core/skills/listing.js'
-import { loadBuiltinSkills, expandSkillPointers } from '@use-brian/core/skills/loader.js'
+import { extractPointers, loadBuiltinSkills, expandSkillPointers } from '@use-brian/core/skills/loader.js'
 import { createReadSkillResourceTool, createSearchSkillResourcesTool } from '@use-brian/core/skills/resource-tool.js'
 import { createUseSkillTool } from '@use-brian/core/skills/tool.js'
 import type { FileStore } from '@use-brian/core/files/types.js'
@@ -504,6 +507,8 @@ export function isSkillOfferable(
 type InjectSkillsOptions = {
   executionContext?: ExecutionContext
   scopeAccumulator?: ContextScopeAccumulator
+  /** Use the host's actual shared destination when skill metadata enters a turn. */
+  authorizeSkillAudience?: (evidence: ScopeEvidence) => Promise<ScopeEvidence>
   /** Direct clients discover metadata through a governed tool, not their prompt. */
   exposeListingTool?: boolean
   /** Host-observed native connector bindings; empty means no admitted accounts. */
@@ -651,10 +656,12 @@ async function injectScopedSkills(opts: InjectSkillsOptions): Promise<InjectSkil
     // `opts.workspaceId`; only legacy workspace-less assistants fall back to the
     // caller's own skills. Per-assistant enablement (`enabledSlugs`) still gates
     // which are offered.
+    const resourceOptions = { includeResources: Boolean(opts.workspaceSkillFilesStore) }
+    const actingUserId = opts.executionContext?.security.access.userId ?? connectorUserId
     const [userSkills, assistantSkillSettings, workspaceEnablement] = await Promise.all([
       opts.workspaceId
-        ? skillStore.listForWorkspaceContent(opts.workspaceId, connectorUserId)
-        : skillStore.listOwned(connectorUserId),
+        ? skillStore.listForWorkspaceContent(opts.workspaceId, actingUserId, resourceOptions)
+        : skillStore.listOwned(connectorUserId, resourceOptions),
       skillStore.listForAssistant(assistantId),
       // S14: per-assistant enablement for workspace / auto-gen skills (UUID FK).
       // This is the read side of the skill-approval enable-for-originating
@@ -673,13 +680,11 @@ async function injectScopedSkills(opts: InjectSkillsOptions): Promise<InjectSkil
     // skills surface here as `source='auto-generated'` rows; the
     // counter still needs to fire for them.
     const rowIdToSlug = new Map<string, string>()
-    let workspaceSkillsForRuntime: Awaited<ReturnType<WorkspaceSkillStore['listForWorkspace']>> = []
     if (opts.workspaceSkillStore && opts.workspaceId) {
       try {
         const workspaceSkills = await opts.workspaceSkillStore.listForWorkspace(
           opts.workspaceId,
         )
-        workspaceSkillsForRuntime = workspaceSkills
         for (const ws of workspaceSkills) {
           slugToRowId.set(ws.slug, ws.rowId)
           rowIdToSlug.set(ws.rowId, ws.slug)
@@ -699,39 +704,10 @@ async function injectScopedSkills(opts: InjectSkillsOptions): Promise<InjectSkil
       }
     }
 
-    // Hydrate bundle-v2 resources for workspace skills in one bounded read.
-    // Community skills already carry their registry resources; built-ins have
-    // none today. The bodies stay inside the guarded tool objects and never
-    // enter the listing or the useSkill result.
-    if (opts.workspaceSkillFilesStore && workspaceSkillsForRuntime.length > 0) {
-      try {
-        const fileRows = await opts.workspaceSkillFilesStore.listForSkills(
-          workspaceSkillsForRuntime.map((skill) => skill.rowId),
-          { actingUserId: connectorUserId },
-        )
-        const filesBySlug = new Map<string, SkillContent['resources']>()
-        for (const file of fileRows) {
-          const slug = rowIdToSlug.get(file.workspaceSkillId)
-          if (!slug) continue
-          const resources = filesBySlug.get(slug) ?? []
-          const path = file.path ?? `${file.kind === 'reference' ? 'references' : file.kind === 'asset' ? 'assets' : file.kind === 'template' ? 'templates' : 'scripts'}/${file.name}`
-          resources.push({
-            path,
-            kind: file.kind,
-            name: file.name,
-            content: file.content,
-            description: file.description ?? undefined,
-            contentHash: file.contentHash ?? sha256(file.content),
-          })
-          filesBySlug.set(slug, resources)
-        }
-        for (const skill of userSkills) {
-          if (skill.bundleVersion === 2) skill.resources = filesBySlug.get(skill.id) ?? []
-        }
-      } catch (err) {
-        console.error(`[${channel}] skill resource hydration failed:`, err)
-      }
-    }
+    // An explicit empty resource set is a complete snapshot. A missing one
+    // cannot authorize a pointer or resource index for a protected skill.
+    const unavailableBundles = new Set(opts.workspaceSkillFilesStore ? userSkills.filter(skill =>
+      (skill.bundleVersion === 2 || extractPointers(skill.content).length > 0) && !skill.resources) : [])
     // S14 enablement, projected from row UUID to slug (the key the gate below
     // compares against `SkillContent.id`). A workspace skill enabled for this
     // assistant via `workspace_skill_enablement` becomes available even with
@@ -788,16 +764,13 @@ async function injectScopedSkills(opts: InjectSkillsOptions): Promise<InjectSkil
       const gov = slugToGovernance.get(s.id) ?? { sensitivity: 'public' as const }
       return isSkillOfferable(gov, viewer)
     }
-    // Shared governance predicate — enablement + app_type + clearance +
-    // required-connector gates. Both the discovery listing and the enforced
-    // set pass through this, so a workflow step can never surface (offer OR
-    // enforce) a skill the assistant is not entitled to.
-    const passesGovernance = (s: { id: string; source: string; appliesToAppType?: string; requiresConnectors: string[] }): boolean => {
+    // Eligibility precedes connector availability; even a missing-connector
+    // notice reveals the skill's name and needs its source proof.
+    const passesGovernance = (s: SkillContent): boolean => {
       if (disabledSlugs.has(s.id)) return false
       if (!isEnabled(s)) return false
       if (!matchesAppType(s)) return false
-      if (!isOfferable(s)) return false
-      return s.requiresConnectors.every((c) => connectedIds.has(c))
+      return isOfferable(s)
     }
 
     // Discovery allow-list (workflow `assistant_call.skills`). `undefined` →
@@ -810,53 +783,85 @@ async function injectScopedSkills(opts: InjectSkillsOptions): Promise<InjectSkil
     // discovery allow-list; the governance gates still apply.
     const enforceSet = opts.enforceSlugs && opts.enforceSlugs.length > 0 ? new Set(opts.enforceSlugs) : null
 
-    // Discovery set: governance-passing ∩ allow-list, MINUS anything enforced
-    // (an enforced skill is already active — never double-surface it via useSkill).
-    const availableSkills = allSkills.filter(
-      (s) => passesGovernance(s) && isInScope(s) && !enforceSet?.has(s.id),
-    )
+    const connectorsAvailable = (skill: SkillContent) => skill.requiresConnectors.every(id => connectedIds.has(id))
+    const discovery = allSkills.filter(skill => passesGovernance(skill) && isInScope(skill) && !enforceSet?.has(skill.id))
+    const enforcedSkills = allSkills.filter(skill => enforceSet?.has(skill.id) && passesGovernance(skill) && connectorsAvailable(skill))
+    const workspaceContent = new Set(userSkills)
 
-    const retainSkills = async (skills: readonly SkillContent[], context?: ToolContext) => {
+    const retainSkills = async (skills: readonly SkillContent[], context?: ToolContext, retain = true) => {
+      if (skills.some(skill => unavailableBundles.has(skill))) throw new Error('skill_source_unavailable')
       const execution = context?.executionContext ?? opts.executionContext
-      const accumulator = context?.scopeAccumulator ?? opts.scopeAccumulator
       if (!execution) return
+      const accumulator = context?.scopeAccumulator ?? opts.scopeAccumulator
       if (!accumulator) throw new Error('skill_source_authority_required')
       const sources: ScopeSource[] = []
       for (const skill of skills) {
         const captured = boundScopeSources(skill)
-        if (userSkills.includes(skill) && !captured.length) throw new Error('skill_source_unavailable')
+        if (workspaceContent.has(skill) && !captured.length) throw new Error('skill_source_unavailable')
         sources.push(...captured)
       }
       if (!sources.length) return
+      // Use the model's admitted native reader even when this batch contains
+      // only skill roots. Its app-role transaction enforces any application binding.
+      const caller = await runApplicationTransaction(getAppPool(), execution, async client => {
+        await client.query("SELECT set_config('app.v2_assistant_id',$1,true)", [execution.assistant.id])
+        return validateCallerScopeEvidence({ sources }, execution.security.ceiling, client)
+      })
+      const audience = opts.authorizeSkillAudience
+        ? await opts.authorizeSkillAudience(caller)
+        : await validateAudienceScopeEvidence(caller, execution.security.ceiling)
+      execution.lifecycle.abortSignal.throwIfAborted()
       await execution.security.authority.assertCurrent()
-      await validateCallerScopeEvidence({ sources }, execution.security.ceiling)
-      await validateAudienceScopeEvidence({ sources }, execution.security.ceiling)
-      accumulator.note({ sources })
+      // A shared destination can return only a raised label floor.
+      if (retain) accumulator.note({ ...audience, sources: [...(caller.sources ?? []), ...(audience.sources ?? [])] })
     }
-    // Native chat consumes the listing in its prompt; MCP asks for metadata
-    // through a command so discovery itself cannot disclose protected content.
-    if (!opts.exposeListingTool) await retainSkills(availableSkills)
 
-    for (const s of allSkills) {
-      if (disabledSlugs.has(s.id)) continue
-      // A skill outside the caller's allow-list is not "unavailable" — it was
-      // simply never requested by this step; don't surface it in the prompt.
-      if (!isInScope(s)) continue
-      if (enforceSet?.has(s.id)) continue // enforced, not a discovery candidate
-      if (!isEnabled(s)) continue
-      // Skills constrained to a different app_type are not "unavailable" —
-      // they're irrelevant for this assistant. Skip surfacing them in the
-      // unavailable list so we don't pollute the prompt for personal
-      // assistants with "voice-import skill (requires: ...)".
-      if (!matchesAppType(s)) continue
-      // A skill gated out by clearance / activation scope (§5.5) is not
-      // "unavailable" either — it must not even be named to an under-cleared
-      // or non-originating assistant.
-      if (!isOfferable(s)) continue
-      const missing = s.requiresConnectors.filter((c) => !connectedIds.has(c))
-      if (missing.length > 0) {
-        unavailableCapabilities.push(`${s.name} skill (requires: ${missing.join(', ')})`)
+    // Most catalogs take one batched proof. Isolate individual refusals only
+    // after a policy/source denial; a database outage should not fan out reads.
+    const optionalSkills = async (skills: SkillContent[], context?: ToolContext, retain = true): Promise<SkillContent[]> => {
+      const execution = context?.executionContext ?? opts.executionContext
+      skills = skills.filter(skill => !unavailableBundles.has(skill))
+      if (!execution) return skills
+      const admitted = new Set<SkillContent>()
+      const protectedSkills = skills.filter(skill => {
+        if (boundScopeSources(skill).length) return true
+        if (!workspaceContent.has(skill)) admitted.add(skill)
+        return false
+      })
+      const check = async (batch: SkillContent[]): Promise<void> => {
+        if (!batch.length) return
+        try {
+          await retainSkills(batch, context, retain)
+          for (const skill of batch) admitted.add(skill)
+        } catch (error) {
+          if (isAuthorityChangedError(error)) throw error
+          execution.lifecycle.abortSignal.throwIfAborted()
+          await execution.security.authority.assertCurrent()
+          const diagnostic = scopeEvidenceFailureOf(error)
+          const sourceDenied = isAudienceScopeRestriction(diagnostic) || diagnostic === 'source_held'
+            || diagnostic === 'source_changed' || diagnostic === 'source_unverifiable' || diagnostic === 'shape'
+          if (!sourceDenied) {
+            if (context) throw error // An explicit list request must report an indeterminate read.
+            return
+          }
+          if (batch.length === 1) return
+          const middle = Math.ceil(batch.length / 2)
+          await check(batch.slice(0, middle))
+          await check(batch.slice(middle))
+        }
       }
+      await check(protectedSkills)
+      return skills.filter(skill => admitted.has(skill))
+    }
+
+    // Mandatory instructions are proven before registering tools or emitting
+    // discovery metadata. Direct clients discover their listing on demand.
+    await retainSkills(enforcedSkills)
+    const visible = await optionalSkills(opts.exposeListingTool ? discovery.filter(skill => !connectorsAvailable(skill)) : discovery)
+    const availableSkills = (opts.exposeListingTool ? discovery : visible).filter(connectorsAvailable)
+    for (const skill of visible) {
+      const missing = skill.requiresConnectors.filter(id => !connectedIds.has(id))
+      if (missing.length) unavailableCapabilities.push(`${skill.name} skill (requires: ${missing.join(', ')})`)
     }
 
     // CL-8: fire-and-forget counter bump (invocations + last_invoked_at, stale
@@ -875,27 +880,21 @@ async function injectScopedSkills(opts: InjectSkillsOptions): Promise<InjectSkil
       opts.invocationBuffer?.addInvocation(rowId)
     }
 
-    // Load-time `{{kind:name}}` pointer expansion: resolve the skill's row UUID
-    // (built-ins are absent → pass through) and substitute support-file
-    // pointers from `workspace_skill_files`. Shared by discovery + enforcement.
-    const filesStore = opts.workspaceSkillFilesStore
-    const expandContent = filesStore
-      ? async (skill: SkillContent): Promise<string> => {
-          const rowId = slugToRowId.get(skill.id)
-          if (!rowId) return skill.content
-          const expanded = await expandSkillPointers(skill, rowId, {
-            async getByPointer(workspaceSkillId, pointer) {
-              const row = await filesStore.getByPointer(workspaceSkillId, pointer)
-              if (!row || row.kind === 'asset') return null
-              return { kind: row.kind, name: row.name, content: row.content }
-            },
-          })
-          return expanded.content
-        }
-      : undefined
+    // v1 placeholders read the pinned bundle captured with this root.
+    const expandContent = async (skill: SkillContent): Promise<string> => {
+      const resources = skill.resources
+      if (!workspaceContent.has(skill) || !opts.workspaceSkillFilesStore || !resources) return skill.content
+      const expanded = await expandSkillPointers(skill, skill.id, {
+        async getByPointer(_id, pointer) {
+          const file = resources.find(file => file.kind === pointer.kind && file.name === pointer.name)
+          return file ? { ...pointer, content: file.content } : null
+        },
+      })
+      return expanded.content
+    }
 
     let promptFragment = ''
-    const listing = formatSkillListing(availableSkills)
+    const listing = opts.exposeListingTool ? '' : formatSkillListing(availableSkills)
     if (listing) {
       promptFragment = `\n\n# Available Skills\nUse the useSkill tool to activate a skill when relevant.\nBefore answering what Use Brian (or you) can do, or how a feature works, activate the most relevant skill FIRST and answer only from it.\n${listing}`
     }
@@ -913,9 +912,7 @@ async function injectScopedSkills(opts: InjectSkillsOptions): Promise<InjectSkil
       )
     }
 
-    const resourceSkillCandidates = allSkills.filter(
-      (skill) => passesGovernance(skill) && (isInScope(skill) || Boolean(enforceSet?.has(skill.id))),
-    )
+    const resourceSkillCandidates = [...availableSkills, ...enforcedSkills]
     if (resourceSkillCandidates.some((skill) => skill.bundleVersion === 2 && (skill.resources?.length ?? 0) > 0)) {
       const resourceParams = {
         getAvailableSkills: () => resourceSkillCandidates,
@@ -928,7 +925,8 @@ async function injectScopedSkills(opts: InjectSkillsOptions): Promise<InjectSkil
     for (const name of ['useSkill', 'readSkillResource', 'searchSkillResources']) {
       const tool = tools.get(name)
       if (tool) tools.set(name, { ...tool, async execute(input, context) {
-        const picked = resourceSkillCandidates.find(skill => skill.id === input.skill)
+        const candidates = name === 'useSkill' ? availableSkills : resourceSkillCandidates
+        const picked = candidates.find(skill => skill.id === input.skill)
         await retainSkills(picked ? [picked] : availableSkills, context)
         return tool.execute(input, context)
       } })
@@ -937,10 +935,20 @@ async function injectScopedSkills(opts: InjectSkillsOptions): Promise<InjectSkil
       const list = buildTool({ name: 'listAvailableSkills', description: 'List the skills currently admitted for this assistant and work context. Use a returned skill ID with useSkill; availability is checked again when used.',
         inputSchema: z.object({ offset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(100).default(50) }).strict(), isReadOnly: true,
         async execute({ offset, limit }, context) {
-          const page = availableSkills.slice(offset, offset + limit)
-          await retainSkills(page, context)
-          return { data: { skills: page.map(skill => ({ id: skill.id, name: skill.name, description: skill.description })),
-            nextOffset: offset + limit < availableSkills.length ? offset + limit : null } }
+          // Skip only admitted entries and retain only the page and the one
+          // extra entry whose existence is exposed by nextOffset.
+          const page: SkillContent[] = []
+          let skip = offset
+          let index = 0
+          while (index < availableSkills.length && page.length <= limit) {
+            const batch = availableSkills.slice(index, index + (skip || limit + 1 - page.length))
+            const visible = await optionalSkills(batch, context, skip === 0)
+            if (skip) skip -= visible.length
+            else page.push(...visible)
+            index += batch.length
+          }
+          return { data: { skills: page.slice(0, limit).map(skill => ({ id: skill.id, name: skill.name, description: skill.description })),
+            nextOffset: page.length > limit ? offset + limit : null } }
         } })
       tools.set(list.name, list)
     }
@@ -953,13 +961,11 @@ async function injectScopedSkills(opts: InjectSkillsOptions): Promise<InjectSkil
     // is silently skipped — a workflow step cannot escalate.
     let enforcedPromptFragment = ''
     if (enforceSet) {
-      const enforcedSkills = allSkills.filter((s) => enforceSet.has(s.id) && passesGovernance(s))
-      await retainSkills(enforcedSkills)
       const sections: string[] = []
       for (const skill of enforcedSkills) {
         activatedSkillSlugs.add(skill.id)
         let instructions = formatSkillInstructions(skill)
-        if (skill.bundleVersion !== 2 && expandContent) {
+        if (skill.bundleVersion !== 2) {
           try {
             instructions = await expandContent(skill)
           } catch {
@@ -976,6 +982,10 @@ async function injectScopedSkills(opts: InjectSkillsOptions): Promise<InjectSkil
 
     return { promptFragment, enforcedPromptFragment }
   } catch (err) {
+    if (isAuthorityChangedError(err)) throw err
+    opts.executionContext?.lifecycle.abortSignal.throwIfAborted()
+    await opts.executionContext?.security.authority.assertCurrent()
+    if (opts.enforceSlugs?.length) throw err
     console.error(`[${channel}] skill injection failed:`, err)
     return { promptFragment: '', enforcedPromptFragment: '' }
   }

@@ -2,9 +2,13 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { getAppPool, getPool } from '../client.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
+import { createDbSkillStore } from '../skill-store.js'
+import { createDbWorkspaceSkillFilesStore } from '../workspace-skill-files-store.js'
 import { createMemory, type Memory } from '../memories.js'
 import {
   applyDerivedSkillPatch,
+  applyDerivedSkillSupportFile,
   createDerivedWorkspaceSkill,
   readWorkspaceSkillRevisionSource,
   recordDerivedSkillRederivation,
@@ -16,6 +20,31 @@ const { assertLocalFixture } = await import(
 await assertLocalFixture()
 
 const pool = getPool()
+
+async function admittedSkill(workspaceId: string, revisionId: string, userId: string, settings: Record<string, string> = {}) {
+  const app = await getAppPool().connect()
+  try {
+    await app.query('BEGIN')
+    const context = {
+      'app.current_user_id': userId,
+      'app.system_bypass': 'false',
+      'app.agent_workspace_id': workspaceId,
+      'app.agent_actor_id': userId,
+      ...settings,
+    }
+    await app.query('SELECT set_config(k,v,true) FROM unnest($1::text[],$2::text[]) AS t(k,v)',
+      [Object.keys(context), Object.values(context)])
+    const result = await app.query(
+      `SELECT read_admitted_native_scope_snapshot($1,'workspace_skill_revision',$2) AS snapshot,
+              read_entity_derivation_source($1,'workspace_skill_revision',$2) AS "entityWriter"`,
+      [workspaceId, revisionId],
+    )
+    return result.rows[0]
+  } finally {
+    await app.query('ROLLBACK')
+    app.release()
+  }
+}
 
 function memorySource(memory: Memory): ScopeSource {
   return {
@@ -70,6 +99,33 @@ describe('[COMP:api/procedural-skill-evidence] immutable skill revision lineage'
     await pool.end()
   })
 
+  it('admits an authored revision for its native member and withholds withdrawn or inaccessible receipts', async () => {
+    const f = await fixture()
+    await pool.query(`INSERT INTO workspace_skills(workspace_id,author_id,slug,name,description,content,sensitivity,induction_source,write_origin)
+      VALUES($1,$2,'native-offer','Native offer','Fixture skill','Fixture instructions','public','authored','foreground')`,
+    [f.workspaceId, f.userId])
+    const { rows: [skill] } = await pool.query('SELECT id,scope_revision_id FROM workspace_skills WHERE workspace_id=$1', [f.workspaceId])
+    const read = (id: string, settings?: Record<string, string>) => admittedSkill(f.workspaceId, id, f.userId, settings)
+
+    expect(await read(skill.scope_revision_id)).toMatchObject({
+      snapshot: { workspaceId: f.workspaceId, userId: null, assistantId: null, version: '1', held: false, sensitivity: 'public' },
+      entityWriter: null,
+    })
+    expect((await read(randomUUID())).snapshot).toEqual({ held: true })
+    const other = await fixture()
+    expect((await admittedSkill(other.workspaceId, skill.scope_revision_id, other.userId)).snapshot).toEqual({ held: true })
+    expect((await read(skill.scope_revision_id, { 'app.application_id': randomUUID() })).snapshot).toEqual({ held: true })
+    expect((await read(skill.scope_revision_id, { 'app.public_share_root': randomUUID() })).snapshot).toEqual({ held: true })
+    await expect(read(skill.scope_revision_id, { 'app.v2_assistant_id': randomUUID() })).rejects.toThrow('scope_operation_denied')
+    await expect(admittedSkill(f.workspaceId, skill.scope_revision_id, randomUUID())).rejects.toThrow('scope_operation_denied')
+
+    await pool.query("UPDATE workspace_skills SET content='Replacement instructions' WHERE id=$1", [skill.id])
+    expect((await read(skill.scope_revision_id)).snapshot).toEqual({ held: true })
+    const replacement = await readWorkspaceSkillRevisionSource(f.workspaceId, skill.id)
+    expect(replacement!.resourceId).not.toBe(skill.scope_revision_id)
+    expect((await read(replacement!.resourceId)).snapshot.held).toBe(false)
+  })
+
   it('persists complete inputs, carries the exact scope, and holds every descendant revision', async () => {
     const f = await fixture()
     const created = await createDerivedWorkspaceSkill({
@@ -108,6 +164,18 @@ describe('[COMP:api/procedural-skill-evidence] immutable skill revision lineage'
       },
     })
     const second = await readWorkspaceSkillRevisionSource(f.workspaceId, created.rowId)
+    // A derived patch references its predecessor. The retained immutable receipt
+    // still carries that earlier read's scope after the skill head advances.
+    const actor = {
+      'app.agent_clearance': 'confidential',
+      'app.agent_compartments': JSON.stringify(['finance']),
+      'app.agent_project_ids': 'null',
+      'app.agent_visibility_assistants': JSON.stringify([f.assistantId]),
+    }
+    expect((await admittedSkill(f.workspaceId, first!.resourceId, f.userId, actor)).snapshot).toMatchObject({
+      version: first!.version, held: false, userId: f.userId, assistantId: f.assistantId, compartments: ['finance'],
+    })
+    expect((await admittedSkill(f.workspaceId, first!.resourceId, f.userId, { ...actor, 'app.agent_clearance': 'public' })).snapshot).toEqual({ held: true })
     expect(second).toMatchObject({ resourceKind: 'workspace_skill_revision', version: '1' })
     expect(second!.resourceId).not.toBe(first!.resourceId)
 
@@ -176,5 +244,48 @@ describe('[COMP:api/procedural-skill-evidence] immutable skill revision lineage'
     } finally {
       app.release()
     }
+  })
+  it('keeps captured skill resources stable across derived replacement and ordinary human edits', async () => {
+    const f = await fixture()
+    const evidence = { producer: 'fixture:bundle', sources: [memorySource(f.source)] }
+    const skill = await createDerivedWorkspaceSkill({
+      workspaceId: f.workspaceId, authorUserId: f.userId, slug: 'versioned-bundle', name: 'Versioned bundle',
+      description: 'Fixture resource', content: '{{reference:guide.md}}', inductionSource: 'self',
+      humanApproved: true, source: 'auto-generated', writeOrigin: 'background_review', evidence,
+    })
+    const files = createDbWorkspaceSkillFilesStore()
+    const store = createDbSkillStore()
+    const capture = async () => {
+      const rows = await store.listForWorkspaceContent(f.workspaceId, f.userId, { includeResources: true })
+      return rows.find(row => row.id === skill.slug)!
+    }
+    const writeDerived = (content: string) => applyDerivedSkillSupportFile({
+      workspaceId: f.workspaceId, skillId: skill.rowId, kind: 'reference', name: 'guide.md', content, evidence,
+    })
+    expect((await capture()).resources).toEqual([])
+    await writeDerived('First derived resource')
+    const initial = await capture()
+    await writeDerived('Second derived resource')
+    const beforeManualEdit = await capture()
+    expect(boundScopeSources(initial)[0].resourceId).not.toBe(boundScopeSources(beforeManualEdit)[0].resourceId)
+
+    // The same RLS-backed store used by PUT and DELETE /skills/:id/files.
+    // A human edit of a derived skill leaves its scope lineage intact.
+    await files.upsert(f.userId, { workspaceSkillId: skill.rowId, kind: 'reference', name: 'guide.md', content: 'Human replacement' })
+    const afterManualEdit = await capture()
+    expect(boundScopeSources(afterManualEdit)).toEqual(boundScopeSources(beforeManualEdit))
+    expect(await files.delete(f.userId, skill.rowId, 'reference', 'guide.md')).toBe(true)
+
+    expect(initial.resources?.map(file => file.content)).toEqual(['First derived resource'])
+    expect(beforeManualEdit.resources?.map(file => file.content)).toEqual(['Second derived resource'])
+    expect(afterManualEdit.resources?.map(file => file.content)).toEqual(['Human replacement'])
+    expect((await capture()).resources).toEqual([])
+    const historical = boundScopeSources(beforeManualEdit)[0]!
+    const actor = {
+      'app.agent_clearance': 'confidential', 'app.agent_compartments': JSON.stringify(['finance']),
+      'app.agent_project_ids': 'null', 'app.agent_visibility_assistants': JSON.stringify([f.assistantId]),
+    }
+    expect((await admittedSkill(f.workspaceId, historical.resourceId, f.userId, actor)).snapshot)
+      .toMatchObject({ version: historical.version, held: false })
   })
 })

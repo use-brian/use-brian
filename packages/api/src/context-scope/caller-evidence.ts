@@ -196,7 +196,7 @@ async function validateScopeEvidence(
     }
     const raised: ScopeEvidence = { ...evidence }
     for (const state of states) {
-      if (state.state === 'held') throw unavailable(kind, 'source_held')
+      if (state.state === 'held') throw unavailable(kind, 'source_held', { sourceKind: state.source.resourceKind })
       if (state.state === 'unverifiable') throw unavailable(kind, 'source_unverifiable')
       if (state.state === 'stale_input') throw unavailable(kind, 'source_changed')
       if (state.state !== 'changed') continue

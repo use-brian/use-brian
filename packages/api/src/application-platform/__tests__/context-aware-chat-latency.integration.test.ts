@@ -242,3 +242,60 @@ it.each(['native_proof','ancestry'] as const)('reports a PostgreSQL proof timeou
     await f.cleanup()
   }
 }, 120_000)
+
+it('delivers a private chat reply with both a CRM self profile and an offered skill revision', async () => {
+  const f = await persistentContextFixture()
+  try {
+    const { workspaceId, assistantId, ownerId } = f
+    await f.pool.query("UPDATE workspaces SET plan='pro', department_read_v2=true WHERE id=$1", [workspaceId])
+    const person = await f.pool.query<{ id: string }>(
+      `INSERT INTO entities(workspace_id,kind,display_name,attributes,user_id,created_by_user_id,source)
+       VALUES($1,'person','Fictional Profile','{"self":true,"profile":{"name":"Fictional Profile"}}',$2,$2,'manual') RETURNING id`,
+      [workspaceId, ownerId],
+    )
+    await f.pool.query('UPDATE users SET entity_id=$1 WHERE id=$2', [person.rows[0].id, ownerId])
+    const skill = await f.pool.query<{ id: string }>(
+      `INSERT INTO workspace_skills(workspace_id,author_id,slug,name,description,content,sensitivity,state,activated_at)
+       VALUES($1,$2,'fixture-inventory','Fixture inventory','Count fictional widgets','Count the widgets in the fixture.','internal','active',now()) RETURNING id`,
+      [workspaceId, ownerId],
+    )
+    async function greet() {
+      const { session, token } = await openContextChatSession(f, secret)
+      providerInputs = []
+      const response = await request(boot.app).post('/api/chat').set('Authorization', 'Bearer ' + token)
+        .send({ workspaceId, assistantId, sessionId: session.id, appOrigin: 'chat', message: 'hi' })
+        .expect(200)
+      const reopened = await request(boot.app).get('/api/sessions/' + session.id + '/messages')
+        .set('Authorization', 'Bearer ' + token).expect(200)
+      return { stream: response.text, messages: reopened.body }
+    }
+
+    answer = 'Hello from the fixture.'
+    for (const enabled of [false, true]) {
+      if (enabled) await f.pool.query(
+        'INSERT INTO workspace_skill_enablement(workspace_skill_id,assistant_id,enabled_by_user_id) VALUES($1,$2,$3)',
+        [skill.rows[0].id, assistantId, ownerId],
+      )
+      const { stream, messages } = await greet()
+      expect(stream).toContain('event: done')
+      expect(providerInputs).toHaveLength(1)
+      expect(providerInputs[0].includes('fixture-inventory')).toBe(enabled)
+      expect(messages.at(-1)).toMatchObject({ role: 'assistant', content: [{ type: 'text', text: answer }] })
+    }
+
+    // Replacing the revision after model dispatch invalidates durable
+    // publication, even while the original chat audience is still authorized.
+    beforeOutput = async () => {
+      await f.pool.query('UPDATE workspace_skills SET content=$2 WHERE id=$1', [skill.rows[0].id, 'Revised fixture instructions.'])
+    }
+    const { stream, messages } = await greet()
+    expect(providerInputs[0]).toContain('fixture-inventory')
+    expect(stream).toContain('event: error')
+    expect(stream).not.toContain('event: done')
+    expect(messages.map((row: { role: string }) => row.role)).toEqual(['user'])
+  } finally {
+    beforeOutput = undefined
+    await boot.ctx.analytics.flush()
+    await f.cleanup()
+  }
+}, 60_000)
