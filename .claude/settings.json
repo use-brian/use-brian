@@ -10,6 +10,28 @@
             "timeout": 30
           }
         ]
+      },
+      {
+        "matcher": "Edit|Write|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR}/scripts/hooks/check-migration-size.mjs\" --edits || exit 2",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR}/scripts/hooks/check-migration-size.mjs\" --before-write || exit 2",
+            "timeout": 10
+          }
+        ]
       }
     ]
   }

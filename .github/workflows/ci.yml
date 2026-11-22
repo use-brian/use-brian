@@ -49,6 +49,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Check SQL migration sizes
+        run: node scripts/hooks/check-migration-size.mjs --files
       - id: scope
         run: node scripts/testing/ci-scope.mjs
       - name: Retain proposed change impact (report-only)

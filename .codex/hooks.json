@@ -10,6 +10,28 @@
             "timeout": 30
           }
         ]
+      },
+      {
+        "matcher": "apply_patch|exec_command|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "repo_root=\"$(git rev-parse --show-toplevel)\" && node \"$repo_root/scripts/hooks/check-migration-size.mjs\" --edits || exit 2",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "repo_root=\"$(git rev-parse --show-toplevel)\" && node \"$repo_root/scripts/hooks/check-migration-size.mjs\" --before-write || exit 2",
+            "timeout": 10
+          }
+        ]
       }
     ]
   }
