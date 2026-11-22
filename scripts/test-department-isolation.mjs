@@ -11,6 +11,7 @@ import {
   DEPARTMENT_ISOLATION_SUITES,
   departmentIsolationManifestCoverage,
 } from '../packages/shared/src/department-isolation-coverage.ts'
+import { runCalendarIsolation } from './testing/calendar-isolation.mjs'
 import { createLocalFixture, runCommand, cleanRuntimeEnvironment, validateAmbientDatabase } from './crm/local-fixture.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
@@ -40,6 +41,7 @@ const relTest = (suite, testFile) => join(suite.packageDir, testFile)
 const relevantPaths = new Set([
   'scripts/test-department-isolation.mjs',
   'scripts/testing/department-isolation-report.mjs',
+  'scripts/testing/calendar-isolation.mjs',
   'scripts/crm/local-fixture.mjs',
   'scripts/crm/runtime-role.mjs',
   'apps/api/src/__tests__/prepared-pglite.ts',
@@ -220,14 +222,39 @@ async function run() {
         for(const [index,testFiles] of groups.entries()){
           const resultFile=groups.length===1?outputFile:join(reports,`${suite.id}-${index}.json`)
           const integrationGroup=testFiles.every(file=>file.endsWith('.integration.test.ts'))
+          const captured = []
+          const runTests = async (testEnv, pattern, phase) => {
+            const file = phase ? join(reports,`${suite.id}-${phase}.json`) : resultFile
+            let rows = []
+            try {
+              await runCommand('pnpm', ['exec','vitest','run',
+                ...(integrationGroup?['--config','vitest.integration.config.ts']:[]),...testFiles,
+                ...(pattern?['--testNamePattern',pattern]:[]),'--reporter=default','--reporter=json',`--outputFile=${file}`],
+                { cwd:join(root,suite.packageDir),env:testEnv,inherit:true })
+            } finally {
+              // Vitest writes assertion failures even when its process exits nonzero.
+              const raw = await readFile(file,'utf8').catch(error => {
+                if (error.code !== 'ENOENT') throw error
+                return null
+              })
+              if (raw) {
+                rows = flattenAssertions(JSON.parse(raw),suite)
+                const match = pattern && new RegExp(pattern)
+                captured.push(...rows.filter(row => !match || match.test(row.fullName)))
+              }
+            }
+            return rows
+          }
           try {
-            await runCommand('pnpm', ['exec', 'vitest', 'run',
-                ...(integrationGroup?['--config','vitest.integration.config.ts']:[]),
-                ...testFiles,'--reporter=default','--reporter=json',`--outputFile=${resultFile}`],
-              { cwd:join(root,suite.packageDir), env, inherit:true })
-          } catch(error) {executionErrors.push(error instanceof Error?error.message:String(error))}
-          const raw=await readFile(resultFile,'utf8').catch(()=>JSON.stringify({testResults:[]}))
-          actual.push(...flattenAssertions(JSON.parse(raw),suite))
+            if (shard && suite.id==='recovered-calendar-history' && selectedSuites.length===1) {
+              actual.push(...await runCalendarIsolation(env,runTests))
+            } else {
+              actual.push(...await runTests(env))
+            }
+          } catch(error) {
+            executionErrors.push(error instanceof Error?error.message:String(error))
+            actual.push(...captured)
+          }
         }
       }
       const executionError=executionErrors.length?executionErrors.join('; '):null

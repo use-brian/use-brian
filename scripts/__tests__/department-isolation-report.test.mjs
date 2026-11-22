@@ -6,6 +6,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, wr
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { cleanRuntimeEnvironment } from '../crm/local-fixture.mjs'
+import { calendarPartition } from '../testing/calendar-isolation.mjs'
 import { embeddedTestFiles } from '../testing/embedded-database-tests.mjs'
 import {
   DEPARTMENT_ISOLATION_BOUNDARIES, DEPARTMENT_ISOLATION_CASES, DEPARTMENT_ISOLATION_SUITES,
@@ -37,6 +38,17 @@ function receipts(profile = 'full') {
 }
 
 describe('[COMP:ci/execution-topology] complete acceptance across isolated runners', () => {
+  it('keeps a selected Calendar skip or failure and refuses missing, duplicate or renamed cases', () => {
+    const names = ['history', 'hold']
+    for (const status of ['passed', 'failed', 'skipped']) {
+      const rows = [{ fullName: 'hold', status }, { fullName: 'history', status: 'skipped' }]
+      assert.deepEqual(calendarPartition(rows, '^hold$', names).selected, [rows[0]])
+      assert.throws(() => calendarPartition(rows.slice(1), '^hold$', names))
+      assert.throws(() => calendarPartition([...rows, rows[0]], '^hold$', names))
+      assert.throws(() => calendarPartition(rows, '^renamed$', names))
+    }
+  })
+
   it('registers existing test files within their owning packages', () => {
     for (const suite of DEPARTMENT_ISOLATION_SUITES) {
       for (const file of suite.testFiles) {
@@ -66,7 +78,7 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
     const root = mkdtempSync(join(tmpdir(), 'ci-report-merge-'))
     t.after(() => rmSync(root, { recursive: true, force: true }))
     const cli = 'scripts/test-department-isolation.mjs'
-    const sources = [cli, 'scripts/testing/department-isolation-report.mjs', 'scripts/crm/local-fixture.mjs',
+    const sources = [cli, 'scripts/testing/calendar-isolation.mjs', 'scripts/testing/department-isolation-report.mjs', 'scripts/crm/local-fixture.mjs',
       'scripts/crm/runtime-role.mjs', 'packages/shared/src/department-isolation-coverage.ts']
     const sourceHashes = {}
     for (const path of sources) {

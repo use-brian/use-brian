@@ -290,8 +290,8 @@ export async function assertLocalFixture(env = process.env) {
   return marker
 }
 
-/** Clone only a pristine template created by this disposable fixture owner. */
-export async function cloneLocalFixture(env = process.env) {
+/** Clone the owned pristine template, or the quiescent parent after a completed journey. */
+export async function cloneLocalFixture(env = process.env, { fromCurrent = false } = {}) {
   const parent = await assertLocalFixture(env)
   if (parent.template !== 'brian_assurance_template' || env.BRIAN_ASSURANCE_TEMPLATE !== parent.template) {
     throw new Error('Owned fixture has no prepared template')
@@ -307,7 +307,9 @@ export async function cloneLocalFixture(env = process.env) {
   await admin.connect()
   let created = false
   try {
-    await admin.query(`CREATE DATABASE "${database}" OWNER assurance_owner TEMPLATE brian_assurance_template`)
+    // PostgreSQL refuses to clone a source database with other active sessions.
+    const source = fromCurrent ? parent.database : parent.template
+    await admin.query(`CREATE DATABASE "${database}" OWNER assurance_owner TEMPLATE "${source}"`)
     created = true
     await writeFile(marker, JSON.stringify({ token, port: parent.port, database, directory: parent.directory, ...(parent.bootstrapRole ? { bootstrapRole: parent.bootstrapRole } : {}) }), { mode: 0o600 })
   } catch (error) {
