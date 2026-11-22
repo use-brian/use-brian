@@ -1,8 +1,8 @@
 // [COMP:invariants/migrations] Shared by the editor, Git pre-commit and CI.
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs'
-import { dirname, relative, resolve, sep } from 'node:path'
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from 'node:fs'
+import { basename, dirname, relative, resolve, sep } from 'node:path'
 
 const limit = 64 * 1024
 const dirs = ['packages/api/migrations', 'packages/api-platform/migrations']
@@ -76,7 +76,11 @@ function checkProposedWrite(event) {
   if (event.hook_event_name !== 'PreToolUse' || typeof event.cwd !== 'string') return
   function inspect(path, content) {
     if (typeof path !== 'string' || !path.endsWith('.sql') || typeof content !== 'string') return
-    const file = relative(process.cwd(), resolve(event.cwd, path)).split(sep).join('/')
+    const absolute = resolve(realpathSync(event.cwd), path)
+    // The new file can be absent and its parent can be reached through a symlink.
+    const parent = dirname(absolute)
+    const canonical = existsSync(parent) ? resolve(realpathSync(parent), basename(absolute)) : absolute
+    const file = relative(process.cwd(), canonical).split(sep).join('/')
     const ownPath = file.startsWith('use-brian/') && existsSync('use-brian/.git') ? file.slice('use-brian/'.length) : file
     if (!dirs.includes(dirname(ownPath).split(sep).join('/'))) return
     const bytes = Buffer.from(content)
