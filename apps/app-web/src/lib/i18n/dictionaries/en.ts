@@ -11820,6 +11820,7 @@ export const en = {
       applicationRecovery: {
         ambiguousIdentity: "Brian skipped a record or relationship because the name could refer to more than one entity.",
         scopeMismatch: "Brian held an update to keep the source’s sharing restrictions.",
+        crmSourceHeld: "Brian held a CRM update because it could not preserve a verified link to its source.",
         finishedWithHolds: "Finished with held items",
         rejected: "Rejected",
         newer: "Newer runs",

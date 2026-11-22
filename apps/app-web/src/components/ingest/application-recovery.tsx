@@ -100,6 +100,10 @@ function ApplicationRecoveryPages({ workspaceId }: { workspaceId: string }) {
                   {item.items.some(candidate => candidate.failureCode === "application_entity_scope_mismatch") && (
                     <p className="mt-1 text-muted-foreground">{copy.scopeMismatch}</p>
                   )}
+                  {item.items.some(candidate =>
+                    candidate.failureCode === "application_crm_merge_provenance_required"
+                    || candidate.failureCode === "application_crm_source_changed"
+                  ) && <p className="mt-1 text-muted-foreground">{copy.crmSourceHeld}</p>}
                   {retryError === item.runId && <p role="alert" className="mt-1 text-destructive">{copy.error}</p>}
                   {item.errorCode && <p className="mt-1 text-destructive">{copy.lastError}: {item.errorCode}</p>}
                   {item.resumable && (

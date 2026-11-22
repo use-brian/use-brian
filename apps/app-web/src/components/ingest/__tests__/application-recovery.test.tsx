@@ -17,7 +17,7 @@ vi.mock("@/lib/i18n/client", () => ({
     error: "Error", refresh: "Refresh", retry: "Retry unfinished", retrying: "Retrying",
     cancel: "Cancel", confirmTitle: "Confirm", confirmBody: "Only unfinished writes", older: "Older runs", newer: "Newer runs",
     committed: "Applied", failed: "Failed", held: "Held", rejected: "Rejected", finishedWithHolds: "Finished with held items", ambiguousIdentity: "Ambiguous record match", lastError: "Last error",
-    scopeMismatch: "Source sharing restrictions", legacy: "Legacy", states: { complete: "Complete", partial: "Partially applied", blocked: "Blocked", not_started: "Not started" },
+    scopeMismatch: "Source sharing restrictions", crmSourceHeld: "CRM source required", legacy: "Legacy", states: { complete: "Complete", partial: "Partially applied", blocked: "Blocked", not_started: "Not started" },
   } } } }),
 }));
 
@@ -87,6 +87,16 @@ describe("[COMP:app-web/ingest-application] application recovery", () => {
     expect(container!.textContent).toContain("Source sharing restrictions");
     expect(container!.textContent).not.toContain("Ambiguous record match");
   });
+
+  it.each(["application_crm_merge_provenance_required", "application_crm_source_changed"])(
+    "explains a held CRM update with reason %s", async failureCode => {
+      const held = { candidateId: "contact", primitiveKind: "entity", disposition: "held",
+        failureCode, attemptCount: 1, retryable: false };
+      authFetch.mockResolvedValueOnce(Response.json({ applications: [{ ...item, items: [held] }], nextCursor: null }));
+      await mount();
+      expect(container!.textContent).toContain("CRM source required");
+    },
+  );
 
   it("keeps persisted results across navigation and reuses the workspace cache", async () => {
     authFetch.mockResolvedValueOnce(Response.json({ applications: [item], nextCursor: null }));

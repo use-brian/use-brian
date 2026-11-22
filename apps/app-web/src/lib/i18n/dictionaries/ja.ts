@@ -11573,6 +11573,7 @@ export const ja: Dictionary = {
       applicationRecovery: {
         ambiguousIdentity: "名前が複数の対象を指す可能性があるため、Brian は該当するレコードまたは関係の保存を見送りました。",
         scopeMismatch: "元の情報の共有範囲を守るため、Brian は更新を保留しました。",
+        crmSourceHeld: "元の情報との対応を検証可能な形で保存できないため、Brian は CRM の更新を保留しました。",
         finishedWithHolds: "一部を保留して完了",
         rejected: "却下",
         newer: "新しい実行履歴",

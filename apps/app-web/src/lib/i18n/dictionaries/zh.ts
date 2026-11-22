@@ -11516,6 +11516,7 @@ export const zh: Dictionary = {
       applicationRecovery: {
         ambiguousIdentity: "名稱可能指向多個對象，Brian 已略過相關紀錄或關聯。",
         scopeMismatch: "為保留來源的分享限制，Brian 已暫緩更新。",
+        crmSourceHeld: "由於無法保留可驗證的來源連結，Brian 已暫緩更新 CRM 紀錄。",
         finishedWithHolds: "已完成，部分項目暫緩處理",
         rejected: "已拒絕",
         newer: "較新的執行紀錄",

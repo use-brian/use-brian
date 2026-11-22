@@ -34,6 +34,7 @@ import { ApplicationPlatformError,applicationJsonSchema,applicationResourceRefSc
 import { assertExecutionResourceScope, buildAccessPredicate, buildCurrentMemberSourcePredicate, mutationActorAccess } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { applyRLSGucs, getAppPool, query, queryGated, queryWithRLS } from './client.js'
+import { CrmEpisodeHold, assertCrmEpisodeMergeTarget, authorizeCrmEpisode, ensureCrmEpisodeDerivationPolicy, findCrmEpisodeCompanyId, type CrmEpisodeExecution } from './crm-episode-authority.js'
 import { emitCrmRelationEdge, emitEdgeFireAndForget, superseedCrmRelationEdge } from './edge-hooks.js'
 import { assertNativeEntityFieldWrites, createEntity, updateEntity } from './entities-store.js'
 import {
@@ -429,46 +430,62 @@ export async function createCompany(
     mergeByName?: boolean
   },
   transaction?: CrmWriteTransaction,
+  extraction?: CrmEpisodeExecution,
 ): Promise<CompanyRecord> {
   validateCrmCreation(crmCompanyPatch.pick({name:true,domain:true,tags:true,externalRef:true,customFields:true}).required({name:true}),params,['mergeByName'])
   assertAuthorshipPresent('createCompany', userId)
-  const access = dedupeAccessContext(userId, params.workspaceId, params.access)
-  const bound=currentApplicationReadTransaction(access)
+  const author = dedupeAccessContext(userId, params.workspaceId, params.access)
+  const bound=currentApplicationReadTransaction(author)
   if(bound&&transaction?.client!==bound.client)throw new ApplicationPlatformError('access_unavailable','The transaction is unavailable.')
-  if(!transaction)return runCrmWriteTransaction(userId,tx=>createCompany(userId,params,tx))
+  if(!transaction)return runCrmWriteTransaction(userId,tx=>createCompany(userId,params,tx,extraction))
+  const episode = params.source === 'extracted' && params.sourceEpisodeId
+    ? await authorizeCrmEpisode(transaction.client, author, params.sourceEpisodeId, extraction)
+    : null
+  const access = episode?.access ?? author
   assertExecutionResourceScope({ workspaceId: params.workspaceId, userId: null, assistantId: null,
     sensitivity: params.sensitivity ?? 'internal', compartments: params.compartments ?? [], projectIds: params.projectIds ?? [] }, 'mutation', access)
 
   // Consumed names and ordering fields are admitted before any comparison;
   // the candidate evaluator sees captured values in this exact transaction.
   if(params.mergeByName!==false) {
-    const ap=buildAccessPredicate(access,{startIdx:3,operation:'mutation'})
-    const member=buildCurrentMemberSourcePredicate(userId,{alias:'entities',startIdx:ap.nextIdx})
     await transaction.client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[JSON.stringify(['crm-company',params.workspaceId,params.name.toLowerCase()])])
-    const existing=await queryLegacyCanonicalCrmSql<{id:string}>(access,[{type:'company',fields:['name','createdAt']}],
-      `SELECT id FROM entities WHERE workspace_id=$1 AND kind='company' AND lower(display_name)=lower($2)
-        AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held AND ${ap.sql} AND ${member.sql}
-        ORDER BY created_at ASC LIMIT 1`,[params.workspaceId,params.name,...ap.params,...member.params],transaction.client)
-    if(existing.rows[0])return mergeCompanyFields(userId,existing.rows[0].id,{
-      domain:params.domain??null,tags:params.tags,externalRef:params.externalRef,customFields:params.customFields,
-    },{compartments:params.compartments??[],projectIds:params.projectIds??[],sensitivity:params.sensitivity??'internal'},access,transaction)
+    let existingId: string | undefined
+    if (episode) existingId = await findCrmEpisodeCompanyId(transaction.client, episode, params.name)
+    else {
+      const ap=buildAccessPredicate(access,{startIdx:3,operation:'mutation'})
+      const member=buildCurrentMemberSourcePredicate(userId,{alias:'entities',startIdx:ap.nextIdx})
+      const existing=await queryLegacyCanonicalCrmSql<{id:string}>(access,[{type:'company',fields:['name','createdAt']}],
+        `SELECT id FROM entities WHERE workspace_id=$1 AND kind='company' AND lower(display_name)=lower($2)
+          AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held AND ${ap.sql} AND ${member.sql}
+          ORDER BY created_at ASC LIMIT 1`,[params.workspaceId,params.name,...ap.params,...member.params],transaction.client)
+      existingId = existing.rows[0]?.id
+    }
+    if (existingId) {
+      if (episode) await assertCrmEpisodeMergeTarget(transaction.client, episode, existingId, 'company')
+      return mergeCompanyFields(userId, existingId, {
+        domain: params.domain ?? null, tags: params.tags, externalRef: params.externalRef, customFields: params.customFields,
+      }, episode?.source ?? {
+        compartments: params.compartments ?? [], projectIds: params.projectIds ?? [], sensitivity: params.sensitivity ?? 'internal',
+      }, access, transaction, episode !== null)
+    }
   }
 
   const custom=params.customFields===undefined?{values:undefined,references:[] as EntityRecord[]}:
     await initialCrmCustomValues(userId,params.workspaceId,'company',params.customFields,['name','tags',...(params.domain?['domain']:[]),
       ...(params.externalRef && Object.keys(params.externalRef).length?['externalRef']:[])],access,transaction!.client)
-  const destination=crmReferenceScope({userId:null,assistantId:null,sensitivity:params.sensitivity??'internal',
+  const destination=crmReferenceScope(episode?.source ?? {userId:null,assistantId:null,sensitivity:params.sensitivity??'internal',
     compartments:params.compartments,projectIds:params.projectIds},custom.references,undefined,true)
+  if (episode) await ensureCrmEpisodeDerivationPolicy(transaction.client, params.workspaceId)
   const entity = await createEntity({
+    ...(episode ? { derivation: episode.derivation } : {}),
     kind: 'company',
     displayName: params.name,
     canonicalId: params.domain ?? null,
     attributes: companyAttributes({...params,customFields:custom.values}),
     sensitivity: destination.sensitivity,
     workspaceId: params.workspaceId,
-    // Workspace-scoped: a company is a company-wide fact, not the property of
-    // whoever happened to type it. Visibility must NOT copy authorship —
-    // `createdByUserId` below carries who wrote it. See migration 423.
+    // Manual records start in the workspace audience. Extracted records carry
+    // the independently verified Episode audience.
     userId: destination.userId,
     assistantId: destination.assistantId,
     createdByUserId: userId,
@@ -490,6 +507,7 @@ async function mergeCompanyFields(
   scope: { compartments: string[]; projectIds: string[]; sensitivity?: Sensitivity },
   access: AccessContext,
   transaction: CrmWriteTransaction,
+  fromEpisode = false,
 ): Promise<CompanyRecord> {
   const point=await readLegacyCanonicalCrmPoint(access,'company',id,legacyCompanyFields,transaction.client)
   if(!point)throw new ApplicationPlatformError('access_unavailable','The company result is unavailable.')
@@ -514,6 +532,7 @@ async function mergeCompanyFields(
     assertExecutionResourceScope(current.scope,'mutation',access)
     return bindScopeSources(cur,current.sources)
   }
+  if (fromEpisode) throw new CrmEpisodeHold('application_crm_merge_provenance_required')
   const result=await updateCompany(userId,id,fields,access,transaction.client,{...scope,sensitivity},{expectedVersion:point.projection.ref.version,afterCommit:transaction.afterCommit})
   if(!result)throw new ApplicationPlatformError('access_unavailable','The company result is unavailable.')
   return result
@@ -711,17 +730,22 @@ export async function createContact(
   },
   entityLinks?: EntityLinksStore,
   transaction?: CrmWriteTransaction,
+  extraction?: CrmEpisodeExecution,
 ): Promise<ContactRecord> {
   validateCrmCreation(crmContactPatch.pick({name:true,email:true,phone:true,companyId:true,tags:true,externalRef:true,customFields:true}).required({name:true}),params,['stableIdentity'])
   assertAuthorshipPresent('createContact', userId)
-  const access = dedupeAccessContext(userId, params.workspaceId, params.access)
-  assertExecutionResourceScope({ workspaceId: params.workspaceId, userId: null, assistantId: null,
-    sensitivity: params.sensitivity ?? 'internal', compartments: params.compartments ?? [], projectIds: params.projectIds ?? [] }, 'mutation', access)
-  const bound=currentApplicationReadTransaction(access)
+  const author = dedupeAccessContext(userId, params.workspaceId, params.access)
+  const bound=currentApplicationReadTransaction(author)
   if(bound&&transaction?.client!==bound.client)throw new ApplicationPlatformError('access_unavailable','The transaction is unavailable.')
-  if (!transaction) return runCrmWriteTransaction(userId, tx => createContact(userId, params, entityLinks, tx))
+  if (!transaction) return runCrmWriteTransaction(userId, tx => createContact(userId, params, entityLinks, tx, extraction))
+  const episode = params.source === 'extracted' && params.sourceEpisodeId
+    ? await authorizeCrmEpisode(transaction.client, author, params.sourceEpisodeId, extraction)
+    : null
+  const access = episode?.access ?? author
+  assertExecutionResourceScope(episode?.source ?? { workspaceId: params.workspaceId, userId: null, assistantId: null,
+    sensitivity: params.sensitivity ?? 'internal', compartments: params.compartments ?? [], projectIds: params.projectIds ?? [] }, 'mutation', access)
   const company = await readCrmReference(userId, params.workspaceId, params.companyId, 'company', access, transaction?.client)
-  const destination = crmReferenceScope({ userId: null, assistantId: null,
+  const destination = crmReferenceScope(episode?.source ?? { userId: null, assistantId: null,
     sensitivity: params.sensitivity ?? 'internal', compartments: params.compartments, projectIds: params.projectIds }, [company], undefined, true)
   params = { ...params, ...destination }
   assertExecutionResourceScope({ workspaceId: params.workspaceId, userId: destination.userId, assistantId: destination.assistantId,
@@ -742,6 +766,7 @@ export async function createContact(
       throw new CrmPersonIdentityConflictError(resolution.entityIds)
     }
     if (resolution.status === 'resolved') {
+      if (episode) await assertCrmEpisodeMergeTarget(transaction.client, episode, resolution.binding.entityId, 'person')
       const merged = await mergeContactFields(userId, resolution.binding.entityId, {
         email: params.email ?? null,
         phone: params.phone ?? null,
@@ -752,7 +777,7 @@ export async function createContact(
         compartments: params.compartments ?? [],
         projectIds: params.projectIds ?? [],
         sensitivity: params.sensitivity ?? 'internal',
-      }, transaction)
+      }, transaction, episode !== null)
       if (merged) return merged
       throw Object.assign(new Error('The identity cannot be used in the current scope.'), { code: 'scope_operation_denied' })
     }
@@ -764,7 +789,9 @@ export async function createContact(
       ...(params.externalRef && Object.keys(params.externalRef).length?['externalRef']:[])],access,transaction.client)
   const customDestination=crmReferenceScope(destination,custom.references,undefined,true)
   params={...params,...customDestination}
+  if (episode) await ensureCrmEpisodeDerivationPolicy(transaction.client, params.workspaceId)
   const entity = await createEntity({
+    ...(episode ? { derivation: episode.derivation } : {}),
     kind: 'person',
     displayName: params.name,
     canonicalId: params.email ?? null,
@@ -821,6 +848,7 @@ async function mergeContactFields(
   access: AccessContext,
   scope: { compartments: string[]; projectIds: string[]; sensitivity?: Sensitivity },
   transaction: CrmWriteTransaction,
+  fromEpisode = false,
 ): Promise<ContactRecord> {
   const point=await readLegacyCanonicalCrmPoint(access,'person',id,legacyContactFields,transaction.client)
   if(!point)throw Object.assign(new Error('The identity cannot be used in the current scope.'),{code:'scope_operation_denied'})
@@ -849,6 +877,7 @@ async function mergeContactFields(
     assertExecutionResourceScope(current.scope,'mutation',access)
     return bindScopeSources(cur,current.sources)
   }
+  if (fromEpisode) throw new CrmEpisodeHold('application_crm_merge_provenance_required')
   const result=await updateContact(userId,id,fields,entityLinks,access,transaction.client,{...scope,sensitivity},transaction.afterCommit,{expectedVersion:point.projection.ref.version})
   if(!result)throw Object.assign(new Error('The identity cannot be used in the current scope.'),{code:'scope_operation_denied'})
   return result

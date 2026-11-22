@@ -120,7 +120,7 @@ On a chat path: surface the drafts as a list ("here are 5 drafts for review"); t
 
 ### 7. Send on approval (separate flow — not this skill's responsibility)
 
-The operator approves a draft → calls `gmailSendMessage({ to: <investor-email>, subject, body: <draft content> })`. The tool's existing `requiresConfirmation: true` gate fires; on approve the email sends. The connector-action audit (shipped 2026-05-21) writes a `connector_action` Episode + `connector_actions` audit row with IFC stamped. After send, update the `target_investor` edge's `attributes.last_digest_episode_id` to the new audit Episode id (skill responsibility OR a follow-up turn — operator-driven for v1):
+When you hold `gmailSendMessage` this turn and the operator explicitly requests delivery of a reviewed draft, pass the investor's email address, subject, and final body to the tool. The operator approves the send through its confirmation control. If the Gmail send tool is unavailable, leave the draft ready for manual sending. After a successful send, the connector-action audit writes a `connector_action` Episode and an audit row with IFC stamped. Use the audit Episode ID to record the send:
 
 ```
 // After successful gmailSendMessage:
@@ -183,9 +183,4 @@ The brain remembers who got what when. The next month's turn doesn't repeat cont
 
 This skill closes the original "no recipient personalization" and "no monthly digest generator" gaps via existing primitives — no new schema, no new approval-kind producer. The investor edge with `audience_clearance` attribute is the recipient-list / IFC anchor — no recipient-list primitive needed.
 
-**Why `workspace_files` + `staged_write` here, not `distribution_draft`?** Two different approval shapes for two different user journeys, both legitimate:
-
-- **`distribution_draft`** (`approvals.md` §`distribution_draft`) — the **feed app's reactive draft**: inbound Threads/X mention → app composes a short reply with typed conversation context (`inbound_reply_event_id`) + a `reply`/`post`/`hide` discriminator → operator reviews in the feed UI alongside the original mention → **approve auto-publishes to the platform API** in one click. Single-action publishing is the value.
-- **`workspace_files` + `staged_write`** (per SV(2) 2026-05-14 "Drafts as workspace_files") — the **compositional document draft**: skill composes a long-form artifact (IR digest, research finding, PRD) → operator reviews in the files surface → on approve the file is committed; **a separate explicit tool call** (here `gmailSendMessage` (only when Gmail is connected)) sends or publishes. Decoupled from the publishing step.
-
-The IR flow fits the second shape — long compositional bodies, separate send step, no inbound context to render side-by-side — so `workspace_files` is the right substrate. The feed reply flow fits the first shape and should stay on `distribution_draft`.
+Store the digest drafts in `workspace_files` under `staged_write`. A file approval commits the draft for review. Sending a reviewed draft requires a separate explicit request and approval.

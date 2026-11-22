@@ -340,6 +340,11 @@ export function createExtractionApplicationStore(): DbExtractionApplicationStore
 
     async applyItem(claim, candidate, mutate) {
       return transaction(async (client) => {
+        // Entity admission locks the workspace before touching the Episode.
+        // Match that order while fencing the durable receipt and source.
+        if (candidate.primitiveKind === 'entity' && claim.authority?.workspaceId) {
+          await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [claim.authority.workspaceId])
+        }
         await lockClaim(client, claim)
         const locked = await client.query<ItemRow>(
           `SELECT ${ITEM_COLUMNS} FROM episode_extraction_items
