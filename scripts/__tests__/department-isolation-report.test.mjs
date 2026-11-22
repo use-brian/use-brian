@@ -2,7 +2,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { cleanRuntimeEnvironment } from '../crm/local-fixture.mjs'
@@ -49,6 +49,50 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
     }
   })
 
+  it('keys pristine fixtures on installer inputs and server binaries while Calendar assertions execute independently', t => {
+    const root = mkdtempSync(join(tmpdir(), 'calendar-cache-key-'))
+    t.after(() => rmSync(root, { recursive: true, force: true }))
+    const put = (path, bytes) => {
+      mkdirSync(dirname(join(root, path)), { recursive: true })
+      writeFileSync(join(root, path), bytes)
+    }
+    const helper = 'scripts/crm/pristine-fixture.mjs'
+    put(helper, readFileSync(new URL('../../' + helper, import.meta.url)))
+    execFileSync('git', ['init', '--quiet'], { cwd: root })
+    put('bin/pg_config', '#!/bin/sh\nprintf "%s\\n" "$FAKE_PG_DIR"\n')
+    chmodSync(join(root, 'bin/pg_config'), 0o700)
+    put('bin/postgres', 'test PostgreSQL')
+    for (const name of ['pg_trgm', 'vector']) {
+      put('bin/' + name + (process.platform === 'darwin' ? '.dylib' : '.so'), name)
+      put('bin/extension/' + name + '.control', name)
+    }
+    put('packages/api/migrations/000.sql', 'initial migration')
+    const key = () => {
+      const output = join(root, 'output')
+      writeFileSync(output, '')
+      const githubEnv = join(root, 'github-env')
+      writeFileSync(githubEnv, '')
+      execFileSync(process.execPath, [helper, '--pg-bin', join(root, 'bin')], { cwd: root,
+        env: { ...cleanRuntimeEnvironment(process.env), FAKE_PG_DIR: join(root, 'bin'), GITHUB_OUTPUT: output, GITHUB_ENV: githubEnv, RUNNER_TEMP: root } })
+      assert.equal(readFileSync(githubEnv, 'utf8').trim(), 'BRIAN_CALENDAR_FIXTURE_CACHE=' + join(root, 'calendar-pristine'))
+      return readFileSync(output, 'utf8').trim()
+    }
+    const first = key()
+    assert.match(first, /^key=calendar-pg-[a-f0-9]{64}$/)
+    put('packages/api/src/__tests__/channel-calendar-recovery.integration.test.ts', 'new test')
+    assert.equal(key(), first)
+    for (const [path, value] of [
+      ['packages/api/migrations/000.sql', 'edited migration'], ['packages/api/migrations/001.sql', 'new migration'],
+      ['scripts/rig-admin-role.sql', 'different role setup'], ['packages/api/src/migrations/execution-sql.ts', 'different adapter'],
+      ['packages/api/scripts/migrate.ts', 'different installer'], ['bin/postgres', 'different server'],
+      ['bin/extension/vector--1.sql', 'different extension SQL'], ['pnpm-lock.yaml', 'new dependencies'],
+    ]) {
+      const previous = key()
+      put(path, value)
+      assert.notEqual(key(), previous, path)
+    }
+  })
+
   it('registers existing test files within their owning packages', () => {
     for (const suite of DEPARTMENT_ISOLATION_SUITES) {
       for (const file of suite.testFiles) {
@@ -78,7 +122,7 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
     const root = mkdtempSync(join(tmpdir(), 'ci-report-merge-'))
     t.after(() => rmSync(root, { recursive: true, force: true }))
     const cli = 'scripts/test-department-isolation.mjs'
-    const sources = [cli, 'scripts/testing/calendar-isolation.mjs', 'scripts/testing/department-isolation-report.mjs', 'scripts/crm/local-fixture.mjs',
+    const sources = [cli, 'scripts/testing/calendar-isolation.mjs', 'scripts/testing/department-isolation-report.mjs', 'scripts/crm/local-fixture.mjs', 'scripts/crm/pristine-fixture.mjs',
       'scripts/crm/runtime-role.mjs', 'packages/shared/src/department-isolation-coverage.ts']
     const sourceHashes = {}
     for (const path of sources) {

@@ -206,6 +206,10 @@ export async function executeWorkflow({ source, root, context, env, directory, l
               const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
               if (`pnpm@${version}` !== manifest.packageManager) throw new Error('Local pnpm differs from packageManager')
               stepRecord.provisioning = `local pnpm@${version}`
+            } else if (job.id === 'calendar-isolation' && step.uses === 'actions/cache@v4'
+                && step.with?.key === '${{ steps.calendar_fixture.outputs.key }}' && step.with?.path === '${{ runner.temp }}/calendar-pristine/${{ steps.calendar_fixture.outputs.key }}'
+                && !step.with?.['restore-keys']) {
+              stepRecord.provisioning = 'cold pristine database cache'
             } else if (step.uses) throw new Error(`Unsupported required action: ${step.uses}`)
             else if (step.name === 'Install PostgreSQL 18 with required extensions') {
               const version = (await invoke(pgBin ? join(pgBin, 'postgres') : 'postgres', ['--version'], { log })).output

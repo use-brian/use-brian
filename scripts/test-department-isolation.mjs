@@ -43,6 +43,7 @@ const relevantPaths = new Set([
   'scripts/testing/department-isolation-report.mjs',
   'scripts/testing/calendar-isolation.mjs',
   'scripts/crm/local-fixture.mjs',
+  'scripts/crm/pristine-fixture.mjs',
   'scripts/crm/runtime-role.mjs',
   'apps/api/src/__tests__/prepared-pglite.ts',
   'apps/api/src/__tests__/context-scope-migration-upgrade.ts',
@@ -166,7 +167,9 @@ async function run() {
   const preparationStarted = performance.now()
   console.log(`Preparing ${native ? 'native PostgreSQL' : 'embedded acceptance'} fixture`)
   // Every native suite shares the ordinary-owner fixture that migration 8274 requires.
-  const fixture = native ? await createLocalFixture({ pgBin, prepareTemplate: true, migrationProgress: true }) : {
+  const calendarShard = shard && selectedSuites.length === 1 && selectedSuites[0].id === 'recovered-calendar-history'
+  const pristineCacheDirectory = calendarShard ? process.env.BRIAN_CALENDAR_FIXTURE_CACHE : undefined
+  const fixture = native ? await createLocalFixture({ pgBin, prepareTemplate: true, migrationProgress: true, pristineCacheDirectory }) : {
     directory: await mkdtemp(join(tmpdir(), 'brian-isolation-report-')), env: {},
     async dispose() { await rm(this.directory, { recursive: true, force: true }) },
   }
@@ -174,6 +177,9 @@ async function run() {
   console.log(`Prepared fixture in ${Math.round(fixturePreparationMs / 1000)}s`)
   try {
     if(reportPath&&resolve(reportPath).startsWith(`${resolve(fixture.directory)}/`))throw new Error('--report must be outside the disposable fixture')
+    if (pristineCacheDirectory && !isDeepStrictEqual(await migrationRevision(fixture.adminUrl), await migrationRevision())) {
+      throw new Error('Pristine Calendar fixture migration ledger differs from the current migration files')
+    }
     const reports = join(fixture.directory, 'reports')
     await mkdir(reports)
     const runtime=cleanRuntimeEnvironment(process.env)
@@ -246,7 +252,7 @@ async function run() {
             return rows
           }
           try {
-            if (shard && suite.id==='recovered-calendar-history' && selectedSuites.length===1) {
+            if (calendarShard) {
               actual.push(...await runCalendarIsolation(env,runTests))
             } else {
               actual.push(...await runTests(env))

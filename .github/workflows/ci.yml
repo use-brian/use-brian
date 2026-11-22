@@ -106,6 +106,19 @@ jobs:
         name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Identify pristine Calendar database
+        id: calendar_fixture
+        continue-on-error: true
+        if: &calendar-cache-event github.event_name == 'push' || github.event_name == 'pull_request'
+        run: node scripts/crm/pristine-fixture.mjs --pg-bin /usr/lib/postgresql/18/bin
+      - name: Cache pristine Calendar database
+        continue-on-error: true
+        if: *calendar-cache-event
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/calendar-pristine/${{ steps.calendar_fixture.outputs.key }}
+          key: ${{ steps.calendar_fixture.outputs.key }}
+
       - name: Build Calendar test dependencies
         run: pnpm exec turbo run build --filter='@use-brian/api^...'
 
