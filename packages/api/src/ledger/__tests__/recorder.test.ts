@@ -82,6 +82,23 @@ describe('[COMP:api/turn-ledger-recorder] event shapes', () => {
     expect(db.events[0].payloadRefs).toEqual([hashPayload('s'), ...messages.map((m) => hashPayload(JSON.stringify(m))), hashPayload(JSON.stringify(textResponse('ok').content))])
   })
 
+  it('records the replacement context and its prompt on the same trace after discovery', async () => {
+    const { store } = fakePayloads()
+    const handle = createTurnLedger({ workspaceId: 'ws1', payloads: store })
+    const messages = [{ role: 'user' as const, content: 'Follow up.' }]
+    const trace = handle.ledger.startTrace({ actor: 'assistant_turn', model: 'm', systemPrompt: 'Initial', messages })
+    trace.request({ turn: 0, messages, full: false })
+    trace.turn({ turn: 0, response: textResponse('First round'), toolResults: [] })
+    const full = [{ role: 'user' as const, content: 'Prior history' }, ...messages]
+    trace.request({ turn: 1, messages: full, full: true, systemPrompt: 'Expanded' })
+    trace.turn({ turn: 1, response: textResponse('Final answer'), toolResults: [] })
+    await handle.flush()
+    expect(db.events[0].payloadRefs).toEqual([hashPayload('Initial'), hashPayload(JSON.stringify(messages[0])),
+      hashPayload(JSON.stringify(textResponse('First round').content))])
+    expect(db.events[1].payloadRefs).toEqual([hashPayload('Expanded'), ...full.map(row => hashPayload(JSON.stringify(row))),
+      hashPayload(JSON.stringify(textResponse('Final answer').content))])
+  })
+
   it('a bulk failure keeps the recorder nonblocking and warns once', async () => {
     const { store } = fakePayloads()
     store.putMany = vi.fn(async () => { throw new Error('bulk bytes unavailable') })

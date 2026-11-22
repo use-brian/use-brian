@@ -86,8 +86,9 @@ const provider:LLMProvider={name:'fixture-public',models:['fixture'],stream(){th
     yield {type:'message_start' as const,model:'fixture'}
     await providerGate
     if(toolRequested&&first){first=false
-      yield {type:'tool_use_start' as const,id:'public-call',name:'fixtureEcho'}
-      yield {type:'tool_use_delta' as const,id:'public-call',input:'{"value":"fictional"}'}
+      const discovery = options.tools?.some(tool => tool.name === 'requestConversationContext')
+      yield {type:'tool_use_start' as const,id:'public-call',name:discovery ? 'requestConversationContext' : 'fixtureEcho'}
+      yield {type:'tool_use_delta' as const,id:'public-call',input:discovery ? '{}' : '{"value":"fictional"}'}
       yield {type:'tool_use_end' as const,id:'public-call'}
       yield {type:'message_end' as const,stopReason:'tool_use' as const,usage:{inputTokens:2,outputTokens:3}}
     }else{
@@ -167,8 +168,10 @@ describe('[COMP:api/public-turn] complete public operation ownership',()=>{
     // strip remains their only fence.
     extraTools=[buildTool({name:'fixtureConfirmedWrite',description:'Fictional write needing approval',inputSchema:z.object({}),
       isReadOnly:false,requiresConfirmation:true,async execute(){effects++;return {data:'unexpected'}}})]
+    toolRequested=true
     const run=start();await run.promise
     expect(run.res.body).toMatchObject({reply:'Fictional public answer'})
+    expect(offeredTools.shift()).toEqual(['requestConversationContext'])
     expect(offeredTools.length).toBeGreaterThan(0)
     for(const names of offeredTools){expect(names).toContain('fixtureEcho');expect(names).not.toContain('fixtureConfirmedWrite')}
   })
@@ -184,7 +187,7 @@ describe('[COMP:api/public-turn] complete public operation ownership',()=>{
     gate.resolve(null);await Promise.all([first.promise,second.promise])
     expect(first.res.body).toMatchObject({reply:'Fictional public answer',sessionId:session.channelId})
     expect(second.res.body).toMatchObject({reply:'Fictional public answer'})
-    expect(effects).toBe(2);expect(requests).toEqual(['public-token-1','public-token-1','public-token-2','public-token-2'])
+    expect(effects).toBe(2);expect(requests).toEqual(['public-token-1','public-token-1','public-token-1','public-token-2','public-token-2','public-token-2'])
     expect(mocks.release.mock.calls.map(args=>[args[1],args[2]])).toEqual([['completed','public-token-1'],['completed','public-token-2']])
     expect(mocks.usage).toHaveBeenCalledWith(expect.objectContaining({userId:'public-payer',actorUserId:'public-actor',source:'api'}))
     expect(first.req.listenerCount('aborted')).toBe(0);expect(first.res.listenerCount('close')).toBe(0);expect(held).toBeNull()

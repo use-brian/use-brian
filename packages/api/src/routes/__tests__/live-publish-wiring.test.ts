@@ -120,16 +120,16 @@ describe('[COMP:api/session-live-publisher] lane wiring', () => {
     const turnOwner = { released: false, turnId: 'a'.repeat(64), completionReason: 'completed', finish: vi.fn(async () => {
       order.push('release started'); await gate; turnOwner.released = released; order.push('release finished')
     }) }
-    const scope = { turnOwner, settlePreparationUsage: async () => { order.push('auxiliary settled') }, pendingPreparation: [], pendingUsage: [],
+    const scope = { turnOwner, settlePreparationUsage: async () => { order.push('auxiliary settled') }, captureFollowup: async () => { order.push('follow-up captured') }, pendingUsage: [],
       channelType: 'fixture', hooks: { onCleanup: async () => { order.push('transport cleaned') } }, channelStopRequested: () => false,
       turnFailed: false, session: { id: 'session' }, userId: 'actor', publishSessionEvent: bus, publishTurnCompleted }
     const run = new Function(...Object.keys(scope), ts.transpileModule(`return (async () => { ${cleanup.getText(tree)} })()`,
       { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText)(...Object.values(scope))
     await vi.waitFor(() => expect(turnOwner.finish).toHaveBeenCalledExactlyOnceWith('completed'))
-    expect(order).toEqual(['auxiliary settled', 'transport cleaned', 'release started'])
+    expect(order).toEqual(['auxiliary settled', 'follow-up captured', 'transport cleaned', 'release started'])
     expect(bus).not.toHaveBeenCalled()
     release(); await run
-    expect(order).toEqual(['auxiliary settled', 'transport cleaned', 'release started', 'release finished', ...(released ? ['published'] : [])])
+    expect(order).toEqual(['auxiliary settled', 'follow-up captured', 'transport cleaned', 'release started', 'release finished', ...(released ? ['published'] : [])])
     expect(bus).toHaveBeenCalledTimes(released ? 1 : 0)
     if (released) expect(bus).toHaveBeenCalledWith({ kind: 'turn_completed', sessionId: 'session', payload: { senderUserId: 'actor', turnId: 'a'.repeat(64) } })
   })

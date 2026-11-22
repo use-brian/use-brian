@@ -1,5 +1,6 @@
 import { inheritRoutineCalendarRead } from '@use-brian/core/engine/routine-read-ownership.js'
-import type { LLMProvider, Message } from '@use-brian/agent-runtime/providers/types.js'
+import type { QueryLoopOptions } from '@use-brian/agent-runtime/engine/query-loop.js'
+import type { ContentBlock, LLMProvider, Message } from '@use-brian/agent-runtime/providers/types.js'
 import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { inheritScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import type { CurrentAuthorityBoundary, Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
@@ -26,7 +27,20 @@ export type NamedRunContribution = {
   content: string
 }
 
-export type TurnRunPreparationInput = {
+export type TurnRunPreparationInput = TurnRunFrame & {
+  contextDiscovery?: (signal: AbortSignal) => Promise<DiscoveredTurnFrame>
+}
+
+/** Only orchestration and capability data may change after the initial round.
+ * Authority, input/output admission, evidence and the lifecycle stay with the owner. */
+export type DiscoveryToolContext = Pick<ToolContext,
+  'activeCapabilities' | 'preferredChannel' | 'workflowProposalReceipt' | 'requestTools' | 'workerRuntime' | 'researchMode'>
+export type DiscoveredTurnFrame = TurnRunFrame & Pick<QueryLoopOptions,
+  'maxTurns' | 'maxToolCalls' | 'suppressIntermediateText' | 'routineCalendarRead' | 'toolSelection' | 'workerDrainPrompt' | 'planNudgeCap' | 'groundingGate'> & {
+    context?: Partial<DiscoveryToolContext>
+    mainModel?: TurnMainModelRequest
+  }
+type TurnRunFrame = {
   systemPrompt: string
   messages: Message[]
   candidateTools: ReadonlyMap<string, Tool>
@@ -50,8 +64,23 @@ function snapshotMessageData<T extends object>(original: T): T {
   return copied
 }
 
+/** Non-native PDF adaptation may make an auxiliary model call. Leave the
+ * original attachment with its current-turn source for the discovery round. */
+function initialModelMessages(messages: Message[], model: PreparedTurnModel): Message[] {
+  if (!model.customLlm && registryRow(model.model)?.capabilities.nativePdf) return messages
+  const isPdf = (block: ContentBlock) => block.type === 'image' && block.mimeType.split(';')[0]?.trim().toLowerCase() === 'application/pdf'
+  const initial = messages.map(message => {
+    if (!Array.isArray(message.content) || !message.content.some(isPdf)) return message
+    const blocks = message.content.map(block => isPdf(block)
+      ? inheritScopeSources<ContentBlock>({ type: 'text', text: '[PDF attachment. Request conversation context to read it.]' }, block)
+      : block)
+    return inheritScopeSources({ ...message, content: inheritScopeSources(blocks, message.content) }, message)
+  })
+  return inheritScopeSources(initial, messages)
+}
+
 const TOOL_METADATA = ['isConcurrencySafe', 'isReadOnly', 'requiresConfirmation', 'requiresCapability', 'homeAppToolSet',
-  'hiddenFromModel', 'deferredSchemaOnly', 'allowPersistentApproval', 'confirmationMode', 'allowsRepeatCalls',
+  'hiddenFromModel', 'deferredSchemaOnly', 'acceptsToolCatalog', 'allowPersistentApproval', 'confirmationMode', 'allowsRepeatCalls',
   'abortSiblingsOnError', 'interruptBehavior', 'timeoutMs', 'maxResultSizeChars'] as const
 
 /** Frozen private copy: implementation and confirmation callbacks are captured
@@ -62,6 +91,7 @@ function snapshotTool(tool: Tool): Tool {
     name: tool.name, description: tool.description, inputSchema: tool.inputSchema, execute: tool.execute.bind(tool),
   }
   for (const key of TOOL_METADATA) if (tool[key] !== undefined) snapshot[key] = tool[key]
+  if (tool.resolveToolCall) snapshot.resolveToolCall = tool.resolveToolCall
   if (tool.resolveConfirmation) snapshot.resolveConfirmation = tool.resolveConfirmation.bind(tool)
   if (tool.describeConfirmation) snapshot.describeConfirmation = tool.describeConfirmation.bind(tool)
   for (const key of Object.getOwnPropertySymbols(tool)) {
@@ -258,12 +288,20 @@ export function captureTurnModelPreparation(invocation: TurnModelInvocation, inp
   }
   return {
     tools: bindTools,
+    /** Workers execute as their own delegated identity. Capture exactly the
+     * caller's request-scoped reader implementations; the worker's ordinary
+     * capability, delegated execution and source gates apply at invocation. */
+    captureWorkerReaders(candidates: ReadonlyMap<string, Tool>) {
+      assertBinding(); owner.signal.throwIfAborted()
+      return new Map([...candidates].filter(([, tool]) => tool.isReadOnly)
+        .map(([name, tool]) => [name, snapshotTool(tool)]))
+    },
     /** Synchronous capture, then the returned operation performs admission,
      * Brief and final assembly. Nothing the adapter supplied is read after this call. */
-    captureRun(input: TurnRunPreparationInput, model: PreparedTurnModel, accumulator?: ContextScopeAccumulator): () => Promise<PreparedTurnRun> {
+    captureRun(input: TurnRunFrame, model: PreparedTurnModel, accumulator?: ContextScopeAccumulator, initialDispatch = false): () => Promise<PreparedTurnRun> {
       assertBinding(); owner.signal.throwIfAborted()
       const systemPrompt = String(input.systemPrompt)
-      const messages = snapshotMessageData(input.messages)
+      const messages = snapshotMessageData(initialDispatch ? initialModelMessages(input.messages, model) : input.messages)
       const copy = (contributions: readonly NamedRunContribution[] | undefined) =>
         (contributions ?? []).map(({ name, content }) => Object.freeze({ name: String(name), content: String(content) }))
       const trusted = copy(input.trustedContributions), visible = copy(input.userVisibleContributions)
@@ -273,7 +311,7 @@ export function captureTurnModelPreparation(invocation: TurnModelInvocation, inp
         [name, { candidate, snapshot: snapshotTool(candidate) }] as const))
       const briefPreparation = captureBriefRunPreparation()
       const harnessPreparation = captureHarnessRunPreparation()
-      harnessRun = harnessPreparation.appliesTo(execution, input.candidateTools)
+      harnessRun = !initialDispatch && harnessPreparation.appliesTo(execution, input.candidateTools)
       retainedRunAccumulator = accumulator
       const maxTokens = model.maxTokens, inputTokenLimit = model.inputTokenLimit
       return async () => {
@@ -286,7 +324,7 @@ export function captureTurnModelPreparation(invocation: TurnModelInvocation, inp
         // Accepted Brief grounding for a Project-bound execution, below runtime
         // policy, on every lane: resume's system execution freezes its basis
         // under its approval job like any unattended run.
-        const brief = await briefPreparation(execution, snapshots)
+        const brief = initialDispatch ? { tools: snapshots, contribution: null } : await briefPreparation(execution, snapshots)
         assertBinding(); owner.signal.throwIfAborted()
         const harness = harnessRun ? await harnessPreparation.apply(execution, brief.tools, accumulator) : null
         if (harnessRun) {

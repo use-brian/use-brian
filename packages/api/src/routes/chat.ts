@@ -1,5 +1,7 @@
+import { admitCurrentAuthoredInput, readAttendedSessionHistory } from './attended-session-context.js'
+import type { DiscoveredTurnFrame } from '../turn/prepare.js'
 import { routeAttendedTurn, type AttendedTurnRoute } from './attended-turn-routing.js'
-import {bindPrivateResponderTranscript,resumePrivateLegacySession,PRIVATE_TRANSCRIPT_INSTRUCTION} from '../db/private-transcript.js'
+import {bindPrivateResponderTranscript,privateTranscriptText,resumePrivateLegacySession,PRIVATE_TRANSCRIPT_INSTRUCTION} from '../db/private-transcript.js'
 import { attachWorkspaceFiles } from '../files/workspace-attachments.js'
 import { bindWorkspaceCredentialDelegation, workspaceCredentialDelegation } from '@use-brian/agent-runtime/security/workspace-delegation.js'
 import { createWorkspaceTurnSink, type NativeChatRequest, type NativeChatSink, type WorkspaceTurnInput, type WorkspaceTurnResult, type WorkspaceTurnBinding } from '../workspace-mcp/native-turn.js'
@@ -34,7 +36,7 @@ import { pinAccessCeiling } from '@use-brian/agent-runtime/security/access-ceili
 import { executionToolContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import { closeProviderError } from './chat-provider-error.js'
 import type { FeedGenerationService } from '../content-planning/generation.js'
-import { resolveFeedTurnContext, formatFeedTurnContext } from '../content-planning/collaboration-service.js'
+import { admitFeedTurnContext, formatFeedTurnContext } from '../content-planning/collaboration-service.js'
 import { loadFeedReviewContext, recordFeedContextApplication } from '../content-planning/review-context.js'
 import { buildFeedCollaborationTools } from '../content-planning/collaboration-tools.js'
 import { createHash } from 'node:crypto'
@@ -181,7 +183,7 @@ import type { ConnectorResumeTarget, Tool, WorkerResult } from '@use-brian/agent
 import { MODEL_MAP, resolveModel, ensureServableModel, backgroundModelFor, isStandardTier, chatTierBudget, planNudgeCap, tierForModel, isExplicitMeteredModelSelection } from '../model-resolution.js'
 import { isRegistryModelAvailable, registryRow } from '@use-brian/shared/model-registry'
 import type { ConnectorStore } from '../db/connector-store.js'
-import { sanitizeDeliveryText, getToolDisplayName, stripFollowUps, stripCommentThreadReplyTag, resolveCharter, charterMission, recordingIdFromAnchorKey } from '@use-brian/shared'
+import { sanitizeDeliveryText, getToolDisplayName, stripFollowUps, stripCommentThreadReplyTag, resolveCharter, renderCharterBlock, charterMission, recordingIdFromAnchorKey } from '@use-brian/shared'
 import { loadDecisionPlaybookContext } from '../decision-learning/playbook-context.js'
 import {
   CUSTOM_MODEL_ENDPOINT_FALLBACK_NOTICE,
@@ -2037,7 +2039,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
     const options = maximum ? { ...baseOptions, tools: new Map([...baseOptions.tools].filter(([name]) => maximum.has(name))) } : baseOptions
     // Inference wiring through the turn kernel's boot registration.
     const turnOptions = withTurnInference(options)
-    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, attachedRecordingIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, appOrigin: requestedAppOrigin, sessionAudience: requestedSessionAudience, contextGroupId: requestedContextGroupId, contextProjectId: requestedContextProjectId, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, viewingBrainEntry: requestedViewingBrainEntry, kbSourceId: requestedKbSourceId, meteredProfileId, meteredToolRounds, meteredAccepted, ask: requestedAsk, roomResponseGroup: rawRoomResponseGroup, steer: requestedSteer, inputId: requestedInputId, midTurn: requestedMidTurn, researchActivityId: requestedResearchActivityId } = req.body as {
+    const { message: submittedMessage, sessionId: requestedSessionId, model: requestedModel, fileIds: requestedFileIds, attachedRecordingIds: requestedRecordingIds, truncateFromMessageId: requestedTruncation, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo: requestedReplyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, appOrigin: requestedAppOrigin, sessionAudience: requestedSessionAudience, contextGroupId: requestedContextGroupId, contextProjectId: requestedContextProjectId, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, viewingBrainEntry: requestedViewingBrainEntry, kbSourceId: requestedKbSourceId, meteredProfileId, meteredToolRounds, meteredAccepted, ask: requestedAsk, roomResponseGroup: rawRoomResponseGroup, steer: requestedSteer, inputId: requestedInputId, midTurn: requestedMidTurn, researchActivityId: requestedResearchActivityId } = req.body as {
       /**
        * A saved research result the member is explicitly following up on
        * (research card). Resolved under the member's own access; an unknown
@@ -2209,6 +2211,14 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
     // excerpt once the workspace/assistant are resolved below. Every
     // downstream consumer (nag resolver, classifier, persistence, the model
     // turn) sees the replaced text — the original is durable in the artifact.
+    // A later group member continues the already-authored row. Only its
+    // original post may supply attachment bytes, edits or a reply selection.
+    const reuseGroupInput = Boolean(requestedRoomResponseGroup?.sourceMessageId)
+    let rawMessage = reuseGroupInput ? undefined : submittedMessage
+    const fileIds = reuseGroupInput ? undefined : requestedFileIds
+    const attachedRecordingIds = reuseGroupInput ? undefined : requestedRecordingIds
+    const replyTo = reuseGroupInput ? undefined : requestedReplyTo
+    const truncateFromMessageId = reuseGroupInput ? undefined : requestedTruncation
     let message = rawMessage
     // `requestedMode` semantics:
     //   - 'research'  → legacy explicit entry, classifier skipped, deep research budget
@@ -2222,7 +2232,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
     // turn. A recording-only send is the clarification UX after upload.
     const hasFiles = Array.isArray(fileIds) && fileIds.length > 0
     const hasRecordings = Array.isArray(attachedRecordingIds) && attachedRecordingIds.length > 0
-    if (!message?.trim() && !hasFiles && !hasRecordings) {
+    if (!reuseGroupInput && !message?.trim() && !hasFiles && !hasRecordings) {
       res.status(400).json({ error: 'Missing message or attachments' })
       return
     }
@@ -2418,64 +2428,6 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         userPlan = requestIdentity?.plan ?? await getWorkspacePlan(assistant.workspaceId)
       }
 
-      // Workspace BYO LLM key resolution. When the workspace has set its own
-      // Gemini key, the main response runs against a provider built from THAT
-      // key and the turn is NOT billed for LLM usage (MCP/memory ops are
-      // unaffected — they bill as today). When no BYO key is set we keep the
-      // platform provider and platform billing.
-      //
-      // A SYSTEM-level decrypt is used here (no acting user) because the chat
-      // request is already authenticated/authorized for this assistant's
-      // workspace; the key is consumed for provider construction only and is
-      // NEVER logged or returned. If a BYO key is set but the provider rejects
-      // it (invalid/quota), the error surfaces to the user via the normal
-      // query-loop error path — we deliberately do NOT fall back to the
-      // platform key, which would silently charge them.
-      // Eligibility and explicit quota denial precede session creation. Actual
-      // assessment waits for this request's canonical execution and admitted
-      // authored/history query; no owner-read transcript reaches a provider.
-      // The quota read happens only when adaptive entry is otherwise possible;
-      // turn routing receives the same fact (`researchQuotaAvailable`).
-      const researchQuotaAvailable = researchMode || !message || !assistant.workspaceId || !deploymentCapabilities().researchPlanGate
-        || userPlan !== 'free' || (await getWorkspaceResearchUsed(assistant.workspaceId!)) < FREE_RESEARCH_QUOTA
-      const adaptiveResearchEligible =
-        !researchMode &&
-        !!message &&
-        isAdaptiveResearchEligible({
-          requestedMode,
-          workspaceId: assistant.workspaceId,
-          userPlan,
-          assistantKind: assistant.kind,
-          researchPlanGate: deploymentCapabilities().researchPlanGate,
-          researchQuotaAvailable,
-        })
-      // Adaptive research entry. When the request didn't pin a mode, run a
-      // cheap Gemini-Flash-Lite classifier to decide whether this message
-      // warrants research mode. If yes, flip `researchMode = true` so the
-      // existing quota gate / model upgrade / worker pipeline downstream
-      // applies the assessed effort. Gated by `isAdaptiveResearchEligible`:
-      // skipped when free allowance is exhausted, outside a workspace (research
-      // requires workspace billing), and on `kind='app'` assistants
-      // (doc/feed — research mode strips the very authoring tools they
-      // need, so silent auto-entry would break their core job).
-      //
-      // Assessment runs below after canonical session and authored-input
-      // admission, as one turn route (`routeAttendedTurn`), which records its
-      // classifier usage once.
-      // Operate-site override (docs/architecture/engine/coordinator-pattern.md
-      // → "Adaptive entry and the operate-site override"): a request to open /
-      // browse / log into / act on ONE named site or URL must keep the normal
-      // query loop — the coordinator allowlist and the research workers'
-      // read-only boot snapshot structurally exclude every computer-use tool,
-      // so entering delegation makes the browse impossible (incident
-      // 2026-07-13: "browse luma" → 69-webSearch coordinator fan-out, zero
-      // browser calls). Computed deterministically here so `mode:'default'`
-      // and classifier-ineligible turns are covered too; the adaptive
-      // classifier below ORs in its language-agnostic verdict. It only gates
-      // the AUTOMATIC delegation triggers (adaptive entry, the Pro/Max
-      // splitter, the Flash standard preflight) — the explicit research
-      // API override wins, which the `!researchMode` guard encodes.
-      let operateSiteIntent = !researchMode && !!message && detectOperateSiteIntent(message)
       // Research-mode quota gate (mig 185_workspace_research_quota).
       //
       // `mode: 'research'` is the brain empty-state's deep-research entry
@@ -2906,9 +2858,9 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         officeLane = admitted.lane
       }
 
-      let feedTurnContext: Awaited<ReturnType<typeof resolveFeedTurnContext>> = null
+      let discoverFeedTurn: Awaited<ReturnType<typeof admitFeedTurnContext>> = null
       try {
-        feedTurnContext = await resolveFeedTurnContext(user.id, assistant.id, session, (req.body as { feedTarget?: unknown }).feedTarget)
+        discoverFeedTurn = await admitFeedTurnContext(user.id, assistant.id, session, (req.body as { feedTarget?: unknown }).feedTarget)
       } catch (error) {
         sendEvent('error', { code: 'feed_context_invalid', error: error instanceof Error ? error.message : 'Invalid draft context' })
         options.analytics?.logEvent({
@@ -3378,7 +3330,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
        *  below then reuses it instead of inserting twice. */
       let prePersistedUserMsg: SessionMessage | null = null
       if (roomResponseGroupContext?.sourceMessageId) {
-        const source = await query<SessionMessage & { sourceSensitivity: string | null }>(
+        const source = await query<SessionMessage & { sourceSensitivity: string | null; sourceVersion: string | null }>(
           `SELECT id, session_id AS "sessionId", role, content,
                   sequence_num AS "sequenceNum", created_at AS "createdAt",
                   reply_to_text AS "replyToText", topic_label AS "topicLabel",
@@ -3386,7 +3338,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
                   channel_message_id AS "channelMessageId",
                   sender_user_id AS "senderUserId",
                   sender_assistant_id AS "senderAssistantId",
-                  attachments, sensitivity AS "sourceSensitivity"
+                  attachments, sensitivity AS "sourceSensitivity", scope_version::text AS "sourceVersion"
              FROM session_messages
             WHERE id = $1 AND session_id = $2 AND role = 'user'
               AND sender_user_id = $3`,
@@ -3401,7 +3353,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           res.end()
           return
         }
-        const { sourceSensitivity, ...sourceMessage } = sourceRow
+        const { sourceSensitivity, sourceVersion, ...sourceMessage } = sourceRow
         // Personal response group: the authored row keeps the label the first
         // member's turn stamped (`sessionMessageInputScope`, that member's
         // ceiling). A later member whose current ceiling cannot read it is
@@ -3414,6 +3366,14 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           skipResponseGroupMember('message')
           return
         }
+        const sourceEvidence = await readSessionMessageScopeSource(assistant.workspaceId, sourceMessage.id, undefined,
+          { sessionId: session.id, sequenceNum: sourceMessage.sequenceNum })
+        if (!sourceEvidence || sourceEvidence.version !== sourceVersion) throw new DerivedScopeError('scope_source_changed')
+        scopeAccumulator.noteSource(sourceEvidence)
+        // Stored dialogue may retain attachment references. Its original file
+        // bodies have their own authority and are retrieved on demand.
+        message = privateTranscriptText(sourceMessage.content, 'user') ?? ''
+        rawMessage = message
         prePersistedUserMsg = sourceMessage
       }
       if (roomAdmission && typeof message === 'string' && message.trim()) {
@@ -3701,11 +3661,17 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           resolveWorkspaceCustomLlm: turnOptions.resolveWorkspaceCustomLlm?.bind(turnOptions) ?? null,
           resolveLegacyByoKey: resolveOriginalLegacyKey,
           buildLegacyByoProvider: options.buildWorkspaceProvider?.bind(options) ?? null })
-      const background = await ownedTurn.prepareBackgroundModel({ configuredDefault: true })
-      const backgroundLlmRuntime = background.customLlm
-      const backgroundProvider = background.provider
-      const backgroundModel = background.model!
-      const backgroundUsageAttribution = { modelTier: 'standard', providerKeySource: background.providerKeySource }
+      const loadBackground = async () => {
+        const background = await ownedTurn.prepareBackgroundModel({ configuredDefault: true })
+        return {
+          backgroundLlmRuntime: background.customLlm,
+          backgroundProvider: background.provider,
+          backgroundModel: background.model!,
+          backgroundUsageAttribution: { modelTier: 'standard', providerKeySource: background.providerKeySource },
+        }
+      }
+      let background: ReturnType<typeof loadBackground> | undefined
+      const getBackground = () => background ??= loadBackground()
       let turnProvider: LLMProvider = options.provider
       let usedByoKey = false
       let usedLegacyByoKey = false
@@ -3815,8 +3781,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // `overhead:transcription` — collect results here and record once we
       // have the stored user_message_id below.
       const transcriptions: TranscribeResult[] = []
-      // Distills pre-warmed this turn — attributed as `overhead:pdf-distill`
-      // once the user message id exists, exactly like transcriptions.
+      // PDF adaptation and its usage record belong to the context request.
+      const prepareAttachedPdfs: Array<() => Promise<void>> = []
       const pdfDistills: Array<{ model: string; usage: TokenUsage; pages: number | null }> = []
       if (hasFiles && options.fileStore) {
         // Gate each client-supplied fileId by the turn's identity so a file
@@ -3845,7 +3811,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           const providerReadsPdfInline = registryRow(servedModel)?.capabilities.nativePdf ?? false
 
           /**
-           * Probe, warn, distill, cache — before the turn runs.
+           * Probe, warn and cache the distillation when the agent requests the document.
            *
            * The probe is deliberately the CHEAP one (`probePdfPageCount`
            * parses structure; it does not render or call a model), because a
@@ -3946,11 +3912,11 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
                   `<attached_file id="${file.id}" name="${file.fileName}" type="${file.mimeType}">[${isPdf ? 'pdf' : 'image'}]</attached_file>`,
                 )
                 if (isPdf && !providerReadsPdfInline && options.pdfPreflight) {
-                  await prewarmPdf(Buffer.from(match[1], 'base64'), file.fileName)
+                  prepareAttachedPdfs.push(() => prewarmPdf(Buffer.from(match[1]!, 'base64'), file.fileName))
                 }
               }
             } else if (isAudio) {
-              // Voice preflight — transcribe just-in-time via Gemini. Transcript
+              // Decode an explicitly attached voice message into the authored speech. Transcript
               // becomes an `[voice] <transcript>` text part; raw audio is NOT
               // sent inline to the LLM (the transcript is authoritative).
               // See docs/architecture/media/transcription.md.
@@ -4120,203 +4086,6 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       const activeCapabilities = new Set(await options.capabilityStore.listActive(assistant.id))
       const sensitivityAccumulator = new SensitivityAccumulator()
       const compartmentAccumulator = new CompartmentAccumulator()
-      const connectorActionAudit =
-        assistant.workspaceId &&
-        options.connectorActionStore &&
-        options.episodesStore &&
-        options.buildConnectorActionAudit
-          ? options.buildConnectorActionAudit({
-              workspaceId: assistant.workspaceId,
-              assistantClearance: assistant.clearance,
-              // Same instance as the queryLoop's `sensitivity:` accumulator
-              // — the loop's tool reads populate it, the audit hooks read
-              // `.max` at action time.
-              sensitivityAccumulator,
-              connectorActionStore: options.connectorActionStore,
-              episodesStore: options.episodesStore,
-            })
-          : undefined
-      const connectorUserId = await getConnectorUserId(user.id, assistant.workspaceId)
-      const preparedConnectorTools = new Map(filterToolsByCapabilities(options.tools, activeCapabilities))
-      // Routine Calendar planning needs the native owner-delivery boundary; the
-      // same predicate gates preparation below and the routine decline reason.
-      const routineNativeOutput = Boolean(!programmatic && !permissionContext && nativeTranscriptAuthority
-        && turnPolicy.deliveryCeiling.ceiling === 'owner' && !executionContext.security.access.sharedAudience
-        && classifySession(session).surface === 'chat')
-      // The roster is prepared by the original turn owner through the M3
-      // capability surface (`web` profile, catalog-only until a call).
-      const preparedConnectors = await turnTiming.time('connector_prepare', () => ownedTurn.prepareCapabilities({
-        profile: 'web', composition: { kind: 'route-params', params: {
-        scope: 'chat',
-        ...(programmatic ? { bindingMaximum: programmatic.consent.connectorBindings,
-          restrictSearchToToolNames: programmatic.consent.operationNames, keepToolsDirect: true } : {}),
-        connectorUserId,
-        assistant,
-        userTimezone: user.timezone,
-        tools: preparedConnectorTools,
-        stores: {
-          ...options,
-          // Promote a just-attached photo on demand, so an image can reach a
-          // Shopify product without the model first calling saveFileToBrain.
-          readCachedFile: options.fileStore
-            ? (id, ctx) => options.fileStore!.get(id, ctx)
-            : undefined,
-        },
-        engineHooks: options.engineHooks,
-        // In-app actor identity: email is how the signed-in user is known on
-        // the web/app surface. Channel turns (WA/TG/Slack) set their native id
-        // in channel-pipeline. Resolved server-side from the session — never
-        // model output. Opted-in connectors receive X-Sidanclaw-Actor-*.
-        actorIdentity: { channel: session.channelType ?? 'web', id: user.email, email: user.email, userId: user.id },
-        // Forwarded to the Google provider's Gmail `sendMessage` audit wrap.
-        // Shared with the host extra-tool inject above.
-        connectorActionAudit,
-        // Workspace domain is null today — workspaces don't carry an
-        // email_domain column. The GCal audit hook falls back to
-        // treating attendees-with-domain as external (audience=public).
-        // Future migration adds the column.
-        workspaceDomain: null,
-        // Interactive chat has a live Approve/Deny loop, so the KB write
-        // tools may exist here (D2 — chat-only). The public API shares the
-        // route parameter block and must NOT set this.
-        allowKnowledgeWrites: true,
-        knowledgeCaptureText: message ?? '',
-        discoveryQuery: rawMessage ?? undefined,
-        exposeLocalReadTools: true,
-        contextScope: turnScope,
-        executionContext,
-        scopeAccumulator,
-        // On-demand introspection lane (ability audit §6-c/d): workspace
-        // PRIMARY assistants only — these read workspace-operational state
-        // (approvals / scheduled jobs / research runs / session history).
-        // They enter the mcp_search index, never the direct tool surface.
-        introspectionTools:
-          assistant.kind === 'primary' && assistant.workspaceId
-            ? options.introspectionTools
-            : undefined,
-        // T1: the late-activated Calendar read adapters are requested only when
-        // routine planning can be eligible on this turn (the necessary
-        // conditions of `routineCalendarReadDeclineReason` known now); the
-        // routine port activates exactly the planned read after planning.
-        routineCalendarRead: Boolean(options.decisionRuntime) && routineNativeOutput && Boolean(nativeTranscriptAuthority)
-          && !researchMode && !operateSiteIntent,
-      } } }))
-
-      // One turn route decides research, topic and split after the original
-      // canonical invocation and authored input exist (research.md "Adapter
-      // switch"). Quota races retain this real request and its denial in the
-      // same thread. Classifier usage is recorded once by the route; a legacy
-      // turn's authored row does not exist yet, so its records wait for it.
-      const pendingRoutingUsage: import('@use-brian/core/workers/turn-routing.js').TurnRoutingUsageRecord[] = []
-      const recordRoutingUsage = (record: import('@use-brian/core/workers/turn-routing.js').TurnRoutingUsageRecord, userMessageId: string) => recordOverheadUsage({
-        usageStore: options.usageStore, userId: user.id, assistantId: assistant.id, sessionId: session.id,
-        userMessageId, model: record.model, usage: record.usage ?? undefined, source: record.source,
-        ...(record.triggerKey ? { triggerKey: record.triggerKey } : {}), ...backgroundUsageAttribution,
-      })
-      const requestedCustom = !!requestedModel?.startsWith('custom:')
-      const standardWhenOk = isStandardTier(resolveModel(requestedModel, userPlan, 'ok'))
-      const standardWhenDowngraded = isStandardTier(resolveModel(requestedModel, userPlan, 'downgraded'))
-      const routingNative = !pageBoundTurn && nativeTranscriptAuthority && earlyStoredUserMsg ? {
-        authority: nativeTranscriptAuthority, session, message: earlyStoredUserMsg,
-        reply: { channelType: 'web' as const, replyToMessageId: replyTo?.id ?? null, clientSnippet: replyTo?.text },
-      } : undefined
-      // A legacy transcript (no native authority) routes over its pre-turn history.
-      const legacyReply = !pageBoundTurn && !nativeTranscriptAuthority ? await resolveReplyText({
-        channelType: 'web', replyToMessageId: replyTo?.id ?? null, session, clientSnippet: replyTo?.text,
-      }) : undefined
-      const routingLegacy = !pageBoundTurn && !nativeTranscriptAuthority ? {
-        history: await getSessionMessages(session.id, { excludeHeld: true }), replyToText: legacyReply?.text ?? null,
-        topicText: userMessageText, research: 'refuse' as const,
-      } : undefined
-      const routing: AttendedTurnRoute = await routeAttendedTurn({
-        facts: {
-          profile: 'web', requestedMode, workspaceId: assistant.workspaceId ?? null, assistantKind: assistant.kind,
-          researchQuotaAvailable, pageBound: pageBoundTurn, docSurface: !!turnPolicy.docSurface,
-          // The ordinary tier before the budget gate. Whether a split is taken
-          // never depends on it; the prepared main model picks the consumer.
-          tier: standardWhenOk && standardWhenDowngraded ? 'standard' : 'pro_max',
-          model: { custom: requestedCustom, explicitMetered: isExplicitMeteredModelSelection(requestedModel), standardWhenOk, standardWhenDowngraded },
-        },
-        message: message ?? '',
-        ...(routingNative ? { native: routingNative } : {}),
-        ...(routingLegacy ? { legacy: routingLegacy } : {}),
-        // The research classifier owns tool selection only with a decision runtime.
-        ...(options.decisionRuntime ? { roster: filterToolsByCapabilities(preparedConnectorTools, activeCapabilities) } : {}),
-        provider: backgroundProvider, model: backgroundModel, decisionRuntime: options.decisionRuntime,
-        workspaceId: assistant.workspaceId ?? undefined, runId: earlyStoredUserMsg?.id ?? crypto.randomUUID(),
-        split: { concurrent: 'admitted', late: !appAssistantForbidsCoordinator(assistant.kind) && !turnPolicy.docSurface
-          && !(standardWhenOk && standardWhenDowngraded) ? 'coordinator' : 'preflight' },
-        recordUsage: async record => {
-          if (earlyStoredUserMsg) await recordRoutingUsage(record, earlyStoredUserMsg.id)
-          else pendingRoutingUsage.push(record)
-        },
-        attribution: backgroundUsageAttribution, signal: abortController.signal, measure: turnTiming.time,
-      })
-      const route = routing.route
-      operateSiteIntent = operateSiteIntent || route.research.operateSite
-      if (route.research.active && route.research.entry === 'adaptive') {
-        if (!(await authority.execute(admitResearchQuota))) return
-        await assertDeliveryAudience()
-        researchMode = true
-        assessedResearchEffort = route.research.effort ?? 'standard'
-        // `phase` is a stable, client-localizable code; `message` stays for
-        // non-web consumers and logs. The web client renders a research
-        // banner off `phase` (see chat-experience.tsx `case "status"`).
-        sendEvent('status', { phase: 'research_detected', message: 'Detected deep-research intent…' })
-      }
-
-      const nativeClassification = routing.topic
-        ? await turnTiming.time('topic_annotation', () => routing.topic!.defer())
-        : undefined
-
-      // ── Reply resolution + topic classification ────────────────
-      // The routed topic carries the resolved reply target; a page-bound turn
-      // (no topic lane) resolves it here, a legacy turn resolved it for routing.
-      const replyResolved = nativeClassification ? nativeClassification.reply : legacyReply !== undefined ? legacyReply : await resolveReplyText({
-        channelType: 'web',
-        replyToMessageId: replyTo?.id ?? null,
-        session,
-        clientSnippet: replyTo?.text,
-      })
-      const classification: TopicClassification | null = nativeClassification?.classification ?? routing.legacyClassification
-
-      // Execution-plan lifecycle (anti-leak). Reuse the topic-classifier
-      // verdict (decision E): a clean topic SHIFT demotes the active attempt
-      // to `dormant` so its `# Active plan` block stops injecting on the
-      // off-topic turn (built just below); RESUMING an earlier topic
-      // reactivates the most-recent dormant attempt. Runs before
-      // buildActivePlanBlock so the transition takes effect this turn.
-      if (options.planStore && classification) {
-        const planStore = options.planStore
-        const activeAttemptId = planStore.activeAttemptId.bind(planStore)
-        const recentDormantAttemptId = planStore.recentDormantAttemptId.bind(planStore)
-        const setAttemptState = planStore.setAttemptState.bind(planStore)
-        const effect = async <T>(run: () => Promise<T>): Promise<T> => {
-          await routing.topic?.assertCurrent()
-          return run()
-        }
-        try {
-          if (classification.state === 'shift') {
-            const activeId = await effect(() => activeAttemptId(session.id))
-            if (activeId) {
-              await effect(() => setAttemptState({
-                sessionId: session.id, attemptId: activeId, state: 'dormant',
-              }))
-            }
-          } else if (classification.state === 'resume') {
-            const dormantId = await effect(() => recentDormantAttemptId(session.id))
-            if (dormantId) {
-              await effect(() => setAttemptState({
-                sessionId: session.id, attemptId: dormantId, state: 'active',
-              }))
-            }
-          }
-        } catch (err) {
-          if (isAuthorityChangedError(err)) throw err
-          console.error('[chat] plan lifecycle transition failed:', err)
-        }
-      }
-
       // Store user message — capture the DB-assigned ID so the client can
       // reference it later for retry/edit/feedback actions.
       // For team-shared draft sessions, stamp the per-message author so
@@ -4331,9 +4100,9 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         content: userContentBlocks.length > 0
           ? userContentBlocks
           : [{ type: 'text', text: userMessageText }],
-        replyToText: replyResolved?.text ?? null,
-        topicLabel: classification?.topic_label ?? null,
-        topicConfidence: classification?.confidence ?? null,
+        // This is the selection sent by the user. The referenced row is read
+        // under turn authority only if the model requests its context.
+        replyToText: replyTo?.text ?? null,
         // Attribute the human author on multi-participant sessions: draft-mode
         // sessions ('draft'), doc comment threads ('doc_thread'), and
         // workspace-shared chats — everywhere several people + the AI share
@@ -4364,21 +4133,24 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           onError: (error) => console.error('[research] follow-up capture failed', { sessionId: session.id, error: error instanceof Error ? error.message : String(error) }),
         })
       }
-      if (researchMode && assistant.workspaceId && !prePersistedUserMsg) {
-        try {
-          researchActivity = await beginResearchActivity({
-            workspaceId: assistant.workspaceId, sessionId: session.id, requestMessageId: storedUserMsg.id,
-            actorUserId: user.id, assistantId: assistant.id, projectId: session.contextProjectId ?? null,
-            entry: requestedMode === 'research' ? 'explicit' : 'adaptive',
-            runtime: { surface: 'web', assistantKind: assistant.kind, plan: userPlan ?? null, effort: assessedResearchEffort },
-            sensitivity: inputMessageScope?.sensitivity ?? null,
-            compartments: inputMessageScope?.compartments ?? null,
-          })
-          researchObserver = createResearchTurnObserver()
-        } catch (error) {
-          console.error('[research] activity open failed', { sessionId: session.id, error: error instanceof Error ? error.message : String(error) })
+      const startResearchActivity = async () => {
+        if (researchMode && assistant.workspaceId && !prePersistedUserMsg && !researchActivity) {
+          try {
+            researchActivity = await beginResearchActivity({
+              workspaceId: assistant.workspaceId, sessionId: session.id, requestMessageId: storedUserMsg.id,
+              actorUserId: user.id, assistantId: assistant.id, projectId: session.contextProjectId ?? null,
+              entry: requestedMode === 'research' ? 'explicit' : 'adaptive',
+              runtime: { surface: 'web', assistantKind: assistant.kind, plan: userPlan ?? null, effort: assessedResearchEffort },
+              sensitivity: inputMessageScope?.sensitivity ?? null,
+              compartments: inputMessageScope?.compartments ?? null,
+            })
+            researchObserver = createResearchTurnObserver()
+          } catch (error) {
+            console.error('[research] activity open failed', { sessionId: session.id, error: error instanceof Error ? error.message : String(error) })
+          }
         }
       }
+      await startResearchActivity()
       if (!prePersistedUserMsg) {
         sendEvent('user_message_saved', {
           id: storedUserMsg.id,
@@ -4424,9 +4196,6 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         }
       }
 
-      // Turn-routing classifier overhead of a legacy turn waited for its
-      // authored row; a native turn's records were written by the route.
-      for (const record of pendingRoutingUsage.splice(0)) await recordRoutingUsage(record, storedUserMsg.id)
       // Mirror to the session-event bus so other watchers of a live shared
       // session — a draft-mode session, or a workspace-shared chat — see the
       // new user turn appear live. Without this a teammate's message only
@@ -4469,1908 +4238,6 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           triggerKey: 'voice_message_transcription',
           ...(t.audioSeconds !== undefined ? { audioSeconds: t.audioSeconds } : {}),
         })
-      }
-
-      // Attribute PDF distillation as overhead. One row per document actually
-      // distilled — a cache hit records nothing, which is the whole point of
-      // the cache and what makes the COGS number meaningful.
-      for (const d of pdfDistills) {
-        await recordOverheadUsage({
-          usageStore: options.usageStore,
-          userId: user.id,
-          assistantId: assistant.id,
-          sessionId: session.id,
-          userMessageId: storedUserMsg.id,
-          model: d.model,
-          usage: d.usage,
-          source: 'overhead:pdf-distill',
-          triggerKey: d.pages !== null && d.pages > PDF_CONFIRM_PAGE_THRESHOLD
-            ? 'pdf_distill_large'
-            : 'pdf_distill',
-        })
-      }
-
-      // Load history. Run two repair passes unconditionally — both are
-      // idempotent and run on every request as defence-in-depth against
-      // legacy rows:
-      //
-      //   1. `ensureToolResultPairing` fills in synthetic tool_results for
-      //      any orphan tool_use and strips dangling tool_results. Without
-      //      this, every provider rejects the malformed history.
-      //
-      //   2. `stripUnsignedToolUses` drops pre-signature tool_use blocks
-      //      (plus their paired results). Gemini 3.x requires a
-      //      `thoughtSignature` on every functionCall that reappears in
-      //      history; rows persisted before the signature-round-trip fix
-      //      will fail the next call otherwise. Going forward, the Gemini
-      //      provider emits signatures which the accumulator attaches to
-      //      the ContentBlock and the chat route persists as-is into JSONB.
-      //
-      // See docs/architecture/engine/query-loop.md → "Tool-pairing
-      // invariant" and docs/architecture/engine/provider-abstraction.md →
-      // "Provider signatures".
-      // `fromSequence` skips rows already compacted into the most recent
-      // boundary; null (never compacted) loads full history.
-      // The original turn owner selects and performs the main-turn history read
-      // (native admitted reader, the classifier's captured continuation, or the
-      // stored transcript) and notes its automatic scope evidence.
-      let preparedHistory: CapturedTurnHistory | undefined
-      const dbMessages = await turnTiming.time('history_read', async () => {
-        if (pageBoundTurn) {
-          noteAutomaticScopeEvidence(scopeAccumulator, [storedUserMsg])
-          return [storedUserMsg]
-        }
-        preparedHistory = await ownedTurn.prepareHistory({ native: nativeTranscriptAuthority ?? null,
-          fromSequence: session.compactBoundarySequence, evidence: scopeAccumulator,
-          ...(nativeClassification ? { classified: nativeClassification } : {}) })
-        return preparedHistory.messages
-      })
-      // Reuse the exact authored row in the admitted delivered record. Reads
-      // without that manifest still need the original independent row proof.
-      const recordUserSource = preparedHistory?.sourceForCurrentInput?.(storedUserMsg)
-      const storedUserSource = recordUserSource ?? await readSessionMessageScopeSource(assistant.workspaceId, storedUserMsg.id)
-      if (storedUserSource && !recordUserSource) scopeAccumulator.noteSource(storedUserSource)
-      const workflowProposalReceipt = latestWorkflowProposalReceipt(dbMessages)
-
-      // Speaker attribution for a workspace-shared chat (chat-app.md →
-      // "Attribution reaches the model"). One batched profile lookup over the
-      // session's distinct authors; the map rides into `toStampedMessages`,
-      // which labels each human turn `[stamp] Alice: …` at ASSEMBLY time.
-      // Stored content stays clean, so this is reversible and never bakes a
-      // name prefix into history. A lookup failure degrades to unlabelled
-      // turns — worse for the model, never fatal for the user.
-      let sharedSenderNames: Map<string, string> | undefined
-      let sharedParticipants: string[] = []
-      /** Multi-voice sessions — rooms (T9) AND the doc dock's per-turn-
-       *  addressable personal thread: assistant-id → name, for labeling
-       *  FOREIGN assistant turns at assembly (`toStampedMessages`
-       *  `assistantVoices`) — the answering model must never mistake another
-       *  assistant's words for its own. The human-sender half is every
-       *  workspace session (`attribution`): a personal thread has one human. */
-      let roomAssistantVoices: { names: Map<string, string>; currentAssistantId: string } | undefined
-      if (turnPolicy.multiVoice) {
-        try {
-          const senderIds = turnPolicy.attribution
-            ? [
-                ...new Set(
-                  dbMessages
-                    .map((m) => m.senderUserId)
-                    .filter((id): id is string => Boolean(id)),
-                ),
-              ]
-            : []
-          if (senderIds.length > 0) {
-            const profiles = await getUserProfilesByIds(senderIds)
-            sharedSenderNames = new Map(
-              [...profiles.entries()]
-                .filter(([, p]) => Boolean(p.name))
-                .map(([id, p]) => [id, p.name as string]),
-            )
-            sharedParticipants = [...new Set(sharedSenderNames.values())]
-          }
-          const voiceIds = [
-            ...new Set(
-              dbMessages
-                .map((m) => m.senderAssistantId)
-                .filter((id): id is string => Boolean(id) && id !== assistant.id),
-            ),
-          ]
-          if (voiceIds.length > 0) {
-            const voiceRows = await query<{ id: string; name: string }>(
-              `SELECT id, name FROM assistants WHERE id = ANY($1::uuid[])`,
-              [voiceIds],
-            )
-            roomAssistantVoices = {
-              names: new Map(voiceRows.rows.map((r) => [r.id, r.name])),
-              currentAssistantId: assistant.id,
-            }
-          }
-        } catch (err) {
-          console.warn('[chat] shared-session sender lookup failed:', err)
-        }
-      }
-
-      // Proactive compaction check (web = 1.0× threshold, linear profile).
-      // Web chat: the authenticated user IS the owner, so ownerId === user.id.
-      // runProactiveCompaction owns stamping + pairing + summary-prepend
-      // internally. We apply web-only post-transforms (stripUnsignedToolUses,
-      // retryHint injection) to the returned message array before the query
-      // loop.
-      await assertDeliveryAudience()
-      const compactionResult = pageBoundTurn
-        ? { messages: toStampedMessages(dbMessages, user.timezone ?? 'UTC', sharedSenderNames, roomAssistantVoices) as Message[] }
-        : await turnTiming.time('compaction', () => runProactiveCompaction({
-        modelContext: { execution: executionContext, accumulator: scopeAccumulator },
-        sessionMessages: dbMessages,
-        conversationFrame: preparedHistory?.frame,
-        readCompleteRecord: preparedHistory?.readCompleteRecord,
-        timezone: user.timezone ?? 'UTC',
-        senderNames: sharedSenderNames,
-        assistantVoices: roomAssistantVoices,
-        session,
-        tier: modelToCompactionTier(resolveModel(requestedModel, userPlan, 'ok')),
-        channelClass: 'web',
-        profile: 'linear',
-        provider: backgroundProvider,
-        model: backgroundModel,
-        inputTokenLimit: backgroundLlmRuntime?.inputTokenLimit,
-        ...backgroundUsageAttribution,
-        systemPrompt: options.systemPrompt,
-        assistantId: assistant.id,
-        userId: user.id,
-        ownerId: user.id,
-        channelType: 'web',
-        memoryStore: options.memoryStore,
-        episodicStore: options.episodicStore,
-        sessionStateStore: options.sessionStateStore,
-        analytics: options.analytics,
-        usageStore: options.usageStore,
-        userMessageId: storedUserMsg.id,
-        // Company-brain ingest (WU-3.6) — extract a web_chat Episode from
-        // the compacted window. Both gate on a workspace-scoped assistant.
-        workspaceId: assistant.workspaceId ?? undefined,
-        chatEpisodeIngestor: options.chatEpisodeIngestor,
-        compartments: writeCompartments,
-        projectIds: writeProjectIds,
-        authority,
-      }))
-      // Gate on the serving provider: the signature strip is a Gemini-only
-      // workaround and would erase a Qwen (openai-compat) turn's tool calls
-      // from history. Resolve the requested model to its provider here (the
-      // budget-final model is resolved later; a pure-Qwen deploy still resolves
-      // to Qwen, and the unknown/gemini default fails safe). See tool-pairing.ts.
-      let messages: Message[] = stripUnsignedToolUses(
-        compactionResult.messages,
-        modelRequiresToolSignatures(resolveModel(requestedModel, userPlan, 'ok')),
-      )
-
-      if (scopeAccumulator.evidence.sources?.some(source => source.resourceKind === 'private_transcript')) {
-        messages = [{role:'system',content:PRIVATE_TRANSCRIPT_INSTRUCTION}, ...messages]
-      }
-
-      // Doc tool-result elision (across-turn context-window control).
-      // Doc authoring accumulates a full-page outline in every
-      // patchPage/getCurrentPage tool_result; the history reloads them on every
-      // turn even though the live page is re-delivered as user-visible context
-      // below. Collapse all but the most-recent doc page-state results
-      // to a stub. Signature-safe (only rewrites unsigned tool_result bodies) and a
-      // no-op on non-doc histories, so it runs on every request as
-      // defence-in-depth, like the two transforms above. See
-      // docs/architecture/engine/query-loop.md → "Doc tool-result elision".
-      messages = elideStaleDocToolResults(messages)
-
-      // Coalesced assembly (multiplayer chat T4). The provider wire contract
-      // is strict `(user, assistant)` alternation; a room accumulates one
-      // user ROW per post between assistant turns, so every run of adjacent
-      // plain user messages collapses into ONE user turn here — each line
-      // already carrying its `[stamp] Name:` prefix from `toStampedMessages`
-      // (inside the compaction pass above). Runs on every web session, not
-      // just rooms: an aborted or errored turn leaves the same consecutive
-      // user rows in a personal session (the pre-existing edge this fixes).
-      // Tool-result-bearing user messages never merge (pairing invariant).
-      messages = coalesceConsecutiveUserMessages(messages)
-
-      // A continuation reuses the original visible human row instead of
-      // persisting it again. Once an earlier assistant has replied, provider
-      // alternation requires a trailing user turn before the next assistant
-      // can answer. Repeat only the SAME user-visible text ephemerally; the
-      // coordination instructions stay in the trusted system suffix.
-      if (
-        roomResponseGroupContext?.sourceMessageId &&
-        messages.at(-1)?.role === 'assistant' &&
-        typeof message === 'string' &&
-        message.trim()
-      ) {
-        messages = [
-          ...messages,
-          { role: 'user', content: [{ type: 'text', text: message }] },
-        ]
-      }
-
-      // Inject retry hint into the last user message (the one we just saved).
-      // This is what the model sees — the stored DB version remains clean.
-      if (retryHint && messages.length > 0) {
-        const last = messages[messages.length - 1]
-        if (last.role === 'user') {
-          const clone: Message = { role: 'user', content:
-            typeof last.content === 'string'
-              ? retryHint + last.content
-              : [{ type: 'text', text: retryHint }, ...last.content],
-          }
-          messages = [...messages.slice(0, -1), clone]
-        }
-      }
-
-      // Build memory context + resolve preferred delivery channel.
-      // Per-turn callers use the ranked+capped slice so the system prompt
-      // stays bounded as the user's memory count grows. See
-      // docs/architecture/context-engine/memory-system.md → "Index cap".
-      // WU-4.2b: viewer projection ctx used by every per-turn memory read.
-      // Personal memories use a personal ctx (workspace falls back to ''
-      // for legacy assistants without a workspace — the universal predicate
-      // then matches nothing, equivalent to today's empty-result path).
-      //
-      // Read-side clearance (incident 2026-06-01): the READ ceiling is the
-      // acting member's clearance bounded by the assistant's
-      // (`min(member, assistant)`), NOT the assistant's alone — otherwise a
-      // low-clearance member reads confidential workspace data through a
-      // higher-clearance assistant. Writes keep the assistant's clearance
-      // (passed as `assistantClearance` on the tool context below).
-      const readClearance = turnScope.access.clearance ?? assistant.clearance
-      const readCompartments = turnScope.effectiveCompartments
-      // Automatic context reads only the bound shared Project (D18 relevance).
-      const viewerCtx = { ...automaticContextAccess(turnScope.access, turnScope.activeProjectId), memoryContext: { ...(turnScope.activeProjectId ? {projectId:turnScope.activeProjectId} : {}), activity:memoryActivityFromText(typeof message === "string" ? message : undefined) } }
-      let promptIndexes: ReturnType<NonNullable<typeof options.memoryStore.getPairedPromptIndexes>> | undefined
-      let nativePromptMemory: ReturnType<NonNullable<typeof options.memoryStore.getPromptMemoryContext>> | undefined
-      const privatePromptShape = !executionContext.security.access.sharedAudience && usesStoredPrivateChat(session)
-        && session.workspaceId===assistant.workspaceId
-        && session.userId===user.id && session.assistantId===assistant.id
-      const readTaskContext = async () => {
-        let sessionStateBlock: string | null = null
-        let planBlock: string | null = null
-        let available = true
-        if (options.sessionStateStore && !pageBoundTurn) {
-          try {
-            sessionStateBlock = await optionalContext(candidate => buildSessionStateBlock({
-              authority: candidate ?? { execution: executionContext, accumulator: scopeAccumulator },
-              store: options.sessionStateStore!,
-              sessionId: session.id,
-            }), null)
-          } catch (err) {
-            available = false
-            console.error('[chat] session-state block fetch failed:', err)
-          }
-        }
-        if (options.planStore && !turnScope.access.sharedAudience) {
-          try {
-            planBlock = await buildActivePlanBlock({ store: options.planStore, sessionId: session.id })
-          } catch (err) {
-            available = false
-            console.error('[chat] active-plan block fetch failed:', err)
-          }
-        }
-        return { sessionStateBlock, planBlock, available }
-      }
-      const readPinnedPromptContext = async () => {
-        if (!turnPolicy.pins || !assistant.workspaceId) return null
-        try {
-          return await resolvePinnedContext({
-            sessionId: session.id, context: { executionContext, scopeAccumulator },
-            workspaceId: assistant.workspaceId,
-            clearance: session.effectiveClearance,
-          })
-        } catch (err) {
-          console.warn('[chat] pinned-context resolution failed:', err)
-          return null
-        }
-      }
-      // Only a plain greeting on the owned native Chat path can defer ambient
-      // indexes. Validate ongoing work and pins through their existing owners;
-      // an unavailable reader keeps the full preparation path.
-      const explicitPromptContext = replyTo || fileIds?.length || attachedRecordingIds?.length
-        || requestedDocViewId || requestedDocAnchorBlockId || requestedViewingSkillRowId
-        || requestedViewingBrainEntry || requestedKbSourceId || requestedResearchActivityId || turnScope.activeProjectId
-      const continuedPromptContext = truncateFromMessageId || requestedSteer || requestedMidTurn || requestedRoomResponseGroup
-        || prePersistedUserMsg || workflowProposalReceipt
-      const fullContextReason = (() => {
-        if (typeof rawMessage !== 'string' || userMessageText !== rawMessage || !isBareChatGreeting(rawMessage)) return 'message'
-        if (!nativeTranscriptAuthority) return 'transcript_authority'
-        if (!privatePromptShape) return 'audience'
-        if (!pendingQuestionChecked) return 'pending_question'
-        if (programmatic || pageBoundTurn || officeLane || feedTurnContext || (requestedAppOrigin && requestedAppOrigin !== 'chat')) return 'surface'
-        if (researchMode || requestedCustom || isExplicitMeteredModelSelection(requestedModel)) return 'model_or_mode'
-        if (explicitPromptContext) return 'supplied_context'
-        if (continuedPromptContext) return 'continuation'
-        return null
-      })()
-      turnTiming.mark('admission')
-      const earlyTaskContext = !fullContextReason ? await turnTiming.time('prompt_task_context', readTaskContext) : undefined
-      const earlyPinnedContext = earlyTaskContext?.available && !earlyTaskContext.sessionStateBlock && !earlyTaskContext.planBlock
-        ? await turnTiming.time('prompt_pins', readPinnedPromptContext) : undefined
-      const deferAmbientIndexes = earlyPinnedContext?.block === null
-      if (deferAmbientIndexes) turnTiming.count('prompt_ambient_indexes_deferred')
-      else {
-        const reason = fullContextReason ?? (!earlyTaskContext?.available ? 'task_context_unavailable'
-          : earlyTaskContext.sessionStateBlock || earlyTaskContext.planBlock ? 'ongoing_work'
-          : earlyPinnedContext ? 'pins' : 'pins_unavailable')
-        turnTiming.count(`prompt_ambient_full_${reason}`)
-      }
-      const auxiliaryPrompt = nativeTranscriptAuthority && privatePromptShape && options.memoryStore.getPromptAuxiliaryContext
-        ? turnTiming.time('prompt_identity_context', () => options.memoryStore.getPromptAuxiliaryContext!(viewerCtx, 'Use Brian', nativeTranscriptAuthority!))
-        : undefined
-      const readNativePromptMemory = (candidate: typeof nativeTranscriptAuthority) =>
-        candidate && privatePromptShape && !deferAmbientIndexes && options.memoryStore.getPromptMemoryContext
-          ? (nativePromptMemory ??= turnTiming.time('prompt_packed_memory', () => options.memoryStore.getPromptMemoryContext!(viewerCtx, PER_TURN_INDEX_CAP, candidate)))
-          : undefined
-      const readPromptIndexes = (candidate: typeof nativeTranscriptAuthority) =>
-        candidate && assistant.workspaceId && options.memoryStore.getPairedPromptIndexes && (!executionContext.security.access.sharedAudience
-          || conversationReadersActive() && usesWorkspacePromptIndexes(session, pageBoundTurn)
-          && session.workspaceId===assistant.workspaceId && session.assistantId===assistant.id
-          && turnScope.activeProjectId===null)
-          ? (promptIndexes ??= turnTiming.time('prompt_paired_memory', () => options.memoryStore.getPairedPromptIndexes!(viewerCtx, PER_TURN_INDEX_CAP, candidate)))
-          : undefined
-      const indexValue = <T>(result: PromiseSettledResult<T>) => {
-        if (result.status === 'rejected') throw result.reason
-        return result.value
-      }
-      const [soulContext, identityMemories, rankedIndex, preferredChannel, selfEntityId] = await Promise.all([
-        optionalContext(async () => {
-          const auxiliary = await auxiliaryPrompt
-          if (auxiliary) return auxiliary.soul
-          const value = await (options.memoryStore.getSoulContext?.(viewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} }))
-          if (executionContext.security.access.sharedAudience && value.content && !value.evidence.sources?.length) {
-            return { content: null, evidence: {} }
-          }
-          return value
-        }, { content: null, evidence: {} }, value => value.evidence.sources?.map(scopeSource => ({ scopeSource })) ?? [], value => !!value.content),
-        optionalContext(async candidate => {
-          const auxiliary = await auxiliaryPrompt
-          return auxiliary?.identity ?? options.memoryStore.getIdentity(viewerCtx,candidate)
-        }, []),
-        optionalContext(async candidate => {
-          if (deferAmbientIndexes) return { rows: [], totalCount: 0 }
-          const packed = await readNativePromptMemory(candidate)
-          if (packed) return indexValue(packed.indexes.ranked)
-          const paired = readPromptIndexes(candidate)
-          return paired ? indexValue((await paired).ranked) : options.memoryStore.getIndexRanked(viewerCtx,PER_TURN_INDEX_CAP,candidate)
-        }, { rows: [], totalCount: 0 }, value => [value, value.rows, ...value.rows], value => value.rows.length > 0 || value.totalCount > 0),
-        (async () => {
-          const auxiliary = await auxiliaryPrompt
-          return auxiliary ? auxiliary.preferred : getPreferredChannel(assistant.id, user.id)
-        })(),
-        (async () => {
-          if(turnScope.access.sharedAudience)return null
-          const packed=await readNativePromptMemory(nativeTranscriptAuthority)
-          return packed?.selfEntityId===undefined?getSelfEntityId(viewerCtx):packed.selfEntityId
-        })(),
-      ])
-      noteAutomaticScopeEvidence(scopeAccumulator,[identityMemories,...identityMemories])
-      const soul = soulContext.content
-      scopeAccumulator.note(soulContext.evidence)
-
-      // v2 retrieval-side local-match (Q3b of the brain-ingestion-
-      // classification design thread). Fire-and-forget: for each
-      // retrieved memory whose summary mentions an existing workspace
-      // entity by display_name, write a `mentioned` edge + brain
-      // candidate audit row. No LLM in the hot path; failures isolated
-      // by the helper. Surfaces only on assistants with a personal
-      // brain (`kind='primary' | 'standard'`) — distribution apps have
-      // no brain to enrich. Gated by `workspaces.brain_extraction_v2_enabled`
-      // is intentionally NOT checked here — the helper is cheap enough
-      // and additive that we skip the extra DB hit on the hot path; the
-      // edge writes themselves are harmless even when v2 is off.
-      if (
-        (assistant.kind === 'primary' || assistant.kind === 'standard') &&
-        assistant.workspaceId &&
-        options.brainCandidateStore &&
-        options.entitiesStore &&
-        options.entityLinksStore
-      ) {
-        const matchDeps = {
-          ctx: viewerCtx,
-          entityStore: options.entitiesStore,
-          entityLinks: options.entityLinksStore,
-          candidates: options.brainCandidateStore,
-        }
-        const matchMemories = rankedIndex.rows.filter(m=>!boundScopeSources(m).some(source=>source.resourceKind==='application_field'||source.resourceKind==='external_source')).map((m) => ({ id: m.id, summary: m.summary }))
-        if(matchMemories.length)void runLocalMatchCheck(matchMemories, matchDeps).catch((err) => {
-          console.warn(
-            `[chat/retrieval-match] check failed for user ${user.id}: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          )
-        })
-      }
-
-      // Fetch team memories + identity (name + purpose) when assistant is team-owned.
-      // Team name is surfaced into the L1 soul; purpose grounds the team-vs-user
-      // routing decision for saveMemory and the ## Team Context block. Identity
-      // memories and voice rules share a read and retain separate admission.
-      let workspaceIdentityMemories: Awaited<ReturnType<typeof options.memoryStore.getWorkspaceIdentity>> = []
-      let teamMemoryIndex: Awaited<ReturnType<typeof options.memoryStore.getWorkspaceIndex>> = []
-      let teamVoiceRules: Awaited<ReturnType<typeof options.memoryStore.getWorkspaceMemoriesByCategory>> = []
-      let workspaceIdentity: { name: string; purpose: string } | null = null
-      if (assistant.workspaceId) {
-        let promptMemories: ReturnType<NonNullable<typeof options.memoryStore.getWorkspacePromptMemories>> | undefined
-        const readPromptMemories = () => options.memoryStore.getWorkspacePromptMemories
-          ? (promptMemories ??= turnTiming.time('prompt_workspace_identity_voice', () => options.memoryStore.getWorkspacePromptMemories!(viewerCtx, 'voice')))
-          : undefined
-        ;[workspaceIdentityMemories, teamMemoryIndex, teamVoiceRules, workspaceIdentity] = await Promise.all([
-          optionalContext(async candidate => {
-            const packed = await readNativePromptMemory(candidate)
-            if (packed) return packed.team.identity
-            const paired = readPromptMemories()
-            return paired ? (await paired).identity : options.memoryStore.getWorkspaceIdentity(viewerCtx)
-          }, []),
-          optionalContext(async candidate => {
-            if (deferAmbientIndexes) return []
-            const packed = await readNativePromptMemory(candidate)
-            if (packed) return indexValue(packed.indexes.workspace)
-            const paired = readPromptIndexes(candidate)
-            return paired ? indexValue((await paired).workspace) : options.memoryStore.getWorkspaceIndex(viewerCtx,undefined,candidate)
-          }, []),
-          optionalContext(async candidate => {
-            const packed = await readNativePromptMemory(candidate)
-            if (packed) return packed.team.tagged
-            const paired = readPromptMemories()
-            return paired ? (await paired).tagged : options.memoryStore.getWorkspaceMemoriesByCategory(viewerCtx, 'voice')
-          }, []),
-          (async () => {
-            const auxiliary = await auxiliaryPrompt
-            if (auxiliary) return auxiliary.workspace
-            return turnScope.access.sharedAudience ? null : getWorkspaceIdentity(assistant.workspaceId)
-          })(),
-        ])
-      }
-      const teamPurpose = workspaceIdentity?.purpose ?? null
-
-      // Shared Feed authoring uses the existing loaders intersected with its
-      // viewers and draft scope. Generic personal indexes cannot bypass that
-      // boundary or inject a lesson for a different brand/platform/format.
-      const feedPromptContext = feedTurnContext
-        ? await (options.feedReviewContext ?? loadFeedReviewContext)(feedTurnContext.actor).catch(() => null)
-        : null
-      if (feedTurnContext) {
-        feedTurnContext.learningSources = feedPromptContext?.dimensions.memory.sources ?? []
-        feedTurnContext.learningCoverage = feedPromptContext?.dimensions.memory.coverage ?? { state: 'failed', eligible: 0, retrieved: 0, reviewed: 0, limits: ['source_read_failed'] }
-      }
-
-      const voiceTitle = nativeTranscriptAuthority && classifySession(session).anchor.kind === 'feed_draft'
-        ? await readSessionTitle(session.id,nativeTranscriptAuthority) : null
-      if(voiceTitle)await admitModelInput({...executionToolContext(executionContext,{appId:'native-session-voice-title'}),scopeAccumulator})
-      const memoryContext = buildMemoryContext({
-        soul,
-        identityMemories: identityMemories.map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
-        memoryIndex: feedTurnContext ? [] : rankedIndex.rows.map((m) => ({ ...m, appId: null })),
-        memoryIndexDeferred: deferAmbientIndexes,
-        totalNonIdentityCount: rankedIndex.totalCount,
-        workspaceIdentityMemories: feedTurnContext ? [] : workspaceIdentityMemories.map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
-        teamMemoryIndex: feedTurnContext ? [] : teamMemoryIndex.map((m) => ({ ...m, appId: null })),
-        teamVoiceRules: (feedTurnContext ? [] : teamVoiceRules).map((m) => ({
-          id: m.id,
-          summary: m.summary,
-          detail: m.detail,
-          confidence: m.confidence,
-          tags: m.tags ?? [],
-        })),
-        // Per-platform voice (docs/architecture/feed/voice-learning.md →
-        // "Per-platform voice"): a draft session's target platform (title
-        // prefix) narrows the Voice Rules block to general + that
-        // platform's rules. Tuning chat / ordinary sessions pass null and
-        // see every rule, platform-labelled.
-        voiceTargetPlatform:
-          classifySession(session).anchor.kind === 'feed_draft' ? voicePlatformFromDraftTitle(voiceTitle?.title) : null,
-        teamPurpose,
-        assistantName: assistant.name,
-        selfEntityId,
-      })
-
-      // Capability set — used both for the L1 `# Workspace Files` block
-      // gating below and for `filterToolsByCapabilities` further down.
-      // One fetch, two consumers.
-
-      // Workspace files L1 block (Q3 / company-brain §10). Built only when
-      // the assistant has the `files` capability AND a workspace AND the
-      // store is wired (skipped in dev / smoke without GCS).
-      let workspaceFilesContext: string | null = null
-      if (
-        !deferAmbientIndexes &&
-        options.workspaceFilesStore &&
-        assistant.workspaceId &&
-        activeCapabilities.has('files')
-      ) {
-        try {
-          let scopedIndexEmpty = false
-          const admittedRows = await turnTiming.time('prompt_workspace_files', () => optionalContext(async () => {
-            const indexed = await options.workspaceFilesStore!.listIndexRanked({
-              workspaceId: assistant.workspaceId!, userId: user.id, assistantId: assistant.id, assistantKind: assistant.kind,
-              clearance: readClearance, compartments: readCompartments,
-              mutationCompartments: turnScope.access.mutationCompartments, projectIds: turnScope.effectiveProjectIds,
-              sharedAudience: turnScope.access.sharedAudience,
-              ...(viewerCtx.departmentRead ? { departmentRead: viewerCtx.departmentRead } : {}),
-            }, PER_TURN_FILES_INDEX_CAP)
-            return selectWorkspaceFilesContextRows(indexed, PER_TURN_FILES_INDEX_CAP)
-          }, null, undefined, (rows) => {
-            // An empty scoped read has no source rows to admit. The shared
-            // reader checks current invocation authority before this callback.
-            scopedIndexEmpty = rows?.length === 0
-            return Boolean(rows?.length)
-          }))
-          const rows = admittedRows ?? (scopedIndexEmpty ? [] : null)
-          if (rows) noteAutomaticScopeEvidence(scopeAccumulator, rows)
-          workspaceFilesContext = buildWorkspaceFilesContext(rows)
-        } catch (err) {
-          if (isAuthorityChangedError(err)) throw err
-          console.error('[chat] workspace-files index fetch failed:', err)
-          workspaceFilesContext = buildWorkspaceFilesContext(null)
-        }
-      }
-
-      // Brand L1 digest (docs/architecture/features/brand.md). The gates
-      // (capability + an APPROVED default brand) and the store live in
-      // `resolveBrandContext`, so this route and every channel share one
-      // chokepoint instead of each forwarding a store.
-      const brandContext = turnScope.access.sharedAudience ? null : await resolveBrandContext({
-        userId: user.id,
-        workspaceId: assistant.workspaceId,
-        hasCapability: activeCapabilities.has('brand'),
-        logLabel: 'chat',
-      })
-
-      // Recall logging — TWO separate channels:
-      //
-      //   (a) `memories.recall_count` aggregate — historically inflated when
-      //       every index-inject bumped the counter. Today only explicit
-      //       getMemory tool calls bump `recall_count` (via the tool's
-      //       `store.trackRecall` call). Utility is judged post-loop by the
-      //       memory nudge.
-      //
-      //   (b) `memory_recall_events` (mig 167, separate table) — logs
-      //       index-inject + tool_call recalls per turn, joins downstream
-      //       with feedback to surface bad-outcome memories. Two-phase:
-      //       push into the per-turn buffer here / inside the tool, flush
-      //       with the assistant message id once it commits.
-      //
-      // Constructed once per turn so each request has its own queue.
-      // Turn ledger (plan §4): one recorder per chat turn. Created beside the
-      // recall buffer so context-assembly retrieval provenance (below) can be
-      // recorded before the loop starts; the trace id is minted now and
-      // re-keyed to the persisted assistant message id at the flush site.
-      const turnLedgerHandle = createTurnLedger({
-        workspaceId: assistant.workspaceId ?? null,
-        assistantId: assistant.id,
-        sessionId: session.id,
-        payloads: getLedgerPayloadStore(),
-      })
-      const recallBuffer = options.memoryRecallEventsStore && assistant.workspaceId
-        ? createMemoryRecallBuffer({
-            sink: options.memoryRecallEventsStore,
-            sessionId: session.id,
-            workspaceId: assistant.workspaceId,
-            userId: user.id,
-          })
-        : undefined
-
-      // Push `index_inject` rows for the personal memory index + team
-      // memory index (when team-owned). The identityMemories are part of
-      // the L1 prompt every turn and are intentionally NOT recall-logged
-      // — they're always-on, not "the model reached for them".
-      if (recallBuffer) {
-        recallBuffer.pushMany(
-          rankedIndex.rows.map((m) => m.id),
-          'index_inject',
-        )
-        if (assistant.workspaceId) {
-          recallBuffer.pushMany(
-            teamMemoryIndex.map((m) => m.id),
-            'index_inject',
-          )
-        }
-      }
-      // Ledger retrieval provenance (chat-auditing Phase 0 shape): the
-      // automatic context-assembly sets. Tool-driven retrieval is already
-      // captured as tool_call events with full inputs/results.
-      if (rankedIndex.rows.length > 0 || teamMemoryIndex.length > 0) {
-        turnLedgerHandle.recordRetrieval({
-          returnedRows: [
-            ...rankedIndex.rows.map((m) => ({ primitive: 'memory', rowId: m.id })),
-            ...teamMemoryIndex.map((m) => ({ primitive: 'memory', rowId: m.id })),
-          ],
-          source: 'index_inject',
-        })
-      }
-
-      // CL-8: per-turn skill invocation buffer. Constructed when we have
-      // a workspace-scoped skill store; the `useSkill` tool's
-      // `recordInvocation` callback (wired in `injectSkills` below)
-      // pushes onto this buffer for every successful pick. Flushed once
-      // the assistant message commits — on success, the `succeeded`
-      // counter is bumped for each invoked skill. On turn error or
-      // empty completion, the buffer is cleared without writes.
-      //
-      // Synchronous counters (`invocations`, `last_invoked_at`, stale →
-      // active reactivation) fire directly from `injectSkills` —
-      // they're cumulative pick-counters and must fire even if the
-      // turn later errors out.
-      //
-      // See `docs/architecture/context-engine/memory-consolidation.md` →
-      // "Skill invocation feedback (CL-8 lock)".
-      const skillInvocationBuffer = options.workspaceSkillStore && assistant.workspaceId
-        ? createSkillInvocationBuffer({
-            sink: {
-              incrementSucceeded: (id) => options.workspaceSkillStore!.incrementSucceeded(id),
-              incrementUserCorrectedAfter: (id) =>
-                options.workspaceSkillStore!.incrementUserCorrectedAfter(id),
-            },
-          })
-        : undefined
-
-      // Episodic context (topic-scoped history for resume/cross-topic).
-      let episodicContext: string | null = null
-      if (options.episodicStore && classification) {
-        const store = options.episodicStore, fetchByTopic = store.fetchByTopic.bind(store)
-        try {
-          episodicContext = await optionalContext(candidate => fetchEpisodicContext({
-            authority: candidate ?? { execution: executionContext, accumulator: scopeAccumulator },
-            store: { ...store, fetchByTopic: async query => {
-              await routing.topic?.assertCurrent()
-              return fetchByTopic(query)
-            } },
-            sessionId: session.id,
-            classification,
-          }), null)
-        } catch (err) {
-          if (isAuthorityChangedError(err)) throw err
-          console.error('[chat] episodic context fetch failed:', err)
-        }
-      }
-
-      // Open commitments and the active plan stay in every applicable prompt.
-      const { sessionStateBlock, planBlock } = earlyTaskContext ?? await turnTiming.time('prompt_task_context', readTaskContext)
-
-      const anchorTz = user.timezone ?? 'UTC'
-      const presenceTz = resolvePresenceTimezone({
-        liveClientTz: req.clientTimezone ?? clientTimezone ?? null,
-        lastSeenTz: user.lastSeenTz,
-        lastSeenTzAt: user.lastSeenTzAt,
-        anchorTimezone: anchorTz,
-      })
-      const now = new Date()
-      const currentDateTime = now.toLocaleString('en-US', {
-        timeZone: presenceTz,
-        weekday: 'long',
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: true,
-        timeZoneName: 'short',
-      })
-      // Doc surface context — drives doc-skill injection independent of
-      // WHICH assistant is talking (default: workspace primary; switchable).
-      // On the doc surface the host keeps its own Layer-1 and gets the
-      // page-authoring protocol appended as a skill block + the doc tools.
-      // (Doc is a surface/skill, not an app type — so this is purely the
-      // surface test; `docCtx` is kept as the name the gates below read.)
-      const onDocSurface = turnPolicy.docSurface
-      const docCtx = onDocSurface
-      const docSkillTurn = docCtx && activeCapabilities.has('page') && activeCapabilities.has('home_app:page:read') && activeCapabilities.has('home_app:page:write')
-      // The app-web workspace surfaces (Brain / Studio / Workflow / Approvals /
-      // Knowledge-base / full Chat) get the doc tools too, but with AMBIENT steering
-      // (chat-first, author only on an explicit ask). `docToolsTurn` gates the
-      // tool injection + the post-turn auto-title pass; every research /
-      // coordinator / outline / presence gate stays keyed to the doc-only
-      // `docCtx` / `onDocSurface` so those behaviours don't change off-doc.
-      const onAppSurface = Boolean(programmatic) || isAppSurface(session)
-      const docToolsTurn = (docCtx || onAppSurface) && activeCapabilities.has('page')
-      let basePrompt = resolveLayer1Prompt({
-        defaultPrompt: options.systemPrompt,
-        assistant: {
-          kind: assistant.kind ?? 'standard',
-          name: assistant.name,
-          appType: assistant.appType ?? null,
-        },
-        team: workspaceIdentity
-          ? { name: workspaceIdentity.name, purpose: workspaceIdentity.purpose }
-          : null,
-        // The charter mission is the assistant's one-line purpose (successor
-        // of `bio`, migration 418) - the app-soul hook renders it as the
-        // voice + identity anchor.
-        assistantBio: charterMission(resolveCharter(assistant)),
-        resolveAppSoul: assistant.appType === 'distribution' && (!activeCapabilities.has('feed') || !activeCapabilities.has('home_app:feed:read') || !activeCapabilities.has('home_app:feed:write')) ? undefined : options.resolveAppSoul,
-      })
-      // Follow-up chips are opt-in per client (see _prompt-builder.ts):
-      // appended only when the requesting surface declares it renders chips,
-      // never for `app` assistants. This is what stops `<followup>` leaking
-      // into doc page content.
-      basePrompt = maybeAppendFollowupChips(basePrompt, {
-        followupChips: requestedFollowupChips,
-        assistantKind: assistant.kind ?? 'standard',
-      })
-      // Workspace-level prompt-evolution snippet. Read once per turn
-      // from the table the weekly worker writes to. Bare query (system
-      // bypass) — the snippet biases the model toward workspace-wide
-      // conventions regardless of which user is currently chatting.
-      // Failure mode = no snippet injected; never blocks prompt
-      // assembly. See docs/architecture/brain/corrections.md →
-      // "Workspace-level prompt evolution".
-      const auxiliary = await auxiliaryPrompt
-      let workspaceEvolutionSnippet: string | null = auxiliary?.evolution ?? null
-      if (!auxiliary && assistant.workspaceId && !turnScope.access.sharedAudience) {
-        try {
-          // Two snippets: memory-side (scope/sensitivity bias from
-          // memory_verifications, mig 166) and brain-side (per-primitive
-          // delete-rate bias from brain_verifications, mig 179). Both
-          // sit in Layer 2 and bias future model saves. Join with a
-          // blank line so they read as two distinct guidance blocks.
-          const [memoryEvo, brainEvo] = await Promise.all([
-            getWorkspaceMemoryEvolution(assistant.workspaceId),
-            getBrainEvolution(assistant.workspaceId),
-          ])
-          const parts = [memoryEvo?.promptSnippet, brainEvo?.promptSnippet].filter(
-            (s): s is string => typeof s === 'string' && s.length > 0,
-          )
-          workspaceEvolutionSnippet = parts.length > 0 ? parts.join('\n\n') : null
-        } catch (err) {
-          console.error('[chat] workspace evolution snippet fetch failed:', err)
-        }
-      }
-
-      // One scoped loader serves every prompt lane. It returns model-visible
-      // rule text separately from the content-free application id used only
-      // by an exact frozen approval created later in this turn.
-      const decisionPlaybookContext = turnScope.access.sharedAudience && !feedTurnContext
-        ? { playbookRules: [], appliedRuleIds: [], decisionApplicationId: null, readFailed: false }
-        : await loadDecisionPlaybookContext({
-        ...(researchMode ? { research: { projectId: session.contextProjectId ?? null } } : {}),
-        workspaceId: assistant.workspaceId ?? null,
-        assistantId: assistant.id,
-        actorUserId: user.id,
-        externalPrincipal: Boolean(programmatic),
-        operationKind: 'chat_turn',
-        operationId: storedUserMsg.id,
-        sourceKind: 'session_message',
-        sourceId: storedUserMsg.id,
-        channelType: 'web',
-        analytics: options.analytics,
-        logLabel: 'chat',
-        ...(feedTurnContext ? { allowedRuleIds: (feedPromptContext?.dimensions.memory.sources ?? []).filter(source => source.kind === 'playbook').map(source => source.id.slice('playbook:'.length)), recordApplication: false, applicability: { kind: 'feed' as const, scope: feedPromptContext?.learningScope } } : {}),
-      })
-      const playbookRules = decisionPlaybookContext.playbookRules
-      if (feedTurnContext && assistant.workspaceId) feedTurnContext.applicationId = await recordFeedContextApplication(feedTurnContext.actor, assistant.workspaceId, 'feed_chat', storedUserMsg.id, feedTurnContext.learningSources ?? [], feedPromptContext?.learningScope) ?? undefined
-
-      // Charter intake mode (growth loop Phase 2): an unconfigured standard
-      // assistant being spoken to by its OWNER gets the setup interview -
-      // the `saveCharter` tool (injected at the tool site below) plus the
-      // interview addendum in the stable prefix, both keyed on this one
-      // boolean (tool-awareness rule). The role lookup only runs for
-      // unconfigured assistants, so configured ones pay nothing.
-      let charterIntakeMode = false
-      if (charterNeedsIntake(resolveCharter(assistant), assistant.kind)) {
-        try {
-          const access = await resolveAssistantAccess(user.id, assistant.id)
-          charterIntakeMode = access?.role === 'owner'
-        } catch (err) {
-          console.error('[chat] intake role resolution failed:', err)
-        }
-      }
-
-      // Phase 0 doc-context instrumentation: stash the skill block string and
-      // (further down) the live outline + page counts so the post-turn meter can
-      // attribute tokens per component for the `doc_context_composition`
-      // event. See docs/plans/doc-turn-context-optimization.md → Phase 0.
-      let docSkillBlockStr: string | null = null
-      let docLiveOutlineStr: string | null = null
-      let docOutlineBlockCount = 0
-      let docPageBlockCount = 0
-      let docPageVersion = 0
-      // Full Chat room Page pins become edit authority only after the same
-      // fresh workspace/clearance resolution that renders their index line.
-      // Other surfaces never receive this supplemental target set.
-      let pinnedPageEditTargets: ResolvedPinnedPageTarget[] = []
-
-      // Provenance split (2026-08-01): private runtime metadata stays in the
-      // trusted system channel. Only representations of content actually
-      // visible in the client may prefix the newest user turn. The earlier
-      // cache-first design placed every volatile block in one user-role
-      // envelope; that made hidden headings such as Open commitments a
-      // candidate referent for questions like "呢句咩意思".
-      const splitPrompt = buildSplitSystemPrompt({
-        basePrompt,
-        // Doc page-authoring steering as a skill addendum. On the doc surface:
-        // the full page-first protocol (mode tracks the research toggle, the
-        // same split the doc soul used to make). On an app-web workspace
-        // surface: the compact AMBIENT block — tools present, chat-first,
-        // author a page only on an explicit ask. `null` everywhere else.
-        docSkillBlock: docSkillTurn
-          ? (docSkillBlockStr = buildDocSupervisorSkillBlock({
-              mode: researchMode ? 'research' : 'page',
-              teamName: workspaceIdentity?.name,
-              teamPurpose: workspaceIdentity?.purpose ?? undefined,
-            }))
-          : onAppSurface && activeCapabilities.has('page') && activeCapabilities.has('home_app:page:read') && activeCapabilities.has('home_app:page:write')
-            ? (docSkillBlockStr = buildAmbientDocSkillBlock({
-                teamName: workspaceIdentity?.name,
-                teamPurpose: workspaceIdentity?.purpose ?? undefined,
-                // `onAppSurface` guarantees appOrigin is one of the ambient
-                // workspace surfaces (APP_SURFACE_ORIGINS) — the line tells
-                // the model which view the dock is mounted over, pairing
-                // with the client's "Asking about <surface>" chip.
-                surface: session.appOrigin as AmbientSurface,
-              }))
-            : null,
-        charter: resolveCharter(assistant),
-        playbookRules,
-        intakeAddendum: charterIntakeMode ? CHARTER_INTAKE_ADDENDUM : null,
-        workspaceEvolutionSnippet,
-        // Who is speaking — the authenticated member behind this request.
-        // Web sessions know this positively, so the model never has to ask
-        // "which team member are you?" to resolve "me" / "my tasks". In a
-        // shared room the request is authenticated as the newest sender, so
-        // the line stays correct per turn. See chat-app.md → "Attribution
-        // reaches the model".
-        speakerIdentity: user.name?.trim()
-          ? { name: user.name.trim(), email: user.email }
-          : user.email
-            ? { name: user.email }
-            : null,
-        currentDateTime,
-        timezone: presenceTz,
-        anchorTimezone: anchorTz,
-        memoryContext,
-        workspaceFilesContext,
-        brandContext,
-        sessionStateBlock,
-        activePlanBlock: planBlock,
-        episodicContext,
-        topicHint: classification,
-        replyContext: replyResolved
-          ? { text: replyResolved.text, fromAssistant: replyResolved.fromAssistant }
-          : null,
-      })
-      // Route-specific addenda follow the reusable builder prefix in system context.
-      let systemAddenda = ''
-      const privateRuntimeContextParts: string[] = splitPrompt.privateRuntimeContext
-        ? [splitPrompt.privateRuntimeContext]
-        : []
-      const activeWorkspaceContext = formatActiveWorkspaceContext(turnScope)
-      if (activeWorkspaceContext) privateRuntimeContextParts.push(activeWorkspaceContext)
-      if (feedTurnContext) privateRuntimeContextParts.push(formatFeedTurnContext(feedTurnContext))
-      const userVisibleContextParts: string[] = splitPrompt.userVisibleContext
-        ? [splitPrompt.userVisibleContext]
-        : []
-      if (!turnScope.access.sharedAudience && options.crmEmailDraftStore && assistant.workspaceId && activeCapabilities.has('crm')) {
-        try {
-          const activeEmailDraft = await options.crmEmailDraftStore.getActiveForSession({
-            userId: user.id,
-            workspaceId: assistant.workspaceId,
-            sessionId: session.id,
-          })
-          if (activeEmailDraft) {
-            userVisibleContextParts.push(formatActiveEmailDraftContext(activeEmailDraft))
-          }
-        } catch (err) {
-          console.error('[chat] active email draft fetch failed:', err)
-        }
-      }
-      let updateViewedSkillTool: Tool | null = null
-      let brainEntryEditTools: BrainEntryEditTools | null = null
-      let scopedBrainEntryActive = false
-      let scopedBrainUpdateAllowed = false
-
-      // Shared-chat participants are application-derived runtime metadata.
-      // They remain private even though doing so makes this system suffix
-      // change as new participants appear.
-      if (turnPolicy.attribution && sharedParticipants.length > 0) {
-        privateRuntimeContextParts.push(
-          [
-            '# Shared chat',
-            'This conversation is shared with the workspace and several people write in it.',
-            `Participants so far: ${sharedParticipants.join(', ')}.`,
-            'Each human turn is prefixed with its timestamp and the sender name. Address the person who wrote the newest message, and do not assume earlier turns came from them.',
-          ].join('\n'),
-        )
-      }
-
-      if (roomResponseGroupContext) {
-        const coordinationBlock = buildRoomResponseCoordinationBlock({
-          assistants: roomResponseGroupContext.assistants,
-          currentAssistantId: assistant.id,
-        })
-        if (coordinationBlock) privateRuntimeContextParts.push(coordinationBlock)
-      }
-
-      // Pinned room context (multiplayer chat P1b, T15) — the room's working
-      // frame, resolved FRESH each turn under the session's clearance. An
-      // index, not inlined content. The pins are visible on the room surface,
-      // so their representation is valid user-visible context. Best-effort: a
-      // resolver failure costs the block, never the turn. Every Chat
-      // conversation pins (`policy.pins`): a personal chat is a room with one
-      // human (chat-parity D1).
-      const pinnedContext = earlyPinnedContext === undefined ? await turnTiming.time('prompt_pins', readPinnedPromptContext) : earlyPinnedContext
-      if (pinnedContext) {
-        if (pinnedContext.block) userVisibleContextParts.push(pinnedContext.block)
-        if (programmatic || classifySession(session).surface === 'chat') {
-          pinnedPageEditTargets = pinnedContext.pageTargets
-        }
-      }
-
-      // ── Dispute pre-pass (grounding-gate claim ledger) ──
-      // A dispute-shaped message carrying a figure ("唔係要 look 11萬咩")
-      // loads the previous reply's claim provenance so the model re-verifies
-      // instead of re-asserting. One indexed read, only on the dispute
-      // shape. This claim ledger is hidden application metadata and therefore
-      // stays in private runtime context. See grounding-gate.md → "Dispute
-      // pre-pass".
-      if (typeof message === 'string' && message && matchesDisputedFigure(message)) {
-        try {
-          const priorClaims = await getClaimsForLatestAssistantMessage(session.id)
-          if (priorClaims.length > 0) {
-            privateRuntimeContextParts.push(buildDisputeContextNote(priorClaims))
-          }
-        } catch (err) {
-          console.warn('[chat] dispute pre-pass failed, continuing without:', err)
-        }
-      }
-
-      // Uploaded-file save policy — shared with the channel pipeline (this
-      // block was web-only for its whole life). See
-      // `workspace-files/upload-policy-block.ts` for the two invariants it
-      // holds (tool-agnostic, capability-gated).
-      systemAddenda += buildUploadPolicyBlock(activeCapabilities.has('files'))
-
-      // Task autopilot nudge (task-goal-autopilot.md §8). Capability-gated +
-      // dynamic (post-`injectMcpTools`), so naming the goal tools here is
-      // allowed — they exist whenever this runs. v2: task creation is triaged
-      // in the BACKGROUND (a judge drafts a goal only for tasks the assistant
-      // can honestly help with), so the model must NOT announce or pitch a
-      // goal per created task — the creating turn cannot know the verdict.
-      // What remains is the fails-safe contract: never work an unconfirmed
-      // goal.
-      if (activeCapabilities.has('goals')) {
-        systemAddenda +=
-          '\n\n# Goals for tasks\n' +
-          'Some tasks are judged in the background as workable by you; those get a DRAFT goal (an outcome, verification criteria, and an approach) the user reviews on their Tasks-assignable surface. A draft goal does NOTHING on its own. ' +
-          'Do NOT announce or pitch goals when you create tasks — the judgment happens after creation and most tasks will not have one. ' +
-          'When the user asks you to work a task, find its goal with listGoals (filter by the task id). ' +
-          'If the goal is still a draft, review its outcome with the user, confirm it (confirmGoal), then spin it up (workTask). ' +
-          'If the task has NO goal, you may define one with the user explicitly before working it. ' +
-          'NEVER start working a task whose goal is not confirmed.'
-      }
-
-      // ── Doc outline injection (Lock #5/#6, §5.4) ────────────
-      // When a doc page is open in the editor, inject its outline so the
-      // model can address blocks by id and plan against the LIVE document.
-      // `getVersionedPage` prefers `documents.snapshot_json`, so the
-      // outline reflects every human edit — not the frozen `saved_views.page`.
-      // The doc page/entity tools themselves are injected further down
-      // (post-capability-filter, mirroring the extra-tool inject).
-      if (
-        docCtx &&
-        typeof requestedDocViewId === 'string' &&
-        requestedDocViewId
-      ) {
-        try {
-          const [{ createDbDocPageStore }, { buildOutline }, { renderActivePageOutline }] =
-            await Promise.all([
-              import('../db/doc-page-store.js'),
-              import('@use-brian/core/doc/outline.js'),
-              import('@use-brian/core/doc/page-retrieval.js'),
-            ])
-          const pageContext = { ...executionToolContext(executionContext, { appId: assistant.id }), scopeAccumulator }
-          const current = await permissionContext?.readPageAnchor?.(pageContext, requestedDocViewId)
-            ?? await createDbDocPageStore().getVersionedPage(user.id, requestedDocViewId, pageContext)
-          if (!current && classifySession(session).anchor.kind === 'doc_thread') {
-            throw new ChatTurnRefusal('page_context_unavailable', 'Brian could not access the Page needed to complete this request.')
-          }
-          if (current) {
-            const pageForOutline = {
-              blocks: current.page.blocks,
-              version: current.version,
-              title: current.title,
-            }
-            const outline = buildOutline(pageForOutline, {
-              pageId: requestedDocViewId,
-              pageVersion: current.version,
-              title: current.title,
-            })
-            // Flat outline for a small / heading-less page (byte-identical to
-            // before); the folded large-page map (every heading + relevant
-            // sections expanded, the rest collapsed to a getSection pointer) for
-            // a large, heading-structured page — Phases 2/3 of the doc
-            // turn-context work. The flat-vs-folded gate is the pure, unit-tested
-            // `renderActivePageOutline`. See doc-turn-context-optimization.md.
-            const lines = renderActivePageOutline(
-              pageForOutline,
-              outline,
-              typeof message === 'string' ? message : '',
-            )
-            const isEmptyPage = current.page.blocks.length === 0
-            let activeRecordingBlock = ''
-            if (
-              activeCapabilities.has('crm') &&
-              options.tools.has('assignRecordingSpeakers')
-            ) {
-              try {
-                const { createDbSavedViewStore } = await import('../db/saved-views-store.js')
-                const pageMeta = await createDbSavedViewStore().getById(user.id, requestedDocViewId)
-                const activeRecordingId = pageMeta
-                  ? recordingIdFromAnchorKey(pageMeta.anchorKey) ?? pageMeta.linkedRecordingId
-                  : null
-                if (activeRecordingId && pageMeta) {
-                  // Recording recovery loads only inside the recording branch (chat import graph).
-                  const { resolveCurrentRecordingId } = await import('../recordings/recovery.js')
-                  const currentRecordingId = await resolveCurrentRecordingId({ actorUserId: user.id }, pageMeta.workspaceId, activeRecordingId)
-                  if (currentRecordingId) activeRecordingBlock = `\n\n${buildActiveRecordingInstruction(currentRecordingId)}`
-                }
-              } catch (err) {
-                console.error('[chat] active recording context failed:', err)
-              }
-            }
-            const activePageBlock =
-              `# Active doc page (id=${outline.pageId}, version=${outline.pageVersion})\n` +
-              `Title: ${JSON.stringify(outline.title)}\n` +
-              `Blocks:\n${lines || '  (empty page)'}\n\n` +
-              buildActivePageInstruction({
-                isEmptyPage,
-                isCommentThread: classifySession(session).anchor.kind === 'doc_thread',
-              }) +
-              activeRecordingBlock
-            // The open page is visible in the editor and is a valid referent
-            // for "this page". Its representation prefixes the user turn;
-            // the runtime boundary prevents wrapper ids/instructions from
-            // becoming independently addressable content.
-            userVisibleContextParts.push(activePageBlock)
-            // Phase 0 capture for the doc-context meter (post-turn emit).
-            docLiveOutlineStr = activePageBlock
-            docOutlineBlockCount = outline.blocks.length
-            docPageBlockCount = current.page.blocks.length
-            docPageVersion = current.version
-
-            // Insertion anchor (app-web "Space for AI" on an empty line):
-            // the user parked their cursor on a specific block and wants the
-            // generation to land THERE, not at the page end. The raw operation
-            // mechanics now live in the isolated editor; the parent only needs
-            // to preserve the placement constraint in its one delegation.
-            if (
-              typeof requestedDocAnchorBlockId === 'string' &&
-              requestedDocAnchorBlockId
-            ) {
-              userVisibleContextParts.push(
-                `## Insertion anchor\n` +
-                `The user placed their cursor on block \`${requestedDocAnchorBlockId}\` and asked you ` +
-                `to generate content there. Call \`delegateDocEdit\` once and preserve this exact block id ` +
-                `and placement constraint in the brief. Do not describe the change in prose or ask to ` +
-                `confirm first. The isolated editor receives this anchor again from the server and owns ` +
-                `the block operations.`,
-              )
-            }
-
-            // ── Page-tree visibility ("where this page sits") ─────────
-            // The outline above shows the OPEN page only. Users also point
-            // at pages by POSITION - "the meeting notes at the parent
-            // level", "the sub-page" - so append a titles-only map of the
-            // page's ancestors / siblings / sub-pages with their ids and
-            // the instruction to READ the referenced page (`exportPage`)
-            // instead of asking the user to paste it. Titles + ids only;
-            // never neighbour content (doc-context cost). Its own try so a
-            // tree read failure can never take the outline down with it.
-            // See doc.md → "Page-tree visibility".
-            try {
-              const [{ getPageTreeNeighborhood }, { formatPageTreeContext }] =
-                await Promise.all([
-                  import('../db/saved-views-store.js'),
-                  import('@use-brian/core/doc/page-tree-context.js'),
-                ])
-              const hood = turnScope.access.sharedAudience ? null : await getPageTreeNeighborhood(user.id, requestedDocViewId)
-              const treeBlock = hood
-                ? formatPageTreeContext(
-                    { id: requestedDocViewId, title: current.title },
-                    hood,
-                  )
-                : ''
-              if (treeBlock) userVisibleContextParts.push(treeBlock)
-            } catch (err) {
-              console.error('[chat] doc page-tree injection failed:', err)
-            }
-          }
-        } catch (err) {
-          if (classifySession(session).anchor.kind === 'doc_thread') {
-            if (isAuthorityChangedError(err)) throw err
-            throw new ChatTurnRefusal('page_context_unavailable', 'Brian could not access the Page needed to complete this request.')
-          }
-          console.error('[chat] doc outline injection failed:', err)
-        }
-
-        // ── In-page comment-thread discovery ───────────────────────
-        // Surface the page's other comment threads (metadata only) so the AI
-        // knows what's already been discussed and reads a thread's conversation
-        // on demand via `getCommentThread`. A comment-reply turn (its session is
-        // `doc_thread`) sees every thread BUT the one it's replying in; a
-        // chat turn (floating dock / Space→AI) sees them all.
-        try {
-          const [{ createDbCommentThreadStore }, { formatThreadDiscovery }] = await Promise.all([
-            import('../db/comment-thread-store.js'),
-            import('@use-brian/core/doc/comment-discovery.js'),
-          ])
-          const summaries = turnScope.access.sharedAudience ? [] : await createDbCommentThreadStore().listThreadSummariesForPage(
-            user.id,
-            requestedDocViewId,
-          )
-          const section = formatThreadDiscovery(summaries, {
-            variant: classifySession(session).anchor.kind === 'doc_thread' ? 'thread' : 'chat',
-            currentSessionId: session.id,
-          })
-          if (section) userVisibleContextParts.push(section)
-        } catch (err) {
-          console.error('[chat] doc thread discovery injection failed:', err)
-        }
-      }
-
-      // ── Viewing-skill context (Brain skill editor) ──────────────
-      // The app-web floating dock sends `viewingSkillRowId` while the user
-      // is on the skill editor route. Inject the skill's saved contents as
-      // turn context so "this skill" resolves to what they are looking at.
-      // Read through the same RLS-scoped workspace list the editor itself
-      // uses (`listForWorkspace` + actingUserId), so the chat can never
-      // surface a skill the requesting user couldn't open in the editor.
-      if (
-        typeof requestedViewingSkillRowId === 'string' &&
-        requestedViewingSkillRowId &&
-        assistant.workspaceId &&
-        options.workspaceSkillStore
-      ) {
-        try {
-          const workspaceSkills = await options.workspaceSkillStore.listForWorkspace(
-            assistant.workspaceId,
-            { actingUserId: user.id },
-          )
-          const viewedSkill = workspaceSkills.find(
-            (s) =>
-              s.rowId === requestedViewingSkillRowId &&
-              s.state !== 'archived' &&
-              isSkillOfferable(s, { assistantClearance: assistant.clearance }),
-          )
-          if (viewedSkill) {
-            userVisibleContextParts.push(buildViewingSkillBlock(viewedSkill))
-            updateViewedSkillTool = createUpdateViewedSkillTool({
-              workspaceSkillStore: options.workspaceSkillStore,
-              workspaceId: assistant.workspaceId,
-              skillRowId: viewedSkill.rowId,
-              skillName: viewedSkill.name,
-              expectedRevision: workspaceSkillRevision(viewedSkill),
-              assistantClearance: assistant.clearance,
-            })
-          }
-        } catch (err) {
-          console.error('[chat] viewing-skill context injection failed:', err)
-        }
-      }
-
-      // ── Currently-viewing / server-bound Brain entry ───────────
-      // A normal floating-chat turn may carry a live drawer/URL anchor. A
-      // `brain_edit` session ignores client target input and reconstructs its
-      // immutable target from sessions.channel_id. Both are re-read by
-      // workspace + row before trusted context or a scoped write exists.
-      if (options.brainEntryMutator && assistant.workspaceId) {
-        try {
-          const bound = classifySession(session).machine === 'brain_edit'
-            ? parseBrainEditChannelId(session.channelId)
-            : null
-          const requested =
-            !bound &&
-            requestedViewingBrainEntry &&
-            typeof requestedViewingBrainEntry === 'object' &&
-            typeof requestedViewingBrainEntry.primitive === 'string' &&
-            typeof requestedViewingBrainEntry.rowId === 'string'
-              ? {
-                  primitive: requestedViewingBrainEntry.primitive,
-                  rowId: requestedViewingBrainEntry.rowId,
-                }
-              : null
-          const target = bound ?? requested
-          const scopedEntry = target
-            ? await options.brainEntryMutator.getEditableEntry(
-                assistant.workspaceId,
-                target.primitive,
-                target.rowId,
-                {
-                  ...turnScope.access,
-                  userId: user.id,
-                  workspaceId: assistant.workspaceId,
-                },
-              )
-            : null
-          if (scopedEntry) {
-            scopedBrainEntryActive = true
-            scopedBrainUpdateAllowed = true
-            privateRuntimeContextParts.push(buildViewingBrainEntryBlock(scopedEntry))
-          }
-          brainEntryEditTools = createBrainEntryEditTools({
-            mutator: options.brainEntryMutator,
-            scopedEntry,
-          })
-        } catch (err) {
-          console.error('[chat] viewing Brain entry injection failed:', err)
-        }
-      }
-
-      // ── Knowledge-source scope (Studio ▸ Knowledge chat panel) ──
-      // `kbSourceId` anchors this session to the focused knowledge source.
-      // The block is application-composed runtime metadata, so it stays in
-      // the PRIVATE system channel (provenance split — never a user-role
-      // tail). Tool-agnostic wording per the Layer-1 tool-awareness rule.
-      // Soft steering only: reads stay clearance-bounded and the KB write
-      // gates are unchanged. Best-effort — a resolve failure costs the
-      // block, never the turn.
-      if (
-        typeof requestedKbSourceId === 'string' &&
-        requestedKbSourceId &&
-        assistant.workspaceId &&
-        options.knowledgeStore
-      ) {
-        try {
-          if (requestedKbSourceId === 'manual') {
-            privateRuntimeContextParts.push(
-              [
-                '# Knowledge maintenance scope',
-                'The user is on the workspace knowledge management surface, focused on MANUALLY CREATED knowledge entries (entries not synced from any repository).',
-                'Treat knowledge-base questions and edit requests in this conversation as scoped to those manual entries unless the user says otherwise.',
-                'Use the manual namespace (sourceId: null) when finding entries. Identify a particular entry by its entry ID.',
-                'Read the relevant entries from the knowledge base before answering about them or proposing a change.',
-              ].join('\n'),
-            )
-          } else if (options.knowledgeStore.getSource) {
-            const kbSource = await options.knowledgeStore.getSource(requestedKbSourceId)
-            if (kbSource && kbSource.workspaceId === assistant.workspaceId) {
-              privateRuntimeContextParts.push(
-                [
-                  '# Knowledge maintenance scope',
-                  'The user is on the workspace knowledge management surface, focused on the knowledge source below. Treat knowledge-base questions and edit requests in this conversation as scoped to this source unless the user says otherwise.',
-                  kbSource.sourceType === 'local'
-                    ? `- Source: local directory ${kbSource.repo}${kbSource.rootPath ? ` (root path ${kbSource.rootPath})` : ''}`
-                    : `- Source: ${kbSource.repo} (branch ${kbSource.branch}${kbSource.rootPath ? `, root path ${kbSource.rootPath}` : ''})`,
-                  `- Source ID: ${kbSource.id}. Use this source ID when finding entries, then identify a particular entry by its entry ID.`,
-                  kbSource.lastSyncedAt
-                    ? `- Last synced: ${kbSource.lastSyncedAt.toISOString()}`
-                    : '- Never synced yet.',
-                  'Entries synced from this source live in the workspace knowledge base. Read the relevant entries before answering about them or proposing a change, and confirm every knowledge-base edit with the user as usual.',
-                ].join('\n'),
-              )
-            }
-          }
-        } catch (err) {
-          console.warn('[chat] kb-source scope injection failed:', err)
-        }
-      }
-      if (officeLane) privateRuntimeContextParts.push(officeLaneContextBlock(officeLane))
-
-      // ── Host system-prompt addendum ──────────────────────────
-      // A host may add a session-specific prompt block (e.g. a draft-session
-      // authoring addendum). Open default: none. Pairs with injectExtraTools
-      // below so the prompt and the available tools agree.
-      const extraSystemPrompt = (assistant.appType !== 'distribution' || (activeCapabilities.has('feed') && activeCapabilities.has('home_app:feed:write'))) ? await options.resolveExtraSystemPrompt?.({
-        mode: session.mode,
-        channelType: session.channelType,
-        anchor: classifySession(session).anchor.kind,
-        assistantId: assistant.id,
-      }) : null
-      if (extraSystemPrompt) {
-        systemAddenda += `\n\n${extraSystemPrompt}`
-      }
-
-      // Add memory tools (with analytics callbacks)
-      const { saveMemory, getMemory, deleteMemory } = createMemoryTools(options.memoryStore, {
-        entityStore: options.entitiesStore,
-        entityLinksStore: options.entityLinksStore,
-        recallBuffer,
-        onEvent: (evt) => {
-          if (evt.type === 'memory_created') {
-            options.analytics?.logEvent({
-              userId: user.id, assistantId: assistant.id, sessionId: session.id,
-              eventName: 'memory_created', channelType: 'web',
-              metadata: { source: sanitize(evt.source), memory_type: sanitize(evt.memoryType) },
-            })
-          } else if (evt.type === 'memory_retrieved') {
-            options.analytics?.logEvent({
-              userId: user.id, assistantId: assistant.id, sessionId: session.id,
-              eventName: 'memory_retrieved', channelType: 'web',
-              metadata: { source: sanitize(evt.source), result_count: evt.resultCount, hit: evt.resultCount > 0 },
-            })
-          } else if (evt.type === 'memory_deleted') {
-            options.analytics?.logEvent({
-              userId: user.id, assistantId: assistant.id, sessionId: session.id,
-              eventName: 'memory_deleted', channelType: 'web',
-              metadata: { memory_id: sanitize(evt.memoryId) },
-            })
-          }
-        },
-      })
-      // Capability gate: drop tools the assistant lacks the grant for before
-      // MCP / skills layer them on. The tool executor re-checks at invocation.
-      // Reuses the set computed near the L1 prompt build above.
-      const allTools = filterToolsByCapabilities(new Map(options.tools), activeCapabilities)
-      // Presentation is a client capability, not a general assistant power.
-      // Keep it invisible unless this request came from the full Chat app;
-      // docks and channels do not render document_payload events. Existing
-      // chat-origin sessions remain capable even if an older client omitted
-      // the per-turn surface stamp.
-      if (requestedAppOrigin !== 'chat' && classifySession(session).surface !== 'chat') {
-        allTools.delete('presentDocument')
-      }
-      // The Office lane offers exactly the file-bound read and revise tools.
-      if (officeLane) bindOfficeLaneTools(allTools, options.tools, officeLane.artifact.id)
-      allTools.set('saveMemory', saveMemory)
-      allTools.set('getMemory', getMemory)
-      allTools.set('deleteMemory', deleteMemory)
-      if (updateViewedSkillTool) {
-        allTools.set(updateViewedSkillTool.name, updateViewedSkillTool)
-      }
-      if (brainEntryEditTools) {
-        allTools.set(
-          brainEntryEditTools.findEditableBrainEntries.name,
-          brainEntryEditTools.findEditableBrainEntries,
-        )
-        allTools.set(
-          brainEntryEditTools.updateBrainEntry.name,
-          brainEntryEditTools.updateBrainEntry,
-        )
-      }
-
-      // A private web conversation can explicitly hand its reviewed current
-      // work to a new workspace room. This is per-turn admission, not a global
-      // base tool: public API, messaging channels, rooms, workflows, workers,
-      // and inter-assistant callees must never discover it.
-      if (
-        options.workspaceChatHandoffTool &&
-        mayOfferWorkspaceChatHandoff(session, assistant.workspaceId)
-      ) {
-        allTools.set(
-          options.workspaceChatHandoffTool.name,
-          options.workspaceChatHandoffTool,
-        )
-      }
-
-      // Room pin tools — the assistant's write access to the conversation's
-      // Pins panel ("pin all tasks in this project here"). Per-turn admission,
-      // Chat conversations only (`policy.pins`: a room or a personal chat,
-      // whose Work Bench renders the pins): channels, the doc dock,
-      // workflows, and workers never discover these.
-      if (turnPolicy.pins && assistant.workspaceId) {
-        const pinTools = createSessionPinTools({
-          sessionId: session.id,
-          workspaceId: assistant.workspaceId,
-          clearance: session.effectiveClearance,
-          assistantId: assistant.id,
-          publishSessionEvent,
-        })
-        allTools.set('addPin', pinTools.addPin)
-        allTools.set('removePin', pinTools.removePin)
-        allTools.set('listPins', pinTools.listPins)
-      }
-
-      // updateSelfProfile — Identity Phase 2 groundwork. Available
-      // whenever the entity store is wired AND the assistant has a
-      // workspace; falls back silently otherwise (the tool would
-      // error at execute-time without workspace). See
-      // docs/architecture/brain/corrections.md.
-      if (options.entitiesStore && assistant.workspaceId) {
-        const updateSelfProfile = createSelfProfileTool(options.entitiesStore, options.entityLinksStore)
-        allTools.set('updateSelfProfile', updateSelfProfile)
-      }
-
-      // Tasks (Q1) + CRM (Q2) are constructed at boot in apps/api/src/index.ts
-      // and arrive via options.tools. Per-assistant visibility is gated by
-      // §17 capability grants ('tasks' / 'crm') applied above by
-      // filterToolsByCapabilities — no per-turn injection here.
-
-      // Retrieval (WS-5) — the 6 read tools that expose the company brain
-      // (`getEntity`, `search`, `recentEpisodes`, `provenance`, `markUseful`,
-      // `aggregate`). Workspace-scoped: requires `assistant.workspaceId`
-      // because the permission predicate filters every read on workspace
-      // partition (per `permissions.md` P1-12). Personal assistants without a
-      // workspace skip the injection — the tools would always error on the
-      // workspace check in `actorFromContext`. See
-      // `docs/architecture/brain/retrieval-layer.md`.
-      if (options.retrievalStore && assistant.workspaceId) {
-        const retrievalTools = createRetrievalTools(options.retrievalStore, {
-          onEvent: (evt) => {
-            const metadata: Record<string, number | boolean | ReturnType<typeof sanitize>> = {}
-            if (evt.type === 'entity_retrieved') {
-              metadata.found = evt.found
-            } else if (evt.type === 'search_executed') {
-              metadata.result_count = evt.resultCount
-            } else if (evt.type === 'recent_episodes_listed') {
-              metadata.result_count = evt.resultCount
-            } else if (evt.type === 'provenance_walked') {
-              metadata.found = evt.found
-            } else if (evt.type === 'mark_useful_recorded') {
-              metadata.primitive = sanitize(evt.primitive)
-            } else if (evt.type === 'aggregate_computed') {
-              metadata.result_count = evt.resultCount
-              metadata.fn = sanitize(evt.fn)
-            } else if (evt.type === 'row_history_walked') {
-              metadata.chain_length = evt.chainLength
-              metadata.primitive = sanitize(evt.primitive)
-            }
-            options.analytics?.logEvent({
-              userId: user.id,
-              assistantId: assistant.id,
-              sessionId: session.id,
-              eventName: `brain_${evt.type}`,
-              channelType: 'web',
-              metadata,
-            })
-          },
-        })
-        for (const [name, tool] of Object.entries(retrievalTools)) {
-          allTools.set(name, tool)
-        }
-      }
-
-      // Generate mode as a chat tool — fill a blueprint from the brain on request
-      // (requiresConfirmation; the cost rides this turn's credit). Workspace-scoped.
-      if (options.generateBlueprintTool && assistant.workspaceId) {
-        allTools.set(options.generateBlueprintTool.name, options.generateBlueprintTool)
-      }
-
-      // Blueprint record surface — save/read typed records in-context, define
-      // contracts, discover them. Workspace-scoped like the fill tool.
-      if (options.blueprintRecordTools && assistant.workspaceId) {
-        for (const tool of options.blueprintRecordTools) {
-          allTools.set(tool.name, tool)
-        }
-      }
-
-      // Brain inbox inspection toolkit — read-only introspection tools.
-      // Two surfaces:
-      //   1. Brain inbox "Ask about this" drawer
-      //      (channel_type='brain_inspection') — any assistant in the
-      //      inspection session sees these.
-      //   2. Primary workspace assistant in normal chat — so the user
-      //      can ask "what happened in this workspace today?" /
-      //      "what have you been getting wrong?" without detouring
-      //      through the inbox.
-      //
-      // Personal assistants without a workspace don't get the tools
-      // (they'd error on the workspace check inside each tool's
-      // execute path).
-      const isInspectionSession = classifySession(session).machine === 'inspection'
-      const isBrainEditSession = classifySession(session).machine === 'brain_edit'
-      const isPrimaryWithWorkspace =
-        assistant.kind === 'primary' && !!assistant.workspaceId
-      if (
-        options.inspectionTools &&
-        (isInspectionSession || isPrimaryWithWorkspace)
-      ) {
-        for (const [name, tool] of Object.entries(options.inspectionTools)) {
-          allTools.set(name, tool)
-        }
-      }
-
-      // Per-turn sensitivity accumulator — populated by retrieval +
-      // memory + KB reads inside the queryLoop, and read by the
-      // connector_action audit hook (via closure through the injected tools)
-      // when a connector action succeeds. A single shared instance so
-      // the audit's `retrieval_sensitivity_max` is the true max sensitivity
-      // of brain rows the model saw this turn — not a conservative
-      // `'public'` under-stamp. See `connector-actions.md` → IFC.
-      noteAutomaticScopeEvidence(scopeAccumulator, [
-        rankedIndex.rows,teamMemoryIndex,
-        ...identityMemories,
-        ...rankedIndex.rows,
-        ...workspaceIdentityMemories,
-        ...teamMemoryIndex,
-        ...teamVoiceRules,
-      ])
-
-      // Per-turn outbound-attachment collector (`sendFile`). Web moves no
-      // bytes — the drained list persists onto the final assistant
-      // `session_messages.attachments` row and the client downloads via
-      // the signed-URL route. See adapter-pattern.md → "Outbound documents".
-      const outboundAttachmentCollector = new AttachmentCollector()
-
-      // Connector-action audit deps — engaged only when the assistant
-      // is workspace-scoped AND both audit stores are wired. Shared
-      // across host-injected extra tools (e.g. an outbound post) AND
-      // the MCP inject (Gmail `sendMessage`) so one workspace-scoped chat
-      // turn audits both surfaces consistently. See
-      // `docs/plans/company-brain/connector-actions.md`.
-
-
-      // Host extra-tool injection — a host may merge additional tools into the
-      // turn for certain assistants (e.g. a publishing app's outbound tools).
-      // The injected impl does its own assistant-kind/appType + session
-      // gating; the open route stays agnostic. Open default: unset.
-      if (options.injectExtraTools) {
-        try {
-          await options.injectExtraTools({
-            tools: allTools,
-            userId: user.id,
-            assistant: {
-              id: assistant.id,
-              kind: assistant.kind,
-              appType: assistant.appType ?? null,
-            },
-            session: {
-              id: session.id,
-              mode: session.mode,
-              channelType: session.channelType,
-              anchor: classifySession(session).anchor.kind,
-            },
-            // Connector-action audit — built once above, shared with the MCP
-            // inject (Gmail audit). See `connector-actions.md`.
-            connectorActionAudit,
-            ...(feedTurnContext ? {feedDraft:{revision:feedTurnContext.reference.revision,wholePost:!feedTurnContext.reference.target||feedTurnContext.reference.target.kind==='post'}} : {}),
-          })
-        } catch (err) {
-          console.error('[chat] extra tool injection failed:', err)
-        }
-      }
-
-      if (feedTurnContext) for (const tool of buildFeedCollaborationTools(feedTurnContext, storedUserMsg.id, options.feedGeneration, options.feedReviewContext)) allTools.set(tool.name, tool)
-
-      // Pages the AI wrote this turn (filled by the doc tools' onEvent
-      // below). Drives the post-turn auto-title pass (migration 218).
-      const docWrittenPageIds = new Set<string>()
-
-      // Doc tools — page authoring (renderPage/patchPage/getBlock/…) +
-      // entity tools. Injected for any doc-surface turn (`docSurface` policy) AND
-      // for the app-web workspace surfaces (`isAppSurface` — ambient: the
-      // tools ride the turn, the skill block above tells the model to author
-      // only on an explicit ask).
-      // Injected here, post-capability-filter (like the extra-tool inject), so
-      // they're always present on a doc turn. `patchPage` writes through the live Yjs doc when
-      // DOC_SYNC_URL/SECRET are configured; otherwise it falls back to the
-      // legacy CAS path. See `packages/api/src/doc/inject.ts`.
-      // Charter intake tool (growth loop Phase 2). Keyed on the same
-      // boolean as the interview addendum above, so the prompt never names
-      // a tool that is absent (tool-awareness rule). requiresConfirmation
-      // on the tool means the owner taps to approve the exact drafted
-      // charter before it lands.
-      if (charterIntakeMode) {
-        // Loaded only on an intake turn: ordinary chat never loads the intake
-        // implementation (chat import graph, M4 frontier).
-        const { createSaveCharterTool } = await import('../intake/charter-intake.js')
-        const saveCharterTool = createSaveCharterTool({ assistantId: assistant.id })
-        allTools.set(saveCharterTool.name, saveCharterTool)
-      }
-
-      if (docToolsTurn) {
-        try {
-          const { injectDocTools } = await import('../doc/inject.js')
-          const standardDocEditModel = resolveModel('standard', userPlan, 'ok')
-          await injectDocTools({
-            tools: allTools,
-            backgroundModel,
-            fallbackModel: turnOptions.configuredProviders
-              ? ensureServableModel(standardDocEditModel, turnOptions.configuredProviders)
-              : standardDocEditModel,
-            editMode: researchMode ? 'research' : 'page',
-            userId: user.id,
-            assistant: {
-              id: assistant.id,
-              kind: assistant.kind,
-              appType: assistant.appType,
-              workspaceId: assistant.workspaceId,
-            },
-            // Surface-context injection: true when doc tools are riding the
-            // turn — the doc surface itself, or a workspace surface getting
-            // the ambient injection.
-            docSurface: docToolsTurn,
-            // Cached-file store for the `importToPage` faithful AI import.
-            fileStore: options.fileStore,
-            // Doc-page → brain distillation runner. When present, the
-            // `ingestPage` tool is injected so "add this page to the brain"
-            // works on request. Absent (no Pipeline B) → tool not injected.
-            ingestPage: options.ingestPage,
-            // Workspace files API — backs `fetchSiteIcon` (site logo →
-            // stored image → `img:` page-icon token). Absent → not injected.
-            filesApi: options.filesApi,
-            pageId:
-              typeof requestedDocViewId === 'string' && requestedDocViewId
-                ? requestedDocViewId
-                : null,
-            // Full Chat has no open `docViewId`. Readable Page pins from this
-            // exact room are the only existing-page targets the gateway may
-            // admit, and inject.ts re-anchors the child mutation tools to the
-            // selected id after validation.
-            editPageTargets:
-              programmatic || classifySession(session).surface === 'chat' ? pinnedPageEditTargets : [],
-            anchorBlockId:
-              typeof requestedDocAnchorBlockId === 'string' && requestedDocAnchorBlockId
-                ? requestedDocAnchorBlockId
-                : null,
-            // Theme iteration from chat (refine-only). The active custom theme
-            // id is a per-user client value; when present we inject
-            // `refineActiveTheme` and stream the rebuilt tokens back via the
-            // `doc_theme_update` SSE for live apply.
-            activeThemeId:
-              typeof requestedActiveThemeId === 'string' && requestedActiveThemeId
-                ? requestedActiveThemeId
-                : null,
-            provider: backgroundProvider,
-            onEditUsage: ({ model: editModel, usage }) => recordOverheadUsage({
-              usageStore: options.usageStore,
-              userId: user.id,
-              assistantId: assistant.id,
-              sessionId: session.id,
-              userMessageId: storedUserMsg.id,
-              model: editModel,
-              usage,
-              source: 'overhead:doc-edit',
-              triggerKey: 'doc_edit_worker',
-              ...backgroundUsageAttribution,
-            }),
-            onChildToolResult: (result) => {
-              if (result.isError) return
-              try {
-                const parsed = JSON.parse(result.content) as {
-                  kind?: string
-                  pageId?: string
-                  threadId?: string
-                  anchorBlockId?: string | null
-                  isNew?: boolean
-                }
-                if (result.name === 'createSubPage' && parsed.kind === 'doc_sub_page' && parsed.pageId) {
-                  sendEvent('sub_page_created', {
-                    toolUseId: result.toolUseId,
-                    pageId: parsed.pageId,
-                  })
-                } else if (result.name === 'postComment' && parsed.kind === 'comment_posted' && parsed.threadId) {
-                  sendEvent('comment_posted', {
-                    toolUseId: result.toolUseId,
-                    threadId: parsed.threadId,
-                    pageId: parsed.pageId,
-                    anchorBlockId: parsed.anchorBlockId ?? null,
-                    isNew: parsed.isNew ?? false,
-                  })
-                } else if (result.name === 'resolveComment' && parsed.kind === 'thread_resolved' && parsed.threadId) {
-                  sendEvent('comment_resolved', {
-                    toolUseId: result.toolUseId,
-                    threadId: parsed.threadId,
-                  })
-                }
-              } catch {
-                // A malformed child result cannot break the edit receipt.
-              }
-            },
-            onThemeRefined: (themeId, tokens, appearance) => {
-              if (!res.writableEnded) {
-                sendEvent('doc_theme_update', { themeId, tokens, appearance })
-              }
-            },
-            // Record which page(s) the AI wrote this turn so the post-turn
-            // auto-title pass (migration 218) only considers pages that
-            // changed — covers both `patchPage` (the open page) and
-            // `renderPage` (a brand-new page with a different id).
-            onEvent: (evt) => {
-              if (evt.type === 'page_rendered' || evt.type === 'page_patched') {
-                docWrittenPageIds.add(evt.pageId)
-              }
-              // `renderPage` minted a brand-new page. Unlike `patchPage` (which
-              // streams onto the open editor via the Yjs doc) and `renderView`
-              // (which rode the now-removed `view_payload` path), `renderPage`
-              // emits no client signal — so the new page sat server-side,
-              // invisible in the sidebar until a manual refresh. That compounded
-              // the 2026-06-02 orphan-page incident: even once the model picks
-              // `renderPage` for a genuinely-new page, the user never saw it
-              // appear. Forward a dedicated `page_created` SSE the instant the
-              // draft persists; the client reloads the sidebar and lands the
-              // user on it. (createSubPage keeps its own `sub_page_created` event
-              // — that one deliberately does NOT navigate; a new root page does.)
-              if (evt.type === 'page_rendered' && !res.writableEnded) {
-                sendEvent('page_created', { pageId: evt.pageId })
-              }
-              // Explicit metadata change (`setTitle`/`setIcon`) — stream the
-              // committed title/icon to the open clients the instant the patch
-              // commits, so the tabs / breadcrumb / sidebar reflect it live.
-              // The post-turn auto-title pass skips `'user'`-named pages, so
-              // without this an explicit AI rename / icon change only surfaces
-              // on the next refetch. Reuses the `doc_title_update` channel;
-              // `nameOrigin` + `overwrite` tell the client to apply the
-              // authoritative values (not the COALESCE suggestion semantics).
-              if (
-                evt.type === 'page_patched' &&
-                evt.meta &&
-                !res.writableEnded
-              ) {
-                sendEvent('doc_title_update', {
-                  pageId: evt.pageId,
-                  title: evt.meta.title,
-                  icon: evt.meta.icon,
-                  nameOrigin: evt.meta.nameOrigin,
-                  overwrite: true,
-                })
-              }
-            },
-          })
-        } catch (err) {
-          console.error('[chat] doc tool injection failed:', err)
-        }
-      }
-
-      // Session-state commitment tools (always on — the store itself is the
-      // feature gate; absent store means absent tools, same as memories).
-      if (options.sessionStateStore) {
-        const { trackCommitment, resolveCommitment } = createSessionStateTools(
-          options.sessionStateStore,
-          {
-            onEvent: (evt) => {
-              options.analytics?.logEvent({
-                userId: user.id, assistantId: assistant.id, sessionId: session.id,
-                eventName: evt.type, channelType: 'web',
-                metadata:
-                  evt.type === 'session_state_upsert'
-                    ? { source: sanitize(evt.source), was_insert: evt.wasInsert, key: sanitize(evt.key) }
-                    : { source: sanitize(evt.source), hit: evt.hit, key: sanitize(evt.key) },
-              })
-            },
-          },
-        )
-        allTools.set('trackCommitment', trackCommitment)
-        allTools.set('resolveCommitment', resolveCommitment)
-      }
-
-      // Execution-plan tools (always on when the store is present — the store
-      // is the feature gate, same as session-state). Domain-agnostic: step
-      // content comes from the model, so research / doc-editing / batch saves
-      // are all instances. See execution-plan.md.
-      if (options.planStore) {
-        const { setPlan, updatePlanStep, abandonPlan } = createPlanTools(
-          options.planStore,
-          {
-            onEvent: (evt) => {
-              options.analytics?.logEvent({
-                userId: user.id, assistantId: assistant.id, sessionId: session.id,
-                eventName: evt.type, channelType: 'web',
-                metadata:
-                  evt.type === 'plan_set'
-                    ? { attempt_id: sanitize(evt.attemptId), steps: evt.steps, revised: evt.revised }
-                    : evt.type === 'plan_step_update'
-                      ? { key: sanitize(evt.key), status: sanitize(evt.status), hit: evt.hit }
-                      : { attempt_id: sanitize(evt.attemptId) },
-              })
-            },
-          },
-        )
-        allTools.set('setPlan', setPlan)
-        allTools.set('updatePlanStep', updatePlanStep)
-        allTools.set('abandonPlan', abandonPlan)
-      }
-
-      // Inject user's connected MCP tools (custom connectors + built-in Google).
-      // `getConnectorUserId` resolves the workspace owner, but for ANY
-      // workspace assistant `injectMcpTools` suppresses the owner-personal
-      // base load and draws tools only from team-native instances +
-      // `connector_grant` overlays — exposure is the injection boundary, solo
-      // included (incidents 2026-06-01 / 2026-07-14). Shared with the public
-      // API channel via `applyMcpInjection` — both routes must surface the
-      // same tool set or assistants degrade silently when consumers switch
-      // transports.
-      const admittedTools = filterToolsByCapabilities(allTools, activeCapabilities)
-      for (const name of allTools.keys()) {
-        if (!admittedTools.has(name)) allTools.delete(name)
-      }
-      turnTiming.mark('context')
-      const { enrichConfirmation, unavailable: unavailableCapabilities, searchableSources, knowledgeCapturePrompt } = preparedConnectors
-      for (const [name, tool] of preparedConnectorTools) {
-        if (tool === options.tools.get(name) || tool.deferredSchemaOnly && allTools.has(name)) continue
-        allTools.set(name, tool)
-      }
-      if (maximum) for (const name of preparedConnectorTools.keys()) if (!maximum.has(name)) preparedConnectorTools.delete(name)
-      if (maximum) for (const name of allTools.keys()) if (!maximum.has(name)) allTools.delete(name)
-      turnTiming.mark('tools_inject')
-      if (knowledgeCapturePrompt) privateRuntimeContextParts.push(knowledgeCapturePrompt)
-
-      let preparedCommand = message ? prepareSlashCommand(message) : null
-      if (message && assistant.workspaceId && (options.skillStore || options.workflowStore)) {
-        try {
-          const nativeCatalog = await buildWorkspaceNativeSlashCommands({
-            userId: connectorUserId,
-            workspaceId: assistant.workspaceId,
-            skillStore: options.skillStore,
-            workflowStore: options.workflowStore,
-          })
-          preparedCommand = resolveNativeSlashCommand(message, nativeCatalog) ?? preparedCommand
-        } catch (err) {
-          console.warn('[chat] native slash-command resolution failed:', err)
-        }
-      }
-
-      // Inject skills — budget-aware listing + useSkill tool
-      if (options.skillStore) {
-        // Slash command (`/goal register …` as the whole message): the name is
-        // a skill slug, threaded as an enforced slug so the skill's full
-        // instructions become mandatory. Governance gates still apply inside
-        // injectSkills; a name that resolves to nothing enforces nothing and
-        // the message falls through as plain text (checked below on the
-        // enforcedPromptFragment, never on the parse alone).
-        const slashCommand = preparedCommand?.kind === 'skill'
-          ? { name: preparedCommand.name, args: preparedCommand.args }
-          : null
-        const skillResult = await injectSkills({
-          enforceSlugs: slashCommand ? [slashCommand.name] : undefined,
-          skillStore: options.skillStore,
-          executionContext, scopeAccumulator,
-          authorizeSkillAudience: executionContext.security.access.sharedAudience ? readLegacyDeliveryAudience : undefined,
-          connectorUserId,
-          assistantId: assistant.id,
-          // §5.5 governance gate: the assistant's own clearance is the
-          // use-time ceiling for which workspace skills are offered.
-          assistantClearance: executionContext.security.access.clearance,
-          availableConnectorIds: programmatic ? preparedConnectors.admittedConnectorIds ?? new Set() : undefined,
-          tools: allTools,
-          connectorStore: options.connectorStore,
-          unavailableCapabilities,
-          communitySkills: options.communitySkills,
-          channel: 'chat',
-          assistantKind: assistant.kind,
-          assistantAppType: assistant.appType ?? null,
-          // CL-8 wiring — `injectSkills` builds a slug→rowId map and
-          // wires `useSkill.recordInvocation` to bump invocations +
-          // last_invoked_at synchronously and queue rowIds for the
-          // post-commit `succeeded` flush. No-ops for built-in skills.
-          workspaceSkillStore: options.workspaceSkillStore,
-          workspaceSkillEnablementStore: options.workspaceSkillEnablementStore,
-          workspaceSkillFilesStore: options.workspaceSkillFilesStore,
-          workspaceId: assistant.workspaceId ?? undefined,
-          invocationBuffer: skillInvocationBuffer,
-        })
-        systemAddenda += skillResult.promptFragment
-        if (slashCommand && skillResult.enforcedPromptFragment) {
-          systemAddenda += skillResult.enforcedPromptFragment
-          privateRuntimeContextParts.push(buildSlashCommandBlock(slashCommand))
-        }
-      }
-      if (preparedCommand?.kind === 'workflow' && allTools.has('runWorkflow')) {
-        privateRuntimeContextParts.push(buildWorkflowSlashCommandBlock(preparedCommand))
-      }
-
-      // Inject unavailable capabilities so the model doesn't waste turns
-      // searching for tools that don't exist.
-      systemAddenda += buildUnavailableCapabilitiesPrompt(
-        unavailableCapabilities,
-        allTools,
-        searchableSources,
-      )
-
-      // Browser-escalation guidance — dynamic injection gated on the acting
-      // browser tools being in the map (tool-awareness carve-out): search
-      // that can't produce the exact figure escalates to the browser, and
-      // zero profiles never blocks a public-site browse.
-      systemAddenda += buildBrowserEscalationPrompt(allTools)
-      systemAddenda += buildEmailDraftAnchorPrompt(allTools)
-
-      // Dynamic workspace-blueprints section (blueprint output contract):
-      // present only when the workspace has blueprints, naming only blueprints
-      // that exist right now. Tool names are legal here — this is a dynamic
-      // injection gated on the tools being in the map, never Layer 1 prose.
-      if (
-        options.buildBlueprintPromptFragment &&
-        options.blueprintRecordTools &&
-        assistant.workspaceId
-      ) {
-        systemAddenda += await options.buildBlueprintPromptFragment(user.id, assistant.workspaceId)
-      }
-
-      // Research-mode override. Suspends the base L1's "two searches and stop"
-      // discipline and replaces it with coordinator-pattern rules (parallelism,
-      // multi-round, anti-fabrication). Injected only when the caller passed
-      // `mode: 'research'`; the quota gate above has already accepted the turn.
-      // See packages/core/src/system-prompt.ts → RESEARCH_MODE_ADDENDUM.
-      //
-      // Doc-surface research turns are the exception: this addendum is
-      // worker / coordinator-centric ("delegate via spawnWorker",
-      // "<worker-findings> XML"), but a doc research turn authors findings to
-      // the page itself and never delegates. Its research guidance lives in the
-      // doc skill block's RESEARCH_MODE_BLOCK (mode tracks the research
-      // toggle), so stacking the global addendum here would give it
-      // contradictory worker instructions.
-      if (researchMode && !docCtx) {
-        const { RESEARCH_MODE_ADDENDUM } = await import('@use-brian/core/system-prompt.js')
-        systemAddenda += `\n\n${RESEARCH_MODE_ADDENDUM}`
       }
 
       // Budget gate — see docs/architecture/platform/cost-and-pricing.md
@@ -6548,393 +4415,79 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           workspaceId: assistant.workspaceId,
         })
       }
-      // Per-request research flag: workers spawned during a Research-mode turn
-      // get a loosened system prompt (chain webSearch → urlReader, up to 5
-      // searches, surface blocked URLs) and a higher turn budget. The
-      // session-scoped reset above clears this binding on the next turn.
-      options.workerManager?.setResearchMode(researchMode, session.id)
-      // Upgrade research workers to the coordinator's model. Without this they
-      // run on boot-time Flash, which treats "Search for X" prompts as one-shot
-      // and skips urlReader entirely — defeating the deep-research wedge.
-      if (researchMode) {
-        // Persist the logical Research model, not today's serving alias. The
-        // routing provider reapplies the live application preference on spawn
-        // and durable rehydrate. Explicit custom selectors still ride
-        // workerRuntime and remain pinned authoritatively.
-        options.workerManager?.setResearchModel(logicalModel, session.id)
-        // The assessment bounds parallelism and each worker's effort. Five
-        // remains the absolute deep-research concurrency ceiling for memory.
-        options.workerManager?.setResearchEffort(assessedResearchEffort, session.id)
-        options.workerManager?.setMaxConcurrent(RESEARCH_EFFORT_BUDGETS[assessedResearchEffort].maxConcurrent, session.id)
-      }
-
-      // ── Pre-flight: automatic parallel research ──────────────
-      // Two modes based on model intelligence:
-      //   Standard (Flash): application-layer pre-flight — classifier splits,
-      //     workers research, results injected into system prompt.
-      //   Pro/Max: full coordinator mode — strip research tools from the main
-      //     model, let it delegate via spawnWorker with Phase 4b drain.
-      //     Structurally prevents re-searching.
-      //
-      // Research mode forces coordinator regardless of the classifier — the
-      // user explicitly asked for deep research, so we skip the splitter
-      // call (saves a Gemini round-trip) and seed coordinator immediately.
-      const isProMode = !isStandardTier(logicalModel)
-      let preflightContext = ''
-      // App assistants (doc + feed) never enter coordinator mode — it
-      // strips their authoring tools. So a doc research turn (researchMode
-      // true) authors directly instead of delegating: coordinatorMode stays
-      // false here, the splitter branch below is skipped, and the standard
-      // preflight is skipped too (it would strip webSearch/urlReader the
-      // research soul tells the model to use).
-      const isDocResearchTurn = researchMode && docCtx
-      // The doc surface never enters coordinator mode for ANY interlocutor:
-      // coordinator strips the page-authoring tools, so a primary doing doc
-      // research must author in its own loop, not delegate. `appAssistantForbids`
-      // already covers the legacy doc app; `!onDocSurface` covers the
-      // primary / switched-in assistant case.
-      let coordinatorMode =
-        researchMode && !appAssistantForbidsCoordinator(assistant.kind) && !onDocSurface
-
-      if (message && message.length > 40) {
-        // `!appAssistantForbidsCoordinator` is the third coordinator gate: a
-        // Pro/Max doc/feed turn must NOT enter coordinator mode via the
-        // splitter (it would strip the authoring tools — incident 2026-06-01).
-        // Non-doc app turns fall through to the standard application-layer
-        // preflight below; doc research turns skip even that (see the
-        // `isDocResearchTurn` guard on the else branch).
-        if (
-          !appAssistantForbidsCoordinator(assistant.kind) &&
-          !onDocSurface &&
-          (researchMode || isProMode)
-        ) {
-          // Pro/Max: the routed split decides coordinator mode (one turn route
-          // made the split call, research.md "Adapter switch"); the model then
-          // drives delegation via spawnWorker + Phase 4b.
-          //
-          // Research mode takes no split (the user already asked for deep
-          // mode) and seeds the coordinator path unconditionally.
-          let splitterDecidedCoordinator = false
-          // Operate-site turns never take a split — a browse of one named site
-          // must not be decomposed into search workers that cannot browse (see
-          // the operateSiteIntent block above).
-          if (!researchMode && !operateSiteIntent) {
-            const routedTasks = await routing.consumeSplit()
-            splitterDecidedCoordinator = !!routedTasks
-
-            // Auto-seed (Phase 3): the routed split decomposed this message
-            // into ≤3 sub-tasks — turn them into an execution plan so the
-            // completeness gate has something to enforce (and the # Active
-            // plan block surfaces it from the next turn). No-ops if a plan is
-            // already active or the store is absent. Reuses the split signal
-            // only; no new LLM call. See execution-plan.md → "Auto-seed".
-            if (options.planStore && routedTasks && routedTasks.length > 0) {
-              await seedPlanFromTasks(
-                options.planStore,
-                { sessionId: session.id, userId: user.id, assistantId: assistant.id },
-                routedTasks,
-              ).catch((err) => console.error('[chat] plan auto-seed failed:', err))
-            }
-          }
-          if (researchMode || splitterDecidedCoordinator) {
-            coordinatorMode = true
-            // `phase` lets the web client render a localized research banner;
-            // `message` is the plain-text fallback for non-web consumers/logs.
-            sendActivityEvent('status', {
-              phase: researchMode ? 'research_starting' : 'research_parallel',
-              message: researchMode ? 'Starting deep research…' : 'Researching in parallel...',
-            })
-            // Set up event streaming for coordinator workers (same as standard pre-flight)
-            const seenWorkers = new Set<string>()
-            const seenCitationUrls = new Set<string>()
-            options.workerManager?.setOnEvent((workerId, event) => {
-              researchObserver?.observeWorker(event)
-              if (!seenWorkers.has(workerId)) {
-                seenWorkers.add(workerId)
-                const desc = options.workerManager?.getDescription(workerId)
-                sendActivityEvent('worker_start', { workerId, description: desc })
-              }
-              if (event.type === 'tool_start') {
-                sendActivityEvent('tool_start', { id: event.id, name: event.name, workerId })
-              }
-              if (event.type === 'tool_input') {
-                sendActivityEvent('tool_input', { id: event.id, name: event.name, input: event.input, workerId })
-              }
-              if (event.type === 'tool_dropped') {
-                sendActivityEvent('tool_dropped', { id: event.id, workerId })
-              }
-              if (event.type === 'tool_result') {
-                for (const block of event.results) {
-                  if (block.type === 'tool_result') {
-                    const resultEvent = {
-                      id: block.toolUseId,
-                      name: block.name,
-                      isError: block.isError ?? false,
-                      workerId,
-                      errorMessage: block.isError ? toolErrorExcerpt(block.content) : undefined,
-                      // Sender's own stream only — the reduced room payload
-                      // below never carries what a connector returned.
-                      output: block.isError ? undefined : toolOutputExcerpt(block.content),
-                    }
-                    sendActivityEvent('tool_result', resultEvent, {
-                      id: resultEvent.id,
-                      name: resultEvent.name,
-                      isError: resultEvent.isError,
-                      workerId,
-                    })
-                    // Realtime brain stream — fire-and-forget NOTIFY so other
-                    // surfaces (a /brain tab, Claude Code, another device)
-                    // see the change without polling. No-ops on read tools.
-                    // Spec: docs/architecture/platform/realtime-sync.md.
-                    notifyBrainWriteIfMatch(assistant.workspaceId, block.name, block.isError ?? false)
-                    const toolMeta = event.metaByToolUseId?.[block.toolUseId]
-                    const extraMeta: Record<string, string | number | boolean> = { in_worker: true }
-                    if (toolMeta) {
-                      for (const [k, v] of Object.entries(toolMeta)) {
-                        extraMeta[k] = typeof v === 'string' ? sanitize(v) : v
-                      }
-                    }
-                    options.analytics?.logEvent({
-                      userId: user.id, assistantId: assistant.id, sessionId: session.id,
-                      eventName: 'tool_executed', channelType: 'web',
-                      metadata: { tool_name: sanitize(block.name), success: !(block.isError ?? false), ...(block.isError ? { error_message: sanitize(toolErrorExcerpt(block.content)) } : {}), ...extraMeta },
-                    })
-                    // Fire-and-forget: bill the user for any external API cost
-                    // the tool incurred (e.g. Grok tokens for xSearch / x.com
-                    // URL read, flat Brave/Serper/Tavily rate for webSearch).
-                    void recordExternalCostFromMeta({
-                      toolMeta,
-                      usageStore: options.usageStore,
-                      userId: user.id,
-                      assistantId: assistant.id,
-                      sessionId: session.id,
-                      userMessageId: storedUserMsg.id,
-                      userPlan,
-                      analytics: options.analytics,
-                    })
-                  }
-                }
-              }
-              if (event.type === 'citation') {
-                const newSources = event.sources
-                  .filter((s) => {
-                    if (seenCitationUrls.has(s.url)) return false
-                    seenCitationUrls.add(s.url)
-                    return true
-                  })
-                  .slice(0, 3)
-                if (newSources.length > 0) {
-                  sendEvent('citation', { sources: newSources })
-                }
-              }
-            }, session.id)
-          }
-        } else if (!isDocResearchTurn && !operateSiteIntent) {
-          // Standard: application-layer pre-flight.
-          //
-          // Skipped for a doc research turn: the preflight can return
-          // `researched` (sets `preflightContext`), which strips RESEARCH_TOOLS
-          // (webSearch/urlReader) from the loop on the "context already
-          // gathered, synthesize don't re-search" rule. But a doc research
-          // turn's soul (RESEARCH_MODE_BLOCK) tells the model to search the web
-          // and author findings itself — so it must keep those tools. Letting
-          // it run its own search→author loop is the whole point of the mode.
-          //
-          // Also skipped for an operate-site turn (see operateSiteIntent
-          // above): pre-searching a site the model is about to open directly
-          // wastes worker calls and biases the turn toward synthesis-from-
-          // snippets instead of the browse the user asked for.
-          try {
-            const preflightTools = turnOwner.prepareTools(allTools)
-            const preflight = await runPreflight({
-              provider: backgroundProvider,
-              model: backgroundModel,
-              message,
-              // The turn route already made the split call; preflight takes it
-              // after a fresh split-lane proof and never classifies again.
-              classify: async () => ({ tasks: await routing.consumeSplit(), usage: null, model: null }),
-              tools: preflightTools,
-              context: {
-                ...executionToolContext(executionContext, { appId: 'Use Brian' }),
-                scopeAccumulator,
-                abortSignal: abortController.signal,
-                requestTools: preflightTools,
-              },
-              // A local preflight worker is real COGS, separate from splitter
-              // overhead and the main-loop owner's cumulative response charge.
-              onUsage: options.usageStore ? async u => {
-                const providerKeySource=u.providerKeySource??backgroundUsageAttribution.providerKeySource
-                await options.usageStore!.recordUsage({
-                  ...turnUsageIdentity(turnBilling),assistantId:assistant.id,sessionId:session.id,
-                  model:u.model,modelTier:u.modelTier??backgroundUsageAttribution.modelTier,
-                  inputTokens:u.usage.inputTokens,outputTokens:u.usage.outputTokens,
-                  cacheReadTokens:u.usage.cacheReadTokens,cacheWriteTokens:u.usage.cacheWriteTokens,
-                  actualCostUsd:providerKeySource==='user'?0:calculateCost(u.model,u.usage),
-                  source:'included',triggerKey:'worker_run',providerKeySource,
-                }).catch(error=>console.error('[chat] preflight worker usage tracking failed:',error))
-              } : undefined,
-              onStatus: (msg) => sendActivityEvent('status', { message: msg }),
-              onEvent: (() => {
-                const seenWorkers = new Set<string>()
-                const seenCitationUrls = new Set<string>()
-                return (event: import('@use-brian/agent-runtime/engine/query-loop.js').QueryEvent, workerId: string, description?: string) => {
-                  if (!seenWorkers.has(workerId)) {
-                    seenWorkers.add(workerId)
-                    sendActivityEvent('worker_start', { workerId, description })
-                  }
-                  if (event.type === 'tool_start') {
-                    sendActivityEvent('tool_start', { id: event.id, name: event.name, workerId })
-                  }
-                  if (event.type === 'tool_input') {
-                    sendActivityEvent('tool_input', { id: event.id, name: event.name, input: event.input, workerId })
-                  }
-                  if (event.type === 'tool_result') {
-                    for (const block of event.results) {
-                      if (block.type === 'tool_result') {
-                        const resultEvent = {
-                          id: block.toolUseId,
-                          name: block.name,
-                          isError: block.isError ?? false,
-                          workerId,
-                          errorMessage: block.isError ? toolErrorExcerpt(block.content) : undefined,
-                          output: block.isError ? undefined : toolOutputExcerpt(block.content),
-                        }
-                        sendActivityEvent('tool_result', resultEvent, {
-                          id: resultEvent.id,
-                          name: resultEvent.name,
-                          isError: resultEvent.isError,
-                          workerId,
-                        })
-                        notifyBrainWriteIfMatch(assistant.workspaceId, block.name, block.isError ?? false)
-                        const toolMeta = event.metaByToolUseId?.[block.toolUseId]
-                        const extraMeta: Record<string, string | number | boolean> = { in_worker: true }
-                        if (toolMeta) {
-                          for (const [k, v] of Object.entries(toolMeta)) {
-                            extraMeta[k] = typeof v === 'string' ? sanitize(v) : v
-                          }
-                        }
-                        options.analytics?.logEvent({
-                          userId: user.id, assistantId: assistant.id, sessionId: session.id,
-                          eventName: 'tool_executed', channelType: 'web',
-                          metadata: { tool_name: sanitize(block.name), success: !(block.isError ?? false), ...(block.isError ? { error_message: sanitize(toolErrorExcerpt(block.content)) } : {}), ...extraMeta },
-                        })
-                        void recordExternalCostFromMeta({
-                          toolMeta,
-                          usageStore: options.usageStore,
-                          userId: user.id,
-                          assistantId: assistant.id,
-                          sessionId: session.id,
-                          userMessageId: storedUserMsg.id,
-                          userPlan,
-                          analytics: options.analytics,
-                        })
-                      }
-                    }
-                  }
-                  if (event.type === 'citation') {
-                    const newSources = event.sources
-                      .filter((s) => {
-                        if (seenCitationUrls.has(s.url)) return false
-                        seenCitationUrls.add(s.url)
-                        return true
-                      })
-                      .slice(0, 3)
-                    if (newSources.length > 0) {
-                      sendEvent('citation', { sources: newSources })
-                    }
-                  }
-                }
-              })(),
-            })
-            if (preflight.type === 'researched') {
-              preflightContext = preflight.context
-            }
-            // The routed split call was charged once by the turn route.
-          } catch (err) {
-            if (isAuthorityChangedError(err) || abortController.signal.aborted) throw err
-            console.error('[chat] pre-flight failed, continuing without:', err)
-          }
-        }
-      }
-
-      // Build the tools map for the query loop.
-      // In coordinator mode: strip research tools so the model MUST delegate.
-      // When preflight has already researched: also strip research tools —
-      // the context is injected, main agent should synthesize not re-research.
-      // If it genuinely needs more info, it can still use spawnWorker.
-      // The coordinator keeps delegation + memory and a narrow native document workflow.
-      // No research tools (structurally forces delegation), no task/notes
-      // (coordinator shouldn't do bookkeeping — workers are the tasks).
-      //
-      // Research-mode coordinator gets the base tools + brain-ingestion
-      // primitives (updateSelfProfile / saveContact / saveCompany / saveDeal
-      // / createEntity) so it can persist findings to typed entities in
-      // Phase 4 — the brain-first architectural edge.
-      //
-      // askQuestion is kept in the set BUT is structurally terminal — the
-      // queryLoop exits when it's called (see query-loop.ts). Combined with
-      // the Phase 0 "clarify upfront" rule in the addendum, the model can
-      // ask ONE clarifying question before research starts, the user
-      // answers, and the next turn proceeds to Phase 1. Calling askQuestion
-      // mid-research is forbidden by the addendum but if the model does it
-      // anyway, the turn ends cleanly (user can answer) rather than
-      // continuing without their input — that's the production failure
-      // mode 5/26 22:24 fixed: 3× askQuestion mid-flow with the user
-      // unable to interject.
-      // `createEdge` stays available — it's the only path for the
-      // "link existing entities" case (the model can't call `links`
-      // on save tools after the rows already exist without an
-      // update-call-per-entity loop). The prior hallucinated-id
-      // failure mode is now mitigated upstream:
-      //   - saveContact/saveCompany/saveDeal return the underlying
-      //     `entityId` in tool output, so the model has real ids
-      //     to chain through createEdge.
-      //   - createEntity's Zod schema rejects CRM kinds, so the
-      //     model can't end up with a fictional entity id from a
-      //     rejected createEntity call.
-      //   - Tool descriptions explicitly require listing/getting
-      //     before calling createEdge with stale or unknown ids.
-      // Transient Brain surfaces carry exact effect policies. Inspection is
-      // mechanically read-only. Editing keeps reads plus one confirmed,
-      // row-bound write. This filter runs after every ambient injector,
-      // including Doc, so no later merge can reintroduce a mutation tool.
-      const brainSurfaceTools = filterBrainSurfaceTools(allTools, {
-        inspection: isInspectionSession,
-        editSession: isBrainEditSession,
-        scopedOpenEntry: scopedBrainEntryActive,
-        allowBrainUpdate: scopedBrainUpdateAllowed,
+      // Constructed once per turn so each request has its own queue.
+      // Turn ledger (plan §4): one recorder per chat turn. Created beside the
+      // recall buffer so context-assembly retrieval provenance (below) can be
+      // recorded before the loop starts; the trace id is minted now and
+      // re-keyed to the persisted assistant message id at the flush site.
+      const turnLedgerHandle = createTurnLedger({
+        workspaceId: assistant.workspaceId ?? null,
+        assistantId: assistant.id,
+        sessionId: session.id,
+        payloads: getLedgerPayloadStore(),
       })
-      const loopTools = filterCoordinatorTools(brainSurfaceTools, {
-        coordinatorMode, researchMode, hasPreflightContext: Boolean(preflightContext),
-      })
+      const recallBuffer = options.memoryRecallEventsStore && assistant.workspaceId
+        ? createMemoryRecallBuffer({
+            sink: options.memoryRecallEventsStore,
+            sessionId: session.id,
+            workspaceId: assistant.workspaceId,
+            userId: user.id,
+          })
+        : undefined
+      // CL-8: per-turn skill invocation buffer. Constructed when we have
+      // a workspace-scoped skill store; the `useSkill` tool's
+      // `recordInvocation` callback (wired in `injectSkills` below)
+      // pushes onto this buffer for every successful pick. Flushed once
+      // the assistant message commits — on success, the `succeeded`
+      // counter is bumped for each invoked skill. On turn error or
+      // empty completion, the buffer is cleared without writes.
+      //
+      // Synchronous counters (`invocations`, `last_invoked_at`, stale →
+      // active reactivation) fire directly from `injectSkills` —
+      // they're cumulative pick-counters and must fire even if the
+      // turn later errors out.
+      //
+      // See `docs/architecture/context-engine/memory-consolidation.md` →
+      // "Skill invocation feedback (CL-8 lock)".
+      const skillInvocationBuffer = options.workspaceSkillStore && assistant.workspaceId
+        ? createSkillInvocationBuffer({
+            sink: {
+              incrementSucceeded: (id) => options.workspaceSkillStore!.incrementSucceeded(id),
+              incrementUserCorrectedAfter: (id) =>
+                options.workspaceSkillStore!.incrementUserCorrectedAfter(id),
+            },
+          })
+        : undefined
 
-      if (programmatic) {
-        const maximum = new Set(programmatic.consent.operationNames)
-        for (const name of allTools.keys()) if (!maximum.has(name)) allTools.delete(name)
-        for (const name of loopTools.keys()) if (!maximum.has(name)) loopTools.delete(name)
-      }
-
-      // Coordinator-mode addendum. The base wording covers "spawn 2-3 workers,
-      // synthesize, done" — adequate for the splitter-triggered parallel-research
-      // path. Research mode runs a structurally distinct 4-phase protocol
-      // (Know → Delegate → Reflect → Ingest+Respond) because production traces
-      // showed the previous prompt collapsing into "one wave then guess", with
-      // workers returning snippet-only summaries and the coordinator concluding
-      // "no info found" before workers had real urlReader content.
-      const coordinatorBaseAddendum = COORDINATOR_BASE_ADDENDUM
-      const coordinatorResearchAddendum = `${COORDINATOR_RESEARCH_ADDENDUM}\n\n${researchEffortInstruction(assessedResearchEffort)}`
-      // Coordinator addenda are mode-stable and stay on the system prompt.
-      // Preflight findings are hidden runtime metadata, so they also stay in
-      // the trusted channel inside the private-runtime suffix.
-      let runtimeSystemContext = coordinatorMode
-        ? `${systemAddenda}\n\n${researchMode ? coordinatorResearchAddendum : coordinatorBaseAddendum}\n\n${COORDINATOR_DOCUMENT_WORKFLOW_ADDENDUM}`
-        : systemAddenda
-      if (!coordinatorMode && preflightContext) {
-        privateRuntimeContextParts.push(
-          buildPreflightPrompt('', preflightContext).replace(/^\n+/, ''),
-        )
-      }
-
+      // Doc surface context — drives doc-skill injection independent of
+      // WHICH assistant is talking (default: workspace primary; switchable).
+      // On the doc surface the host keeps its own Layer-1 and gets the
+      // page-authoring protocol appended as a skill block + the doc tools.
+      // (Doc is a surface/skill, not an app type — so this is purely the
+      // surface test; `docCtx` is kept as the name the gates below read.)
+      const onDocSurface = turnPolicy.docSurface
+      const docCtx = onDocSurface
+      const docSkillTurn = docCtx && activeCapabilities.has('page') && activeCapabilities.has('home_app:page:read') && activeCapabilities.has('home_app:page:write')
+      // The app-web workspace surfaces (Brain / Studio / Workflow / Approvals /
+      // Knowledge-base / full Chat) get the doc tools too, but with AMBIENT steering
+      // (chat-first, author only on an explicit ask). `docToolsTurn` gates the
+      // tool injection + the post-turn auto-title pass; every research /
+      // coordinator / outline / presence gate stays keyed to the doc-only
+      // `docCtx` / `onDocSurface` so those behaviours don't change off-doc.
+      const onAppSurface = Boolean(programmatic) || isAppSurface(session)
+      const docToolsTurn = (docCtx || onAppSurface) && activeCapabilities.has('page')
+      const outboundAttachmentCollector = new AttachmentCollector()
+      const docWrittenPageIds = new Set<string>()
+      let preparedHistory: CapturedTurnHistory | undefined
+      let pendingAnnotation: Awaited<ReturnType<NonNullable<AttendedTurnRoute['topic']>['defer']>>['pendingAnnotation'] | undefined
+      const storedUserSource = nativeTranscriptAuthority
+        ? await admitCurrentAuthoredInput(nativeTranscriptAuthority, session.id, storedUserMsg)
+        : await readSessionMessageScopeSource(assistant.workspaceId, storedUserMsg.id)
+      if (!nativeTranscriptAuthority && storedUserSource) scopeAccumulator.noteSource(storedUserSource)
+      const initialMessage = bindScopeSources<Message>({
+        role: 'user',
+        content: userContentBlocks.length ? userContentBlocks : [{ type: 'text', text: userMessageText }],
+      }, storedUserSource ? [storedUserSource] : [])
       // Assistant-run presence — announce to every tab viewing this doc page
       // that a run just opened, attributed to this member + the channel they
       // came from (works for Telegram/Slack/web triggers with no browser open).
@@ -7127,7 +4680,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           native: nativeTranscriptAuthority, execute: operation => authority.execute(operation), measure: turnTiming.time,
           // Only the turn that authored the group input publishes its annotation.
           // Later responders read that revision and must leave their evidence current.
-          pendingAnnotation: roomResponseGroupContext?.sourceMessageId ? undefined : nativeClassification?.pendingAnnotation,
+          pendingAnnotation: roomResponseGroupContext?.sourceMessageId ? undefined : pendingAnnotation,
           replyRowIndex: replyRow,
           // The durable completion header (8277): this turn's answer to its authored input.
           completion: { lane: programmatic ? 'public' : 'web', input: { kind: 'session_message', ref: storedUserMsg.id }, assistantId: assistant.id },
@@ -7232,25 +4785,6 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         turnTiming.mark('flush')
       }
 
-      // ── Runtime-context provenance ────────────────────────────
-      // Hidden application metadata is a trusted system suffix. This is a
-      // correctness boundary, not merely a wrapper convention: private
-      // runtime text must never become a user-role candidate referent.
-      const privateRuntimeContext = privateRuntimeContextParts
-        .filter((s) => s.trim().length > 0)
-        .join('\n\n')
-      const privateRuntimeBlock = formatPrivateRuntimeContext(privateRuntimeContext)
-      if (privateRuntimeBlock) {
-        runtimeSystemContext = `${runtimeSystemContext}\n\n${privateRuntimeBlock}`
-      }
-
-      // Only content represented on a visible client surface may prefix the
-      // newest user turn. The persisted DB row remains untouched. The original
-      // turn owner's `prepareRun` places it exactly once, including the tagged
-      // system-channel fallback for rare resume shapes.
-      const userVisibleContext = userVisibleContextParts
-        .filter((s) => s.trim().length > 0)
-        .join('\n\n')
 
       // ── Reply evidence (grounding gate) ──
       // Figures observed in successful tool results this turn (fed by the
@@ -7282,8 +4816,2421 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // confirmations (multiplayer chat T11/D8).
       if (turnPolicy.confirmations === 'addresser_or_admin') roomTurnAddressers.set(session.id, user.id)
 
-      try {
-        const presentedDocumentInputs = new Map<string, PresentedDocumentInput>()
+      const baseAssistantPrompt = (team: { name: string; purpose: string } | null) => maybeAppendFollowupChips(resolveLayer1Prompt({
+        defaultPrompt: options.systemPrompt,
+        assistant: { kind: assistant.kind ?? 'standard', name: assistant.name, appType: assistant.appType ?? null },
+        team,
+        assistantBio: charterMission(resolveCharter(assistant)),
+        resolveAppSoul: assistant.appType === 'distribution' && (!activeCapabilities.has('feed') || !activeCapabilities.has('home_app:feed:read') || !activeCapabilities.has('home_app:feed:write')) ? undefined : options.resolveAppSoul,
+      }), { followupChips: requestedFollowupChips, assistantKind: assistant.kind ?? 'standard' })
+
+      const discoverWebContext = async (signal: AbortSignal) => {
+        const { backgroundLlmRuntime, backgroundProvider, backgroundModel, backgroundUsageAttribution } = await getBackground()
+        let operateSiteIntent = !researchMode && !!message && detectOperateSiteIntent(message)
+        const checkAdaptiveQuota = !researchMode && message && userPlan === 'free' && deploymentCapabilities().researchPlanGate
+          && isAdaptiveResearchEligible({ requestedMode, workspaceId: assistant.workspaceId, userPlan, assistantKind: assistant.kind })
+        const researchQuotaAvailable = !checkAdaptiveQuota || !assistant.workspaceId
+          || (await getWorkspaceResearchUsed(assistant.workspaceId)) < FREE_RESEARCH_QUOTA
+        const feedTurnContext = discoverFeedTurn ? await authority.execute(discoverFeedTurn) : null
+        for (const preparePdf of prepareAttachedPdfs) {
+          signal.throwIfAborted()
+          await assertDeliveryAudience()
+          await preparePdf()
+        }
+        // Attribute PDF distillation as overhead. One row per document actually
+        // distilled — a cache hit records nothing, which is the whole point of
+        // the cache and what makes the COGS number meaningful.
+        for (const d of pdfDistills) {
+          await recordOverheadUsage({
+            usageStore: options.usageStore,
+            userId: user.id,
+            assistantId: assistant.id,
+            sessionId: session.id,
+            userMessageId: storedUserMsg.id,
+            model: d.model,
+            usage: d.usage,
+            source: 'overhead:pdf-distill',
+            triggerKey: d.pages !== null && d.pages > PDF_CONFIRM_PAGE_THRESHOLD
+              ? 'pdf_distill_large'
+              : 'pdf_distill',
+          })
+        }
+
+        const connectorActionAudit =
+          assistant.workspaceId &&
+          options.connectorActionStore &&
+          options.episodesStore &&
+          options.buildConnectorActionAudit
+            ? options.buildConnectorActionAudit({
+                workspaceId: assistant.workspaceId,
+                assistantClearance: assistant.clearance,
+                // Same instance as the queryLoop's `sensitivity:` accumulator
+                // — the loop's tool reads populate it, the audit hooks read
+                // `.max` at action time.
+                sensitivityAccumulator,
+                connectorActionStore: options.connectorActionStore,
+                episodesStore: options.episodesStore,
+              })
+            : undefined
+        const connectorUserId = await getConnectorUserId(user.id, assistant.workspaceId)
+        const preparedConnectorTools = new Map(filterToolsByCapabilities(options.tools, activeCapabilities))
+        // Routine Calendar planning needs the native owner-delivery boundary; the
+        // same predicate gates preparation below and the routine decline reason.
+        const routineNativeOutput = Boolean(!programmatic && !permissionContext && nativeTranscriptAuthority
+          && turnPolicy.deliveryCeiling.ceiling === 'owner' && !executionContext.security.access.sharedAudience
+          && classifySession(session).surface === 'chat')
+        // The roster is prepared by the original turn owner through the M3
+        // capability surface (`web` profile, catalog-only until a call).
+        const preparedConnectors = await turnTiming.time('connector_prepare', () => ownedTurn.prepareCapabilities({
+          profile: 'web', composition: { kind: 'route-params', params: {
+          scope: 'chat',
+          ...(programmatic ? { bindingMaximum: programmatic.consent.connectorBindings,
+            restrictSearchToToolNames: programmatic.consent.operationNames, keepToolsDirect: true } : {}),
+          connectorUserId,
+          assistant,
+          userTimezone: user.timezone,
+          tools: preparedConnectorTools,
+          stores: {
+            ...options,
+            // Promote a just-attached photo on demand, so an image can reach a
+            // Shopify product without the model first calling saveFileToBrain.
+            readCachedFile: options.fileStore
+              ? (id, ctx) => options.fileStore!.get(id, ctx)
+              : undefined,
+          },
+          engineHooks: options.engineHooks,
+          // In-app actor identity: email is how the signed-in user is known on
+          // the web/app surface. Channel turns (WA/TG/Slack) set their native id
+          // in channel-pipeline. Resolved server-side from the session — never
+          // model output. Opted-in connectors receive X-Sidanclaw-Actor-*.
+          actorIdentity: { channel: session.channelType ?? 'web', id: user.email, email: user.email, userId: user.id },
+          // Forwarded to the Google provider's Gmail `sendMessage` audit wrap.
+          // Shared with the host extra-tool inject above.
+          connectorActionAudit,
+          // Workspace domain is null today — workspaces don't carry an
+          // email_domain column. The GCal audit hook falls back to
+          // treating attendees-with-domain as external (audience=public).
+          // Future migration adds the column.
+          workspaceDomain: null,
+          // Interactive chat has a live Approve/Deny loop, so the KB write
+          // tools may exist here (D2 — chat-only). The public API shares the
+          // route parameter block and must NOT set this.
+          allowKnowledgeWrites: true,
+          knowledgeCaptureText: message ?? '',
+          discoveryQuery: rawMessage ?? undefined,
+          exposeLocalReadTools: true,
+          contextScope: turnScope,
+          executionContext,
+          scopeAccumulator,
+          // On-demand introspection lane (ability audit §6-c/d): workspace
+          // PRIMARY assistants only — these read workspace-operational state
+          // (approvals / scheduled jobs / research runs / session history).
+          // They enter the mcp_search index, never the direct tool surface.
+          introspectionTools:
+            assistant.kind === 'primary' && assistant.workspaceId
+              ? options.introspectionTools
+              : undefined,
+          // T1: the late-activated Calendar read adapters are requested only when
+          // routine planning can be eligible on this turn (the necessary
+          // conditions of `routineCalendarReadDeclineReason` known now); the
+          // routine port activates exactly the planned read after planning.
+          routineCalendarRead: Boolean(options.decisionRuntime) && routineNativeOutput && Boolean(nativeTranscriptAuthority)
+            && !researchMode && !operateSiteIntent,
+        } } }))
+
+        // One turn route accounts for the research, topic and split decisions.
+        const recordRoutingUsage = (record: import('@use-brian/core/workers/turn-routing.js').TurnRoutingUsageRecord, userMessageId: string) => recordOverheadUsage({
+          usageStore: options.usageStore, userId: user.id, assistantId: assistant.id, sessionId: session.id,
+          userMessageId, model: record.model, usage: record.usage ?? undefined, source: record.source,
+          ...(record.triggerKey ? { triggerKey: record.triggerKey } : {}), ...backgroundUsageAttribution,
+        })
+        const requestedCustom = !!requestedModel?.startsWith('custom:')
+        const standardWhenOk = isStandardTier(resolveModel(requestedModel, userPlan, 'ok'))
+        const standardWhenDowngraded = isStandardTier(resolveModel(requestedModel, userPlan, 'downgraded'))
+        const routingNative = !pageBoundTurn && nativeTranscriptAuthority && earlyStoredUserMsg ? {
+          authority: nativeTranscriptAuthority, session, message: earlyStoredUserMsg,
+          reply: { channelType: 'web' as const, replyToMessageId: replyTo?.id ?? null, clientSnippet: replyTo?.text },
+        } : undefined
+        // A legacy transcript (no native authority) routes over its pre-turn history.
+        const legacyReply = !nativeTranscriptAuthority && replyTo?.id
+          ? await authority.execute(() => resolveReplyText({
+              channelType: 'web', replyToMessageId: replyTo.id, session, clientSnippet: replyTo.text,
+            }))
+          : null
+        const routingLegacy = !pageBoundTurn && !nativeTranscriptAuthority ? {
+          history: (await getSessionMessages(session.id, { excludeHeld: true })).filter(row => row.sequenceNum < storedUserMsg.sequenceNum), replyToText: legacyReply?.text ?? null,
+          topicText: userMessageText, research: 'refuse' as const,
+        } : undefined
+        const routing: AttendedTurnRoute = await routeAttendedTurn({
+          facts: {
+            profile: 'web', requestedMode, workspaceId: assistant.workspaceId ?? null, assistantKind: assistant.kind,
+            researchQuotaAvailable, pageBound: pageBoundTurn, docSurface: !!turnPolicy.docSurface,
+            // The ordinary tier before the budget gate. Whether a split is taken
+            // never depends on it; the prepared main model picks the consumer.
+            tier: standardWhenOk && standardWhenDowngraded ? 'standard' : 'pro_max',
+            model: { custom: requestedCustom, explicitMetered: isExplicitMeteredModelSelection(requestedModel), standardWhenOk, standardWhenDowngraded },
+          },
+          message: message ?? '',
+          ...(routingNative ? { native: routingNative } : {}),
+          ...(routingLegacy ? { legacy: routingLegacy } : {}),
+          // The research classifier owns tool selection only with a decision runtime.
+          ...(options.decisionRuntime ? { roster: filterToolsByCapabilities(preparedConnectorTools, activeCapabilities) } : {}),
+          provider: backgroundProvider, model: backgroundModel, decisionRuntime: options.decisionRuntime,
+          workspaceId: assistant.workspaceId ?? undefined, runId: earlyStoredUserMsg?.id ?? crypto.randomUUID(),
+          split: { concurrent: 'admitted', late: !appAssistantForbidsCoordinator(assistant.kind) && !turnPolicy.docSurface
+            && !(standardWhenOk && standardWhenDowngraded) ? 'coordinator' : 'preflight' },
+          recordUsage: record => recordRoutingUsage(record, storedUserMsg.id),
+          attribution: backgroundUsageAttribution, signal: abortController.signal, measure: turnTiming.time,
+        })
+        const route = routing.route
+        operateSiteIntent = operateSiteIntent || route.research.operateSite
+        if (route.research.active && route.research.entry === 'adaptive') {
+          if (!(await authority.execute(admitResearchQuota))) throw new ChatTurnRefusal('research_quota_exhausted', 'Research quota exhausted.')
+          await assertDeliveryAudience()
+          researchMode = true
+          assessedResearchEffort = route.research.effort ?? 'standard'
+          await startResearchActivity()
+          // `phase` is a stable, client-localizable code; `message` stays for
+          // non-web consumers and logs. The web client renders a research
+          // banner off `phase` (see chat-experience.tsx `case "status"`).
+          sendEvent('status', { phase: 'research_detected', message: 'Detected deep-research intent…' })
+        }
+
+        const nativeClassification = routing.topic
+          ? await turnTiming.time('topic_annotation', () => routing.topic!.defer())
+          : undefined
+
+        // ── Reply resolution + topic classification ────────────────
+        // The routed topic carries the resolved reply target; a page-bound turn
+        // (no topic lane) resolves it here, a legacy turn resolved it for routing.
+        const replyResolved = nativeClassification ? nativeClassification.reply : !nativeTranscriptAuthority ? legacyReply : await resolveReplyText({
+          channelType: 'web',
+          replyToMessageId: replyTo?.id ?? null,
+          session,
+          clientSnippet: replyTo?.text,
+        })
+        const classification: TopicClassification | null = nativeClassification?.classification ?? routing.legacyClassification
+
+        // Execution-plan lifecycle (anti-leak). Reuse the topic-classifier
+        // verdict (decision E): a clean topic SHIFT demotes the active attempt
+        // to `dormant` so its `# Active plan` block stops injecting on the
+        // off-topic turn (built just below); RESUMING an earlier topic
+        // reactivates the most-recent dormant attempt. Runs before
+        // buildActivePlanBlock so the transition takes effect this turn.
+        if (options.planStore && classification) {
+          const planStore = options.planStore
+          const activeAttemptId = planStore.activeAttemptId.bind(planStore)
+          const recentDormantAttemptId = planStore.recentDormantAttemptId.bind(planStore)
+          const setAttemptState = planStore.setAttemptState.bind(planStore)
+          const effect = async <T>(run: () => Promise<T>): Promise<T> => {
+            await routing.topic?.assertCurrent()
+            return run()
+          }
+          try {
+            if (classification.state === 'shift') {
+              const activeId = await effect(() => activeAttemptId(session.id))
+              if (activeId) {
+                await effect(() => setAttemptState({
+                  sessionId: session.id, attemptId: activeId, state: 'dormant',
+                }))
+              }
+            } else if (classification.state === 'resume') {
+              const dormantId = await effect(() => recentDormantAttemptId(session.id))
+              if (dormantId) {
+                await effect(() => setAttemptState({
+                  sessionId: session.id, attemptId: dormantId, state: 'active',
+                }))
+              }
+            }
+          } catch (err) {
+            if (isAuthorityChangedError(err)) throw err
+            console.error('[chat] plan lifecycle transition failed:', err)
+          }
+        }
+        // Load history. Run two repair passes unconditionally — both are
+        // idempotent and run on every request as defence-in-depth against
+        // legacy rows:
+        //
+        //   1. `ensureToolResultPairing` fills in synthetic tool_results for
+        //      any orphan tool_use and strips dangling tool_results. Without
+        //      this, every provider rejects the malformed history.
+        //
+        //   2. `stripUnsignedToolUses` drops pre-signature tool_use blocks
+        //      (plus their paired results). Gemini 3.x requires a
+        //      `thoughtSignature` on every functionCall that reappears in
+        //      history; rows persisted before the signature-round-trip fix
+        //      will fail the next call otherwise. Going forward, the Gemini
+        //      provider emits signatures which the accumulator attaches to
+        //      the ContentBlock and the chat route persists as-is into JSONB.
+        //
+        // See docs/architecture/engine/query-loop.md → "Tool-pairing
+        // invariant" and docs/architecture/engine/provider-abstraction.md →
+        // "Provider signatures".
+        // `fromSequence` skips rows already compacted into the most recent
+        // boundary; null (never compacted) loads full history.
+        // The original turn owner selects and performs the main-turn history read
+        // (native admitted reader, the classifier's captured continuation, or the
+        // stored transcript) and notes its automatic scope evidence.
+        const dbMessages = await turnTiming.time('history_read', async () => {
+          if (pageBoundTurn) {
+            noteAutomaticScopeEvidence(scopeAccumulator, [storedUserMsg])
+            return [storedUserMsg]
+          }
+          preparedHistory = await ownedTurn.prepareHistory({ native: nativeTranscriptAuthority ?? null,
+            fromSequence: session.compactBoundarySequence, evidence: scopeAccumulator,
+            ...(nativeClassification ? { classified: nativeClassification } : {}) })
+          return preparedHistory.messages
+        })
+        pendingAnnotation = nativeClassification?.pendingAnnotation
+        const workflowProposalReceipt = latestWorkflowProposalReceipt(dbMessages)
+
+        // Speaker attribution for a workspace-shared chat (chat-app.md →
+        // "Attribution reaches the model"). One batched profile lookup over the
+        // session's distinct authors; the map rides into `toStampedMessages`,
+        // which labels each human turn `[stamp] Alice: …` at ASSEMBLY time.
+        // Stored content stays clean, so this is reversible and never bakes a
+        // name prefix into history. A lookup failure degrades to unlabelled
+        // turns — worse for the model, never fatal for the user.
+        let sharedSenderNames: Map<string, string> | undefined
+        let sharedParticipants: string[] = []
+        /** Multi-voice sessions — rooms (T9) AND the doc dock's per-turn-
+         *  addressable personal thread: assistant-id → name, for labeling
+         *  FOREIGN assistant turns at assembly (`toStampedMessages`
+         *  `assistantVoices`) — the answering model must never mistake another
+         *  assistant's words for its own. The human-sender half is every
+         *  workspace session (`attribution`): a personal thread has one human. */
+        let roomAssistantVoices: { names: Map<string, string>; currentAssistantId: string } | undefined
+        if (turnPolicy.multiVoice) {
+          try {
+            const senderIds = turnPolicy.attribution
+              ? [
+                  ...new Set(
+                    dbMessages
+                      .map((m) => m.senderUserId)
+                      .filter((id): id is string => Boolean(id)),
+                  ),
+                ]
+              : []
+            if (senderIds.length > 0) {
+              const profiles = await getUserProfilesByIds(senderIds)
+              sharedSenderNames = new Map(
+                [...profiles.entries()]
+                  .filter(([, p]) => Boolean(p.name))
+                  .map(([id, p]) => [id, p.name as string]),
+              )
+              sharedParticipants = [...new Set(sharedSenderNames.values())]
+            }
+            const voiceIds = [
+              ...new Set(
+                dbMessages
+                  .map((m) => m.senderAssistantId)
+                  .filter((id): id is string => Boolean(id) && id !== assistant.id),
+              ),
+            ]
+            if (voiceIds.length > 0) {
+              const voiceRows = await query<{ id: string; name: string }>(
+                `SELECT id, name FROM assistants WHERE id = ANY($1::uuid[])`,
+                [voiceIds],
+              )
+              roomAssistantVoices = {
+                names: new Map(voiceRows.rows.map((r) => [r.id, r.name])),
+                currentAssistantId: assistant.id,
+              }
+            }
+          } catch (err) {
+            console.warn('[chat] shared-session sender lookup failed:', err)
+          }
+        }
+
+        // Proactive compaction check (web = 1.0× threshold, linear profile).
+        // Web chat: the authenticated user IS the owner, so ownerId === user.id.
+        // runProactiveCompaction owns stamping + pairing + summary-prepend
+        // internally. We apply web-only post-transforms (stripUnsignedToolUses,
+        // room-message coalescing) to the returned message array before the query
+        // loop.
+        await assertDeliveryAudience()
+        const compactionResult = pageBoundTurn
+          ? { messages: toStampedMessages(dbMessages, user.timezone ?? 'UTC', sharedSenderNames, roomAssistantVoices) as Message[] }
+          : await turnTiming.time('compaction', () => runProactiveCompaction({
+          modelContext: { execution: executionContext, accumulator: scopeAccumulator },
+          sessionMessages: dbMessages,
+          conversationFrame: preparedHistory?.frame,
+          readCompleteRecord: preparedHistory?.readCompleteRecord,
+          timezone: user.timezone ?? 'UTC',
+          senderNames: sharedSenderNames,
+          assistantVoices: roomAssistantVoices,
+          session,
+          tier: modelToCompactionTier(resolveModel(requestedModel, userPlan, 'ok')),
+          channelClass: 'web',
+          profile: 'linear',
+          provider: backgroundProvider,
+          model: backgroundModel,
+          inputTokenLimit: backgroundLlmRuntime?.inputTokenLimit,
+          ...backgroundUsageAttribution,
+          systemPrompt: options.systemPrompt,
+          assistantId: assistant.id,
+          userId: user.id,
+          ownerId: user.id,
+          channelType: 'web',
+          memoryStore: options.memoryStore,
+          episodicStore: options.episodicStore,
+          sessionStateStore: options.sessionStateStore,
+          analytics: options.analytics,
+          usageStore: options.usageStore,
+          userMessageId: storedUserMsg.id,
+          // Company-brain ingest (WU-3.6) — extract a web_chat Episode from
+          // the compacted window. Both gate on a workspace-scoped assistant.
+          workspaceId: assistant.workspaceId ?? undefined,
+          chatEpisodeIngestor: options.chatEpisodeIngestor,
+          compartments: writeCompartments,
+          projectIds: writeProjectIds,
+          authority,
+        }))
+        // Gate on the serving provider: the signature strip is a Gemini-only
+        // workaround and would erase a Qwen (openai-compat) turn's tool calls
+        // from history. Resolve the requested model to its provider here (the
+        // budget-final model is resolved later; a pure-Qwen deploy still resolves
+        // to Qwen, and the unknown/gemini default fails safe). See tool-pairing.ts.
+        let messages: Message[] = stripUnsignedToolUses(
+          compactionResult.messages,
+          modelRequiresToolSignatures(resolveModel(requestedModel, userPlan, 'ok')),
+        )
+
+        if (scopeAccumulator.evidence.sources?.some(source => source.resourceKind === 'private_transcript')) {
+          messages = [{role:'system',content:PRIVATE_TRANSCRIPT_INSTRUCTION}, ...messages]
+        }
+
+        // Doc tool-result elision (across-turn context-window control).
+        // Doc authoring accumulates a full-page outline in every
+        // patchPage/getCurrentPage tool_result; the history reloads them on every
+        // turn even though the live page is re-delivered as user-visible context
+        // below. Collapse all but the most-recent doc page-state results
+        // to a stub. Signature-safe (only rewrites unsigned tool_result bodies) and a
+        // no-op on non-doc histories, so it runs on every request as
+        // defence-in-depth, like the two transforms above. See
+        // docs/architecture/engine/query-loop.md → "Doc tool-result elision".
+        messages = elideStaleDocToolResults(messages)
+
+        // Coalesced assembly (multiplayer chat T4). The provider wire contract
+        // is strict `(user, assistant)` alternation; a room accumulates one
+        // user ROW per post between assistant turns, so every run of adjacent
+        // plain user messages collapses into ONE user turn here — each line
+        // already carrying its `[stamp] Name:` prefix from `toStampedMessages`
+        // (inside the compaction pass above). Runs on every web session, not
+        // just rooms: an aborted or errored turn leaves the same consecutive
+        // user rows in a personal session (the pre-existing edge this fixes).
+        // Tool-result-bearing user messages never merge (pairing invariant).
+        messages = coalesceConsecutiveUserMessages(messages)
+
+        // A continuation reuses the original visible human row instead of
+        // persisting it again. Once an earlier assistant has replied, provider
+        // alternation requires a trailing user turn before the next assistant
+        // can answer. Repeat only the SAME user-visible text ephemerally; the
+        // coordination instructions stay in the trusted system suffix.
+        if (
+          roomResponseGroupContext?.sourceMessageId &&
+          messages.at(-1)?.role === 'assistant' &&
+          typeof message === 'string' &&
+          message.trim()
+        ) {
+          messages = [
+            ...messages,
+            { role: 'user', content: [{ type: 'text', text: message }] },
+          ]
+        }
+
+        // Build memory context + resolve preferred delivery channel.
+        // Per-turn callers use the ranked+capped slice so the system prompt
+        // stays bounded as the user's memory count grows. See
+        // docs/architecture/context-engine/memory-system.md → "Index cap".
+        // WU-4.2b: viewer projection ctx used by every per-turn memory read.
+        // Personal memories use a personal ctx (workspace falls back to ''
+        // for legacy assistants without a workspace — the universal predicate
+        // then matches nothing, equivalent to today's empty-result path).
+        //
+        // Read-side clearance (incident 2026-06-01): the READ ceiling is the
+        // acting member's clearance bounded by the assistant's
+        // (`min(member, assistant)`), NOT the assistant's alone — otherwise a
+        // low-clearance member reads confidential workspace data through a
+        // higher-clearance assistant. Writes keep the assistant's clearance
+        // (passed as `assistantClearance` on the tool context below).
+        const readClearance = turnScope.access.clearance ?? assistant.clearance
+        const readCompartments = turnScope.effectiveCompartments
+        // Automatic context reads only the bound shared Project (D18 relevance).
+        const viewerCtx = { ...automaticContextAccess(turnScope.access, turnScope.activeProjectId), memoryContext: { ...(turnScope.activeProjectId ? {projectId:turnScope.activeProjectId} : {}), activity:memoryActivityFromText(typeof message === "string" ? message : undefined) } }
+        let promptIndexes: ReturnType<NonNullable<typeof options.memoryStore.getPairedPromptIndexes>> | undefined
+        let nativePromptMemory: ReturnType<NonNullable<typeof options.memoryStore.getPromptMemoryContext>> | undefined
+        const privatePromptShape = !executionContext.security.access.sharedAudience && usesStoredPrivateChat(session)
+          && session.workspaceId===assistant.workspaceId
+          && session.userId===user.id && session.assistantId===assistant.id
+        const readTaskContext = async () => {
+          let sessionStateBlock: string | null = null
+          let planBlock: string | null = null
+          let available = true
+          if (options.sessionStateStore && !pageBoundTurn) {
+            try {
+              sessionStateBlock = await optionalContext(candidate => buildSessionStateBlock({
+                authority: candidate ?? { execution: executionContext, accumulator: scopeAccumulator },
+                store: options.sessionStateStore!,
+                sessionId: session.id,
+              }), null)
+            } catch (err) {
+              available = false
+              console.error('[chat] session-state block fetch failed:', err)
+            }
+          }
+          if (options.planStore && !turnScope.access.sharedAudience) {
+            try {
+              planBlock = await buildActivePlanBlock({ store: options.planStore, sessionId: session.id })
+            } catch (err) {
+              available = false
+              console.error('[chat] active-plan block fetch failed:', err)
+            }
+          }
+          return { sessionStateBlock, planBlock, available }
+        }
+        const readPinnedPromptContext = async () => {
+          if (!turnPolicy.pins || !assistant.workspaceId) return null
+          try {
+            return await resolvePinnedContext({
+              sessionId: session.id, context: { executionContext, scopeAccumulator },
+              workspaceId: assistant.workspaceId,
+              clearance: session.effectiveClearance,
+            })
+          } catch (err) {
+            console.warn('[chat] pinned-context resolution failed:', err)
+            return null
+          }
+        }
+        // Only a plain greeting on the owned native Chat path can defer ambient
+        // indexes. Validate ongoing work and pins through their existing owners;
+        // an unavailable reader keeps the full preparation path.
+        const explicitPromptContext = replyTo || fileIds?.length || attachedRecordingIds?.length
+          || requestedDocViewId || requestedDocAnchorBlockId || requestedViewingSkillRowId
+          || requestedViewingBrainEntry || requestedKbSourceId || requestedResearchActivityId || turnScope.activeProjectId
+        const continuedPromptContext = truncateFromMessageId || requestedSteer || requestedMidTurn || requestedRoomResponseGroup
+          || prePersistedUserMsg || workflowProposalReceipt
+        const fullContextReason = (() => {
+          if (typeof rawMessage !== 'string' || userMessageText !== rawMessage || !isBareChatGreeting(rawMessage)) return 'message'
+          if (!nativeTranscriptAuthority) return 'transcript_authority'
+          if (!privatePromptShape) return 'audience'
+          if (!pendingQuestionChecked) return 'pending_question'
+          if (programmatic || pageBoundTurn || officeLane || feedTurnContext || (requestedAppOrigin && requestedAppOrigin !== 'chat')) return 'surface'
+          if (researchMode || requestedCustom || isExplicitMeteredModelSelection(requestedModel)) return 'model_or_mode'
+          if (explicitPromptContext) return 'supplied_context'
+          if (continuedPromptContext) return 'continuation'
+          return null
+        })()
+        turnTiming.mark('admission')
+        const earlyTaskContext = !fullContextReason ? await turnTiming.time('prompt_task_context', readTaskContext) : undefined
+        const earlyPinnedContext = earlyTaskContext?.available && !earlyTaskContext.sessionStateBlock && !earlyTaskContext.planBlock
+          ? await turnTiming.time('prompt_pins', readPinnedPromptContext) : undefined
+        const deferAmbientIndexes = earlyPinnedContext?.block === null
+        if (deferAmbientIndexes) turnTiming.count('prompt_ambient_indexes_deferred')
+        else {
+          const reason = fullContextReason ?? (!earlyTaskContext?.available ? 'task_context_unavailable'
+            : earlyTaskContext.sessionStateBlock || earlyTaskContext.planBlock ? 'ongoing_work'
+            : earlyPinnedContext ? 'pins' : 'pins_unavailable')
+          turnTiming.count(`prompt_ambient_full_${reason}`)
+        }
+        const auxiliaryPrompt = nativeTranscriptAuthority && privatePromptShape && options.memoryStore.getPromptAuxiliaryContext
+          ? turnTiming.time('prompt_identity_context', () => options.memoryStore.getPromptAuxiliaryContext!(viewerCtx, 'Use Brian', nativeTranscriptAuthority!))
+          : undefined
+        const readNativePromptMemory = (candidate: typeof nativeTranscriptAuthority) =>
+          candidate && privatePromptShape && !deferAmbientIndexes && options.memoryStore.getPromptMemoryContext
+            ? (nativePromptMemory ??= turnTiming.time('prompt_packed_memory', () => options.memoryStore.getPromptMemoryContext!(viewerCtx, PER_TURN_INDEX_CAP, candidate)))
+            : undefined
+        const readPromptIndexes = (candidate: typeof nativeTranscriptAuthority) =>
+          candidate && assistant.workspaceId && options.memoryStore.getPairedPromptIndexes && (!executionContext.security.access.sharedAudience
+            || conversationReadersActive() && usesWorkspacePromptIndexes(session, pageBoundTurn)
+            && session.workspaceId===assistant.workspaceId && session.assistantId===assistant.id
+            && turnScope.activeProjectId===null)
+            ? (promptIndexes ??= turnTiming.time('prompt_paired_memory', () => options.memoryStore.getPairedPromptIndexes!(viewerCtx, PER_TURN_INDEX_CAP, candidate)))
+            : undefined
+        const indexValue = <T>(result: PromiseSettledResult<T>) => {
+          if (result.status === 'rejected') throw result.reason
+          return result.value
+        }
+        const [soulContext, identityMemories, rankedIndex, preferredChannel, selfEntityId] = await Promise.all([
+          optionalContext(async () => {
+            const auxiliary = await auxiliaryPrompt
+            if (auxiliary) return auxiliary.soul
+            const value = await (options.memoryStore.getSoulContext?.(viewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} }))
+            if (executionContext.security.access.sharedAudience && value.content && !value.evidence.sources?.length) {
+              return { content: null, evidence: {} }
+            }
+            return value
+          }, { content: null, evidence: {} }, value => value.evidence.sources?.map(scopeSource => ({ scopeSource })) ?? [], value => !!value.content),
+          optionalContext(async candidate => {
+            const auxiliary = await auxiliaryPrompt
+            return auxiliary?.identity ?? options.memoryStore.getIdentity(viewerCtx,candidate)
+          }, []),
+          optionalContext(async candidate => {
+            if (deferAmbientIndexes) return { rows: [], totalCount: 0 }
+            const packed = await readNativePromptMemory(candidate)
+            if (packed) return indexValue(packed.indexes.ranked)
+            const paired = readPromptIndexes(candidate)
+            return paired ? indexValue((await paired).ranked) : options.memoryStore.getIndexRanked(viewerCtx,PER_TURN_INDEX_CAP,candidate)
+          }, { rows: [], totalCount: 0 }, value => [value, value.rows, ...value.rows], value => value.rows.length > 0 || value.totalCount > 0),
+          (async () => {
+            const auxiliary = await auxiliaryPrompt
+            return auxiliary ? auxiliary.preferred : getPreferredChannel(assistant.id, user.id)
+          })(),
+          (async () => {
+            if(turnScope.access.sharedAudience)return null
+            const packed=await readNativePromptMemory(nativeTranscriptAuthority)
+            return packed?.selfEntityId===undefined?getSelfEntityId(viewerCtx):packed.selfEntityId
+          })(),
+        ])
+        noteAutomaticScopeEvidence(scopeAccumulator,[identityMemories,...identityMemories])
+        const soul = soulContext.content
+        scopeAccumulator.note(soulContext.evidence)
+
+        // v2 retrieval-side local-match (Q3b of the brain-ingestion-
+        // classification design thread). Fire-and-forget: for each
+        // retrieved memory whose summary mentions an existing workspace
+        // entity by display_name, write a `mentioned` edge + brain
+        // candidate audit row. No LLM in the hot path; failures isolated
+        // by the helper. Surfaces only on assistants with a personal
+        // brain (`kind='primary' | 'standard'`) — distribution apps have
+        // no brain to enrich. Gated by `workspaces.brain_extraction_v2_enabled`
+        // is intentionally NOT checked here — the helper is cheap enough
+        // and additive that we skip the extra DB hit on the hot path; the
+        // edge writes themselves are harmless even when v2 is off.
+        if (
+          (assistant.kind === 'primary' || assistant.kind === 'standard') &&
+          assistant.workspaceId &&
+          options.brainCandidateStore &&
+          options.entitiesStore &&
+          options.entityLinksStore
+        ) {
+          const matchDeps = {
+            ctx: viewerCtx,
+            entityStore: options.entitiesStore,
+            entityLinks: options.entityLinksStore,
+            candidates: options.brainCandidateStore,
+          }
+          const matchMemories = rankedIndex.rows.filter(m=>!boundScopeSources(m).some(source=>source.resourceKind==='application_field'||source.resourceKind==='external_source')).map((m) => ({ id: m.id, summary: m.summary }))
+          if(matchMemories.length)void runLocalMatchCheck(matchMemories, matchDeps).catch((err) => {
+            console.warn(
+              `[chat/retrieval-match] check failed for user ${user.id}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            )
+          })
+        }
+
+        // Fetch team memories + identity (name + purpose) when assistant is team-owned.
+        // Team name is surfaced into the L1 soul; purpose grounds the team-vs-user
+        // routing decision for saveMemory and the ## Team Context block. Identity
+        // memories and voice rules share a read and retain separate admission.
+        let workspaceIdentityMemories: Awaited<ReturnType<typeof options.memoryStore.getWorkspaceIdentity>> = []
+        let teamMemoryIndex: Awaited<ReturnType<typeof options.memoryStore.getWorkspaceIndex>> = []
+        let teamVoiceRules: Awaited<ReturnType<typeof options.memoryStore.getWorkspaceMemoriesByCategory>> = []
+        let workspaceIdentity: { name: string; purpose: string } | null = null
+        if (assistant.workspaceId) {
+          let promptMemories: ReturnType<NonNullable<typeof options.memoryStore.getWorkspacePromptMemories>> | undefined
+          const readPromptMemories = () => options.memoryStore.getWorkspacePromptMemories
+            ? (promptMemories ??= turnTiming.time('prompt_workspace_identity_voice', () => options.memoryStore.getWorkspacePromptMemories!(viewerCtx, 'voice')))
+            : undefined
+          ;[workspaceIdentityMemories, teamMemoryIndex, teamVoiceRules, workspaceIdentity] = await Promise.all([
+            optionalContext(async candidate => {
+              const packed = await readNativePromptMemory(candidate)
+              if (packed) return packed.team.identity
+              const paired = readPromptMemories()
+              return paired ? (await paired).identity : options.memoryStore.getWorkspaceIdentity(viewerCtx)
+            }, []),
+            optionalContext(async candidate => {
+              if (deferAmbientIndexes) return []
+              const packed = await readNativePromptMemory(candidate)
+              if (packed) return indexValue(packed.indexes.workspace)
+              const paired = readPromptIndexes(candidate)
+              return paired ? indexValue((await paired).workspace) : options.memoryStore.getWorkspaceIndex(viewerCtx,undefined,candidate)
+            }, []),
+            optionalContext(async candidate => {
+              const packed = await readNativePromptMemory(candidate)
+              if (packed) return packed.team.tagged
+              const paired = readPromptMemories()
+              return paired ? (await paired).tagged : options.memoryStore.getWorkspaceMemoriesByCategory(viewerCtx, 'voice')
+            }, []),
+            (async () => {
+              const auxiliary = await auxiliaryPrompt
+              if (auxiliary) return auxiliary.workspace
+              return turnScope.access.sharedAudience ? null : getWorkspaceIdentity(assistant.workspaceId)
+            })(),
+          ])
+        }
+        const teamPurpose = workspaceIdentity?.purpose ?? null
+
+        // Shared Feed authoring uses the existing loaders intersected with its
+        // viewers and draft scope. Generic personal indexes cannot bypass that
+        // boundary or inject a lesson for a different brand/platform/format.
+        const feedPromptContext = feedTurnContext
+          ? await (options.feedReviewContext ?? loadFeedReviewContext)(feedTurnContext.actor).catch(() => null)
+          : null
+        if (feedTurnContext) {
+          feedTurnContext.learningSources = feedPromptContext?.dimensions.memory.sources ?? []
+          feedTurnContext.learningCoverage = feedPromptContext?.dimensions.memory.coverage ?? { state: 'failed', eligible: 0, retrieved: 0, reviewed: 0, limits: ['source_read_failed'] }
+        }
+
+        const voiceTitle = nativeTranscriptAuthority && classifySession(session).anchor.kind === 'feed_draft'
+          ? await readSessionTitle(session.id,nativeTranscriptAuthority) : null
+        if(voiceTitle)await admitModelInput({...executionToolContext(executionContext,{appId:'native-session-voice-title'}),scopeAccumulator})
+        const memoryContext = buildMemoryContext({
+          soul,
+          identityMemories: identityMemories.map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
+          memoryIndex: feedTurnContext ? [] : rankedIndex.rows.map((m) => ({ ...m, appId: null })),
+          memoryIndexDeferred: deferAmbientIndexes,
+          totalNonIdentityCount: rankedIndex.totalCount,
+          workspaceIdentityMemories: feedTurnContext ? [] : workspaceIdentityMemories.map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
+          teamMemoryIndex: feedTurnContext ? [] : teamMemoryIndex.map((m) => ({ ...m, appId: null })),
+          teamVoiceRules: (feedTurnContext ? [] : teamVoiceRules).map((m) => ({
+            id: m.id,
+            summary: m.summary,
+            detail: m.detail,
+            confidence: m.confidence,
+            tags: m.tags ?? [],
+          })),
+          // Per-platform voice (docs/architecture/feed/voice-learning.md →
+          // "Per-platform voice"): a draft session's target platform (title
+          // prefix) narrows the Voice Rules block to general + that
+          // platform's rules. Tuning chat / ordinary sessions pass null and
+          // see every rule, platform-labelled.
+          voiceTargetPlatform:
+            classifySession(session).anchor.kind === 'feed_draft' ? voicePlatformFromDraftTitle(voiceTitle?.title) : null,
+          teamPurpose,
+          assistantName: assistant.name,
+          selfEntityId,
+        })
+
+        // Capability set — used both for the L1 `# Workspace Files` block
+        // gating below and for `filterToolsByCapabilities` further down.
+        // One fetch, two consumers.
+
+        // Workspace files L1 block (Q3 / company-brain §10). Built only when
+        // the assistant has the `files` capability AND a workspace AND the
+        // store is wired (skipped in dev / smoke without GCS).
+        let workspaceFilesContext: string | null = null
+        if (
+          !deferAmbientIndexes &&
+          options.workspaceFilesStore &&
+          assistant.workspaceId &&
+          activeCapabilities.has('files')
+        ) {
+          try {
+            let scopedIndexEmpty = false
+            const admittedRows = await turnTiming.time('prompt_workspace_files', () => optionalContext(async () => {
+              const indexed = await options.workspaceFilesStore!.listIndexRanked({
+                workspaceId: assistant.workspaceId!, userId: user.id, assistantId: assistant.id, assistantKind: assistant.kind,
+                clearance: readClearance, compartments: readCompartments,
+                mutationCompartments: turnScope.access.mutationCompartments, projectIds: turnScope.effectiveProjectIds,
+                sharedAudience: turnScope.access.sharedAudience,
+                ...(viewerCtx.departmentRead ? { departmentRead: viewerCtx.departmentRead } : {}),
+              }, PER_TURN_FILES_INDEX_CAP)
+              return selectWorkspaceFilesContextRows(indexed, PER_TURN_FILES_INDEX_CAP)
+            }, null, undefined, (rows) => {
+              // An empty scoped read has no source rows to admit. The shared
+              // reader checks current invocation authority before this callback.
+              scopedIndexEmpty = rows?.length === 0
+              return Boolean(rows?.length)
+            }))
+            const rows = admittedRows ?? (scopedIndexEmpty ? [] : null)
+            if (rows) noteAutomaticScopeEvidence(scopeAccumulator, rows)
+            workspaceFilesContext = buildWorkspaceFilesContext(rows)
+          } catch (err) {
+            if (isAuthorityChangedError(err)) throw err
+            console.error('[chat] workspace-files index fetch failed:', err)
+            workspaceFilesContext = buildWorkspaceFilesContext(null)
+          }
+        }
+
+        // Brand L1 digest (docs/architecture/features/brand.md). The gates
+        // (capability + an APPROVED default brand) and the store live in
+        // `resolveBrandContext`, so this route and every channel share one
+        // chokepoint instead of each forwarding a store.
+        const brandContext = turnScope.access.sharedAudience ? null : await resolveBrandContext({
+          userId: user.id,
+          workspaceId: assistant.workspaceId,
+          hasCapability: activeCapabilities.has('brand'),
+          logLabel: 'chat',
+        })
+
+        // Recall logging — TWO separate channels:
+        //
+        //   (a) `memories.recall_count` aggregate — historically inflated when
+        //       every index-inject bumped the counter. Today only explicit
+        //       getMemory tool calls bump `recall_count` (via the tool's
+        //       `store.trackRecall` call). Utility is judged post-loop by the
+        //       memory nudge.
+        //
+        //   (b) `memory_recall_events` (mig 167, separate table) — logs
+        //       index-inject + tool_call recalls per turn, joins downstream
+        //       with feedback to surface bad-outcome memories. Two-phase:
+        //       push into the per-turn buffer here / inside the tool, flush
+        //       with the assistant message id once it commits.
+        //
+
+        // Push `index_inject` rows for the personal memory index + team
+        // memory index (when team-owned). The identityMemories are part of
+        // the L1 prompt every turn and are intentionally NOT recall-logged
+        // — they're always-on, not "the model reached for them".
+        if (recallBuffer) {
+          recallBuffer.pushMany(
+            rankedIndex.rows.map((m) => m.id),
+            'index_inject',
+          )
+          if (assistant.workspaceId) {
+            recallBuffer.pushMany(
+              teamMemoryIndex.map((m) => m.id),
+              'index_inject',
+            )
+          }
+        }
+        // Ledger retrieval provenance (chat-auditing Phase 0 shape): the
+        // automatic context-assembly sets. Tool-driven retrieval is already
+        // captured as tool_call events with full inputs/results.
+        if (rankedIndex.rows.length > 0 || teamMemoryIndex.length > 0) {
+          turnLedgerHandle.recordRetrieval({
+            returnedRows: [
+              ...rankedIndex.rows.map((m) => ({ primitive: 'memory', rowId: m.id })),
+              ...teamMemoryIndex.map((m) => ({ primitive: 'memory', rowId: m.id })),
+            ],
+            source: 'index_inject',
+          })
+        }
+
+        // Episodic context (topic-scoped history for resume/cross-topic).
+        let episodicContext: string | null = null
+        if (options.episodicStore && classification) {
+          const store = options.episodicStore, fetchByTopic = store.fetchByTopic.bind(store)
+          try {
+            episodicContext = await optionalContext(candidate => fetchEpisodicContext({
+              authority: candidate ?? { execution: executionContext, accumulator: scopeAccumulator },
+              store: { ...store, fetchByTopic: async query => {
+                await routing.topic?.assertCurrent()
+                return fetchByTopic(query)
+              } },
+              sessionId: session.id,
+              classification,
+            }), null)
+          } catch (err) {
+            if (isAuthorityChangedError(err)) throw err
+            console.error('[chat] episodic context fetch failed:', err)
+          }
+        }
+
+        // Open commitments and the active plan stay in every applicable prompt.
+        const { sessionStateBlock, planBlock } = earlyTaskContext ?? await turnTiming.time('prompt_task_context', readTaskContext)
+
+        const anchorTz = user.timezone ?? 'UTC'
+        const presenceTz = resolvePresenceTimezone({
+          liveClientTz: req.clientTimezone ?? clientTimezone ?? null,
+          lastSeenTz: user.lastSeenTz,
+          lastSeenTzAt: user.lastSeenTzAt,
+          anchorTimezone: anchorTz,
+        })
+        const now = new Date()
+        const currentDateTime = now.toLocaleString('en-US', {
+          timeZone: presenceTz,
+          weekday: 'long',
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: true,
+          timeZoneName: 'short',
+        })
+        const basePrompt = baseAssistantPrompt(workspaceIdentity)
+        // The workspace evolution snippet supplies shared conventions.
+        // Failure mode = no snippet injected; never blocks prompt
+        // assembly. See docs/architecture/brain/corrections.md →
+        // "Workspace-level prompt evolution".
+        const auxiliary = await auxiliaryPrompt
+        let workspaceEvolutionSnippet: string | null = auxiliary?.evolution ?? null
+        if (!auxiliary && assistant.workspaceId && !turnScope.access.sharedAudience) {
+          try {
+            // Two snippets: memory-side (scope/sensitivity bias from
+            // memory_verifications, mig 166) and brain-side (per-primitive
+            // delete-rate bias from brain_verifications, mig 179). Both
+            // sit in Layer 2 and bias future model saves. Join with a
+            // blank line so they read as two distinct guidance blocks.
+            const [memoryEvo, brainEvo] = await Promise.all([
+              getWorkspaceMemoryEvolution(assistant.workspaceId),
+              getBrainEvolution(assistant.workspaceId),
+            ])
+            const parts = [memoryEvo?.promptSnippet, brainEvo?.promptSnippet].filter(
+              (s): s is string => typeof s === 'string' && s.length > 0,
+            )
+            workspaceEvolutionSnippet = parts.length > 0 ? parts.join('\n\n') : null
+          } catch (err) {
+            console.error('[chat] workspace evolution snippet fetch failed:', err)
+          }
+        }
+
+        // One scoped loader serves every prompt lane. It returns model-visible
+        // rule text separately from the content-free application id used only
+        // by an exact frozen approval created later in this turn.
+        const decisionPlaybookContext = turnScope.access.sharedAudience && !feedTurnContext
+          ? { playbookRules: [], appliedRuleIds: [], decisionApplicationId: null, readFailed: false }
+          : await loadDecisionPlaybookContext({
+          ...(researchMode ? { research: { projectId: session.contextProjectId ?? null } } : {}),
+          workspaceId: assistant.workspaceId ?? null,
+          assistantId: assistant.id,
+          actorUserId: user.id,
+          externalPrincipal: Boolean(programmatic),
+          operationKind: 'chat_turn',
+          operationId: storedUserMsg.id,
+          sourceKind: 'session_message',
+          sourceId: storedUserMsg.id,
+          channelType: 'web',
+          analytics: options.analytics,
+          logLabel: 'chat',
+          ...(feedTurnContext ? { allowedRuleIds: (feedPromptContext?.dimensions.memory.sources ?? []).filter(source => source.kind === 'playbook').map(source => source.id.slice('playbook:'.length)), recordApplication: false, applicability: { kind: 'feed' as const, scope: feedPromptContext?.learningScope } } : {}),
+        })
+        const playbookRules = decisionPlaybookContext.playbookRules
+        if (feedTurnContext && assistant.workspaceId) feedTurnContext.applicationId = await recordFeedContextApplication(feedTurnContext.actor, assistant.workspaceId, 'feed_chat', storedUserMsg.id, feedTurnContext.learningSources ?? [], feedPromptContext?.learningScope) ?? undefined
+
+        // Charter intake mode (growth loop Phase 2): an unconfigured standard
+        // assistant being spoken to by its OWNER gets the setup interview -
+        // the `saveCharter` tool (injected at the tool site below) plus the
+        // interview addendum in the stable prefix, both keyed on this one
+        // boolean (tool-awareness rule). The role lookup only runs for
+        // unconfigured assistants, so configured ones pay nothing.
+        let charterIntakeMode = false
+        if (charterNeedsIntake(resolveCharter(assistant), assistant.kind)) {
+          try {
+            const access = await resolveAssistantAccess(user.id, assistant.id)
+            charterIntakeMode = access?.role === 'owner'
+          } catch (err) {
+            console.error('[chat] intake role resolution failed:', err)
+          }
+        }
+
+        // Phase 0 doc-context instrumentation: stash the skill block string and
+        // (further down) the live outline + page counts so the post-turn meter can
+        // attribute tokens per component for the `doc_context_composition`
+        // event. See docs/plans/doc-turn-context-optimization.md → Phase 0.
+        let docSkillBlockStr: string | null = null
+        let docLiveOutlineStr: string | null = null
+        let docOutlineBlockCount = 0
+        let docPageBlockCount = 0
+        let docPageVersion = 0
+        // Full Chat room Page pins become edit authority only after the same
+        // fresh workspace/clearance resolution that renders their index line.
+        // Other surfaces never receive this supplemental target set.
+        let pinnedPageEditTargets: ResolvedPinnedPageTarget[] = []
+
+        // Provenance split (2026-08-01): private runtime metadata stays in the
+        // trusted system channel. Only representations of content actually
+        // visible in the client may prefix the newest user turn. The earlier
+        // cache-first design placed every volatile block in one user-role
+        // envelope; that made hidden headings such as Open commitments a
+        // candidate referent for questions like "呢句咩意思".
+        const splitPrompt = buildSplitSystemPrompt({
+          basePrompt,
+          // Doc page-authoring steering as a skill addendum. On the doc surface:
+          // the full page-first protocol (mode tracks the research toggle, the
+          // same split the doc soul used to make). On an app-web workspace
+          // surface: the compact AMBIENT block — tools present, chat-first,
+          // author a page only on an explicit ask. `null` everywhere else.
+          docSkillBlock: docSkillTurn
+            ? (docSkillBlockStr = buildDocSupervisorSkillBlock({
+                mode: researchMode ? 'research' : 'page',
+                teamName: workspaceIdentity?.name,
+                teamPurpose: workspaceIdentity?.purpose ?? undefined,
+              }))
+            : onAppSurface && activeCapabilities.has('page') && activeCapabilities.has('home_app:page:read') && activeCapabilities.has('home_app:page:write')
+              ? (docSkillBlockStr = buildAmbientDocSkillBlock({
+                  teamName: workspaceIdentity?.name,
+                  teamPurpose: workspaceIdentity?.purpose ?? undefined,
+                  // `onAppSurface` guarantees appOrigin is one of the ambient
+                  // workspace surfaces (APP_SURFACE_ORIGINS) — the line tells
+                  // the model which view the dock is mounted over, pairing
+                  // with the client's "Asking about <surface>" chip.
+                  surface: session.appOrigin as AmbientSurface,
+                }))
+              : null,
+          charter: resolveCharter(assistant),
+          playbookRules,
+          intakeAddendum: charterIntakeMode ? CHARTER_INTAKE_ADDENDUM : null,
+          workspaceEvolutionSnippet,
+          // Who is speaking — the authenticated member behind this request.
+          // Web sessions know this positively, so the model never has to ask
+          // "which team member are you?" to resolve "me" / "my tasks". In a
+          // shared room the request is authenticated as the newest sender, so
+          // the line stays correct per turn. See chat-app.md → "Attribution
+          // reaches the model".
+          speakerIdentity: user.name?.trim()
+            ? { name: user.name.trim(), email: user.email }
+            : user.email
+              ? { name: user.email }
+              : null,
+          currentDateTime,
+          timezone: presenceTz,
+          anchorTimezone: anchorTz,
+          memoryContext,
+          workspaceFilesContext,
+          brandContext,
+          sessionStateBlock,
+          activePlanBlock: planBlock,
+          episodicContext,
+          topicHint: classification,
+          replyContext: replyResolved
+            ? { text: replyResolved.text, fromAssistant: replyResolved.fromAssistant }
+            : null,
+        })
+        // Route-specific addenda follow the reusable builder prefix in system context.
+        let systemAddenda = ''
+        const privateRuntimeContextParts: string[] = splitPrompt.privateRuntimeContext
+          ? [splitPrompt.privateRuntimeContext]
+          : []
+        const activeWorkspaceContext = formatActiveWorkspaceContext(turnScope)
+        if (activeWorkspaceContext) privateRuntimeContextParts.push(activeWorkspaceContext)
+        if (feedTurnContext) privateRuntimeContextParts.push(formatFeedTurnContext(feedTurnContext))
+        const userVisibleContextParts: string[] = splitPrompt.userVisibleContext
+          ? [splitPrompt.userVisibleContext]
+          : []
+        if (!turnScope.access.sharedAudience && options.crmEmailDraftStore && assistant.workspaceId && activeCapabilities.has('crm')) {
+          try {
+            const activeEmailDraft = await options.crmEmailDraftStore.getActiveForSession({
+              userId: user.id,
+              workspaceId: assistant.workspaceId,
+              sessionId: session.id,
+            })
+            if (activeEmailDraft) {
+              userVisibleContextParts.push(formatActiveEmailDraftContext(activeEmailDraft))
+            }
+          } catch (err) {
+            console.error('[chat] active email draft fetch failed:', err)
+          }
+        }
+        let updateViewedSkillTool: Tool | null = null
+        let brainEntryEditTools: BrainEntryEditTools | null = null
+        let scopedBrainEntryActive = false
+        let scopedBrainUpdateAllowed = false
+
+        // Shared-chat participants are application-derived runtime metadata.
+        // They remain private even though doing so makes this system suffix
+        // change as new participants appear.
+        if (turnPolicy.attribution && sharedParticipants.length > 0) {
+          privateRuntimeContextParts.push(
+            [
+              '# Shared chat',
+              'This conversation is shared with the workspace and several people write in it.',
+              `Participants so far: ${sharedParticipants.join(', ')}.`,
+              'Each human turn is prefixed with its timestamp and the sender name. Address the person who wrote the newest message, and do not assume earlier turns came from them.',
+            ].join('\n'),
+          )
+        }
+
+        if (roomResponseGroupContext) {
+          const coordinationBlock = buildRoomResponseCoordinationBlock({
+            assistants: roomResponseGroupContext.assistants,
+            currentAssistantId: assistant.id,
+          })
+          if (coordinationBlock) privateRuntimeContextParts.push(coordinationBlock)
+        }
+
+        // Pinned room context (multiplayer chat P1b, T15) — the room's working
+        // frame, resolved FRESH each turn under the session's clearance. An
+        // index, not inlined content. The pins are visible on the room surface,
+        // so their representation is valid user-visible context. Best-effort: a
+        // resolver failure costs the block, never the turn. Every Chat
+        // conversation pins (`policy.pins`): a personal chat is a room with one
+        // human (chat-parity D1).
+        const pinnedContext = earlyPinnedContext === undefined ? await turnTiming.time('prompt_pins', readPinnedPromptContext) : earlyPinnedContext
+        if (pinnedContext) {
+          if (pinnedContext.block) userVisibleContextParts.push(pinnedContext.block)
+          if (programmatic || classifySession(session).surface === 'chat') {
+            pinnedPageEditTargets = pinnedContext.pageTargets
+          }
+        }
+
+        // ── Dispute pre-pass (grounding-gate claim ledger) ──
+        // A dispute-shaped message carrying a figure ("唔係要 look 11萬咩")
+        // loads the previous reply's claim provenance so the model re-verifies
+        // instead of re-asserting. One indexed read, only on the dispute
+        // shape. This claim ledger is hidden application metadata and therefore
+        // stays in private runtime context. See grounding-gate.md → "Dispute
+        // pre-pass".
+        if (typeof message === 'string' && message && matchesDisputedFigure(message)) {
+          try {
+            const priorClaims = await getClaimsForLatestAssistantMessage(session.id)
+            if (priorClaims.length > 0) {
+              privateRuntimeContextParts.push(buildDisputeContextNote(priorClaims))
+            }
+          } catch (err) {
+            console.warn('[chat] dispute pre-pass failed, continuing without:', err)
+          }
+        }
+
+        // Uploaded-file save policy — shared with the channel pipeline (this
+        // block was web-only for its whole life). See
+        // `workspace-files/upload-policy-block.ts` for the two invariants it
+        // holds (tool-agnostic, capability-gated).
+        systemAddenda += buildUploadPolicyBlock(activeCapabilities.has('files'))
+
+        // Task autopilot nudge (task-goal-autopilot.md §8). Capability-gated +
+        // dynamic (post-`injectMcpTools`), so naming the goal tools here is
+        // allowed — they exist whenever this runs. v2: task creation is triaged
+        // in the BACKGROUND (a judge drafts a goal only for tasks the assistant
+        // can honestly help with), so the model must NOT announce or pitch a
+        // goal per created task — the creating turn cannot know the verdict.
+        // What remains is the fails-safe contract: never work an unconfirmed
+        // goal.
+        if (activeCapabilities.has('goals')) {
+          systemAddenda +=
+            '\n\n# Goals for tasks\n' +
+            'Some tasks are judged in the background as workable by you; those get a DRAFT goal (an outcome, verification criteria, and an approach) the user reviews on their Tasks-assignable surface. A draft goal does NOTHING on its own. ' +
+            'Do NOT announce or pitch goals when you create tasks — the judgment happens after creation and most tasks will not have one. ' +
+            'When the user asks you to work a task, find its goal with listGoals (filter by the task id). ' +
+            'If the goal is still a draft, review its outcome with the user, confirm it (confirmGoal), then spin it up (workTask). ' +
+            'If the task has NO goal, you may define one with the user explicitly before working it. ' +
+            'NEVER start working a task whose goal is not confirmed.'
+        }
+
+        // ── Doc outline injection (Lock #5/#6, §5.4) ────────────
+        // When a doc page is open in the editor, inject its outline so the
+        // model can address blocks by id and plan against the LIVE document.
+        // `getVersionedPage` prefers `documents.snapshot_json`, so the
+        // outline reflects every human edit — not the frozen `saved_views.page`.
+        // The doc page/entity tools themselves are injected further down
+        // (post-capability-filter, mirroring the extra-tool inject).
+        if (
+          docCtx &&
+          typeof requestedDocViewId === 'string' &&
+          requestedDocViewId
+        ) {
+          try {
+            const [{ createDbDocPageStore }, { buildOutline }, { renderActivePageOutline }] =
+              await Promise.all([
+                import('../db/doc-page-store.js'),
+                import('@use-brian/core/doc/outline.js'),
+                import('@use-brian/core/doc/page-retrieval.js'),
+              ])
+            const pageContext = { ...executionToolContext(executionContext, { appId: assistant.id }), scopeAccumulator }
+            const current = await permissionContext?.readPageAnchor?.(pageContext, requestedDocViewId)
+              ?? await createDbDocPageStore().getVersionedPage(user.id, requestedDocViewId, pageContext)
+            if (!current && classifySession(session).anchor.kind === 'doc_thread') {
+              throw new ChatTurnRefusal('page_context_unavailable', 'Brian could not access the Page needed to complete this request.')
+            }
+            if (current) {
+              const pageForOutline = {
+                blocks: current.page.blocks,
+                version: current.version,
+                title: current.title,
+              }
+              const outline = buildOutline(pageForOutline, {
+                pageId: requestedDocViewId,
+                pageVersion: current.version,
+                title: current.title,
+              })
+              // Flat outline for a small / heading-less page (byte-identical to
+              // before); the folded large-page map (every heading + relevant
+              // sections expanded, the rest collapsed to a getSection pointer) for
+              // a large, heading-structured page — Phases 2/3 of the doc
+              // turn-context work. The flat-vs-folded gate is the pure, unit-tested
+              // `renderActivePageOutline`. See doc-turn-context-optimization.md.
+              const lines = renderActivePageOutline(
+                pageForOutline,
+                outline,
+                typeof message === 'string' ? message : '',
+              )
+              const isEmptyPage = current.page.blocks.length === 0
+              let activeRecordingBlock = ''
+              if (
+                activeCapabilities.has('crm') &&
+                options.tools.has('assignRecordingSpeakers')
+              ) {
+                try {
+                  const { createDbSavedViewStore } = await import('../db/saved-views-store.js')
+                  const pageMeta = await createDbSavedViewStore().getById(user.id, requestedDocViewId)
+                  const activeRecordingId = pageMeta
+                    ? recordingIdFromAnchorKey(pageMeta.anchorKey) ?? pageMeta.linkedRecordingId
+                    : null
+                  if (activeRecordingId && pageMeta) {
+                    // Recording recovery loads only inside the recording branch (chat import graph).
+                    const { resolveCurrentRecordingId } = await import('../recordings/recovery.js')
+                    const currentRecordingId = await resolveCurrentRecordingId({ actorUserId: user.id }, pageMeta.workspaceId, activeRecordingId)
+                    if (currentRecordingId) activeRecordingBlock = `\n\n${buildActiveRecordingInstruction(currentRecordingId)}`
+                  }
+                } catch (err) {
+                  console.error('[chat] active recording context failed:', err)
+                }
+              }
+              const activePageBlock =
+                `# Active doc page (id=${outline.pageId}, version=${outline.pageVersion})\n` +
+                `Title: ${JSON.stringify(outline.title)}\n` +
+                `Blocks:\n${lines || '  (empty page)'}\n\n` +
+                buildActivePageInstruction({
+                  isEmptyPage,
+                  isCommentThread: classifySession(session).anchor.kind === 'doc_thread',
+                }) +
+                activeRecordingBlock
+              // The open page is visible in the editor and is a valid referent
+              // for "this page". Its representation prefixes the user turn;
+              // the runtime boundary prevents wrapper ids/instructions from
+              // becoming independently addressable content.
+              userVisibleContextParts.push(activePageBlock)
+              // Phase 0 capture for the doc-context meter (post-turn emit).
+              docLiveOutlineStr = activePageBlock
+              docOutlineBlockCount = outline.blocks.length
+              docPageBlockCount = current.page.blocks.length
+              docPageVersion = current.version
+
+              // Insertion anchor (app-web "Space for AI" on an empty line):
+              // the user parked their cursor on a specific block and wants the
+              // generation to land THERE, not at the page end. The raw operation
+              // mechanics now live in the isolated editor; the parent only needs
+              // to preserve the placement constraint in its one delegation.
+              if (
+                typeof requestedDocAnchorBlockId === 'string' &&
+                requestedDocAnchorBlockId
+              ) {
+                userVisibleContextParts.push(
+                  `## Insertion anchor\n` +
+                  `The user placed their cursor on block \`${requestedDocAnchorBlockId}\` and asked you ` +
+                  `to generate content there. Call \`delegateDocEdit\` once and preserve this exact block id ` +
+                  `and placement constraint in the brief. Do not describe the change in prose or ask to ` +
+                  `confirm first. The isolated editor receives this anchor again from the server and owns ` +
+                  `the block operations.`,
+                )
+              }
+
+              // ── Page-tree visibility ("where this page sits") ─────────
+              // The outline above shows the OPEN page only. Users also point
+              // at pages by POSITION - "the meeting notes at the parent
+              // level", "the sub-page" - so append a titles-only map of the
+              // page's ancestors / siblings / sub-pages with their ids and
+              // the instruction to READ the referenced page (`exportPage`)
+              // instead of asking the user to paste it. Titles + ids only;
+              // never neighbour content (doc-context cost). Its own try so a
+              // tree read failure can never take the outline down with it.
+              // See doc.md → "Page-tree visibility".
+              try {
+                const [{ getPageTreeNeighborhood }, { formatPageTreeContext }] =
+                  await Promise.all([
+                    import('../db/saved-views-store.js'),
+                    import('@use-brian/core/doc/page-tree-context.js'),
+                  ])
+                const hood = turnScope.access.sharedAudience ? null : await getPageTreeNeighborhood(user.id, requestedDocViewId)
+                const treeBlock = hood
+                  ? formatPageTreeContext(
+                      { id: requestedDocViewId, title: current.title },
+                      hood,
+                    )
+                  : ''
+                if (treeBlock) userVisibleContextParts.push(treeBlock)
+              } catch (err) {
+                console.error('[chat] doc page-tree injection failed:', err)
+              }
+            }
+          } catch (err) {
+            if (classifySession(session).anchor.kind === 'doc_thread') {
+              if (isAuthorityChangedError(err)) throw err
+              throw new ChatTurnRefusal('page_context_unavailable', 'Brian could not access the Page needed to complete this request.')
+            }
+            console.error('[chat] doc outline injection failed:', err)
+          }
+
+          // ── In-page comment-thread discovery ───────────────────────
+          // Surface the page's other comment threads (metadata only) so the AI
+          // knows what's already been discussed and reads a thread's conversation
+          // on demand via `getCommentThread`. A comment-reply turn (its session is
+          // `doc_thread`) sees every thread BUT the one it's replying in; a
+          // chat turn (floating dock / Space→AI) sees them all.
+          try {
+            const [{ createDbCommentThreadStore }, { formatThreadDiscovery }] = await Promise.all([
+              import('../db/comment-thread-store.js'),
+              import('@use-brian/core/doc/comment-discovery.js'),
+            ])
+            const summaries = turnScope.access.sharedAudience ? [] : await createDbCommentThreadStore().listThreadSummariesForPage(
+              user.id,
+              requestedDocViewId,
+            )
+            const section = formatThreadDiscovery(summaries, {
+              variant: classifySession(session).anchor.kind === 'doc_thread' ? 'thread' : 'chat',
+              currentSessionId: session.id,
+            })
+            if (section) userVisibleContextParts.push(section)
+          } catch (err) {
+            console.error('[chat] doc thread discovery injection failed:', err)
+          }
+        }
+
+        // ── Viewing-skill context (Brain skill editor) ──────────────
+        // The app-web floating dock sends `viewingSkillRowId` while the user
+        // is on the skill editor route. Inject the skill's saved contents as
+        // turn context so "this skill" resolves to what they are looking at.
+        // Read through the same RLS-scoped workspace list the editor itself
+        // uses (`listForWorkspace` + actingUserId), so the chat can never
+        // surface a skill the requesting user couldn't open in the editor.
+        if (
+          typeof requestedViewingSkillRowId === 'string' &&
+          requestedViewingSkillRowId &&
+          assistant.workspaceId &&
+          options.workspaceSkillStore
+        ) {
+          try {
+            const workspaceSkills = await options.workspaceSkillStore.listForWorkspace(
+              assistant.workspaceId,
+              { actingUserId: user.id },
+            )
+            const viewedSkill = workspaceSkills.find(
+              (s) =>
+                s.rowId === requestedViewingSkillRowId &&
+                s.state !== 'archived' &&
+                isSkillOfferable(s, { assistantClearance: assistant.clearance }),
+            )
+            if (viewedSkill) {
+              userVisibleContextParts.push(buildViewingSkillBlock(viewedSkill))
+              updateViewedSkillTool = createUpdateViewedSkillTool({
+                workspaceSkillStore: options.workspaceSkillStore,
+                workspaceId: assistant.workspaceId,
+                skillRowId: viewedSkill.rowId,
+                skillName: viewedSkill.name,
+                expectedRevision: workspaceSkillRevision(viewedSkill),
+                assistantClearance: assistant.clearance,
+              })
+            }
+          } catch (err) {
+            console.error('[chat] viewing-skill context injection failed:', err)
+          }
+        }
+
+        // ── Currently-viewing / server-bound Brain entry ───────────
+        // A normal floating-chat turn may carry a live drawer/URL anchor. A
+        // `brain_edit` session ignores client target input and reconstructs its
+        // immutable target from sessions.channel_id. Both are re-read by
+        // workspace + row before trusted context or a scoped write exists.
+        if (options.brainEntryMutator && assistant.workspaceId) {
+          try {
+            const bound = classifySession(session).machine === 'brain_edit'
+              ? parseBrainEditChannelId(session.channelId)
+              : null
+            const requested =
+              !bound &&
+              requestedViewingBrainEntry &&
+              typeof requestedViewingBrainEntry === 'object' &&
+              typeof requestedViewingBrainEntry.primitive === 'string' &&
+              typeof requestedViewingBrainEntry.rowId === 'string'
+                ? {
+                    primitive: requestedViewingBrainEntry.primitive,
+                    rowId: requestedViewingBrainEntry.rowId,
+                  }
+                : null
+            const target = bound ?? requested
+            const scopedEntry = target
+              ? await options.brainEntryMutator.getEditableEntry(
+                  assistant.workspaceId,
+                  target.primitive,
+                  target.rowId,
+                  {
+                    ...turnScope.access,
+                    userId: user.id,
+                    workspaceId: assistant.workspaceId,
+                  },
+                )
+              : null
+            if (scopedEntry) {
+              scopedBrainEntryActive = true
+              scopedBrainUpdateAllowed = true
+              privateRuntimeContextParts.push(buildViewingBrainEntryBlock(scopedEntry))
+            }
+            brainEntryEditTools = createBrainEntryEditTools({
+              mutator: options.brainEntryMutator,
+              scopedEntry,
+            })
+          } catch (err) {
+            console.error('[chat] viewing Brain entry injection failed:', err)
+          }
+        }
+
+        // ── Knowledge-source scope (Studio ▸ Knowledge chat panel) ──
+        // `kbSourceId` anchors this session to the focused knowledge source.
+        // The block is application-composed runtime metadata, so it stays in
+        // the PRIVATE system channel (provenance split — never a user-role
+        // tail). Tool-agnostic wording per the Layer-1 tool-awareness rule.
+        // Soft steering only: reads stay clearance-bounded and the KB write
+        // gates are unchanged. Best-effort — a resolve failure costs the
+        // block, never the turn.
+        if (
+          typeof requestedKbSourceId === 'string' &&
+          requestedKbSourceId &&
+          assistant.workspaceId &&
+          options.knowledgeStore
+        ) {
+          try {
+            if (requestedKbSourceId === 'manual') {
+              privateRuntimeContextParts.push(
+                [
+                  '# Knowledge maintenance scope',
+                  'The user is on the workspace knowledge management surface, focused on MANUALLY CREATED knowledge entries (entries not synced from any repository).',
+                  'Treat knowledge-base questions and edit requests in this conversation as scoped to those manual entries unless the user says otherwise.',
+                  'Use the manual namespace (sourceId: null) when finding entries. Identify a particular entry by its entry ID.',
+                  'Read the relevant entries from the knowledge base before answering about them or proposing a change.',
+                ].join('\n'),
+              )
+            } else if (options.knowledgeStore.getSource) {
+              const kbSource = await options.knowledgeStore.getSource(requestedKbSourceId)
+              if (kbSource && kbSource.workspaceId === assistant.workspaceId) {
+                privateRuntimeContextParts.push(
+                  [
+                    '# Knowledge maintenance scope',
+                    'The user is on the workspace knowledge management surface, focused on the knowledge source below. Treat knowledge-base questions and edit requests in this conversation as scoped to this source unless the user says otherwise.',
+                    kbSource.sourceType === 'local'
+                      ? `- Source: local directory ${kbSource.repo}${kbSource.rootPath ? ` (root path ${kbSource.rootPath})` : ''}`
+                      : `- Source: ${kbSource.repo} (branch ${kbSource.branch}${kbSource.rootPath ? `, root path ${kbSource.rootPath}` : ''})`,
+                    `- Source ID: ${kbSource.id}. Use this source ID when finding entries, then identify a particular entry by its entry ID.`,
+                    kbSource.lastSyncedAt
+                      ? `- Last synced: ${kbSource.lastSyncedAt.toISOString()}`
+                      : '- Never synced yet.',
+                    'Entries synced from this source live in the workspace knowledge base. Read the relevant entries before answering about them or proposing a change, and confirm every knowledge-base edit with the user as usual.',
+                  ].join('\n'),
+                )
+              }
+            }
+          } catch (err) {
+            console.warn('[chat] kb-source scope injection failed:', err)
+          }
+        }
+        if (officeLane) privateRuntimeContextParts.push(officeLaneContextBlock(officeLane))
+
+        // ── Host system-prompt addendum ──────────────────────────
+        // A host may add a session-specific prompt block (e.g. a draft-session
+        // authoring addendum). Open default: none. Pairs with injectExtraTools
+        // below so the prompt and the available tools agree.
+        const extraSystemPrompt = (assistant.appType !== 'distribution' || (activeCapabilities.has('feed') && activeCapabilities.has('home_app:feed:write'))) ? await options.resolveExtraSystemPrompt?.({
+          mode: session.mode,
+          channelType: session.channelType,
+          anchor: classifySession(session).anchor.kind,
+          assistantId: assistant.id,
+        }) : null
+        if (extraSystemPrompt) {
+          systemAddenda += `\n\n${extraSystemPrompt}`
+        }
+
+        // Add memory tools (with analytics callbacks)
+        const { saveMemory, getMemory, deleteMemory } = createMemoryTools(options.memoryStore, {
+          entityStore: options.entitiesStore,
+          entityLinksStore: options.entityLinksStore,
+          recallBuffer,
+          onEvent: (evt) => {
+            if (evt.type === 'memory_created') {
+              options.analytics?.logEvent({
+                userId: user.id, assistantId: assistant.id, sessionId: session.id,
+                eventName: 'memory_created', channelType: 'web',
+                metadata: { source: sanitize(evt.source), memory_type: sanitize(evt.memoryType) },
+              })
+            } else if (evt.type === 'memory_retrieved') {
+              options.analytics?.logEvent({
+                userId: user.id, assistantId: assistant.id, sessionId: session.id,
+                eventName: 'memory_retrieved', channelType: 'web',
+                metadata: { source: sanitize(evt.source), result_count: evt.resultCount, hit: evt.resultCount > 0 },
+              })
+            } else if (evt.type === 'memory_deleted') {
+              options.analytics?.logEvent({
+                userId: user.id, assistantId: assistant.id, sessionId: session.id,
+                eventName: 'memory_deleted', channelType: 'web',
+                metadata: { memory_id: sanitize(evt.memoryId) },
+              })
+            }
+          },
+        })
+        // Capability gate: drop tools the assistant lacks the grant for before
+        // MCP / skills layer them on. The tool executor re-checks at invocation.
+        // Reuses the set computed near the L1 prompt build above.
+        const allTools = filterToolsByCapabilities(new Map(options.tools), activeCapabilities)
+        // Presentation is a client capability, not a general assistant power.
+        // Keep it invisible unless this request came from the full Chat app;
+        // docks and channels do not render document_payload events. Existing
+        // chat-origin sessions remain capable even if an older client omitted
+        // the per-turn surface stamp.
+        if (requestedAppOrigin !== 'chat' && classifySession(session).surface !== 'chat') {
+          allTools.delete('presentDocument')
+        }
+        // The Office lane offers exactly the file-bound read and revise tools.
+        if (officeLane) bindOfficeLaneTools(allTools, options.tools, officeLane.artifact.id)
+        allTools.set('saveMemory', saveMemory)
+        allTools.set('getMemory', getMemory)
+        allTools.set('deleteMemory', deleteMemory)
+        if (updateViewedSkillTool) {
+          allTools.set(updateViewedSkillTool.name, updateViewedSkillTool)
+        }
+        if (brainEntryEditTools) {
+          allTools.set(
+            brainEntryEditTools.findEditableBrainEntries.name,
+            brainEntryEditTools.findEditableBrainEntries,
+          )
+          allTools.set(
+            brainEntryEditTools.updateBrainEntry.name,
+            brainEntryEditTools.updateBrainEntry,
+          )
+        }
+
+        // A private web conversation can explicitly hand its reviewed current
+        // work to a new workspace room. This is per-turn admission, not a global
+        // base tool: public API, messaging channels, rooms, workflows, workers,
+        // and inter-assistant callees must never discover it.
+        if (
+          options.workspaceChatHandoffTool &&
+          mayOfferWorkspaceChatHandoff(session, assistant.workspaceId)
+        ) {
+          allTools.set(
+            options.workspaceChatHandoffTool.name,
+            options.workspaceChatHandoffTool,
+          )
+        }
+
+        // Room pin tools — the assistant's write access to the conversation's
+        // Pins panel ("pin all tasks in this project here"). Per-turn admission,
+        // Chat conversations only (`policy.pins`: a room or a personal chat,
+        // whose Work Bench renders the pins): channels, the doc dock,
+        // workflows, and workers never discover these.
+        if (turnPolicy.pins && assistant.workspaceId) {
+          const pinTools = createSessionPinTools({
+            sessionId: session.id,
+            workspaceId: assistant.workspaceId,
+            clearance: session.effectiveClearance,
+            assistantId: assistant.id,
+            publishSessionEvent,
+          })
+          allTools.set('addPin', pinTools.addPin)
+          allTools.set('removePin', pinTools.removePin)
+          allTools.set('listPins', pinTools.listPins)
+        }
+
+        // updateSelfProfile — Identity Phase 2 groundwork. Available
+        // whenever the entity store is wired AND the assistant has a
+        // workspace; falls back silently otherwise (the tool would
+        // error at execute-time without workspace). See
+        // docs/architecture/brain/corrections.md.
+        if (options.entitiesStore && assistant.workspaceId) {
+          const updateSelfProfile = createSelfProfileTool(options.entitiesStore, options.entityLinksStore)
+          allTools.set('updateSelfProfile', updateSelfProfile)
+        }
+
+        // Tasks (Q1) + CRM (Q2) are constructed at boot in apps/api/src/index.ts
+        // and arrive via options.tools. Per-assistant visibility is gated by
+        // §17 capability grants ('tasks' / 'crm') applied above by
+        // filterToolsByCapabilities — no per-turn injection here.
+
+        // Retrieval (WS-5) — the 6 read tools that expose the company brain
+        // (`getEntity`, `search`, `recentEpisodes`, `provenance`, `markUseful`,
+        // `aggregate`). Workspace-scoped: requires `assistant.workspaceId`
+        // because the permission predicate filters every read on workspace
+        // partition (per `permissions.md` P1-12). Personal assistants without a
+        // workspace skip the injection — the tools would always error on the
+        // workspace check in `actorFromContext`. See
+        // `docs/architecture/brain/retrieval-layer.md`.
+        if (options.retrievalStore && assistant.workspaceId) {
+          const retrievalTools = createRetrievalTools(options.retrievalStore, {
+            onEvent: (evt) => {
+              const metadata: Record<string, number | boolean | ReturnType<typeof sanitize>> = {}
+              if (evt.type === 'entity_retrieved') {
+                metadata.found = evt.found
+              } else if (evt.type === 'search_executed') {
+                metadata.result_count = evt.resultCount
+              } else if (evt.type === 'recent_episodes_listed') {
+                metadata.result_count = evt.resultCount
+              } else if (evt.type === 'provenance_walked') {
+                metadata.found = evt.found
+              } else if (evt.type === 'mark_useful_recorded') {
+                metadata.primitive = sanitize(evt.primitive)
+              } else if (evt.type === 'aggregate_computed') {
+                metadata.result_count = evt.resultCount
+                metadata.fn = sanitize(evt.fn)
+              } else if (evt.type === 'row_history_walked') {
+                metadata.chain_length = evt.chainLength
+                metadata.primitive = sanitize(evt.primitive)
+              }
+              options.analytics?.logEvent({
+                userId: user.id,
+                assistantId: assistant.id,
+                sessionId: session.id,
+                eventName: `brain_${evt.type}`,
+                channelType: 'web',
+                metadata,
+              })
+            },
+          })
+          for (const [name, tool] of Object.entries(retrievalTools)) {
+            allTools.set(name, tool)
+          }
+        }
+
+        // Generate mode as a chat tool — fill a blueprint from the brain on request
+        // (requiresConfirmation; the cost rides this turn's credit). Workspace-scoped.
+        if (options.generateBlueprintTool && assistant.workspaceId) {
+          allTools.set(options.generateBlueprintTool.name, options.generateBlueprintTool)
+        }
+
+        // Blueprint record surface — save/read typed records in-context, define
+        // contracts, discover them. Workspace-scoped like the fill tool.
+        if (options.blueprintRecordTools && assistant.workspaceId) {
+          for (const tool of options.blueprintRecordTools) {
+            allTools.set(tool.name, tool)
+          }
+        }
+
+        // Brain inbox inspection toolkit — read-only introspection tools.
+        // Two surfaces:
+        //   1. Brain inbox "Ask about this" drawer
+        //      (channel_type='brain_inspection') — any assistant in the
+        //      inspection session sees these.
+        //   2. Primary workspace assistant in normal chat — so the user
+        //      can ask "what happened in this workspace today?" /
+        //      "what have you been getting wrong?" without detouring
+        //      through the inbox.
+        //
+        // Personal assistants without a workspace don't get the tools
+        // (they'd error on the workspace check inside each tool's
+        // execute path).
+        const isInspectionSession = classifySession(session).machine === 'inspection'
+        const isBrainEditSession = classifySession(session).machine === 'brain_edit'
+        const isPrimaryWithWorkspace =
+          assistant.kind === 'primary' && !!assistant.workspaceId
+        if (
+          options.inspectionTools &&
+          (isInspectionSession || isPrimaryWithWorkspace)
+        ) {
+          for (const [name, tool] of Object.entries(options.inspectionTools)) {
+            allTools.set(name, tool)
+          }
+        }
+
+        // Per-turn sensitivity accumulator — populated by retrieval +
+        // memory + KB reads inside the queryLoop, and read by the
+        // connector_action audit hook (via closure through the injected tools)
+        // when a connector action succeeds. A single shared instance so
+        // the audit's `retrieval_sensitivity_max` is the true max sensitivity
+        // of brain rows the model saw this turn — not a conservative
+        // `'public'` under-stamp. See `connector-actions.md` → IFC.
+        noteAutomaticScopeEvidence(scopeAccumulator, [
+          rankedIndex.rows,teamMemoryIndex,
+          ...identityMemories,
+          ...rankedIndex.rows,
+          ...workspaceIdentityMemories,
+          ...teamMemoryIndex,
+          ...teamVoiceRules,
+        ])
+
+        // Per-turn outbound-attachment collector (`sendFile`). Web moves no
+        // bytes — the drained list persists onto the final assistant
+        // `session_messages.attachments` row and the client downloads via
+        // the signed-URL route. See adapter-pattern.md → "Outbound documents".
+
+        // Connector-action audit deps — engaged only when the assistant
+        // is workspace-scoped AND both audit stores are wired. Shared
+        // across host-injected extra tools (e.g. an outbound post) AND
+        // the MCP inject (Gmail `sendMessage`) so one workspace-scoped chat
+        // turn audits both surfaces consistently. See
+        // `docs/plans/company-brain/connector-actions.md`.
+
+
+        // Host extra-tool injection — a host may merge additional tools into the
+        // turn for certain assistants (e.g. a publishing app's outbound tools).
+        // The injected impl does its own assistant-kind/appType + session
+        // gating; the open route stays agnostic. Open default: unset.
+        if (options.injectExtraTools) {
+          try {
+            await options.injectExtraTools({
+              tools: allTools,
+              userId: user.id,
+              assistant: {
+                id: assistant.id,
+                kind: assistant.kind,
+                appType: assistant.appType ?? null,
+              },
+              session: {
+                id: session.id,
+                mode: session.mode,
+                channelType: session.channelType,
+                anchor: classifySession(session).anchor.kind,
+              },
+              // Connector-action audit — built once above, shared with the MCP
+              // inject (Gmail audit). See `connector-actions.md`.
+              connectorActionAudit,
+              ...(feedTurnContext ? {feedDraft:{revision:feedTurnContext.reference.revision,wholePost:!feedTurnContext.reference.target||feedTurnContext.reference.target.kind==='post'}} : {}),
+            })
+          } catch (err) {
+            console.error('[chat] extra tool injection failed:', err)
+          }
+        }
+
+        if (feedTurnContext) for (const tool of buildFeedCollaborationTools(feedTurnContext, storedUserMsg.id, options.feedGeneration, options.feedReviewContext)) allTools.set(tool.name, tool)
+
+        // Pages the AI wrote this turn (filled by the doc tools' onEvent
+        // below). Drives the post-turn auto-title pass (migration 218).
+
+        // Doc tools — page authoring (renderPage/patchPage/getBlock/…) +
+        // entity tools. Injected for any doc-surface turn (`docSurface` policy) AND
+        // for the app-web workspace surfaces (`isAppSurface` — ambient: the
+        // tools ride the turn, the skill block above tells the model to author
+        // only on an explicit ask).
+        // Injected here, post-capability-filter (like the extra-tool inject), so
+        // they're always present on a doc turn. `patchPage` writes through the live Yjs doc when
+        // DOC_SYNC_URL/SECRET are configured; otherwise it falls back to the
+        // legacy CAS path. See `packages/api/src/doc/inject.ts`.
+        // Charter intake tool (growth loop Phase 2). Keyed on the same
+        // boolean as the interview addendum above, so the prompt never names
+        // a tool that is absent (tool-awareness rule). requiresConfirmation
+        // on the tool means the owner taps to approve the exact drafted
+        // charter before it lands.
+        if (charterIntakeMode) {
+          // Loaded only on an intake turn: ordinary chat never loads the intake
+          // implementation (chat import graph, M4 frontier).
+          const { createSaveCharterTool } = await import('../intake/charter-intake.js')
+          const saveCharterTool = createSaveCharterTool({ assistantId: assistant.id })
+          allTools.set(saveCharterTool.name, saveCharterTool)
+        }
+
+        if (docToolsTurn) {
+          try {
+            const { injectDocTools } = await import('../doc/inject.js')
+            const standardDocEditModel = resolveModel('standard', userPlan, 'ok')
+            await injectDocTools({
+              tools: allTools,
+              backgroundModel,
+              fallbackModel: turnOptions.configuredProviders
+                ? ensureServableModel(standardDocEditModel, turnOptions.configuredProviders)
+                : standardDocEditModel,
+              editMode: researchMode ? 'research' : 'page',
+              userId: user.id,
+              assistant: {
+                id: assistant.id,
+                kind: assistant.kind,
+                appType: assistant.appType,
+                workspaceId: assistant.workspaceId,
+              },
+              // Surface-context injection: true when doc tools are riding the
+              // turn — the doc surface itself, or a workspace surface getting
+              // the ambient injection.
+              docSurface: docToolsTurn,
+              // Cached-file store for the `importToPage` faithful AI import.
+              fileStore: options.fileStore,
+              // Doc-page → brain distillation runner. When present, the
+              // `ingestPage` tool is injected so "add this page to the brain"
+              // works on request. Absent (no Pipeline B) → tool not injected.
+              ingestPage: options.ingestPage,
+              // Workspace files API — backs `fetchSiteIcon` (site logo →
+              // stored image → `img:` page-icon token). Absent → not injected.
+              filesApi: options.filesApi,
+              pageId:
+                typeof requestedDocViewId === 'string' && requestedDocViewId
+                  ? requestedDocViewId
+                  : null,
+              // Full Chat has no open `docViewId`. Readable Page pins from this
+              // exact room are the only existing-page targets the gateway may
+              // admit, and inject.ts re-anchors the child mutation tools to the
+              // selected id after validation.
+              editPageTargets:
+                programmatic || classifySession(session).surface === 'chat' ? pinnedPageEditTargets : [],
+              anchorBlockId:
+                typeof requestedDocAnchorBlockId === 'string' && requestedDocAnchorBlockId
+                  ? requestedDocAnchorBlockId
+                  : null,
+              // Theme iteration from chat (refine-only). The active custom theme
+              // id is a per-user client value; when present we inject
+              // `refineActiveTheme` and stream the rebuilt tokens back via the
+              // `doc_theme_update` SSE for live apply.
+              activeThemeId:
+                typeof requestedActiveThemeId === 'string' && requestedActiveThemeId
+                  ? requestedActiveThemeId
+                  : null,
+              provider: backgroundProvider,
+              onEditUsage: ({ model: editModel, usage }) => recordOverheadUsage({
+                usageStore: options.usageStore,
+                userId: user.id,
+                assistantId: assistant.id,
+                sessionId: session.id,
+                userMessageId: storedUserMsg.id,
+                model: editModel,
+                usage,
+                source: 'overhead:doc-edit',
+                triggerKey: 'doc_edit_worker',
+                ...backgroundUsageAttribution,
+              }),
+              onChildToolResult: (result) => {
+                if (result.isError) return
+                try {
+                  const parsed = JSON.parse(result.content) as {
+                    kind?: string
+                    pageId?: string
+                    threadId?: string
+                    anchorBlockId?: string | null
+                    isNew?: boolean
+                  }
+                  if (result.name === 'createSubPage' && parsed.kind === 'doc_sub_page' && parsed.pageId) {
+                    sendEvent('sub_page_created', {
+                      toolUseId: result.toolUseId,
+                      pageId: parsed.pageId,
+                    })
+                  } else if (result.name === 'postComment' && parsed.kind === 'comment_posted' && parsed.threadId) {
+                    sendEvent('comment_posted', {
+                      toolUseId: result.toolUseId,
+                      threadId: parsed.threadId,
+                      pageId: parsed.pageId,
+                      anchorBlockId: parsed.anchorBlockId ?? null,
+                      isNew: parsed.isNew ?? false,
+                    })
+                  } else if (result.name === 'resolveComment' && parsed.kind === 'thread_resolved' && parsed.threadId) {
+                    sendEvent('comment_resolved', {
+                      toolUseId: result.toolUseId,
+                      threadId: parsed.threadId,
+                    })
+                  }
+                } catch {
+                  // A malformed child result cannot break the edit receipt.
+                }
+              },
+              onThemeRefined: (themeId, tokens, appearance) => {
+                if (!res.writableEnded) {
+                  sendEvent('doc_theme_update', { themeId, tokens, appearance })
+                }
+              },
+              // Record which page(s) the AI wrote this turn so the post-turn
+              // auto-title pass (migration 218) only considers pages that
+              // changed — covers both `patchPage` (the open page) and
+              // `renderPage` (a brand-new page with a different id).
+              onEvent: (evt) => {
+                if (evt.type === 'page_rendered' || evt.type === 'page_patched') {
+                  docWrittenPageIds.add(evt.pageId)
+                }
+                // `renderPage` minted a brand-new page. Unlike `patchPage` (which
+                // streams onto the open editor via the Yjs doc) and `renderView`
+                // (which rode the now-removed `view_payload` path), `renderPage`
+                // emits no client signal — so the new page sat server-side,
+                // invisible in the sidebar until a manual refresh. That compounded
+                // the 2026-06-02 orphan-page incident: even once the model picks
+                // `renderPage` for a genuinely-new page, the user never saw it
+                // appear. Forward a dedicated `page_created` SSE the instant the
+                // draft persists; the client reloads the sidebar and lands the
+                // user on it. (createSubPage keeps its own `sub_page_created` event
+                // — that one deliberately does NOT navigate; a new root page does.)
+                if (evt.type === 'page_rendered' && !res.writableEnded) {
+                  sendEvent('page_created', { pageId: evt.pageId })
+                }
+                // Explicit metadata change (`setTitle`/`setIcon`) — stream the
+                // committed title/icon to the open clients the instant the patch
+                // commits, so the tabs / breadcrumb / sidebar reflect it live.
+                // The post-turn auto-title pass skips `'user'`-named pages, so
+                // without this an explicit AI rename / icon change only surfaces
+                // on the next refetch. Reuses the `doc_title_update` channel;
+                // `nameOrigin` + `overwrite` tell the client to apply the
+                // authoritative values (not the COALESCE suggestion semantics).
+                if (
+                  evt.type === 'page_patched' &&
+                  evt.meta &&
+                  !res.writableEnded
+                ) {
+                  sendEvent('doc_title_update', {
+                    pageId: evt.pageId,
+                    title: evt.meta.title,
+                    icon: evt.meta.icon,
+                    nameOrigin: evt.meta.nameOrigin,
+                    overwrite: true,
+                  })
+                }
+              },
+            })
+          } catch (err) {
+            console.error('[chat] doc tool injection failed:', err)
+          }
+        }
+
+        // Session-state commitment tools (always on — the store itself is the
+        // feature gate; absent store means absent tools, same as memories).
+        if (options.sessionStateStore) {
+          const { trackCommitment, resolveCommitment } = createSessionStateTools(
+            options.sessionStateStore,
+            {
+              onEvent: (evt) => {
+                options.analytics?.logEvent({
+                  userId: user.id, assistantId: assistant.id, sessionId: session.id,
+                  eventName: evt.type, channelType: 'web',
+                  metadata:
+                    evt.type === 'session_state_upsert'
+                      ? { source: sanitize(evt.source), was_insert: evt.wasInsert, key: sanitize(evt.key) }
+                      : { source: sanitize(evt.source), hit: evt.hit, key: sanitize(evt.key) },
+                })
+              },
+            },
+          )
+          allTools.set('trackCommitment', trackCommitment)
+          allTools.set('resolveCommitment', resolveCommitment)
+        }
+
+        // Execution-plan tools (always on when the store is present — the store
+        // is the feature gate, same as session-state). Domain-agnostic: step
+        // content comes from the model, so research / doc-editing / batch saves
+        // are all instances. See execution-plan.md.
+        if (options.planStore) {
+          const { setPlan, updatePlanStep, abandonPlan } = createPlanTools(
+            options.planStore,
+            {
+              onEvent: (evt) => {
+                options.analytics?.logEvent({
+                  userId: user.id, assistantId: assistant.id, sessionId: session.id,
+                  eventName: evt.type, channelType: 'web',
+                  metadata:
+                    evt.type === 'plan_set'
+                      ? { attempt_id: sanitize(evt.attemptId), steps: evt.steps, revised: evt.revised }
+                      : evt.type === 'plan_step_update'
+                        ? { key: sanitize(evt.key), status: sanitize(evt.status), hit: evt.hit }
+                        : { attempt_id: sanitize(evt.attemptId) },
+                })
+              },
+            },
+          )
+          allTools.set('setPlan', setPlan)
+          allTools.set('updatePlanStep', updatePlanStep)
+          allTools.set('abandonPlan', abandonPlan)
+        }
+
+        // Inject user's connected MCP tools (custom connectors + built-in Google).
+        // `getConnectorUserId` resolves the workspace owner, but for ANY
+        // workspace assistant `injectMcpTools` suppresses the owner-personal
+        // base load and draws tools only from team-native instances +
+        // `connector_grant` overlays — exposure is the injection boundary, solo
+        // included (incidents 2026-06-01 / 2026-07-14). Shared with the public
+        // API channel via `applyMcpInjection` — both routes must surface the
+        // same tool set or assistants degrade silently when consumers switch
+        // transports.
+        const admittedTools = filterToolsByCapabilities(allTools, activeCapabilities)
+        for (const name of allTools.keys()) {
+          if (!admittedTools.has(name)) allTools.delete(name)
+        }
+        turnTiming.mark('context')
+        const { enrichConfirmation, unavailable: unavailableCapabilities, searchableSources, knowledgeCapturePrompt } = preparedConnectors
+        for (const [name, tool] of preparedConnectorTools) {
+          if (tool === options.tools.get(name) || tool.deferredSchemaOnly && allTools.has(name)) continue
+          allTools.set(name, tool)
+        }
+        if (maximum) for (const name of preparedConnectorTools.keys()) if (!maximum.has(name)) preparedConnectorTools.delete(name)
+        if (maximum) for (const name of allTools.keys()) if (!maximum.has(name)) allTools.delete(name)
+        turnTiming.mark('tools_inject')
+        if (knowledgeCapturePrompt) privateRuntimeContextParts.push(knowledgeCapturePrompt)
+
+        let preparedCommand = message ? prepareSlashCommand(message) : null
+        if (preparedCommand && message && assistant.workspaceId && (options.skillStore || options.workflowStore)) {
+          try {
+            const nativeCatalog = await buildWorkspaceNativeSlashCommands({
+              userId: executionContext.security.access.userId,
+              workspaceId: assistant.workspaceId,
+              skillStore: options.skillStore,
+              workflowStore: options.workflowStore,
+            })
+            preparedCommand = resolveNativeSlashCommand(message, nativeCatalog) ?? preparedCommand
+          } catch (err) {
+            console.warn('[chat] native slash-command resolution failed:', err)
+          }
+        }
+
+        // Inject skills — budget-aware listing + useSkill tool
+        if (options.skillStore) {
+          // Slash command (`/goal register …` as the whole message): the name is
+          // a skill slug, threaded as an enforced slug so the skill's full
+          // instructions become mandatory. Governance gates still apply inside
+          // injectSkills; a name that resolves to nothing enforces nothing and
+          // the message falls through as plain text (checked below on the
+          // enforcedPromptFragment, never on the parse alone).
+          const slashCommand = preparedCommand?.kind === 'skill'
+            ? { name: preparedCommand.name, args: preparedCommand.args }
+            : null
+          const skillResult = await injectSkills({
+            enforceSlugs: slashCommand ? [slashCommand.name] : undefined,
+            skillStore: options.skillStore,
+            executionContext, scopeAccumulator,
+            authorizeSkillAudience: executionContext.security.access.sharedAudience ? readLegacyDeliveryAudience : undefined,
+            connectorUserId,
+            assistantId: assistant.id,
+            // §5.5 governance gate: the assistant's own clearance is the
+            // use-time ceiling for which workspace skills are offered.
+            assistantClearance: executionContext.security.access.clearance,
+            availableConnectorIds: assistant.workspaceId || programmatic
+              ? preparedConnectors.admittedConnectorIds ?? new Set() : undefined,
+            tools: allTools,
+            connectorStore: options.connectorStore,
+            unavailableCapabilities,
+            communitySkills: options.communitySkills,
+            channel: 'chat',
+            assistantKind: assistant.kind,
+            assistantAppType: assistant.appType ?? null,
+            // CL-8 wiring — `injectSkills` builds a slug→rowId map and
+            // wires `useSkill.recordInvocation` to bump invocations +
+            // last_invoked_at synchronously and queue rowIds for the
+            // post-commit `succeeded` flush. No-ops for built-in skills.
+            workspaceSkillStore: options.workspaceSkillStore,
+            workspaceSkillEnablementStore: options.workspaceSkillEnablementStore,
+            workspaceSkillFilesStore: options.workspaceSkillFilesStore,
+            workspaceId: assistant.workspaceId ?? undefined,
+            invocationBuffer: skillInvocationBuffer,
+          })
+          systemAddenda += skillResult.promptFragment
+          if (slashCommand && skillResult.enforcedPromptFragment) {
+            systemAddenda += skillResult.enforcedPromptFragment
+            privateRuntimeContextParts.push(buildSlashCommandBlock(slashCommand))
+          }
+        }
+        if (preparedCommand?.kind === 'workflow' && allTools.has('runWorkflow')) {
+          privateRuntimeContextParts.push(buildWorkflowSlashCommandBlock(preparedCommand))
+        }
+
+        // Inject unavailable capabilities so the model doesn't waste turns
+        // searching for tools that don't exist.
+        systemAddenda += buildUnavailableCapabilitiesPrompt(
+          unavailableCapabilities,
+          allTools,
+          searchableSources,
+        )
+
+        // Browser-escalation guidance — dynamic injection gated on the acting
+        // browser tools being in the map (tool-awareness carve-out): search
+        // that can't produce the exact figure escalates to the browser, and
+        // zero profiles never blocks a public-site browse.
+        systemAddenda += buildBrowserEscalationPrompt(allTools)
+        systemAddenda += buildEmailDraftAnchorPrompt(allTools)
+
+        // Dynamic workspace-blueprints section (blueprint output contract):
+        // present only when the workspace has blueprints, naming only blueprints
+        // that exist right now. Tool names are legal here — this is a dynamic
+        // injection gated on the tools being in the map, never Layer 1 prose.
+        if (
+          options.buildBlueprintPromptFragment &&
+          options.blueprintRecordTools &&
+          assistant.workspaceId
+        ) {
+          systemAddenda += await options.buildBlueprintPromptFragment(user.id, assistant.workspaceId)
+        }
+
+        // Research-mode override. Suspends the base L1's "two searches and stop"
+        // discipline and replaces it with coordinator-pattern rules (parallelism,
+        // multi-round, anti-fabrication). Injected only when the caller passed
+        // `mode: 'research'`; the quota gate above has already accepted the turn.
+        // See packages/core/src/system-prompt.ts → RESEARCH_MODE_ADDENDUM.
+        //
+        // Doc-surface research turns are the exception: this addendum is
+        // worker / coordinator-centric ("delegate via spawnWorker",
+        // "<worker-findings> XML"), but a doc research turn authors findings to
+        // the page itself and never delegates. Its research guidance lives in the
+        // doc skill block's RESEARCH_MODE_BLOCK (mode tracks the research
+        // toggle), so stacking the global addendum here would give it
+        // contradictory worker instructions.
+        if (researchMode && !docCtx) {
+          const { RESEARCH_MODE_ADDENDUM } = await import('@use-brian/core/system-prompt.js')
+          systemAddenda += `\n\n${RESEARCH_MODE_ADDENDUM}`
+        }
+
+        // Per-request research flag: workers spawned during a Research-mode turn
+        // get a loosened system prompt (chain webSearch → urlReader, up to 5
+        // searches, surface blocked URLs) and a higher turn budget. The
+        // session-scoped reset above clears this binding on the next turn.
+        options.workerManager?.setResearchMode(researchMode, session.id)
+        // Upgrade research workers to the coordinator's model. Without this they
+        // run on boot-time Flash, which treats "Search for X" prompts as one-shot
+        // and skips urlReader entirely — defeating the deep-research wedge.
+        if (researchMode) {
+          // Persist the logical Research model, not today's serving alias. The
+          // routing provider reapplies the live application preference on spawn
+          // and durable rehydrate. Explicit custom selectors still ride
+          // workerRuntime and remain pinned authoritatively.
+          const researchWorkerModel = route.research.entry === 'adaptive' && budgetStatus !== 'downgraded'
+            ? resolveModel('research', 'max_5x', budgetStatus) : logicalModel
+          options.workerManager?.setResearchModel(researchWorkerModel, session.id)
+          // The assessment bounds parallelism and each worker's effort. Five
+          // remains the absolute deep-research concurrency ceiling for memory.
+          options.workerManager?.setResearchEffort(assessedResearchEffort, session.id)
+          options.workerManager?.setMaxConcurrent(RESEARCH_EFFORT_BUDGETS[assessedResearchEffort].maxConcurrent, session.id)
+        }
+
+        // ── Pre-flight: automatic parallel research ──────────────
+        // Two modes based on model intelligence:
+        //   Standard (Flash): application-layer pre-flight — classifier splits,
+        //     workers research, results injected into system prompt.
+        //   Pro/Max: full coordinator mode — strip research tools from the main
+        //     model, let it delegate via spawnWorker with Phase 4b drain.
+        //     Structurally prevents re-searching.
+        //
+        // Research mode forces coordinator regardless of the classifier — the
+        // user explicitly asked for deep research, so we skip the splitter
+        // call (saves a Gemini round-trip) and seed coordinator immediately.
+        const isProMode = !isStandardTier(logicalModel)
+        let preflightContext = ''
+        // App assistants (doc + feed) never enter coordinator mode — it
+        // strips their authoring tools. So a doc research turn (researchMode
+        // true) authors directly instead of delegating: coordinatorMode stays
+        // false here, the splitter branch below is skipped, and the standard
+        // preflight is skipped too (it would strip webSearch/urlReader the
+        // research soul tells the model to use).
+        const isDocResearchTurn = researchMode && docCtx
+        // The doc surface never enters coordinator mode for ANY interlocutor:
+        // coordinator strips the page-authoring tools, so a primary doing doc
+        // research must author in its own loop, not delegate. `appAssistantForbids`
+        // already covers the legacy doc app; `!onDocSurface` covers the
+        // primary / switched-in assistant case.
+        let coordinatorMode =
+          researchMode && !appAssistantForbidsCoordinator(assistant.kind) && !onDocSurface
+
+        if (message && message.length > 40) {
+          // `!appAssistantForbidsCoordinator` is the third coordinator gate: a
+          // Pro/Max doc/feed turn must NOT enter coordinator mode via the
+          // splitter (it would strip the authoring tools — incident 2026-06-01).
+          // Non-doc app turns fall through to the standard application-layer
+          // preflight below; doc research turns skip even that (see the
+          // `isDocResearchTurn` guard on the else branch).
+          if (
+            !appAssistantForbidsCoordinator(assistant.kind) &&
+            !onDocSurface &&
+            (researchMode || isProMode)
+          ) {
+            // Pro/Max: the routed split decides coordinator mode (one turn route
+            // made the split call, research.md "Adapter switch"); the model then
+            // drives delegation via spawnWorker + Phase 4b.
+            //
+            // Research mode takes no split (the user already asked for deep
+            // mode) and seeds the coordinator path unconditionally.
+            let splitterDecidedCoordinator = false
+            // Operate-site turns never take a split — a browse of one named site
+            // must not be decomposed into search workers that cannot browse (see
+            // the operateSiteIntent block above).
+            if (!researchMode && !operateSiteIntent) {
+              const routedTasks = await routing.consumeSplit()
+              splitterDecidedCoordinator = !!routedTasks
+
+              // Auto-seed (Phase 3): the routed split decomposed this message
+              // into ≤3 sub-tasks — turn them into an execution plan so the
+              // completeness gate has something to enforce (and the # Active
+              // plan block surfaces it from the next turn). No-ops if a plan is
+              // already active or the store is absent. Reuses the split signal
+              // only; no new LLM call. See execution-plan.md → "Auto-seed".
+              if (options.planStore && routedTasks && routedTasks.length > 0) {
+                await seedPlanFromTasks(
+                  options.planStore,
+                  { sessionId: session.id, userId: user.id, assistantId: assistant.id },
+                  routedTasks,
+                ).catch((err) => console.error('[chat] plan auto-seed failed:', err))
+              }
+            }
+            if (researchMode || splitterDecidedCoordinator) {
+              coordinatorMode = true
+              // `phase` lets the web client render a localized research banner;
+              // `message` is the plain-text fallback for non-web consumers/logs.
+              sendActivityEvent('status', {
+                phase: researchMode ? 'research_starting' : 'research_parallel',
+                message: researchMode ? 'Starting deep research…' : 'Researching in parallel...',
+              })
+              // Set up event streaming for coordinator workers (same as standard pre-flight)
+              const seenWorkers = new Set<string>()
+              const seenCitationUrls = new Set<string>()
+              options.workerManager?.setOnEvent((workerId, event) => {
+                researchObserver?.observeWorker(event)
+                if (!seenWorkers.has(workerId)) {
+                  seenWorkers.add(workerId)
+                  const desc = options.workerManager?.getDescription(workerId)
+                  sendActivityEvent('worker_start', { workerId, description: desc })
+                }
+                if (event.type === 'tool_start') {
+                  sendActivityEvent('tool_start', { id: event.id, name: event.name, workerId })
+                }
+                if (event.type === 'tool_input') {
+                  sendActivityEvent('tool_input', { id: event.id, name: event.name, input: event.input, workerId })
+                }
+                if (event.type === 'tool_dropped') {
+                  sendActivityEvent('tool_dropped', { id: event.id, workerId })
+                }
+                if (event.type === 'tool_result') {
+                  for (const block of event.results) {
+                    if (block.type === 'tool_result') {
+                      const resultEvent = {
+                        id: block.toolUseId,
+                        name: block.name,
+                        isError: block.isError ?? false,
+                        workerId,
+                        errorMessage: block.isError ? toolErrorExcerpt(block.content) : undefined,
+                        // Sender's own stream only — the reduced room payload
+                        // below never carries what a connector returned.
+                        output: block.isError ? undefined : toolOutputExcerpt(block.content),
+                      }
+                      sendActivityEvent('tool_result', resultEvent, {
+                        id: resultEvent.id,
+                        name: resultEvent.name,
+                        isError: resultEvent.isError,
+                        workerId,
+                      })
+                      // Realtime brain stream — fire-and-forget NOTIFY so other
+                      // surfaces (a /brain tab, Claude Code, another device)
+                      // see the change without polling. No-ops on read tools.
+                      // Spec: docs/architecture/platform/realtime-sync.md.
+                      notifyBrainWriteIfMatch(assistant.workspaceId, block.name, block.isError ?? false)
+                      const toolMeta = event.metaByToolUseId?.[block.toolUseId]
+                      const extraMeta: Record<string, string | number | boolean> = { in_worker: true }
+                      if (toolMeta) {
+                        for (const [k, v] of Object.entries(toolMeta)) {
+                          extraMeta[k] = typeof v === 'string' ? sanitize(v) : v
+                        }
+                      }
+                      options.analytics?.logEvent({
+                        userId: user.id, assistantId: assistant.id, sessionId: session.id,
+                        eventName: 'tool_executed', channelType: 'web',
+                        metadata: { tool_name: sanitize(block.name), success: !(block.isError ?? false), ...(block.isError ? { error_message: sanitize(toolErrorExcerpt(block.content)) } : {}), ...extraMeta },
+                      })
+                      // Fire-and-forget: bill the user for any external API cost
+                      // the tool incurred (e.g. Grok tokens for xSearch / x.com
+                      // URL read, flat Brave/Serper/Tavily rate for webSearch).
+                      void recordExternalCostFromMeta({
+                        toolMeta,
+                        usageStore: options.usageStore,
+                        userId: user.id,
+                        assistantId: assistant.id,
+                        sessionId: session.id,
+                        userMessageId: storedUserMsg.id,
+                        userPlan,
+                        analytics: options.analytics,
+                      })
+                    }
+                  }
+                }
+                if (event.type === 'citation') {
+                  const newSources = event.sources
+                    .filter((s) => {
+                      if (seenCitationUrls.has(s.url)) return false
+                      seenCitationUrls.add(s.url)
+                      return true
+                    })
+                    .slice(0, 3)
+                  if (newSources.length > 0) {
+                    sendEvent('citation', { sources: newSources })
+                  }
+                }
+              }, session.id)
+            }
+          } else if (!isDocResearchTurn && !operateSiteIntent) {
+            // Standard: application-layer pre-flight.
+            //
+            // Skipped for a doc research turn: the preflight can return
+            // `researched` (sets `preflightContext`), which strips RESEARCH_TOOLS
+            // (webSearch/urlReader) from the loop on the "context already
+            // gathered, synthesize don't re-search" rule. But a doc research
+            // turn's soul (RESEARCH_MODE_BLOCK) tells the model to search the web
+            // and author findings itself — so it must keep those tools. Letting
+            // it run its own search→author loop is the whole point of the mode.
+            //
+            // Also skipped for an operate-site turn (see operateSiteIntent
+            // above): pre-searching a site the model is about to open directly
+            // wastes worker calls and biases the turn toward synthesis-from-
+            // snippets instead of the browse the user asked for.
+            try {
+              const preflightTools = ownedTurn.prepareTools(allTools)
+              const preflight = await runPreflight({
+                provider: backgroundProvider,
+                model: backgroundModel,
+                message,
+                // The turn route already made the split call; preflight takes it
+                // after a fresh split-lane proof and never classifies again.
+                classify: async () => ({ tasks: await routing.consumeSplit(), usage: null, model: null }),
+                tools: preflightTools,
+                context: {
+                  ...executionToolContext(executionContext, { appId: 'Use Brian' }),
+                  scopeAccumulator,
+                  abortSignal: abortController.signal,
+                  requestTools: preflightTools,
+                },
+                // A local preflight worker is real COGS, separate from splitter
+                // overhead and the main-loop owner's cumulative response charge.
+                onUsage: options.usageStore ? async u => {
+                  const providerKeySource=u.providerKeySource??backgroundUsageAttribution.providerKeySource
+                  await options.usageStore!.recordUsage({
+                    ...turnUsageIdentity(turnBilling),assistantId:assistant.id,sessionId:session.id,
+                    model:u.model,modelTier:u.modelTier??backgroundUsageAttribution.modelTier,
+                    inputTokens:u.usage.inputTokens,outputTokens:u.usage.outputTokens,
+                    cacheReadTokens:u.usage.cacheReadTokens,cacheWriteTokens:u.usage.cacheWriteTokens,
+                    actualCostUsd:providerKeySource==='user'?0:calculateCost(u.model,u.usage),
+                    source:'included',triggerKey:'worker_run',providerKeySource,
+                  }).catch(error=>console.error('[chat] preflight worker usage tracking failed:',error))
+                } : undefined,
+                onStatus: (msg) => sendActivityEvent('status', { message: msg }),
+                onEvent: (() => {
+                  const seenWorkers = new Set<string>()
+                  const seenCitationUrls = new Set<string>()
+                  return (event: import('@use-brian/agent-runtime/engine/query-loop.js').QueryEvent, workerId: string, description?: string) => {
+                    if (!seenWorkers.has(workerId)) {
+                      seenWorkers.add(workerId)
+                      sendActivityEvent('worker_start', { workerId, description })
+                    }
+                    if (event.type === 'tool_start') {
+                      sendActivityEvent('tool_start', { id: event.id, name: event.name, workerId })
+                    }
+                    if (event.type === 'tool_input') {
+                      sendActivityEvent('tool_input', { id: event.id, name: event.name, input: event.input, workerId })
+                    }
+                    if (event.type === 'tool_result') {
+                      for (const block of event.results) {
+                        if (block.type === 'tool_result') {
+                          const resultEvent = {
+                            id: block.toolUseId,
+                            name: block.name,
+                            isError: block.isError ?? false,
+                            workerId,
+                            errorMessage: block.isError ? toolErrorExcerpt(block.content) : undefined,
+                            output: block.isError ? undefined : toolOutputExcerpt(block.content),
+                          }
+                          sendActivityEvent('tool_result', resultEvent, {
+                            id: resultEvent.id,
+                            name: resultEvent.name,
+                            isError: resultEvent.isError,
+                            workerId,
+                          })
+                          notifyBrainWriteIfMatch(assistant.workspaceId, block.name, block.isError ?? false)
+                          const toolMeta = event.metaByToolUseId?.[block.toolUseId]
+                          const extraMeta: Record<string, string | number | boolean> = { in_worker: true }
+                          if (toolMeta) {
+                            for (const [k, v] of Object.entries(toolMeta)) {
+                              extraMeta[k] = typeof v === 'string' ? sanitize(v) : v
+                            }
+                          }
+                          options.analytics?.logEvent({
+                            userId: user.id, assistantId: assistant.id, sessionId: session.id,
+                            eventName: 'tool_executed', channelType: 'web',
+                            metadata: { tool_name: sanitize(block.name), success: !(block.isError ?? false), ...(block.isError ? { error_message: sanitize(toolErrorExcerpt(block.content)) } : {}), ...extraMeta },
+                          })
+                          void recordExternalCostFromMeta({
+                            toolMeta,
+                            usageStore: options.usageStore,
+                            userId: user.id,
+                            assistantId: assistant.id,
+                            sessionId: session.id,
+                            userMessageId: storedUserMsg.id,
+                            userPlan,
+                            analytics: options.analytics,
+                          })
+                        }
+                      }
+                    }
+                    if (event.type === 'citation') {
+                      const newSources = event.sources
+                        .filter((s) => {
+                          if (seenCitationUrls.has(s.url)) return false
+                          seenCitationUrls.add(s.url)
+                          return true
+                        })
+                        .slice(0, 3)
+                      if (newSources.length > 0) {
+                        sendEvent('citation', { sources: newSources })
+                      }
+                    }
+                  }
+                })(),
+              })
+              if (preflight.type === 'researched') {
+                preflightContext = preflight.context
+              }
+              // The routed split call was charged once by the turn route.
+            } catch (err) {
+              if (isAuthorityChangedError(err) || abortController.signal.aborted) throw err
+              console.error('[chat] pre-flight failed, continuing without:', err)
+            }
+          }
+        }
+
+        // Build the tools map for the query loop.
+        // In coordinator mode: strip research tools so the model MUST delegate.
+        // When preflight has already researched: also strip research tools —
+        // the context is injected, main agent should synthesize not re-research.
+        // If it genuinely needs more info, it can still use spawnWorker.
+        // The coordinator keeps delegation + memory and a narrow native document workflow.
+        // No research tools (structurally forces delegation), no task/notes
+        // (coordinator shouldn't do bookkeeping — workers are the tasks).
+        //
+        // Research-mode coordinator gets the base tools + brain-ingestion
+        // primitives (updateSelfProfile / saveContact / saveCompany / saveDeal
+        // / createEntity) so it can persist findings to typed entities in
+        // Phase 4 — the brain-first architectural edge.
+        //
+        // askQuestion is kept in the set BUT is structurally terminal — the
+        // queryLoop exits when it's called (see query-loop.ts). Combined with
+        // the Phase 0 "clarify upfront" rule in the addendum, the model can
+        // ask ONE clarifying question before research starts, the user
+        // answers, and the next turn proceeds to Phase 1. Calling askQuestion
+        // mid-research is forbidden by the addendum but if the model does it
+        // anyway, the turn ends cleanly (user can answer) rather than
+        // continuing without their input — that's the production failure
+        // mode 5/26 22:24 fixed: 3× askQuestion mid-flow with the user
+        // unable to interject.
+        // `createEdge` stays available — it's the only path for the
+        // "link existing entities" case (the model can't call `links`
+        // on save tools after the rows already exist without an
+        // update-call-per-entity loop). The prior hallucinated-id
+        // failure mode is now mitigated upstream:
+        //   - saveContact/saveCompany/saveDeal return the underlying
+        //     `entityId` in tool output, so the model has real ids
+        //     to chain through createEdge.
+        //   - createEntity's Zod schema rejects CRM kinds, so the
+        //     model can't end up with a fictional entity id from a
+        //     rejected createEntity call.
+        //   - Tool descriptions explicitly require listing/getting
+        //     before calling createEdge with stale or unknown ids.
+        // Transient Brain surfaces carry exact effect policies. Inspection is
+        // mechanically read-only. Editing keeps reads plus one confirmed,
+        // row-bound write. This filter runs after every ambient injector,
+        // including Doc, so no later merge can reintroduce a mutation tool.
+        const brainSurfaceTools = filterBrainSurfaceTools(allTools, {
+          inspection: isInspectionSession,
+          editSession: isBrainEditSession,
+          scopedOpenEntry: scopedBrainEntryActive,
+          allowBrainUpdate: scopedBrainUpdateAllowed,
+        })
+        const loopTools = filterCoordinatorTools(brainSurfaceTools, {
+          coordinatorMode, researchMode, hasPreflightContext: Boolean(preflightContext),
+        })
+
+        if (programmatic) {
+          const maximum = new Set(programmatic.consent.operationNames)
+          for (const name of allTools.keys()) if (!maximum.has(name)) allTools.delete(name)
+          for (const name of loopTools.keys()) if (!maximum.has(name)) loopTools.delete(name)
+        }
+
+        // Coordinator-mode addendum. The base wording covers "spawn 2-3 workers,
+        // synthesize, done" — adequate for the splitter-triggered parallel-research
+        // path. Research mode runs a structurally distinct 4-phase protocol
+        // (Know → Delegate → Reflect → Ingest+Respond) because production traces
+        // showed the previous prompt collapsing into "one wave then guess", with
+        // workers returning snippet-only summaries and the coordinator concluding
+        // "no info found" before workers had real urlReader content.
+        const coordinatorBaseAddendum = COORDINATOR_BASE_ADDENDUM
+        const coordinatorResearchAddendum = `${COORDINATOR_RESEARCH_ADDENDUM}\n\n${researchEffortInstruction(assessedResearchEffort)}`
+        // Coordinator addenda are mode-stable and stay on the system prompt.
+        // Preflight findings are hidden runtime metadata, so they also stay in
+        // the trusted channel inside the private-runtime suffix.
+        let runtimeSystemContext = coordinatorMode
+          ? `${systemAddenda}\n\n${researchMode ? coordinatorResearchAddendum : coordinatorBaseAddendum}\n\n${COORDINATOR_DOCUMENT_WORKFLOW_ADDENDUM}`
+          : systemAddenda
+        if (!coordinatorMode && preflightContext) {
+          privateRuntimeContextParts.push(
+            buildPreflightPrompt('', preflightContext).replace(/^\n+/, ''),
+          )
+        }
+
+        // ── Runtime-context provenance ────────────────────────────
+        // Hidden application metadata is a trusted system suffix. This is a
+        // correctness boundary, not merely a wrapper convention: private
+        // runtime text must never become a user-role candidate referent.
+        const privateRuntimeContext = privateRuntimeContextParts
+          .filter((s) => s.trim().length > 0)
+          .join('\n\n')
+        const privateRuntimeBlock = formatPrivateRuntimeContext(privateRuntimeContext)
+        if (privateRuntimeBlock) {
+          runtimeSystemContext = `${runtimeSystemContext}\n\n${privateRuntimeBlock}`
+        }
+
+        // Only content represented on a visible client surface may prefix the
+        // newest user turn. The persisted DB row remains untouched. The original
+        // turn owner's `prepareRun` places it exactly once, including the tagged
+        // system-channel fallback for rare resume shapes.
+        const userVisibleContext = userVisibleContextParts
+          .filter((s) => s.trim().length > 0)
+          .join('\n\n')
         const boundRoutineCalendarTools=new Map<string,Tool>()
         // Typed vocabulary from the same admitted history; never parse untrusted replay prose.
         const successfulHistoricalCalls=new Set(dbMessages.flatMap(row=>Array.isArray(row.content)?row.content.flatMap(block=>
@@ -7313,35 +7260,19 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             return tool.execute(input, context)
           } })
         }
-        const scopedTools = turnOwner.prepareTools(loopTools)
+        const scopedTools = ownedTurn.prepareTools(loopTools)
         for (const [name, tool] of preparedConnectors.routineCalendarTools ?? []) {
           if (loopTools.get(name) === tool && scopedTools.has(name)) {
             boundRoutineCalendarTools.set(name, inheritRoutineCalendarRead(tool, scopedTools.get(name)!))
           }
         }
-        const preparedRun = await ownedTurn.prepareRun({
-          systemPrompt: splitPrompt.stablePrompt,
-          messages,
-          candidateTools: scopedTools,
-          trustedContributions: [{ name: 'runtime', content: runtimeSystemContext },
-            ...(fileIntentContext ? [{ name: 'attachment_intent', content: fileIntentContext }] : []), ...(pageDiscussion ? [{
-            name: 'page_discussion', content: `This turn starts with the current Page and newest comment. Earlier discussion remains available through getCommentThread({threadId: ${JSON.stringify(pageDiscussion.id)}}). If the request refers to earlier comments, choices or decisions, read that discussion before answering or editing. Do not ask the person to repeat it.`,
-          }] : [])],
-          userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
-        })
-        const systemPromptWithPreflight = renderSystemContext({
-          systemPrompt: splitPrompt.stablePrompt, runtimeSystemContext: preparedRun.grounding.runtimeContext,
-        })
-        replyEvidence.note(systemPromptWithPreflight)
-        replyEvidence.note(preparedRun.grounding.userVisibleContext)
-        if (typeof message === 'string') replyEvidence.note(message)
         const routineDeclineReason = routineCalendarReadDeclineReason({
           // Preserve the selector's supported profile independently of admission ownership.
           nativeOutput: routineNativeOutput,
           nativeTranscript: Boolean(nativeTranscriptAuthority),
           decisionRuntime: Boolean(options.decisionRuntime), research: researchMode, coordinator: coordinatorMode,
           site: Boolean(operateSiteIntent), document: Boolean(docCtx), modelRoute: customLlmRuntime,
-          calendarTools: boundRoutineCalendarTools, adoptsTool: preparedRun.adoptsTool,
+          calendarTools: boundRoutineCalendarTools, adoptsTool: (name, candidate) => scopedTools.get(name) === candidate,
         })
         console.info('[chat] routine eligibility', {
           reason: routineDeclineReason ?? 'eligible',
@@ -7352,6 +7283,91 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         // memory or other ambient context. Validate precisely that source.
         const selectionScope = new ContextScopeAccumulator(executionContext.security.provenance)
         if (storedUserSource) selectionScope.noteSource(storedUserSource)
+        const run = {
+          systemPrompt: splitPrompt.stablePrompt,
+          messages,
+          candidateTools: scopedTools,
+          trustedContributions: [{ name: 'runtime', content: runtimeSystemContext },
+            ...(retryHint ? [{ name: 'retry', content: retryHint.trim() }] : []),
+            ...(fileIntentContext ? [{ name: 'attachment_intent', content: fileIntentContext }] : []), ...(pageDiscussion ? [{
+            name: 'page_discussion', content: `This turn starts with the current Page and newest comment. Earlier discussion remains available through getCommentThread({threadId: ${JSON.stringify(pageDiscussion.id)}}). If the request refers to earlier comments, choices or decisions, read that discussion before answering or editing. Do not ask the person to repeat it.`,
+          }] : [])],
+          userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
+          context: { preferredChannel, workflowProposalReceipt, requestTools: allTools, researchMode },
+          suppressIntermediateText: coordinatorMode,
+          planNudgeCap: planNudgeCap({ model, researchMode }),
+          groundingGate: !coordinatorMode && !researchMode && typeof message === 'string' && message.trim()
+            ? { userMessage: message, draftDelivered: true } : undefined,
+          workerDrainPrompt: researchMode
+            ? createResearchWorkerDrainPrompt(RESEARCH_EFFORT_BUDGETS[assessedResearchEffort].maxWaves) : undefined,
+          ...(route.research.entry === 'adaptive' && researchMode ? {
+            mainModel: { kind: 'web' as const, requestedModel, plan: userPlan, budgetStatus, researchMode, metered: null, hasImage: turnHasInlineImage(userContentBlocks) },
+            maxTurns: RESEARCH_EFFORT_BUDGETS[assessedResearchEffort].maxTurns,
+            maxToolCalls: RESEARCH_EFFORT_BUDGETS[assessedResearchEffort].maxToolCalls,
+          } : {}),
+          routineCalendarRead: routineDeclineReason === null && options.decisionRuntime ? {
+              runtime:options.decisionRuntime, llm:{provider:preparedModel.provider,modelId:preparedModel.model},
+              workspaceId:assistant.workspaceId??undefined, calendarTools:boundRoutineCalendarTools,historyCalls:routineHistoryCalls,
+              onResult:async result=>{
+                turnTiming.add('routine_planning',result.durationMs)
+                await recordOverheadUsage({usageStore:options.usageStore,userId:user.id,assistantId:assistant.id,sessionId:session.id,
+                  userMessageId:storedUserMsg.id,model:result.model,usage:result.usage,source:'overhead:classifier',triggerKey:'chat_tool_selection',
+                  ...(result.usedRequestedLlm?{modelTier:customLlmRuntime?.modelTier??logicalTier,
+                    providerKeySource:customLlmRuntime?.providerKeySource??(usedLegacyByoKey?'user' as const:'platform' as const)}:{})})
+                console.info('[chat] routine planning',{path:result.path,selected:result.plan!==null,durationMs:result.durationMs,...(result.scopeCounts?{scopeCounts:result.scopeCounts}:{}),...(result.inputCounts?{inputCounts:result.inputCounts}:{})})
+              },
+            } : undefined,
+          toolSelection: options.decisionRuntime && storedUserSource && rawMessage?.trim() ? {
+            runtime: options.decisionRuntime, workspaceId: assistant.workspaceId ?? undefined,
+            preselected: route.research.toolNames,
+            input: {
+              messages: [bindScopeSources<Message>({ role: 'user', content: rawMessage }, [storedUserSource])],
+              assertInputAuthority: () => admitModelInput({
+                ...executionToolContext(executionContext, { appId: 'native-tool-selection' }), scopeAccumulator: selectionScope,
+              }),
+            },
+            llm: { provider: backgroundProvider, modelId: backgroundModel },
+            onResult: async selection => {
+              if (selection.path === 'preparation') return
+              turnTiming.add('tool_selection', selection.durationMs)
+              await recordOverheadUsage({ usageStore: options.usageStore, userId: user.id, assistantId: assistant.id,
+                sessionId: session.id, userMessageId: storedUserMsg.id, model: selection.model, usage: selection.usage,
+                source: 'overhead:classifier', triggerKey: 'chat_tool_selection', ...backgroundUsageAttribution })
+              console.info('[chat] tool selection', { path: selection.path, count: selection.names.length, durationMs: selection.durationMs, failureKind: selection.failureKind })
+            },
+          } : undefined,
+        } satisfies DiscoveredTurnFrame
+        replyEvidence.note(renderSystemContext({systemPrompt: run.systemPrompt, runtimeSystemContext}))
+        replyEvidence.note(userVisibleContext)
+        return { run, messages, allTools, enrichConfirmation, decisionPlaybookContext,
+          docSkillBlockStr, docLiveOutlineStr, docOutlineBlockCount, memoryContext, docPageBlockCount, docPageVersion }
+      }
+      let discovered: Awaited<ReturnType<typeof discoverWebContext>> | undefined
+      try {
+        const presentedDocumentInputs = new Map<string, PresentedDocumentInput>()
+        const charter = resolveCharter(assistant)
+        const initialPrompt = [baseAssistantPrompt(null), charter && renderCharterBlock(charter)].filter(Boolean).join('\n\n')
+        const hasExplicitTarget = replyTo?.id || requestedDocViewId || requestedKbSourceId
+          || requestedViewingBrainEntry || requestedViewingSkillRowId || requestedResearchActivityId || discoverFeedTurn || officeLane || pageBoundTurn
+        const initialContributions = [
+          ...(retryHint ? [{ name: 'retry', content: retryHint.trim() }] : []),
+          ...(reuseGroupInput ? [{ name: 'group_reply', content: 'Another assistant has already responded to this message. Request conversation context to read the earlier response before adding yours.' }] : []),
+          ...(fileIntentContext ? [{name: 'attachment_intent', content: fileIntentContext}] : []),
+          ...(hasExplicitTarget ? [{ name: 'selected_target', content: 'The user selected a conversation or application item. Request its authorized context before responding about it.' }] : []),
+          ...(researchMode ? [{name: 'research_mode', content: 'The user selected Research mode. Request conversation context to begin the research turn.'}] : []),
+        ]
+        const preparedRun = await ownedTurn.prepareRun({
+          systemPrompt: initialPrompt,
+          messages: [initialMessage],
+          candidateTools: new Map(),
+          trustedContributions: initialContributions,
+          contextDiscovery: async signal => {
+            discovered = await discoverWebContext(signal)
+            return discovered.run
+          },
+        })
+        replyEvidence.note(initialPrompt)
+        if (typeof message === 'string') replyEvidence.note(message)
         turnTiming.mark('prompt')
         turnTiming.observe('loop_started')
         markProviderStreamPhase('loop')
@@ -7407,37 +7423,6 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           // Presentation-only opt-in: capable drivers use the registration plan;
           // legacy/custom and eager fallback drivers retain the complete tools list.
           deferToolSchemas: true,
-          routineCalendarRead: routineDeclineReason === null && options.decisionRuntime ? {
-              runtime:options.decisionRuntime, llm:{provider:preparedModel.provider,modelId:preparedModel.model},
-              workspaceId:assistant.workspaceId??undefined, calendarTools:boundRoutineCalendarTools,historyCalls:routineHistoryCalls,
-              onResult:async result=>{
-                turnTiming.add('routine_planning',result.durationMs)
-                await recordOverheadUsage({usageStore:options.usageStore,userId:user.id,assistantId:assistant.id,sessionId:session.id,
-                  userMessageId:storedUserMsg.id,model:result.model,usage:result.usage,source:'overhead:classifier',triggerKey:'chat_tool_selection',
-                  ...(result.usedRequestedLlm?{modelTier:customLlmRuntime?.modelTier??logicalTier,
-                    providerKeySource:customLlmRuntime?.providerKeySource??(usedLegacyByoKey?'user' as const:'platform' as const)}:{})})
-                console.info('[chat] routine planning',{path:result.path,selected:result.plan!==null,durationMs:result.durationMs,...(result.scopeCounts?{scopeCounts:result.scopeCounts}:{}),...(result.inputCounts?{inputCounts:result.inputCounts}:{})})
-              },
-            } : undefined,
-          toolSelection: options.decisionRuntime && storedUserSource && rawMessage?.trim() ? {
-            runtime: options.decisionRuntime, workspaceId: assistant.workspaceId ?? undefined,
-            preselected: route.research.toolNames,
-            input: {
-              messages: [bindScopeSources<Message>({ role: 'user', content: rawMessage }, [storedUserSource])],
-              assertInputAuthority: () => admitModelInput({
-                ...executionToolContext(executionContext, { appId: 'native-tool-selection' }), scopeAccumulator: selectionScope,
-              }),
-            },
-            llm: { provider: backgroundProvider, modelId: backgroundModel },
-            onResult: async selection => {
-              if (selection.path === 'preparation') return
-              turnTiming.add('tool_selection', selection.durationMs)
-              await recordOverheadUsage({ usageStore: options.usageStore, userId: user.id, assistantId: assistant.id,
-                sessionId: session.id, userMessageId: storedUserMsg.id, model: selection.model, usage: selection.usage,
-                source: 'overhead:classifier', triggerKey: 'chat_tool_selection', ...backgroundUsageAttribution })
-              console.info('[chat] tool selection', { path: selection.path, count: selection.names.length, durationMs: selection.durationMs, failureKind: selection.failureKind })
-            },
-          } : undefined,
           context: {
             ...(classifySession(session).anchor.kind === 'doc_thread'
               ? { admitModelInput: assertLegacyDeliveryAudience } : {}),
@@ -7452,9 +7437,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
                   maxTokens: customLlmRuntime.maxTokens,
                 }
               : undefined,
-            preferredChannel,
             userTimezone: user.timezone ?? undefined,
-            workflowProposalReceipt,
             docViewId:
               typeof requestedDocViewId === 'string' && requestedDocViewId
                 ? requestedDocViewId
@@ -7467,7 +7450,6 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             currentTurnAttachmentIds,
             cacheStore: options.cacheStore,
             sessionStateStore: options.sessionStateStore,
-            requestTools: allTools,
             workerManager: options.workerManager,
             activeCapabilities,
             // WU-4.3 — Q8 lock + read-side clearance (incident 2026-06-01).
@@ -7522,8 +7504,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
                         displayLines,
                         allowPersistentApproval,
                         ...(ownedTurn.token ? { turnLeaseToken: ownedTurn.token } : {}),
-                        ...(decisionPlaybookContext.decisionApplicationId
-                          ? { decisionApplicationId: decisionPlaybookContext.decisionApplicationId }
+                        ...(discovered?.decisionPlaybookContext.decisionApplicationId
+                          ? { decisionApplicationId: discovered?.decisionPlaybookContext.decisionApplicationId }
                           : {}),
                       },
                       deliveryChannelType: 'web',
@@ -7619,7 +7601,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           // thinking-style preambles emitted BEFORE the first spawnWorker
           // chunk don't leak — the reactive flip in queryLoop happens after
           // the text part has already streamed.
-          suppressIntermediateText: coordinatorMode,
+          suppressIntermediateText: researchMode && !appAssistantForbidsCoordinator(assistant.kind) && !onDocSurface,
           // Per-turn ceilings scale with intelligence tier — paid tiers
           // earn headroom for multi-step reasoning; research mode lifts
           // them further so the coordinator + workers have room for
@@ -7678,7 +7660,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           // evidence. `draftDelivered: true` — the web SSE already streamed
           // the draft, so the nudge copy tells the model to correct it
           // explicitly. See docs/architecture/engine/grounding-gate.md.
-          ...(!coordinatorMode && !researchMode && typeof message === 'string' && message.trim()
+          ...(!researchMode && typeof message === 'string' && message.trim()
             ? { groundingGate: { userMessage: message, draftDelivered: true } }
             : {}),
           ...(researchMode ? {
@@ -7706,6 +7688,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             sendActivityEvent('reply_text_complete', {})
             turnStream.setReplyPhase('saving')
           }), afterLoop: async (result) => {
+            const { backgroundProvider, backgroundModel, backgroundUsageAttribution } = await getBackground()
             finalizedOutput = !queryLoopError ? finalizedTurnOutput(result) : null
             if (ownedTurn.beginFinalization(result, !!queryLoopError)) {
               ownedTurn.announceTextCompletion(() => {
@@ -8178,7 +8161,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             // The private output observer already inserted/revised the exact origin.
           }
           if (event.type === 'tool_confirmation_required') {
-            const enrichedInput = await enrichConfirmation(event.request.toolName, event.request.input)
+            const enrichedInput = discovered ? await discovered.enrichConfirmation(event.request.toolName, event.request.input) : event.request.input
             const displayName = getToolDisplayName(event.request.toolName)
 
             const directConfirmation = {
@@ -8331,16 +8314,16 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
               // retrieval) is measured, not guessed. Metadata is token counts
               // only (no content) — analytics-events 'metadata-only' contract.
               // See docs/plans/doc-turn-context-optimization.md → Phase 0.
-              if (onDocSurface) try {
+              if (onDocSurface && discovered) try {
                 const composition = measureDocContext({
-                  systemPrompt: systemPromptWithPreflight,
-                  skillBlock: docSkillBlockStr,
-                  liveOutline: docLiveOutlineStr,
-                  outlineBlockCount: docOutlineBlockCount,
-                  memoryContext,
+                  systemPrompt: renderSystemContext({systemPrompt: discovered.run.systemPrompt, runtimeSystemContext: preparedRun.grounding.runtimeContext}),
+                  skillBlock: discovered.docSkillBlockStr,
+                  liveOutline: discovered.docLiveOutlineStr,
+                  outlineBlockCount: discovered.docOutlineBlockCount,
+                  memoryContext: discovered.memoryContext,
                   messages: preparedRun.messageSnapshot(),
-                  pageBlockCount: docPageBlockCount,
-                  pageVersion: docPageVersion,
+                  pageBlockCount: discovered.docPageBlockCount,
+                  pageVersion: discovered.docPageVersion,
                   usage,
                 })
                 options.analytics?.logEvent({
@@ -8407,6 +8390,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           }
           } },
         })
+        const { backgroundProvider, backgroundUsageAttribution } = await getBackground()
         turnTiming.observe('loop_returned')
         turnTiming.mark('loop')
         markProviderStreamPhase('post_loop')
@@ -8574,7 +8558,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
                 provider: backgroundProvider,
                 pendingAssistantTurns,
                 userText: userMessageText,
-                conversationHistory: messages.slice(0, -1),
+                conversationHistory: discovered?.messages.slice(0, -1) ?? [],
                 channelType: 'web',
               }))
               if (result) {
@@ -8627,7 +8611,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         // Live authority and recipient refusals are structural. Persisting a
         // partial buffer or synthesizing recovery text would cross the very
         // boundary that refused this turn.
-        if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) throw err
+        if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err) || isContextVerificationReadFailure(err)) throw err
         // Any throw from the loop — flush whatever we have so the DB
         // stays well-paired, then rethrow to the outer handler.
         await flushBufferedTurns(
@@ -8656,6 +8640,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         // mode after tool calls). Best-effort; if Flash hiccups we
         // fall through to the outer catch's generic `error` event.
         try {
+          const { backgroundUsageAttribution } = await getBackground()
           const recovered = !queryLoopError && !recoveryDelivered
             ? await ownedTurn.recoverInteractiveReply({
                 reason: 'failed', pendingAssistantTurns, userText: userMessageText, channelType: 'web',
@@ -8696,6 +8681,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // SSE event is emitted inside the flush.
       void lastAssistantMessageId
 
+      const { backgroundProvider, backgroundModel, backgroundUsageAttribution } = await getBackground()
       await ownedTurn.finish()
       activeResolvers.delete(session.id)
       roomTurnAddressers.delete(session.id)
@@ -8802,7 +8788,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // title as an auto-generated placeholder to replace (isPlaceholderTitle —
       // open default false), or every ~10 human turns. The NULL check is robust
       // against tool-use inflating the message count.
-      const recordTitle = !pageBoundTurn && !titleQueued && nativeTranscriptAuthority && preparedHistory?.source === 'record'
+      const recordTitle = !pageBoundTurn && !titleQueued && nativeTranscriptAuthority && storedUserSource?.resourceKind === 'conversation_record'
         ? await prepareAttendedRecordTitle(nativeTranscriptAuthority, pinSessionTitleClaims(req)) : null
       const currentTitle = recordTitle ? recordTitle.previous : !pageBoundTurn && !titleQueued && nativeTranscriptAuthority
         ? await readSessionTitle(session.id,nativeTranscriptAuthority) : null
@@ -8811,7 +8797,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       let shouldTitle = !pageBoundTurn && !titleQueued && needsFirstTitle && !isNotification && !currentTitle?.manual
       if (!pageBoundTurn && !titleQueued && !shouldTitle && !isNotification && !currentTitle?.manual) {
         const turnCount = recordTitle ? recordTitle.turnCount : nativeTranscriptAuthority
-          ? await preparedHistory!.readTurnCount!(nativeTranscriptAuthority)
+          ? await (preparedHistory ?? await readAttendedSessionHistory(nativeTranscriptAuthority, session.id)).readTurnCount!(nativeTranscriptAuthority)
           : Math.floor(await authority.execute(() => countSessionTurns(session.id)) / 2)
         shouldTitle = turnCount > 1 && turnCount % 10 === 0
       }
@@ -8910,7 +8896,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
             .map((b) => b.text)
             .join('\n\n')
-          const delegateDocEdit = allTools.get('delegateDocEdit')
+          const delegateDocEdit = discovered?.allTools.get('delegateDocEdit')
           if (replyText.trim() && delegateDocEdit) {
             const { createDbDocPageStore } = await import('../db/doc-page-store.js')
             const current = await authority.execute(() => createDbDocPageStore().getVersionedPage(

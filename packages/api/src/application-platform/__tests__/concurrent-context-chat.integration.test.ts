@@ -33,6 +33,7 @@ vi.mock('../../boot/providers.register.js', async importOriginal => {
 const secret = 'fictional-context-load-secret'
 const reference = 'fictional-working-release-checklist.txt'
 const fileCount = 24
+const sharedSkill = 'fixture-shared-inventory'
 const lockIntervalMs = 50
 const fixtureSlotHeader = 'x-brian-fixture-slot'
 type Fixture = Awaited<ReturnType<typeof persistentContextFixture>>
@@ -70,10 +71,11 @@ const provider: LLMProvider = {
       yield { type: 'message_start', model: 'fixture' }
       if (turn?.active && (turn.inputs.length > 0 || input.includes(turn.question))) {
         turn.inputs.push(input)
-        if (turn.inputs.length === 1) {
-          const id = 'fixture_attachment_lookup_' + turn.slot
-          yield { type: 'tool_use_start', id, name: 'readFileContent' }
-          yield { type: 'tool_use_delta', id, input: JSON.stringify({ fileId: turn.attachmentId }) }
+        const discover = options.tools?.some(tool => tool.name === 'requestConversationContext')
+        if (discover || turn.inputs.length === 2) {
+          const id = (discover ? 'fixture_context_lookup_' : 'fixture_attachment_lookup_') + turn.slot
+          yield { type: 'tool_use_start', id, name: discover ? 'requestConversationContext' : 'readFileContent' }
+          yield { type: 'tool_use_delta', id, input: JSON.stringify(discover ? {} : { fileId: turn.attachmentId }) }
           yield { type: 'tool_use_end', id }
           yield { type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 1, outputTokens: 1 } }
           return
@@ -352,6 +354,12 @@ it.skipIf(process.env.BRIAN_CONTEXT_CHAT_LOAD !== '1')('reopens concurrent worke
     await f.pool.query("UPDATE workspaces SET plan='pro', department_read_v2=true WHERE id=$1", [f.workspaceId])
     const actors = await seedUsers(f, Math.max(...widths), addedUsers)
     await seedFiles(f)
+    await f.pool.query(`WITH skill AS (
+      INSERT INTO workspace_skills(workspace_id,author_id,slug,name,description,content,sensitivity,state,activated_at)
+      VALUES($1,$2,$3,'Fixture inventory','Count fixture items','Count the fixture items.','internal','active',now())
+      RETURNING id
+    ) INSERT INTO workspace_skill_enablement(workspace_skill_id,assistant_id,enabled_by_user_id)
+      SELECT id,$4,$2 FROM skill`, [f.workspaceId, f.ownerId, sharedSkill, f.assistantId])
     workload = (await f.pool.query<{ memoryRows: number; liveMemoryRows: number; derivationEdges: number; files: number }>(`SELECT
       (SELECT count(*)::int FROM memories WHERE workspace_id=$1) AS "memoryRows",
       (SELECT count(*)::int FROM memories WHERE workspace_id=$1 AND valid_to IS NULL) AS "liveMemoryRows",
@@ -410,11 +418,12 @@ it.skipIf(process.env.BRIAN_CONTEXT_CHAT_LOAD !== '1')('reopens concurrent worke
             const result = results[index]
             const actual = result.status === 'fulfilled' ? result.value : undefined
             const inputChecks = {
-              tookToolRound: turn.inputs.length === 2,
-              memory: turn.inputs[0]?.includes(participants[index].fact) ?? false,
-              files: turn.inputs[0]?.includes(reference) ?? false,
-              attachment: turn.inputs[0]?.includes(turn.attachmentId) && turn.inputs[1]?.includes(attachments[index].content) || false,
-              retainedHistory: phase === 'first' || (turn.inputs[0]?.includes(prior.get(turn.slot)!) ?? false),
+              tookToolRound: turn.inputs.length === 3,
+              memory: !turn.inputs[0]?.includes(participants[index].fact) && Boolean(turn.inputs[1]?.includes(participants[index].fact)),
+              files: !turn.inputs[0]?.includes(reference) && Boolean(turn.inputs[1]?.includes(reference)),
+              skill: !turn.inputs[0]?.includes(sharedSkill) && Boolean(turn.inputs[1]?.includes(sharedSkill)),
+              attachment: turn.inputs[0]?.includes(turn.attachmentId) && turn.inputs[2]?.includes(attachments[index].content) || false,
+              retainedHistory: phase === 'first' || (!turn.inputs[0]?.includes(prior.get(turn.slot)!) && Boolean(turn.inputs[1]?.includes(prior.get(turn.slot)!))),
               isolation: turn.inputs.every(input => actors.every((actor, other) => other === index || !input.includes(actor.fact))
                 && attachments.every((attachment, other) => other === index || !input.includes(attachment.content))),
             }
@@ -444,8 +453,8 @@ it.skipIf(process.env.BRIAN_CONTEXT_CHAT_LOAD !== '1')('reopens concurrent worke
               FROM analytics_events WHERE session_id=$1 AND event_name='turn_timings' ORDER BY created_at DESC LIMIT 1`, [turn.sessionId])
             const ordinals = turn.providerTimings.map(timing => timing.provider_stream_ordinal)
             turnReports[index].providerTraceVerified = /^pt-[0-9a-f-]{36}$/.test(analytics?.trace ?? '')
-              && !seenProviderTraces.has(analytics.trace) && ordinals.length === 2
-              && Number.isInteger(ordinals[0]) && ordinals[0] > 0 && ordinals[1] > ordinals[0]
+              && !seenProviderTraces.has(analytics.trace) && ordinals.length === 3
+              && ordinals.every((value, index) => Number.isInteger(value) && value > (ordinals[index - 1] ?? 0))
               && turn.providerTimings.every(timing => timing.provider_trace_id === analytics.trace && timing.provider_phase === 'loop')
             if (analytics?.trace) seenProviderTraces.add(analytics.trace)
             prior.set(turn.slot, turn.answer)

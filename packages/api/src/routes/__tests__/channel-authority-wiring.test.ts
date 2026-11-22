@@ -46,7 +46,7 @@ describe('[COMP:api/channel-live-authority] exact destination authority wiring',
     expect(source).toContain('persistLongTermContext: !room && !isolatedAudience && roomShape.memoryWrites')
     expect(source).toContain('getClaimsForLatestAssistantMessage(session.id, true)')
     const pendingRecordingBlock = source.match(
-      /Pre-flight-confirm reply correlation[\s\S]*?Pre-generation audience recheck/,
+      /Pre-flight-confirm reply correlation[\s\S]*?listPendingRecordingConfirmationsForSession\(channelSessionKey\)/,
     )?.[0] ?? ''
     expect(pendingRecordingBlock).toContain('if (!isolatedAudience) {')
   })

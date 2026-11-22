@@ -343,6 +343,35 @@ describe('[COMP:providers/codex-app-server] Codex app-server provider bridge', (
     } finally { harness.peer.close() }
   })
 
+  it.each([false, true])('replays a replacement session with a native matched tool result (queued input=%s)', async queued => {
+    const harness = createHarness()
+    try {
+      const provider = createCodexAppServerProvider({ transport: { rpc: harness.peer, cwd: '/tmp/brian-codex-test' }, models: [MODEL] })
+      const input = queued ? 'Also include the date.' : 'Continue with the preceding tool results.'
+      const session = provider.createSession({ model: MODEL, systemPrompt: 'Expanded context' })
+      const chunks = collect(session.send([
+        { role: 'user', content: 'Continue earlier work.' },
+        { role: 'assistant', content: [{ type: 'tool_use', id: 'lookup-1', name: 'requestConversationContext', input: {} }] },
+        { role: 'user', content: [{ type: 'tool_result', toolUseId: 'lookup-1', name: 'requestConversationContext', content: 'Ready' },
+          ...(queued ? [{ type: 'text' as const, text: input }] : [])] },
+      ]))
+      respondToThreadStart(harness, await waitForMethod(harness, 'thread/start'))
+      const injected = await waitForMethod(harness, 'thread/inject_items')
+      expect(injected.params).toMatchObject({ items: [
+        { type: 'message', role: 'user' },
+        { type: 'function_call', call_id: 'lookup-1', name: 'requestConversationContext' },
+        { type: 'function_call_output', call_id: 'lookup-1', output: 'Ready' },
+      ] })
+      respond(harness, injected, {})
+      const start = await waitForMethod(harness, 'turn/start')
+      expect(start.params).toMatchObject({ input: [{ type: 'text', text: input }] })
+      respondToTurnStart(harness, start)
+      await new Promise<void>(resolve => setImmediate(resolve))
+      complete(harness, 'thread-1', 'turn-1')
+      await chunks
+    } finally { harness.peer.close() }
+  })
+
   it.each([false, true])('starts an isolated thread with both system sections (stateless=%s)', async (stateless) => {
     const harness = createHarness()
     const provider = createCodexAppServerProvider({

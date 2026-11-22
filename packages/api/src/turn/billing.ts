@@ -14,6 +14,8 @@
  *
  * [COMP:api/turn-kernel]
  */
+import type { QueryUsageSnapshot } from '@use-brian/agent-runtime/engine/query-loop.js'
+import type { TokenUsage } from '@use-brian/agent-runtime/providers/types.js'
 import { calculateCost } from '@use-brian/agent-runtime/billing/cost-tracker.js'
 import { billingPartyForAssistant, type AssistantBillingIdentity } from '../billing-party.js'
 import type { SessionPolicy } from '../session-kind.js'
@@ -66,30 +68,52 @@ export type TurnUsageSettlement =
   | { status: 'recorded' | 'no_usage' | 'not_configured' }
   | { status: 'failed'; error: unknown }
 
+/** A context request can promote the main model. The previous producer's
+ * cumulative spend and actual key source end at that round boundary. */
+export type PriorTurnSpend = { spend: QueryUsageSnapshot; keySource: 'user' | 'platform'; nextTier: string }
+function followingUsage(total: TokenUsage, prior: TokenUsage): TokenUsage {
+  return {
+    inputTokens: total.inputTokens - prior.inputTokens, outputTokens: total.outputTokens - prior.outputTokens,
+    cacheReadTokens: (total.cacheReadTokens ?? 0) - (prior.cacheReadTokens ?? 0),
+    cacheWriteTokens: (total.cacheWriteTokens ?? 0) - (prior.cacheWriteTokens ?? 0),
+    ...(total.calculatedCostUsd === undefined ? {} : { calculatedCostUsd: total.calculatedCostUsd - (prior.calculatedCostUsd ?? 0) }),
+  }
+}
+
 export function captureTurnUsageBilling(registration: TurnUsageBilling, producerKeySource?: () => 'user' | 'platform' | undefined) {
   const metadata = Object.freeze({ ...registration.metadata })
   const { costPolicy, recordUsage, onError, afterSettlement } = registration
-  return async (spend: import('@use-brian/agent-runtime/engine/query-loop.js').QueryUsageSnapshot | null): Promise<TurnUsageSettlement> => {
+  return async (spend: QueryUsageSnapshot | null, prior?: PriorTurnSpend): Promise<TurnUsageSettlement> => {
     if (!spend) return { status: 'no_usage' }
-    const { model, totalUsage: usage } = spend
-    const actualKeySource = producerKeySource?.() ?? metadata.providerKeySource
-    const row: TurnUsageRow = {
-      ...metadata, model, providerKeySource: actualKeySource,
+    const currentKey = producerKeySource?.() ?? metadata.providerKeySource
+    const rowFor = ({ model, totalUsage: usage }: QueryUsageSnapshot, providerKeySource = currentKey, modelTier = metadata.modelTier): TurnUsageRow => ({
+      ...metadata, model, modelTier, providerKeySource,
       inputTokens: usage.inputTokens, outputTokens: usage.outputTokens,
       cacheReadTokens: usage.cacheReadTokens, cacheWriteTokens: usage.cacheWriteTokens,
-      actualCostUsd: actualKeySource === 'user' ? 0
+      actualCostUsd: providerKeySource === 'user' ? 0
         : costPolicy === 'reported_or_calculated' ? usage.calculatedCostUsd ?? calculateCost(model, usage)
           : calculateCost(model, usage),
+    })
+    const rows = prior ? [rowFor(prior.spend, prior.keySource)] : [rowFor(spend)]
+    if (prior) {
+      const usage = followingUsage(spend.totalUsage, prior.spend.totalUsage)
+      if (usage.inputTokens || usage.outputTokens || usage.cacheReadTokens || usage.cacheWriteTokens) {
+        rows.push(rowFor({ model: spend.model, totalUsage: usage }, currentKey, prior.nextTier))
+      }
     }
     let outcome: TurnUsageSettlement = { status: 'recorded' }
-    try { await recordUsage({ ...row }) }
-    catch (error) {
-      outcome = { status: 'failed', error }
-      try { await onError?.(error) } catch (reportError) { outcome = { status: 'failed', error: reportError } }
+    for (const row of rows) {
+      try { await recordUsage({ ...row }) }
+      catch (error) {
+        outcome = { status: 'failed', error }
+        try { await onError?.(error) } catch (reportError) { outcome = { status: 'failed', error: reportError } }
+      }
     }
-    // Provider completion and bookkeeping persistence are independent. Keep
-    // the original completion-only surcharge even when the COGS write failed.
-    try { await afterSettlement?.(Object.freeze({ ...row })) }
+    // The original completion-only surcharge still observes the complete turn once.
+    const completionRow = { ...rows[rows.length - 1], inputTokens: spend.totalUsage.inputTokens,
+      outputTokens: spend.totalUsage.outputTokens, cacheReadTokens: spend.totalUsage.cacheReadTokens,
+      cacheWriteTokens: spend.totalUsage.cacheWriteTokens, actualCostUsd: rows.reduce((sum, row) => sum + row.actualCostUsd, 0) }
+    try { await afterSettlement?.(Object.freeze(completionRow)) }
     catch (error) { outcome = { status: 'failed', error } }
     return outcome
   }

@@ -186,6 +186,7 @@ function titleScheduling(accepted: boolean, failure?: Error) {
     pinSessionTitleClaims: () => ({ userId: 'actor' }), req: {}, storedUserMsg: { id: 'message' },
     isAuthorityChangedError: (error: unknown) => error instanceof AuthorityChangedError,
     isDeliveryAudienceUnverifiedError: () => false, readSessionTitle: readTitle, isPlaceholderTitle: () => false,
+    storedUserSource: { resourceKind: 'session_message' },
     preparedHistory: { readTurnCount: vi.fn(async () => 1) }, dbMessages: [],
     authority: { execute: (fn: () => unknown) => fn() }, countSessionTurns: vi.fn(async () => 2),
   }

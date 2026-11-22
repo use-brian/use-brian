@@ -289,16 +289,30 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
    }
    if(main){
     mainRequests.push(request);mark(mainRequests.length===1?'first-model-wire':'continuation-model-wire')
-    expect(JSON.stringify(request)).not.toContain('PRIVATE_')
-    expect(JSON.stringify(request)).toContain(`Fictional Calendar retained turn ${historyRows}.`)
-    expect(JSON.stringify(request)).toContain(indexedTranscriptMarker)
-    if(priorTopic)return modelResponse([{text:priorReply}])
+    const wire=JSON.stringify(request)
+    const historyMarker=`Fictional Calendar retained turn ${historyRows}.`
+    expect(wire).not.toContain('PRIVATE_')
     if(mainRequests.length===1){
+     expect(JSON.stringify(request.contents)).toContain(messageText)
+     expect(wire).not.toContain(historyMarker)
+     expect(wire).not.toContain(indexedTranscriptMarker)
+     expect(JSON.stringify(request.tools)).toContain('requestConversationContext')
+     expect(JSON.stringify(request.tools)).not.toContain('mcp_call')
+     if(change==='trivial-topic')return modelResponse([{text:priorReply}])
+     return modelResponse([{functionCall:{id:'calendar-context',name:'requestConversationContext',args:{}},thoughtSignature:'fictional-context-signature'}])
+    }
+    expect(wire).toContain(historyMarker)
+    expect(wire).toContain(indexedTranscriptMarker)
+    const discoveryParts=request.contents?.flatMap(message=>message.parts??[])??[]
+    expect(discoveryParts).toContainEqual(expect.objectContaining({functionCall:expect.objectContaining({name:'requestConversationContext',id:'calendar-context'})}))
+    expect(discoveryParts).toContainEqual(expect.objectContaining({functionResponse:expect.objectContaining({name:'requestConversationContext',id:'calendar-context'})}))
+    if(priorTopic)return modelResponse([{text:priorReply}])
+    if(mainRequests.length===2){
      expect(JSON.stringify(request.tools)).toContain('mcp_call')
      if(change==='disconnect-before-tool')await instances.setConnectedSystem(calendarId,false)
      return modelResponse([{functionCall:{id:'calendar-read',name:'mcp_call',args:{server:'gcal',tool:'googleCalendarListEvents',args:{calendarId:'primary',timeMin,timeMax}}},thoughtSignature:'fictional-calendar-signature'}])
     }
-    expect(mainRequests).toHaveLength(2)
+    expect(mainRequests).toHaveLength(3)
     expect(googleRequests).toHaveLength(1)
     expect(JSON.stringify(request.contents)).toContain(eventLabel)
     expect(JSON.stringify(request.contents)).toContain('functionResponse')
@@ -457,7 +471,7 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
   const id=`prior-topic-${index}`
   const result=await runCalendarTurn(id,index===5?'prior-topic-timeout':'prior-topic')
   expect(result.error).toBeUndefined()
-  expect(result.mainRequests).toHaveLength(1);expect(result.googleRequests).toHaveLength(0)
+  expect(result.mainRequests).toHaveLength(2);expect(result.googleRequests).toHaveLength(0)
   expect(result.sent).toEqual([result.priorReply])
   expect((await query('SELECT count(*)::int count FROM session_message_annotation_heads WHERE session_id=$1',[recovered])).rows[0].count).toBe(index+1)
   expect((await query('SELECT sequence_num FROM session_messages WHERE session_id=$1 AND channel_message_id=$2',[recovered,id])).rows[0].sequence_num).toBe(historyRows+3+index*2)
@@ -473,11 +487,11 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
   }
  },retainedJourneyTestTimeout)
 
- it('executes the connected speaker Calendar read and delivers its actual result after a second model request',async()=>{
+ it('executes the connected speaker Calendar read and delivers its actual result after context discovery and a Calendar call',async()=>{
   expect(await readAnnotationShape()).toEqual({heads:15,frames:14})
   const result=await runCalendarTurn('3101')
   expect(result.error).toBeUndefined()
-  expect(result.mainRequests).toHaveLength(2);expect(result.googleRequests).toHaveLength(1)
+  expect(result.mainRequests).toHaveLength(3);expect(result.googleRequests).toHaveLength(1)
   expect(result.oauthTokens.length).toBeGreaterThan(0)
   expect(result.oauthTokens.every(token=>token==='fictional-speaker-refresh')).toBe(true)
   expect(result.sent).toEqual([finalText])
@@ -530,11 +544,12 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
   const nextEvent='Fictional telescope handover'
   const result=await runCalendarTurn('3101-followup',undefined,nextEvent)
   expect(result.error).toBeUndefined()
-  expect(result.mainRequests).toHaveLength(2);expect(result.googleRequests).toHaveLength(1)
-  // The first request receives the prior published reply, before the second
-  // real tool call returns a different event through the connector transport.
-  expect(JSON.stringify(result.mainRequests[0].contents)).toContain(eventMarker)
-  expect(JSON.stringify(result.mainRequests[1].contents)).toContain(nextEvent)
+  expect(result.mainRequests).toHaveLength(3);expect(result.googleRequests).toHaveLength(1)
+  // Discovery supplies the prior published reply; the next round receives
+  // the new event from the actual Calendar tool.
+  expect(JSON.stringify(result.mainRequests[0].contents)).not.toContain(eventMarker)
+  expect(JSON.stringify(result.mainRequests[1].contents)).toContain(eventMarker)
+  expect(JSON.stringify(result.mainRequests[2].contents)).toContain(nextEvent)
   expect(result.sent).toEqual([result.replyText])
   expect(result.telegramRequests).toEqual([{chat_id:'-1000008246',message_thread_id:26,parse_mode:'HTML',text:result.replyText}])
   const stored=(await query(`SELECT role,content FROM session_messages WHERE session_id=$1 AND channel_message_id=$2`,
@@ -562,14 +577,14 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
    const result=await runCalendarTurn('3102','disconnect-before-tool')
    expect(result.error).toMatchObject({name:'AuthorityChangedError',reason:'authority_changed'})
    expect(deliveryFailureMetadata(result.error).verificationSqlstateClass).not.toBe('57')
-   expect(result.mainRequests).toHaveLength(1);expect(result.googleRequests).toHaveLength(0)
+   expect(result.mainRequests).toHaveLength(2);expect(result.googleRequests).toHaveLength(0)
    expect(JSON.stringify(result.sent)).not.toContain(eventMarker)
   }finally{await instances.setConnectedSystem(calendarId,true)}
  },retainedJourneyTestTimeout)
  it.each([
   {label:'recording media ancestor',id:'3103-file',change:'hold-file-before-continuation'},
   {label:'historical message',id:'3103-history',change:'hold-before-continuation'},
- ] as const)('withholds the second provider request after a $label hold during the actual Calendar response',async({id,change})=>{
+ ] as const)('withholds the post-Calendar provider request after a $label hold during the actual Calendar response',async({id,change})=>{
   try{
    const result=await runCalendarTurn(id,change)
    expect(result.error).toMatchObject({name:'DeliveryAudienceUnverifiedError',reason:'delivery_audience_unverified',
@@ -581,7 +596,7 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
    expect(boundary).toContain(hold)
    expect(boundary.indexOf('calendar-http')).toBeLessThan(boundary.indexOf(hold))
    expect(boundary.indexOf(hold)).toBeLessThan(boundary.indexOf('turn-finished'))
-   expect(result.mainRequests).toHaveLength(1);expect(result.googleRequests).toHaveLength(1)
+   expect(result.mainRequests).toHaveLength(2);expect(result.googleRequests).toHaveLength(1)
    expect(result.sent).toEqual([]);expect(result.telegramRequests).toEqual([])
    expect((await query('SELECT id FROM session_messages WHERE session_id=$1 AND channel_message_id=$2',[recovered,result.providerMessageId])).rows).toEqual([])
   }finally{

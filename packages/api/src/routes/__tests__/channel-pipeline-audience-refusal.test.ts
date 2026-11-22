@@ -16,11 +16,10 @@ import { fileURLToPath } from 'node:url'
 const source = readFileSync(fileURLToPath(new URL('../channel-pipeline.ts', import.meta.url)), 'utf8')
 
 describe('[COMP:api/channel-pipeline-audience-refusal] pre-generation audience refusals always reply', () => {
-  it('gates compaction and processing start through the replying helper', () => {
-    const helperCalls = source.match(/if \(!\(await deliveryAudienceAdmitsTurn\(\)\)\) return/g) ?? []
-    expect(helperCalls.length).toBe(3)
-    const beforeCompaction = source.slice(0, source.indexOf('await runProactiveCompaction('))
-    expect(beforeCompaction).toMatch(/if \(!\(await deliveryAudienceAdmitsTurn\(\)\)\) return\s*\n\s*const compactionResult/)
+  it('checks the audience before discovery reads and before model dispatch', () => {
+    const discovery = source.slice(source.indexOf('const discoverContext ='), source.indexOf('// ── Query loop ──'))
+    expect(discovery).toMatch(/await assertDeliveryAudience\(\)\s+const compactionResult/)
+    expect(source.slice(0, source.indexOf('const discoverContext ='))).toContain('if (!(await deliveryAudienceAdmitsTurn())) return')
   })
 
   it('has no bare audience assertion between the helper and the query-loop try', () => {
@@ -43,7 +42,8 @@ describe('[COMP:api/channel-pipeline-audience-refusal] group provider rows are n
   // 2026-10-13: the inbound row was counted while the identical history rule
   // skipped it, so a room floor above the group's approval refused every turn.
   it('applies the rule to the inbound message and to history alike', () => {
-    expect(source).toMatch(/if \(storedUserSource && countsAsGroupAudienceEvidence\(userMessageRow, isGroupChat\)\)/)
+    expect(source).toContain('const enrollAuthoredSource = countsAsGroupAudienceEvidence(userMessageRow, isGroupChat)')
+    expect(source).toContain('if (storedUserSource && enrollAuthoredSource)')
     expect(source).toMatch(/dbMessages\.filter\(\(message\) => countsAsGroupAudienceEvidence\(message, isGroupChat\)\)/)
     expect(source).not.toMatch(/if \(storedUserSource\) scopeAccumulator\.noteSource/)
   })

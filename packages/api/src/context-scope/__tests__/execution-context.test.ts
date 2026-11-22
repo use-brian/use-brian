@@ -263,7 +263,8 @@ describe('[COMP:api/execution-context] trusted execution resolution', () => {
         'captureTurnModelPreparation(invocation', 'prepareRun(input: TurnRunPreparationInput)',
         'private retainedPreparationAccumulator: ContextScopeAccumulator | undefined',
         'this.retainedPreparationAccumulator = invocation.scopeAccumulator',
-        'this.modelPreparation.captureRun(input, model, this.retainedPreparationAccumulator)',
+        'preparation.captureRun(initial, model, this.retainedPreparationAccumulator, Boolean(discover))',
+        'preparation.captureRun(frame, model, this.retainedPreparationAccumulator)',
         "throw new Error('The original run has not been prepared.')",
         "throw new Error('The original owner supplies the prepared run.')",
         'this.modelPreparation.assertLoopContext(supplied.context)',
@@ -271,7 +272,7 @@ describe('[COMP:api/execution-context] trusted execution resolution', () => {
       'packages/api/src/turn/prepare.ts': [
         "{ kind: 'execution'; toolProfile: 'web' | 'channel' | 'public' | 'callee' | 'resume'; execution: ExecutionContext;",
         'bindToolsToAgentAccess(unbound, projection', 'captureBriefRunPreparation()',
-        'captureRun(input: TurnRunPreparationInput, model: PreparedTurnModel, accumulator?: ContextScopeAccumulator)',
+        'captureRun(input: TurnRunFrame, model: PreparedTurnModel, accumulator?: ContextScopeAccumulator, initialDispatch = false)',
         'retainedRunAccumulator = accumulator',
         'harnessPreparation.apply(execution, brief.tools, accumulator)',
         'candidate.executionContext !== execution || harnessRun && candidate.scopeAccumulator !== retainedRunAccumulator',

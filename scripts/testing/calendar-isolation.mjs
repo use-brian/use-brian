@@ -5,8 +5,8 @@ import { cloneLocalFixture } from '../crm/local-fixture.mjs'
 
 const controls = [
   'withdraws a disconnected account',
-  "withholds the second provider request after a 'recording media ancestor' hold",
-  "withholds the second provider request after a 'historical message' hold",
+  "withholds the post-Calendar provider request after a 'recording media ancestor' hold",
+  "withholds the post-Calendar provider request after a 'historical message' hold",
 ]
 const history = `^(?!.*(?:${controls.join('|')})).*$`
 

@@ -669,7 +669,7 @@ async function injectScopedSkills(opts: InjectSkillsOptions): Promise<InjectSkil
       // model because the legacy gate only consults the slug-keyed table.
       opts.workspaceSkillEnablementStore && opts.workspaceId
         ? opts.workspaceSkillEnablementStore.listForAssistant(assistantId, {
-            actingUserId: connectorUserId,
+            actingUserId,
           })
         : Promise.resolve([] as Array<{ workspaceSkillId: string }>),
     ])

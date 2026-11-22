@@ -155,9 +155,13 @@ export function createTurnLedger(ctx: TurnLedgerContext): TurnLedgerHandle {
       })
     }
 
-    request(info: { turn: number; messages: Message[]; full: boolean }): void {
-      const { messages, full } = info
+    request(info: { turn: number; messages: Message[]; full: boolean; systemPrompt?: string }): void {
+      const { messages, full, systemPrompt } = info
       enqueue(async () => {
+        if (systemPrompt !== undefined) {
+          this.systemRef = await ctx.payloads.put({ workspaceId: ctx.workspaceId, content: systemPrompt,
+            mediaType: 'text/plain', sensitivity: ctx.sensitivity })
+        }
         const messageBytes = messages.map(message => JSON.stringify(message))
         // The regular first request repeats the initial bytes. The original
         // success is enough to reuse those immutable refs, including a ref

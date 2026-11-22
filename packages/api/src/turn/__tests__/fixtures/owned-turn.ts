@@ -60,7 +60,7 @@ export async function openAssistantTurn(input: Parameters<typeof openProductionT
     const { model: _model, sessionId: _session, policy: _policy, abortController: _abort, prepareBackground: _background, loop, ...rest } = options
     // The fixture submits its assembled values once through the production
     // owner's prepareRun; run then consumes only the owner's private copy.
-    const { systemPrompt, runtimeSystemContext, messages, tools, maxTokens: _maxTokens, inputTokenLimit: _inputTokenLimit, ...owned } = loop
+    const { systemPrompt, runtimeSystemContext, messages, tools, maxTokens: _maxTokens, inputTokenLimit: _inputTokenLimit, takeDiscoveredContext: _discovery, ...owned } = loop
     if (!runPrepared) {
       runPrepared = true
       await owner.prepareRun({ systemPrompt, messages, candidateTools: tools,

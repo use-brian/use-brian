@@ -369,6 +369,16 @@ export async function executeFeedCommands(actor: FeedActor, raw: FeedCommandRequ
   return transaction ? execute(transaction.client, transaction.scope) : withFeedTransaction(actor, execute)
 }
 
+/** Metadata needed to admit a draft turn before the model requests its contents. */
+export async function readFeedTurnHead(actor: FeedActor, transcriptId?: string) {
+  return withFeedTransaction(actor, async (client, scope) => {
+    if (transcriptId) await assertFeedThreadAccess(client, actor, scope, transcriptId)
+    return (await client.query<{ revision: number; structured: boolean }>(`
+      SELECT revision, content->'schemaVersion'='2'::jsonb AND jsonb_typeof(content->'composition')='object' AS structured
+      FROM feed_post_working_copies WHERE session_id=$1`, [actor.sessionId])).rows[0] ?? null
+  }, false)
+}
+
 export async function getFeedCollaboration(actor: FeedActor) {
   return withFeedTransaction(actor, async client => {
     const visibleThreads = await threads(client,actor.sessionId,actor.userId)

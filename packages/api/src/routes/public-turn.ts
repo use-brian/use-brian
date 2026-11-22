@@ -1,6 +1,7 @@
 import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/attended-audience.js'
 import { withTurnInference } from '../turn/runtime.js'
 import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
+import { bindScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { renderSystemContext } from '@use-brian/agent-runtime/providers/system-context.js'
 /**
  * Shared public turn pipeline — the body of the public API's message
@@ -1020,10 +1021,6 @@ async function executePublicTurnInScope(
       plan: workspacePlan, budgetStatus })
     const { logicalModel, logicalTier, model } = preparedModel
     const customLlmRuntime = preparedModel.customLlm
-    const background = await turnOwner.prepareBackgroundModel({})
-    const backgroundLlmRuntime = background.customLlm
-    const turnProvider = preparedModel.provider
-
     // Deliberately do NOT publish to the workspace incoming-message dispatcher.
     // Its workflow/goal subscribers do not carry this turn's authority, public
     // floor, client compartments, or tool policy. Publishing even after saving
@@ -1063,125 +1060,6 @@ async function executePublicTurnInScope(
     )
     if (storedUserSource) scopeAccumulator.noteSource(storedUserSource)
 
-    // ── 8. Tools — mirror web chat ───────────────────────────
-    // Same shape as `chat.ts`: capability filter → the `public` capability
-    // surface (the team owner's connectors behind mcp_search/mcp_call, and KB
-    // reads; it never indexes a confirmation-required capability) → strip
-    // requiresConfirmation tools from the boot roster (no human-in-the-loop on
-    // the API channel) → memory tools for Tier 1.
-    //
-    // Without connector preparation here, an assistant whose system prompt
-    // references specific MCP tools (e.g. cgov chat referencing
-    // `search_dreps` from cgov-mcp) would silently fail on this channel —
-    // the model would see the tool name in the prompt, find no such tool,
-    // hallucinate or thought-burn into empty responses. See
-    // docs/architecture/features/public-api.md → "Tools available".
-    await assertTurnCurrent()
-    const activeCapabilities = new Set(
-      await deps.capabilityStore.listActive(assistant.id),
-    )
-    const baseTools = filterToolsByCapabilities(new Map(deps.tools), activeCapabilities)
-    const limitedPublicResearch = applyPublicResearchToolCeiling({
-      tools: baseTools,
-      toolPolicy: input.toolPolicy,
-      internalScope,
-      allowPublicResearch: body.allowPublicResearch === true,
-    })
-
-    const connectorUserId = await getConnectorUserId(user.id, assistant.workspaceId ?? null)
-    // Read-side clearance (incident 2026-06-01): read ceiling =
-    // min(member, assistant). The API key's principal is typically the
-    // workspace owner (resolves to the assistant's clearance), but a
-    // lower-clearance principal is correctly bounded. Writes keep the
-    // assistant's clearance via `assistantClearance` on the context.
-    //
-    // `assistant-full` deliberately skips the membership floor. A chat-link
-    // visitor is a non-member, so the floor resolved every read to `public` —
-    // and every brain table defaults to `sensitivity='internal'`, so the link
-    // matched almost nothing and shipped as a persona with an empty brain. The
-    // owner is publishing THEIR assistant, so the assistant's own clearance is
-    // the ceiling, exactly as it is on any channel the owner speaks through.
-    //
-    // This makes `assistants.clearance` the security control for the link: point
-    // one at a `confidential` assistant and that content is readable by anyone
-    // holding the URL. The Studio create-link flow states the inherited
-    // clearance for that reason — see docs/architecture/features/public-chat-link.md.
-    const capabilityOwner = turnOwner
-    const mcpInjection = limitedPublicResearch
-      ? {
-          enrichConfirmation: async (_toolName: string, toolInput: Record<string, unknown>) => toolInput,
-          unavailable: [] as string[],
-          searchableSources: [] as string[],
-        }
-      // Prepared by the original turn owner through the M3 capability surface
-      // (`public` profile, catalog-only until a call), from the route parameter block.
-      : await withCurrentTurn(() => capabilityOwner.prepareCapabilities({ profile: 'public', composition: { kind: 'route-params', params: {
-          scope: 'public-api',
-          executionContext,
-          scopeAccumulator,
-          connectorUserId,
-          assistant: { id: assistant.id, workspaceId: assistant.workspaceId ?? null },
-          userTimezone: owner.timezone ?? undefined,
-          tools: baseTools,
-          stores: deps,
-          engineHooks: deps.engineHooks,
-          contextScope: turnScope,
-          // End-user identity on the wire. A consumer serving its own clients
-          // points this assistant at a bridge MCP server; the bridge maps
-          // `X-UseBrian-Actor-Id` back to its own user record and scopes every
-          // fetch to that person. Without it the bridge cannot tell one client
-          // from another and the scoping has to be attempted in the prompt,
-          // which is not a guarantee.
-          //
-          // `id` is the consumer's own opaque `externalUserId` — the value the
-          // bridge already indexes on — while `userId` is the stable Use Brian
-          // UUID that survives the same human arriving on another channel.
-          // Server-resolved from the authenticated key, never from model output;
-          // the `X-UseBrian-*` namespace is unsettable from user connector config
-          // (`preflightHeadersToRecord`) and merges at highest precedence, so
-          // neither the model nor the end user can forge it. Still opt-in per
-          // connector via `config.sendActorIdentity`.
-          //
-          // `roles` is deliberately absent: identity is forwarded, authorization
-          // is derived. See `ActorIdentity.org`.
-          actorIdentity: {
-            channel: 'api',
-            id: body.externalUserId,
-            // Internal lane: the actor is the resolved member, so the wire carries
-            // their real email (the tier fields that feed claimedEmail are rejected
-            // at the route for internal keys).
-            email: internalScope ? (user.email ?? null) : (claimedEmail ?? null),
-            userId: user.id,
-            org: body.claims?.orgId ?? null,
-          },
-          // KB write tools are chat-only (D2): the API consumer has no
-          // Approve/Deny loop, so this surface never exposes them, neither
-          // directly nor in the `mcp_search` index.
-          allowKnowledgeWrites: false,
-        } } }))
-
-    // Strip confirmation-required tools AFTER preparation (D11-10 decision:
-    // kept). The `public` surface already never indexes a confirmation-required
-    // connector capability, so for connectors this is a second fence; it is the
-    // only fence for the boot roster (`deps.tools`), whose write tools also carry
-    // `requiresConfirmation` and which the capability catalog does not own. The
-    // API consumer has no way to approve them; they are dropped silently
-    // (the spec's "API path is safe-by-default" posture).
-    for (const [, tool] of baseTools) {
-      if (tool.requiresConfirmation) {
-        baseTools.delete(tool.name)
-      }
-    }
-
-    // Memory tools. `saveMemory` is Tier 1 only — an anonymous stranger must
-    // never write into the workspace brain, and on `assistant-full` that is the
-    // one capability deliberately withheld from an otherwise complete surface.
-    //
-    // The write bar is structural, not just this branch: `listMemoryUsers`
-    // applies `excludeExternalPrincipalsSql` and `chatlink:` is an
-    // external-principal namespace, so background consolidation cannot turn a
-    // visitor's session into memories either. Withholding the tool is therefore
-    // sufficient; there is no second write path to close.
     const memoryViewerCtx = {
       ...automaticContextAccess(turnScope.access, turnScope.activeProjectId),
       clientSelfMemory: clientSelfMemory ?? undefined,
@@ -1202,168 +1080,6 @@ async function executePublicTurnInScope(
       }))
     }
 
-    const { saveMemory, getMemory } = createMemoryTools(deps.memoryStore)
-    if (shouldExposeSaveMemoryTool({
-      isIdentified,
-      externalPrincipal,
-      hasClientSelfMemory: !!clientSelfMemory,
-      hasDeterministicClientMemory: !!body.clientMemory,
-    })) {
-      baseTools.set('saveMemory', saveMemory)
-    }
-    if (isIdentified || fullScope) {
-      baseTools.set('getMemory', getMemory)
-    }
-
-    // ── 9. Memory context ────────────────────────────────────
-    // Built for an identified caller, and for every `assistant-full` turn
-    // regardless of tier: the visitor's own shadow soul is empty, but the
-    // workspace/team memory is the assistant's knowledge of its own company and
-    // is the substance of what the link is meant to expose.
-    let memoryContext = ''
-    if (isIdentified || fullScope) {
-      const [soulContext, identityMemories, rankedIndex, workspaceIdentityMemories, teamMemoryIndex] =
-        await Promise.all([
-          (deps.memoryStore.getSoulContext?.(memoryViewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
-          deps.memoryStore.getIdentity(memoryViewerCtx,nativeTranscriptAuthority),
-          deps.memoryStore.getIndexRanked(memoryViewerCtx, PER_TURN_INDEX_CAP,executionContext.ownership.kind==='workspace'&&executionContext.identity.kind==='attended'&&executionContext.identity.principal.kind==='workspace_member'?{execution:executionContext,accumulator:scopeAccumulator}:undefined),
-          // Team memory is what makes a full-scope link useful, and what makes
-          // the internal lane a colleague rather than a stranger; the external
-          // keyed lanes stay on their per-user projection.
-          (fullScope || internalScope) && assistant.workspaceId
-            ? deps.memoryStore.getWorkspaceIdentity(memoryViewerCtx)
-            : Promise.resolve([]),
-          (fullScope || internalScope) && assistant.workspaceId
-            ? deps.memoryStore.getWorkspaceIndex(memoryViewerCtx,undefined,executionContext.ownership.kind==='workspace'&&executionContext.identity.kind==='attended'&&executionContext.identity.principal.kind==='workspace_member'?{execution:executionContext,accumulator:scopeAccumulator}:undefined)
-            : Promise.resolve([]),
-        ])
-      const soul = soulContext.content
-      scopeAccumulator.note(soulContext.evidence)
-      noteAutomaticScopeEvidence(scopeAccumulator, [
-        identityMemories,rankedIndex.rows,teamMemoryIndex,
-        ...identityMemories,
-        ...rankedIndex.rows,
-        ...workspaceIdentityMemories,
-        ...teamMemoryIndex,
-      ])
-      memoryContext = buildMemoryContext({
-        soul,
-        identityMemories: identityMemories.map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
-        memoryIndex: rankedIndex.rows.map((m) => ({ ...m, appId: null })),
-        totalNonIdentityCount: rankedIndex.totalCount,
-        workspaceIdentityMemories: workspaceIdentityMemories.map((m) => ({
-          id: m.id,
-          summary: m.summary,
-          detail: m.detail,
-        })),
-        teamMemoryIndex: teamMemoryIndex.map((m) => ({ ...m, appId: null })),
-        assistantName: assistant.name,
-      })
-    }
-
-    // ── 9b. Ambient workspace context (assistant-full + internal-member) ──
-    // The blocks web chat carries and the thin public turn never had. Each is
-    // independently optional and failure-tolerant: a store that is not wired in
-    // (OSS, or a caller that never passes it) simply omits its block. The
-    // internal lane gets them member-bounded: the files index reads through
-    // `readClearance`/`readCompartments`, which for a member is min(member,
-    // assistant) rather than the assistant override full scope uses.
-    let workspaceFilesContext: string | null = null
-    let brandContext: string | null = null
-    let sessionStateBlock: string | null = null
-    let skillsFragment = ''
-    if (fullScope || internalScope) {
-      if (deps.workspaceFilesStore && assistant.workspaceId && activeCapabilities.has('files')) {
-        try {
-          const indexed = await deps.workspaceFilesStore.listIndexRanked(
-            {
-              workspaceId: assistant.workspaceId,
-              userId: user.id,
-              assistantId: assistant.id,
-              assistantKind: assistant.kind,
-              clearance: readClearance,
-              compartments: readCompartments,
-              mutationCompartments: turnScope.access.mutationCompartments,
-              projectIds: turnScope.effectiveProjectIds,
-              systemRead: laneReadsSystemSide(input.contextScope) || undefined,
-            },
-            PER_TURN_FILES_INDEX_CAP,
-          )
-          const rows = selectWorkspaceFilesContextRows(indexed, PER_TURN_FILES_INDEX_CAP)
-          noteAutomaticScopeEvidence(scopeAccumulator, rows)
-          workspaceFilesContext = buildWorkspaceFilesContext(rows)
-        } catch (err) {
-          console.error('[public-turn] workspace-files index fetch failed:', err)
-          workspaceFilesContext = buildWorkspaceFilesContext(null)
-        }
-      }
-
-      brandContext = await resolveBrandContext({
-        userId: ownerId,
-        workspaceId: assistant.workspaceId,
-        hasCapability: activeCapabilities.has('brand'),
-        logLabel: 'public-turn',
-      })
-
-      if (deps.sessionStateStore) {
-        try {
-          sessionStateBlock = await buildSessionStateBlock({
-            authority: { execution: executionContext, accumulator: scopeAccumulator },
-            store: deps.sessionStateStore,
-            sessionId: session.id,
-          })
-        } catch (err) {
-          console.error('[public-turn] session-state block fetch failed:', err)
-        }
-      }
-
-      if (deps.skillStore) {
-        try {
-          const skillResult = await withCurrentTurn(() => injectSkills({
-            skillStore: deps.skillStore!,
-            connectorUserId,
-            assistantId: assistant.id,
-            // §5.5 governance gate — the assistant's clearance bounds which
-            // workspace skills are offered, same as every other channel.
-            assistantClearance: assistant.clearance,
-            tools: baseTools,
-            connectorStore: deps.connectorStore,
-            unavailableCapabilities: mcpInjection.unavailable,
-            channel: 'api',
-            assistantKind: assistant.kind,
-            workspaceId: assistant.workspaceId ?? undefined,
-            // Same gap the messaging channels had until mig 492: without these
-            // two stores the public API and the `/c/<token>` chat link saw only
-            // the legacy slug-keyed toggles, so a workspace skill enabled
-            // through the allowlist (or flagged `all_assistants`) was never
-            // offered here. Defaulted from the stateless factories to match
-            // `channel-pipeline.ts`; an injected store still wins.
-            workspaceSkillStore: deps.workspaceSkillStore ?? createDbWorkspaceSkillStore(),
-            workspaceSkillEnablementStore:
-              deps.workspaceSkillEnablementStore ?? createDbWorkspaceSkillEnablementStore(),
-          }))
-          skillsFragment = skillResult.promptFragment
-        } catch (err) {
-          console.error('[public-turn] skill injection failed:', err)
-        }
-      }
-
-      // Skills inject their own tools, so re-run the confirmation strip: this
-      // surface still has no approval loop. Ordering matters — the earlier strip
-      // ran before injectSkills existed on this path.
-      for (const [, tool] of baseTools) {
-        if (tool.requiresConfirmation) {
-          baseTools.delete(tool.name)
-        }
-      }
-    }
-
-    // The assistant-name override rides the memory context when one was built,
-    // and is injected alone otherwise - see `resolvePublicContextBlock`.
-    const contextBlock = resolvePublicContextBlock({
-      assistantName: assistant.name,
-      memoryContext,
-    })
     // End-user identity is private runtime context on the external lanes — the
     // trusted system channel, never the user turn. See
     // `buildEndUserIdentityContext`. The internal lane replaces it with the
@@ -1372,174 +1088,472 @@ async function executePublicTurnInScope(
     // model treat its own colleague as an unauthenticated stranger.
     const endUserContext = internalScope ? '' : buildEndUserIdentityContext(body, { isIdentified })
 
-    const decisionPlaybookContext = await withCurrentTurn(() => loadDecisionPlaybookContext({
-      workspaceId: assistant.workspaceId ?? null,
-      assistantId: assistant.id,
-      actorUserId: user.id,
-      externalPrincipal,
-      operationKind: 'public_turn',
-      operationId: storedUserMsg.id,
-      sourceKind: 'session_message',
-      sourceId: storedUserMsg.id,
-      channelType: 'api',
-      analytics: deps.analytics,
-      logLabel: 'public-turn',
-    }))
-    const playbookRules = decisionPlaybookContext.playbookRules
+    const capabilityOwner = turnOwner
+    const discoverContext = async () => {
+      const background = await capabilityOwner.prepareBackgroundModel({})
+      const backgroundLlmRuntime = background.customLlm
 
-    let fullSystemPrompt: string
-    let runtimeSystemContext = ''
-    // Representations of content the visitor can actually see. Empty on this
-    // surface today (no reply quotes, no open page), but the three-way split
-    // contract is wired rather than assumed: an authority collapse is not
-    // repairable by reordering, so the seam exists before it has a payload.
-    // See `invariants/prompt-cache-alignment`.
-    let userVisibleContext = ''
-    if (fullScope || internalScope) {
-      // Route through the shared builder so the chat link inherits the same
-      // block order and the same provenance split as every other channel,
-      // rather than growing a second hand-rolled assembly that drifts.
+      // ── 8. Tools — mirror web chat ───────────────────────────
+      // Same shape as `chat.ts`: capability filter → the `public` capability
+      // surface (the team owner's connectors behind mcp_search/mcp_call, and KB
+      // reads; it never indexes a confirmation-required capability) → strip
+      // requiresConfirmation tools from the boot roster (no human-in-the-loop on
+      // the API channel) → memory tools for Tier 1.
       //
-      // Timezone: the internal lane has a real member with a real timezone;
-      // the anonymous full-scope link falls back to the workspace owner's (the
-      // visitor's is unknown and the browser sends none on this surface).
-      // Naming the assistant's own zone is the honest answer, and it is
-      // strictly better than the previous state, where no date reached the
-      // model at all and it guessed.
-      const timezone =
-        (internalScope ? user.timezone : null) ?? owner.timezone ?? 'UTC'
-      const split = buildSplitSystemPrompt({
-        basePrompt: deps.systemPrompt,
-        charter: resolveCharter(assistant),
-        playbookRules,
-        memoryContext: contextBlock,
-        workspaceFilesContext,
-        brandContext,
-        skillsFragment,
-        sessionStateBlock,
-        currentDateTime: new Date().toLocaleString('en-US', {
-          timeZone: timezone,
-          dateStyle: 'full',
-          timeStyle: 'short',
-        }),
-        timezone,
-        unavailableCapabilitiesPrompt: buildUnavailableCapabilitiesPrompt(
+      // Without connector preparation here, an assistant whose system prompt
+      // references specific MCP tools (e.g. cgov chat referencing
+      // `search_dreps` from cgov-mcp) would silently fail on this channel —
+      // the model would see the tool name in the prompt, find no such tool,
+      // hallucinate or thought-burn into empty responses. See
+      // docs/architecture/features/public-api.md → "Tools available".
+      await assertTurnCurrent()
+      const activeCapabilities = new Set(
+        await deps.capabilityStore.listActive(assistant.id),
+      )
+      const baseTools = filterToolsByCapabilities(new Map(deps.tools), activeCapabilities)
+      const limitedPublicResearch = applyPublicResearchToolCeiling({
+        tools: baseTools,
+        toolPolicy: input.toolPolicy,
+        internalScope,
+        allowPublicResearch: body.allowPublicResearch === true,
+      })
+
+      const connectorUserId = await getConnectorUserId(user.id, assistant.workspaceId ?? null)
+      // Read-side clearance (incident 2026-06-01): read ceiling =
+      // min(member, assistant). The API key's principal is typically the
+      // workspace owner (resolves to the assistant's clearance), but a
+      // lower-clearance principal is correctly bounded. Writes keep the
+      // assistant's clearance via `assistantClearance` on the context.
+      //
+      // `assistant-full` deliberately skips the membership floor. A chat-link
+      // visitor is a non-member, so the floor resolved every read to `public` —
+      // and every brain table defaults to `sensitivity='internal'`, so the link
+      // matched almost nothing and shipped as a persona with an empty brain. The
+      // owner is publishing THEIR assistant, so the assistant's own clearance is
+      // the ceiling, exactly as it is on any channel the owner speaks through.
+      //
+      // This makes `assistants.clearance` the security control for the link: point
+      // one at a `confidential` assistant and that content is readable by anyone
+      // holding the URL. The Studio create-link flow states the inherited
+      // clearance for that reason — see docs/architecture/features/public-chat-link.md.
+      const mcpInjection = limitedPublicResearch
+        ? {
+            enrichConfirmation: async (_toolName: string, toolInput: Record<string, unknown>) => toolInput,
+            unavailable: [] as string[],
+            searchableSources: [] as string[],
+            admittedConnectorIds: new Set<string>(),
+          }
+        // Prepared by the original turn owner through the M3 capability surface
+        // (`public` profile, catalog-only until a call), from the route parameter block.
+        : await withCurrentTurn(() => capabilityOwner.prepareCapabilities({ profile: 'public', composition: { kind: 'route-params', params: {
+            scope: 'public-api',
+            executionContext,
+            scopeAccumulator,
+            connectorUserId,
+            assistant: { id: assistant.id, workspaceId: assistant.workspaceId ?? null },
+            userTimezone: owner.timezone ?? undefined,
+            tools: baseTools,
+            stores: deps,
+            engineHooks: deps.engineHooks,
+            contextScope: turnScope,
+            // End-user identity on the wire. A consumer serving its own clients
+            // points this assistant at a bridge MCP server; the bridge maps
+            // `X-UseBrian-Actor-Id` back to its own user record and scopes every
+            // fetch to that person. Without it the bridge cannot tell one client
+            // from another and the scoping has to be attempted in the prompt,
+            // which is not a guarantee.
+            //
+            // `id` is the consumer's own opaque `externalUserId` — the value the
+            // bridge already indexes on — while `userId` is the stable Use Brian
+            // UUID that survives the same human arriving on another channel.
+            // Server-resolved from the authenticated key, never from model output;
+            // the `X-UseBrian-*` namespace is unsettable from user connector config
+            // (`preflightHeadersToRecord`) and merges at highest precedence, so
+            // neither the model nor the end user can forge it. Still opt-in per
+            // connector via `config.sendActorIdentity`.
+            //
+            // `roles` is deliberately absent: identity is forwarded, authorization
+            // is derived. See `ActorIdentity.org`.
+            actorIdentity: {
+              channel: 'api',
+              id: body.externalUserId,
+              // Internal lane: the actor is the resolved member, so the wire carries
+              // their real email (the tier fields that feed claimedEmail are rejected
+              // at the route for internal keys).
+              email: internalScope ? (user.email ?? null) : (claimedEmail ?? null),
+              userId: user.id,
+              org: body.claims?.orgId ?? null,
+            },
+            // KB write tools are chat-only (D2): the API consumer has no
+            // Approve/Deny loop, so this surface never exposes them, neither
+            // directly nor in the `mcp_search` index.
+            allowKnowledgeWrites: false,
+          } } }))
+
+      // Strip confirmation-required tools AFTER preparation (D11-10 decision:
+      // kept). The `public` surface already never indexes a confirmation-required
+      // connector capability, so for connectors this is a second fence; it is the
+      // only fence for the boot roster (`deps.tools`), whose write tools also carry
+      // `requiresConfirmation` and which the capability catalog does not own. The
+      // API consumer has no way to approve them; they are dropped silently
+      // (the spec's "API path is safe-by-default" posture).
+      for (const [, tool] of baseTools) {
+        if (tool.requiresConfirmation) {
+          baseTools.delete(tool.name)
+        }
+      }
+
+      // Memory tools. `saveMemory` is Tier 1 only — an anonymous stranger must
+      // never write into the workspace brain, and on `assistant-full` that is the
+      // one capability deliberately withheld from an otherwise complete surface.
+      //
+      // The write bar is structural, not just this branch: `listMemoryUsers`
+      // applies `excludeExternalPrincipalsSql` and `chatlink:` is an
+      // external-principal namespace, so background consolidation cannot turn a
+      // visitor's session into memories either. Withholding the tool is therefore
+      // sufficient; there is no second write path to close.
+      const { saveMemory, getMemory } = createMemoryTools(deps.memoryStore)
+      if (shouldExposeSaveMemoryTool({
+        isIdentified,
+        externalPrincipal,
+        hasClientSelfMemory: !!clientSelfMemory,
+        hasDeterministicClientMemory: !!body.clientMemory,
+      })) {
+        baseTools.set('saveMemory', saveMemory)
+      }
+      if (isIdentified || fullScope) {
+        baseTools.set('getMemory', getMemory)
+      }
+
+      // ── 9. Memory context ────────────────────────────────────
+      // Built for an identified caller, and for every `assistant-full` turn
+      // regardless of tier: the visitor's own shadow soul is empty, but the
+      // workspace/team memory is the assistant's knowledge of its own company and
+      // is the substance of what the link is meant to expose.
+      let memoryContext = ''
+      if (isIdentified || fullScope) {
+        const [soulContext, identityMemories, rankedIndex, workspaceIdentityMemories, teamMemoryIndex] =
+          await Promise.all([
+            (deps.memoryStore.getSoulContext?.(memoryViewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
+            deps.memoryStore.getIdentity(memoryViewerCtx,nativeTranscriptAuthority),
+            deps.memoryStore.getIndexRanked(memoryViewerCtx, PER_TURN_INDEX_CAP,executionContext.ownership.kind==='workspace'&&executionContext.identity.kind==='attended'&&executionContext.identity.principal.kind==='workspace_member'?{execution:executionContext,accumulator:scopeAccumulator}:undefined),
+            // Team memory is what makes a full-scope link useful, and what makes
+            // the internal lane a colleague rather than a stranger; the external
+            // keyed lanes stay on their per-user projection.
+            (fullScope || internalScope) && assistant.workspaceId
+              ? deps.memoryStore.getWorkspaceIdentity(memoryViewerCtx)
+              : Promise.resolve([]),
+            (fullScope || internalScope) && assistant.workspaceId
+              ? deps.memoryStore.getWorkspaceIndex(memoryViewerCtx,undefined,executionContext.ownership.kind==='workspace'&&executionContext.identity.kind==='attended'&&executionContext.identity.principal.kind==='workspace_member'?{execution:executionContext,accumulator:scopeAccumulator}:undefined)
+              : Promise.resolve([]),
+          ])
+        const soul = soulContext.content
+        scopeAccumulator.note(soulContext.evidence)
+        noteAutomaticScopeEvidence(scopeAccumulator, [
+          identityMemories,rankedIndex.rows,teamMemoryIndex,
+          ...identityMemories,
+          ...rankedIndex.rows,
+          ...workspaceIdentityMemories,
+          ...teamMemoryIndex,
+        ])
+        memoryContext = buildMemoryContext({
+          soul,
+          identityMemories: identityMemories.map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
+          memoryIndex: rankedIndex.rows.map((m) => ({ ...m, appId: null })),
+          totalNonIdentityCount: rankedIndex.totalCount,
+          workspaceIdentityMemories: workspaceIdentityMemories.map((m) => ({
+            id: m.id,
+            summary: m.summary,
+            detail: m.detail,
+          })),
+          teamMemoryIndex: teamMemoryIndex.map((m) => ({ ...m, appId: null })),
+          assistantName: assistant.name,
+        })
+      }
+
+      // ── 9b. Ambient workspace context (assistant-full + internal-member) ──
+      // The blocks web chat carries and the thin public turn never had. Each is
+      // independently optional and failure-tolerant: a store that is not wired in
+      // (OSS, or a caller that never passes it) simply omits its block. The
+      // internal lane gets them member-bounded: the files index reads through
+      // `readClearance`/`readCompartments`, which for a member is min(member,
+      // assistant) rather than the assistant override full scope uses.
+      let workspaceFilesContext: string | null = null
+      let brandContext: string | null = null
+      let sessionStateBlock: string | null = null
+      let skillsFragment = ''
+      if (fullScope || internalScope) {
+        if (deps.workspaceFilesStore && assistant.workspaceId && activeCapabilities.has('files')) {
+          try {
+            const indexed = await deps.workspaceFilesStore.listIndexRanked(
+              {
+                workspaceId: assistant.workspaceId,
+                userId: user.id,
+                assistantId: assistant.id,
+                assistantKind: assistant.kind,
+                clearance: readClearance,
+                compartments: readCompartments,
+                mutationCompartments: turnScope.access.mutationCompartments,
+                projectIds: turnScope.effectiveProjectIds,
+                systemRead: laneReadsSystemSide(input.contextScope) || undefined,
+              },
+              PER_TURN_FILES_INDEX_CAP,
+            )
+            const rows = selectWorkspaceFilesContextRows(indexed, PER_TURN_FILES_INDEX_CAP)
+            noteAutomaticScopeEvidence(scopeAccumulator, rows)
+            workspaceFilesContext = buildWorkspaceFilesContext(rows)
+          } catch (err) {
+            console.error('[public-turn] workspace-files index fetch failed:', err)
+            workspaceFilesContext = buildWorkspaceFilesContext(null)
+          }
+        }
+
+        brandContext = await resolveBrandContext({
+          userId: ownerId,
+          workspaceId: assistant.workspaceId,
+          hasCapability: activeCapabilities.has('brand'),
+          logLabel: 'public-turn',
+        })
+
+        if (deps.sessionStateStore) {
+          try {
+            sessionStateBlock = await buildSessionStateBlock({
+              authority: { execution: executionContext, accumulator: scopeAccumulator },
+              store: deps.sessionStateStore,
+              sessionId: session.id,
+            })
+          } catch (err) {
+            console.error('[public-turn] session-state block fetch failed:', err)
+          }
+        }
+
+        if (deps.skillStore) {
+          try {
+            const skillResult = await withCurrentTurn(() => injectSkills({
+              skillStore: deps.skillStore!,
+              executionContext, scopeAccumulator,
+              availableConnectorIds: assistant.workspaceId ? mcpInjection.admittedConnectorIds ?? new Set() : undefined,
+              connectorUserId,
+              assistantId: assistant.id,
+              // §5.5 governance gate — the assistant's clearance bounds which
+              // workspace skills are offered, same as every other channel.
+              assistantClearance: assistant.clearance,
+              tools: baseTools,
+              connectorStore: deps.connectorStore,
+              unavailableCapabilities: mcpInjection.unavailable,
+              channel: 'api',
+              assistantKind: assistant.kind,
+              workspaceId: assistant.workspaceId ?? undefined,
+              // Same gap the messaging channels had until mig 492: without these
+              // two stores the public API and the `/c/<token>` chat link saw only
+              // the legacy slug-keyed toggles, so a workspace skill enabled
+              // through the allowlist (or flagged `all_assistants`) was never
+              // offered here. Defaulted from the stateless factories to match
+              // `channel-pipeline.ts`; an injected store still wins.
+              workspaceSkillStore: deps.workspaceSkillStore ?? createDbWorkspaceSkillStore(),
+              workspaceSkillEnablementStore:
+                deps.workspaceSkillEnablementStore ?? createDbWorkspaceSkillEnablementStore(),
+            }))
+            skillsFragment = skillResult.promptFragment
+          } catch (err) {
+            console.error('[public-turn] skill injection failed:', err)
+          }
+        }
+
+        // Skills inject their own tools, so re-run the confirmation strip: this
+        // surface still has no approval loop. Ordering matters — the earlier strip
+        // ran before injectSkills existed on this path.
+        for (const [, tool] of baseTools) {
+          if (tool.requiresConfirmation) {
+            baseTools.delete(tool.name)
+          }
+        }
+      }
+
+      // The assistant-name override rides the memory context when one was built,
+      // and is injected alone otherwise - see `resolvePublicContextBlock`.
+      const contextBlock = resolvePublicContextBlock({
+        assistantName: assistant.name,
+        memoryContext,
+      })
+      const decisionPlaybookContext = await withCurrentTurn(() => loadDecisionPlaybookContext({
+        workspaceId: assistant.workspaceId ?? null,
+        assistantId: assistant.id,
+        actorUserId: user.id,
+        externalPrincipal,
+        operationKind: 'public_turn',
+        operationId: storedUserMsg.id,
+        sourceKind: 'session_message',
+        sourceId: storedUserMsg.id,
+        channelType: 'api',
+        analytics: deps.analytics,
+        logLabel: 'public-turn',
+      }))
+      const playbookRules = decisionPlaybookContext.playbookRules
+
+      let fullSystemPrompt: string
+      let runtimeSystemContext = ''
+      // Representations of content the visitor can actually see. Empty on this
+      // surface today (no reply quotes, no open page), but the three-way split
+      // contract is wired rather than assumed: an authority collapse is not
+      // repairable by reordering, so the seam exists before it has a payload.
+      // See `invariants/prompt-cache-alignment`.
+      let userVisibleContext = ''
+      if (fullScope || internalScope) {
+        // Route through the shared builder so the chat link inherits the same
+        // block order and the same provenance split as every other channel,
+        // rather than growing a second hand-rolled assembly that drifts.
+        //
+        // Timezone: the internal lane has a real member with a real timezone;
+        // the anonymous full-scope link falls back to the workspace owner's (the
+        // visitor's is unknown and the browser sends none on this surface).
+        // Naming the assistant's own zone is the honest answer, and it is
+        // strictly better than the previous state, where no date reached the
+        // model at all and it guessed.
+        const timezone =
+          (internalScope ? user.timezone : null) ?? owner.timezone ?? 'UTC'
+        const split = buildSplitSystemPrompt({
+          basePrompt: deps.systemPrompt,
+          charter: resolveCharter(assistant),
+          playbookRules,
+          memoryContext: contextBlock,
+          workspaceFilesContext,
+          brandContext,
+          skillsFragment,
+          sessionStateBlock,
+          currentDateTime: new Date().toLocaleString('en-US', {
+            timeZone: timezone,
+            dateStyle: 'full',
+            timeStyle: 'short',
+          }),
+          timezone,
+          unavailableCapabilitiesPrompt: buildUnavailableCapabilitiesPrompt(
+            mcpInjection.unavailable,
+            baseTools,
+            mcpInjection.searchableSources,
+          ),
+          // Internal lane: the same "You are talking with:" lead line web chat
+          // ships (web-chat speaker identity, 08-06) — the actor is a member.
+          speakerIdentity: internalScope
+            ? { name: user.name ?? user.email ?? 'Workspace member', email: user.email }
+            : undefined,
+          // Ordered last among the builder's private-runtime sections, so the
+          // end-user identity block stays at the end of the envelope as before.
+          // Empty (and omitted by the builder) on the internal lane.
+          preflightContext: endUserContext,
+        })
+        const privateBlock = formatPrivateRuntimeContext([
+          split.privateRuntimeContext,
+          formatActiveWorkspaceContext(turnScope),
+        ].filter(Boolean).join('\n\n'))
+        fullSystemPrompt = split.stablePrompt
+        runtimeSystemContext = privateBlock
+        userVisibleContext = split.userVisibleContext
+      } else {
+        // Same Layer 2 the shared builder renders: the charter block (with
+        // admitted playbook rules), not the raw legacy column (which a
+        // post-418 write no longer updates).
+        const charterBlock = renderCharterBlock(resolveCharter(assistant), { playbookRules })
+        const assistantSystemPrompt = charterBlock
+          ? `${deps.systemPrompt}\n\n${charterBlock}`
+          : deps.systemPrompt
+        const promptWithMemory = contextBlock
+          ? `${assistantSystemPrompt}\n\n${contextBlock}`
+          : assistantSystemPrompt
+        // Append the unavailable-capabilities block so the model doesn't
+        // burn turns hunting for tools that aren't connected. Same pattern
+        // as chat.ts (line 1124).
+        const capabilityAddendum = buildUnavailableCapabilitiesPrompt(
           mcpInjection.unavailable,
           baseTools,
           mcpInjection.searchableSources,
-        ),
-        // Internal lane: the same "You are talking with:" lead line web chat
-        // ships (web-chat speaker identity, 08-06) — the actor is a member.
-        speakerIdentity: internalScope
-          ? { name: user.name ?? user.email ?? 'Workspace member', email: user.email }
-          : undefined,
-        // Ordered last among the builder's private-runtime sections, so the
-        // end-user identity block stays at the end of the envelope as before.
-        // Empty (and omitted by the builder) on the internal lane.
-        preflightContext: endUserContext,
-      })
-      const privateBlock = formatPrivateRuntimeContext([
-        split.privateRuntimeContext,
-        formatActiveWorkspaceContext(turnScope),
-      ].filter(Boolean).join('\n\n'))
-      fullSystemPrompt = split.stablePrompt
-      runtimeSystemContext = privateBlock
-      userVisibleContext = split.userVisibleContext
-    } else {
-      // Same Layer 2 the shared builder renders: the charter block (with
-      // admitted playbook rules), not the raw legacy column (which a
-      // post-418 write no longer updates).
-      const charterBlock = renderCharterBlock(resolveCharter(assistant), { playbookRules })
-      const assistantSystemPrompt = charterBlock
-        ? `${deps.systemPrompt}\n\n${charterBlock}`
-        : deps.systemPrompt
-      const promptWithMemory = contextBlock
-        ? `${assistantSystemPrompt}\n\n${contextBlock}`
-        : assistantSystemPrompt
-      // Append the unavailable-capabilities block so the model doesn't
-      // burn turns hunting for tools that aren't connected. Same pattern
-      // as chat.ts (line 1124).
-      const capabilityAddendum = buildUnavailableCapabilitiesPrompt(
-        mcpInjection.unavailable,
-        baseTools,
-        mcpInjection.searchableSources,
+        )
+        const identityBlock = formatPrivateRuntimeContext([
+          endUserContext,
+          formatActiveWorkspaceContext(turnScope),
+        ].filter(Boolean).join('\n\n'))
+        fullSystemPrompt = promptWithMemory
+        runtimeSystemContext = [capabilityAddendum, identityBlock]
+          .filter(Boolean).join('\n\n')
+      }
+
+      // ── 10. Load history + proactive compaction ──────────────
+      // Mirrors web chat (chat.ts:797–816). `runProactiveCompaction`
+      // owns stamping + tool-result pairing + summary-prepend + the
+      // compaction LLM call when the tier+channel threshold is hit,
+      // updating `compact_boundary_sequence` / `compact_summary`
+      // in place.
+      //
+      // `channelClass: 'web'` — the API channel is Q&A-shaped with
+      // longer turns, much closer to web chat than rapid messaging
+      // (Telegram/Slack run at 0.5×). Without compaction long-lived
+      // API sessions grow until Gemini 3 Pro hits its empty-response
+      // failure mode on large inputs; see query-loop.ts:372 and the
+      // EMPTY_RETRY_PLAN comments.
+      // The original turn owner performs the stored-history read and notes its evidence.
+      const dbMessages = (await capabilityOwner.prepareHistory({ native: null,
+        fromSequence: session.compactBoundarySequence, evidence: scopeAccumulator, publicConversation })).messages
+      await assertDeliveryAudience()
+      const compactionResult = await withCurrentTurn(() => runProactiveCompaction({
+        modelContext: { execution: executionContext, accumulator: scopeAccumulator },
+        sessionMessages: dbMessages,
+        timezone: owner.timezone ?? 'UTC',
+        session,
+        tier: modelToCompactionTier(logicalModel),
+        channelClass: 'web',
+        profile: 'linear',
+        provider: background.provider,
+        model: backgroundLlmRuntime?.selector,
+        inputTokenLimit: backgroundLlmRuntime?.inputTokenLimit,
+        modelTier: 'standard',
+        providerKeySource: backgroundLlmRuntime?.providerKeySource ?? 'platform',
+        systemPrompt: renderSystemContext({ systemPrompt: fullSystemPrompt, runtimeSystemContext }),
+        assistantId: assistant.id,
+        userId: user.id,
+        ownerId,
+        channelType: 'api',
+        memoryStore: deps.memoryStore,
+        episodicStore: deps.episodicStore,
+        sessionStateStore: deps.sessionStateStore,
+        analytics: deps.analytics,
+        usageStore: deps.usageStore,
+        userMessageId: storedUserMsg.id,
+        compartments: turnScope.writeCompartments,
+        projectIds: turnScope.writeProjectIds,
+        authority,
+      }))
+      // Gate on the serving provider (the `model` resolved above) — the strip
+      // is Gemini-only and would erase a Qwen turn's tool calls. See tool-pairing.ts.
+      let messages: Message[] = stripUnsignedToolUses(
+        compactionResult.messages,
+        modelRequiresToolSignatures(model),
       )
-      const identityBlock = formatPrivateRuntimeContext([
-        endUserContext,
-        formatActiveWorkspaceContext(turnScope),
-      ].filter(Boolean).join('\n\n'))
-      fullSystemPrompt = promptWithMemory
-      runtimeSystemContext = [capabilityAddendum, identityBlock]
-        .filter(Boolean).join('\n\n')
-    }
 
-    // ── 10. Load history + proactive compaction ──────────────
-    // Mirrors web chat (chat.ts:797–816). `runProactiveCompaction`
-    // owns stamping + tool-result pairing + summary-prepend + the
-    // compaction LLM call when the tier+channel threshold is hit,
-    // updating `compact_boundary_sequence` / `compact_summary`
-    // in place.
-    //
-    // `channelClass: 'web'` — the API channel is Q&A-shaped with
-    // longer turns, much closer to web chat than rapid messaging
-    // (Telegram/Slack run at 0.5×). Without compaction long-lived
-    // API sessions grow until Gemini 3 Pro hits its empty-response
-    // failure mode on large inputs; see query-loop.ts:372 and the
-    // EMPTY_RETRY_PLAN comments.
-    // The original turn owner performs the stored-history read and notes its evidence.
-    const dbMessages = (await turnOwner.prepareHistory({ native: null,
-      fromSequence: session.compactBoundarySequence, evidence: scopeAccumulator, publicConversation })).messages
-    await assertDeliveryAudience()
-    const compactionResult = await withCurrentTurn(() => runProactiveCompaction({
-      modelContext: { execution: executionContext, accumulator: scopeAccumulator },
-      sessionMessages: dbMessages,
-      timezone: owner.timezone ?? 'UTC',
-      session,
-      tier: modelToCompactionTier(logicalModel),
-      channelClass: 'web',
-      profile: 'linear',
-      provider: background.provider,
-      model: backgroundLlmRuntime?.selector,
-      inputTokenLimit: backgroundLlmRuntime?.inputTokenLimit,
-      modelTier: 'standard',
-      providerKeySource: backgroundLlmRuntime?.providerKeySource ?? 'platform',
-      systemPrompt: renderSystemContext({ systemPrompt: fullSystemPrompt, runtimeSystemContext }),
-      assistantId: assistant.id,
-      userId: user.id,
-      ownerId,
-      channelType: 'api',
-      memoryStore: deps.memoryStore,
-      episodicStore: deps.episodicStore,
-      sessionStateStore: deps.sessionStateStore,
-      analytics: deps.analytics,
-      usageStore: deps.usageStore,
-      userMessageId: storedUserMsg.id,
-      compartments: turnScope.writeCompartments,
-      projectIds: turnScope.writeProjectIds,
-      authority,
-    }))
-    // Gate on the serving provider (the `model` resolved above) — the strip
-    // is Gemini-only and would erase a Qwen turn's tool calls. See tool-pairing.ts.
-    let messages: Message[] = stripUnsignedToolUses(
-      compactionResult.messages,
-      modelRequiresToolSignatures(model),
-    )
-
-    // Inject the retry/edit hint into the last user turn for the
-    // model only — the persisted row stays clean. Mirrors
-    // chat.ts:808–826.
-    if (retryHint && messages.length > 0) {
-      const lastIdx = messages.length - 1
-      const last = messages[lastIdx]
-      if (last.role === 'user') {
-        const cloned: Message = {
-          role: 'user',
-          content:
-            typeof last.content === 'string'
-              ? retryHint + last.content
-              : [{ type: 'text', text: retryHint }, ...last.content],
+      // Inject the retry/edit hint into the last user turn for the
+      // model only — the persisted row stays clean. Mirrors
+      // chat.ts:808–826.
+      if (retryHint && messages.length > 0) {
+        const lastIdx = messages.length - 1
+        const last = messages[lastIdx]
+        if (last.role === 'user') {
+          const cloned: Message = {
+            role: 'user',
+            content:
+              typeof last.content === 'string'
+                ? retryHint + last.content
+                : [{ type: 'text', text: retryHint }, ...last.content],
+          }
+          messages = [...messages.slice(0, lastIdx), cloned]
         }
-        messages = [...messages.slice(0, lastIdx), cloned]
+      }
+
+      return {
+        systemPrompt: fullSystemPrompt,
+        messages,
+        candidateTools: baseTools,
+        trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
+        userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
+        context: { activeCapabilities },
       }
     }
 
@@ -1566,12 +1580,29 @@ async function executePublicTurnInScope(
       await assertDeliveryAudience()
       sendEvent = input.delivery === 'sse' ? openPublicTurnSse(res) : null
       sendEvent?.('session', { sessionId: channelId })
+      const actorTimezone = (internalScope ? user.timezone : null) ?? owner.timezone ?? 'UTC'
+      const initialPrompt = buildSplitSystemPrompt({
+        basePrompt: deps.systemPrompt, charter: resolveCharter(assistant),
+        memoryContext: resolvePublicContextBlock({ assistantName: assistant.name, memoryContext: '' }),
+        currentDateTime: new Date().toLocaleString('en-US', { timeZone: actorTimezone, dateStyle: 'full', timeStyle: 'short' }),
+        timezone: actorTimezone,
+        speakerIdentity: internalScope
+          ? { name: user.name ?? user.email ?? 'Workspace member', email: user.email }
+          : undefined,
+        preflightContext: endUserContext,
+      })
+      const runtimeSystemContext = formatPrivateRuntimeContext(
+        [initialPrompt.privateRuntimeContext, formatActiveWorkspaceContext(turnScope)].filter(Boolean).join('\n\n'),
+      )
+      const userVisibleContext = initialPrompt.userVisibleContext
       await turnOwner.prepareRun({
-        systemPrompt: fullSystemPrompt,
-        messages,
-        candidateTools: baseTools,
+        systemPrompt: initialPrompt.stablePrompt,
+        messages: [bindScopeSources<Message>({ role: 'user', content: retryHint ? retryHint + body.message : userContent },
+          storedUserSource ? [storedUserSource] : [])],
+        candidateTools: new Map(),
         trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
         userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
+        contextDiscovery: discoverContext,
       })
       await assertTurnCurrent()
       const turnLoopResult = await turnOwner.run({
@@ -1629,7 +1660,6 @@ async function executePublicTurnInScope(
           userTimezone:
             (internalScope ? user.timezone : null) ?? owner.timezone ?? undefined,
           sessionStateStore: deps.sessionStateStore,
-          activeCapabilities,
         },
         channelType: 'api',
         // Reactive compaction on context-overflow errors —

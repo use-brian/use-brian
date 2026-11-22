@@ -30,12 +30,16 @@
  *
  * [COMP:api/turn-kernel]
  */
+import { z } from 'zod'
+import { NO_TOOL_TIMEOUT } from '@use-brian/agent-runtime/engine/tool-executor.js'
+import type { DiscoveredQueryContext } from '@use-brian/agent-runtime/engine/query-loop.js'
 import type { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import { queryLoop } from '@use-brian/core/engine/query-loop-defaults.js'
 import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
 import type { QueryOutputProvenance } from '@use-brian/agent-runtime/engine/output-provenance.js'
 import {
   assertModelOutputAuthority,
+  CONVERSATION_CONTEXT_TOOL,
   type QueryEvent,
   type QueryLoopOptions,
   type QueryUsageSnapshot,
@@ -62,7 +66,7 @@ import type { SessionPolicy } from '../session-kind.js'
 import { ownsTurnDeliveryAdmission, type TurnDeliveryAdmission } from '../context-scope/admission.js'
 import { openTurnAdmissionClosure, type AdmissionClosureStats, type TurnAdmissionClosure } from '../context-scope/admission-closure.js'
 import { registerTurnAbort, releaseTurn, startLeaseHeartbeat, takeTurnLease, unregisterTurnAbort,TurnLeaseLostError,TurnStoppedError,turnAbortKind } from './lease.js'
-import { captureTurnUsageBilling, type TurnBilling, type TurnUsageBilling, type TurnUsageSettlement } from './billing.js'
+import { captureTurnUsageBilling, type TurnBilling, type TurnUsageBilling, type TurnUsageSettlement, type PriorTurnSpend } from './billing.js'
 import { bindSessionTurnAuthority,isAuthorityChangedError } from '../context-scope/authority-lease.js'
 import { bindVerifiedResumeEvidence } from '../context-scope/native-invocation-evidence.js'
 import { findSessionTurnLeaseState, type TurnEndReason, type RecoveredTurn } from '../db/sessions.js'
@@ -218,7 +222,7 @@ export function openTurnSqlScope(): TurnSqlScope {
 }
 
 /** Values only the original owner's `prepareRun` supplies to its run. */
-const PREPARED_RUN_KEYS = ['systemPrompt', 'runtimeSystemContext', 'messages', 'tools', 'maxTokens', 'inputTokenLimit'] as const
+const PREPARED_RUN_KEYS = ['systemPrompt', 'runtimeSystemContext', 'messages', 'tools', 'maxTokens', 'inputTokenLimit', 'takeDiscoveredContext'] as const
 type PreparedRunKey = typeof PREPARED_RUN_KEYS[number]
 type KernelLoop = AssistantTurnLoopInput['loop']
 /** A prepared run's loop: the owner supplies tools, prompt, messages, runtime
@@ -239,6 +243,14 @@ export type PreparedTurnRunView = Readonly<{
   /** Analytics-only copy of the adopted provider messages, without source bindings. */
   messageSnapshot(): Message[]
 }>
+
+function adoptedRoutine(routine: QueryLoopOptions['routineCalendarRead'], prepared: PreparedTurnRun) {
+  if (!routine) return undefined
+  return { ...routine, calendarTools: new Map([...routine.calendarTools].map(([name, candidate]) => {
+    if (!prepared.adoptsTool(name, candidate)) throw Object.assign(new Error('The routine calendar tool is not the adopted original.'), { reason: 'authority_changed' as const, retrySafe: false })
+    return [name, prepared.tools.get(name)!] as const
+  })) }
+}
 
 /** The existing kernel owns the complete lease lifetime, including recovery.
  * The token identifies writes; it never proves permission to perform them. */
@@ -312,7 +324,7 @@ class AssistantTurnOwner {
   /** The turn's capability roster under the original owner (M3 catalog port).
    * Today it delegates unchanged to the entrypoint's existing composition. */
   prepareCapabilities(request: TurnCapabilityRequest): Promise<TurnCapabilityResult> {
-    if (this.capabilityProfile || this.runPreparationStarted || this.ran || this.closed) throw new Error('Capability preparation is unavailable or already started.')
+    if (this.capabilityProfile || this.preparationLocked || this.closed) throw new Error('Capability preparation is unavailable or already started.')
     if (this.modelPreparation && this.modelPreparation.lane !== request.profile) throw capabilityProfileChanged()
     this.capabilityProfile = request.profile
     const { tools, compose } = captureCapabilityComposition(request)
@@ -337,7 +349,7 @@ class AssistantTurnOwner {
     return this.modelPreparation.tools(candidates)
   }
   prepareBackgroundModel(request: { model?: string; configuredDefault?: boolean }) {
-    if (!this.modelPreparation || this.backgroundPreparationStarted || this.ran || this.closed) throw new Error('Background model preparation is unavailable or already started.')
+    if (!this.modelPreparation || this.backgroundPreparationStarted || this.closed) throw new Error('Background model preparation is unavailable or already started.')
     this.backgroundPreparationStarted = true
     const preparation = this.modelPreparation, original = { ...request }
     const prepared = this.frame('preparation', () => Promise.resolve().then(() => preparation.background(original)).then(background => {
@@ -359,7 +371,7 @@ class AssistantTurnOwner {
     return prepared
   }
   prepareTools(candidates: ReadonlyMap<string, Tool>): Map<string, Tool> {
-    if (!this.modelPreparation || this.ran || this.closed) throw new Error('Tool preparation requires the original prepared turn.')
+    if (!this.modelPreparation || this.ran && !this.discovering || this.closed) throw new Error('Tool preparation requires the original prepared turn.')
     return this.modelPreparation.tools(candidates)
   }
   private retainedPreparationAccumulator: ContextScopeAccumulator | undefined
@@ -369,7 +381,7 @@ class AssistantTurnOwner {
    * never a permission); the reader's own admitted query decides visibility. */
   prepareHistory(request: TurnHistoryRequest): Promise<CapturedTurnHistory> {
     const preparation = this.modelPreparation
-    if (!preparation || this.historyPreparationStarted || this.runPreparationStarted || this.ran || this.closed) {
+    if (!preparation || this.historyPreparationStarted || this.preparationLocked || this.closed) {
       throw new Error('History preparation is unavailable or already started.')
     }
     preparation.assertHistoryAuthority(request.native)
@@ -390,6 +402,11 @@ class AssistantTurnOwner {
     this.modelPreparations.push(prepared)
     return prepared
   }
+  private discovering = false
+  private get preparationLocked(): boolean {
+    return (this.runPreparationStarted || this.ran) && !this.discovering
+  }
+  private takeDiscoveredContext: (() => DiscoveredQueryContext | undefined) | undefined
   private runPreparationStarted = false
   private preparedRun: PreparedTurnRun | undefined
   /** Final assembly under the original invocation and prepared main model. The
@@ -400,16 +417,102 @@ class AssistantTurnOwner {
     const model = this.preparedMainModel
     if (!model) throw new Error('The original main model has not been prepared.')
     this.runPreparationStarted = true
-    const assemble = this.modelPreparation.captureRun(input, model, this.retainedPreparationAccumulator)
+    const preparation = this.modelPreparation
+    const discover = input.contextDiscovery
+    let initial = input
+    if (discover) {
+      if (input.messages.length !== 1 || input.messages[0]?.role !== 'user') {
+        throw new Error('The initial context-discovery frame requires one current user message.')
+      }
+      if (!['web', 'channel', 'public'].includes(preparation.lane) || input.candidateTools.size) {
+        throw new Error('Context discovery requires an attended turn with only its discovery tool.')
+      }
+      let ready: DiscoveredQueryContext | undefined
+      let continuationModel: PreparedTurnModel | undefined
+      let loading: Promise<void> | undefined
+      let failure: { error: unknown } | undefined
+      this.takeDiscoveredContext = () => {
+        if (failure) throw failure.error
+        const next = ready
+        if (next && continuationModel) {
+          const previous = this.preparedMainModel!
+          // A newly selected route can fall back to a different payer later,
+          // even if its current model label and key source still match.
+          if (this.usageSnapshot && continuationModel !== previous) {
+            this.priorSpend = { spend: structuredClone(this.usageSnapshot), keySource: previous.providerKeySource, nextTier: continuationModel.logicalTier }
+          }
+          this.preparedMainModel = continuationModel
+        }
+        ready = undefined
+        return next
+      }
+      const discoveryTool: Tool = {
+        name: CONVERSATION_CONTEXT_TOOL,
+        description: 'Load the permitted conversation history, referenced material, and tools for this request. Use for follow-ups, earlier work, personal facts or actions before replying. Answer self-contained requests directly.',
+        inputSchema: z.object({}).strict(), isReadOnly: true, isConcurrencySafe: false, requiresConfirmation: false,
+        timeoutMs: NO_TOOL_TIMEOUT,
+        execute: async (_input, toolContext) => {
+          const signal = toolContext.abortSignal
+          signal.throwIfAborted()
+          loading ??= this.frame('preparation', async () => {
+            this.discovering = true
+            try {
+              const frame = await discover(signal)
+              signal.throwIfAborted()
+              // Snapshot the adapter's messages, scoped tools and prompt now, before
+              // a model promotion can yield to another task.
+              const assemble = preparation.captureRun(frame, model, this.retainedPreparationAccumulator)
+              const readers = frame.context?.requestTools && preparation.captureWorkerReaders(frame.context.requestTools)
+              const nextModel = frame.mainModel ? await preparation.main(structuredClone(frame.mainModel)) : model
+              if (nextModel.refusal || nextModel.imageRoute === 'refuse') throw new Error('The discovered turn model is unavailable.')
+              const run = await assemble()
+              signal.throwIfAborted()
+              preparation.assertLoopContext(toolContext)
+              const context = frame.context
+              ready = {
+                provider: nextModel.provider, model: servedTurnModel(nextModel), systemPrompt: run.systemPrompt,
+                runtimeSystemContext: run.runtimeSystemContext, messages: run.messages, tools: new Map(run.tools),
+                maxTokens: nextModel.maxTokens, inputTokenLimit: nextModel.inputTokenLimit,
+                maxTurns: frame.maxTurns, maxToolCalls: frame.maxToolCalls, suppressIntermediateText: frame.suppressIntermediateText,
+                workerDrainPrompt: frame.workerDrainPrompt, planNudgeCap: frame.planNudgeCap, groundingGate: frame.groundingGate,
+                toolSelection: frame.toolSelection, routineCalendarRead: adoptedRoutine(frame.routineCalendarRead, run),
+                context: {
+                  ...(readers ? { requestTools: readers } : {}),
+                  ...(context?.activeCapabilities ? { activeCapabilities: new Set(context.activeCapabilities) } : {}),
+                  ...(context?.preferredChannel !== undefined ? { preferredChannel: context.preferredChannel } : {}),
+                  ...(context?.workflowProposalReceipt ? { workflowProposalReceipt: context.workflowProposalReceipt } : {}),
+                  ...(context?.researchMode !== undefined ? { researchMode: context.researchMode } : {}),
+                  ...(context?.workerRuntime ? { workerRuntime: context.workerRuntime } : {}),
+                },
+              }
+              this.preparedRun = run
+              continuationModel = nextModel
+            } catch (error) {
+              failure = { error }
+              throw error
+            } finally { this.discovering = false }
+          })
+          await loading
+          signal.throwIfAborted()
+          return { data: 'The permitted conversation context and available tools are ready.' }
+        },
+      }
+      initial = { ...input, candidateTools: new Map([[discoveryTool.name, discoveryTool]]),
+        trustedContributions: [...input.trustedContributions ?? [], { name: 'context_discovery',
+          content: `You have the current user message. Answer directly when it is self-contained. Call ${CONVERSATION_CONTEXT_TOOL} before answering from earlier exchanges or private workspace material, resolving references, or taking an action. Use the resulting evidence and tools to complete the request.` }] }
+    }
+    const assemble = preparation.captureRun(initial, model, this.retainedPreparationAccumulator, Boolean(discover))
     const prepared = this.frame('preparation', () => Promise.resolve().then(assemble).then((run): PreparedTurnRunView => {
       this.preparedRun = run
-      return Object.freeze({ grounding: run.grounding,
-        adoptsTool: (name: string, candidate: Tool) => run.adoptsTool(name, candidate),
-        messageSnapshot: () => structuredClone(run.messages) })
+      const current = () => this.preparedRun!
+      return Object.freeze({ get grounding() { return current().grounding },
+        adoptsTool: (name: string, candidate: Tool) => current().adoptsTool(name, candidate),
+        messageSnapshot: () => structuredClone(current().messages) })
     }))
     this.modelPreparations.push(prepared)
     return prepared
   }
+  private priorSpend: PriorTurnSpend | undefined
   private billing: ReturnType<typeof captureTurnUsageBilling> | undefined
   private usageSettlement: Promise<TurnUsageSettlement> | undefined
   private running: Promise<TurnLoopResult> | undefined
@@ -425,7 +528,7 @@ class AssistantTurnOwner {
     if ((this.ran && !this.runDrained && !this.producerTerminal) || (!this.ran && !this.closed)) {
       return Promise.reject(new Error('Turn usage is not terminal yet.'))
     }
-    return this.usageSettlement ??= Promise.resolve().then(() => this.billing?.(this.usage) ?? { status: this.usage ? 'not_configured' as const : 'no_usage' as const })
+    return this.usageSettlement ??= Promise.resolve().then(() => this.billing?.(this.usage, this.priorSpend) ?? { status: this.usage ? 'not_configured' as const : 'no_usage' as const })
   }
   private usageSnapshot:QueryUsageSnapshot|null=null
   get usage():QueryUsageSnapshot|null{return this.usageSnapshot?structuredClone(this.usageSnapshot):null}
@@ -468,19 +571,19 @@ class AssistantTurnOwner {
     if (!prepared) throw new Error('The original run preparation has not finished.')
     if (PREPARED_RUN_KEYS.some(key => key in supplied)) throw new Error('The original owner supplies the prepared run.')
     this.modelPreparation.assertLoopContext(supplied.context)
-    let routine = supplied.routineCalendarRead
-    if (routine) {
-      // Identity query only: a candidate the owner did not adopt unchanged refuses.
-      routine = { ...routine, calendarTools: new Map([...routine.calendarTools].map(([name, candidate]) => {
-        if (!prepared.adoptsTool(name, candidate)) throw Object.assign(new Error('The routine calendar tool is not the adopted original.'), { reason: 'authority_changed' as const, retrySafe: false })
-        return [name, prepared.tools.get(name)!] as const
-      })) }
-    }
-    const loop: KernelLoop = { ...supplied, systemPrompt: prepared.systemPrompt, runtimeSystemContext: prepared.runtimeSystemContext,
+    const take = this.takeDiscoveredContext
+    const takeDiscoveredContext = take && (() => {
+      const next = take()
+      if (!next) return undefined
+      next.routineCalendarRead ??= adoptedRoutine(supplied.routineCalendarRead, this.preparedRun!)
+      next.toolSelection ??= supplied.toolSelection
+      return next
+    })
+    const routine = !take ? adoptedRoutine(supplied.routineCalendarRead, prepared) : undefined
+    const loop: KernelLoop = { ...supplied, routineCalendarRead: routine, toolSelection: take ? undefined : supplied.toolSelection, takeDiscoveredContext, systemPrompt: prepared.systemPrompt, runtimeSystemContext: prepared.runtimeSystemContext,
       messages: inheritScopeSources([...prepared.messages], prepared.messages), tools: new Map(prepared.tools),
       ...(prepared.maxTokens !== undefined ? { maxTokens: prepared.maxTokens } : {}),
-      ...(prepared.inputTokenLimit !== undefined ? { inputTokenLimit: prepared.inputTokenLimit } : {}),
-      ...(routine ? { routineCalendarRead: routine } : {}) }
+      ...(prepared.inputTokenLimit !== undefined ? { inputTokenLimit: prepared.inputTokenLimit } : {}) }
     this.ran = true
     this.sinkKind = params.sink.kind
     this.recoveryContext = { ...supplied.context }
