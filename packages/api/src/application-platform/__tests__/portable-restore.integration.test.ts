@@ -264,7 +264,10 @@ describe.skipIf(phase!=='target').sequential('[COMP:api/portable-restore] authen
      ['acl',`GRANT EXECUTE ON FUNCTION public.harness_execution_human(uuid,uuid) TO app_user`,'portable_successor_catalog_changed'],
      ['trigger',`ALTER TABLE public.project_harness_runs DISABLE TRIGGER harness_run_audit`,'portable_successor_catalog_changed'],
      ['unknown-prefix',`CREATE FUNCTION public.harness_execution_unreviewed() RETURNS int LANGUAGE sql AS 'SELECT 1'`,'portable_successor_unknown_catalog_object'],
-     ...(head==='8342_memory_history_terminal_proof.sql'?[
+     ...(head==='8343_conversation_capture_linear_aggregation.sql'?[
+      ['capture-release-receipt',`DELETE FROM public._migrations WHERE name='8343_conversation_capture_linear_aggregation.sql'`,'portable_successor_migration_tail_missing'],
+     ]:[]),
+     ...(head>='8342_memory_history_terminal_proof.sql'?[
       ['memory-history-release-receipt',`DELETE FROM public._migrations WHERE name='8342_memory_history_terminal_proof.sql'`,'portable_successor_migration_tail_missing'],
      ]:[]),
      ...(head>='8341_crm_import_csv_index.sql'?[
