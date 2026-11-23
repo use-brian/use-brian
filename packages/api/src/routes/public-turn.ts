@@ -37,10 +37,6 @@ import { createMemoryTools } from '@use-brian/core/memory/tools.js'
 import { buildWorkspaceFilesContext, selectWorkspaceFilesContextRows } from '@use-brian/core/workspace-files/context-builder.js'
 import { calculateCost } from '@use-brian/agent-runtime/billing/cost-tracker.js'
 import { modelToCompactionTier } from '@use-brian/agent-runtime/compaction/compact.js'
-import {
-  stripUnsignedToolUses,
-  modelRequiresToolSignatures,
-} from '@use-brian/agent-runtime/engine/tool-pairing.js'
 import { unionCompartments } from '@use-brian/agent-runtime/security/compartments.js'
 import { canRead } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
@@ -1522,12 +1518,7 @@ async function executePublicTurnInScope(
         projectIds: turnScope.writeProjectIds,
         authority,
       }))
-      // Gate on the serving provider (the `model` resolved above) — the strip
-      // is Gemini-only and would erase a Qwen turn's tool calls. See tool-pairing.ts.
-      let messages: Message[] = stripUnsignedToolUses(
-        compactionResult.messages,
-        modelRequiresToolSignatures(model),
-      )
+      let messages: Message[] = compactionResult.messages
 
       // Inject the retry/edit hint into the last user turn for the
       // model only — the persisted row stays clean. Mirrors

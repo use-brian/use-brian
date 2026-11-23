@@ -69,7 +69,9 @@ query loop, and localized Settings surface:
 - `@openai/codex` inference and the `@openai/codex-catalog` account-only alias
   share one exact schema-reviewed version; their RPC allowlists remain separate.
 - A bounded, Zod-validated JSONL RPC peer owns initialization, correlation,
-  notifications, server requests, cancellation, and shutdown.
+  notifications, server requests, cancellation, and shutdown. A request timeout
+  reports its method, its last phase and the time spent queuing, checking input
+  permission, writing to stdin and waiting for a response.
 - A managed process seam starts the pinned package over stdio with an isolated
   `CODEX_HOME`, a private working directory under `CODEX_HOME/runtime/`, and an allowlisted
   environment that excludes OpenAI/Codex API keys and access tokens.
@@ -221,6 +223,9 @@ provider was unavailable. It remains readable only as migration input.
 
 Settings → Models now owns one workspace route per Brian tier. A route is one
 of: `Auto`, an exact active registry alias, or a verified custom profile.
+On OSS and Outpost, every available managed chat model in the Standard, Pro,
+Max or Research catalog can serve any of these four routes. The selected
+route keeps its own policy tier when several routes point to the same model.
 `Auto` is the only mode that permits provider substitution. An exact managed
 alias reaches the routing provider with substitution disabled, so a missing
 Codex entitlement, disconnected account, quota error, or provider failure

@@ -1365,6 +1365,21 @@ export const CRM_PRIVACY_COVERAGE: readonly CrmPrivacyCoverageEntry[] = [
     "reason": "Shared source bytes are redacted; import rows and source inventory provide explicit lineage."
   },
   {
+    domain: 'crm_import_csv_indexes',
+    columns: ['id', 'workspace_id', 'staged_file_id', 'source_id', 'source_version', 'parser_version', 'claim_token', 'claim_expires_at', 'source_hash', 'total_rows', 'headers'],
+    excludedColumns: ['claim_token', 'headers'],
+    orderBy: 't.id', workspaceWhere: 'false', subjectWhere: null, subjectRedactions: {}, transforms: {},
+    reason: 'The processing index is derived from the authoritative source and is erased with it.',
+  },
+  {
+    domain: 'crm_import_csv_index_chunks',
+    columns: ['index_id', 'chunk_index', 'start_byte', 'end_byte', 'chunk_hash', 'staged_bytes'],
+    excludedColumns: ['staged_bytes'],
+    orderBy: 't.index_id,t.chunk_index', workspacePredicate: 'false', workspaceWhere: 'false', subjectWhere: null,
+    subjectRedactions: {}, transforms: {},
+    reason: 'The processing chunks duplicate the original source and are erased with it.',
+  },
+  {
     "domain": "crm_intake_credential_definitions",
     "columns": [
       "workspace_id",

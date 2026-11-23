@@ -21,6 +21,7 @@ vi.mock('../../db/client.js', () => {const pool={
     if (/^(BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE SAVEPOINT)/.test(sql) || sql.includes("set_config('app.system_bypass'") || sql.includes('pg_advisory_xact_lock')) return Promise.resolve({ rows: [] })
     if (sql.startsWith('SELECT id FROM workspaces WHERE id=$1 AND department_read_v2 FOR UPDATE')) return Promise.resolve({ rows: [] })
     if (sql.includes('SELECT role FROM workspace_members')) return Promise.resolve({ rows: [{ role: 'admin' }] })
+    if (sql.includes('SELECT id FROM workspace_files')) return Promise.resolve({ rows: [{ id: 'file' }] })
     return mocks.query(sql, values)
   },
 } } };return {query:mocks.query,getPool:()=>pool,getAppPool:()=>pool,applyRLSGucs:mocks.applyRLSGucs} })
@@ -34,6 +35,23 @@ vi.mock('../../db/crm.js', () => ({
 }))
 vi.mock('../../db/crm-r2.js', () => ({ updateCrmCustomFields: vi.fn() }))
 vi.mock('../../db/entities-store.js', () => ({ getEntityById: vi.fn(), updateEntity: vi.fn() }))
+vi.mock('../../db/crm-import-csv-index.js', async () => {
+  const { indexCrmCsv } = await import('../import-csv.js')
+  return { createCrmCsvIndexStore: () => {
+    const indexes = new Map()
+    return {
+      ensure: async (source: { version: string }, read: () => Promise<Buffer>) => {
+        if (!indexes.has(source.version)) {
+          const { spans, ...layout } = indexCrmCsv(await read())
+          indexes.set(source.version, { ...layout, id: source.version, spans })
+        }
+        return indexes.get(source.version)
+      },
+      chunk: async (id: string, index: number) => indexes.get(id).spans[index],
+      chunks: async (id: string) => indexes.get(id).spans,
+    }
+  } }
+})
 
 import { createCrmProductionImportService } from '../import-service.js'
 
@@ -54,7 +72,20 @@ const context: CrmOperationsContext & { actor: { kind: 'user'; userId: string } 
 }
 
 const readBytes = vi.fn(async () => ({ ok: true, value: { file: { id: fileId }, bytes } }))
-const filesApi = { readBytes } as unknown as FilesApi
+const fileVersions = new Map<string, Buffer>()
+const filesApi = {
+  statByteVersion: async () => {
+    const response = await readBytes()
+    const current = response.value.bytes
+    const version = createHash('sha256').update(current).digest('hex')
+    fileVersions.set(version, current)
+    return { ok: true, value: { file: { id: fileId, scopeVersion: '1', storageUri: 'fixture://local' }, version, byteCount: current.length, rangeReads: true } }
+  },
+  readByteVersion: async (_ctx: unknown, head: { version: string; file: unknown }, span?: { start: number; end: number }) => {
+    const current = fileVersions.get(head.version)!
+    return { ok: true, value: { file: head.file, bytes: span ? current.subarray(span.start, span.end) : current } }
+  },
+} as unknown as FilesApi
 const operations = { execute: vi.fn() }
 
 function job(status: 'ready' | 'paused' | 'completed', overrides: Record<string, unknown> = {}) {
@@ -89,6 +120,7 @@ function job(status: 'ready' | 'paused' | 'completed', overrides: Record<string,
 describe('[COMP:crm/production-import] production CRM import', () => {
   beforeEach(() => {
     vi.resetAllMocks()
+    fileVersions.clear()
     readBytes.mockResolvedValue({ ok: true, value: { file: { id: fileId }, bytes } })
     mocks.createContact.mockResolvedValue({ id: entityId })
     mocks.updateContact.mockResolvedValue({ id: entityId })

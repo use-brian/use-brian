@@ -284,7 +284,7 @@ describe('[COMP:ingest/doc-page-distillation] distillPageToBrain', () => {
       expect(result.ingested).toBe(true)
       expect(result.sectionsProcessed).toBe(0)
       expect(episodeCalls).toHaveLength(0)
-      expect(deps.upsertPageSource).toHaveBeenCalledWith({ pageId: 'p', chunks: [] })
+      expect(deps.upsertPageSource).toHaveBeenCalledWith({ pageId: 'p', chunks: [], contentHash: result.contentHash })
     })
   })
 })

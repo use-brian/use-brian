@@ -9,6 +9,7 @@ import type { HttpRetryWindow } from './types.js'
  * calling. We hit the REST API and preserve raw response parts (including
  * thoughtSignature) in session history.
  */
+import { stripUnsignedToolUses } from '../engine/tool-pairing.js'
 import { debugDocumentFlow } from '../engine/document-flow-debug.js'
 import { Agent } from 'undici'
 import { servingModelAlias, providerAliasMap, recordedAliasIds, providerModelIds, registryRow } from '@use-brian/shared/model-registry'
@@ -175,7 +176,9 @@ function messagesToGeminiParts(messages: Message[]): GeminiPart[] {
 
 function toGeminiContents(messages: Message[]): GeminiContent[] {
   const contents: GeminiContent[] = []
-  for (const msg of messages) {
+  // The full transcript can include unsigned calls from a previous provider.
+  // Remove their paired results only for this Gemini wire request.
+  for (const msg of stripUnsignedToolUses(messages)) {
     if (msg.role === 'system') continue
     const parts = messagesToGeminiParts([msg])
     if (parts.length > 0) {

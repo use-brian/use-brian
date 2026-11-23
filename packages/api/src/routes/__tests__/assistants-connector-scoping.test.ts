@@ -71,7 +71,7 @@ beforeEach(() => {
   workspaceStore.getRole.mockReset().mockResolvedValue('owner')
 })
 
-function makeApp(userId: string) {
+function makeApp(userId: string, settingsOverrides = {}) {
   const app = express()
   app.use(express.json())
   app.use((req, _res, next) => {
@@ -85,7 +85,7 @@ function makeApp(userId: string) {
       assistantConnectorStore: assistantConnectorStore as never,
       connectorInstanceStore: connectorInstanceStore as never,
       connectorGrantStore: connectorGrantStore as never,
-      mcpSettingsStore: mcpSettingsStore as never,
+      mcpSettingsStore: { ...mcpSettingsStore, ...settingsOverrides } as never,
       workspaceToolPolicyStore: workspaceToolPolicyStore as never,
       workspaceStore: workspaceStore as never,
       // Built-in primitive rows report `enabled` from the capability grant
@@ -488,6 +488,32 @@ describe('[COMP:routes/assistants-connector-scoping] GET /:assistantId/connector
 })
 
 describe('[COMP:routes/assistants-connector-scoping] account-bound connector governance routes', () => {
+  it('batches tool picker overrides for app, exact instance and provider fallback', async () => {
+    queueMembershipAndTeam('owner', 'ws-1')
+    const getPolicies = vi.fn(async () => [
+      { assistantId: '00000000-0000-0000-0000-000000000000', serverName: 'github', toolName: 'githubSearchRepositories', policy: 'ask' },
+      { assistantId: 'a-1', serverName: 'github:work', toolName: 'githubSearchRepositories', policy: 'allow' },
+      { assistantId: 'a-1', serverName: 'github', toolName: 'githubSearchRepositories', policy: 'block' },
+      { assistantId: 'a-1', serverName: 'github', toolName: 'githubGetRepository', policy: 'block' },
+    ])
+    const response = await request(makeApp('u-owner', { getPolicies }))
+      .get('/api/assistants/a-1/connectors/github%3Awork/tools')
+    expect(response.status).toBe(200)
+    expect(response.body.tools).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'githubSearchRepositories', appPolicy: 'ask', assistantPolicy: 'allow', effectivePolicy: 'ask' }),
+      expect.objectContaining({ name: 'githubGetRepository', appPolicy: 'allow', assistantPolicy: 'block', effectivePolicy: 'block' }),
+    ]))
+    expect(getPolicies).toHaveBeenCalledExactlyOnceWith({
+      userId: 'u-owner', toolNames: expect.arrayContaining(['githubSearchRepositories', 'githubGetRepository']),
+      scopes: [
+        { assistantId: '00000000-0000-0000-0000-000000000000', serverName: 'github' },
+        { assistantId: 'a-1', serverName: 'github:work' },
+        { assistantId: 'a-1', serverName: 'github' },
+      ],
+    })
+    expect(mcpSettingsStore.getPolicy).not.toHaveBeenCalled()
+  })
+
   it('reads and writes L2 policy under the instance id while L1 stays canonical', async () => {
     mockAccess.mockResolvedValue({
       assistant: { id: 'a-1', name: 'A', workspaceId: 'ws-1' },

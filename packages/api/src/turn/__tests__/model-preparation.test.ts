@@ -3,6 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { NOOP_TURN_LEDGER } from '@use-brian/agent-runtime/engine/turn-ledger.js'
 import type { LLMProvider, ProviderRequest } from '@use-brian/agent-runtime/providers/types.js'
+import { createRoutingProvider } from '@use-brian/agent-runtime/providers/routing.js'
 import {
   createExecutionContext,
   executionToolContext
@@ -28,6 +29,7 @@ const owners: AssistantTurn[] = [], pending: (() => void)[] = []
 function deferred() { let resolve!: () => void; const promise = new Promise<void>(yes => { resolve = yes }); pending.push(resolve); return { promise, resolve } }
 afterEach(async () => { pending.splice(0).forEach(resolve => resolve()); for (const owner of owners.splice(0)) await owner.finish('failed') })
 beforeEach(() => vi.clearAllMocks())
+afterEach(() => vi.unstubAllEnvs())
 const identity = { workspace: '00000000-0000-4000-8000-000000000030', assistant: 'fixture-assistant', user: 'fixture-user', session: 'fixture-session' }
 async function fixture(assertCurrent = vi.fn(async () => {}), workspaceId: string = identity.workspace) {
   const abort = new AbortController(), authority: CurrentAuthorityBoundary = { assertCurrent, async execute(operation) { await assertCurrent(); return operation() } }
@@ -128,6 +130,60 @@ it('[COMP:api/assistant-run-preparation] refuses alternate caller models and una
   await expect(resume.owner.prepareMainModel({ kind: 'resume', fallbackModel: 'fixture', selectedCustomModel: 'custom:missing' })).rejects.toThrow('no longer available')
 })
 
+it('[COMP:api/assistant-run-preparation] replays the checkpoint model through a changed tier route and refuses entitlement loss', async () => {
+  vi.stubEnv('USEBRIAN_EDITION', 'oss')
+  const f = await fixture()
+  const availability = new MutableProviderAvailability()
+  const saved = 'gpt-6.2-sol-pro'
+  availability.setModelCatalog('openai-codex', new Set(['gpt-6.2-sol', 'gpt-6-luna']))
+  const wire: string[] = []
+  const codex: LLMProvider = {
+    name: 'fixture', models: [saved],
+    async *stream(request) {
+      wire.push(request.model)
+      yield { type: 'message_start', model: request.model }
+    },
+    createSession(options) { return { send: messages => this.stream({ ...options, messages }) } },
+  }
+  const managed = createRoutingProvider({ 'openai-codex': codex }, { availability })
+  const readCurrent = vi.fn(async () => ({ tier: 'standard', modelAlias: 'gpt-6-luna' }))
+  const store = { getTierRouteSystem: readCurrent } as unknown as WorkspaceCustomLlmEndpointStore
+  const resolver = createWorkspaceCustomLlmResolver(store, { managedProvider: managed })
+  f.owner.bindModelPreparation({ ...f.invocation, toolProfile: 'resume' }, {
+    ...services(), provider: managed, configuredProviders: availability, resolveWorkspaceCustomLlm: resolver,
+  })
+  const selected = await f.owner.prepareMainModel({ kind: 'resume', fallbackModel: chatTierDefaults().standard,
+    selectedTier: 'standard', selectedCustomModel: saved })
+  expect(selected).toMatchObject({ model: saved, logicalTier: 'standard', providerKeySource: 'platform' })
+  const dispatch = async () => {
+    const session = selected.provider.createSession({ model: selected.model, systemPrompt: '' })
+    for await (const _ of session.send([{ role: 'user', content: 'Continue.' }])) { /* drain */ }
+  }
+  await dispatch()
+  availability.setModelCatalog('openai-codex', new Set(['gpt-6-luna']))
+  await expect(dispatch()).rejects.toThrow('not available')
+  expect(wire).toEqual([saved])
+  expect(readCurrent).not.toHaveBeenCalled()
+  // A request-supplied managed alias has no checkpoint authority.
+  const regular = await resolver({ workspaceId: identity.workspace, requestedModel: saved, requestedTier: 'standard' })
+  expect(regular?.selector).toBe('gpt-6-luna')
+})
+
+it.each([true, false])('[COMP:api/assistant-run-preparation] reopens only the saved custom profile on resume (available=%s)', async available => {
+  const f = await fixture()
+  const profile = endpoint(), saved = customLlmAlias(profile.id)
+  const getRuntimeSystem = vi.fn(async () => available ? profile : null)
+  const getTierRouteSystem = vi.fn(async () => ({ modelAlias: 'gpt-6.2-sol' }))
+  const resolver = createWorkspaceCustomLlmResolver({ getRuntimeSystem, getTierRouteSystem } as unknown as WorkspaceCustomLlmEndpointStore)
+  f.owner.bindModelPreparation({ ...f.invocation, toolProfile: 'resume' }, { ...services(), resolveWorkspaceCustomLlm: resolver })
+  const selected = f.owner.prepareMainModel({ kind: 'resume', fallbackModel: chatTierDefaults().standard,
+    selectedTier: 'standard', selectedCustomModel: saved })
+  if (available) await expect(selected).resolves.toMatchObject({ model: saved, logicalTier: 'standard', providerKeySource: 'user' })
+  else await expect(selected).rejects.toThrow('no longer available')
+  expect(getRuntimeSystem).toHaveBeenCalledExactlyOnceWith({ workspaceId: identity.workspace, profileId: profile.id })
+  expect(getTierRouteSystem).not.toHaveBeenCalled()
+})
+
 it('[COMP:api/assistant-run-preparation] preserves explicit image refusal and default image fallback with original legacy precedence', async () => {
   const custom = { ...services(), provider: { ...provider, name: 'fictional-custom' } }, legacyProvider = { ...provider, name: 'fictional-legacy' }
   const runtime = { provider: custom.provider, selector: 'custom:fictional', providerKeySource: 'user', supportsVision: false } as ResolvedWorkspaceCustomLlm
@@ -180,6 +236,53 @@ it('[COMP:api/assistant-run-preparation] refuses an actual background endpoint f
   await expect(request()).rejects.toThrow('530')
   expect(managedDispatch).not.toHaveBeenCalled(); expect(background.providerKeySource).toBe('user')
   expect(background.customLlm!.fallback.used).toBe(false)
+})
+
+it('[COMP:api/assistant-run-preparation] dispatches the exact self-hosted model and records the logical tier', async () => {
+  vi.stubEnv('USEBRIAN_EDITION', 'outpost')
+  const f = await fixture()
+  const availability = new MutableProviderAvailability()
+  availability.setModelCatalog('openai-codex', new Set(['gpt-6.2-sol', 'gpt-6-luna']))
+  const dispatched: string[] = []
+  const codex: LLMProvider = {
+    name: 'fixture-codex', models: ['gpt-6.2-sol', 'gpt-6-luna'],
+    async *stream(request) {
+      dispatched.push(request.model)
+      yield { type: 'message_start', model: request.model }
+      yield { type: 'text_delta', text: 'Fixture answer.' }
+      yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 7, outputTokens: 3 } }
+    },
+    createSession(options) { return { send: messages => this.stream({ ...options, messages }) } },
+  }
+  const managedProvider = createRoutingProvider({ 'openai-codex': codex }, { availability })
+  const store = { getTierRouteSystem: async ({ tier }: { tier: string }) =>
+    tier === 'standard' ? { tier, modelAlias: 'gpt-6.2-sol' } : null } as unknown as WorkspaceCustomLlmEndpointStore
+  const resolver = createWorkspaceCustomLlmResolver(store, { managedProvider })
+  f.owner.bindModelPreparation(f.invocation, { ...services(), configuredProviders: availability,
+    provider: managedProvider, resolveWorkspaceCustomLlm: resolver })
+  expect((await f.owner.prepareBackgroundModel({ configuredDefault: true })).customLlm).toBeNull()
+  const selected = await f.owner.prepareMainModel({ ...web(), requestedModel: 'standard' })
+  expect(selected).toMatchObject({ logicalModel: chatTierDefaults().standard, logicalTier: 'standard',
+    model: 'gpt-6.2-sol', customLlm: { selector: 'gpt-6.2-sol', modelTier: 'standard', providerKeySource: 'platform' } })
+  const recordUsage = vi.fn(async (_row: TurnUsageRow) => {})
+  f.owner.registerUsageBilling({ metadata: { userId: identity.user, actorUserId: identity.user, assistantId: identity.assistant,
+    sessionId: identity.session, modelTier: selected.logicalTier, source: 'included', triggerKey: 'main_response',
+    providerKeySource: selected.providerKeySource }, costPolicy: 'calculate', recordUsage })
+  await runPrepared(f.owner, f.context, { kind: 'sse' })
+  await f.owner.finish()
+  expect(dispatched).toEqual(['gpt-6.2-sol'])
+  expect(recordUsage).toHaveBeenCalledWith(expect.objectContaining({ model: 'gpt-6.2-sol', modelTier: 'standard', outputTokens: 3 }))
+
+  availability.setModelCatalog('openai-codex', new Set(['gpt-6-luna']))
+  const dispatchAfterWithdrawal = async () => {
+    for await (const _ of selected.provider.stream({ model: selected.model, systemPrompt: '', messages: [] })) { /* drain */ }
+  }
+  await expect(dispatchAfterWithdrawal()).rejects.toThrow('not available')
+  expect(dispatched).toEqual(['gpt-6.2-sol'])
+  vi.stubEnv('USEBRIAN_EDITION', 'hosted')
+  const hostedResolver = createWorkspaceCustomLlmResolver(store, { managedProvider })
+  await expect(hostedResolver({ workspaceId: identity.workspace, requestedTier: 'standard' }))
+    .rejects.toThrow("cannot serve the 'standard' tier")
 })
 
 describe('[COMP:api/assistant-run-preparation] actual endpoint fallback spend', () => {

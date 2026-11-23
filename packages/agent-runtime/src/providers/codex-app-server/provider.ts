@@ -3,7 +3,7 @@ import {toolInputTextProblem,isRejectedToolInputPreview} from '../../engine/reje
 import { Buffer } from 'node:buffer'
 import { MODEL_REGISTRY, providerAliasMap } from '@use-brian/shared/model-registry'
 import { renderSystemContext } from '../system-context.js'
-import { assertInputAuthority, isInputAuthorityError } from '../input-authority.js'
+import { assertInputAuthority, isInputAuthorityError, registerInputAdmissionOwner } from '../input-authority.js'
 import { registeredToolDefinitions, toolDiscoveryInstructions } from '../tool-registration.js'
 import { CodexTextReconciler } from './text-reconciler.js'
 import { z } from 'zod'
@@ -140,7 +140,7 @@ export function createCodexAppServerProvider(
     return runtime.createSession(sessionOptions)
   }
 
-  return {
+  return registerInputAdmissionOwner({
     name: 'openai-codex',
     models,
     toolSchemaMode: codexToolSchemaMode,
@@ -172,7 +172,7 @@ export function createCodexAppServerProvider(
     },
 
     createSession,
-  }
+  })
 }
 
 class CodexProviderRuntime {

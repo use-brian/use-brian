@@ -264,7 +264,15 @@ describe.skipIf(phase!=='target').sequential('[COMP:api/portable-restore] authen
      ['acl',`GRANT EXECUTE ON FUNCTION public.harness_execution_human(uuid,uuid) TO app_user`,'portable_successor_catalog_changed'],
      ['trigger',`ALTER TABLE public.project_harness_runs DISABLE TRIGGER harness_run_audit`,'portable_successor_catalog_changed'],
      ['unknown-prefix',`CREATE FUNCTION public.harness_execution_unreviewed() RETURNS int LANGUAGE sql AS 'SELECT 1'`,'portable_successor_unknown_catalog_object'],
-     ...(head==='8339_knowledge_source_path_identity.sql'?[
+     ...(head==='8342_memory_history_terminal_proof.sql'?[
+      ['memory-history-release-receipt',`DELETE FROM public._migrations WHERE name='8342_memory_history_terminal_proof.sql'`,'portable_successor_migration_tail_missing'],
+     ]:[]),
+     ...(head>='8341_crm_import_csv_index.sql'?[
+      ['batch-catalog-reader',`ALTER FUNCTION public.read_generic_application_catalog_states(uuid,uuid[]) COST 101`,'installation_additional_catalog_changed'],
+      ['csv-cleanup',`ALTER TABLE public.crm_import_sources DISABLE TRIGGER crm_import_csv_index_source_retired`,'installation_additional_catalog_changed'],
+      ['catalog-release-receipt',`DELETE FROM public._migrations WHERE name='8340_generic_application_catalog_batch.sql'`,'portable_successor_migration_tail_missing'],
+     ]:[]),
+     ...(head>='8339_knowledge_source_path_identity.sql'?[
       ['source-path-writer',`ALTER FUNCTION public.apply_knowledge_source_sync_worker(jsonb,jsonb) COST 101`,'installation_additional_catalog_changed'],
       ['source-path-index',`ALTER INDEX public.idx_kb_chunks_knowledge_entry RENAME TO fictional_chunk_index`,'installation_additional_catalog_changed'],
       ['source-path-receipt',`DELETE FROM public._migrations WHERE name='8339_knowledge_source_path_identity.sql'`,'portable_successor_migration_tail_missing'],

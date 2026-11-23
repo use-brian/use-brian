@@ -48,9 +48,10 @@ the launcher does not start another listener or substitute fixture credentials.
 The ChatGPT lane uses Codex-managed OAuth and live model discovery (design:
 [`plans/chatgpt-codex-oauth.md`](./plans/chatgpt-codex-oauth.md)). It stays
 Beta until release validation passes on the supported OS matrix.
-When the connected account lists them, Settings → Models offers GPT-6.2 Sol
-in Pro and Max and GPT-6.2 Astra in Research. Existing exact model selections
-keep their original version.
+In Settings → Models → Routing, each chat tier offers the available managed
+chat models from your connected providers. To use GPT-6.2 Sol throughout chat,
+select it for Standard, Pro, Max and Research. Each tier keeps its own turn
+limits, and an exact route requires the connected account to offer that model.
 
 Both `USEBRIAN_EDITION=oss` and `USEBRIAN_EDITION=outpost` enable the ChatGPT
 provider through the shared `selfManagedProviders` capability. API startup and

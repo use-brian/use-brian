@@ -16,8 +16,23 @@ const record = (prefix: string, alias: string, title: string, body: string, upda
 const brainTarget = (alias: string, primitive: string) => `jsonb_build_object('type','brain','id',${alias}.id,'primitive',${primitive})`
 const jsonText = (expression: string) => `(SELECT string_agg(value #>> '{}', ' ') FROM jsonb_path_query(coalesce(${expression}, '{}'::jsonb), 'strict $.**.text') value WHERE jsonb_typeof(value)='string')`
 
-/** Shared authorization, with native Project filtering before projection. */
-function searchSourceSql(projectScoped = false, countsOnly = false, conversationRecord = false): Record<WorkspaceSearchFamily, string> {
+const ITEM_PREFIXES = {
+  pages: ['page'],
+  knowledge: ['knowledge', 'memory'],
+  records: ['entity', 'record'],
+  tasks: ['task'],
+  files: ['file', 'recording'],
+  office: ['office'],
+  conversations: ['conversation'],
+  workflows: ['workflow'],
+} as const satisfies Record<WorkspaceSearchFamily, readonly string[]>
+type ItemPrefix = typeof ITEM_PREFIXES[WorkspaceSearchFamily][number]
+
+const CANONICAL_ITEM_KEY = /^([a-z]+):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/
+
+/** Listing, Project and point reads share the same per-source authority. */
+function sourceBranches({ projectScoped = false, countsOnly = false, conversationRecord = false, exactId = false } = {}): Record<ItemPrefix, string> {
+  const identity = (alias: string) => exactId ? ` AND ${alias}.id=$3::uuid` : ''
   const project = (alias: string, column?: string) => !projectScoped ? '' : column
     ? ` AND ${alias}.${column}=$3::uuid`
     // UUID equality is leakproof, unlike array containment: PostgreSQL may
@@ -25,9 +40,9 @@ function searchSourceSql(projectScoped = false, countsOnly = false, conversation
     : ` AND $3::uuid = ANY(${alias}.project_ids)`
   const select: typeof record = countsOnly ? (prefix) => `SELECT '${prefix}' AS source` : record
   return {
-  pages: `${select('page', 'p', 'coalesce(d.snapshot_title,p.name)', jsonText('coalesce(d.snapshot_json,p.page)'), 'p.updated_at', "jsonb_build_object('type','page','id',p.id)")}
+  page: `${select('page', 'p', 'coalesce(d.snapshot_title,p.name)', jsonText('coalesce(d.snapshot_json,p.page)'), 'p.updated_at', "jsonb_build_object('type','page','id',p.id)")}
     FROM saved_views p LEFT JOIN documents d ON d.page_id=p.id
-    WHERE p.workspace_id=$1${project('p', 'project_id')} AND (p.state='saved' OR (p.state='draft' AND p.created_by=$2))
+    WHERE p.workspace_id=$1${identity('p')}${project('p', 'project_id')} AND (p.state='saved' OR (p.state='draft' AND p.created_by=$2))
       AND saved_view_principal_boundary_allows(p.workspace_id,p.created_by,p.teamspace_id,p.clearance,p.project_id,p.shared_project_id)
       AND saved_view_operation_scope_allows(p.workspace_id,p.clearance,p.teamspace_id,p.project_id,false,p.shared_project_id)
       AND department_row_allows((SELECT department_read_grants()),p.workspace_id,
@@ -40,47 +55,44 @@ function searchSourceSql(projectScoped = false, countsOnly = false, conversation
       (SELECT string_agg(c.chunk_text,' ' ORDER BY c.chunk_index) FROM kb_chunks c
         WHERE c.workspace_id=k.workspace_id AND c.knowledge_entry_id=k.id AND ${live('c')} AND ${department('c')}))`,
     'k.updated_at', "jsonb_build_object('type','knowledge','id',k.id,'path',k.path)")}
-    FROM knowledge_entries k WHERE k.workspace_id=$1${project('k')} AND ${department('k', 'NULL::uuid')}
-    UNION ALL
-    ${select('memory', 'm', 'm.summary', "concat_ws(' ',m.summary,m.detail)", 'm.updated_at', brainTarget('m', "'memories'"))}
-    FROM memories m WHERE m.workspace_id=$1${project('m')} AND ${live('m')} AND ${department('m')}`,
-  records: `${select('entity', 'e', 'e.display_name', `concat_ws(' ',e.display_name,e.attributes->>'description',e.attributes->>'notes',
+    FROM knowledge_entries k WHERE k.workspace_id=$1${identity('k')}${project('k')} AND ${department('k', 'NULL::uuid')}`,
+  memory: `${select('memory', 'm', 'm.summary', "concat_ws(' ',m.summary,m.detail)", 'm.updated_at', brainTarget('m', "'memories'"))}
+    FROM memories m WHERE m.workspace_id=$1${identity('m')}${project('m')} AND ${live('m')} AND ${department('m')}`,
+  entity: `${select('entity', 'e', 'e.display_name', `concat_ws(' ',e.display_name,e.attributes->>'description',e.attributes->>'notes',
       e.attributes->>'email',e.attributes->>'phone',e.attributes->>'domain',e.attributes->>'stage')`,
     'e.updated_at', brainTarget('e', "CASE e.kind WHEN 'person' THEN 'people' WHEN 'company' THEN 'companies' WHEN 'deal' THEN 'deals' ELSE 'entities' END"))}
-    FROM entities e WHERE e.workspace_id=$1${project('e')} AND ${live('e')} AND ${department('e')}
-    UNION ALL
-    ${select('record', 'r', "r.data -> (t.properties->0->>'name') ->> 'value'", `(SELECT string_agg(cell.value->>'value',' ' ORDER BY cell.key)
+    FROM entities e WHERE e.workspace_id=$1${identity('e')}${project('e')} AND ${live('e')} AND ${department('e')}`,
+  record: `${select('record', 'r', "r.data -> (t.properties->0->>'name') ->> 'value'", `(SELECT string_agg(cell.value->>'value',' ' ORDER BY cell.key)
       FROM jsonb_each(r.data) cell WHERE cell.value->>'kind' IN ('text','title','rich_text','email','url','phone')
       AND cell.key !~* '(password|secret|credential|token|cookie)')`, 'r.last_edited_at',
     "jsonb_build_object('type','record','id',r.id,'entityTypeId',r.entity_type_id)")}
     FROM entity_instances r JOIN entity_types t ON t.id=r.entity_type_id AND t.workspace_id=r.workspace_id
-    WHERE r.workspace_id=$1${projectScoped ? ' AND false' : ''} AND ${department('r')}`,
-  tasks: `${select('task', 't', 't.title', "concat_ws(' ',t.title,t.attributes->>'description')", 't.updated_at', brainTarget('t', "'tasks'"), 't.status')}
-    FROM tasks t WHERE t.workspace_id=$1${project('t')} AND ${live('t')} AND ${department('t')}`,
-  files: `${select('file', 'f', 'coalesce(f.title,f.name)', `concat_ws(' ',f.summary,
+    WHERE r.workspace_id=$1${identity('r')}${projectScoped ? ' AND false' : ''} AND ${department('r')}`,
+  task: `${select('task', 't', 't.title', "concat_ws(' ',t.title,t.attributes->>'description')", 't.updated_at', brainTarget('t', "'tasks'"), 't.status')}
+    FROM tasks t WHERE t.workspace_id=$1${identity('t')}${project('t')} AND ${live('t')} AND ${department('t')}`,
+  file: `${select('file', 'f', 'coalesce(f.title,f.name)', `concat_ws(' ',f.summary,
       (SELECT string_agg(s.content,' ' ORDER BY s.segment_index) FROM file_segments s
         WHERE s.workspace_id=f.workspace_id AND s.file_id=f.id AND ${live('s')} AND ${department('s')}))`,
     'f.updated_at', brainTarget('f', "'files'"))}
-    FROM workspace_files f WHERE f.workspace_id=$1${project('f')} AND ${live('f')} AND ${department('f')}
-    UNION ALL
-    ${select('recording', 'r', 'coalesce(r.title,r.file_name)', `(SELECT string_agg(s.segment_text,' ' ORDER BY s.segment_index)
+    FROM workspace_files f WHERE f.workspace_id=$1${identity('f')}${project('f')} AND ${live('f')} AND ${department('f')}`,
+  recording: `${select('recording', 'r', 'coalesce(r.title,r.file_name)', `(SELECT string_agg(s.segment_text,' ' ORDER BY s.segment_index)
       FROM transcript_segments s WHERE s.recording_id=r.id AND s.workspace_id=r.workspace_id AND ${live('s')} AND ${department('s')})`,
     'r.updated_at', "jsonb_build_object('type','recording','id',r.id)")}
-    FROM recordings r WHERE r.workspace_id=$1${project('r')} AND r.retracted_at IS NULL AND (r.valid_to IS NULL OR r.valid_to>now()) AND ${department('r')}`,
+    FROM recordings r WHERE r.workspace_id=$1${identity('r')}${project('r')} AND r.retracted_at IS NULL AND (r.valid_to IS NULL OR r.valid_to>now()) AND ${department('r')}`,
   office: `${select('office', 'a', 'a.title', 'p.body', 'a.updated_at', "jsonb_build_object('type','office','id',a.id,'family',a.family)",
     `CASE WHEN p.revision=(${OFFICE_SEARCH_REVISION}) THEN NULL ELSE 'index_pending' END`)}
     FROM office_artifacts a LEFT JOIN workspace_search_office_text p ON p.artifact_id=a.id
     LEFT JOIN office_collab_documents d ON d.artifact_id=a.id
-    WHERE a.workspace_id=$1${project('a')} AND a.lifecycle_state IN ('active','archived') AND a.mode='artifact'
+    WHERE a.workspace_id=$1${identity('a')}${project('a')} AND a.lifecycle_state IN ('active','archived') AND a.mode='artifact'
       AND a.family IN ('document','presentation','spreadsheet') AND ${department('a', 'NULL::uuid')}
       AND workspace_search_office_allows(a.id,a.workspace_id)
       AND office_root_scope_allows(a.id,a.workspace_id,a.sensitivity,a.compartments,a.project_ids,a.visibility_user_ids,a.visibility_assistant_ids,false)
       AND (a.creator_user_id=$2 OR a.owner_user_id=$2 OR a.default_workspace_role<>'deny'
         OR EXISTS(SELECT 1 FROM office_artifact_grants g WHERE g.artifact_id=a.id AND g.user_id=$2 AND g.revoked_at IS NULL AND g.role<>'deny'))`,
-  conversations: conversationRecord
+  conversation: conversationRecord
     ? `${select('conversation', 's', "read_conversation_title_current(s.id)->>'title'", 'read_conversation_search_text_current(s.id)',
     's.last_active_at', "jsonb_build_object('type','conversation','id',s.id,'visibility',s.visibility)")}
-    FROM sessions s JOIN assistants a ON a.id=s.assistant_id WHERE coalesce(s.workspace_id,a.workspace_id)=$1${project('s', 'context_project_id')}
+    FROM sessions s JOIN assistants a ON a.id=s.assistant_id WHERE coalesce(s.workspace_id,a.workspace_id)=$1${identity('s')}${project('s', 'context_project_id')}
       AND public.assistant_placement_visible($2,s.assistant_id) AND ${sessionKindSql.conversationLane('s')} AND ${sessionKindSql.searchableConversation('s')}`
     : `${select('conversation', 's', 's.title', `(SELECT string_agg(
       CASE WHEN jsonb_typeof(m.content)='string' THEN m.content#>>'{}'
@@ -90,24 +102,32 @@ function searchSourceSql(projectScoped = false, countsOnly = false, conversation
         AND m.scope_held IS NOT TRUE AND ${department('m')}
         AND NOT jsonb_path_exists(m.content,'$[*] ? (@.type == "tool_use" || @.type == "tool_result")'))`,
     's.last_active_at', "jsonb_build_object('type','conversation','id',s.id,'visibility',s.visibility)")}
-    FROM sessions s WHERE session_recording_read_allowed(s.id) AND s.workspace_id=$1${project('s', 'context_project_id')} AND public.assistant_placement_visible($2,s.assistant_id) AND ${sessionKindSql.conversationLane('s')}
+    FROM sessions s WHERE session_recording_read_allowed(s.id) AND s.workspace_id=$1${identity('s')}${project('s', 'context_project_id')} AND public.assistant_placement_visible($2,s.assistant_id) AND ${sessionKindSql.conversationLane('s')}
       AND ${sessionKindSql.searchableConversation('s')} AND (s.user_id=$2 OR ${sessionKindSql.workspaceAudience('s')})
       AND department_row_allows((SELECT department_read_grants()),s.workspace_id,coalesce(s.effective_clearance,'internal'),s.context_compartments,
         CASE WHEN ${sessionKindSql.workspaceAudience('s')} THEN NULL ELSE s.user_id END)`,
-  workflows: `${select('workflow', 'w', 'w.name', 'w.description', 'w.updated_at', "jsonb_build_object('type','workflow','id',w.id)")}
-    FROM workflows w WHERE w.workspace_id=$1${project('w', 'context_project_id')} AND w.lifecycle_state NOT IN ('deleted','trash')
+  workflow: `${select('workflow', 'w', 'w.name', 'w.description', 'w.updated_at', "jsonb_build_object('type','workflow','id',w.id)")}
+    FROM workflows w WHERE w.workspace_id=$1${identity('w')}${project('w', 'context_project_id')} AND w.lifecycle_state NOT IN ('deleted','trash')
       AND department_row_allows((SELECT department_read_grants()),w.workspace_id,'internal',
         ARRAY(SELECT g.compartment_key FROM workspace_groups g WHERE g.id=w.context_group_id AND g.workspace_id=w.workspace_id AND g.compartment_key IS NOT NULL),NULL::uuid)`,
   }
 }
 
+function searchSourceSql(options?: Parameters<typeof sourceBranches>[0]): Record<WorkspaceSearchFamily, string> {
+  const branches = sourceBranches(options)
+  return Object.fromEntries(WORKSPACE_SEARCH_FAMILIES.map(kind =>
+    [kind, ITEM_PREFIXES[kind].map(prefix => branches[prefix]).join(' UNION ALL ')])) as Record<WorkspaceSearchFamily, string>
+}
+
 /** Canonical identity is assigned before ranking; chunks never become hits. */
 export const SEARCH_SOURCE_SQL = searchSourceSql()
-export const PROJECT_SEARCH_SOURCE_SQL = searchSourceSql(true)
-export const PROJECT_COUNT_SOURCE_SQL = searchSourceSql(true, true)
-const RECORD_SEARCH_SOURCE_SQL = searchSourceSql(false, false, true)
-const PROJECT_RECORD_SEARCH_SOURCE_SQL = searchSourceSql(true, false, true)
-const PROJECT_RECORD_COUNT_SOURCE_SQL = searchSourceSql(true, true, true)
+export const PROJECT_SEARCH_SOURCE_SQL = searchSourceSql({ projectScoped: true })
+export const PROJECT_COUNT_SOURCE_SQL = searchSourceSql({ projectScoped: true, countsOnly: true })
+const RECORD_SEARCH_SOURCE_SQL = searchSourceSql({ conversationRecord: true })
+const PROJECT_RECORD_SEARCH_SOURCE_SQL = searchSourceSql({ projectScoped: true, conversationRecord: true })
+const PROJECT_RECORD_COUNT_SOURCE_SQL = searchSourceSql({ projectScoped: true, countsOnly: true, conversationRecord: true })
+const ITEM_SOURCE_SQL = sourceBranches({ exactId: true })
+const ITEM_RECORD_SOURCE_SQL = sourceBranches({ exactId: true, conversationRecord: true })
 const currentSource = (kind: WorkspaceSearchFamily) => (conversationReadersActive() ? RECORD_SEARCH_SOURCE_SQL : SEARCH_SOURCE_SQL)[kind]
 export const currentProjectSearchSource = (kind: WorkspaceSearchFamily) => (conversationReadersActive() ? PROJECT_RECORD_SEARCH_SOURCE_SQL : PROJECT_SEARCH_SOURCE_SQL)[kind]
 export const currentProjectCountSource = (kind: WorkspaceSearchFamily) => (conversationReadersActive() ? PROJECT_RECORD_COUNT_SOURCE_SQL : PROJECT_COUNT_SOURCE_SQL)[kind]
@@ -147,11 +167,16 @@ export function createSearchAdapters(): SearchAdapters {
 
 /** Identity read for revocation-safe preview/open; no unbounded query or client ACL. */
 export async function readSearchItem(scope: {userId:string;workspaceId:string}, kind:WorkspaceSearchFamily, key:string, signal:AbortSignal) {
+  const match = CANONICAL_ITEM_KEY.exec(key)
+  if (match?.[0] !== key) return null
+  const [, requestedPrefix, id] = match
+  const prefix = ITEM_PREFIXES[kind].find(candidate => candidate === requestedPrefix)
+  if (!prefix) return null
+  const branches = conversationReadersActive() ? ITEM_RECORD_SOURCE_SQL : ITEM_SOURCE_SQL
   const rows=await searchDatabase<{key:string;id:string;title:string;body:string;target:SearchCandidate['target'];status:string|null}>(scope,signal,
-    `WITH authorized AS MATERIALIZED (${currentSource(kind)})
-     SELECT key,id,title,left(body,4000) AS body,target,status FROM authorized WHERE key=$3
-       AND status IS DISTINCT FROM 'index_pending'
-       AND EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$2) LIMIT 1`,[scope.workspaceId,scope.userId,key])
+    `SELECT key,id,title,left(body,4000) AS body,target,status
+     FROM (${branches[prefix]}) authorized WHERE status IS DISTINCT FROM 'index_pending'
+       AND EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$2) LIMIT 1`,[scope.workspaceId,scope.userId,id])
   const row=rows[0]
   return row ? {key:row.key,id:row.id,title:row.title,text:row.body,target:row.target,kind,status:row.status} : null
 }

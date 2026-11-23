@@ -1,7 +1,7 @@
 import {readCurrentScopeSources} from '../../db/derived-scope-store.js'
 /** Current audit history uses real native-session authority and current per-version rights. */
 import {describe,it,expect,beforeEach,afterEach,afterAll,vi} from 'vitest'
-import type {PoolClient} from 'pg'
+import pg, {type PoolClient} from 'pg'
 import {createHash} from 'node:crypto'
 import {createCorrectionTools} from '@use-brian/core/corrections/tools.js'
 import type {AccessCeiling} from '@use-brian/agent-runtime/security/access-ceiling.js'
@@ -27,7 +27,7 @@ import {admitModelInput,admitModelOutput} from '../../context-scope/admission.js
 import {createDbWorkspaceGroupStore} from '../../db/workspace-group-store.js'
 import {createDbContextScopeStore} from '../../db/context-scope-store.js'
 import {createDbSavedViewStore} from '../../db/saved-views-store.js'
-import {getMemoryHistory,createMemory as legacyCreate,updateMemory as legacyUpdate} from '../../db/memories.js'
+import {deleteMemory, getMemoryHistory,createMemory as legacyCreate,updateMemory as legacyUpdate} from '../../db/memories.js'
 import {executeWorkspaceScopeReview} from '../../workspace-access/scope-review.js'
 import {validateCallerScopeEvidence,validateAudienceScopeEvidence} from '../../context-scope/caller-evidence.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
@@ -186,6 +186,63 @@ describe.sequential('[COMP:corrections/row-history] current native Memory audit 
   expect(protectedNext).not.toBeNull()
   await expect(history(protectedRow.id)).rejects.toThrow('scope_source_changed')
  })
+ it.each([8,17])('projects and decodes %i exact versions in bounded batches', async versionCount => {
+  const current = await authority()
+  const access = current.execution.security.access
+  let head = await legacyCreate({ assistantId, userId, workspaceId, summary: 'Fictional history version 1', sensitivity: 'internal', createdByUserId: userId })
+  const ids = [head.id]
+  for (let version = 2; version <= versionCount; version++) {
+   const successor = await legacyUpdate(head.id, { summary: `Fictional history version ${version}` }, access)
+   if (!successor) throw new Error(`Legacy history fixture could not advance to version ${version}`)
+   head = successor
+   ids.push(head.id)
+  }
+  const requestedId = ids[Math.floor(versionCount / 2)]
+  const expected = await getMemoryHistory(requestedId)
+  expect(expected.chain.map(row => row.id)).toEqual(ids)
+  const statements = vi.spyOn(pg.Client.prototype, 'query')
+  try {
+   const result = await history(requestedId)
+   expect(result).toEqual(expected)
+   expect(result.currentId).toBe(ids.at(-1))
+   for (const row of result.chain) {
+    expect(row.validFrom).toBeInstanceOf(Date)
+    expect(boundScopeSources(row)).toEqual(expect.arrayContaining([
+     expect.objectContaining({ workspaceId, resourceKind: 'application_field' }),
+    ]))
+   }
+   const projection = statements.mock.calls.filter(call => /read_native_memory_history_projection\(|jsonb_populate_record\(NULL::public.memories/.test(String(call[0])))
+   const currentFields = statements.mock.calls.filter(call => String(call[0]).includes('read_native_session_field_snapshots('))
+   expect(currentFields.length).toBeGreaterThan(0)
+   for (const [,params] of currentFields) expect((params as [string,string[],string[]])[1].length).toBeLessThanOrEqual(8)
+   const batches = projection.map(([, params]) => params as [string, string[], string[]])
+   expect(batches.map(([, requestedIds]) => requestedIds.length)).toEqual(versionCount === 8 ? [8] : [8,8,1])
+   expect(batches.flatMap(([, requestedIds]) => requestedIds).sort()).toEqual([...ids].sort())
+   const versions = new Map(expected.chain.map(row => [row.id,row.scopeVersion]))
+   for (const [workspace, requestedIds, requestedVersions] of batches) {
+    expect(workspace).toBe(workspaceId)
+    expect(requestedVersions).toEqual(requestedIds.map(id => versions.get(id)))
+   }
+  } finally {
+   statements.mockRestore()
+  }
+  if (versionCount === 17) {
+   const query = pg.Client.prototype.query
+   let withdrew = false
+   const interrupted = vi.spyOn(pg.Client.prototype,'query').mockImplementation(function(this:pg.Client,...args:unknown[]) {
+    const result = Reflect.apply(query,this,args)
+    if (withdrew || typeof args[0] !== 'string' || !args[0].includes('read_native_memory_history_projection(')) return result
+    return Promise.resolve(result).then(async value=>{
+     withdrew = await authSessionStore.revokeForUser(userId,credential.sessionId)
+     return value
+    })
+   } as typeof query)
+   try {
+    await expect(history(requestedId)).rejects.toBeDefined()
+    expect(withdrew).toBe(true)
+   } finally { interrupted.mockRestore() }
+  }
+ })
  it('preserves a truthful legacy prefix followed by an authenticated native successor',async()=>{
   const first=await legacyCreate({assistantId,userId,workspaceId,summary:'Fictional mixed legacy first',sensitivity:'internal',createdByUserId:userId})
   const human=await authority(),second=(await legacyUpdate(first.id,{summary:'Fictional mixed legacy second'},human.execution.security.access))!
@@ -197,6 +254,35 @@ describe.sequential('[COMP:corrections/row-history] current native Memory audit 
   expect(result.chain.map(x=>x.summary)).toEqual(['Fictional mixed legacy first','Fictional mixed legacy second','Fictional mixed native third'])
   expect(result.currentId).toBe(third.id)
  })
+ it.each(['held','deleted-successor','retired-terminal','foreign-successor','cycle'] as const)(
+  'refuses a plain legacy component with %s physical evidence', async condition => {
+   const owner = await authority()
+   const root = await legacyCreate({assistantId,userId,workspaceId,summary:'Fictional legacy root',sensitivity:'internal',createdByUserId:userId})
+   const successor = await legacyUpdate(root.id,{},owner.execution.security.access)
+   if (!successor) throw new Error('Missing the fixture successor')
+   let foreign: Awaited<ReturnType<typeof persistentContextFixture>> | undefined
+   try {
+    switch (condition) {
+     case 'held': await hold(root.id); break
+     case 'deleted-successor': expect(await deleteMemory(successor.id)).toBe(true); break
+     case 'retired-terminal':
+      await pool.query('UPDATE memories SET valid_to=now() WHERE id=$1', [successor.id]); break
+     case 'foreign-successor': {
+      foreign = await persistentContextFixture()
+      const outside = await foreign.memory('Fictional foreign successor',foreign.ownerId)
+      await pool.query('UPDATE memories SET superseded_by=$2 WHERE id=$1', [root.id,outside.id])
+      break
+     }
+     case 'cycle':
+      await pool.query('UPDATE memories SET valid_to=now(),superseded_by=$2 WHERE id=$1', [successor.id,root.id]); break
+    }
+    // The scalar control and the retained chain both refuse the physical
+    // component before its contents can be returned.
+    expect(await currentPort(root.id,(await state(root.id)).version)).toBeNull()
+    await expect(history(root.id)).rejects.toThrow('scope_source_changed')
+   } finally { await foreign?.cleanup() }
+  },
+ )
  it('keeps missing/foreign/version refusal and private helper access separate from human authority',async()=>{
   const row=await createMemory({assistantId,userId,summary:'Fictional exact history target',sensitivity:'internal',createdByUserId:userId})
   expect(await currentPort(row.id,'999')).toBeNull();expect(await currentPort(row.id,row.scopeVersion!,crypto.randomUUID())).toBeNull()

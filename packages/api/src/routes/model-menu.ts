@@ -27,8 +27,10 @@ import { Router } from 'express'
 import { z } from 'zod'
 import {
   MODEL_REGISTRY,
+  canRouteManagedModel,
   decisionModelRows,
   isRegistryModelAvailable,
+  managedRouteModelMenu,
   menuForClass,
   registryRow,
   type ModelClass,
@@ -41,6 +43,7 @@ import { isDefaultableClass, type WorkspaceModelDefaultsStore } from '../db/work
 import type { WorkspaceCustomLlmEndpointStore } from '../db/workspace-custom-llm-endpoints.js'
 import { CUSTOM_LLM_TIERS, isCustomLlmTier } from '../db/workspace-custom-llm-endpoints.js'
 import { customLlmAlias } from '../custom-llm-runtime.js'
+import { deploymentCapabilities } from '../edition.js'
 import type { WorkspaceDecisionRoutingStore } from '../db/workspace-decision-routing.js'
 import type {
   ApprovedDecisionProfileSummary,
@@ -147,6 +150,7 @@ function configuredProviderForPreference(preference: string): string {
 
 export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
   const router = Router()
+  const { selfManagedProviders } = deploymentCapabilities()
 
   async function memberOr403(req: { userId?: string }, res: { status(n: number): { json(b: unknown): void } }, workspaceId: string): Promise<boolean> {
     const userId = req.userId
@@ -254,6 +258,11 @@ export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
     )
     res.json({
       classes,
+      managedRouteModels: Object.fromEntries(CUSTOM_LLM_TIERS.map(tier => [
+        tier,
+        managedRouteModelMenu(tier, selfManagedProviders, opts.configuredProviders,
+          modelRoutes.find(route => route.tier === tier)?.modelAlias).map(serializeRow),
+      ])),
       profiles: visibleProfiles,
       defaults: defaults.filter((d) =>
         d.meteredProfileId !== null
@@ -455,9 +464,7 @@ export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
       const row = registryRow(parsed.data.modelAlias)
       if (
         !row ||
-        row.status !== 'active' ||
-        row.menu !== true ||
-        row.tier !== tier ||
+        !canRouteManagedModel(row, tier, selfManagedProviders) ||
         !isRegistryModelAvailable(row, opts.configuredProviders)
       ) {
         return void res.status(400).json({ error: 'Model is not available for this tier' })

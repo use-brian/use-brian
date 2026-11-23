@@ -15,6 +15,27 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
 type NotificationHandler = (params: unknown) => void | Promise<void>
 type RequestHandler = (params: unknown, signal: AbortSignal) => unknown | Promise<unknown>
 type CloseHandler = (reason: Error) => void
+type RequestPhase = 'write_queue' | 'input_authority' | 'stdin_write' | 'awaiting_response'
+
+class RequestProgress {
+  #phase: RequestPhase = 'write_queue'
+  #started = Math.floor(performance.now())
+  readonly #elapsed: Record<RequestPhase, number> = { write_queue: 0, input_authority: 0, stdin_write: 0, awaiting_response: 0 }
+
+  enter(next: RequestPhase): void {
+    const now = Math.floor(performance.now())
+    this.#elapsed[this.#phase] += now - this.#started
+    this.#phase = next
+    this.#started = now
+  }
+
+  describeTimeout(): string {
+    const elapsed = { ...this.#elapsed }
+    elapsed[this.#phase] += Math.floor(performance.now()) - this.#started
+    const durations = Object.entries(elapsed).map(([phase, ms]) => `${phase}_ms=${ms}`)
+    return [`phase=${this.#phase}`, ...durations].join(', ')
+  }
+}
 
 type PendingRequest<T = unknown> = {
   schema: z.ZodType<T>
@@ -187,13 +208,14 @@ export class CodexRpcPeer {
 
     const id = this.#nextRequestId++
     const timeoutMs = positiveInteger(options.timeoutMs, this.#requestTimeoutMs, 'timeoutMs')
+    const progress = new RequestProgress()
 
     let pending!: PendingRequest<T>
     const result = new Promise<T>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.#pending.delete(id)
         pending.removeAbortListener?.()
-        reject(new CodexProtocolError(`Codex app-server RPC request timed out: ${method}`))
+        reject(new CodexProtocolError(`Codex app-server RPC request timed out: ${method} (${progress.describeTimeout()})`))
       }, timeoutMs)
 
       pending = { schema: resultSchema, resolve, reject, timeout }
@@ -212,8 +234,11 @@ export class CodexRpcPeer {
     })
 
     try {
-      void this.#write({ method, id, params }, options.assertInputAuthority,
-        () => this.#pending.has(id) && !options.signal?.aborted)
+      void this.#write({ method, id, params }, {
+        check: options.assertInputAuthority,
+        isCurrent: () => this.#pending.has(id) && !options.signal?.aborted,
+        progress,
+      })
         .catch(error => this.#rejectPending(id, asError(error)))
     } catch (error) {
       this.#rejectPending(id, asError(error))
@@ -384,7 +409,7 @@ export class CodexRpcPeer {
     try {
       const result = await handler(params, controller.signal)
       const guarded = result && typeof result === 'object' ? this.#guardedResponses.get(result) : undefined
-      if (!this.closed) await this.#write({ id, result: (guarded ? guarded.value : result) ?? null }, guarded?.check)
+      if (!this.closed) await this.#write({ id, result: (guarded ? guarded.value : result) ?? null }, { check: guarded?.check })
     } catch (error) {
       if (!this.closed) await this.#writeError(id, -32603, safeErrorMessage(error))
     } finally {
@@ -421,7 +446,11 @@ export class CodexRpcPeer {
     }
   }
 
-  #write(message: unknown, check?: () => Promise<void>, isCurrent?: () => boolean): Promise<void> {
+  #write(message: unknown, { check, isCurrent, progress }: {
+    check?: () => Promise<void>
+    isCurrent?: () => boolean
+    progress?: RequestProgress
+  } = {}): Promise<void> {
     this.#assertOpen()
     let frame: string
     try {
@@ -442,6 +471,7 @@ export class CodexRpcPeer {
       .then(async () => {
         this.#assertOpen()
         if (isCurrent && !isCurrent()) throw abortError()
+        if (check) progress?.enter('input_authority')
         await assertInputAuthority(check)
         this.#assertOpen()
         if (isCurrent && !isCurrent()) throw abortError()
@@ -450,9 +480,13 @@ export class CodexRpcPeer {
             reject(this.#closedReason)
             return
           }
+          progress?.enter('stdin_write')
           this.#output.write(frame, (error?: Error | null) => {
             if (error) reject(error)
-            else resolve()
+            else {
+              progress?.enter('awaiting_response')
+              resolve()
+            }
           })
         })
       })

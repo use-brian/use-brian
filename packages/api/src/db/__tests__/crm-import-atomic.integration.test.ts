@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { setTimeout } from 'node:timers/promises'
 import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -25,7 +25,19 @@ const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, applicati
 // wait_event_type, xact_start or query in pg_stat_activity.
 const observer = new pg.Pool({ connectionString: await bootstrapConnectionString(), max: 2, application_name: 'crm_atomic_import_observer' })
 const files = new Map<string, Buffer>()
-const filesApi = { readBytes: async (_ctx: unknown, id: string) => ({ ok: true, value: { file: { id }, bytes: files.get(id)! } }) } as unknown as FilesApi
+const bytesVersion = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex')
+const filesApi = {
+  statByteVersion: async (_ctx: unknown, id: string) => {
+    const bytes = files.get(id)!
+    const { rows: [head] } = await pool.query('SELECT scope_version AS "scopeVersion",storage_uri AS "storageUri" FROM workspace_files WHERE id=$1', [id])
+    return { ok: true, value: { file: { id, ...head }, version: bytesVersion(bytes), byteCount: bytes.length, rangeReads: true } }
+  },
+  readByteVersion: async (_ctx: unknown, head: { file: { id: string }; version: string }, range?: { start: number; end: number }) => {
+    const bytes = files.get(head.file.id)!
+    if (bytesVersion(bytes) !== head.version) return { ok: false, error: { kind: 'not_found', reference: head.file.id } }
+    return { ok: true, value: { file: head.file, bytes: range ? bytes.subarray(range.start, range.end) : bytes } }
+  },
+} as unknown as FilesApi
 const operations = createCrmOperationsService(createDbCrmOperationsStore(pool))
 type Hook = (client: pg.PoolClient, command: CrmOperationsCommand) => Promise<void>
 function importer(hook?: Hook, entityLinks?: EntityLinksStore) {
@@ -327,15 +339,53 @@ describe('[COMP:crm/production-import] [COMP:crm/association-inventory] Atomic r
   it('finishes file I/O before borrowing the only transaction connection', async () => {
     const f = await fixture(), job = await f.job(consentColumns, [row(0)])
     const single = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 1000 })
-    const boundedFiles = { readBytes: async (ctx: unknown, id: string) => {
+    const boundedFiles = { ...filesApi, readByteVersion: async (...args: Parameters<NonNullable<FilesApi['readByteVersion']>>) => {
       await single.query('SELECT 1')
-      return filesApi.readBytes(ctx as Parameters<FilesApi['readBytes']>[0], id)
-    } } as unknown as FilesApi
+      return filesApi.readByteVersion!(...args)
+    } }
     try {
       const service = createCrmProductionImportService({ pool: single, filesApi: boundedFiles,
         operationsForTransaction: (client) => createCrmOperationsService(createDbCrmOperationsStore(single, client)) })
       expect(await service.resume(f.context, job.id)).toMatchObject({ status: 'completed', succeededRows: 1 })
     } finally { await single.end() }
+  })
+
+  it('builds one index for a legacy job and fetches bounded ranges before each later checkpoint', async () => {
+    const f = await fixture()
+    const job = await f.job(consentColumns, Array.from({ length: 51 }, (_, i) => i === 49 ? ['Multiline\nName', ...row(i).slice(1)] : row(i)))
+    const fileId = job.stagedFileId!
+    const original = files.get(fileId)!
+    await pool.query('DELETE FROM crm_import_csv_indexes WHERE workspace_id=$1 AND staged_file_id=$2', [f.workspaceId, fileId])
+    // A previous worker died before publishing any records. Reclaim the expired build for this legacy job.
+    const version = bytesVersion(Buffer.from(JSON.stringify(['fixture://local', bytesVersion(original)])))
+    const abandoned = (await pool.query(`INSERT INTO crm_import_csv_indexes
+      (workspace_id,staged_file_id,source_version,parser_version,claim_token,claim_expires_at)
+      VALUES($1,$2,$3,1,gen_random_uuid(),clock_timestamp()-interval '1 second') RETURNING id`, [f.workspaceId, fileId, version])).rows[0]
+    const readRanges: Array<{ start: number; end: number } | undefined> = []
+    const monitoredFiles: FilesApi = { ...filesApi, readByteVersion: async (ctx, version, range) => {
+      readRanges.push(range)
+      return filesApi.readByteVersion!(ctx, version, range)
+    } }
+    const service = createCrmProductionImportService({ pool, filesApi: monitoredFiles,
+      operationsForTransaction: client => createCrmOperationsService(createDbCrmOperationsStore(pool, client)) })
+    expect(await service.resume(f.context, job.id)).toMatchObject({ status: 'paused', succeededRows: 50 })
+    expect(readRanges).toHaveLength(1)
+    expect(readRanges[0]).toBeUndefined()
+    const index = (await pool.query(`SELECT id FROM crm_import_csv_indexes WHERE workspace_id=$1 AND staged_file_id=$2`, [f.workspaceId, fileId])).rows[0]
+    expect(index.id).toBe(abandoned.id)
+    expect((await pool.query('SELECT count(*)::int AS n FROM crm_import_csv_index_chunks WHERE index_id=$1 AND staged_bytes IS NULL', [index.id])).rows[0].n).toBe(2)
+
+    // The pending range is unchanged but a different provider version means earlier bytes changed.
+    files.set(fileId, Buffer.from(original.toString().replace('Fixture 0', 'Changed 0')))
+    await expect(service.resume(f.context, job.id)).rejects.toMatchObject({ code: 'conflict' })
+    expect(await service.get(f.context, job.id)).toMatchObject({ status: 'paused', succeededRows: 50 })
+
+    files.set(fileId, original)
+    readRanges.length = 0
+    expect(await service.resume(f.context, job.id)).toMatchObject({ status: 'completed', succeededRows: 51 })
+    expect(readRanges).toHaveLength(1)
+    expect(readRanges[0]!.end - readRanges[0]!.start).toBeLessThan(original.length / 10)
+    expect((await service.resultsCsv(f.context, job.id))?.split('\r\n').at(-1)).toMatch(/^52,completed,/)
   })
 
   it('serializes concurrent resume and cancellation across a 50-row boundary', async () => {
@@ -374,6 +424,7 @@ describe('[COMP:crm/production-import] [COMP:crm/association-inventory] Atomic r
     } finally { release(); await Promise.allSettled([first, ...(cancellation ? [cancellation] : [])]) }
     expect(await first).toMatchObject({ status: 'paused', processedRows: 50, succeededRows: 50 })
     expect(await cancellation).toMatchObject({ status: 'cancelled', processedRows: 50 })
+    expect((await pool.query('SELECT id FROM crm_import_csv_indexes WHERE workspace_id=$1 AND staged_file_id=$2', [f.workspaceId, job.stagedFileId])).rowCount).toBe(0)
     expect(await importer().resume(f.context, job.id)).toMatchObject({ status: 'cancelled', processedRows: 50 })
     expect(await f.counts()).toMatchObject({ entities: 50, consent: 50, receipts: 50, chunks: 1, outbox: 50 })
   })

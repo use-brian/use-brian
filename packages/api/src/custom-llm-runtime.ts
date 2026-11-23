@@ -13,7 +13,8 @@ import {
   type EndpointFallbackEvent,
 } from '@use-brian/agent-runtime/providers/wrap-endpoint-fallback.js'
 import { wrapProvider } from '@use-brian/agent-runtime/providers/wrappers.js'
-import { registryRow } from '@use-brian/shared/model-registry'
+import { canRouteManagedModel, registryRow, type ChatTierKey } from '@use-brian/shared/model-registry'
+import { deploymentCapabilities } from './edition.js'
 import type {
   WorkspaceCustomLlmProfileRuntime,
   WorkspaceCustomLlmEndpointStore,
@@ -451,6 +452,36 @@ function inertFallbackState(): CustomLlmFallbackState {
   return { enabled: false, used: false, reason: null, status: null, detail: null, endpointName: '' }
 }
 
+/** Bind an exact alias already recorded by a workspace route or a durable
+ * checkpoint. Request-supplied model strings do not enter this boundary. */
+export function bindRecordedManagedRoute(
+  selector: string,
+  routeTier: ChatTierKey,
+  modelTier: ChatTierKey,
+  provider: LLMProvider | undefined,
+): ResolvedWorkspaceCustomLlm {
+  const row = registryRow(selector)
+  if (!row || row.status !== 'active' || !row.menu) {
+    throw new Error(`[workspace-model-route] '${selector}' is not an active selectable registry model`)
+  }
+  if (!canRouteManagedModel(row, routeTier, deploymentCapabilities().selfManagedProviders)) {
+    throw new Error(`[workspace-model-route] '${selector}' cannot serve the '${routeTier}' tier`)
+  }
+  if (!provider) throw new Error('[workspace-model-route] managed provider routing is unavailable')
+  return {
+    provider: bindExactModelProvider(provider, selector),
+    selector,
+    fallback: inertFallbackState(),
+    profileId: null,
+    modelTier,
+    inputTokenLimit: row.contextWindow,
+    maxTokens: row.maxOutput,
+    providerKeySource: 'platform',
+    routeKind: 'managed',
+    supportsVision: row.capabilities.vision,
+  }
+}
+
 export function createWorkspaceCustomLlmResolver(
   store: WorkspaceCustomLlmEndpointStore,
   options?: {
@@ -517,32 +548,7 @@ export function createWorkspaceCustomLlmResolver(
     }
 
     if (managedModel) {
-      const row = registryRow(managedModel)
-      if (!row || row.status !== 'active' || !row.menu) {
-        throw new Error(`[workspace-model-route] '${managedModel}' is not an active selectable registry model`)
-      }
-      if (row.tier !== routeTier) {
-        throw new Error(`[workspace-model-route] '${managedModel}' cannot serve the '${routeTier}' tier`)
-      }
-      if (!options?.managedProvider) {
-        throw new Error('[workspace-model-route] managed provider routing is unavailable')
-      }
-      const exactProvider = bindExactModelProvider(options.managedProvider, managedModel)
-      return {
-        provider: exactProvider,
-        selector: managedModel,
-        // A managed route already IS a platform model: there is nothing to
-        // fall back FROM, and `allowProviderFallback: false` above keeps the
-        // tier exact.
-        fallback: inertFallbackState(),
-        profileId: null,
-        modelTier,
-        inputTokenLimit: row.contextWindow,
-        maxTokens: row.maxOutput,
-        providerKeySource: 'platform',
-        routeKind: 'managed',
-        supportsVision: row.capabilities.vision,
-      }
+      return bindRecordedManagedRoute(managedModel, routeTier, modelTier, options?.managedProvider)
     }
 
     if (!profile) return null

@@ -6,7 +6,8 @@ import { inheritScopeSources } from '@use-brian/agent-runtime/security/source-ev
 import type { CurrentAuthorityBoundary, Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { MODEL_REGISTRY, registryRow, isRegistryModelAvailable, type ProviderAvailability } from '@use-brian/shared/model-registry'
 import { MODEL_MAP, resolveModel, resolveChatModelSelection, ensureServableModel, tierForModel, backgroundModelFor, chatTierBudget } from '../model-resolution.js'
-import { decideImageTurnRoute, type ResolvedWorkspaceCustomLlm, type WorkspaceCustomLlmResolver } from '../custom-llm-runtime.js'
+import { bindRecordedManagedRoute, decideImageTurnRoute, type ResolvedWorkspaceCustomLlm, type WorkspaceCustomLlmResolver } from '../custom-llm-runtime.js'
+import { isCustomLlmTier } from '../db/workspace-custom-llm-endpoints.js'
 import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
 import { AuthorityChangedError } from '../context-scope/authority-lease.js'
 import { runWithAgentAccess, currentAgentAccess } from '../db/agent-access-context.js'
@@ -64,10 +65,14 @@ function snapshotMessageData<T extends object>(original: T): T {
   return copied
 }
 
+export function readsNativePdf(model: PreparedTurnModel): boolean {
+  return model.customLlm?.routeKind !== 'custom' && registryRow(model.model)?.capabilities.nativePdf === true
+}
+
 /** Non-native PDF adaptation may make an auxiliary model call. Leave the
  * original attachment with its current-turn source for the discovery round. */
 function initialModelMessages(messages: Message[], model: PreparedTurnModel): Message[] {
-  if (!model.customLlm && registryRow(model.model)?.capabilities.nativePdf) return messages
+  if (readsNativePdf(model)) return messages
   const isPdf = (block: ContentBlock) => block.type === 'image' && block.mimeType.split(';')[0]?.trim().toLowerCase() === 'application/pdf'
   const initial = messages.map(message => {
     if (!Array.isArray(message.content) || !message.content.some(isPdf)) return message
@@ -367,7 +372,8 @@ export function captureTurnModelPreparation(invocation: TurnModelInvocation, inp
     async background(fallback: { model?: string; configuredDefault?: boolean }): Promise<PreparedBackgroundModel> {
       const original = { ...fallback }
       await current()
-      const runtime = workspaceId ? await resolveCustom({ workspaceId, requestedTier: 'standard', allowDefault: true, allowAnyDefault: true }) : null
+      const runtime = workspaceId ? await resolveCustom({ workspaceId, requestedTier: 'standard', allowDefault: true,
+        allowAnyDefault: true, allowManagedRoutes: false }) : null
       return Object.freeze({ provider: runtime?.provider ?? services.provider,
         model: runtime?.selector ?? (original.configuredDefault ? backgroundModelFor(services.configuredProviders) : original.model),
         maxTokens: runtime?.maxTokens, inputTokenLimit: runtime?.inputTokenLimit,
@@ -421,10 +427,16 @@ export function captureTurnModelPreparation(invocation: TurnModelInvocation, inp
       } else {
         const policy = resolveDurableResumePolicy(request, request.fallbackModel)
         logicalTier = policy.logicalTier; logicalModel = policy.logicalModel; budget = policy.budget
-        runtime = request.selectedCustomModel && !request.selectedLegacyByo && workspaceId
-          ? await resolveCustom({ workspaceId, requestedModel: request.selectedCustomModel, requestedTier: logicalTier }) : null
-        if (request.selectedCustomModel && !runtime) throw new Error('The custom model selected for this suspended turn is no longer available.')
-        provider = runtime?.provider ?? services.provider; keySource = runtime ? 'user' : 'platform'
+        if (request.selectedCustomModel) {
+          const saved = request.selectedCustomModel
+          if (workspaceId && !request.selectedLegacyByo && isCustomLlmTier(logicalTier)) {
+            runtime = saved.startsWith('custom:')
+              ? await resolveCustom({ workspaceId, requestedModel: saved, requestedTier: logicalTier, allowDefault: false })
+              : bindRecordedManagedRoute(saved, logicalTier, logicalTier, services.provider)
+          }
+          if (runtime?.selector !== saved) throw new Error('The model selected for this suspended turn is no longer available.')
+        }
+        provider = runtime?.provider ?? services.provider; keySource = runtime?.providerKeySource ?? 'platform'
         if (request.selectedLegacyByo) {
           if (!services.resolveLegacyByoKey || !services.buildLegacyByoProvider) throw new Error('The legacy BYO Gemini runtime for this suspended turn is unavailable.')
           const byo = await legacy()
@@ -433,6 +445,7 @@ export function captureTurnModelPreparation(invocation: TurnModelInvocation, inp
         }
         model = runtime?.selector ?? logicalModel
       }
+      if (runtime?.routeKind === 'managed') model = runtime.selector
       await current()
       return Object.freeze({ provider, model, logicalModel, logicalTier, configuredProviders: services.configuredProviders,
         customLlm: runtime, get providerKeySource() { return runtime?.providerKeySource ?? keySource }, usedLegacyByoKey, imageRoute, refusal, budget,

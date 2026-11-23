@@ -130,6 +130,14 @@ export type FilesReadBytesResult = {
   bytes: Uint8Array
 }
 
+/** Identity of the current bytes, with the authorized workspace file head. */
+export type FilesByteVersion = {
+  file: WorkspaceFile
+  version: string
+  byteCount: number
+  rangeReads: boolean
+}
+
 export type FilesSearchParams = {
   query?: string
   tag?: string
@@ -163,6 +171,9 @@ export type FilesApi = {
   /** Row + raw bytes, byte-preserving (binary-safe — `read` decodes UTF-8 and
    *  would corrupt binary). Backs outbound document delivery. */
   readBytes(ctx: FilesContext, idOrPath: string): Promise<FilesResult<FilesReadBytesResult>>
+
+  statByteVersion?(ctx: FilesContext, id: string): Promise<FilesResult<FilesByteVersion>>
+  readByteVersion?(ctx: FilesContext, head: FilesByteVersion, range?: { start: number; end: number }): Promise<FilesResult<FilesReadBytesResult>>
 
   search(ctx: FilesContext, params: FilesSearchParams): Promise<WorkspaceFileIndexRow[]>
 

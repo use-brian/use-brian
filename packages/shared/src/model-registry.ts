@@ -1446,6 +1446,39 @@ export function menuForClass(
   )
 }
 
+/** Workspace tier assignments use ordinary chat models. Self-managed providers
+ * can serve any of the four policy tiers with the same exact model. */
+export function canRouteManagedModel(row: ModelRegistryRow, tier: ChatTierKey, selfManagedProviders: boolean): boolean {
+  return isChatModelRow(row) && row.status === 'active' && row.menu === true &&
+    (row.class === 'standard-pro' || row.class === 'max' || row.class === 'research') &&
+    (selfManagedProviders || row.tier === tier)
+}
+
+/** One choice per provider wire model. Preserve an existing exact assignment
+ * before preferring a tier-specific selector or the canonical wire alias. */
+export function managedRouteModelMenu(
+  tier: ChatTierKey,
+  selfManagedProviders: boolean,
+  configuredProviders: ProviderAvailability,
+  savedAlias?: string | null,
+): ModelRegistryRow[] {
+  const saved = savedAlias ? registryRow(savedAlias) : undefined
+  const choices = new Map<string, ModelRegistryRow>()
+  function preference(row: ModelRegistryRow): number {
+    if (row === saved) return 3
+    if (row.tier === tier) return 2
+    if (row.alias === row.apiModelId) return 1
+    return 0
+  }
+  for (const row of MODEL_REGISTRY) {
+    if (!canRouteManagedModel(row, tier, selfManagedProviders) || !isRegistryModelAvailable(row, configuredProviders)) continue
+    const key = `${row.provider}/${row.apiModelId}`
+    const current = choices.get(key)
+    if (!current || preference(row) > preference(current)) choices.set(key, row)
+  }
+  return [...choices.values()]
+}
+
 /**
  * Active rows of a class from configured providers, IGNORING the `menu` flag.
  *

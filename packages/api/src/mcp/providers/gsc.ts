@@ -4,7 +4,7 @@
  * The injector body below moved verbatim from `mcp/inject.ts`. It builds the
  * family's tools into a provider-local map (never the turn's shared map):
  * credentials bound per lane, build-time action-grant gate, health probe,
- * policy (`applyPolicyOrSkip`) and instance variants. The lane function and
+ * policy (`applyToolPolicies`) and instance variants. The lane function and
  * `ProviderModule` at the end are the family's activation surface.
  *
  * See docs/architecture/integrations/mcp.md → "Provider activation".
@@ -17,7 +17,7 @@ import type { AssistantConnectorStore } from '../../db/assistant-connector-store
 import { gateToolsOnActionGrants } from '../../safety/assert-action-allowed.js'
 import { wrapToolsWithHealthProbe, type HealthReporter } from '../connector-health.js'
 import { createSearchConsoleApi, unpackSearchConsoleCredentials, type SearchConsoleCredentials } from '../../gsc/client.js'
-import { applyPolicyOrSkip, injectInstanceVariants } from '../activation.js'
+import { applyToolPolicies, injectInstanceVariants } from '../activation.js'
 import type { ConnectorInstanceRef } from '../tool-names.js'
 import { notConnectedNotice, expiredCredentialsNotice } from './notices.js'
 import type { ProviderModule, ProviderActivationContext } from './types.js'
@@ -108,10 +108,8 @@ async function collectSearchConsoleTools(
         const gscTools = healthProbe && primaryInstanceId
           ? wrapToolsWithHealthProbe(built, primaryInstanceId, healthProbe.report)
           : built
-        for (const tool of gscTools) {
-          if (await applyPolicyOrSkip(tool, 'gsc', settingsStore, assistantId, userId, unavailable) === 'include') {
-            tools.set(tool.name, tool)
-          }
+        for (const tool of await applyToolPolicies(gscTools, 'gsc', settingsStore, assistantId, userId, unavailable)) {
+          tools.set(tool.name, tool)
         }
       }
     }

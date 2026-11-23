@@ -58,6 +58,7 @@ vi.mock("../llm-key-block", () => ({
 import { I18nProvider } from "@/lib/i18n/client";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 import { en } from "@/lib/i18n/dictionaries/en";
+import { clearWorkspaceModelRoute, setWorkspaceModelRoute, type MenuModel } from "@/lib/api/models";
 import { resetSurfaceCache } from "@/lib/surface-cache";
 import { ModelsSection } from "../models-section";
 
@@ -127,6 +128,73 @@ beforeEach(() => {
   });
   getCustomLlmConfiguration.mockResolvedValue({ endpoints: [endpoint], tierDefaults: [] });
   updateCustomLlmProfile.mockResolvedValue({ ...profile, contextWindow: 1_048_576 });
+});
+
+describe("[COMP:app-web/models-settings] workspace tier routing", () => {
+  const t = en.chrome.settingsModal.models;
+  const model: MenuModel = {
+    alias: "fixture-pro", apiModelId: "fixture-wire", displayName: "Fixture Chat",
+    provider: "openai-codex", class: "standard-pro", tier: "pro", contextWindow: 32000,
+    capabilities: { tools: true, vision: false, thinking: false }, metered: false,
+  };
+  const classes = { "standard-pro": [model] };
+  const baseMenu = { classes, defaults: [], profiles: [], modelRoutes: [], meteredBillingAvailable: false };
+
+  async function openTier(container: HTMLElement, label: string) {
+    const trigger = container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
+    expect(trigger).not.toBeNull();
+    await act(async () => trigger!.click());
+    return Array.from(document.querySelectorAll<HTMLElement>('[role="option"]'));
+  }
+
+  it("saves a cross-tier managed route, renders its exact saved alias, and restores Auto", async () => {
+    const menu = {
+      ...baseMenu,
+      managedRouteModels: { standard: [model], pro: [model], max: [model], research: [model] },
+    };
+    fetchModelMenu.mockResolvedValueOnce(menu)
+      .mockResolvedValueOnce({ ...menu, modelRoutes: [{ tier: "standard", modelAlias: model.alias }] })
+      .mockResolvedValue(menu);
+    const container = document.body.appendChild(document.createElement("div"));
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<I18nProvider locale="en" dict={en}><ModelsSection /></I18nProvider>));
+      const options = await openTier(container, t.classStandard);
+      const matches = options.filter((option) => option.textContent?.includes(model.displayName));
+      expect(matches).toHaveLength(1);
+      await act(async () => matches[0].click());
+      expect(setWorkspaceModelRoute).toHaveBeenCalledWith("ws-1", "standard", { modelAlias: model.alias });
+      expect(container.querySelector(`button[aria-label="${t.classStandard}"]`)?.textContent).toContain(model.displayName);
+      const auto = (await openTier(container, t.classStandard)).find((option) => option.textContent?.startsWith(t.autoRouting));
+      expect(auto).toBeDefined();
+      await act(async () => auto!.click());
+      expect(clearWorkspaceModelRoute).toHaveBeenCalledWith("ws-1", "standard");
+      expect(container.querySelector(`button[aria-label="${t.classStandard}"]`)?.textContent).toContain(t.autoRouting);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  it.each([
+    ["hosted routes", { ...baseMenu, managedRouteModels: { standard: [], pro: [model], max: [], research: [] } }],
+    ["older servers", baseMenu],
+  ])("respects tier availability for %s and retains an unavailable saved alias", async (_case, menu) => {
+    fetchModelMenu.mockResolvedValue({
+      ...menu, modelRoutes: [{ tier: "standard", modelAlias: "unavailable", modelDisplayName: "Offline Model" }],
+    });
+    const container = document.body.appendChild(document.createElement("div"));
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<I18nProvider locale="en" dict={en}><ModelsSection /></I18nProvider>));
+      const options = await openTier(container, t.classStandard);
+      expect(options.some((option) => option.textContent?.includes(model.displayName))).toBe(false);
+      expect(options.some((option) => option.textContent?.includes(t.unavailableModel.replace("{model}", "Offline Model")))).toBe(true);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
 });
 
 describe("[COMP:app-web/models-settings] custom profile editing", () => {

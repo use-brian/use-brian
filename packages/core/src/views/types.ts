@@ -831,14 +831,6 @@ export type SavedViewStore = {
     brainLastIngestAt: Date | null
   } | null>
 
-  /**
-   * Stamp the result of a brain ingest — set `brain_last_ingest_hash` +
-   * `brain_last_ingest_at = now()` so the next save can dedup + cooldown
-   * against them. System-level (the runner already resolved + authorised the
-   * page owner). Returns `true` if a row was updated.
-   */
-  markBrainIngestedSystem(id: string, contentHash: string): Promise<boolean>
-
   // ── Page event source (content-edit updated events) ─────────────────
 
   /**

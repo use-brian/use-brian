@@ -4,7 +4,7 @@
  * The injector body below moved verbatim from `mcp/inject.ts`. It builds the
  * family's tools into a provider-local map (never the turn's shared map):
  * credentials bound per lane, build-time action-grant gate, health probe,
- * policy (`applyPolicyOrSkip`) and instance variants. The lane function and
+ * policy (`applyToolPolicies`) and instance variants. The lane function and
  * `ProviderModule` at the end are the family's activation surface.
  *
  * See docs/architecture/integrations/mcp.md → "Provider activation".
@@ -18,7 +18,7 @@ import { wrapToolsWithHealthProbe, type HealthReporter } from '../connector-heal
 import { createMsGraphClient } from '../../msgraph/client.js'
 import { createMsGraphTokenManager, packMsGraphTokens, unpackMsGraphTokens, unpackMsGraphAppCredentials, type MsGraphTokens } from '../../msgraph/token.js'
 import { getConnectorConfig } from '../../connector-config.js'
-import { applyPolicyOrSkip } from '../activation.js'
+import { applyToolPolicies } from '../activation.js'
 import { notConnectedNotice } from './notices.js'
 import type { ProviderModule, ProviderActivationContext } from './types.js'
 import { describeFactoryTools, inertPort, memoDescribe } from './describe.js'
@@ -157,10 +157,8 @@ async function collectMsGraphTools(
       ? wrapToolsWithHealthProbe(built, primaryInstanceId, healthProbe.report)
       : built
 
-    for (const tool of msgraphTools) {
-      if (await applyPolicyOrSkip(tool, 'msgraph', settingsStore, assistantId, userId, unavailable) === 'include') {
-        tools.set(tool.name, tool)
-      }
+    for (const tool of await applyToolPolicies(msgraphTools, 'msgraph', settingsStore, assistantId, userId, unavailable)) {
+      tools.set(tool.name, tool)
     }
 
     console.debug('[mcp-inject] Microsoft Teams: injected tools')

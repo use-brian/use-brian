@@ -451,6 +451,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
     let needsConfirmation = toolDef.resolveConfirmation
       ? await toolDef.resolveConfirmation(options.context, t.input)
       : toolDef.requiresConfirmation
+    let confirmed = false
 
     // ── WU-6.5 INTEGRATION POINT — workflow-scoped permission grants ──
     // If the caller is driving an active workflow run whose definition
@@ -461,6 +462,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
     if (needsConfirmation && options.permissionGrantEvaluator && toolDef.confirmationMode !== 'durable_attended') {
       const decision = await options.permissionGrantEvaluator(t.name, options.context)
       if (decision.kind === 'allow') {
+        confirmed = true
         needsConfirmation = false
       } else if (decision.kind === 'block') {
         deniedTools.add(t.name)
@@ -705,6 +707,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
           return
         }
         confirmedApprovalId = approvalId
+        confirmed = true
         // 'allow' or 'always_allow' - fall through to execution
       } catch {
         // Timeout — treat as deny for this session
@@ -951,6 +954,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
                 },
               }
             : {}),
+          confirmedToolName: confirmed ? t.name : undefined,
         }),
         abandonSignal,
         t.name,

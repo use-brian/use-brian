@@ -85,7 +85,7 @@ export class ContextScopeAccumulator {
   #sensitivity: Sensitivity = 'public'
   readonly #compartments = new Set<string>()
   readonly #projectIds = new Set<string>()
-  readonly #sources: ScopeSource[] = []
+  readonly #sources = new Map<string, ScopeSource>()
 
   constructor(initial?: ScopeEvidence | null) {
     this.note(initial)
@@ -113,7 +113,7 @@ export class ContextScopeAccumulator {
       sensitivity: this.#sensitivity,
       compartments: this.compartments,
       projectIds: this.projectIds,
-      ...(this.#sources.length ? { sources: structuredClone(this.#sources) } : {}),
+      ...(this.#sources.size ? { sources: structuredClone([...this.#sources.values()]) } : {}),
     }
   }
 
@@ -125,13 +125,15 @@ export class ContextScopeAccumulator {
       // invalid or protected earlier item could disappear behind a later one.
       const incomingFloors = evidence.sources.map(source =>
         deriveContextFloor({ producer: 'context', sources: [source] }))
-      const latest = new Map<string, ScopeSource>()
-      for (const source of [...this.#sources, ...evidence.sources]) {
+      // Compare only the incoming observations. Existing snapshots have
+      // already contributed their labels and cannot be mutated by callers.
+      const updates = new Map<string, ScopeSource>()
+      const workspaceId = this.#sources.values().next().value?.workspaceId ?? evidence.sources[0].workspaceId
+      for (const source of evidence.sources) {
+        if (source.workspaceId !== workspaceId) throw new DerivedScopeError('scope_workspace_mismatch')
         const key = JSON.stringify([source.workspaceId, source.resourceKind, source.resourceId])
-        const previous = latest.get(key)
-        // Native D1 re-reads may advance after this turn's own mutation. An
-        // immutable field/source/revision observation cannot be replaced by
-        // that rule. Conflicting exact observations refuse the whole batch.
+        const previous = updates.get(key) ?? this.#sources.get(key)
+        // A native re-read may advance after this turn's own mutation.
         const immutable = source.resourceKind === 'application_field'
           || source.resourceKind === 'external_source'
           || source.resourceKind === 'session_context_revision'
@@ -139,15 +141,10 @@ export class ContextScopeAccumulator {
           || (previous.version === source.version && resourceScopeKey(previous) !== resourceScopeKey(source)))) {
           throw new DerivedScopeError('scope_source_changed')
         }
-        latest.set(key, source)
+        updates.set(key, source)
       }
-      const sources = [...latest.values()]
-      // Label floor only: context may span visibility partitions (a primary
-      // reads other authors' rows). The derived write decides whether those
-      // sources can certify one envelope — see `sourcesShareVisibility`.
-      const floor = deriveContextFloor({ producer: 'context', sources })
-      this.#sources.splice(0, this.#sources.length, ...structuredClone(sources))
-      this.note({ sensitivity: floor.sensitivity, compartments: floor.compartments, projectIds: floor.projectIds })
+      // Clone the complete batch before publishing any of it.
+      for (const [key, snapshot] of structuredClone(updates)) this.#sources.set(key, snapshot)
       // Earlier native snapshots in this same valid batch still raise labels,
       // even when the lineage pointer advances to their latest version.
       for (const incoming of incomingFloors) this.note(incoming)

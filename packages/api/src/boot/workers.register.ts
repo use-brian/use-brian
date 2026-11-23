@@ -169,7 +169,7 @@ export async function registerWorkers(scope: WorkersScope) {
   const sessionTitleWorker = createSessionTitleWorker({
     isPlaceholderTitle, getTitleChannelPrefix,
     async resolveRuntime(workspaceId) {
-      const runtime = await resolveWorkspaceCustomLlm({ workspaceId, requestedTier: 'standard', allowDefault: true, allowAnyDefault: true })
+      const runtime = await scope.resolveBackgroundRuntime(workspaceId)
       return { provider: runtime?.provider ?? provider, model: runtime?.selector ?? backgroundModelFor(configuredProviders),
         providerKeySource: runtime?.providerKeySource ?? 'platform' }
     },
@@ -185,7 +185,7 @@ export async function registerWorkers(scope: WorkersScope) {
 
   const sessionStateWorker = createSessionStateWorker({
     async resolveRuntime(workspaceId) {
-      const runtime = await resolveWorkspaceCustomLlm({ workspaceId, requestedTier: 'standard', allowDefault: true, allowAnyDefault: true })
+      const runtime = await scope.resolveBackgroundRuntime(workspaceId)
       return { provider: runtime?.provider ?? provider, model: runtime?.selector ?? backgroundModelFor(configuredProviders),
         providerKeySource: runtime?.providerKeySource ?? 'platform' }
     },

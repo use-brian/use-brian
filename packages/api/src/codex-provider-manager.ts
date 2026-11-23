@@ -9,6 +9,7 @@
  * [COMP:api/codex-provider]
  */
 import { randomUUID } from 'node:crypto'
+import { ownsInputAdmission, registerInputAdmissionOwner } from '@use-brian/agent-runtime/providers/input-authority.js'
 import {
   CodexAccountClient,
   type CodexAccountStatus,
@@ -358,7 +359,7 @@ class ManagedCodexProvider implements CodexProviderManager {
       }
       return provider
     }
-    return {
+    return registerInputAdmissionOwner({
       name: PROVIDER_ID,
       models: [...this.#reviewedModels],
       // The proxy survives runtime replacement: query the current adapter's
@@ -382,7 +383,7 @@ class ManagedCodexProvider implements CodexProviderManager {
       createSession(options: SessionOptions): ProviderSession {
         return current().createSession(options)
       },
-    }
+    }, input => !!this.#runtime && ownsInputAdmission(this.#runtime.provider, input))
   }
 
   #preferredProvider(): OssPreferredProvider {

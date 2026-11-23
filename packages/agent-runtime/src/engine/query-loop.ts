@@ -860,6 +860,9 @@ async function* queryLoopCore(
     context,
     stallWatchdog,
   } = options
+  // A parked Codex tool checks both guards when its caller changes. Keep the
+  // same guard for this invocation; each call still checks the live context.
+  const assertInputAuthority = () => assertModelInputAuthority(context)
   let provider = captureInputAdmissionProvider(originalProvider)
   // Every event the loop hands its consumer is progress; so is every
   // provider chunk (below) and every tool start / end (tool-executor).
@@ -921,7 +924,7 @@ async function* queryLoopCore(
   // session when its immutable prompt/catalog is replaced.
   const initialSession = options.takeDiscoveredContext ? new AbortController() : undefined
   const createPreparedSession = () => provider.createSession({
-    assertInputAuthority: () => assertModelInputAuthority(context),
+    assertInputAuthority,
     model,
     systemPrompt,
     runtimeSystemContext,
@@ -1033,7 +1036,7 @@ async function* queryLoopCore(
   async function* applyRoutineRead(): AsyncGenerator<QueryEvent, void> {
     if (!options.routineCalendarRead) return
     const routine = yield* requireQueryLoopPort(options.ports, 'routineRead', 'routineCalendarRead')({
-      options, tools, loopDetector, deniedTools, ledger: ledgerTrace, assertInputAuthority: () => assertModelInputAuthority(context),
+      options, tools, loopDetector, deniedTools, ledger: ledgerTrace, assertInputAuthority,
     })
     loopStepIndex += routine.calls
     for (const observation of routine.records) {
@@ -1189,7 +1192,7 @@ async function* queryLoopCore(
       // Stateless: send full history via provider.stream() (no rawHistory accumulation).
       // Stateful: send only new messages via session.send() (preserves thought signatures).
       const sendOpts: SendOptions = {
-        assertInputAuthority: () => assertModelInputAuthority(context),
+        assertInputAuthority,
         ...(nextThinkingLevel ? { thinkingLevel: nextThinkingLevel } : {}),
         ...(progress ? { progress } : {}),
       }
@@ -1207,7 +1210,7 @@ async function* queryLoopCore(
       const modelStream = bufferProviderStream(signal => observeProviderUsage(session
         ? session.send(nextMessages, { ...sendOpts, signal })
         : provider.stream({
-            assertInputAuthority: () => assertModelInputAuthority(context),
+            assertInputAuthority,
             model,
             systemPrompt,
             runtimeSystemContext,
@@ -1391,7 +1394,7 @@ async function* queryLoopCore(
           const compact = async () => {
             await assertModelInputAuthority(context)
             return compactConversation({
-              assertInputAuthority: () => assertModelInputAuthority(context),
+              assertInputAuthority,
               provider,
               model: options.compactModel!,
               messages: nextMessages,

@@ -15,6 +15,7 @@ import { persistentContextFixture } from '../application-platform/__tests__/fixt
 import { admitTelegramRecording, changeChannelRecording, confirmChannelRecordingOwner, recordDeliveredTelegramMessage } from '../channel-recording.js'
 import { createDbCapabilityStore } from '../db/capability-store.js'
 import { createDbChannelIntegrationStore, encryptCredentials } from '../db/channel-integrations.js'
+import { createDbChannelUserStore } from '../db/channel-user-store.js'
 import { getAppPool, getPool } from '../db/client.js'
 import { initializeConversationVisibility } from '../db/conversation-visibility.js'
 import { createDbLinkedAccountStore } from '../db/linked-accounts.js'
@@ -33,6 +34,8 @@ const conversationId = `${chat}:topic:${topic}`
 const botId = '987650300'
 const token = botId + ':fictional-dispatch-bot'
 const sender = 9100000300
+const otherMember = 9100000301
+const unlinkedSender = 9100000302
 const question = 'Which instrument did we agree to use during the final calibration?'
 const historicalAnswer = 'the violet spectrometer'
 const reply = 'We agreed to use ' + historicalAnswer + '.'
@@ -42,10 +45,11 @@ const rows = 300
 async function seedConversation() {
   await initializeConversationVisibility()
   const fixture = await persistentContextFixture()
-  const { pool, workspaceId, ownerId, assistantId } = fixture
+  const { pool, workspaceId, ownerId, secondId, assistantId } = fixture
   const integrationId = randomUUID(), channelId = randomUUID(), key = randomBytes(32)
   const linkedAccountStore = createDbLinkedAccountStore()
   await linkedAccountStore.upsert({ userId: ownerId, assistantId, provider: 'telegram', providerId: String(sender) })
+  await linkedAccountStore.upsert({ userId: secondId, assistantId, provider: 'telegram', providerId: String(otherMember) })
   await pool.query("UPDATE workspaces SET department_read_v2=true,plan='pro' WHERE id=$1", [workspaceId])
   await pool.query("INSERT INTO channels(id,workspace_id,channel_type,enabled_capabilities,display_name) VALUES($1,$2,'telegram','{chat}','Fictional dispatch bot')", [channelId, workspaceId])
   await pool.query("INSERT INTO channel_assistants(channel_id,assistant_id,model_alias) VALUES($1,$2,'standard')", [channelId, assistantId])
@@ -98,7 +102,8 @@ async function seedConversation() {
   expect(stats.messages).toBe(rows)
   expect(stats.revisions).toBe(37)
   console.info('[Telegram benchmark history]', stats)
-  return { pool, sessionId, channelId, ownerId, assistantId, linkedAccountStore, integrationStore: createDbChannelIntegrationStore(key), stats }
+  return { pool, workspaceId, sessionId, channelId, integrationId, config, ownerId, secondId, assistantId,
+    linkedAccountStore, integrationStore: createDbChannelIntegrationStore(key), stats }
 }
 
 type ModelRequest = {
@@ -126,9 +131,14 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
     { title: 'withholds the physical request when the current Telegram input is held after admission', phase: 'headers', incomingId: 2001 },
     { title: 'withholds the answer when the current Telegram input is held after model dispatch', phase: 'response', incomingId: 2002 },
     { title: 'resolves an unquoted numeric question choice through authenticated context discovery', phase: 'choice', incomingId: 2003 },
+    { title: 'withholds the answer after the recorded sender loses workspace membership', phase: 'member', incomingId: 2004 },
+    { title: 'withholds the answer after the audience binding moves to another group', phase: 'audience', incomingId: 2005 },
+    { title: 'denies an unlinked sender on an owner-only bot', phase: 'unlinked', incomingId: 2006 },
   ] as const)('$title', async ({ phase, incomingId }) => {
-    const { pool, sessionId, channelId, ownerId, assistantId, linkedAccountStore, integrationStore, stats } = recording
-    const hold = phase === 'headers' || phase === 'response'
+    const { pool, workspaceId, sessionId, channelId, integrationId, config, ownerId, secondId, assistantId,
+      linkedAccountStore, integrationStore, stats } = recording
+    const hold = phase === 'headers' || phase === 'response' || phase === 'member' || phase === 'audience'
+    const telegramSender = phase === 'member' ? otherMember : phase === 'unlinked' ? unlinkedSender : sender
     const choice = 'Use our earlier calibration decision'
     const authored = phase === 'choice' ? '1' : question
     const pendingQuestion = {
@@ -139,6 +149,13 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
     if (phase === 'choice') channelQuestions.create(pendingQuestion, [choice, 'Run a new calibration'])
     const heldAnswer = 'Protected fictional sensor result ' + incomingId
     let heldInputId: string | undefined
+    let memberRevoked = false
+    let configChanged = false
+    async function changeConfig(next: typeof config | (typeof config & { userAccessMode: 'allowlist' })) {
+      const changed = await pool.query('UPDATE channel_integrations SET config=$2 WHERE id=$1', [integrationId, next])
+      expect(changed.rowCount).toBe(1)
+      configChanged = true
+    }
     async function holdPersistedInput() {
       const outcome = await pool.query<{ id: string }>(`UPDATE session_messages SET scope_held=true WHERE session_id=$1
         AND role='user' AND channel_message_id=$2 AND NOT scope_held RETURNING id`, [sessionId, String(incomingId)])
@@ -147,12 +164,24 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
     }
     const app = express()
     let ingress = 0
+    let deliveredMs: number | undefined
+    // Collect on the disposable database only. The first request is timed before
+    // sampling, and SQL observation is excluded from the statement counts.
+    const sqlCounts = async () => {
+      if (process.env.BRIAN_ASSURANCE_STATEMENT_STATS !== 'true') return undefined
+      return (await pool.query<{ top: number, nested: number }>(`SELECT
+        coalesce(sum(calls) FILTER (WHERE toplevel),0)::float8 AS top,
+        coalesce(sum(calls) FILTER (WHERE NOT toplevel),0)::float8 AS nested
+        FROM pg_stat_statements WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database())
+        AND coalesce(query,'') NOT ILIKE '%pg_stat_statements%'`)).rows[0]
+    }
+    const before = await sqlCounts()
     app.use((req, _res, next) => {
       if (req.path.startsWith('/webhook/')) ingress = performance.now()
       next()
     })
     app.use(express.json({ limit: '8mb' }))
-    const modelCalls: Array<{ body: ModelRequest, elapsedMs: number }> = []
+    const modelCalls: Array<{ body: ModelRequest, elapsedMs: number, sqlCalls?: { top: number, nested: number } }> = []
     const backgroundCalls: number[] = []
     app.post('/model/:model', async (req, res) => {
       const body = req.body as ModelRequest
@@ -160,10 +189,25 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       const isMain = req.params.model === standardGemini.apiModelId && body.generationConfig?.responseMimeType !== 'application/json'
       let parts: unknown[]
       if (isMain) {
-        modelCalls.push({ body, elapsedMs })
+        const current = await sqlCounts()
+        const sqlCalls = current && before ? { top: current.top - before.top, nested: current.nested - before.nested } : undefined
+        modelCalls.push({ body, elapsedMs, sqlCalls })
         console.info('[Telegram main model HTTP ingress]', { round: modelCalls.length, elapsedMs: Math.round(elapsedMs) })
         if (hold) {
           if (phase === 'response' && !heldInputId) await holdPersistedInput()
+          if (phase === 'member' && !memberRevoked) {
+            const input = await pool.query<{sender_user_id: string}>(
+              "SELECT sender_user_id FROM session_messages WHERE session_id=$1 AND channel_message_id=$2 AND role='user'",
+              [sessionId, String(incomingId)])
+            expect(input.rows).toEqual([{ sender_user_id: secondId }])
+            const revoked = await pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [workspaceId, secondId])
+            expect(revoked.rowCount).toBe(1)
+            memberRevoked = true
+          }
+          if (phase === 'audience' && !configChanged) await changeConfig({
+            ...config,
+            deliveryAudienceBindings: config.deliveryAudienceBindings.map(binding => ({ ...binding, channelId: String(chat - 1) })),
+          })
           parts = [{ text: heldAnswer }]
         } else if (modelCalls.length === 1 && JSON.stringify(body.tools ?? []).includes('requestConversationContext')) {
           parts = [{ functionCall: { name: 'requestConversationContext', args: {}, id: 'fixture-context' }, thoughtSignature: 'fixture-context-signature' }]
@@ -203,7 +247,8 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       provider, configuredProviders: new Set(['gemini']),
       decisionRuntime: createDecisionRuntime({ llmProvider: provider, defaultLlmModel: standardGemini.alias }),
       systemPrompt: 'Answer the speaker using admitted evidence.', tools: new Map(), memoryStore: createDbMemoryStore(),
-      capabilityStore: createDbCapabilityStore(), integrationStore, linkedAccountStore, apiUrl: origin
+      capabilityStore: createDbCapabilityStore(), integrationStore, linkedAccountStore,
+      channelUserStore: createDbChannelUserStore(), apiUrl: origin,
     }))
     const delivered: string[] = []
     let messageId = incomingId * 10
@@ -217,13 +262,18 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
         const body = JSON.parse(String(init?.body))
         delivered.push(body.text)
         messageId++
-        if (body.text === reply) replyReceiptId = String(messageId)
+        if (body.text === reply) {
+          replyReceiptId = String(messageId)
+          deliveredMs = performance.now() - ingress
+        }
         return Response.json({ ok: true, result: { message_id: messageId, text: body.text } })
       }
       return Response.json({ ok: true, result: true })
     })
+    const linkRead = vi.spyOn(linkedAccountStore, 'findByProvider')
     configureTelegramTextDeliveryObserver(recordDeliveredTelegramMessage)
     try {
+      if (phase === 'unlinked') await changeConfig({ ...config, userAccessMode: 'allowlist' })
       const result = await network(origin + '/webhook/telegram/' + channelId, {
         method: 'POST', headers: {
           'content-type': 'application/json',
@@ -232,14 +282,28 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
           update_id: 7000 + incomingId, message: {
             message_id: incomingId,
             message_thread_id: topic, is_topic_message: true, chat: { id: chat, type: 'supergroup', is_forum: true, title: 'Fictional observatory' },
-            from: { id: sender, first_name: 'Observer', is_bot: false }, date: Math.floor(Date.now() / 1000), text: authored
+            from: { id: telegramSender, first_name: 'Observer', is_bot: false }, date: Math.floor(Date.now() / 1000), text: authored
           }
         })
       })
       expect(result.status).toBe(200)
+      await vi.waitFor(() => expect(linkRead).toHaveBeenCalledWith('telegram', String(telegramSender)))
+      if (phase === 'unlinked') {
+        const link = await linkRead.mock.results[0].value
+        expect(link).toBeNull()
+        const posted = await pool.query('SELECT id FROM session_messages WHERE session_id=$1 AND channel_message_id=$2',
+          [sessionId, String(incomingId)])
+        expect(posted.rows).toHaveLength(0)
+        expect(modelCalls).toHaveLength(0)
+        expect(backgroundCalls).toHaveLength(0)
+        expect(delivered).toHaveLength(0)
+        return
+      }
       if (hold) {
         await vi.waitFor(async () => {
-          expect(heldInputId).toBeDefined()
+          if (phase === 'member') expect(memberRevoked).toBe(true)
+          else if (phase === 'audience') expect(configChanged).toBe(true)
+          else expect(heldInputId).toBeDefined()
           const session = await pool.query('SELECT status,turn_lease_token FROM sessions WHERE id=$1', [sessionId])
           expect(session.rows[0]).toEqual({ status: 'failed', turn_lease_token: null })
         }, { interval: 100, timeout: 15_000 })
@@ -258,11 +322,15 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
         expect(row.status).toBe('idle')
         expect(row.added).toBeGreaterThanOrEqual(2)
       }, { interval: 250, timeout: 180_000 })
+      expect(modelCalls).toHaveLength(2)
+      expect(deliveredMs).toBeDefined()
       console.info('[Telegram first dispatch]', JSON.stringify({
         stats, mainMs: modelCalls.map(row => Math.round(row.elapsedMs)),
+        betweenMainMs: Math.round(modelCalls[1].elapsedMs - modelCalls[0].elapsedMs),
+        sqlCallsSinceBaseline: before ? modelCalls.map(row => row.sqlCalls) : undefined,
+        deliveredMs: Math.round(deliveredMs!),
         backgroundMs: backgroundCalls.map(Math.round), delivered: delivered.includes(reply)
       }))
-      expect(modelCalls).toHaveLength(2)
       expect(modelCalls[0].elapsedMs).toBeLessThan(10_000)
       expect(backgroundCalls.every(time => time > modelCalls[0].elapsedMs)).toBe(true)
       expect(JSON.stringify(modelCalls[0].body.contents)).toContain(phase === 'choice' ? choice : question)
@@ -293,9 +361,14 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
     } finally {
       if (phase === 'choice') channelQuestions.invalidate(channelId, pendingQuestion.incoming)
       configureTelegramTextDeliveryObserver()
+      linkRead.mockRestore()
       stub.mockRestore()
       await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
       if (heldInputId) await pool.query('UPDATE session_messages SET scope_held=false WHERE session_id=$1 AND id=$2', [sessionId, heldInputId])
+      if (memberRevoked) await pool.query(
+        "INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'member','confidential')",
+        [workspaceId, secondId])
+      if (configChanged) await pool.query('UPDATE channel_integrations SET config=$2 WHERE id=$1', [integrationId, config])
     }
   }, 600_000)
 })

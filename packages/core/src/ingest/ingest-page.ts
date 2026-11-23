@@ -333,6 +333,7 @@ export type PageSourceChunk = {
  * upsert + prune removed blocks in one transaction.
  */
 export type UpsertPageSource = (args: {
+  contentHash: string
   pageId: string
   chunks: PageSourceChunk[]
 }) => Promise<void>
@@ -442,7 +443,7 @@ export async function distillPageToBrain(
       contentHash: sha256(text),
     })
   }
-  await deps.upsertPageSource({ pageId: input.pageId, chunks })
+  await deps.upsertPageSource({ pageId: input.pageId, chunks, contentHash })
 
   return {
     contentHash,

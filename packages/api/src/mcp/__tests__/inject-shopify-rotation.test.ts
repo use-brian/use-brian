@@ -25,7 +25,7 @@ async function inject(path: string, result: 'short' | 'valid' | 'static' | 'miss
   await composeForTest({ userId: 'user', assistantId: 'assistant', tools, keepBuiltinsDirect: true,
     ...(overlay === 'grant' || overlay === 'workspace' ? { assistantTeamId: 'workspace' } : {}),
     connectorStore: { list: vi.fn(async () => instances), getCredentials: load, upsert: persist } as never,
-    settingsStore: new Proxy({}, { get: () => vi.fn().mockResolvedValue(undefined) }) as never,
+    settingsStore: new Proxy({}, { get: (_target, key) => vi.fn().mockResolvedValue(key === 'getPolicies' ? [] : undefined) }) as never,
     connectorInstanceStore: { listByWorkspaceSystem: vi.fn(async () => overlay === 'workspace' ? instances : []),
       getCredentialsSystem: load, updateCredentialsSystem: persist,
       ...(durable ? { refreshShopifyCredentialsSystem: refresh } : {}) } as never,
@@ -77,7 +77,7 @@ describe('[COMP:api/mcp-surface] Approved Shopify image attachment', () => {
       connectorStore: { list: async () => [] } as never,
       connectorInstanceStore: { listByWorkspaceSystem: async () => [connecting], getSystem: async () => connecting,
         refreshShopifyCredentialsSystem: async () => credentials, markHealth: async () => {} } as never,
-      settingsStore: new Proxy({}, { get: () => vi.fn().mockResolvedValue(undefined) }) as never,
+      settingsStore: new Proxy({}, { get: (_target, key) => vi.fn().mockResolvedValue(key === 'getPolicies' ? [] : undefined) }) as never,
       filesApi: { readBytes, writeBytes } as never, readCachedFile, policyReader: async () => [], actionGrantReader: null,
     })
     expect([...tools.keys()]).toEqual(['shopifyAddProductImage'])

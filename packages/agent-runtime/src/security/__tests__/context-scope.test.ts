@@ -158,6 +158,19 @@ describe('[COMP:security/context-scope] immutable observations survive accumulat
     expect(accumulator.evidence).toEqual(prior)
   })
 
+  it('keeps recorded history snapshots isolated and rejects mixed-workspace batches atomically', () => {
+    const original = source('application_field', '1')
+    const accumulator = new ContextScopeAccumulator({ sources: [original] })
+    const before = accumulator.evidence
+    original.compartments.length = 0
+    accumulator.evidence.sources![0].projectIds.push('unobserved')
+    expect(() => accumulator.note({ sources: [
+      { ...source('workspace_file', '1'), sensitivity: 'confidential' },
+      { ...source('session_message', '1'), workspaceId: 'other' },
+    ] })).toThrow('scope_workspace_mismatch')
+    expect(accumulator.evidence).toEqual(before)
+  })
+
   it('preserves earlier native labels within the same batch while advancing the current pointer', () => {
     const accumulator = new ContextScopeAccumulator()
     accumulator.note({ sources: [source('workspace_file', '1'), {

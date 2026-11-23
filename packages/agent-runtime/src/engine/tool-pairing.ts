@@ -270,20 +270,10 @@ export function ensureToolResultPairing(messages: Message[]): Message[] {
  * don't trigger Gemini 3.x's "Function call is missing a thought_signature"
  * 400 on the next turn.
  *
- * This is a one-way compatibility shim: any tool_use persisted from this
- * point forward carries a signature. Only rows from before that change are
- * affected, and dropping them is safe because the assistant's accompanying
- * text (if any) is preserved, and the tool's actual output was already
- * summarised into that text by the original response.
- *
- * Idempotent: histories with all-signed tool_uses pass through unchanged.
- *
- * **Gated on the serving provider.** This is a Gemini-family workaround, not a
- * general invariant. Pass `requiresSignatures = modelRequiresToolSignatures(model)`
- * for the turn's model: a signature-less provider (Qwen via openai-compat,
- * Anthropic) must skip the strip entirely, or every tool call it made vanishes
- * from history on the next request. Defaults to `true` so an un-updated caller
- * keeps the original Gemini-safe behaviour.
+ * Unsigned calls also occur in current transcripts when a turn changes
+ * providers. Gemini applies this projection when serializing a full history.
+ * The shared transcript retains these pairs for providers that use call IDs.
+ * Signed parallel siblings and accompanying text survive the projection.
  */
 export function stripUnsignedToolUses(
   messages: Message[],

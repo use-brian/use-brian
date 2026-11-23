@@ -8,10 +8,9 @@
 import { sha256 } from './archive.js'
 import type { LinkedInLedgerRow, ParsedCsvRecord, ParsedLinkedInCsv } from './types.js'
 
-export function parseCsv(text: string): ParsedCsvRecord[] {
-  if (text.length === 0) return []
+export function* scanCsvRecords(text: string) {
 
-  const records: ParsedCsvRecord[] = []
+  let rowOrdinal = 0
   let cells: string[] = []
   let field = ''
   let inQuotes = false
@@ -21,25 +20,22 @@ export function parseCsv(text: string): ParsedCsvRecord[] {
   let startLine = 1
   let line = 1
 
-  const pushRecord = (endOffset: number, endLine: number) => {
+  const takeRecord = (endOffset: number, endLine: number) => {
     cells.push(field)
-    if (records.length === 0 && cells[0]?.charCodeAt(0) === 0xfeff) {
-      cells[0] = cells[0].slice(1)
-    }
-    const raw = text.slice(recordStart, endOffset)
-    records.push({
-      rowOrdinal: records.length + 1,
+    const record = {
+      rowOrdinal: ++rowOrdinal,
       startLine,
       endLine,
+      startOffset: recordStart,
+      endOffset,
       cells,
-      raw,
-      rawSha256: sha256(raw),
       ...(malformedReason ? { malformedReason } : {}),
-    })
+    }
     cells = []
     field = ''
     malformedReason = undefined
     justClosedQuote = false
+    return record
   }
 
   for (let i = 0; i < text.length; i += 1) {
@@ -76,7 +72,7 @@ export function parseCsv(text: string): ParsedCsvRecord[] {
       continue
     }
     if (ch === '\r' && text[i + 1] === '\n') {
-      pushRecord(i, line)
+      yield takeRecord(i, line)
       i += 1
       line += 1
       recordStart = i + 1
@@ -84,7 +80,7 @@ export function parseCsv(text: string): ParsedCsvRecord[] {
       continue
     }
     if (ch === '\n' || ch === '\r') {
-      pushRecord(i, line)
+      yield takeRecord(i, line)
       line += 1
       recordStart = i + 1
       startLine = line
@@ -100,8 +96,17 @@ export function parseCsv(text: string): ParsedCsvRecord[] {
   // A terminal newline already emitted the final record. Otherwise the tail is
   // a logical record, including a one-cell blank record for text === "" only
   // (handled by the early return above).
-  if (recordStart < text.length) pushRecord(text.length, line)
-  return records
+  if (recordStart < text.length) yield takeRecord(text.length, line)
+}
+
+export function parseCsv(text: string): ParsedCsvRecord[] {
+  return Array.from(scanCsvRecords(text), ({ startOffset, endOffset, ...record }) => {
+    if (record.rowOrdinal === 1 && record.cells[0]?.charCodeAt(0) === 0xfeff) {
+      record.cells[0] = record.cells[0].slice(1)
+    }
+    const raw = text.slice(startOffset, endOffset)
+    return { ...record, raw, rawSha256: sha256(raw) }
+  })
 }
 function normalizedHeader(cell: string): string {
   return cell.trim().toLowerCase().replace(/\s+/g, ' ')

@@ -56,6 +56,7 @@ export type GcsBlobStat = {
   sizeBytes: number
   mime: string
   updatedAt: Date | null
+  version?: string
 }
 
 export type GcsFilesClient = {
@@ -75,6 +76,9 @@ export type GcsFilesClient = {
 
   /** Returns null if the object does not exist (404). */
   readBlob(key: string): Promise<GcsBlob | null>
+
+  /** End is exclusive. A missing or replaced version returns null. */
+  readBlobRange?(key: string, version: string, start: number, end: number): Promise<Buffer | null>
 
   /**
    * Size + content type WITHOUT downloading the object. `readBlob` already
@@ -265,6 +269,17 @@ export function createGcsFilesClient({ bucket: bucketName, projectId, credential
       }
     },
 
+    async readBlobRange(key, version, start, end) {
+      const bucket = await bucketHandle()
+      try {
+        const [bytes] = await bucket.file(key, { generation: version }).download({ start, end: end - 1, validation: false })
+        return bytes
+      } catch (err: unknown) {
+        if ([404, 412, 416].includes(Number((err as { code?: unknown })?.code))) return null
+        throw err
+      }
+    },
+
     async statBlob(key) {
       const bucket = await bucketHandle()
       try {
@@ -279,6 +294,7 @@ export function createGcsFilesClient({ bucket: bucketName, projectId, credential
             custom.mime ||
             'application/octet-stream',
           updatedAt: meta.updated ? new Date(meta.updated) : null,
+          ...(meta.generation === undefined ? {} : { version: String(meta.generation) }),
         }
       } catch (err: unknown) {
         if (err && typeof err === 'object' && 'code' in err && (err as { code: number }).code === 404) {

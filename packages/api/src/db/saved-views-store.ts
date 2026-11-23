@@ -1047,18 +1047,6 @@ export function createDbSavedViewStore(
       return result.rows[0] ?? null
     },
 
-    async markBrainIngestedSystem(id, contentHash) {
-      const result = await query<{ id: string }>(
-        `UPDATE saved_views
-            SET brain_last_ingest_hash = $2,
-                brain_last_ingest_at   = now()
-          WHERE id = $1
-          RETURNING id`,
-        [id, contentHash],
-      )
-      return result.rows.length > 0
-    },
-
     async getPageEventContextSystem(id) {
       // A new body-settle receipt captures current parent/Teamspace metadata
       // under a page lock without pretending that an earlier write is current.

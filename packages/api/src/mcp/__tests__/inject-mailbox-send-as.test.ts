@@ -90,7 +90,7 @@ async function inject(audit?: ConnectorActionAudit) {
         connected: true, credentialsType: 'imap', createdAt: new Date('2026-07-01T00:00:00Z'), updatedAt: new Date('2026-07-01T00:00:00Z'),
       }]),
     } as never,
-    settingsStore: new Proxy({}, { get: () => vi.fn().mockResolvedValue(undefined) }) as never,
+    settingsStore: new Proxy({}, { get: (_target, key) => vi.fn().mockResolvedValue(key === 'getPolicies' ? [] : undefined) }) as never,
     connectorInstanceStore: instanceStore,
     keepBuiltinsDirect: true,
     ...(audit ? { connectorActionAudit: audit } : {}),
@@ -129,7 +129,7 @@ describe('[COMP:tools/mailbox-imap] send-as aliases at injection', () => {
     const audit = { preflight: vi.fn(() => preflightResult()), emit } as unknown as ConnectorActionAudit
     const { tools } = await inject(audit)
     const send = tools.get('imapSendMessage')!
-    const result = await send.execute({ to: ['ken@client.hk'], subject: 'Re', body: 'b', inReplyTo: 'INBOX:7' }, {} as never)
+    const result = await send.execute({ to: ['ken@client.hk'], subject: 'Re', body: 'b', inReplyTo: 'INBOX:7' }, { confirmedToolName: send.name } as never)
     expect(result.isError).toBeFalsy()
     expect(result.data).toMatchObject({ from: 'bd@harborlane.example', messageId: '<sent@x>' })
     expect(emit).toHaveBeenCalledWith(

@@ -84,6 +84,8 @@ export type WorkspaceDecisionRoutingSetting =
 
 export type ModelMenu = {
   classes: Record<string, MenuModel[]>;
+  /** Available exact routes for each policy tier. Older servers expose only classes. */
+  managedRouteModels?: Record<WorkspaceModelRoute["tier"], MenuModel[]>;
   profiles: MeteredProfile[];
   defaults: WorkspaceModelDefault[];
   customEndpoints: Array<{

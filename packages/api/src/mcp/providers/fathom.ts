@@ -4,7 +4,7 @@
  * The injector body below moved verbatim from `mcp/inject.ts`. It builds the
  * family's tools into a provider-local map (never the turn's shared map):
  * credentials bound per lane, build-time action-grant gate, health probe,
- * policy (`applyPolicyOrSkip`) and instance variants. The lane function and
+ * policy (`applyToolPolicies`) and instance variants. The lane function and
  * `ProviderModule` at the end are the family's activation surface.
  *
  * See docs/architecture/integrations/mcp.md → "Provider activation".
@@ -16,7 +16,7 @@ import type { ConnectorStore } from '../../db/connector-store.js'
 import type { AssistantConnectorStore } from '../../db/assistant-connector-store.js'
 import { createFathomTokenManager, listFathomMeetings, getFathomMeeting, getFathomTranscript, getFathomSummary, unpackFathomTokens, packFathomTokens, type FathomTokens } from '../../fathom/client.js'
 import { getConnectorConfig } from '../../connector-config.js'
-import { applyPolicyOrSkip, injectInstanceVariants } from '../activation.js'
+import { applyToolPolicies, injectInstanceVariants } from '../activation.js'
 import type { ConnectorInstanceRef } from '../tool-names.js'
 import { notConnectedNotice } from './notices.js'
 import type { ProviderModule, ProviderActivationContext } from './types.js'
@@ -117,10 +117,8 @@ async function collectFathomTools(
     if (fathomEnabled) {
       const fathomTools = buildTools(makeTokenManager(loadEncodedTokens, persistEncoded))
 
-      for (const tool of fathomTools) {
-        if (await applyPolicyOrSkip(tool, 'fathom', settingsStore, assistantId, userId, unavailable) === 'include') {
-          tools.set(tool.name, tool)
-        }
+      for (const tool of await applyToolPolicies(fathomTools, 'fathom', settingsStore, assistantId, userId, unavailable)) {
+        tools.set(tool.name, tool)
       }
     }
 
