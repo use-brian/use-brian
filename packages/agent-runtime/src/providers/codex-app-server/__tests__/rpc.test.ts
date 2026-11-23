@@ -306,13 +306,63 @@ describe('[COMP:providers/codex-rpc] Codex app-server JSONL RPC', () => {
     await expect(first).rejects.toBeInstanceOf(CodexRpcClosedError)
   })
 
-  it('times out and removes a pending request', async () => {
-    const harness = createHarness({ requestTimeoutMs: 10 })
-    const response = harness.peer.request('slow', {}, z.object({}))
+  it('distinguishes a stalled stdin write from a request still in the write queue', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const harness = queuedHarness()
+    try {
+      const check = vi.fn(async () => {})
+      const options = { timeoutMs: 25, assertInputAuthority: check }
+      const written = harness.peer.request('thread/start', { input: 'First private input' }, z.object({}), options)
+      const queued = harness.peer.request('thread/start', { input: 'Second private input' }, z.object({}), options)
+      const results = Promise.allSettled([written, queued])
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(harness.outbound).toHaveLength(1)
+      expect(check).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(25)
+      expect(await results).toMatchObject([
+        { status: 'rejected', reason: { name: 'CodexProtocolError', message: 'Codex app-server RPC request timed out: thread/start (phase=stdin_write)' } },
+        { status: 'rejected', reason: { name: 'CodexProtocolError', message: 'Codex app-server RPC request timed out: thread/start (phase=write_queue)' } },
+      ])
+      harness.release()
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(harness.outbound).toHaveLength(1)
+      expect(check).toHaveBeenCalledTimes(1)
+      expect(harness.peer.pendingRequestCount).toBe(0)
+      expect(harness.peer.closed).toBe(false)
+    } finally {
+      harness.peer.close()
+      vi.useRealTimers()
+    }
+  })
 
-    await expect(response).rejects.toThrow('request timed out: slow')
-    expect(harness.peer.pendingRequestCount).toBe(0)
-    harness.peer.close()
+  it('distinguishes an unfinished authority check from a flushed request without a response', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const harness = createHarness({ requestTimeoutMs: 25 })
+    try {
+      const written = harness.peer.request('thread/start', { input: 'First private input' }, z.object({}))
+      let finishCheck!: () => void
+      const check = vi.fn(() => new Promise<void>(resolve => { finishCheck = resolve }))
+      const withheld = harness.peer.request('thread/start', { input: 'Second private input' }, z.object({}), {
+        assertInputAuthority: check,
+      })
+      const results = Promise.allSettled([written, withheld])
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(harness.outbound).toHaveLength(1)
+      expect(check).toHaveBeenCalledOnce()
+      await vi.advanceTimersByTimeAsync(25)
+      expect(await results).toMatchObject([
+        { status: 'rejected', reason: { name: 'CodexProtocolError', message: 'Codex app-server RPC request timed out: thread/start (phase=awaiting_response)' } },
+        { status: 'rejected', reason: { name: 'CodexProtocolError', message: 'Codex app-server RPC request timed out: thread/start (phase=input_authority)' } },
+      ])
+      finishCheck()
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(harness.outbound).toHaveLength(1)
+      expect(harness.peer.pendingRequestCount).toBe(0)
+      expect(harness.peer.closed).toBe(false)
+    } finally {
+      harness.peer.close()
+      vi.useRealTimers()
+    }
   })
 
   it('honors per-request abort signals', async () => {
