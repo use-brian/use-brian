@@ -15,7 +15,27 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
 type NotificationHandler = (params: unknown) => void | Promise<void>
 type RequestHandler = (params: unknown, signal: AbortSignal) => unknown | Promise<unknown>
 type CloseHandler = (reason: Error) => void
-type RequestProgress = { phase: 'write_queue' | 'input_authority' | 'stdin_write' | 'awaiting_response' }
+type RequestPhase = 'write_queue' | 'input_authority' | 'stdin_write' | 'awaiting_response'
+
+class RequestProgress {
+  #phase: RequestPhase = 'write_queue'
+  #started = Math.floor(performance.now())
+  readonly #elapsed: Record<RequestPhase, number> = { write_queue: 0, input_authority: 0, stdin_write: 0, awaiting_response: 0 }
+
+  enter(next: RequestPhase): void {
+    const now = Math.floor(performance.now())
+    this.#elapsed[this.#phase] += now - this.#started
+    this.#phase = next
+    this.#started = now
+  }
+
+  describeTimeout(): string {
+    const elapsed = { ...this.#elapsed }
+    elapsed[this.#phase] += Math.floor(performance.now()) - this.#started
+    const durations = Object.entries(elapsed).map(([phase, ms]) => `${phase}_ms=${ms}`)
+    return [`phase=${this.#phase}`, ...durations].join(', ')
+  }
+}
 
 type PendingRequest<T = unknown> = {
   schema: z.ZodType<T>
@@ -188,14 +208,14 @@ export class CodexRpcPeer {
 
     const id = this.#nextRequestId++
     const timeoutMs = positiveInteger(options.timeoutMs, this.#requestTimeoutMs, 'timeoutMs')
-    const progress: RequestProgress = { phase: 'write_queue' }
+    const progress = new RequestProgress()
 
     let pending!: PendingRequest<T>
     const result = new Promise<T>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.#pending.delete(id)
         pending.removeAbortListener?.()
-        reject(new CodexProtocolError(`Codex app-server RPC request timed out: ${method} (phase=${progress.phase})`))
+        reject(new CodexProtocolError(`Codex app-server RPC request timed out: ${method} (${progress.describeTimeout()})`))
       }, timeoutMs)
 
       pending = { schema: resultSchema, resolve, reject, timeout }
@@ -451,7 +471,7 @@ export class CodexRpcPeer {
       .then(async () => {
         this.#assertOpen()
         if (isCurrent && !isCurrent()) throw abortError()
-        if (progress && check) progress.phase = 'input_authority'
+        if (check) progress?.enter('input_authority')
         await assertInputAuthority(check)
         this.#assertOpen()
         if (isCurrent && !isCurrent()) throw abortError()
@@ -460,11 +480,11 @@ export class CodexRpcPeer {
             reject(this.#closedReason)
             return
           }
-          if (progress) progress.phase = 'stdin_write'
+          progress?.enter('stdin_write')
           this.#output.write(frame, (error?: Error | null) => {
             if (error) reject(error)
             else {
-              if (progress) progress.phase = 'awaiting_response'
+              progress?.enter('awaiting_response')
               resolve()
             }
           })
