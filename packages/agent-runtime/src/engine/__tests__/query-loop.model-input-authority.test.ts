@@ -110,6 +110,28 @@ describe('[COMP:engine/model-input-authority] every model boundary', () => {
     expect(input).toHaveBeenCalledTimes(1)
     expect(output).toHaveBeenCalled()
   })
+  it('keeps the live provider guard across a tool round trip', async () => {
+    const first = provider({ tool: true }), last = provider()
+    const guards: Array<(() => Promise<void>) | undefined> = []
+    const value = registerInputAdmissionOwner({ ...first.value,
+      createSession(options) {
+        guards.push(options.assertInputAuthority)
+        return { async *send(_messages, opts) {
+          guards.push(opts?.assertInputAuthority)
+          await opts?.assertInputAuthority?.()
+          yield* (guards.length === 2 ? first.send() : last.send())
+        } }
+      },
+    })
+    const read = buildTool({ name: 'observe', description: 'Read a fixture', inputSchema: z.object({}),
+      isReadOnly: true, isConcurrencySafe: true, execute: async () => ({ data: 'ok' }) })
+    const admit = vi.fn(async () => {})
+    await run(value, context(admit), { tools: new Map([['observe', read]]) })
+    expect(guards).toHaveLength(3)
+    expect(guards[0]).toBeTypeOf('function')
+    expect(new Set(guards).size).toBe(1)
+    expect(admit).toHaveBeenCalledTimes(2)
+  })
   it('carries the native lease to physical dispatch even without source facts', async () => {
     const p = provider(); let revoked = false
     let physicalCheck: (() => Promise<void>) | undefined

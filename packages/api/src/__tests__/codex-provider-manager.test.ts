@@ -211,14 +211,15 @@ describe('[COMP:api/codex-provider] OSS Codex provider manager', () => {
       expect(events.filter(event => event.type === 'turn_complete')).toHaveLength(1)
       expect(inference.outbound.filter(frame => frame.method === 'turn/start')).toHaveLength(1)
       expect(execute).not.toHaveBeenCalled()
-      expect(assertInputAuthority).toHaveBeenCalled()
+      // Send admission, thread creation and turn dispatch each check fresh input.
+      expect(assertInputAuthority).toHaveBeenCalledTimes(3)
     } finally {
       await manager.close()
       inference.peer.close(); account.peer.close()
     }
   })
 
-  it('executes a deferred callback through the production manager and canonical engine registry', async () => {
+  it.each([1, 3])('executes %i deferred tool calls through the production manager and canonical engine registry', async toolCount => {
     const model = 'gpt-6-luna'
     const inference = processHarness(), account = processHarness()
     const starting = startCodexProviderManager({ availability: new MutableProviderAvailability(),
@@ -234,12 +235,13 @@ describe('[COMP:api/codex-provider] OSS Codex provider manager', () => {
       const tool = buildTool({ name: 'echoFixture', description: 'Synthetic deferred tool', inputSchema: z.object({ value: z.string() }).strict(),
         isReadOnly: true, isConcurrencySafe: true, execute })
       const events: QueryEvent[] = []
+      const admitModelInput = vi.fn(async () => {})
       const run = (async () => {
         for await (const event of queryLoop({ provider, model, systemPrompt: 'Synthetic only.',
           messages: [{ role: 'user', content: 'Use the fixture tool.' }], tools: new Map([[tool.name, tool]]),
           deferToolSchemas: true, ledger: NOOP_TURN_LEDGER,
           context: { userId: 'fixture', assistantId: 'fixture', sessionId: 'fixture', appId: 'fixture',
-            channelType: 'web', channelId: 'fixture', abortSignal: new AbortController().signal },
+            channelType: 'web', channelId: 'fixture', admitModelInput, abortSignal: new AbortController().signal },
         })) events.push(event)
       })()
       const start = await waitForMethod(inference, 'thread/start')
@@ -247,20 +249,30 @@ describe('[COMP:api/codex-provider] OSS Codex provider manager', () => {
         tools: [{ type: 'function', name: tool.name, deferLoading: true }] }] })
       respond(inference, start, { thread: { id: 'fixture-thread' }, model, modelProvider: 'openai' })
       respond(inference, await waitForMethod(inference, 'turn/start'), { turn: { id: 'fixture-turn', status: 'inProgress' } })
-      inference.inbound.write(`${JSON.stringify({ id: 'fixture-tool-request', method: 'item/tool/call', params: {
-        threadId: 'fixture-thread', turnId: 'fixture-turn', callId: 'fixture-call', namespace: 'brian',
-        tool: tool.name, arguments: { value: 'fixture' },
-      } })}\n`)
-      await vi.waitFor(() => expect(inference.outbound.find(frame => frame.id === 'fixture-tool-request')?.result).toMatchObject({
-        success: true, contentItems: [{ type: 'inputText', text: 'echo:fixture' }],
-      }))
+      for (let index = 0; index < toolCount; index++) {
+        const id = `fixture-tool-request-${index}`
+        const value = `fixture-${index}`
+        inference.inbound.write(`${JSON.stringify({ id, method: 'item/tool/call', params: {
+          threadId: 'fixture-thread', turnId: 'fixture-turn', callId: `fixture-call-${index}`, namespace: 'brian',
+          tool: tool.name, arguments: { value },
+        } })}\n`)
+        await vi.waitFor(() => expect(inference.outbound.find(frame => frame.id === id)?.result).toMatchObject({
+          success: true, contentItems: [{ type: 'inputText', text: `echo:${value}` }],
+        }))
+      }
       inference.inbound.write(`${JSON.stringify({ method: 'turn/completed', params: { threadId: 'fixture-thread',
         turn: { id: 'fixture-turn', status: 'completed', items: [{ type: 'agentMessage', id: 'fixture-message', text: 'Fixture done.' }] },
       } })}\n`)
       await run
-      expect(execute).toHaveBeenCalledOnce()
-      expect(execute.mock.calls[0]?.[0]).toEqual({ value: 'fixture' })
-      expect(events.filter(event => event.type === 'tool_start')).toMatchObject([{ name: tool.name }])
+      // Initial send, thread creation and turn dispatch each check current input.
+      // Each tool adds its incoming call, resumed send and outgoing result.
+      expect(admitModelInput).toHaveBeenCalledTimes(3 + 3 * toolCount)
+      expect(execute.mock.calls.map(([input]) => input.value)).toEqual(
+        Array.from({ length: toolCount }, (_, index) => `fixture-${index}`),
+      )
+      expect(events.filter(event => event.type === 'tool_start').map(event => event.name)).toEqual(
+        Array(toolCount).fill(tool.name),
+      )
       expect(events.filter(event => event.type === 'text_delta').map(event => event.text).join('')).toBe('Fixture done.')
       expect(inference.outbound.filter(frame => frame.method === 'turn/start')).toHaveLength(1)
     } finally {
