@@ -33,6 +33,7 @@ import * as release8337 from './installation-authentication-8337.mjs'
 import * as release8341 from './installation-authentication-8341.mjs'
 import * as release8342 from './installation-authentication-8342.mjs'
 import * as release8343 from './installation-authentication-8343.mjs'
+import * as release8344 from './installation-authentication-8344.mjs'
 import * as release8339 from './installation-authentication-8339.mjs'
 import * as release8338 from './installation-authentication-8338.mjs'
 
@@ -71,6 +72,7 @@ const profiles=new Map([
  ['8341_crm_import_csv_index.sql',release8341],
  ['8342_memory_history_terminal_proof.sql',release8342],
  ['8343_conversation_capture_linear_aggregation.sql',release8343],
+ ['8344_conversation_domain_source_aggregation.sql',release8344],
 ])
 export const hasInstallationRelease=head=>profiles.has(head)
 function profileForRelease(head){

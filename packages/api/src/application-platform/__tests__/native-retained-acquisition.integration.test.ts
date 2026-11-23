@@ -155,6 +155,7 @@ describe.sequential('[COMP:api/native-chat-read-cost] packed retained acquisitio
       AND has_function_privilege(current_user,p.oid,'EXECUTE')`, [[
       'conversation_dag(uuid,jsonb,jsonb)', 'conversation_capture_privacy(uuid,jsonb)',
       'conversation_dag_edges(uuid,jsonb)',
+      'conversation_dag_envelope(uuid,text,uuid,text,text[],jsonb,jsonb,jsonb[])',
       'native_retained_helpers_current()',
       'capture_conversation_selection(uuid,uuid,text,integer,text[],jsonb,jsonb,jsonb)',
       'native_turn_build_query_capture(uuid,uuid,text,integer,text[],jsonb,jsonb,jsonb,jsonb)',
@@ -174,6 +175,51 @@ describe.sequential('[COMP:api/native-chat-read-cost] packed retained acquisitio
     expect(invalid).toEqual({})
     expect(copiedMemo).toEqual([false, false, false])
   }))
+
+  it('preserves the admitted domain proof for repeated child roots in any order', async () => {
+    const { history } = await frame(client => original(client))
+    const [{ sources: [root, ...sources] }, ...points] = history
+    expect(points).toHaveLength(3)
+    expect(sources).toHaveLength(3)
+    expect(sources).toEqual(expect.arrayContaining(points.map(point => point.sources[0])))
+    const [inherited, second, third] = sources
+    const children = [
+      { source: third, sources: [inherited, second, inherited] },
+      { source: second, sources: [third] },
+    ]
+    async function rebuildDomain(children: unknown[]) {
+      // Reuse the real immutable domain state with a controlled child order and overlap.
+      return (await f.pool.query<{ envelope: { value?: { source: ScopeSource; sources: ScopeSource[] } } }>(`
+        SELECT conversation_dag_envelope(r.workspace_id,r.type_key,r.resource_id,r.selection,r.fields,
+          '{"hasExternal":false}',jsonb_build_object('domains:'||r.resource_id,1),
+          ARRAY[jsonb_build_object('value',jsonb_build_object('source',o.source_scope,
+            'sourceKind',o.source_kind,'sourceId',o.source_id,'sourceVersion',o.source_version,
+            'recordVersion',o.record_version,'policyVersion',o.policy_version,'fieldIdentity',r.field_identity),
+            'children',$4::jsonb)]) envelope
+        FROM application_field_resources r JOIN application_field_observations o
+          ON o.workspace_id=r.workspace_id AND o.resource_id=r.id
+        WHERE r.workspace_id=$1 AND r.id=$2 AND o.version=$3`,
+      [f.workspaceId, root.resourceId, root.version, JSON.stringify(children)])).rows[0].envelope
+    }
+    expect((await rebuildDomain(children)).value).toMatchObject({ source: root, sources })
+    expect((await rebuildDomain([...children].reverse())).value).toMatchObject({ source: root, sources })
+    expect(await rebuildDomain(Array.from({ length: 4097 }, () => ({ source: null })))).toEqual({})
+    expect(await rebuildDomain([{ source: root, sources: Array.from({ length: 4096 }, (_, index) => index) }])).toEqual({})
+
+    await frame(async client => {
+      expect(await sourceProof(client, [root])).toMatchObject({
+        admitted: true,
+        immutable: expect.arrayContaining([root, ...sources]),
+        current: expect.arrayContaining([root, ...sources]),
+      })
+      await client.query('SAVEPOINT held_domain_child')
+      try {
+        await client.query(`SELECT ${helper}('hold')`)
+        expect((await sourceProof(client, [root]))?.admitted).not.toBe(true)
+      } finally { await client.query('ROLLBACK TO SAVEPOINT held_domain_child; RELEASE SAVEPOINT held_domain_child') }
+      expect((await sourceProof(client, [root]))?.admitted).toBe(true)
+    })
+  })
 
   it('preserves ordered body and topic selections around a held annotated message', async () => {
     const messages: Awaited<ReturnType<typeof addSessionMessage>>[] = []
