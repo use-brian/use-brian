@@ -29,10 +29,11 @@ describe('[COMP:providers/model-registry] registry integrity', () => {
     const reviewed = MODEL_REGISTRY.filter(row => row.codexNativeDeferredTools === true)
     expect(reviewed.map(row => row.alias).sort()).toEqual([
       'gpt-5.5', 'gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra',
-      'gpt-6-astra', 'gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6.1-terra',
+      'gpt-6-astra', 'gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6.2-sol', 'gpt-6.2-astra',
     ].sort())
     expect(reviewed.every(row => row.provider === 'openai-codex' && row.status === 'active' && isChatModelRow(row))).toBe(true)
     expect(registryRow('gpt-5.2')?.codexNativeDeferredTools).toBeUndefined()
+    expect(registryRow('gpt-6.2-sol-pro')?.apiModelId).toBe('gpt-6.2-sol')
     expect(registryRow('gpt-6.1-sol-pro')?.apiModelId).toBe('gpt-6.1-sol')
   })
 
@@ -131,14 +132,15 @@ describe('[COMP:providers/model-registry] derivations match the pre-registry lit
       'pro', 'gemini-4-hydrogen-pro', 'gemini-3.8-flash-pro', 'gemini-3.6-flash-pro', 'gemini-flash-3', 'gemini-3-flash-preview', 'gemini-flash',
       'gpt-5.6-terra',
       'gpt-6.1-terra',
+      'gpt-6.2-sol-pro',
       'gpt-6.1-sol-pro',
       'gpt-6-sol',
     ].sort())
     expect([...tierModelIds('max')].sort()).toEqual([
-      'max', 'gemini-4-hydrogen', 'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gpt-5.6-sol', 'gpt-6.1-sol',
+      'max', 'gemini-4-hydrogen', 'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gpt-5.6-sol', 'gpt-6.1-sol', 'gpt-6.2-sol',
     ].sort())
     expect([...tierModelIds('research')].sort()).toEqual([
-      'research', 'gemini-4-argon-research', 'gemini-4-argon', 'gemini-3-pro-research', 'gpt-5.5', 'gpt-5.2', 'gpt-6-astra',
+      'research', 'gemini-4-argon-research', 'gemini-4-argon', 'gemini-3-pro-research', 'gpt-5.5', 'gpt-5.2', 'gpt-6-astra', 'gpt-6.2-astra',
     ].sort())
     expect([...tierModelIds('embedding')].sort()).toEqual([
       'gemini-embedding-001', 'text-embedding-004', 'text-embedding-005',
@@ -275,8 +277,11 @@ describe('[COMP:providers/model-registry] provider derivations', () => {
       'gpt-5.6-luna',
       'gpt-6-luna',
       'gpt-6.1-terra',
+      'gpt-6.2-sol-pro',
       'gpt-6.1-sol-pro',
       'gpt-5.6-terra',
+      'gpt-6.2-sol',
+      'gpt-6.2-astra',
       'gpt-5.6-sol',
       'gpt-5.5',
       'gpt-5.2',
@@ -328,17 +333,20 @@ describe('[COMP:providers/model-registry] wave-1 slate + menus (plan §5.1)', ()
       'gpt-5.6-luna',
       'gpt-6-luna',
       'gpt-6.1-terra',
+      'gpt-6.2-sol-pro',
       'gpt-6.1-sol-pro',
       'gpt-5.6-terra',
       'gpt-6-sol',
     ])
     expect(menuForClass('max').map((r) => r.alias)).toEqual([
       'gemini-4-hydrogen',
+      'gpt-6.2-sol',
       'gpt-5.6-sol',
       'gpt-6.1-sol',
     ])
     expect(menuForClass('research').map((r) => r.alias)).toEqual([
       'gemini-4-argon-research',
+      'gpt-6.2-astra',
       'gpt-5.5',
       'gpt-5.2',
       'gpt-6-astra',

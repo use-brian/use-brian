@@ -38,10 +38,10 @@ vi.mock("@/lib/i18n/client", async () => {
   const { format } = await import("@/lib/i18n/format");
   return { useT: () => en, format };
 });
-const { desktopBridgeMock, openAddAccountMock, warmDesktopAccountsMock } = vi.hoisted(() => ({
+const { desktopBridgeMock, openAddAccountMock, getAccountsDirMock } = vi.hoisted(() => ({
   desktopBridgeMock: vi.fn(),
   openAddAccountMock: vi.fn(),
-  warmDesktopAccountsMock: vi.fn(),
+  getAccountsDirMock: vi.fn(),
 }));
 vi.mock("@/lib/desktop-auth-source", () => ({ desktopBridge: desktopBridgeMock }));
 vi.mock("@/components/desktop-add-account", () => ({ openDesktopAddAccount: openAddAccountMock }));
@@ -61,12 +61,12 @@ vi.mock("@/lib/edition", () => ({
 }));
 const { pickerUpdate } = vi.hoisted(() => ({ pickerUpdate: vi.fn(async () => ({})) }));
 vi.mock("@/lib/api/workspaces", () => ({ updateWorkspacePickerPreferences: pickerUpdate }));
-vi.mock("@/lib/accounts", () => ({ getAccountsDir: () => [] }));
+vi.mock("@/lib/accounts", () => ({ getAccountsDir: getAccountsDirMock }));
 vi.mock("@/lib/route-progress", () => ({ routeProgress: { start: vi.fn() } }));
 vi.mock("@/components/team-avatar", () => ({ TeamAvatar: ({ iconUrl }: { iconUrl: string | null }) => <img alt="" data-workspace-avatar src={iconUrl ?? undefined} /> }));
-vi.mock("@/components/desktop-accounts", () => ({
+vi.mock("@/components/desktop-accounts", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../desktop-accounts")>(),
   DesktopAccounts: () => null,
-  warmDesktopAccounts: (...args: unknown[]) => warmDesktopAccountsMock(...args),
 }));
 vi.mock("@/components/ui/user-avatar", () => ({ UserAvatar: () => null }));
 vi.mock("@/components/create-workspace-form", () => ({
@@ -82,7 +82,8 @@ import {
   __resetWorkspaceCacheForTest,
   setWorkspaces,
 } from "@/contexts/workspace-context";
-import { WORKSPACE_RENAMED_EVENT } from "@/lib/workspace-context";
+import { WORKSPACE_ICON_CHANGED_EVENT, WORKSPACE_RENAMED_EVENT } from "@/lib/workspace-context";
+import { resetDesktopAccountDirectory } from "../desktop-accounts";
 import { WorkspaceSwitcher } from "../workspace-switcher";
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -96,7 +97,8 @@ describe("[COMP:app-web/workspace-switcher] paints the shared workspace list", (
     __resetWorkspaceCacheForTest();
     authFetchMock.mockReset();
     desktopBridgeMock.mockReset().mockReturnValue(null);
-    warmDesktopAccountsMock.mockReset();
+    resetDesktopAccountDirectory();
+    getAccountsDirMock.mockReset().mockReturnValue([]);
     openAddAccountMock.mockReset();
     routerPush.mockReset();
     pickerUpdate.mockClear();
@@ -127,6 +129,8 @@ describe("[COMP:app-web/workspace-switcher] paints the shared workspace list", (
   }
 
   const content = () => document.querySelector('[data-slot="popover-content"]');
+  const preloadedImage = (url: string) =>
+    document.head.querySelector(`link[rel="preload"][as="image"][href="${url}"][fetchpriority="low"]`);
   const rowNames = () =>
     Array.from(content()!.querySelectorAll('ul li button[role="menuitem"] span.flex-1')).map(
       (el) => el.textContent,
@@ -175,6 +179,42 @@ describe("[COMP:app-web/workspace-switcher] paints the shared workspace list", (
     expect(content()!.querySelector("[aria-busy]")).toBeNull();
     expect(content()!.textContent).not.toContain("Loading workspaces");
     expect(authFetchMock).not.toHaveBeenCalled();
+  });
+
+  it("preloads web account photos and warms newly available workspace icons with the menu closed", async () => {
+    const photo = "/test-account.png";
+    const icon = "/test-workspace.png";
+    const updatedIcon = "/test-workspace.png?v=updated";
+    getAccountsDirMock.mockReturnValue([{ id: "u1", name: "Example User", email: "u@example.com", avatarUrl: photo }]);
+    setWorkspaces([{ id: "w1", name: "Acme" }]);
+    await mount();
+    expect(content()).toBeNull();
+    expect(preloadedImage(photo)).not.toBeNull();
+
+    await act(async () => setWorkspaces([{ id: "w2", name: "Beta", iconUrl: icon }]));
+    expect(preloadedImage(icon)).not.toBeNull();
+
+    await act(async () => window.dispatchEvent(new CustomEvent(WORKSPACE_ICON_CHANGED_EVENT, {
+      detail: { workspaceId: "w2", iconUrl: updatedIcon },
+    })));
+    expect(preloadedImage(updatedIcon)).not.toBeNull();
+    await open();
+
+    const accountImage = content()!.querySelector<HTMLImageElement>(`img[src="${photo}"]`)!;
+    const workspaceImage = content()!.querySelector<HTMLImageElement>(`img[src="${updatedIcon}"]`)!;
+    expect(accountImage.style.display).toBe("none");
+    expect(accountImage.previousElementSibling?.textContent).toBe("E");
+    expect(workspaceImage.style.display).toBe("none");
+    expect(workspaceImage.previousElementSibling?.tagName).toBe("svg");
+
+    await act(async () => {
+      accountImage.dispatchEvent(new Event("load"));
+      workspaceImage.dispatchEvent(new Event("error"));
+    });
+    expect(accountImage.style.display).toBe("");
+    expect(accountImage.previousElementSibling).toBeNull();
+    expect(workspaceImage.style.display).toBe("none");
+    expect(workspaceImage.previousElementSibling?.tagName).toBe("svg");
   });
 
   it("a cold list shows skeleton rows, never the loading sentence, then the rows when the shared fetch lands", async () => {
@@ -243,19 +283,22 @@ describe("[COMP:app-web/workspace-switcher] paints the shared workspace list", (
     expect(pickerUpdate).not.toHaveBeenCalled();
   });
 
-  it("warms the desktop account directory when the chrome mounts, before the menu opens", async () => {
-    desktopBridgeMock.mockReturnValue({ listAccounts: vi.fn() });
+  it("warms the desktop account directory and its display photos before the menu opens", async () => {
+    const photo = "/test-desktop-account.png";
+    const overriddenPhoto = "/test-desktop-overridden.png";
+    const listAccounts = vi.fn().mockResolvedValue({
+      canSwitch: true,
+      accounts: [{ key: "one", avatarUrl: photo }, { key: "two", icon: "🏡", avatarUrl: overriddenPhoto }],
+    });
+    desktopBridgeMock.mockReturnValue({ listAccounts });
     setWorkspaces([{ id: "w1", name: "Acme" }]);
     await mount();
-    expect(warmDesktopAccountsMock).toHaveBeenCalledOnce();
+    expect(content()).toBeNull();
+    expect(listAccounts).toHaveBeenCalledOnce();
+    expect(preloadedImage(photo)).not.toBeNull();
+    expect(preloadedImage(overriddenPhoto)).toBeNull();
     await open();
-    expect(warmDesktopAccountsMock).toHaveBeenCalledOnce();
-  });
-
-  it("does not ask a browser for the desktop account directory", async () => {
-    setWorkspaces([{ id: "w1", name: "Acme" }]);
-    await mount();
-    expect(warmDesktopAccountsMock).not.toHaveBeenCalled();
+    expect(listAccounts).toHaveBeenCalledOnce();
   });
 
   it("offers one desktop Add account entry instead of launching cloud or the standalone OSS page", async () => {

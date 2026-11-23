@@ -44,7 +44,8 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
  * [COMP:app-web/workspace-switcher]
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { preload } from "react-dom";
 import { useRouter } from "next/navigation";
 import { routeProgress } from "@/lib/route-progress";
 import { useT } from "@/lib/i18n/client";
@@ -70,7 +71,7 @@ import {
 } from "@/lib/workspace-picker";
 import { getAccountsDir, type AccountDirEntry } from "@/lib/accounts";
 import { WorkspacePickerTrigger, IdentityAccountSection, IdentityWorkspaceSection, IdentityMenuAction } from "@use-brian/chat-ui";
-import { DesktopAccounts, warmDesktopAccounts } from "@/components/desktop-accounts";
+import { DesktopAccounts, useWarmDesktopAccounts } from "@/components/desktop-accounts";
 import { openDesktopAddAccount } from "@/components/desktop-add-account";
 import {
   CreateWorkspaceForm,
@@ -95,6 +96,7 @@ import {
 } from "@/components/settings-modal/settings-modal";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
+const WORKSPACE_ICON_PRELOAD_LIMIT = 8;
 
 // `webAppUrl()` (the app→marketing deep-link base) is shared from
 // `@/lib/primary-auth` so billing-section / composer-controls resolve the same
@@ -148,6 +150,8 @@ export function WorkspaceSwitcher({ iconOnly = false }: { iconOnly?: boolean }) 
   const [workspaceQuery, setWorkspaceQuery] = useState("");
 
   const user = getUserInfo();
+  const activeAvatarUrl = user?.avatarUrl;
+  const hasDesktopAccounts = !!desktopBridge()?.listAccounts;
   const activeAccountId = user?.id ?? null;
   // Accounts to show: the saved-account directory, or — for a session with no
   // `accounts_dir` cookie (single-account, or dev where the store lives on the
@@ -162,7 +166,7 @@ export function WorkspaceSwitcher({ iconOnly = false }: { iconOnly?: boolean }) 
               id: user.id ?? "",
               name: user.name,
               email: user.email,
-              ...(user.avatarUrl ? { avatarUrl: user.avatarUrl } : {}),
+              ...(activeAvatarUrl ? { avatarUrl: activeAvatarUrl } : {}),
             },
           ]
         : [];
@@ -228,11 +232,15 @@ export function WorkspaceSwitcher({ iconOnly = false }: { iconOnly?: boolean }) 
     return () => window.removeEventListener(WORKSPACE_RENAMED_EVENT, onRenamed);
   }, []);
 
-  // The desktop shell's account rows live behind IPC. Ask for them with the
-  // chrome, not when the menu opens, so the first open paints the cached list.
+  useWarmDesktopAccounts();
+
   useEffect(() => {
-    if (desktopBridge()?.listAccounts) warmDesktopAccounts();
-  }, []);
+    if (hasDesktopAccounts) return;
+    const urls = accountsDir.length ? accountsDir.map((account) => account.avatarUrl) : [activeAvatarUrl];
+    for (const url of urls) {
+      if (url) preload(url, { as: "image", fetchPriority: "low" });
+    }
+  }, [accountsDir, activeAvatarUrl, hasDesktopAccounts]);
 
   // Re-read the account directory each time the popover opens so it reflects
   // accounts added/switched in another tab (or on the web app) since the last
@@ -406,14 +414,18 @@ export function WorkspaceSwitcher({ iconOnly = false }: { iconOnly?: boolean }) 
   }
 
   const scalableWorkspaceList = usesScalableWorkspacePicker(workspaces.length);
-  const switcherGroups = organizeWorkspacePicker(workspaces, workspaceQuery);
-  const switcherRows = scalableWorkspaceList
-    ? [
-        ...switcherGroups.pinned,
-        ...switcherGroups.recent,
-        ...switcherGroups.all,
-      ]
-    : workspaces;
+  const switcherRows = useMemo(() => {
+    if (!scalableWorkspaceList) return workspaces;
+    const { pinned, recent, all } = organizeWorkspacePicker(workspaces, workspaceQuery);
+    return [...pinned, ...recent, ...all];
+  }, [scalableWorkspaceList, workspaces, workspaceQuery]);
+
+  useEffect(() => {
+    if (workspaceQuery.trim()) return;
+    for (const workspace of switcherRows.slice(0, WORKSPACE_ICON_PRELOAD_LIMIT)) {
+      if (workspace.iconUrl) preload(workspace.iconUrl, { as: "image", fetchPriority: "low" });
+    }
+  }, [switcherRows, workspaceQuery]);
   // Cold list with the fetch in flight: geometry-matched skeleton rows, never
   // a "Loading..." sentence (N4). Anything in hand paints as rows.
   const showListSkeleton = loading && listEmpty;
@@ -501,7 +513,7 @@ export function WorkspaceSwitcher({ iconOnly = false }: { iconOnly?: boolean }) 
           <div className="border-t border-border" />
 
           {/* Signed-in accounts — active row checkmarked, others click to switch */}
-          {desktopBridge()?.listAccounts ? <DesktopAccounts /> : accountRows.length > 0 && (
+          {hasDesktopAccounts ? <DesktopAccounts /> : accountRows.length > 0 && (
             <IdentityAccountSection accounts={accountRows} activeId={activeAccountId} isActiveAccount={isActiveAccount} switchingId={switching}
               onSwitch={handleSwitchAccount} switchLabel={account => format(t.switchAccountAria, { email: account.email })} error={accountError} />
           )}

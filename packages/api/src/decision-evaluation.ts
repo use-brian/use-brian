@@ -145,7 +145,6 @@ export const DECISION_EVAL_FIXTURES: readonly DecisionEvalFixture[] = [
   booleanFixture('extraction-negative', 'ingest.extraction-gate', 'Is extraction needed?', false, false),
   booleanFixture('sensitivity-observation', 'ingest.sensitivity', 'Is the content confidential?', true, true),
   booleanFixture('feed-reply-observation', 'feed.reply-classification', 'Is this a binding ask?', false, false),
-  booleanFixture('feed-safety-observation', 'feed.draft-safety', 'Is this draft safe?', false, false),
 ] as const
 
 const evaluationJsonSchema: z.ZodType<JsonValue> = z.lazy(() => z.union([

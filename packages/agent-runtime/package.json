@@ -20,8 +20,8 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.98.0",
-    "@openai/codex": "0.165.0",
-    "@openai/codex-catalog": "npm:@openai/codex@0.165.0",
+    "@openai/codex": "0.171.0",
+    "@openai/codex-catalog": "npm:@openai/codex@0.171.0",
     "@use-brian/shared": "workspace:*",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",

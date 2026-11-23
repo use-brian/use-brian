@@ -72,6 +72,15 @@ export type ModelMenuRouteOptions = {
 
 const MENU_CLASSES: ModelClass[] = ['standard-pro', 'max', 'research', 'metered']
 
+// The old provider preference had no exact model. Preserve its historical
+// choices for tiers where the account cannot currently advertise a selection.
+const LEGACY_CODEX_TIER_ALIASES = {
+  standard: 'gpt-5.6-luna',
+  pro: 'gpt-6.1-terra',
+  max: 'gpt-5.6-sol',
+  research: 'gpt-5.5',
+} as const
+
 function serializeRow(row: ModelRegistryRow) {
   return {
     alias: row.alias,
@@ -206,12 +215,16 @@ export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
       if (role === 'owner' || role === 'admin') {
         const provider = configuredProviderForPreference(legacyPreference)
         for (const tier of CUSTOM_LLM_TIERS) {
-          const row = MODEL_REGISTRY.find((candidate) =>
+          const candidates = MODEL_REGISTRY.filter((candidate) =>
             candidate.provider === provider &&
             candidate.tier === tier &&
             candidate.status === 'active' &&
             candidate.menu === true,
           )
+          const row = provider === 'openai-codex'
+            ? candidates.find(candidate => isRegistryModelAvailable(candidate, opts.configuredProviders))
+              ?? candidates.find(candidate => candidate.alias === LEGACY_CODEX_TIER_ALIASES[tier])
+            : candidates[0]
           if (!row) continue
           await opts.customLlmEndpointStore.setManagedTierRoute({
             actingUserId: req.userId!,

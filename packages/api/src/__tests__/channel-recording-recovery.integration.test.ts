@@ -27,15 +27,12 @@ import {createDecisionRuntime} from '../decision-runtime.js'
 import {createMemory} from '../db/memories.js'
 import {createDbLinkedAccountStore} from '../db/linked-accounts.js'
 import {channelLinkBindsHere} from '../db/channel-user-store.js'
-const {runTurn,prepareRun,inject,nativeQueries}=vi.hoisted(()=>({runTurn:vi.fn(),inject:vi.fn(),nativeQueries:[] as Array<{available:boolean;sources:number;fields:ScopeSource[]}>,
- // Observes the adapter's single submission to the actual owner preparation.
- prepareRun:vi.fn(<T,R>(input:T,prepare:(value:T)=>R)=>prepare(input))}))
+const {runTurn,inject,nativeQueries}=vi.hoisted(()=>({runTurn:vi.fn(),inject:vi.fn(),nativeQueries:[] as Array<{available:boolean;sources:number;fields:ScopeSource[]}>}))
 vi.mock('../turn/kernel.js',async original=>{
  const real=await original<typeof import('../turn/kernel.js')>()
  return{...real,openAssistantTurn:async(...args:Parameters<typeof real.openAssistantTurn>)=>{
-  const owner=await real.openAssistantTurn(...args),run=owner.run.bind(owner),prepare=owner.prepareRun.bind(owner)
+  const owner=await real.openAssistantTurn(...args),run=owner.run.bind(owner)
   vi.spyOn(owner,'run').mockImplementation(input=>runTurn(input,run))
-  vi.spyOn(owner,'prepareRun').mockImplementation(input=>prepareRun(input,prepare) as ReturnType<typeof prepare>)
   return owner
  }}
 })
@@ -161,9 +158,10 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
   // managed provider boundary; the kernel-focused harness keeps its own reply.
   const mainReply=kernel?'Fictional complete reply.':final.content[0].text
   let nativeQueryStart=0
+  let mainRequestStart=0
+  let currentMessage=''
   runTurn.mockImplementation(async (input,run)=>{
    const {loop}=input
-   expect(nativeQueries.slice(nativeQueryStart).some(proof=>proof.available&&proof.sources>=publicHistoryRows)).toBe(true)
    if(actorId===other)verifiedOtherExecution=loop.context.executionContext
    // Every harness drives the actual owner run, its output admission,
    // publication and usage settlement; only the provider transport is synthetic.
@@ -178,7 +176,26 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
    const request=JSON.parse(String(init?.body))
    providerRequests.push(request)
    const main=String(url).endsWith(`/${standardGemini.apiModelId}`)&&request.generationConfig?.responseMimeType!=='application/json'
-   if(main)mainRequests.push(request)
+   if(main){
+    mainRequests.push(request)
+    const wire=JSON.stringify(request)
+    if(mainRequests.length===mainRequestStart+1){
+     expect(wire).toContain(currentMessage)
+     expect(wire).not.toContain(question)
+     expect(wire).not.toContain('PRIVATE_')
+     expect(wire).not.toContain('fictionalCalendarRead')
+     expect(nativeQueries).toHaveLength(nativeQueryStart)
+     expect(JSON.stringify(request.tools)).toContain('requestConversationContext')
+     return new Response('data: '+JSON.stringify({candidates:[{content:{parts:[{
+      functionCall:{id:'recording-context',name:'requestConversationContext',args:{}},thoughtSignature:'fictional-context',
+     }]},finishReason:'STOP'}],usageMetadata:{promptTokenCount:3,candidatesTokenCount:2}})+'\n\n',{headers:{'content-type':'text/event-stream'}})
+    }
+    expect(mainRequests).toHaveLength(mainRequestStart+2)
+    expectPublicHistory(request)
+    expect(wire).toContain('functionResponse')
+    expect(JSON.stringify(request.tools)).toContain('fictionalCalendarRead')
+    expect(nativeQueries.slice(nativeQueryStart).some(proof=>proof.available&&proof.sources>=publicHistoryRows)).toBe(true)
+   }
    if(options.timeoutTopic&&!main&&request.generationConfig?.responseMimeType==='application/json'){
     const signal=init?.signal
     if(!signal)throw new Error('The fictional classifier transport requires its real deadline signal')
@@ -198,6 +215,8 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
   const decisionRuntime=createDecisionRuntime({llmProvider:provider,defaultLlmModel:standardGemini.alias})
   async function turn(id:string,text:string){
    nativeQueryStart=nativeQueries.length
+   mainRequestStart=mainRequests.length
+   currentMessage=text
    const started=performance.now()
    const abortController=new AbortController()
    let pending:Promise<void>|undefined
@@ -232,9 +251,8 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
   expect(normalHarness.providerRequests.length).toBeGreaterThan(0)
   expect(JSON.stringify(normalHarness.providerRequests)).toContain(`Fictional retained public turn ${publicHistoryRows-2}.`)
   expect(JSON.stringify(normalHarness.providerRequests)).not.toContain('PRIVATE_')
-  const first=runTurn.mock.calls[0][0],firstPrepared=prepareRun.mock.calls[0][0] as {messages:unknown;candidateTools:Map<string,unknown>}
-  expectPublicHistory(firstPrepared.messages)
-  expect(firstPrepared.candidateTools.has('fictionalCalendarRead'),normalHarness.failures.join('\n')).toBe(true)
+  const first=runTurn.mock.calls[0][0]
+  expect(normalHarness.mainRequests).toHaveLength(2)
   expect(first.loop.context.userId).toBe(other)
   expect(normalHarness.injections[0].actorIdentity.userId).toBe(other)
   expect(normalHarness.sent).toEqual([normalHarness.final.content[0].text])
@@ -243,18 +261,17 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
   if(!normalHarness)throw new Error('The preceding Telegram delivery did not initialize its harness')
   await normalHarness.turn('1006','Remind me again.')
   expect(runTurn).toHaveBeenCalledTimes(2)
-  expect(JSON.stringify((prepareRun.mock.calls[1][0] as {messages:unknown}).messages)).toContain('What date did we agree?')
-  expect(JSON.stringify((prepareRun.mock.calls[1][0] as {messages:unknown}).messages)).toContain(normalHarness.final.content[0].text)
+  expect(normalHarness.mainRequests).toHaveLength(4)
+  expect(JSON.stringify(normalHarness.mainRequests[3])).toContain('What date did we agree?')
+  expect(JSON.stringify(normalHarness.mainRequests[3])).toContain(normalHarness.final.content[0].text)
   expect((await query("SELECT count(*)::int AS count FROM session_messages WHERE session_id=$1 AND role='assistant'",[recovered])).rows[0].count).toBeGreaterThan(1)
  },90_000)
  let realHarness:Awaited<ReturnType<typeof createChannelHarness>>
  it('delivers recovered history through the actual kernel and managed provider boundary',async()=>{
   realHarness=await createChannelHarness(true)
-  await realHarness.turn('1007','Hi')
-  expect(realHarness.mainRequests).toHaveLength(1)
-  expect(JSON.stringify(realHarness.mainRequests[0])).toContain('fictionalCalendarRead')
+  await realHarness.turn('1007','What was recorded earlier?')
+  expect(realHarness.mainRequests).toHaveLength(2)
   expect(runTurn.mock.calls.at(-1)?.[0].loop.context.userId).toBe(other)
-  expectPublicHistory(realHarness.mainRequests[0])
   expect(realHarness.injections.at(-1)?.actorIdentity.userId).toBe(other)
   expect(realHarness.sent).toEqual(['Fictional complete reply.'])
   expect((await query("SELECT channel_message_id FROM session_messages WHERE session_id=$1 AND role='assistant' AND channel_message_id=$2",[recovered,'reply-1007'])).rows).toEqual([{channel_message_id:'reply-1007'}])
@@ -262,10 +279,9 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
  },90_000)
  it('keeps the actual kernel reply available to the next managed provider turn',async()=>{
   if(!realHarness)throw new Error('The preceding actual kernel turn did not initialize its harness')
-  await realHarness.turn('1008','Thanks')
-  expect(realHarness.mainRequests).toHaveLength(2)
-  expectPublicHistory(realHarness.mainRequests[1])
-  expect(JSON.stringify(realHarness.mainRequests[1])).toContain('Fictional complete reply.')
+  await realHarness.turn('1008','What did you just tell me?')
+  expect(realHarness.mainRequests).toHaveLength(4)
+  expect(JSON.stringify(realHarness.mainRequests[3])).toContain('Fictional complete reply.')
   expect(realHarness.sent).toEqual(['Fictional complete reply.','Fictional complete reply.'])
   expect((await query("SELECT channel_message_id FROM session_messages WHERE session_id=$1 AND role='assistant' AND channel_message_id=$2",[recovered,'reply-1008'])).rows).toEqual([{channel_message_id:'reply-1008'}])
   expect((await query('SELECT status,turn_lease_token FROM sessions WHERE id=$1',[recovered])).rows[0]).toEqual({status:'idle',turn_lease_token:null})
@@ -295,11 +311,8 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
    expect(prior).toBeGreaterThanOrEqual(2)
    const current=await createChannelHarness(true,{actorId:owner,replyToMessageId:'5',timeoutTopic:true})
    await current.turn('1009','Hi')
-   expect(current.mainRequests).toHaveLength(1)
-   expectPublicHistory(current.mainRequests[0])
-   expect(JSON.stringify(current.mainRequests[0])).toContain('fictionalCalendarRead')
+   expect(current.mainRequests).toHaveLength(2)
    expect(runTurn.mock.calls.at(-1)?.[0].loop.context.userId).toBe(owner)
-   expect((prepareRun.mock.calls.at(-1)?.[0] as {candidateTools:Map<string,{isReadOnly:boolean}>}|undefined)?.candidateTools.get('fictionalCalendarRead')?.isReadOnly).toBe(true)
    expect(current.injections.at(-1)?.actorIdentity.userId).toBe(owner)
    expect(current.sent).toEqual(['Fictional complete reply.'])
    const annotation=(await query(`SELECT (c.content->>'topicConfidence')::float confidence,c.content->>'topicLabel' label,

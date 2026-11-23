@@ -195,6 +195,20 @@ describe('[COMP:api/knowledge-route] GET /entries', () => {
     expect(knowledgeStore.search).toHaveBeenCalled()
     expect(res.body.entries[0].title).toBe('hit')
   })
+
+  it('returns separate source identities for a shared path and accepts a scoped drill-down', async () => {
+    const sourceId = '712567a7-385d-454e-80cc-37719f1d16d2'
+    const manual = { id: 'manual-entry', path: 'guide', title: 'Guide', summary: null, tags: [], sensitivity: 'internal', sourceId: null }
+    const synced = { ...manual, id: 'synced-entry', sourceId }
+    knowledgeStore.listByPath.mockResolvedValueOnce([manual, synced]).mockResolvedValueOnce([synced])
+    const viewer = request(app('u-1'))
+    const root = await viewer.get('/api/assistants/a-1/knowledge/entries')
+    expect(root.body.entries).toMatchObject([{ id: manual.id, sourceId: null }, { id: synced.id, sourceId }])
+    const selected = await viewer.get('/api/assistants/a-1/knowledge/entries').query({ path: 'guide', sourceId })
+    expect(selected.status).toBe(200)
+    expect(knowledgeStore.listByPath).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: 'ws-1' }), 'guide', undefined, sourceId)
+    expect(selected.body.entries).toMatchObject([{ id: synced.id, sourceId }])
+  })
 })
 
 describe('[COMP:api/knowledge-route] GET /entries/:id', () => {

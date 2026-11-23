@@ -30,6 +30,7 @@ import * as release8332 from './installation-authentication-8332.mjs'
 import * as release8333 from './installation-authentication-8333.mjs'
 import * as release8334 from './installation-authentication-8334.mjs'
 import * as release8337 from './installation-authentication-8337.mjs'
+import * as release8339 from './installation-authentication-8339.mjs'
 import * as release8338 from './installation-authentication-8338.mjs'
 
 const profiles=new Map([
@@ -63,6 +64,7 @@ const profiles=new Map([
  ['8334_conversation_publication_lock.sql',release8334],
  ['8337_project_chat_creation_admission.sql',release8337],
  ['8338_native_workspace_skill_receipts.sql',release8338],
+ ['8339_knowledge_source_path_identity.sql',release8339],
 ])
 export const hasInstallationRelease=head=>profiles.has(head)
 function profileForRelease(head){

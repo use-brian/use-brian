@@ -5,6 +5,7 @@ import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { delimiter, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { pristineCache, pristineThrough } from './pristine-fixture.mjs'
 import { prepareRuntimeRole, activateRuntimeRole } from './runtime-role.mjs'
 
 const ossRoot = fileURLToPath(new URL('../../', import.meta.url))
@@ -81,7 +82,7 @@ async function availablePort() {
 }
 
 /** Creates only a new cluster. No caller-supplied database or data directory. */
-export async function createLocalFixture({ pgBin, migrationDirs = [], env = process.env, walArchive = false, beforeApply, beforeApplyFile, runtimeRole = 'app_user', prepareTemplate = false, migrationProgress = false, ordinaryOwner = true, statementStatistics = false, executorProbe } = {}) {
+export async function createLocalFixture({ pgBin, migrationDirs = [], env = process.env, walArchive = false, beforeApply, beforeApplyFile, runtimeRole = 'app_user', prepareTemplate = false, migrationProgress = false, ordinaryOwner = true, statementStatistics = false, executorProbe, pristineCacheDirectory } = {}) {
   validateAmbientDatabase(env)
   const { default: pg } = await import('pg')
   if (typeof statementStatistics !== 'boolean') throw new Error('Invalid statement statistics profile')
@@ -101,6 +102,10 @@ export async function createLocalFixture({ pgBin, migrationDirs = [], env = proc
     try { await readFile(join(sharedir, 'extension', `${extension}.control`)) }
     catch { throw new Error(`Selected PostgreSQL lacks ${extension}; select an installation containing it with --pg-bin`) }
   }
+  if (pristineCacheDirectory && (walArchive || beforeApply || migrationDirs.length || statementStatistics || executorProbe)) {
+    throw new Error('Only the standard OSS migration fixture can use a pristine backup')
+  }
+  const cache = pristineCacheDirectory && await pristineCache(pristineCacheDirectory, pgBin, runCommand)
   const directory = await mkdtemp(join(tmpdir(), 'brian-crm-'))
   const data = join(directory, 'data')
   const token = randomUUID()
@@ -133,7 +138,8 @@ export async function createLocalFixture({ pgBin, migrationDirs = [], env = proc
     stopped = true
     await rm(directory, { recursive: true })
   }
-  const startArguments = ['-D', data, '-l', join(directory, 'postgres.log'), '-o', `-h 127.0.0.1 -p ${port} -k ''`, '-w', 'start']
+  const socket = cache ? directory : ''
+  const startArguments = ['-D', data, '-l', join(directory, 'postgres.log'), '-o', `-h 127.0.0.1 -p ${port} -k '${socket.replaceAll("'", "'\\''")}'`, '-w', 'start']
   /**
    * Owned restart for cold measurements: a fast shutdown of this cluster and a
    * new postmaster on the same data directory, port and settings. Shared
@@ -156,10 +162,13 @@ export async function createLocalFixture({ pgBin, migrationDirs = [], env = proc
     }
   }
   try {
-    const pwfile = join(directory, 'password')
-    await writeFile(pwfile, password, { mode: 0o600 })
-    await runCommand(executable('initdb'), ['-D', data, '-U', bootstrapRole, '--encoding=UTF8', '--locale=C', '--auth-local=trust', '--auth-host=scram-sha-256', `--pwfile=${pwfile}`], { env: runtime, logPath: join(directory, 'initdb.log') })
-    await rm(pwfile)
+    const restored = cache && await cache.restore(data, runtime)
+    if (!restored) {
+      const pwfile = join(directory, 'password')
+      await writeFile(pwfile, password, { mode: 0o600 })
+      await runCommand(executable('initdb'), ['-D', data, '-U', bootstrapRole, '--encoding=UTF8', '--locale=C', '--auth-local=trust', '--auth-host=scram-sha-256', `--pwfile=${pwfile}`], { env: runtime, logPath: join(directory, 'initdb.log') })
+      await rm(pwfile)
+    }
     if(walArchive) {
       const archive=join(directory,'wal-archive'),keyFile=join(directory,'wal-key'),config=join(directory,'wal-config.json')
       await mkdir(archive,{mode:0o700});await writeFile(keyFile,randomBytes(32),{mode:0o600})
@@ -179,37 +188,48 @@ export async function createLocalFixture({ pgBin, migrationDirs = [], env = proc
     // Disposal must attempt to stop this owned cluster in that window too.
     started = true
     await runCommand(executable('pg_ctl'), startArguments, { env: runtime })
-    const admin = new pg.Client({ connectionString: makeUrl(bootstrapRole, password, 'postgres') })
-    await admin.connect()
-    try {
-      if (ordinaryOwner) await admin.query(`CREATE ROLE assurance_owner LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT PASSWORD '${password}'`)
-      await admin.query('CREATE DATABASE brian_assurance OWNER assurance_owner')
-
-    } finally { await admin.end() }
     async function bootstrap(run) {
       const client = new pg.Client({ connectionString: makeUrl(bootstrapRole, password, 'brian_assurance') })
       await client.connect()
       try { return await run(client) } finally { await client.end() }
     }
-    if(statementStatistics){
-      await bootstrap(client=>client.query('CREATE EXTENSION pg_stat_statements'))
-      fixtureEnv.BRIAN_ASSURANCE_STATEMENT_STATS='true'
+    if (restored) {
+      // initdb trusts only local Unix sockets. The containing directory is owned
+      // by this run (0700), and TCP connections continue to require SCRAM.
+      const client = new pg.Client({ host: socket, port, database: 'postgres', user: bootstrapRole })
+      await client.connect()
+      try {
+        await client.query(`ALTER ROLE assurance_bootstrap PASSWORD '${password}'; ALTER ROLE assurance_owner PASSWORD '${password}'`)
+      } finally { await client.end() }
+      console.log('Restored verified pristine PostgreSQL backup')
+    } else {
+      const admin = new pg.Client({ connectionString: makeUrl(bootstrapRole, password, 'postgres') })
+      await admin.connect()
+      try {
+        if (ordinaryOwner) await admin.query(`CREATE ROLE assurance_owner LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT PASSWORD '${password}'`)
+        await admin.query('CREATE DATABASE brian_assurance OWNER assurance_owner')
+
+      } finally { await admin.end() }
+      if(statementStatistics){
+        await bootstrap(client=>client.query('CREATE EXTENSION pg_stat_statements'))
+        fixtureEnv.BRIAN_ASSURANCE_STATEMENT_STATS='true'
+      }
+      if (ordinaryOwner) await bootstrap(async client => {
+        // The immutable baseline moves extensions into public, which requires
+        // their owner. A temporary installer owns only these extension objects;
+        // the initial cluster role also owns pinned system objects.
+        await client.query(`BEGIN;
+          CREATE ROLE assurance_extension_bootstrap SUPERUSER NOLOGIN;
+          SET LOCAL ROLE assurance_extension_bootstrap;
+          CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public;
+          CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
+          RESET ROLE;
+          REASSIGN OWNED BY assurance_extension_bootstrap TO assurance_owner;
+          DROP ROLE assurance_extension_bootstrap;
+          COMMIT`)
+        await prepareRuntimeRole(client)
+      })
     }
-    if (ordinaryOwner) await bootstrap(async client => {
-      // The immutable baseline moves extensions into public, which requires
-      // their owner. A temporary installer owns only these extension objects;
-      // the initial cluster role also owns pinned system objects.
-      await client.query(`BEGIN;
-        CREATE ROLE assurance_extension_bootstrap SUPERUSER NOLOGIN;
-        SET LOCAL ROLE assurance_extension_bootstrap;
-        CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public;
-        CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
-        RESET ROLE;
-        REASSIGN OWNED BY assurance_extension_bootstrap TO assurance_owner;
-        DROP ROLE assurance_extension_bootstrap;
-        COMMIT`)
-      await prepareRuntimeRole(client)
-    })
     const connection = new pg.Client({ connectionString: adminUrl })
     await connection.connect()
     try {
@@ -217,21 +237,32 @@ export async function createLocalFixture({ pgBin, migrationDirs = [], env = proc
         const role = (await connection.query('SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')).rows[0]
         if (!role || role.rolsuper || role.rolbypassrls) throw new Error('Ordinary owner profile has elevated privileges')
       }
-      await prepareRuntimeRole(connection)
+      if (!restored) await prepareRuntimeRole(connection)
       const activate = () => ordinaryOwner ? bootstrap(client => activateRuntimeRole(client, { password: appPassword })) : activateRuntimeRole(connection, { password: appPassword })
-      if (beforeApply) {
-        let boundarySeen = false
+      if (beforeApply || cache) {
         const { tsImport } = await import('tsx/esm/api')
         const { runMigrations } = await tsImport('../../packages/api/scripts/migrate.ts', import.meta.url)
+        let saved = restored
+        const savePrefix = async () => {
+          if (!cache || saved) return
+          saved = true
+          await cache.save({ ...fixtureEnv, PGUSER: bootstrapRole })
+        }
+        let boundarySeen = false
         await runMigrations({ databaseUrl: adminUrl, migrationDirs, beforeApply: async migration => {
-          if (migration.file !== beforeApplyFile) return
-          if (boundarySeen) throw new Error('Upgrade boundary executed twice')
-          boundarySeen = true
-          // Only this explicit new-disposable upgrade boundary may activate early.
-          await activate()
-          await beforeApply({ ...migration, adminUrl, appUrl, env: fixtureEnv })
+          if (cache) {
+            // The preceding migration has committed. Future files always execute
+            // on this run, both when recording the prefix and when restoring it.
+            if (migration.file > pristineThrough) await savePrefix()
+          } else if (migration.file === beforeApplyFile) {
+            if (boundarySeen) throw new Error('Upgrade boundary executed twice')
+            boundarySeen = true
+            await activate()
+            await beforeApply({ ...migration, adminUrl, appUrl, env: fixtureEnv })
+          }
         } })
-        if (!boundarySeen) throw new Error('Upgrade boundary missing or already applied: ' + beforeApplyFile)
+        if (beforeApply && !boundarySeen) throw new Error('Upgrade boundary missing or already applied: ' + beforeApplyFile)
+        await savePrefix()
       } else {
         let pending = ''
         await runCommand(process.execPath, ['--import', import.meta.resolve('tsx'), 'packages/api/scripts/migrate.ts'], {
@@ -290,8 +321,8 @@ export async function assertLocalFixture(env = process.env) {
   return marker
 }
 
-/** Clone only a pristine template created by this disposable fixture owner. */
-export async function cloneLocalFixture(env = process.env) {
+/** Clone the owned pristine template, or the quiescent parent after a completed journey. */
+export async function cloneLocalFixture(env = process.env, { fromCurrent = false } = {}) {
   const parent = await assertLocalFixture(env)
   if (parent.template !== 'brian_assurance_template' || env.BRIAN_ASSURANCE_TEMPLATE !== parent.template) {
     throw new Error('Owned fixture has no prepared template')
@@ -307,7 +338,9 @@ export async function cloneLocalFixture(env = process.env) {
   await admin.connect()
   let created = false
   try {
-    await admin.query(`CREATE DATABASE "${database}" OWNER assurance_owner TEMPLATE brian_assurance_template`)
+    // PostgreSQL refuses to clone a source database with other active sessions.
+    const source = fromCurrent ? parent.database : parent.template
+    await admin.query(`CREATE DATABASE "${database}" OWNER assurance_owner TEMPLATE "${source}"`)
     created = true
     await writeFile(marker, JSON.stringify({ token, port: parent.port, database, directory: parent.directory, ...(parent.bootstrapRole ? { bootstrapRole: parent.bootstrapRole } : {}) }), { mode: 0o600 })
   } catch (error) {

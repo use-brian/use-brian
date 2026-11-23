@@ -1,8 +1,8 @@
 "use client";
 
 /** Compact, selection-preserving editing controls. [COMP:app-web/feed-editor-toolbar] */
-import { useRef } from 'react';
-import { ArrowDown, ArrowUp, Bold, ChevronDown, CopyPlus, Heading2, ImagePlus, Italic, Link2, List, ListOrdered, MoreHorizontal, MessageSquarePlus, Sparkles, Plus, Quote, Replace, TextCursorInput, Trash2 } from 'lucide-react';
+import { useId, useRef, useState } from 'react';
+import { ArrowDown, ArrowUp, Baseline, Bold, ChevronDown, CopyPlus, Heading2, ImagePlus, Italic, Link2, List, ListOrdered, MoreHorizontal, MessageSquarePlus, Sparkles, Plus, Quote, Replace, TextCursorInput, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Tooltip } from '@/components/ui/tooltip';
@@ -29,23 +29,32 @@ export function FeedEditorToolbar(props: {
   const t = useT().feedCollaboration;
   const tg = useT().feedGeneration;
   const applied = useRef(false);
+  const [formatsOpen, setFormatsOpen] = useState(false);
+  const formatGroupId = useId();
   const menuFocus = () => {
     if (!applied.current) return true;
     applied.current = false;
     props.focusEditor();
     return false;
   };
-  return <div role="toolbar" aria-label={t.editor} className="flex flex-wrap items-center gap-1 border-b border-border p-1.5" data-feed-editor-toolbar
+  return <div role="toolbar" aria-label={t.editor} className="flex flex-wrap items-center gap-1 border-b border-border/60 py-1" data-feed-editor-toolbar
     onKeyDown={event => {
       if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key) || !event.currentTarget.contains(event.target as Node)) return;
-      const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];
+      const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')]
+        .filter(button => button.checkVisibility?.() !== false);
       const index = buttons.indexOf(event.target as HTMLButtonElement);
       if (index < 0 || !buttons.length) return;
       event.preventDefault();
       const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + buttons.length) % buttons.length;
       buttons[next]?.focus();
     }}>
-    <div role="group" aria-label={t.formatting} className="flex items-center gap-0.5">
+    <Button type="button" variant="ghost" size="sm" className="h-11 gap-1.5 px-2 md:hidden"
+      disabled={props.disabled} aria-expanded={formatsOpen} aria-controls={formatGroupId}
+      onMouseDown={event => event.preventDefault()} onClick={() => setFormatsOpen(open => !open)}>
+      <Baseline aria-hidden />{t.formatting}<ChevronDown aria-hidden />
+    </Button>
+    <div id={formatGroupId} role="group" aria-label={t.formatting}
+      className={`order-last w-full flex-wrap items-center gap-0.5 md:order-none md:flex md:w-auto ${formatsOpen ? 'flex' : 'hidden'}`}>
       {formats.map(([action, Icon]) => <Tooltip key={action} label={t[action]}>
         <Button type="button" variant="ghost" size="icon" aria-label={t[action]} aria-pressed={Boolean(props.active[action])}
           disabled={props.disabled} className="size-11 md:size-8 rounded-md text-muted-foreground hover:bg-background aria-pressed:bg-background aria-pressed:text-foreground aria-pressed:shadow-xs"

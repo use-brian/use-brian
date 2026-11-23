@@ -7,7 +7,38 @@ import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/se
 import { admitModelInput } from '../context-scope/admission.js'
 import { getPool } from '../db/client.js'
 import { readAdmittedSessionQuery, type ConversationFrame } from '../db/conversation-store.js'
-import type { SessionMessage } from '../db/sessions.js'
+import { readSessionMessageScopeSource, type SessionMessage } from '../db/sessions.js'
+import { selectVerifiedChannelHistory } from '../db/verified-channel-record.js'
+import { conversationRecordSelectedRow } from '../db/conversation-record.js'
+import { tryReadTurnConversationRecord } from '../context-scope/conversation-record-admission.js'
+
+/** Admit the current append receipt and its original request bytes. Older
+ * rows, topic annotations and stored attachment bodies belong to discovery. */
+export async function admitCurrentAuthoredInput(
+  authority: SessionContextAuthority, sessionId: string, row: SessionMessage,
+) {
+  const { execution, accumulator } = authority
+  if (execution.lifecycle.sessionId !== sessionId || row.sessionId !== sessionId ||
+      row.role !== 'user' || !Number.isSafeInteger(row.sequenceNum) || row.sequenceNum < 1) {
+    throw new DerivedScopeError('scope_evidence_missing')
+  }
+  await execution.security.authority.assertCurrent()
+  const record = await tryReadTurnConversationRecord(execution, row.sequenceNum, row.sequenceNum, 0)
+  if (record) {
+    if (!conversationRecordSelectedRow(record, row.id, row.sequenceNum, 'user')) {
+      throw new DerivedScopeError('scope_source_changed')
+    }
+    accumulator.noteSource(record.source)
+    return record.source
+  }
+  const selected = await selectVerifiedChannelHistory(execution, [row.id])
+  if (selected && !selected.has(row.id)) throw new DerivedScopeError('scope_source_changed')
+  const source = await readSessionMessageScopeSource(execution.security.access.workspaceId, row.id, undefined,
+    { sessionId, sequenceNum: row.sequenceNum })
+  if (!source) throw new DerivedScopeError('scope_source_changed')
+  accumulator.noteSource(source)
+  return source
+}
 
 /** Explicit preparation data; count consumption still performs fresh admission. */
 export type PreparedAttendedSessionHistory={

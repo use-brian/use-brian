@@ -254,9 +254,9 @@ describe('[COMP:app-web/feed-post-editor] automatic legacy upgrade', () => {
     const notice = container.querySelector('[data-feed-sync-recovery]')!;
     expect(notice.getAttribute('aria-label')).toBe(en.feedPage.postEditor.syncPaused);
     expect(notice.textContent).toContain(en.feedPage.postEditor.syncBlocked);
-    const header = container.querySelector('[data-feed-document-header]')!;
-    expect(header.textContent).toContain(en.feedPage.postEditor.syncPaused);
-    expect(header.textContent).not.toContain(en.feedPage.postEditor.syncBlocked);
+    const title = container.querySelector('[data-feed-title]')!;
+    expect(title.textContent).toContain(en.feedPage.postEditor.syncPaused);
+    expect(title.textContent).not.toContain(en.feedPage.postEditor.syncBlocked);
     goOnline(post);
     const respond = vi.mocked(authFetch).getMockImplementation()!;
     let release!: () => void;
@@ -309,6 +309,26 @@ describe('[COMP:app-web/feed-post-editor] automatic legacy upgrade', () => {
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
 
 describe("[COMP:app-web/feed-offline] offline editor lifecycle", () => {
+  it("returns from preview to the same passage and scroll position", async () => {
+    const post = await createLocalFeedPost("assistant-1", "threads", {
+      ...blankFeedContent(), text: "A draft with a selected passage.",
+    });
+    await render(post.session.id);
+    const workspace = container.querySelector<HTMLElement>("[data-feed-editor-workspace]")!;
+    const body = workspace.querySelector("textarea")!;
+    const modeButton = (label: string) => [...workspace.querySelectorAll<HTMLButtonElement>("header button")].find(node => node.textContent === label)!;
+    workspace.scrollTop = 240;
+    body.setSelectionRange(2, 7);
+    await act(async () => modeButton(en.feedPage.postEditor.previewMode).click());
+    expect(body.closest("[inert]")).not.toBeNull();
+    expect(workspace.scrollTop).toBe(0);
+    await act(async () => modeButton(en.feedPage.postEditor.editMode).click());
+    expect(body.closest("[inert]")).toBeNull();
+    expect(workspace.querySelector("textarea")).toBe(body);
+    expect([body.selectionStart, body.selectionEnd]).toEqual([2, 7]);
+    expect(workspace.scrollTop).toBe(240);
+  });
+
   it("saves caption keystrokes immediately and restores after closing the editor", async () => {
     const post = await createLocalFeedPost("assistant-1", "threads", blankFeedContent());
     await render(post.session.id);

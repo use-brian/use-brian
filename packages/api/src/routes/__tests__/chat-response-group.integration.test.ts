@@ -51,15 +51,28 @@ async function conversation(variant: Variant, permissionModel: Model, helperClea
     [helperId, f.ownerId, f.workspaceId, helperClearance])
   await f.pool.query("UPDATE workspaces SET plan='pro' WHERE id=$1", [f.workspaceId])
   const device = (await authSessionStore.create(f.ownerId, { deviceLabel: 'Fictional group browser', userAgent: null, ipAddress: null }))!
-  const state = { calls: 0, sent: [] as string[] }
+  const state = { calls: 0, sent: [] as string[], first: [] as string[] }
   const provider: LLMProvider = { name: 'fictional-group', models: ['fixture'], stream: async function* () {
     yield { type: 'message_start', model: 'fixture' } as StreamChunk; yield { type: 'text_delta', text: 'Fictional title' } as StreamChunk
     yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 } } as StreamChunk },
-    createSession() { return { send(...input: unknown[]) { state.sent.push(JSON.stringify(input)); const reply = `Fictional member ${++state.calls} answer.`; return (async function* () {
-      yield { type: 'message_start' as const, model: 'fixture' }
-      yield { type: 'text_delta' as const, text: reply }
-      yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 2, outputTokens: 2 } }
-    })() } } } }
+    createSession(options) { return { async *send(messages) {
+      const input = JSON.stringify(messages)
+      state.sent.push(input)
+      yield { type: 'message_start', model: 'fixture' }
+      if (options.tools?.some(tool => tool.name === 'requestConversationContext')) {
+        state.first.push(input)
+        if (options.runtimeSystemContext?.includes('Another assistant has already responded')) {
+          const id = 'fictional-group-history'
+          yield { type: 'tool_use_start', id, name: 'requestConversationContext' }
+          yield { type: 'tool_use_delta', id, input: '{}' }
+          yield { type: 'tool_use_end', id }
+          yield { type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 2, outputTokens: 2 } }
+          return
+        }
+      }
+      yield { type: 'text_delta', text: `Fictional member ${++state.calls} answer.` }
+      yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 2, outputTokens: 2 } }
+    } } } }
   const app = express(); app.use(express.json()); app.use((req, _res, next) => {
     req.userId = f.ownerId; req.authSessionId = device.id; req.authVersion = device.authVersion; next()
   })
@@ -99,7 +112,7 @@ async function conversation(variant: Variant, permissionModel: Model, helperClea
     const saved = /event: user_message_saved\r?\ndata: \{[^\n]*"id":"([0-9a-f-]{36})"/.exec(first)?.[1]
       ?? (await f.pool.query<{ id: string }>("SELECT id FROM session_messages WHERE session_id=$1 AND role='user' ORDER BY sequence_num DESC LIMIT 1", [sessionId])).rows[0]?.id
     expect(saved).toBeTruthy()
-    return post({ assistantId: helperId, message: '@Brian @Helper compare the fictional plans.', roomResponseGroup: { assistantIds: ids, sourceMessageId: saved } })
+    return post({ assistantId: helperId, message: 'Fictional substitution sent on the follow-up POST.', roomResponseGroup: { assistantIds: ids, sourceMessageId: saved } })
   }
   return { f, helperId, state, post, group, settled }
 }
@@ -115,8 +128,11 @@ describe.sequential('[COMP:api/room-mechanics] response group', () => {
       const rows = await c.settled(before + 2)
       expect(rows.filter(row => row.role === 'user' && text(row) === '@Brian @Helper compare the fictional plans.')).toHaveLength(1)
       expect(c.state.calls).toBe(before + 2)
-      expect(rows.filter(row => row.role === 'assistant').slice(-2).map(row => [row.senderAssistantId, text(row)])).toEqual([
+      expect(rows.filter(row => row.role === 'assistant' && text(row)).slice(-2).map(row => [row.senderAssistantId, text(row)])).toEqual([
         [c.f.assistantId, `Fictional member ${before + 1} answer.`], [c.helperId, `Fictional member ${before + 2} answer.`]])
+      expect(c.state.first.at(-1)).toContain('@Brian @Helper compare the fictional plans.')
+      expect(c.state.first.at(-1)).not.toContain(`Fictional member ${before + 1} answer.`)
+      expect(c.state.sent.join(' ')).not.toContain('Fictional substitution')
       // The second member built on the first member's persisted reply.
       expect(c.state.sent.at(-1)).toContain(`Fictional member ${before + 1} answer.`)
     } finally { await c.f.cleanup() }

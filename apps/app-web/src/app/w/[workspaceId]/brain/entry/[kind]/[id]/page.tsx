@@ -62,10 +62,12 @@ import {
   type BrainGraphNode,
   type KnowledgeEditCapability,
   type KnowledgeEntryDetail,
+  type KnowledgeRelatedRef,
 } from "@/lib/api/brain";
 import { fetchBrainRow, type BrainInboxRowDetail } from "@/lib/api/brain-inbox";
 import {
   KB_WIKILINK_SCHEME,
+  collectKnowledgeLinks,
   knowledgeEntryHref,
   resolveWikilinkTarget,
   rewriteWikilinks,
@@ -309,6 +311,7 @@ function KnowledgeReader({
     () => (entry ? rewriteWikilinks(entry.content) : ""),
     [entry],
   );
+  const entryLinks = useMemo(() => collectKnowledgeLinks(rewritten), [rewritten]);
 
   if (!activeId || view === null) {
     return <ReaderLoading />;
@@ -616,7 +619,9 @@ function KnowledgeReader({
                   <KbLink
                     {...props}
                     currentPath={entry.path}
+                    currentSourceId={entry.sourceId}
                     related={related}
+                    entryLinks={entryLinks}
                     onNavigate={(refId) =>
                       router.push(knowledgeEntryHref(activeId, refId))
                     }
@@ -648,16 +653,20 @@ function KbLink({
   href,
   children,
   currentPath,
+  currentSourceId,
   related,
+  entryLinks,
   onNavigate,
   hrefForTarget,
 }: React.AnchorHTMLAttributes<HTMLAnchorElement> & {
   currentPath: string;
-  related: { id: string; title: string; path: string }[];
+  currentSourceId: string | null;
+  related: KnowledgeRelatedRef[];
+  entryLinks: string[];
   onNavigate: (refId: string) => void;
   hrefForTarget: (refId: string) => string;
 }) {
-  const target = href ? resolveWikilinkTarget(href, currentPath, related) : null;
+  const target = href ? resolveWikilinkTarget(href, currentPath, related, currentSourceId, entryLinks) : null;
   if (target) {
     return (
       <a

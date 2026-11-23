@@ -3,10 +3,12 @@ import { assertTelegramConversationCurrent } from '../telegram-conversation-cont
 import { recordingInputScope, type RecordingAdmission } from '../channel-recording.js'
 import { assembleTurnPublication } from '../turn/publication.js'
 import { isInputAuthorityError } from '@use-brian/agent-runtime/providers/input-authority.js'
+import { admitCurrentAuthoredInput } from './attended-session-context.js'
 import { routeAttendedTurn } from './attended-turn-routing.js'
 import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/attended-audience.js'
 import { bindVerifiedTelegramEvidence, bindVerifiedThreadRoomEvidence } from '../context-scope/native-invocation-evidence.js'
 import { bindScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
+import { resourceScopeKey } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { runTurnSessionStateDiff } from '../turn/session-state.js'
 import { withTurnInference } from '../turn/runtime.js'
 import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
@@ -124,7 +126,6 @@ import type { CrmEmailDraftStore } from '@use-brian/core/crm/email-drafts.js'
 import type { KnowledgeStoreInterface } from '@use-brian/core/knowledge/types.js'
 import type { EpisodicStore } from '@use-brian/core/memory/episodic-types.js'
 import type { SessionStateStore } from '@use-brian/core/memory/session-state-types.js'
-import type { TopicClassification } from '@use-brian/core/memory/topic-classifier.js'
 import type { MemoryStore } from '@use-brian/core/memory/types.js'
 import type { GDriveFilesStore } from '@use-brian/core/tools/base/gdrive-files.js'
 import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
@@ -1298,8 +1299,11 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     await hooks.onCleanup?.()
     return
   }
-  const recordCurrent = async () => !recordAddress || !recordEnvelope
-    || !!await readVerifiedChannelEnvelope(recordAddress,recordEnvelope.version)
+  // A provider-visible original post need not raise its own group's delivery
+  // ceiling. Its exact row must nevertheless remain readable across effects.
+  let currentGroupInput: (() => Promise<boolean>) | undefined
+  const recordCurrent = async () => currentGroupInput ? currentGroupInput()
+    : !recordAddress || !recordEnvelope || !!await readVerifiedChannelEnvelope(recordAddress,recordEnvelope.version)
   const channelWrite = !params.recording && recordAddress && recordEnvelope && verifiedChannelPublicationActive()
     ? {address:recordAddress,version:recordEnvelope.version} : undefined
   const memberMode = assistant.workspaceId === null
@@ -1413,7 +1417,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
       },
       attribution: { billingUserId },
       sessionAuthority: privateRecording ? undefined : session,
-      credentialCurrent: params.conversationContext || recordAddress ? async () => {
+      credentialCurrent: params.conversationContext || recordAddress || isGroupChat && assistant.workspaceId && !privateRecording ? async () => {
         if(params.credentialCurrent && !await params.credentialCurrent())return false
         if (params.conversationContext) await assertTelegramConversationCurrent(params.conversationContext)
         return recordCurrent()
@@ -1470,18 +1474,6 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
   const inputMessageScope = recordAddress && !recordAddress.member && !room && authoredScope
     ? {...authoredScope,userId:null,sensitivity:'public' as const,compartments:[],projectIds:[]} : authoredScope
   if (room && !params.recording && inputMessageScope) await admitRoomInputScope(room, inputMessageScope)
-  // D16: a room is hydrated once from what the provider still shows.
-  const roomHistory = !params.recording && room && audienceEnvelope?.allowed
-    && await mayReadGroupContext(pinAccessCeiling(dataTurnScope.access), { ...audienceEnvelope.ceiling,
-      clearance: (room.effectiveClearance ?? 'internal') as AccessCeiling['clearance'],
-      compartments: room.contextCompartments, projectIds: room.contextProjectId ? [room.contextProjectId] : [] })
-    && params.readProviderHistory && await claimRoomHydration(room.id)
-    ? await params.readProviderHistory().catch((err: unknown) => {
-        console.warn(`[${channelType}] room hydration failed; continuing without history:`, err)
-        return null
-      })
-    : null
-  const providerVisibleContext = room ? roomHistory : params.providerVisibleContext
   // Native history/parent admission keys on sessions.workspace_id. A projected
   // null (legacy personal resume before backfill) must not take that path.
   // Readers that omit the field keep the ownership-only gate.
@@ -1513,7 +1505,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     if (params.conversationContext) await assertTelegramConversationCurrent(params.conversationContext)
     // The native authorizer owns the same original lease at entry and return.
     if (!nativeTranscriptAuthority) await authority.assertCurrent()
-    if (recordEnvelope && !await recordCurrent()) throw new AuthorityChangedError(false)
+    if ((recordEnvelope || currentGroupInput) && !await recordCurrent()) throw new AuthorityChangedError(false)
     if (recordEnvelope && !channelEvidenceFitsEnvelope(recordEnvelope,scopeAccumulator.evidence)) {
       throw new DeliveryAudienceUnverifiedError(undefined,'source_unverifiable')
     }
@@ -1662,26 +1654,12 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
   }
   let turnFailed = true
   const pendingUsage: Promise<void>[] = []
-  const pendingPreparation: Promise<unknown>[] = []
+  let captureFollowup: (() => Promise<void>) | undefined
   let userMessageIdForUsage: string | undefined
-  let classifierUsageAttribution: { modelTier: string; providerKeySource: 'user' | 'platform' } | undefined
-  // Turn-routing classifier usage, recorded once per completed call; a legacy
-  // turn's records wait for its authored row (research.md "Adapter switch").
-  const pendingRoutingUsage: import('@use-brian/core/workers/turn-routing.js').TurnRoutingUsageRecord[] = []
-  const flushRoutingUsage = async (force = false) => {
-    if (!userMessageIdForUsage && !force) return
-    for (const record of pendingRoutingUsage.splice(0)) await recordOverheadUsage({
-      usageStore, userId: billingUserId, actorUserId: userId,
-      assistantId: assistant.id, sessionId: session.id, userMessageId: userMessageIdForUsage,
-      model: record.model, usage: record.usage, source: record.source,
-      ...(record.triggerKey ? { triggerKey: record.triggerKey } : {}), ...classifierUsageAttribution,
-    })
-  }
   let preparationUsageSettled = false
   const settlePreparationUsage = async () => {
     if (preparationUsageSettled) return
     preparationUsageSettled = true
-    await flushRoutingUsage(true)
     if (voiceTranscriptionUsage) await recordOverheadUsage({
       usageStore, userId: billingUserId, actorUserId: userId,
       assistantId: assistant.id, sessionId: session.id, userMessageId: userMessageIdForUsage,
@@ -1706,12 +1684,14 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
           resolveWorkspaceCustomLlm: params.resolveWorkspaceCustomLlm?.bind(params) ?? null,
           resolveLegacyByoKey: null,
           buildLegacyByoProvider: null })
-  const background = await turnOwner.prepareBackgroundModel({ model: laneModel })
-  const backgroundLlmRuntime = background.customLlm
-  const backgroundProvider = background.provider
-  const backgroundLaneModel = background.model!
-  const backgroundUsageAttribution = { modelTier: 'standard', providerKeySource: background.providerKeySource }
-  classifierUsageAttribution = backgroundUsageAttribution
+  const loadBackground = async () => {
+    const model = await turnOwner.prepareBackgroundModel({ model: laneModel })
+    const attribution = { modelTier: 'standard', providerKeySource: model.providerKeySource }
+    return { backgroundLlmRuntime: model.customLlm, backgroundProvider: model.provider,
+      backgroundLaneModel: model.model!, backgroundUsageAttribution: attribution }
+  }
+  let background: ReturnType<typeof loadBackground> | undefined
+  const getBackground = () => background ??= loadBackground()
   // ── Large-paste promotion (large-content-artifacts §Phase 3.2) ──
   // Runs before the message is classified, persisted, or fed to the model, so
   // a giant paste never reaches the classifier or the query loop as a blob.
@@ -1730,8 +1710,6 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
   }
 
   // Persist authored input before deriving native topic/reply annotations.
-  let classification: TopicClassification | null = null
-  let replyResolved: Awaited<ReturnType<typeof resolveReplyText>> | { text: string; fromAssistant: boolean } | null = null
   let createdUserMessage = true
   const persistUserMessage = async (client?: Parameters<typeof addSessionMessage>[1]) => {
     const input = {
@@ -1739,9 +1717,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
       role: 'user' as const,
       content: params.conversationContext ? userContentBlocks.map(block => block.type === 'text' ? block
         : { type: 'text' as const, text: `[${block.type}]` }) : userContentBlocks,
-      replyToText: replyResolved?.text ?? null,
-      topicLabel: classification?.topic_label ?? null,
-      topicConfidence: classification?.confidence ?? null,
+      replyToText: null,
+      topicLabel: null,
+      topicConfidence: null,
       channelMessageId: (room ? providerInputId : incomingChannelMessageId) != null
         ? String(room ? providerInputId : incomingChannelMessageId) : null,
       senderUserId: roomShape.attributeSenders ? userId : senderUserId ?? null,
@@ -1787,107 +1765,28 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
         message: params.archiveIncoming,
       }, persistUserMessage)
     : await persistUserMessage()
-  const earlyUserMessageRow = nativeTranscriptAuthority ? await persistInboundMessage() : undefined
-  userMessageIdForUsage = earlyUserMessageRow?.id
+  const userMessageRow = await persistInboundMessage()
+  userMessageIdForUsage = userMessageRow.id
 
-  // One turn route decides research, topic and split over one captured input
-  // (research.md "Adapter switch"): native lanes share admitted bytes while each
-  // retains its fresh input-authority check; a legacy transcript routes over its
-  // pre-turn dialogue, read once here. Channels have no manual research toggle:
-  // an adaptive verdict upgrades the alias to `research` (paid plans only; the
-  // downstream `resolveModel` still honors plan gating).
-  if(params.conversationContext)await assertTelegramConversationCurrent(params.conversationContext)
-  const legacyHistory = nativeTranscriptAuthority ? undefined
-    : privateRecording ? [] : await filterHistoryForAudience(await getSessionMessages(session.id, { excludeHeld: true }))
-  const legacyReply = legacyHistory ? (privateRecording ? null : await resolveReplyText({
-    channelType,
-    replyToMessageId: replyToMessageId ?? null,
-    session,
-    raw: replyRaw,
-    ...(room ? { readableHistory: legacyHistory } : {}),
-  })) ?? (params.realtimeThreadTarget?.contextText
-    ? { text: params.realtimeThreadTarget.contextText, fromAssistant: true }
-    : null) : undefined
-  if(params.conversationContext)await assertTelegramConversationCurrent(params.conversationContext)
-  const routing = await routeAttendedTurn({
-    facts: { profile: 'channel', adaptiveResearchEnabled: !!adaptiveResearchEnabled, workspaceId: assistant.workspaceId ?? null,
-      plan: workspacePlan, budgetStatus, isolatedAudience },
-    message: messageText,
-    ...(nativeTranscriptAuthority && earlyUserMessageRow ? { native: {
-      authority: nativeTranscriptAuthority, session, message: earlyUserMessageRow,
-      reply: { channelType, replyToMessageId: replyToMessageId ?? null },
-    } } : {}),
-    ...(legacyHistory ? { legacy: { history: legacyHistory, replyToText: legacyReply?.text ?? null, topicText: messageText, research: 'classify' as const } } : {}),
-    provider: backgroundProvider, model: backgroundLaneModel, decisionRuntime: params.decisionRuntime,
-    workspaceId: assistant.workspaceId ?? undefined, runId: earlyUserMessageRow?.id ?? crypto.randomUUID(),
-    // Channel preflight keeps its historical unbound splitter call shape.
-    split: { concurrent: 'preflight', late: 'preflight' },
-    recordUsage: async record => { pendingRoutingUsage.push(record); await flushRoutingUsage() },
-    attribution: backgroundUsageAttribution, signal: abortController.signal,
-  })
-  const adaptiveResearchActive = routing.route.research.active
-  const effectiveModelAlias = adaptiveResearchActive ? 'research' : modelAlias
-  const preparedModel = await turnOwner.prepareMainModel({ kind: 'channel', requestedAlias: effectiveModelAlias,
+  const preparedModel = await turnOwner.prepareMainModel({ kind: 'channel', requestedAlias: modelAlias,
     plan: workspacePlan, budgetStatus, hasImage: turnHasInlineImage(userContentBlocks) })
   const { logicalModel, logicalTier, model, imageRoute } = preparedModel
-  // Announced, never silent - see CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE. The
-  // ordinary path archives the inbound message a few lines below, so the
-  // fallback needs no archive of its own.
+  // The authored input is already durable when the selected model declines an image.
   let imageFallbackNotice: string | null = imageRoute === 'fall_back_to_builtin'
     ? CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE
     : null
   const customLlmRuntime = preparedModel.customLlm
   if (imageRoute === 'refuse') {
-    // Archive BEFORE refusing. This return used to happen first, so an image
-    // sent to a workspace on a custom endpoint left no message row and no
-    // bytes — the user saw only "Something went wrong" and the content was
-    // gone for good. Provider media is not re-fetchable (WeChat's iLink CDN
-    // copy is short-lived and AES-encrypted), so a MODEL capability limit
-    // must never decide whether the archive keeps the message: an assistant
-    // that cannot look at an attachment is a different thing from a record
-    // that no longer exists. Same rule the store applies to embedding and
-    // extraction failures — see brian-message-store docs/architecture.md
-    // → "Failure behavior".
-    if (params.archiveIncoming && !params.archiveInboundAlreadyPersisted && !earlyUserMessageRow) {
-      try {
-        await appendInboundChatArchive({
-          source: channelType,
-          // See the persist-inbound archive below — `ownerId` is NULL for a
-          // workspace-owned assistant against a field typed `string`.
-          ownerUserId: billingUserId,
-          workspaceId: assistant.workspaceId,
-          connectorInstanceId: params.archiveConnectorInstanceId,
-          assistantId: assistant.id,
-          assistantName: assistant.name,
-          conversationId: channelId,
-          message: params.archiveIncoming,
-        })
-      } catch (err) {
-        // Losing the archive row is bad, but failing the whole turn here
-        // would replace one silent loss with a worse one: the user would
-        // not even get the explanation below.
-        console.warn(`[${channelType}] archive-on-refusal failed:`, err)
-      }
-    }
     // The exact string is load-bearing: channelUserErrorText whitelists it
     // by identity so every channel's sendError surfaces it verbatim.
     await hooks.sendError(new Error(CUSTOM_MODEL_IMAGE_REJECTION))
     return
   }
-  const turnProvider = preparedModel.provider
-  // The model analytics must NAME, which is not the one the tier resolved.
-  // `model` is the platform tier's serving model; on a workspace custom
-  // endpoint `turnProvider` is swapped out and the provider pins its own wire
-  // id, so `model` never reaches a provider at all. Labelling an event with it
-  // points an investigator at a model that did not run: a
-  // `channel_delivery_empty` blamed the managed Max model for a turn actually
-  // served by a custom endpoint. `turn_completed` already reports the truth via
-  // `event.response.model`; this is the same answer for the events that fire
-  // before a response exists to read it from.
+  // A custom endpoint pins its own wire model. Attribute pre-response events to that selector.
   const analyticsModel = customLlmRuntime?.selector ?? model
   // Tier budget (chat-route parity) — research mode gets 100/100. Other
   // tiers inherit the queryLoop defaults via `null`.
-  const tierBudget = chatTierBudget({ model: logicalModel, researchMode: adaptiveResearchActive })
+  const tierBudget = chatTierBudget({ model: logicalModel, researchMode: modelAlias === 'research' })
 
   // v2 (brain_extraction_v2_enabled): per-turn regex pattern extraction
   // retired. Channel-side facts (Slack / Telegram / Feishu-Lark / WhatsApp) now land
@@ -1895,10 +1794,6 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
   // structured entities / tasks / memories with proper authorship +
   // justification. See Q9 of the design thread + the `chatEpisodeIngestor`
   // wiring in apps/api/src/index.ts.
-
-  // The routed native topic publishes its annotation now, as the sequential
-  // classifier did; a legacy turn keeps the routed classification.
-  const nativeClassification = routing.topic ? await routing.topic.publish() : undefined
 
   const channelUser = await findUserById(userId)
   const speakerAccount = resolveChannelSpeakerAccount(channelUser)
@@ -1912,15 +1807,6 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     anchorTimezone,
   })
 
-  if(params.conversationContext)await assertTelegramConversationCurrent(params.conversationContext)
-  replyResolved = nativeClassification ? nativeClassification.reply : legacyReply ?? null
-  classification = nativeClassification?.classification ?? routing.legacyClassification
-  if (abortController.signal.aborted) return
-
-  // Reuse the native authored row; legacy profiles persist their input here.
-  const userMessageRow = earlyUserMessageRow ?? await persistInboundMessage()
-  userMessageIdForUsage = userMessageRow.id
-  await flushRoutingUsage()
   if (usageStore) turnOwner.registerUsageBilling({
     metadata: {
       userId: billingUserId, actorUserId: userId, assistantId: assistant.id, sessionId: session.id,
@@ -1931,17 +1817,36 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     costPolicy: 'calculate', recordUsage: usageStore.recordUsage.bind(usageStore),
     onError: error => console.error(`[${channelType}] Usage tracking failed:`, error),
   })
-  if (room && !params.recording && assistant.workspaceId && createdUserMessage) {
-    await captureChannelRoomInput({
-      room, inputScope: inputMessageScope, workspaceId: assistant.workspaceId,
-      senderUserId: userId, senderName: actorDisplayName ?? null, text: messageText ?? '',
-    })
+  const enrollAuthoredSource = countsAsGroupAudienceEvidence(userMessageRow, isGroupChat)
+  let storedUserSource: Awaited<ReturnType<typeof readSessionMessageScopeSource>>
+  try {
+    storedUserSource = privateRecording ? null : nativeTranscriptAuthority && enrollAuthoredSource
+      ? await admitCurrentAuthoredInput(nativeTranscriptAuthority, session.id, userMessageRow)
+      : await readSessionMessageScopeSource(assistant.workspaceId, userMessageRow.id, undefined,
+        { sessionId: session.id, sequenceNum: userMessageRow.sequenceNum })
+    // A replay can resolve to a held or more restricted row. Check just that
+    // receipt before including its provider-authored attachment blocks.
+    if (!privateRecording && (room || recordAddress)) {
+      const current = bindScopeSources(userMessageRow, storedUserSource ? [storedUserSource] : [])
+      if (!storedUserSource || !(await filterHistoryForAudience([current])).length) {
+        throw new AuthorityChangedError(false)
+      }
+    }
+    if (storedUserSource && !enrollAuthoredSource) {
+      const original = storedUserSource
+      currentGroupInput = async () => {
+        const latest = await readSessionMessageScopeSource(assistant.workspaceId, userMessageRow.id, undefined,
+          { sessionId: session.id, sequenceNum: userMessageRow.sequenceNum })
+        if (!latest || latest.version !== original.version || resourceScopeKey(latest) !== resourceScopeKey(original)) return false
+        const current = bindScopeSources(userMessageRow, [latest])
+        return (await filterHistoryForAudience([current])).length === 1
+      }
+    }
+  } catch (error) {
+    if (!abortController.signal.aborted) await hooks.sendError(error instanceof Error ? error : new Error(CONTEXT_NOT_AVAILABLE_MESSAGE))
+    return
   }
-  const storedUserSource = privateRecording ? null : await readSessionMessageScopeSource(
-    assistant.workspaceId,
-    userMessageRow.id,
-  )
-  if (storedUserSource && countsAsGroupAudienceEvidence(userMessageRow, isGroupChat)) {
+  if (storedUserSource && enrollAuthoredSource) {
     scopeAccumulator.noteSource(storedUserSource)
   }
 
@@ -1949,25 +1854,20 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
   // web chat (features/research.md). Capture never blocks the reply.
   let researchActivity: ResearchActivity | null = null
   let researchObserver: ReturnType<typeof createResearchTurnObserver> | null = null
-  if (assistant.workspaceId && !isolatedAudience) {
-    pendingPreparation.push(captureResearchFollowupForMessage({
-      workspaceId: assistant.workspaceId, sessionId: session.id, assistantId: assistant.id,
-      messageId: userMessageRow.id, actorUserId: userId ?? null, externalPrincipal: isolatedAudience,
-      replyToChannelMessageId: replyToMessageId != null ? String(replyToMessageId) : null,
-      onError: (error) => console.error(`[${channelType}] research follow-up capture failed`, { sessionId: session.id, error: error instanceof Error ? error.message : String(error) }),
-    }))
-    if (adaptiveResearchActive && userId) {
-      try {
-        researchActivity = await beginResearchActivity({
-          workspaceId: assistant.workspaceId, sessionId: session.id, requestMessageId: userMessageRow.id,
-          actorUserId: userId, assistantId: assistant.id, projectId: session.contextProjectId ?? null,
-          entry: 'adaptive', runtime: { surface: channelType, assistantKind: assistant.kind },
-          sensitivity: inputMessageScope?.sensitivity ?? null, compartments: inputMessageScope?.compartments ?? null,
-        })
-        researchObserver = createResearchTurnObserver()
-      } catch (error) {
-        console.error(`[${channelType}] research activity open failed`, { sessionId: session.id, error: error instanceof Error ? error.message : String(error) })
-      }
+  captureFollowup = async () => {
+    if (room && !params.recording && assistant.workspaceId && createdUserMessage) {
+      await captureChannelRoomInput({
+        room, inputScope: inputMessageScope, workspaceId: assistant.workspaceId,
+        senderUserId: userId, senderName: actorDisplayName ?? null, text: messageText ?? '',
+      })
+    }
+    if (assistant.workspaceId && !isolatedAudience) {
+      await captureResearchFollowupForMessage({
+        workspaceId: assistant.workspaceId, sessionId: session.id, assistantId: assistant.id,
+        messageId: userMessageRow.id, actorUserId: userId ?? null, externalPrincipal: isolatedAudience,
+        replyToChannelMessageId: replyToMessageId != null ? String(replyToMessageId) : null,
+        onError: (error) => console.error(`[${channelType}] research follow-up capture failed`, { sessionId: session.id, error: error instanceof Error ? error.message : String(error) }),
+      })
     }
   }
   const settleResearch = async (answerText: string, interrupted: boolean) => {
@@ -2000,293 +1900,21 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
   // requiring output authority or minting an input row after cancellation.
   await settlePreparationUsage()
 
-  // ── Load history ──
-  // `fromSequence` skips rows already compacted into the most recent
-  // boundary; null (never compacted) loads full history.
-  if(params.conversationContext)await assertTelegramConversationCurrent(params.conversationContext)
-  // The original turn owner selects and performs the main-turn history read;
-  // the channel declares only its stored-history audience projection.
-  let dbMessages = privateRecording ? [] : (await turnOwner.prepareHistory({ native: nativeTranscriptAuthority ?? null, classified: nativeClassification,
-    // A public audience cannot trust the durable summary because it has no
-    // per-source audience evidence. Rebuild from filtered provider history.
-    fromSequence: isolatedAudience || room ? null : session.compactBoundarySequence,
-    projectStored: rows => filterHistoryForAudience(rows) })).messages
-  if(params.conversationContext)await assertTelegramConversationCurrent(params.conversationContext)
-  if (room && !privateRecording) {
-    const currentHistory = overlayCurrentRoomMessage(dbMessages, { id: userMessageRow.id, content: userContentBlocks })
-    if (!currentHistory) {
-      // A provider replay must not relabel an older, more restricted input
-      // or run a model turn after its current question was withheld.
-      await hooks.sendError(new Error(CONTEXT_NOT_AVAILABLE_MESSAGE))
-      await hooks.onCleanup?.()
-      return
-    }
-    dbMessages = currentHistory
-  }
-  noteAutomaticScopeEvidence(
-    scopeAccumulator,
-    dbMessages.filter((message) => countsAsGroupAudienceEvidence(message, isGroupChat)),
-  )
-  const workflowProposalReceipt = latestWorkflowProposalReceipt(dbMessages)
-
-  // ── Proactive compaction (messaging: 0.5× threshold + multi-topic profile) ──
-  // runProactiveCompaction owns stamping + tool-result pairing + summary
-  // prepending internally. See docs/architecture/context-engine/compaction.md.
-  // A room labels each speaker at assembly (members by name, guests by
-  // handle, D1), the same seam web rooms use; stored content stays clean.
-  let roomSenderNames: Map<string, string> | undefined
-  if (roomShape.attributeSenders && !privateRecording) {
-    try {
-      const senderIds = [...new Set(dbMessages.map((m) => m.senderUserId).filter((id): id is string => Boolean(id)))]
-      const profiles = senderIds.length ? await getUserProfilesByIds(senderIds) : new Map<string, { name: string | null }>()
-      roomSenderNames = new Map()
-      for (const id of senderIds) {
-        const label = roomSpeakerLabel(profiles.get(id)?.name, id === userId ? actorDisplayName : null)
-        if (label) roomSenderNames.set(id, label)
-      }
-    } catch (err) {
-      console.warn(`[${channelType}] room speaker lookup failed; turns stay unlabelled:`, err)
-    }
-  }
-  // This is current provider-authored input, not a read/declassification of
-  // the connector owner's stored transcript. No stored row enters the model.
-  if (!(await deliveryAudienceAdmitsTurn())) return
-  const compactionResult = privateRecording
-    ? { messages: [{ role: 'user' as const, content: structuredClone(userContentBlocks) }] }
-    : await runProactiveCompaction({
-    modelContext: { execution: executionContext, accumulator: scopeAccumulator },
-    sessionMessages: dbMessages,
-    timezone: userTimezone,
-    senderNames: roomSenderNames,
-    session: room ? { ...session, compactSummary: null, compactBoundarySequence: null } : session,
-    tier: modelToCompactionTier(logicalModel),
-    channelClass: 'messaging',
-    profile: 'multi-topic',
-    provider: backgroundProvider,
-    model: backgroundLaneModel,
-    inputTokenLimit: backgroundLlmRuntime?.inputTokenLimit,
-    ...backgroundUsageAttribution,
-    systemPrompt: audienceSystemPrompt,
-    assistantId: assistant.id,
-    userId,
-    // `ProactiveCompactionParams.ownerId` is a usage-attribution field and
-    // nothing else — its only two readers are the `overhead:extraction` and
-    // `overhead:compaction` rows in proactive-compaction.ts, both
-    // `userId: ownerId`. Handing it the raw `ownerId` gave those rows the same
-    // NOT NULL violation the classifier row had; they just fire less often.
-    ownerId: billingUserId,
-    channelType,
-    memoryStore,
-    episodicStore,
-    sessionStateStore: isolatedAudience ? undefined : sessionStateStore,
-    analytics,
-    usageStore,
-    userMessageId: userMessageRow.id,
-    // Room capture owns shared learning. The legacy compaction extractor
-    // reads a privileged personal index and writes per-user memories.
-    persistLongTermContext: !room && !isolatedAudience && roomShape.memoryWrites,
-    persistSessionSummary: !room && !isolatedAudience,
-    compartments: dataTurnScope.writeCompartments,
-    projectIds: dataTurnScope.writeProjectIds,
-    authority,
-  })
-  // Coalesced assembly: a room's un-addressed posts are consecutive user rows,
-  // folded into the addressed turn under the provider's alternation contract.
-  let messages: Message[] = roomShape.coalesce
-    ? coalesceConsecutiveUserMessages(compactionResult.messages)
-    : compactionResult.messages
-
   // ── Sensitivity accumulator (per-turn) ──
   // Tracks max sensitivity of every memory / KB / episodic row the model
   // sees in this turn. Fed into ToolContext so saveMemory / addKnowledgeEntry
   // stamp new rows with the correct tier (no silent downgrade).
   const sensitivityAccumulator = new SensitivityAccumulator()
   const compartmentAccumulator = new CompartmentAccumulator()
-  // Read-side clearance (incident 2026-06-01): the READ ceiling is the acting
-  // channel user's clearance bounded by the assistant's. Channel participants
-  // with no `workspace_members` row (shadow users) resolve to `public` — most
-  // restrictive. Writes keep the assistant's clearance (`assistantClearance`
-  // on the ToolContext below).
-  // ── Memory context (identified users only) ──
-  // Per-turn callers use the ranked+capped index slice. See
-  // docs/architecture/context-engine/memory-system.md → "Index cap".
-  let memoryContext = ''
-  if (isIdentified && !isolatedAudience) {
-    const viewerCtx = automaticContextAccess(dataTurnScope.access, dataTurnScope.activeProjectId)
-    const [soulContext, identityMemories, rankedIndex] = await Promise.all([
-      (memoryStore.getSoulContext?.(viewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
-      memoryStore.getIdentity(viewerCtx,nativeTranscriptAuthority),
-      memoryStore.getIndexRanked(viewerCtx, PER_TURN_INDEX_CAP,nativeTranscriptAuthority),
-    ])
-    const soul = soulContext.content
-    scopeAccumulator.note(soulContext.evidence)
-    noteAutomaticScopeEvidence(scopeAccumulator, [identityMemories,rankedIndex.rows,...identityMemories, ...rankedIndex.rows])
-    for (const m of identityMemories) sensitivityAccumulator.note(m.sensitivity)
-    for (const r of rankedIndex.rows) sensitivityAccumulator.note(r.sensitivity)
-    let workspaceIdentityMems: typeof identityMemories = []
-    let workspaceIdx: Awaited<ReturnType<typeof memoryStore.getWorkspaceIndex>> = []
-    let teamPurpose: string | null = null
-    if (assistant.workspaceId) {
-      ;[workspaceIdentityMems, workspaceIdx, teamPurpose] = await Promise.all([
-        memoryStore.getWorkspaceIdentity(viewerCtx),
-        memoryStore.getWorkspaceIndex(viewerCtx,undefined,nativeTranscriptAuthority),
-        getWorkspacePurpose(assistant.workspaceId),
-      ])
-      for (const m of workspaceIdentityMems) sensitivityAccumulator.note(m.sensitivity)
-      for (const r of workspaceIdx) sensitivityAccumulator.note(r.sensitivity)
-      noteAutomaticScopeEvidence(scopeAccumulator, [workspaceIdx,...workspaceIdentityMems, ...workspaceIdx])
-    }
-    memoryContext = buildMemoryContext({
-      soul,
-      identityMemories: identityMemories.map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
-      memoryIndex: rankedIndex.rows.map((m) => ({ ...m, appId: null })),
-      totalNonIdentityCount: rankedIndex.totalCount,
-      workspaceIdentityMemories: workspaceIdentityMems.map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
-      teamMemoryIndex: workspaceIdx.map((m) => ({ ...m, appId: null })),
-      teamPurpose,
-      assistantName: assistant.name,
-    })
-  }
-  const preferredChannel = await getPreferredChannel(assistant.id, userId)
-
-  // ── Episodic context (topic-scoped history for resume/cross-topic) ──
-  let episodicContext: string | null = null
-  if (!isolatedAudience && episodicStore && classification) {
-    try {
-      episodicContext = await fetchEpisodicContext({
-        authority: { execution: executionContext, accumulator: scopeAccumulator },
-        store: episodicStore,
-        sessionId: session.id,
-        classification,
-      })
-    } catch (err) {
-      console.error(`[${channelType}] episodic context fetch failed:`, err)
-    }
-  }
-
-  // ── Session-state block (# Open commitments — always on) ──
-  let sessionStateBlock: string | null = null
-  if (sessionStateStore && !isolatedAudience) {
-    try {
-      sessionStateBlock = await buildSessionStateBlock({
-        authority: { execution: executionContext, accumulator: scopeAccumulator },
-        store: sessionStateStore,
-        sessionId: session.id,
-      })
-    } catch (err) {
-      console.error(`[${channelType}] session-state block fetch failed:`, err)
-    }
-  }
-
-  // ── Capability set (used twice — L1 files block + tool filter) ──
-  const activeCapabilities = isolatedAudience
-    ? new Set<string>()
-    : new Set(await capabilityStore.listActive(assistant.id))
-
-  // ── Workspace files L1 block (Q3 / company-brain §10) ──
-  // Built only when the store is wired AND the assistant has the `files`
-  // capability AND a workspaceId. Skipped silently in dev / smoke without
-  // GCS (workspaceFilesStore absent).
-  let workspaceFilesContext: string | null = null
-  if (
-    workspaceFilesStore &&
-    assistant.workspaceId &&
-    isIdentified &&
-    !isolatedAudience &&
-    activeCapabilities.has('files')
-  ) {
-    try {
-      const indexed = await workspaceFilesStore.listIndexRanked(
-        {
-          workspaceId: assistant.workspaceId,
-          userId,
-          assistantId: assistant.id,
-          assistantKind: assistant.kind,
-          // Read ceiling = min(member, assistant) — see `clearance` above.
-          clearance,
-          compartments,
-          projectIds: dataTurnScope.effectiveProjectIds,
-          sharedAudience: dataTurnScope.access.sharedAudience,
-        },
-        PER_TURN_FILES_INDEX_CAP,
-      )
-      const rows = selectWorkspaceFilesContextRows(indexed, PER_TURN_FILES_INDEX_CAP)
-      noteAutomaticScopeEvidence(scopeAccumulator, rows)
-      workspaceFilesContext = buildWorkspaceFilesContext(rows)
-    } catch (err) {
-      console.error(`[${channelType}] workspace-files index fetch failed:`, err)
-      workspaceFilesContext = buildWorkspaceFilesContext(null)
-    }
-  }
-
-  // Brand L1 digest (docs/architecture/features/brand.md). The gates
-  // (capability + an APPROVED default brand) and the store live in
-  // `resolveBrandContext`, so every channel shares one chokepoint instead of
-  // each webhook factory forwarding a store.
-  const brandContext = isolatedAudience
-    ? null
-    : await resolveBrandContext({
-        userId,
-        workspaceId: assistant.workspaceId,
-        hasCapability: activeCapabilities.has('brand'),
-        logLabel: channelType,
-      })
-
-  // ── System prompt assembly (shared builder) ──
   const currentDateTime = new Date().toLocaleString('en-US', {
     timeZone: userTimezone,
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
     hour: '2-digit', minute: '2-digit', hour12: true, timeZoneName: 'short',
   })
-  // Workspace-level prompt-evolution snippet. Same wiring as chat.ts —
-  // see docs/architecture/brain/corrections.md → "Workspace-level
-  // prompt evolution".
-  let workspaceEvolutionSnippet: string | null = null
-  if (assistant.workspaceId && !isolatedAudience) {
-    try {
-      // Memory-side + brain-side evolution snippets join into one Layer 2 block.
-      const [memoryEvo, brainEvo] = await Promise.all([
-        getWorkspaceMemoryEvolution(assistant.workspaceId),
-        getBrainEvolution(assistant.workspaceId),
-      ])
-      const parts = [memoryEvo?.promptSnippet, brainEvo?.promptSnippet].filter(
-        (s): s is string => typeof s === 'string' && s.length > 0,
-      )
-      workspaceEvolutionSnippet = parts.length > 0 ? parts.join('\n\n') : null
-    } catch (err) {
-      console.error(`[${channelType}] workspace evolution snippet fetch failed:`, err)
-    }
-  }
-
-  const decisionPlaybookContext = await loadDecisionPlaybookContext({
-    ...(adaptiveResearchActive ? { research: { projectId: session.contextProjectId ?? null } } : {}),
-    workspaceId: assistant.workspaceId ?? null,
-    assistantId: assistant.id,
-    actorUserId: userId,
-    externalPrincipal: isolatedAudience,
-    operationKind: 'channel_turn',
-    operationId: userMessageRow.id,
-    sourceKind: 'session_message',
-    sourceId: userMessageRow.id,
-    channelType,
-    analytics,
-    logLabel: channelType,
-  })
-  const playbookRules = decisionPlaybookContext.playbookRules
-
-  // Provenance split: hidden application metadata remains in the trusted
-  // system channel. Only the replied-to quote — content the user can see in
-  // the messaging client — may prefix the newest user turn. This deliberately
-  // accepts lower implicit-cache reuse for changing private metadata; moving
-  // it into a user-role envelope caused the 2026-08-01 referent leak.
-  const splitPrompt = buildSplitSystemPrompt({
+  const channelPrompt = {
     basePrompt: audienceSystemPrompt,
     charter: publicAudienceTurn ? {} : resolveCharter(assistant),
-    playbookRules,
-    workspaceEvolutionSnippet,
-    currentDateTime,
-    timezone: userTimezone,
-    anchorTimezone,
+    currentDateTime, timezone: userTimezone, anchorTimezone,
     // Who is speaking, stated as application fact. `isIdentified` means the
     // route positively resolved the sender (linked account, email-matched
     // channel user, or the owner on an owner-only path); anonymous shadow
@@ -2302,28 +1930,15 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     speakerIdentity: isIdentified && !isolatedAudience
       ? speakerIdentityFromUser(speakerAccount, { type: channelType, id: actorChannelId ?? null, displayName: actorDisplayName })
       : null,
-    memoryContext,
-    workspaceFilesContext,
-    brandContext,
-    sessionStateBlock,
-    episodicContext,
-    topicHint: classification,
-    replyContext: replyResolved
-      ? { text: replyResolved.text, fromAssistant: replyResolved.fromAssistant }
-      : null,
-  })
-  // Everything appended below remains in the trusted system channel.
-  let systemAddenda = ''
-  const privateRuntimeContextParts = splitPrompt.privateRuntimeContext
-    ? [splitPrompt.privateRuntimeContext]
-    : []
+  }
+  const channelPolicy: string[] = []
   const activeWorkspaceContext = formatActiveWorkspaceContext(dataTurnScope)
-  if (activeWorkspaceContext) privateRuntimeContextParts.push(activeWorkspaceContext)
+  if (activeWorkspaceContext) channelPolicy.push(activeWorkspaceContext)
   if (params.realtimeThreadTarget) {
     const bound = params.realtimeThreadTarget.taskIds.length > 0
       ? params.realtimeThreadTarget.taskIds.map((id) => `- ${id}`).join('\n')
       : '- none (conversation only; task writes are out of scope)'
-    privateRuntimeContextParts.push(
+    channelPolicy.push(
       '# Temporary realtime thread authority\n\n' +
       `The user or an authorized workflow opened this exact ${channelType} thread until ${params.realtimeThreadTarget.expiresAt.toISOString()}. ` +
       'Treat this reply as addressed to you even without a mention. Resolve short references against the visible replied-to message. ' +
@@ -2332,7 +1947,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     )
   }
   if (externalGuest) {
-    privateRuntimeContextParts.push(
+    channelPolicy.push(
       '# External guest boundary\n\n' +
       `You are talking with an external guest through ${channelType}. ` +
       'They are not a workspace member. Keep the conversation within the information they provide in this isolated chat, and do not claim access to workspace memory, files, or private company context.' +
@@ -2342,7 +1957,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     )
   }
   if (publicAudienceTurn) {
-    privateRuntimeContextParts.push(
+    channelPolicy.push(
       '# Unapproved group boundary\n\n' +
       `This ${channelType} group is connected but has not been approved for workspace information. ` +
       'Keep the conversation to public general knowledge and content already visible in this group. ' +
@@ -2364,7 +1979,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
   // senders".
   if (assistant.workspaceId && !isolatedAudience) {
     if (senderWorkspaceRole === null) {
-      privateRuntimeContextParts.push(
+      channelPolicy.push(
         buildNonMemberSenderBlock({
           channelType,
           senderAccount: speakerAccount,
@@ -2373,308 +1988,6 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
       )
     }
   }
-  let activeEmailDraftContext = ''
-  if (params.crmEmailDraftStore && assistant.workspaceId && !isolatedAudience && activeCapabilities.has('crm')) {
-    try {
-      const activeEmailDraft = await params.crmEmailDraftStore.getActiveForSession({
-        userId,
-        workspaceId: assistant.workspaceId,
-        sessionId: session.id,
-      })
-      if (activeEmailDraft) {
-        activeEmailDraftContext = formatActiveEmailDraftContext(activeEmailDraft)
-      }
-    } catch (err) {
-      console.error(`[${channelType}] active email draft fetch failed:`, err)
-    }
-  }
-  const userVisibleContext = [
-    splitPrompt.userVisibleContext,
-    providerVisibleContext?.trim() ?? '',
-    activeEmailDraftContext,
-  ].filter((part) => part.length > 0).join('\n\n')
-
-  // ── Uploaded-file save policy ──
-  // Shared with chat.ts. Channels are where this matters MOST — a photo sent
-  // to Telegram/WhatsApp is the common "forward this for me" case — yet the
-  // block was web-only until 2026-08-06. Tool-agnostic and capability-gated
-  // (returns '' without `files`), so appending is unconditional.
-  systemAddenda += buildUploadPolicyBlock(activeCapabilities.has('files'))
-
-  // ── Channel formatting hints ──
-  if (channelType === 'whatsapp') {
-    systemAddenda += `\n\n# Formatting\nYou're on WhatsApp. Supported: *bold*, _italic_, ~strikethrough~, \`code\`, \`\`\`code blocks\`\`\`, > quotes, and lists. NOT supported: tables, headers (#), links ([text](url)). For comparisons, use bullet lists or numbered lists instead of tables.`
-  }
-
-  // ── Tools: capability filter + memory ──
-  const { saveMemory, getMemory, deleteMemory } = createMemoryTools(memoryStore, {
-    onEvent: (evt) => {
-      if (evt.type === 'memory_deleted') {
-        analytics?.logEvent({
-          userId, assistantId: assistant.id, sessionId: session.id,
-          eventName: 'memory_deleted', channelType,
-          metadata: { memory_id: sanitizeAnalytics(evt.memoryId) },
-        })
-      }
-    },
-  })
-  // activeCapabilities was lifted up above the L1 prompt build (used by both
-  // the `# Workspace Files` block gating and the tool filter here).
-  const allTools = isolatedAudience
-    ? new Map<string, Tool>()
-    : filterToolsByCapabilities(new Map(tools), activeCapabilities)
-  if (!isolatedAudience) {
-    allTools.set('getMemory', getMemory)
-    if (roomShape.memoryWrites) {
-      allTools.set('saveMemory', saveMemory)
-      allTools.set('deleteMemory', deleteMemory)
-    }
-  }
-
-  // Tasks (Q1) + CRM (Q2) are constructed at boot in apps/api/src/index.ts
-  // and arrive via `tools`. Per-assistant visibility is gated by §17
-  // capability grants ('tasks' / 'crm') applied above by
-  // filterToolsByCapabilities — no per-turn injection here.
-
-  if (sessionStateStore && !isolatedAudience) {
-    const { trackCommitment, resolveCommitment } = createSessionStateTools(
-      sessionStateStore,
-      {
-        onEvent: (evt) => {
-          analytics?.logEvent({
-            userId, assistantId: assistant.id, sessionId: session.id,
-            eventName: evt.type, channelType,
-            metadata:
-              evt.type === 'session_state_upsert'
-                ? { source: sanitizeAnalytics(evt.source), was_insert: evt.wasInsert, key: sanitizeAnalytics(evt.key) }
-                : { source: sanitizeAnalytics(evt.source), hit: evt.hit, key: sanitizeAnalytics(evt.key) },
-          })
-        },
-      },
-    )
-    allTools.set('trackCommitment', trackCommitment)
-    allTools.set('resolveCommitment', resolveCommitment)
-  }
-
-  // ── MCP tools ──
-  // `getConnectorUserId` returns the workspace owner when a workspace is bound
-  // and its `baseUserId` argument otherwise — the same two branches
-  // `billingPartyForAssistant` took above, so passing `billingUserId` resolves
-  // identically to the old `ownerId` on every non-null case and stays non-null
-  // on the workspace-owned case where `ownerId` is NULL.
-  const connectorUserId = connectorToolsAllowed
-    ? await getConnectorUserId(billingUserId, assistant.workspaceId)
-    : userId
-  let unavailableCapabilities: string[] = []
-  let searchableSources: string[] = []
-  if (connectorToolsAllowed && connectorStore && mcpSettingsStore) {
-    // Built every turn so local filesystem sources remain writable even when
-    // GitHub credential stores are absent. GitHub targets fail closed without
-    // the optional credential provider.
-    const knowledgeRepoWriter = createKnowledgeRepoWriter({
-      store: createDbKnowledgeStore(),
-      syncCredentials: connectorInstanceStore && connectorGrantStore
-        ? createSyncCredentialProvider(connectorInstanceStore, connectorGrantStore)
-        : undefined,
-      recordEvent: ({ userId: eventUserId, eventName, metadata }) => {
-        const safe: Record<string, number | boolean | undefined | ReturnType<typeof sanitizeAnalytics>> = {}
-        for (const [k, v] of Object.entries(metadata)) {
-          if (typeof v === 'number' || typeof v === 'boolean' || v === undefined) safe[k] = v
-          else if (v === null) safe[k] = undefined
-          else safe[k] = sanitizeAnalytics(String(v))
-        }
-        analytics?.logEvent({ userId: eventUserId, eventName, channelType, metadata: safe })
-      },
-    })
-    try {
-      // Independently impose the actual sender's current native floor. A legacy
-      // assistant-mode toggle or room audience cannot confer staff connectors.
-      const turnScope = await resolveConnectorTurnScopeForChannelTurn({
-        useAssistantConnectorAuthority: useAssistantConnectorAuthority && !room,
-        dataTurnScope,
-        userId,
-        assistant: {
-          ...assistant,
-          compartments: assistant.compartments ?? null,
-        },
-        workspaceId: assistant.workspaceId,
-        session,
-      })
-      // Prepared by the original turn owner through the M3 capability surface
-      // (`channel` profile, catalog-only until a call), from the surface options.
-      const injection = await turnOwner.prepareCapabilities({ profile: 'channel', composition: { kind: 'surface-options', params: {
-        userId: connectorUserId,
-        executionContext,
-        scopeAccumulator,
-        assistantId: assistant.id,
-        tools: allTools,
-        connectorStore,
-        settingsStore: mcpSettingsStore,
-        assistantConnectorStore,
-        userTimezone: channelUser?.timezone ?? undefined,
-        knowledgeStore,
-        knowledgeCaptureRuleStore,
-        knowledgeRepoWriter,
-        allowKnowledgeWrites: true,
-        knowledgeCaptureText: params.rawUserText ?? messageText,
-        gdriveFilesStore,
-        connectorGrantStore,
-        connectorInstanceStore,
-        workspaceToolPolicyStore,
-        assistantTeamId: assistant.workspaceId ?? null,
-        contextScope: turnScope,
-        exposeLocalReadTools: true,
-        // Workspace-files byte layer — `gmailSendMessage` attachments on
-        // channel turns (docs/architecture/integrations/gmail.md).
-        filesApi,
-        readCachedFile,
-        // Actor identity for opted-in connectors. `actorChannelId` is the
-        // channel-native id captured from the inbound webhook by the channel
-        // route (Slack user id / Telegram @handle / Feishu-Lark open id / WhatsApp phone); email +
-        // userId come from the resolved channel user. Only a registered account
-        // contributes an email; a cached shadow profile is not account proof.
-        // Server-resolved, never model output. See
-        // docs/architecture/engine/tool-hooks.md.
-        actorIdentity: {
-          channel: channelType,
-          id: actorChannelId ?? null,
-          email: speakerAccount.email,
-          userId,
-          // Short-lived, user-scoped media capability token. Emitted only to
-          // connectors the user granted media access (`sendMediaToken`); lets
-          // them fetch this user's latest recording via /internal/media without
-          // any shared secret. The endpoint derives the user from the token's
-          // signed `sub`. See packages/api-platform/src/media-token.ts.
-          mediaToken: mintActorMediaToken({
-            sub: userId,
-            episodeId: mediaEpisodeId ?? undefined,
-            ttlMs: 5 * 60_000,
-          }) ?? undefined,
-        },
-      } } })
-      unavailableCapabilities = injection.unavailable
-      searchableSources = injection.searchableSources
-      if (injection.knowledgeCapturePrompt) {
-        privateRuntimeContextParts.push(injection.knowledgeCapturePrompt)
-      }
-    } catch (err) {
-      console.error(`[${channelType}] MCP tool injection failed:`, err)
-    }
-  }
-
-  let preparedCommand = prepareSlashCommand(messageText)
-  if (assistant.workspaceId && !isolatedAudience && (skillStore || params.workflowStore)) {
-    try {
-      const nativeCatalog = await buildWorkspaceNativeSlashCommands({
-        userId: connectorUserId,
-        workspaceId: assistant.workspaceId,
-        skillStore,
-        workflowStore: params.workflowStore,
-      })
-      preparedCommand = resolveNativeSlashCommand(messageText, nativeCatalog) ?? preparedCommand
-    } catch (err) {
-      console.warn(`[${channelType}] native slash-command resolution failed:`, err)
-    }
-  }
-
-  // ── Skills ──
-  if (skillStore && !isolatedAudience) {
-    // Slash command (`/goal register …` as the whole message) — same seam as
-    // the web chat route: the name is threaded as an enforced skill slug, the
-    // governance gates apply inside injectSkills, and an unresolved name
-    // enforces nothing so the message stays plain text. This is what makes
-    // `/goal` work identically from Telegram / Slack / any adapter.
-    const slashCommand = preparedCommand?.kind === 'skill'
-      ? { name: preparedCommand.name, args: preparedCommand.args }
-      : null
-    const skillResult = await injectSkills({
-      enforceSlugs: slashCommand ? [slashCommand.name] : undefined,
-      skillStore,
-      connectorUserId,
-      assistantId: assistant.id,
-      // §5.5 governance gate: assistant clearance bounds which workspace
-      // skills are offered for the turn.
-      assistantClearance: assistant.clearance,
-      tools: allTools,
-      connectorStore,
-      unavailableCapabilities,
-      channel: channelType,
-      // Scope skills to the assistant's workspace (not the owner's personal
-      // workspace) — see injectSkills / incident 2026-06-01.
-      workspaceId: assistant.workspaceId ?? undefined,
-      // Both stores were missing here until mig 492, so on every messaging
-      // channel a workspace skill was gated ONLY by the legacy slug-keyed
-      // `assistant_skill_settings` table: the `workspace_skill_enablement`
-      // allowlist was invisible, and so was the `all_assistants` flag. The
-      // result was a skill that worked in web chat and silently did not on
-      // Telegram / Slack / WhatsApp / Discord — with every layer looking
-      // correct and only the user able to tell.
-      //
-      // Defaulted from the factories rather than threaded, because nine
-      // channel routes each re-declare and forward the pipeline's stores by
-      // hand; a store one of them forgot is exactly the silent per-channel gap
-      // being fixed here. Both factories are stateless (they close over
-      // `query`), same as `createDbKnowledgeStore` above. An injected store
-      // still wins, so tests keep their fakes.
-      workspaceSkillStore: workspaceSkillStore ?? createDbWorkspaceSkillStore(),
-      workspaceSkillEnablementStore:
-        workspaceSkillEnablementStore ?? createDbWorkspaceSkillEnablementStore(),
-      workspaceSkillFilesStore: params.workspaceSkillFilesStore,
-      invocationBuffer: params.invocationBuffer,
-    })
-    systemAddenda += skillResult.promptFragment
-    if (slashCommand && skillResult.enforcedPromptFragment) {
-      systemAddenda += skillResult.enforcedPromptFragment
-      privateRuntimeContextParts.push(buildSlashCommandBlock(slashCommand))
-    }
-  }
-  if (preparedCommand?.kind === 'workflow' && allTools.has('runWorkflow')) {
-    privateRuntimeContextParts.push(buildWorkflowSlashCommandBlock(preparedCommand))
-  }
-  systemAddenda += buildUnavailableCapabilitiesPrompt(
-    unavailableCapabilities,
-    allTools,
-    searchableSources,
-  )
-  systemAddenda += buildBrowserEscalationPrompt(allTools)
-  systemAddenda += buildEmailDraftAnchorPrompt(allTools)
-
-  // ── Pre-flight-confirm reply correlation (channel-recording-preflight-confirm §6) ──
-  // If a big recording in THIS conversation is awaiting the user's confirmation,
-  // inject a context note so the model can interpret the reply and call
-  // `confirmRecordingProcessing` with the right recordingId. The note carries the
-  // file label, duration, credit cost, and the default blueprint id so the model
-  // can map "yes / the default" to the right choice. Per-turn dynamic injection —
-  // not in Layer 1 (the tool name only appears here, when a pending row exists).
-  if (!isolatedAudience) {
-    try {
-      const channelSessionKey = buildChannelSessionKey({
-        channel: channelType,
-        channelId: sessionChannelId,
-        userId,
-      })
-      const pendingRecordings = await listPendingRecordingConfirmationsForSession(channelSessionKey)
-      if (pendingRecordings.length > 0) {
-        const lines = pendingRecordings.map((p) => {
-          const mins = Math.max(1, Math.ceil(p.durationSeconds / 60))
-          const labelPart = p.fileLabel ? ` ("${p.fileLabel}")` : ''
-          const creditWord = p.surchargeCredits === 1 ? 'credit' : 'credits'
-          const defaultPart = p.defaultBlueprintSlug
-            ? ` Default blueprint id (use this if the user says "yes" or "the default"): ${p.defaultBlueprintSlug}.`
-            : ' No workspace default blueprint is set.'
-          return `- recordingId: ${p.recordingId}${labelPart} — about ${mins} min, costs ${p.surchargeCredits} ${creditWord} to process.${defaultPart}`
-        })
-        systemAddenda +=
-          `\n\n# Recording awaiting confirmation\n` +
-          `The user dropped ${pendingRecordings.length === 1 ? 'a recording' : 'recordings'} that ${pendingRecordings.length === 1 ? 'is' : 'are'} held until they confirm processing (it would incur a credit surcharge). ` +
-          `When the user replies about it, call \`confirmRecordingProcessing\` with the matching recordingId and their choice: a blueprint id to shape a brief, "ingest-only" to just file the transcript, or "cancel" to skip it.\n` +
-          lines.join('\n')
-      }
-    } catch (err) {
-      console.error(`[${channelType}] pending recording confirmation lookup failed:`, err)
-    }
-  }
-
   // ── Pre-generation audience recheck ──
   if (!(await deliveryAudienceAdmitsTurn())) return
 
@@ -2711,15 +2024,18 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
   // ── Tool-pairing buffer ──
   type PendingTurn = { content: ContentBlock[]; toolResults: ContentBlock[] }
   const pendingAssistantTurns: PendingTurn[] = []
-  const recoverMessage = (reason: 'failed' | 'empty') => turnOwner.recoverInteractiveReply({
-    reason, pendingAssistantTurns, userText: messageText, channelType,
-    authorizeDestination: assertDeliveryAudience,
-    recordUsage: ({ model, usage }) => recordOverheadUsage({
-      usageStore, userId: billingUserId, actorUserId: userId, assistantId: assistant.id,
-      sessionId: session.id, userMessageId: userMessageRow.id, model, usage,
-      source: 'overhead:recovery-message', triggerKey: 'recovery_message', ...backgroundUsageAttribution,
-    }),
-  })
+  const recoverMessage = async (reason: 'failed' | 'empty') => {
+    const { backgroundUsageAttribution } = await getBackground()
+    return turnOwner.recoverInteractiveReply({
+      reason, pendingAssistantTurns, userText: messageText, channelType,
+      authorizeDestination: assertDeliveryAudience,
+      recordUsage: ({ model, usage }) => recordOverheadUsage({
+        usageStore, userId: billingUserId, actorUserId: userId, assistantId: assistant.id,
+        sessionId: session.id, userMessageId: userMessageRow.id, model, usage,
+        source: 'overhead:recovery-message', triggerKey: 'recovery_message', ...backgroundUsageAttribution,
+      }),
+    })
+  }
 
   let flushed = false
   // Track the most-recently-flushed assistant `session_messages` row id
@@ -2826,112 +2142,6 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     }
   }
 
-  // ── Preflight research ──
-  // The turn route made the split call (non-isolated messages over 40
-  // characters); preflight takes the routed tasks after a fresh split-lane
-  // proof and never classifies again.
-  let preflightContext = ''
-  if (routing.route.split) {
-    try {
-      const preflightTools = turnOwner.prepareTools(allTools)
-      const preflight = await runPreflight({
-        provider: backgroundProvider, model: backgroundLaneModel, message: messageText, tools: preflightTools,
-        classify: async () => ({ tasks: await routing.consumeSplit(), usage: null, model: null }),
-        // Discovery, a read (and an optional detail read), then synthesis.
-        maxWorkerTurns: 4,
-        context: {
-          ...executionToolContext(executionContext, { appId: 'Use Brian' }),
-          channelSessionId: sessionChannelId,
-          userMessageId: userMessageRow.id,
-          userMessageText: messageText,
-          taskAuthority,
-          userTimezone,
-          workerRuntime: { provider: backgroundProvider, model: backgroundLaneModel,
-            modelTier: backgroundUsageAttribution.modelTier,
-            providerKeySource: backgroundUsageAttribution.providerKeySource },
-          abortSignal: abortController.signal,
-          requestTools: preflightTools,
-          activeCapabilities,
-          sensitivity: sensitivityAccumulator,
-          compartmentAccumulator,
-          scopeAccumulator,
-          activeGroupId: dataTurnScope.activeGroupId,
-          activeProjectId: dataTurnScope.activeProjectId,
-          turnLedger: createTurnLedger({
-            workspaceId: assistant.workspaceId ?? null,
-            assistantId: assistant.id,
-            sessionId: session.id,
-            payloads: getLedgerPayloadStore(),
-          }).ledger,
-        },
-        onUsage: async event => {
-          if (!usageStore) return
-          const keySource = event.providerKeySource ?? backgroundUsageAttribution.providerKeySource
-          await usageStore.recordUsage({
-            userId: billingUserId, actorUserId: userId, assistantId: assistant.id, sessionId: session.id,
-            model: event.model, modelTier: event.modelTier ?? backgroundUsageAttribution.modelTier,
-            inputTokens: event.usage.inputTokens, outputTokens: event.usage.outputTokens,
-            cacheReadTokens: event.usage.cacheReadTokens, cacheWriteTokens: event.usage.cacheWriteTokens,
-            actualCostUsd: keySource === 'user' ? 0 : calculateCost(event.model, event.usage),
-            source: 'included', triggerKey: 'worker_run', providerKeySource: keySource,
-          }).catch(error => console.error(`[${channelType}] worker usage tracking failed:`, error))
-        },
-        onStatus: () => hooks.onStatus?.('Researching...') ?? Promise.resolve(),
-        onEvent: (event, workerId) => {
-          if (event.type !== 'tool_result') return
-          recordChannelToolResults({
-            results: event.results,
-            metaByToolUseId: event.metaByToolUseId,
-            analytics, usageStore, userId, billingUserId,
-            assistantId: assistant.id, sessionId: session.id,
-            workspaceId: assistant.workspaceId,
-            userMessageId: userMessageRow.id, userPlan: workspacePlan,
-            channelType, workerId, pendingUsage,
-          })
-        },
-      })
-      if (preflight.type === 'researched') {
-        preflightContext = preflight.context
-      }
-    } catch (err) {
-      // A refused split-lane proof is an authority change, never a degraded turn.
-      if (isInputAuthorityError(err)) throw err
-      console.error(`[${channelType}] pre-flight failed, continuing without:`, err)
-    }
-  }
-  let runtimeSystemContext = systemAddenda
-  if (preflightContext) {
-    privateRuntimeContextParts.push(
-      buildPreflightPrompt('', preflightContext).replace(/^\n+/, ''),
-    )
-  }
-
-  // ── Dispute pre-pass (grounding-gate claim ledger) ──
-  // A dispute-shaped follow-up carrying a figure ("唔係要 look 11萬咩")
-  // loads the previous reply's claim provenance so the model re-verifies
-  // instead of re-asserting. One indexed read, only on the dispute shape.
-  // See docs/architecture/engine/grounding-gate.md → "Dispute pre-pass".
-  if (messageText && matchesDisputedFigure(messageText)) {
-    try {
-      const { getClaimsForLatestAssistantMessage } = await import('../db/claim-provenance-store.js')
-      const priorClaims = await getClaimsForLatestAssistantMessage(session.id, true)
-      if (priorClaims.length > 0) {
-        privateRuntimeContextParts.push(
-          `# Figure provenance (dispute check)\n\n${buildDisputeContextNote(priorClaims)}`,
-        )
-      }
-    } catch (err) {
-      console.warn(`[${channelType}] dispute pre-pass failed, continuing without:`, err)
-    }
-  }
-
-  const privateRuntimeBlock = formatPrivateRuntimeContext(
-    privateRuntimeContextParts.filter((s) => s.trim().length > 0).join('\n\n'),
-  )
-  if (privateRuntimeBlock) {
-    runtimeSystemContext = `${runtimeSystemContext}\n\n${privateRuntimeBlock}`
-  }
-
   // ── Reply evidence (grounding gate) ──
   // Figures observed in successful tool results this turn (fed by the tool
   // executor) plus seeded material — the system prompt and the user's own
@@ -2957,20 +2167,821 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
   >['claims'] | null = null
   const acknowledgedGoalIds = new Set<string>()
 
+  // The owner invokes this only for an actual main-model discovery tool call.
+  const discoverContext = async () => {
+    const { backgroundLlmRuntime, backgroundProvider, backgroundLaneModel, backgroundUsageAttribution } = await getBackground()
+    // D16: a room is hydrated once from what the provider still shows.
+    const roomHistory = !params.recording && room && audienceEnvelope?.allowed
+      && await mayReadGroupContext(pinAccessCeiling(dataTurnScope.access), { ...audienceEnvelope.ceiling,
+        clearance: (room.effectiveClearance ?? 'internal') as AccessCeiling['clearance'],
+        compartments: room.contextCompartments, projectIds: room.contextProjectId ? [room.contextProjectId] : [] })
+      && params.readProviderHistory && await claimRoomHydration(room.id)
+      ? await params.readProviderHistory().catch((err: unknown) => {
+          console.warn(`[${channelType}] room hydration failed; continuing without history:`, err)
+          return null
+        })
+      : null
+    const providerVisibleContext = room ? roomHistory : params.providerVisibleContext
+    // One turn route decides research, topic and split over one captured input
+    // (research.md "Adapter switch"): native lanes share admitted bytes while each
+    // retains its fresh input-authority check; a legacy transcript routes over its
+    // pre-turn dialogue, read once here. Channels have no manual research toggle:
+    // an adaptive verdict upgrades the alias to `research` (paid plans only; the
+    // downstream `resolveModel` still honors plan gating).
+    if(params.conversationContext)await assertTelegramConversationCurrent(params.conversationContext)
+    const legacyHistory = nativeTranscriptAuthority ? undefined
+      : privateRecording ? [] : await filterHistoryForAudience(
+        (await getSessionMessages(session.id, { excludeHeld: true })).filter(row => row.sequenceNum < userMessageRow.sequenceNum),
+      )
+    const legacyReply = legacyHistory ? (privateRecording ? null : await resolveReplyText({
+      channelType,
+      replyToMessageId: replyToMessageId ?? null,
+      session,
+      raw: replyRaw,
+      ...(room ? { readableHistory: legacyHistory } : {}),
+    })) ?? (params.realtimeThreadTarget?.contextText
+      ? { text: params.realtimeThreadTarget.contextText, fromAssistant: true }
+      : null) : undefined
+    if(params.conversationContext)await assertTelegramConversationCurrent(params.conversationContext)
+    const routing = await routeAttendedTurn({
+      facts: { profile: 'channel', adaptiveResearchEnabled: !!adaptiveResearchEnabled, workspaceId: assistant.workspaceId ?? null,
+        plan: workspacePlan, budgetStatus, isolatedAudience },
+      message: messageText,
+      ...(nativeTranscriptAuthority ? { native: {
+        authority: nativeTranscriptAuthority, session, message: userMessageRow,
+        reply: { channelType, replyToMessageId: replyToMessageId ?? null },
+      } } : {}),
+      ...(legacyHistory ? { legacy: { history: legacyHistory, replyToText: legacyReply?.text ?? null, topicText: messageText, research: 'classify' as const } } : {}),
+      provider: backgroundProvider, model: backgroundLaneModel, decisionRuntime: params.decisionRuntime,
+      workspaceId: assistant.workspaceId ?? undefined, runId: userMessageRow.id,
+      // Channel preflight keeps its historical unbound splitter call shape.
+      split: { concurrent: 'preflight', late: 'preflight' },
+      recordUsage: record => recordOverheadUsage({
+        usageStore, userId: billingUserId, actorUserId: userId, assistantId: assistant.id,
+        sessionId: session.id, userMessageId: userMessageRow.id, model: record.model,
+        usage: record.usage, source: record.source, triggerKey: record.triggerKey, ...backgroundUsageAttribution,
+      }),
+      attribution: backgroundUsageAttribution, signal: abortController.signal,
+    })
+    const adaptiveResearchActive = routing.route.research.active
+    // The routed native topic publishes its annotation now, as the sequential
+    // classifier did; a legacy turn keeps the routed classification.
+    const nativeClassification = routing.topic ? await routing.topic.publish() : undefined
+
+    if(params.conversationContext)await assertTelegramConversationCurrent(params.conversationContext)
+    const replyResolved = nativeClassification ? nativeClassification.reply : legacyReply ?? null
+    const classification = nativeClassification?.classification ?? routing.legacyClassification
+    if (assistant.workspaceId && !isolatedAudience && adaptiveResearchActive && userId) {
+      try {
+        researchActivity = await beginResearchActivity({
+          workspaceId: assistant.workspaceId, sessionId: session.id, requestMessageId: userMessageRow.id,
+          actorUserId: userId, assistantId: assistant.id, projectId: session.contextProjectId ?? null,
+          entry: 'adaptive', runtime: { surface: channelType, assistantKind: assistant.kind },
+          sensitivity: inputMessageScope?.sensitivity ?? null, compartments: inputMessageScope?.compartments ?? null,
+        })
+        researchObserver = createResearchTurnObserver()
+      } catch (error) {
+        console.error(`[${channelType}] research activity open failed`, { sessionId: session.id, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    // ── Load history ──
+    // `fromSequence` skips rows already compacted into the most recent
+    // boundary; null (never compacted) loads full history.
+    if(params.conversationContext)await assertTelegramConversationCurrent(params.conversationContext)
+    // The original turn owner selects and performs the main-turn history read;
+    // the channel declares only its stored-history audience projection.
+    let dbMessages = privateRecording ? [] : (await turnOwner.prepareHistory({ native: nativeTranscriptAuthority ?? null, classified: nativeClassification,
+      // A public audience cannot trust the durable summary because it has no
+      // per-source audience evidence. Rebuild from filtered provider history.
+      fromSequence: isolatedAudience || room ? null : session.compactBoundarySequence,
+      projectStored: rows => filterHistoryForAudience(rows) })).messages
+    if(params.conversationContext)await assertTelegramConversationCurrent(params.conversationContext)
+    if (room && !privateRecording) {
+      const currentHistory = overlayCurrentRoomMessage(dbMessages, { id: userMessageRow.id, content: userContentBlocks })
+      if (!currentHistory) {
+        // A provider replay must not relabel an older, more restricted input
+        // or run a model turn after its current question was withheld.
+        throw new AuthorityChangedError(false)
+      }
+      dbMessages = currentHistory
+    }
+    noteAutomaticScopeEvidence(
+      scopeAccumulator,
+      dbMessages.filter((message) => countsAsGroupAudienceEvidence(message, isGroupChat)),
+    )
+    const workflowProposalReceipt = latestWorkflowProposalReceipt(dbMessages)
+
+    // ── Proactive compaction (messaging: 0.5× threshold + multi-topic profile) ──
+    // runProactiveCompaction owns stamping + tool-result pairing + summary
+    // prepending internally. See docs/architecture/context-engine/compaction.md.
+    // A room labels each speaker at assembly (members by name, guests by
+    // handle, D1), the same seam web rooms use; stored content stays clean.
+    let roomSenderNames: Map<string, string> | undefined
+    if (roomShape.attributeSenders && !privateRecording) {
+      try {
+        const senderIds = [...new Set(dbMessages.map((m) => m.senderUserId).filter((id): id is string => Boolean(id)))]
+        const profiles = senderIds.length ? await getUserProfilesByIds(senderIds) : new Map<string, { name: string | null }>()
+        roomSenderNames = new Map()
+        for (const id of senderIds) {
+          const label = roomSpeakerLabel(profiles.get(id)?.name, id === userId ? actorDisplayName : null)
+          if (label) roomSenderNames.set(id, label)
+        }
+      } catch (err) {
+        console.warn(`[${channelType}] room speaker lookup failed; turns stay unlabelled:`, err)
+      }
+    }
+    // This is current provider-authored input, not a read/declassification of
+    // the connector owner's stored transcript. No stored row enters the model.
+    await assertDeliveryAudience()
+    const compactionResult = privateRecording
+      ? { messages: [{ role: 'user' as const, content: structuredClone(userContentBlocks) }] }
+      : await runProactiveCompaction({
+      modelContext: { execution: executionContext, accumulator: scopeAccumulator },
+      sessionMessages: dbMessages,
+      timezone: userTimezone,
+      senderNames: roomSenderNames,
+      session: room ? { ...session, compactSummary: null, compactBoundarySequence: null } : session,
+      tier: modelToCompactionTier(logicalModel),
+      channelClass: 'messaging',
+      profile: 'multi-topic',
+      provider: backgroundProvider,
+      model: backgroundLaneModel,
+      inputTokenLimit: backgroundLlmRuntime?.inputTokenLimit,
+      ...backgroundUsageAttribution,
+      systemPrompt: audienceSystemPrompt,
+      assistantId: assistant.id,
+      userId,
+      // `ProactiveCompactionParams.ownerId` is a usage-attribution field and
+      // nothing else — its only two readers are the `overhead:extraction` and
+      // `overhead:compaction` rows in proactive-compaction.ts, both
+      // `userId: ownerId`. Handing it the raw `ownerId` gave those rows the same
+      // NOT NULL violation the classifier row had; they just fire less often.
+      ownerId: billingUserId,
+      channelType,
+      memoryStore,
+      episodicStore,
+      sessionStateStore: isolatedAudience ? undefined : sessionStateStore,
+      analytics,
+      usageStore,
+      userMessageId: userMessageRow.id,
+      // Room capture owns shared learning. The legacy compaction extractor
+      // reads a privileged personal index and writes per-user memories.
+      persistLongTermContext: !room && !isolatedAudience && roomShape.memoryWrites,
+      persistSessionSummary: !room && !isolatedAudience,
+      compartments: dataTurnScope.writeCompartments,
+      projectIds: dataTurnScope.writeProjectIds,
+      authority,
+    })
+    // Coalesced assembly: a room's un-addressed posts are consecutive user rows,
+    // folded into the addressed turn under the provider's alternation contract.
+    const messages: Message[] = roomShape.coalesce
+      ? coalesceConsecutiveUserMessages(compactionResult.messages)
+      : compactionResult.messages
+
+    // Read-side clearance (incident 2026-06-01): the READ ceiling is the acting
+    // channel user's clearance bounded by the assistant's. Channel participants
+    // with no `workspace_members` row (shadow users) resolve to `public` — most
+    // restrictive. Writes keep the assistant's clearance (`assistantClearance`
+    // on the ToolContext below).
+    // ── Memory context (identified users only) ──
+    // Per-turn callers use the ranked+capped index slice. See
+    // docs/architecture/context-engine/memory-system.md → "Index cap".
+    let memoryContext = ''
+    if (isIdentified && !isolatedAudience) {
+      const viewerCtx = automaticContextAccess(dataTurnScope.access, dataTurnScope.activeProjectId)
+      const [soulContext, identityMemories, rankedIndex] = await Promise.all([
+        (memoryStore.getSoulContext?.(viewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
+        memoryStore.getIdentity(viewerCtx,nativeTranscriptAuthority),
+        memoryStore.getIndexRanked(viewerCtx, PER_TURN_INDEX_CAP,nativeTranscriptAuthority),
+      ])
+      const soul = soulContext.content
+      scopeAccumulator.note(soulContext.evidence)
+      noteAutomaticScopeEvidence(scopeAccumulator, [identityMemories,rankedIndex.rows,...identityMemories, ...rankedIndex.rows])
+      for (const m of identityMemories) sensitivityAccumulator.note(m.sensitivity)
+      for (const r of rankedIndex.rows) sensitivityAccumulator.note(r.sensitivity)
+      let workspaceIdentityMems: typeof identityMemories = []
+      let workspaceIdx: Awaited<ReturnType<typeof memoryStore.getWorkspaceIndex>> = []
+      let teamPurpose: string | null = null
+      if (assistant.workspaceId) {
+        ;[workspaceIdentityMems, workspaceIdx, teamPurpose] = await Promise.all([
+          memoryStore.getWorkspaceIdentity(viewerCtx),
+          memoryStore.getWorkspaceIndex(viewerCtx,undefined,nativeTranscriptAuthority),
+          getWorkspacePurpose(assistant.workspaceId),
+        ])
+        for (const m of workspaceIdentityMems) sensitivityAccumulator.note(m.sensitivity)
+        for (const r of workspaceIdx) sensitivityAccumulator.note(r.sensitivity)
+        noteAutomaticScopeEvidence(scopeAccumulator, [workspaceIdx,...workspaceIdentityMems, ...workspaceIdx])
+      }
+      memoryContext = buildMemoryContext({
+        soul,
+        identityMemories: identityMemories.map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
+        memoryIndex: rankedIndex.rows.map((m) => ({ ...m, appId: null })),
+        totalNonIdentityCount: rankedIndex.totalCount,
+        workspaceIdentityMemories: workspaceIdentityMems.map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
+        teamMemoryIndex: workspaceIdx.map((m) => ({ ...m, appId: null })),
+        teamPurpose,
+        assistantName: assistant.name,
+      })
+    }
+    const preferredChannel = await getPreferredChannel(assistant.id, userId)
+
+    // ── Episodic context (topic-scoped history for resume/cross-topic) ──
+    let episodicContext: string | null = null
+    if (!isolatedAudience && episodicStore && classification) {
+      try {
+        episodicContext = await fetchEpisodicContext({
+          authority: { execution: executionContext, accumulator: scopeAccumulator },
+          store: episodicStore,
+          sessionId: session.id,
+          classification,
+        })
+      } catch (err) {
+        console.error(`[${channelType}] episodic context fetch failed:`, err)
+      }
+    }
+
+    // ── Session-state block (# Open commitments — always on) ──
+    let sessionStateBlock: string | null = null
+    if (sessionStateStore && !isolatedAudience) {
+      try {
+        sessionStateBlock = await buildSessionStateBlock({
+          authority: { execution: executionContext, accumulator: scopeAccumulator },
+          store: sessionStateStore,
+          sessionId: session.id,
+        })
+      } catch (err) {
+        console.error(`[${channelType}] session-state block fetch failed:`, err)
+      }
+    }
+
+    // ── Capability set (used twice — L1 files block + tool filter) ──
+    const activeCapabilities = isolatedAudience
+      ? new Set<string>()
+      : new Set(await capabilityStore.listActive(assistant.id))
+
+    // ── Workspace files L1 block (Q3 / company-brain §10) ──
+    // Built only when the store is wired AND the assistant has the `files`
+    // capability AND a workspaceId. Skipped silently in dev / smoke without
+    // GCS (workspaceFilesStore absent).
+    let workspaceFilesContext: string | null = null
+    if (
+      workspaceFilesStore &&
+      assistant.workspaceId &&
+      isIdentified &&
+      !isolatedAudience &&
+      activeCapabilities.has('files')
+    ) {
+      try {
+        const indexed = await workspaceFilesStore.listIndexRanked(
+          {
+            workspaceId: assistant.workspaceId,
+            userId,
+            assistantId: assistant.id,
+            assistantKind: assistant.kind,
+            // Read ceiling = min(member, assistant) — see `clearance` above.
+            clearance,
+            compartments,
+            projectIds: dataTurnScope.effectiveProjectIds,
+            sharedAudience: dataTurnScope.access.sharedAudience,
+          },
+          PER_TURN_FILES_INDEX_CAP,
+        )
+        const rows = selectWorkspaceFilesContextRows(indexed, PER_TURN_FILES_INDEX_CAP)
+        noteAutomaticScopeEvidence(scopeAccumulator, rows)
+        workspaceFilesContext = buildWorkspaceFilesContext(rows)
+      } catch (err) {
+        console.error(`[${channelType}] workspace-files index fetch failed:`, err)
+        workspaceFilesContext = buildWorkspaceFilesContext(null)
+      }
+    }
+
+    // Brand L1 digest (docs/architecture/features/brand.md). The gates
+    // (capability + an APPROVED default brand) and the store live in
+    // `resolveBrandContext`, so every channel shares one chokepoint instead of
+    // each webhook factory forwarding a store.
+    const brandContext = isolatedAudience
+      ? null
+      : await resolveBrandContext({
+          userId,
+          workspaceId: assistant.workspaceId,
+          hasCapability: activeCapabilities.has('brand'),
+          logLabel: channelType,
+        })
+
+    // ── System prompt assembly (shared builder) ──
+    let workspaceEvolutionSnippet: string | null = null
+    if (assistant.workspaceId && !isolatedAudience) {
+      try {
+        // Memory-side + brain-side evolution snippets join into one Layer 2 block.
+        const [memoryEvo, brainEvo] = await Promise.all([
+          getWorkspaceMemoryEvolution(assistant.workspaceId),
+          getBrainEvolution(assistant.workspaceId),
+        ])
+        const parts = [memoryEvo?.promptSnippet, brainEvo?.promptSnippet].filter(
+          (s): s is string => typeof s === 'string' && s.length > 0,
+        )
+        workspaceEvolutionSnippet = parts.length > 0 ? parts.join('\n\n') : null
+      } catch (err) {
+        console.error(`[${channelType}] workspace evolution snippet fetch failed:`, err)
+      }
+    }
+
+    const decisionPlaybookContext = await loadDecisionPlaybookContext({
+      ...(adaptiveResearchActive ? { research: { projectId: session.contextProjectId ?? null } } : {}),
+      workspaceId: assistant.workspaceId ?? null,
+      assistantId: assistant.id,
+      actorUserId: userId,
+      externalPrincipal: isolatedAudience,
+      operationKind: 'channel_turn',
+      operationId: userMessageRow.id,
+      sourceKind: 'session_message',
+      sourceId: userMessageRow.id,
+      channelType,
+      analytics,
+      logLabel: channelType,
+    })
+    const playbookRules = decisionPlaybookContext.playbookRules
+
+    // Provenance split: hidden application metadata remains in the trusted
+    // system channel. Only the replied-to quote — content the user can see in
+    // the messaging client — may prefix the newest user turn. This deliberately
+    // accepts lower implicit-cache reuse for changing private metadata; moving
+    // it into a user-role envelope caused the 2026-08-01 referent leak.
+    const splitPrompt = buildSplitSystemPrompt({
+      ...channelPrompt,
+      playbookRules, workspaceEvolutionSnippet,
+      memoryContext,
+      workspaceFilesContext,
+      brandContext,
+      sessionStateBlock,
+      episodicContext,
+      topicHint: classification,
+      replyContext: replyResolved
+        ? { text: replyResolved.text, fromAssistant: replyResolved.fromAssistant }
+        : null,
+    })
+    // Everything appended below remains in the trusted system channel.
+    let systemAddenda = ''
+    const privateRuntimeContextParts = splitPrompt.privateRuntimeContext
+      ? [splitPrompt.privateRuntimeContext]
+      : []
+    privateRuntimeContextParts.push(...channelPolicy)
+    let activeEmailDraftContext = ''
+    if (params.crmEmailDraftStore && assistant.workspaceId && !isolatedAudience && activeCapabilities.has('crm')) {
+      try {
+        const activeEmailDraft = await params.crmEmailDraftStore.getActiveForSession({
+          userId,
+          workspaceId: assistant.workspaceId,
+          sessionId: session.id,
+        })
+        if (activeEmailDraft) {
+          activeEmailDraftContext = formatActiveEmailDraftContext(activeEmailDraft)
+        }
+      } catch (err) {
+        console.error(`[${channelType}] active email draft fetch failed:`, err)
+      }
+    }
+    const userVisibleContext = [
+      splitPrompt.userVisibleContext,
+      providerVisibleContext?.trim() ?? '',
+      activeEmailDraftContext,
+    ].filter((part) => part.length > 0).join('\n\n')
+
+    // ── Uploaded-file save policy ──
+    // Shared with chat.ts. Channels are where this matters MOST — a photo sent
+    // to Telegram/WhatsApp is the common "forward this for me" case — yet the
+    // block was web-only until 2026-08-06. Tool-agnostic and capability-gated
+    // (returns '' without `files`), so appending is unconditional.
+    systemAddenda += buildUploadPolicyBlock(activeCapabilities.has('files'))
+
+    // ── Channel formatting hints ──
+    if (channelType === 'whatsapp') {
+      systemAddenda += `\n\n# Formatting\nYou're on WhatsApp. Supported: *bold*, _italic_, ~strikethrough~, \`code\`, \`\`\`code blocks\`\`\`, > quotes, and lists. NOT supported: tables, headers (#), links ([text](url)). For comparisons, use bullet lists or numbered lists instead of tables.`
+    }
+
+    // ── Tools: capability filter + memory ──
+    const { saveMemory, getMemory, deleteMemory } = createMemoryTools(memoryStore, {
+      onEvent: (evt) => {
+        if (evt.type === 'memory_deleted') {
+          analytics?.logEvent({
+            userId, assistantId: assistant.id, sessionId: session.id,
+            eventName: 'memory_deleted', channelType,
+            metadata: { memory_id: sanitizeAnalytics(evt.memoryId) },
+          })
+        }
+      },
+    })
+    // activeCapabilities was lifted up above the L1 prompt build (used by both
+    // the `# Workspace Files` block gating and the tool filter here).
+    const allTools = isolatedAudience
+      ? new Map<string, Tool>()
+      : filterToolsByCapabilities(new Map(tools), activeCapabilities)
+    if (!isolatedAudience) {
+      allTools.set('getMemory', getMemory)
+      if (roomShape.memoryWrites) {
+        allTools.set('saveMemory', saveMemory)
+        allTools.set('deleteMemory', deleteMemory)
+      }
+    }
+
+    // Tasks (Q1) + CRM (Q2) are constructed at boot in apps/api/src/index.ts
+    // and arrive via `tools`. Per-assistant visibility is gated by §17
+    // capability grants ('tasks' / 'crm') applied above by
+    // filterToolsByCapabilities — no per-turn injection here.
+
+    if (sessionStateStore && !isolatedAudience) {
+      const { trackCommitment, resolveCommitment } = createSessionStateTools(
+        sessionStateStore,
+        {
+          onEvent: (evt) => {
+            analytics?.logEvent({
+              userId, assistantId: assistant.id, sessionId: session.id,
+              eventName: evt.type, channelType,
+              metadata:
+                evt.type === 'session_state_upsert'
+                  ? { source: sanitizeAnalytics(evt.source), was_insert: evt.wasInsert, key: sanitizeAnalytics(evt.key) }
+                  : { source: sanitizeAnalytics(evt.source), hit: evt.hit, key: sanitizeAnalytics(evt.key) },
+            })
+          },
+        },
+      )
+      allTools.set('trackCommitment', trackCommitment)
+      allTools.set('resolveCommitment', resolveCommitment)
+    }
+
+    // ── MCP tools ──
+    // `getConnectorUserId` returns the workspace owner when a workspace is bound
+    // and its `baseUserId` argument otherwise — the same two branches
+    // `billingPartyForAssistant` took above, so passing `billingUserId` resolves
+    // identically to the old `ownerId` on every non-null case and stays non-null
+    // on the workspace-owned case where `ownerId` is NULL.
+    const connectorUserId = connectorToolsAllowed
+      ? await getConnectorUserId(billingUserId, assistant.workspaceId)
+      : userId
+    let unavailableCapabilities: string[] = []
+    let searchableSources: string[] = []
+    let admittedConnectorIds: ReadonlySet<string> = new Set()
+    if (connectorToolsAllowed && connectorStore && mcpSettingsStore) {
+      // Built every turn so local filesystem sources remain writable even when
+      // GitHub credential stores are absent. GitHub targets fail closed without
+      // the optional credential provider.
+      const knowledgeRepoWriter = createKnowledgeRepoWriter({
+        store: createDbKnowledgeStore(),
+        syncCredentials: connectorInstanceStore && connectorGrantStore
+          ? createSyncCredentialProvider(connectorInstanceStore, connectorGrantStore)
+          : undefined,
+        recordEvent: ({ userId: eventUserId, eventName, metadata }) => {
+          const safe: Record<string, number | boolean | undefined | ReturnType<typeof sanitizeAnalytics>> = {}
+          for (const [k, v] of Object.entries(metadata)) {
+            if (typeof v === 'number' || typeof v === 'boolean' || v === undefined) safe[k] = v
+            else if (v === null) safe[k] = undefined
+            else safe[k] = sanitizeAnalytics(String(v))
+          }
+          analytics?.logEvent({ userId: eventUserId, eventName, channelType, metadata: safe })
+        },
+      })
+      try {
+        // Independently impose the actual sender's current native floor. A legacy
+        // assistant-mode toggle or room audience cannot confer staff connectors.
+        const turnScope = await resolveConnectorTurnScopeForChannelTurn({
+          useAssistantConnectorAuthority: useAssistantConnectorAuthority && !room,
+          dataTurnScope,
+          userId,
+          assistant: {
+            ...assistant,
+            compartments: assistant.compartments ?? null,
+          },
+          workspaceId: assistant.workspaceId,
+          session,
+        })
+        // Prepared by the original turn owner through the M3 capability surface
+        // (`channel` profile, catalog-only until a call), from the surface options.
+        const injection = await turnOwner.prepareCapabilities({ profile: 'channel', composition: { kind: 'surface-options', params: {
+          userId: connectorUserId,
+          executionContext,
+          scopeAccumulator,
+          assistantId: assistant.id,
+          tools: allTools,
+          connectorStore,
+          settingsStore: mcpSettingsStore,
+          assistantConnectorStore,
+          userTimezone: channelUser?.timezone ?? undefined,
+          knowledgeStore,
+          knowledgeCaptureRuleStore,
+          knowledgeRepoWriter,
+          allowKnowledgeWrites: true,
+          knowledgeCaptureText: params.rawUserText ?? messageText,
+          gdriveFilesStore,
+          connectorGrantStore,
+          connectorInstanceStore,
+          workspaceToolPolicyStore,
+          assistantTeamId: assistant.workspaceId ?? null,
+          contextScope: turnScope,
+          exposeLocalReadTools: true,
+          // Workspace-files byte layer — `gmailSendMessage` attachments on
+          // channel turns (docs/architecture/integrations/gmail.md).
+          filesApi,
+          readCachedFile,
+          // Actor identity for opted-in connectors. `actorChannelId` is the
+          // channel-native id captured from the inbound webhook by the channel
+          // route (Slack user id / Telegram @handle / Feishu-Lark open id / WhatsApp phone); email +
+          // userId come from the resolved channel user. Only a registered account
+          // contributes an email; a cached shadow profile is not account proof.
+          // Server-resolved, never model output. See
+          // docs/architecture/engine/tool-hooks.md.
+          actorIdentity: {
+            channel: channelType,
+            id: actorChannelId ?? null,
+            email: speakerAccount.email,
+            userId,
+            // Short-lived, user-scoped media capability token. Emitted only to
+            // connectors the user granted media access (`sendMediaToken`); lets
+            // them fetch this user's latest recording via /internal/media without
+            // any shared secret. The endpoint derives the user from the token's
+            // signed `sub`. See packages/api-platform/src/media-token.ts.
+            mediaToken: mintActorMediaToken({
+              sub: userId,
+              episodeId: mediaEpisodeId ?? undefined,
+              ttlMs: 5 * 60_000,
+            }) ?? undefined,
+          },
+        } } })
+        unavailableCapabilities = injection.unavailable
+        searchableSources = injection.searchableSources
+        admittedConnectorIds = injection.admittedConnectorIds ?? admittedConnectorIds
+        if (injection.knowledgeCapturePrompt) {
+          privateRuntimeContextParts.push(injection.knowledgeCapturePrompt)
+        }
+      } catch (err) {
+        console.error(`[${channelType}] MCP tool injection failed:`, err)
+      }
+    }
+
+    let preparedCommand = prepareSlashCommand(messageText)
+    if (assistant.workspaceId && !isolatedAudience && (skillStore || params.workflowStore)) {
+      try {
+        const nativeCatalog = await buildWorkspaceNativeSlashCommands({
+          userId: executionContext.security.access.userId,
+          workspaceId: assistant.workspaceId,
+          skillStore,
+          workflowStore: params.workflowStore,
+        })
+        preparedCommand = resolveNativeSlashCommand(messageText, nativeCatalog) ?? preparedCommand
+      } catch (err) {
+        console.warn(`[${channelType}] native slash-command resolution failed:`, err)
+      }
+    }
+
+    // ── Skills ──
+    if (skillStore && !isolatedAudience) {
+      // Slash command (`/goal register …` as the whole message) — same seam as
+      // the web chat route: the name is threaded as an enforced skill slug, the
+      // governance gates apply inside injectSkills, and an unresolved name
+      // enforces nothing so the message stays plain text. This is what makes
+      // `/goal` work identically from Telegram / Slack / any adapter.
+      const slashCommand = preparedCommand?.kind === 'skill'
+        ? { name: preparedCommand.name, args: preparedCommand.args }
+        : null
+      const skillResult = await injectSkills({
+        enforceSlugs: slashCommand ? [slashCommand.name] : undefined,
+        skillStore,
+        executionContext, scopeAccumulator,
+        availableConnectorIds: assistant.workspaceId ? admittedConnectorIds : undefined,
+        authorizeSkillAudience: async evidence => {
+          const decision = await authorizeDeliveryAudience({ ...audienceInput, scopeEvidence: evidence })
+          if (!decision.allowed) throw new DeliveryAudienceUnverifiedError(decision.detail, decision.diagnostic, decision)
+          if (recordEnvelope && !channelEvidenceFitsEnvelope(recordEnvelope, decision.evidence)) {
+            throw new DeliveryAudienceUnverifiedError(undefined, 'source_reclassified')
+          }
+          return decision.evidence
+        },
+        connectorUserId,
+        assistantId: assistant.id,
+        // §5.5 governance gate: assistant clearance bounds which workspace
+        // skills are offered for the turn.
+        assistantClearance: assistant.clearance,
+        tools: allTools,
+        connectorStore,
+        unavailableCapabilities,
+        channel: channelType,
+        // Scope skills to the assistant's workspace (not the owner's personal
+        // workspace) — see injectSkills / incident 2026-06-01.
+        workspaceId: assistant.workspaceId ?? undefined,
+        // Both stores were missing here until mig 492, so on every messaging
+        // channel a workspace skill was gated ONLY by the legacy slug-keyed
+        // `assistant_skill_settings` table: the `workspace_skill_enablement`
+        // allowlist was invisible, and so was the `all_assistants` flag. The
+        // result was a skill that worked in web chat and silently did not on
+        // Telegram / Slack / WhatsApp / Discord — with every layer looking
+        // correct and only the user able to tell.
+        //
+        // Defaulted from the factories rather than threaded, because nine
+        // channel routes each re-declare and forward the pipeline's stores by
+        // hand; a store one of them forgot is exactly the silent per-channel gap
+        // being fixed here. Both factories are stateless (they close over
+        // `query`), same as `createDbKnowledgeStore` above. An injected store
+        // still wins, so tests keep their fakes.
+        workspaceSkillStore: workspaceSkillStore ?? createDbWorkspaceSkillStore(),
+        workspaceSkillEnablementStore:
+          workspaceSkillEnablementStore ?? createDbWorkspaceSkillEnablementStore(),
+        workspaceSkillFilesStore: params.workspaceSkillFilesStore,
+        invocationBuffer: params.invocationBuffer,
+      })
+      systemAddenda += skillResult.promptFragment
+      if (slashCommand && skillResult.enforcedPromptFragment) {
+        systemAddenda += skillResult.enforcedPromptFragment
+        privateRuntimeContextParts.push(buildSlashCommandBlock(slashCommand))
+      }
+    }
+    if (preparedCommand?.kind === 'workflow' && allTools.has('runWorkflow')) {
+      privateRuntimeContextParts.push(buildWorkflowSlashCommandBlock(preparedCommand))
+    }
+    systemAddenda += buildUnavailableCapabilitiesPrompt(
+      unavailableCapabilities,
+      allTools,
+      searchableSources,
+    )
+    systemAddenda += buildBrowserEscalationPrompt(allTools)
+    systemAddenda += buildEmailDraftAnchorPrompt(allTools)
+
+    // ── Pre-flight-confirm reply correlation (channel-recording-preflight-confirm §6) ──
+    // If a big recording in THIS conversation is awaiting the user's confirmation,
+    // inject a context note so the model can interpret the reply and call
+    // `confirmRecordingProcessing` with the right recordingId. The note carries the
+    // file label, duration, credit cost, and the default blueprint id so the model
+    // can map "yes / the default" to the right choice. Per-turn dynamic injection —
+    // not in Layer 1 (the tool name only appears here, when a pending row exists).
+    if (!isolatedAudience) {
+      try {
+        const channelSessionKey = buildChannelSessionKey({
+          channel: channelType,
+          channelId: sessionChannelId,
+          userId,
+        })
+        const pendingRecordings = await listPendingRecordingConfirmationsForSession(channelSessionKey)
+        if (pendingRecordings.length > 0) {
+          const lines = pendingRecordings.map((p) => {
+            const mins = Math.max(1, Math.ceil(p.durationSeconds / 60))
+            const labelPart = p.fileLabel ? ` ("${p.fileLabel}")` : ''
+            const creditWord = p.surchargeCredits === 1 ? 'credit' : 'credits'
+            const defaultPart = p.defaultBlueprintSlug
+              ? ` Default blueprint id (use this if the user says "yes" or "the default"): ${p.defaultBlueprintSlug}.`
+              : ' No workspace default blueprint is set.'
+            return `- recordingId: ${p.recordingId}${labelPart} — about ${mins} min, costs ${p.surchargeCredits} ${creditWord} to process.${defaultPart}`
+          })
+          systemAddenda +=
+            `\n\n# Recording awaiting confirmation\n` +
+            `The user dropped ${pendingRecordings.length === 1 ? 'a recording' : 'recordings'} that ${pendingRecordings.length === 1 ? 'is' : 'are'} held until they confirm processing (it would incur a credit surcharge). ` +
+            `When the user replies about it, call \`confirmRecordingProcessing\` with the matching recordingId and their choice: a blueprint id to shape a brief, "ingest-only" to just file the transcript, or "cancel" to skip it.\n` +
+            lines.join('\n')
+        }
+      } catch (err) {
+        console.error(`[${channelType}] pending recording confirmation lookup failed:`, err)
+      }
+    }
+
+    // ── Preflight research ──
+    // The turn route made the split call (non-isolated messages over 40
+    // characters); preflight takes the routed tasks after a fresh split-lane
+    // proof and never classifies again.
+    let preflightContext = ''
+    if (routing.route.split) {
+      try {
+        const preflightTools = turnOwner.prepareTools(allTools)
+        const preflight = await runPreflight({
+          provider: backgroundProvider, model: backgroundLaneModel, message: messageText, tools: preflightTools,
+          classify: async () => ({ tasks: await routing.consumeSplit(), usage: null, model: null }),
+          // Discovery, a read (and an optional detail read), then synthesis.
+          maxWorkerTurns: 4,
+          context: {
+            ...executionToolContext(executionContext, { appId: 'Use Brian' }),
+            channelSessionId: sessionChannelId,
+            userMessageId: userMessageRow.id,
+            userMessageText: messageText,
+            taskAuthority,
+            userTimezone,
+            workerRuntime: { provider: backgroundProvider, model: backgroundLaneModel,
+              modelTier: backgroundUsageAttribution.modelTier,
+              providerKeySource: backgroundUsageAttribution.providerKeySource },
+            abortSignal: abortController.signal,
+            requestTools: preflightTools,
+            activeCapabilities,
+            sensitivity: sensitivityAccumulator,
+            compartmentAccumulator,
+            scopeAccumulator,
+            activeGroupId: dataTurnScope.activeGroupId,
+            activeProjectId: dataTurnScope.activeProjectId,
+            turnLedger: createTurnLedger({
+              workspaceId: assistant.workspaceId ?? null,
+              assistantId: assistant.id,
+              sessionId: session.id,
+              payloads: getLedgerPayloadStore(),
+            }).ledger,
+          },
+          onUsage: async event => {
+            if (!usageStore) return
+            const keySource = event.providerKeySource ?? backgroundUsageAttribution.providerKeySource
+            await usageStore.recordUsage({
+              userId: billingUserId, actorUserId: userId, assistantId: assistant.id, sessionId: session.id,
+              model: event.model, modelTier: event.modelTier ?? backgroundUsageAttribution.modelTier,
+              inputTokens: event.usage.inputTokens, outputTokens: event.usage.outputTokens,
+              cacheReadTokens: event.usage.cacheReadTokens, cacheWriteTokens: event.usage.cacheWriteTokens,
+              actualCostUsd: keySource === 'user' ? 0 : calculateCost(event.model, event.usage),
+              source: 'included', triggerKey: 'worker_run', providerKeySource: keySource,
+            }).catch(error => console.error(`[${channelType}] worker usage tracking failed:`, error))
+          },
+          onStatus: () => hooks.onStatus?.('Researching...') ?? Promise.resolve(),
+          onEvent: (event, workerId) => {
+            if (event.type !== 'tool_result') return
+            recordChannelToolResults({
+              results: event.results,
+              metaByToolUseId: event.metaByToolUseId,
+              analytics, usageStore, userId, billingUserId,
+              assistantId: assistant.id, sessionId: session.id,
+              workspaceId: assistant.workspaceId,
+              userMessageId: userMessageRow.id, userPlan: workspacePlan,
+              channelType, workerId, pendingUsage,
+            })
+          },
+        })
+        if (preflight.type === 'researched') {
+          preflightContext = preflight.context
+        }
+      } catch (err) {
+        // A refused split-lane proof is an authority change, never a degraded turn.
+        if (isInputAuthorityError(err)) throw err
+        console.error(`[${channelType}] pre-flight failed, continuing without:`, err)
+      }
+    }
+    let runtimeSystemContext = systemAddenda
+    if (preflightContext) {
+      privateRuntimeContextParts.push(
+        buildPreflightPrompt('', preflightContext).replace(/^\n+/, ''),
+      )
+    }
+
+    // ── Dispute pre-pass (grounding-gate claim ledger) ──
+    // A dispute-shaped follow-up carrying a figure ("唔係要 look 11萬咩")
+    // loads the previous reply's claim provenance so the model re-verifies
+    // instead of re-asserting. One indexed read, only on the dispute shape.
+    // See docs/architecture/engine/grounding-gate.md → "Dispute pre-pass".
+    if (messageText && matchesDisputedFigure(messageText)) {
+      try {
+        const { getClaimsForLatestAssistantMessage } = await import('../db/claim-provenance-store.js')
+        const priorClaims = await getClaimsForLatestAssistantMessage(session.id, true)
+        if (priorClaims.length > 0) {
+          privateRuntimeContextParts.push(
+            `# Figure provenance (dispute check)\n\n${buildDisputeContextNote(priorClaims)}`,
+          )
+        }
+      } catch (err) {
+        console.warn(`[${channelType}] dispute pre-pass failed, continuing without:`, err)
+      }
+    }
+
+    const privateRuntimeBlock = formatPrivateRuntimeContext(
+      privateRuntimeContextParts.filter((s) => s.trim().length > 0).join('\n\n'),
+    )
+    if (privateRuntimeBlock) {
+      runtimeSystemContext = `${runtimeSystemContext}\n\n${privateRuntimeBlock}`
+    }
+
+    replyEvidence.note(renderSystemContext({ systemPrompt: splitPrompt.stablePrompt, runtimeSystemContext }))
+    replyEvidence.note(userVisibleContext)
+    return {
+      systemPrompt: splitPrompt.stablePrompt, messages, candidateTools: allTools,
+      trustedContributions: [{ name: 'runtime' as const, content: runtimeSystemContext }],
+      userVisibleContributions: [{ name: 'turn' as const, content: userVisibleContext }],
+      context: { preferredChannel, workflowProposalReceipt, requestTools: allTools, activeCapabilities },
+      ...(adaptiveResearchActive ? {
+        mainModel: { kind: 'channel' as const, requestedAlias: 'research', plan: workspacePlan, budgetStatus,
+          hasImage: turnHasInlineImage(userContentBlocks) },
+        ...chatTierBudget({ model: logicalModel, researchMode: true }),
+      } : {}),
+    }
+  }
+
   // ── Query loop ──
   if (abortController.signal.aborted) return
   try {
-    const preparedRun = await turnOwner.prepareRun({
-      systemPrompt: splitPrompt.stablePrompt,
-      messages,
-      candidateTools: allTools,
+    const initialPrompt = buildSplitSystemPrompt({ ...channelPrompt, memoryContext: '' })
+    const initialContext = [initialPrompt.privateRuntimeContext, ...channelPolicy]
+    if (questionAnswer !== undefined || replyToMessageId != null || params.realtimeThreadTarget || params.providerVisibleContext) {
+      initialContext.push('This message has a conversation reference. Request conversation context to resolve it before answering.')
+    }
+    const currentMessage = bindScopeSources<Message>({ role: 'user', content: userContentBlocks },
+      storedUserSource && enrollAuthoredSource ? [storedUserSource] : [])
+    const runtimeSystemContext = formatPrivateRuntimeContext(initialContext.filter(Boolean).join('\n\n'))
+    const userVisibleContext = initialPrompt.userVisibleContext
+    await turnOwner.prepareRun({
+      systemPrompt: initialPrompt.stablePrompt,
+      messages: [currentMessage],
+      candidateTools: new Map(),
       trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
       userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
+      contextDiscovery: discoverContext,
     })
-    replyEvidence.note(renderSystemContext({ systemPrompt: splitPrompt.stablePrompt, runtimeSystemContext: preparedRun.grounding.runtimeContext }))
-    // The replied-to quote is represented on the user turn, so seed that
-    // visible material explicitly as evidence too.
-    replyEvidence.note(preparedRun.grounding.userVisibleContext)
+    replyEvidence.note(initialPrompt.stablePrompt)
     replyEvidence.note(messageText)
     const turnLoopResult = await turnOwner.run({
 
@@ -2995,13 +3006,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
               maxTokens: customLlmRuntime.maxTokens,
             }
           : undefined,
-        preferredChannel,
         userTimezone,
-        workflowProposalReceipt,
         sessionStateStore,
-        requestTools: allTools,
         workerManager,
-        activeCapabilities,
         outboundAttachments: attachmentCollector,
         channelDocumentsSupported: params.channelDocumentsSupported,
         sensitivity: sensitivityAccumulator,
@@ -3029,12 +3036,15 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
       },
       sink: { kind: 'adapter', ...(nativeTranscriptAuthority ? { admitOutput: async (_context, eventKind) => {
         // The managed recorder suppresses the live mirror and keeps these
-        // events inside the turn. Status and tool hooks can still be outward
-        // effects. The terminal send always checks the complete audience
+        // events inside the turn. Progress becomes an outward effect only
+        // when its adapter hook exists. The terminal send checks the audience
         // again after reading any attachments and before provider I/O.
         if (params.recording && !params.conversationContext && !researchObserver
           && (eventKind === 'assistant_turn' || eventKind === 'question' || eventKind === 'thinking_delta'
-            || eventKind === 'turn_complete' || (eventKind === 'text_delta' && !hooks.onTextDelta))) {
+            || eventKind === 'turn_complete' || (eventKind === 'text_delta' && !hooks.onTextDelta)
+            || (eventKind === 'status' && !hooks.onStatus)
+            || (eventKind === 'tool_start' && !hooks.onToolStart)
+            || (eventKind === 'tool_input' && !hooks.onToolInput))) {
           await authority.assertCurrent()
           return
         }
@@ -3043,6 +3053,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
         await flushBufferedTurns('[Tool did not return a result. Treat as failed and do not retry.]')
         if (!sessionStateStore || !isIdentified || isolatedAudience) return
         try {
+          const { backgroundProvider, backgroundLaneModel, backgroundUsageAttribution } = await getBackground()
           const result = await runTurnSessionStateDiff({
             authority: { execution: executionContext, accumulator: scopeAccumulator },
             provider: backgroundProvider, model: backgroundLaneModel, store: sessionStateStore,
@@ -3418,6 +3429,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
       if (abortController.signal.aborted) return
       // Standard tier per docs/architecture/platform/cost-and-pricing.md
       // → Model routing (extraction / classification / structured-output bucket).
+      const { backgroundProvider, backgroundLaneModel, backgroundUsageAttribution } = await getBackground()
       await runMemoryNudge({
         turns: pendingAssistantTurns,
         callModel: async (prompt, llm) => {
@@ -3532,7 +3544,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
   } finally {
     try {
       await settlePreparationUsage()
-      const completedWork = await Promise.allSettled([...pendingPreparation, ...pendingUsage])
+      const completedWork = await Promise.allSettled([captureFollowup?.(), ...pendingUsage])
       for (const outcome of completedWork) if (outcome.status === 'rejected') console.error(`[${channelType}] turn follow-up failed:`, outcome.reason)
     } finally {
       try { await hooks.onCleanup?.() }

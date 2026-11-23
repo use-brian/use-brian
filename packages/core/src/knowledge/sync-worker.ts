@@ -4,9 +4,8 @@
  * Follows the consolidation worker pattern: setInterval + tick + advisory lock.
  * Pure deterministic sync — no LLM.
  *
- * Team-scoped: entries are stored once per (workspace_id, path); assistants in the
- * team read the team's entries filtered by their clearance. Sync writes one
- * row per file regardless of how many assistants are in the team.
+ * Entries are stored once per workspace, source and path. Assistants read
+ * entries in their workspace subject to their clearance.
  *
  * See docs/architecture/features/knowledge-base.md.
  */
@@ -14,7 +13,7 @@
 import { parseMarkdownFile } from './parser.js'
 import { buildPathIndex, resolveWikilink } from './wikilink-resolver.js'
 import { buildLintIndex, runAllChecks, type Finding, type LintInputEntry } from '@use-brian/brian-kb'
-import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
+import { canRead, type Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { promises as fs } from 'node:fs'
 import * as nodePath from 'node:path'
 import { createHash } from 'node:crypto'
@@ -59,6 +58,18 @@ export type SyncGitHubApi = {
   getRepoPermissions(pat: string, owner: string, repo: string): Promise<{ push: boolean }>
 }
 
+export type SyncLinkEntry = {
+  id: string
+  path: string
+  sourceId: string | null
+  sensitivity: Sensitivity
+  compartments: string[]
+  projectIds: string[]
+  scopeHeld: boolean
+  rawRelated: unknown
+  relatedIds: string[]
+}
+
 export type SyncStore = {
   captureSourceSync?(source: SyncSource): Promise<object | undefined>
   releaseSourceSync?(authority: object): Promise<void>
@@ -77,12 +88,9 @@ export type SyncStore = {
   // System-level reads — sync is a privileged-service caller (no
   // per-viewer projection). See permissions.md § Privileged-service
   // exception and packages/api/src/db/knowledge-store.ts.
-  listPathsSystem(workspaceId: string): Promise<string[]>
-  getByPathSystem(workspaceId: string, path: string): Promise<{
-    id: string
-    sourceId?: string | null
-    metadata?: Record<string, unknown>
-  } | null>
+  listPathsSystem(workspaceId: string, sourceId: string): Promise<string[]>
+  getByPathSystem(workspaceId: string, path: string, sourceId: string): Promise<{ id: string } | null>
+  listSyncLinkEntries(workspaceId: string, sourceId: string): Promise<SyncLinkEntry[]>
   updateRelatedIds(id: string, relatedIds: string[], syncAuthority?: object): Promise<void>
   updateSourceSync(id: string, sha: string, error?: string | null, syncAuthority?: object): Promise<void>
   /** Persist the per-tick PAT write-capability probe (migration 310). */
@@ -202,8 +210,9 @@ export function createKnowledgeSyncWorker(options: {
     // Get current HEAD
     const headSha = await api.getBranchHead(pat, owner, repo, source.branch)
 
-    // Skip if nothing changed
+    // A different source can change a fallback link without changing this HEAD.
     if (headSha === source.lastSyncedSha) {
+      await resolveAllWikilinks(source, syncAuthority)
       if (syncAuthority) await store.updateSourceSync(source.id, headSha, null, syncAuthority)
       return
     }
@@ -257,14 +266,7 @@ export function createKnowledgeSyncWorker(options: {
       }
 
       const retained = new Set(mdFiles.map(file => parseMarkdownFile(source.rootPath ? file.path.slice(source.rootPath.length + 1) : file.path, '').path))
-      for (const path of await store.listPathsSystem(source.workspaceId)) {
-        if (retained.has(path)) continue
-        const entry = await store.getByPathSystem(source.workspaceId, path)
-        if (entry?.sourceId === source.id && await store.deleteByTeamAndPath(source.workspaceId, path, syncAuthority)) deleted++
-      }
-
-      // Pass 2: resolve wikilinks
-      await resolveAllWikilinks(source, store, syncAuthority)
+      deleted += await removeMissingEntries(source, retained, syncAuthority)
 
       // Lint pass — only on full sync (incremental lacks unchanged-file context)
       runLintPass(source, lintInputs)
@@ -312,13 +314,9 @@ export function createKnowledgeSyncWorker(options: {
         if (file.status === 'added') created++
         else updated++
       }
-
-      // Resolve wikilinks for changed entries
-      if (relevantFiles.length > 0) {
-        await resolveAllWikilinks(source, store, syncAuthority)
-      }
     }
 
+    await resolveAllWikilinks(source, syncAuthority)
     await store.updateSourceSync(source.id, headSha, null, syncAuthority)
 
     onEvent?.({
@@ -349,6 +347,7 @@ export function createKnowledgeSyncWorker(options: {
     const mdFiles = await walkMarkdownFiles(root)
     const headSha = await computeDirHash(root, mdFiles)
     if (headSha === source.lastSyncedSha) {
+      await resolveAllWikilinks(source, syncAuthority)
       if (syncAuthority) await store.updateSourceSync(source.id, headSha, null, syncAuthority)
       return
     }
@@ -371,7 +370,7 @@ export function createKnowledgeSyncWorker(options: {
         rawContent: content,
       })
 
-      const existing = await store.getByPathSystem(source.workspaceId, parsed.path)
+      const existing = await store.getByPathSystem(source.workspaceId, parsed.path, source.id)
       await upsertSynced({
         workspaceId: source.workspaceId,
         path: parsed.path,
@@ -392,17 +391,9 @@ export function createKnowledgeSyncWorker(options: {
     const syncedPaths = new Set(
       mdFiles.map((f) => parseMarkdownFile(nodePath.relative(root, f), '').path),
     )
-    const allPaths = await store.listPathsSystem(source.workspaceId)
-    for (const p of allPaths) {
-      if (syncedPaths.has(p)) continue
-      const entry = await store.getByPathSystem(source.workspaceId, p)
-      if (!entry) continue
-      if (entry.sourceId !== source.id) continue
-      const wasDeleted = await store.deleteByTeamAndPath(source.workspaceId, p, syncAuthority)
-      if (wasDeleted) deleted++
-    }
+    deleted += await removeMissingEntries(source, syncedPaths, syncAuthority)
 
-    await resolveAllWikilinks(source, store, syncAuthority)
+    await resolveAllWikilinks(source, syncAuthority)
     runLintPass(source, lintInputs)
     await store.updateSourceSync(source.id, headSha, null, syncAuthority)
 
@@ -462,37 +453,51 @@ export function createKnowledgeSyncWorker(options: {
     }
   }
 
-  async function resolveAllWikilinks(source: SyncSource, syncStore: SyncStore, syncAuthority?: object) {
-    const allPaths = await syncStore.listPathsSystem(source.workspaceId)
-    const pathIndex = buildPathIndex(allPaths)
+  async function removeMissingEntries(source: SyncSource, retained: Set<string>, syncAuthority?: object) {
+    let deleted = 0
+    for (const path of await store.listPathsSystem(source.workspaceId, source.id)) {
+      if (!retained.has(path) && await store.deleteByTeamAndPath(source.workspaceId, path, syncAuthority)) deleted++
+    }
+    return deleted
+  }
 
-    // For each entry, read _rawRelated from metadata, resolve refs to paths,
-    // then look up UUIDs for those paths.
+  async function resolveAllWikilinks(source: SyncSource, syncAuthority?: object) {
+    const owned = new Map<string, SyncLinkEntry>()
+    const workspacePaths = new Map<string, SyncLinkEntry[]>()
+    for (const entry of await store.listSyncLinkEntries(source.workspaceId, source.id)) {
+      if (entry.sourceId === source.id) owned.set(entry.path, entry)
+      const entries = workspacePaths.get(entry.path) ?? []
+      entries.push(entry)
+      workspacePaths.set(entry.path, entries)
+    }
+    const sourceIndex = buildPathIndex([...owned.keys()], { uniqueAliases: true })
+    const workspaceIndex = buildPathIndex([...workspacePaths.keys()], { uniqueAliases: true })
+
     let resolved = 0
-    for (const entryPath of allPaths) {
-      const entry = await syncStore.getByPathSystem(source.workspaceId, entryPath)
-      if (!entry || entry.sourceId !== source.id) continue
-
-      const metadata = (entry as any).metadata as Record<string, unknown> | undefined
-      const rawRelated = metadata?._rawRelated as string[] | undefined
-      if (!Array.isArray(rawRelated)) continue
-
-      // Resolve each raw ref to a path
-      const resolvedIds: string[] = []
+    for (const entry of owned.values()) {
+      if (entry.scopeHeld) continue
+      const rawRelated = Array.isArray(entry.rawRelated) ? entry.rawRelated : []
+      const resolvedIds = new Set<string>()
       for (const ref of rawRelated) {
-        const resolvedPath = resolveWikilink(ref, entryPath, pathIndex)
-        if (!resolvedPath) continue
-
-        // Look up the entry at this path to get its UUID
-        const target = await syncStore.getByPathSystem(source.workspaceId, resolvedPath)
-        if (target) {
-          resolvedIds.push((target as any).id as string)
+        if (typeof ref !== 'string') continue
+        const localPath = resolveWikilink(ref, entry.path, sourceIndex)
+        let target = localPath === null ? undefined : owned.get(localPath)
+        if (!target) {
+          const path = resolveWikilink(ref, entry.path, workspaceIndex)
+          const matches = path === null ? undefined : workspacePaths.get(path)
+          if (matches?.length === 1) target = matches[0]
+        }
+        if (target && !target.scopeHeld && canRead(entry.sensitivity, target.sensitivity)
+          && target.compartments.every(compartment => entry.compartments.includes(compartment))
+          && target.projectIds.every(projectId => entry.projectIds.includes(projectId))) {
+          resolvedIds.add(target.id)
         }
       }
 
       // Empty results must clear stale edges left by an interrupted run too.
-      const unique = [...new Set(resolvedIds)]
-      await syncStore.updateRelatedIds((entry as any).id as string, unique, syncAuthority)
+      const relatedIds = [...resolvedIds]
+      if (relatedIds.length === entry.relatedIds.length && relatedIds.every((id, index) => id === entry.relatedIds[index])) continue
+      await store.updateRelatedIds(entry.id, relatedIds, syncAuthority)
       resolved++
     }
 

@@ -128,7 +128,6 @@ const DECISION_USAGE_TARGETS: Readonly<Record<string, DecisionUsageTarget>> = {
   'ingest.extraction-gate': { source: 'overhead:classifier', triggerKey: 'ingest_extraction_gate' },
   'ingest.sensitivity': { source: 'overhead:classifier', triggerKey: 'sensitivity_classifier' },
   'feed.reply-classification': { source: 'overhead:distribution-classifier', triggerKey: 'feed_reply_classification' },
-  'feed.draft-safety': { source: 'overhead:distribution-safety', triggerKey: 'feed_draft_safety' },
 }
 
 function usageTargetForOperation(operationId: string): DecisionUsageTarget {

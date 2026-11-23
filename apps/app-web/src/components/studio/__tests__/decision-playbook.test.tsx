@@ -72,6 +72,34 @@ afterEach(() => {
 });
 
 describe("[COMP:app-web/decision-playbook] decision rule card", () => {
+  it("identifies rules previously auto-added from conversations and offers owners an individual retirement action", () => {
+    const legacy = {
+      ...RULE,
+      status: "active",
+      createdBy: "reflection",
+      appliesToUserId: null,
+      applicabilityKind: "general",
+      applicabilityKey: null,
+      evidenceCount: 0,
+    } satisfies DecisionPlaybookRuleView;
+
+    render(legacy, false);
+    expect(host.textContent).toContain("Previously auto-added");
+    expect(host.querySelectorAll("button")).toHaveLength(0);
+
+    render(legacy);
+    const retire = Array.from(host.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent?.trim() === "Retire");
+    expect(retire).toBeTruthy();
+    act(() => retire!.click());
+    expect(onDecision).toHaveBeenCalledWith("retire");
+
+    render({ ...legacy, decidedByUserId: "owner" });
+    expect(host.textContent).not.toContain("Previously auto-added");
+    render({ ...legacy, createdBy: "owner" });
+    expect(host.textContent).not.toContain("Previously auto-added");
+  });
+
   it("shows minimized applicability/evidence provenance and member actions", () => {
     render(RULE);
     expect(host.textContent).toContain("Learned from your decisions");

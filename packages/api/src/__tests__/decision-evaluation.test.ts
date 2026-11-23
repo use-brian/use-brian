@@ -47,7 +47,9 @@ describe('[COMP:decisions/evaluation] decision evaluation runner', () => {
         coverage: 1,
       },
     })
-    expect(report.operations.map((entry) => entry.operation.id)).toContain('feed.draft-safety')
+    const operations = report.operations.map((entry) => entry.operation.id)
+    expect(operations).toContain('feed.reply-classification')
+    expect(operations).not.toContain('feed.draft-safety')
     expect(report.profiles.every((profile) => profile.version === '1')).toBe(true)
   })
 

@@ -73,9 +73,10 @@ export interface TurnTrace {
    * Provider request for `turn`. `full` means `messages` is the complete
    * history (stateless mode); otherwise it is the delta appended since the
    * previous turn (stateful session mode) and the recorder reconstructs
-   * the full request as start.messages + all deltas.
+   * the full request as start.messages + all deltas. A replacement session
+   * supplies its full request and newly installed system prompt.
    */
-  request(info: { turn: number; messages: Message[]; full: boolean }): void
+  request(info: { turn: number; messages: Message[]; full: boolean; systemPrompt?: string }): void
   /**
    * Completed turn: the assistant response and its matched tool results
    * (the loop's Phase 3b pairing — inputs ride in the response's

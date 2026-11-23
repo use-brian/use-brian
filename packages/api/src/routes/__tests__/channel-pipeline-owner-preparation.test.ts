@@ -7,7 +7,7 @@ import { createExecutionContext } from '@use-brian/agent-runtime/security/execut
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
-  history: vi.fn(),
+  persist: vi.fn(), history: vi.fn(),
   current: vi.fn(),
   audience: vi.fn(),
   budget: vi.fn(),
@@ -17,7 +17,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('../../db/sessions.js', async original => ({
   ...(await original<typeof import('../../db/sessions.js')>()),
   findOrCreateSession: vi.fn(async () => ({ id: 'session', visibility: 'personal', channelType: 'feishu' })),
-  getSessionMessages: mocks.history,
+  addSessionMessage: mocks.persist, getSessionMessages: mocks.history,
   claimTurnLeaseOutcome: mocks.claim,
   releaseTurnOutcome: mocks.release,
   touchTurnLease: vi.fn(async () => ({ held: true, cancelRequested: false })),
@@ -106,18 +106,18 @@ const deferred = <T,>() => {
 }
 
 describe('[COMP:api/turn-kernel] channel preparation under the original owner', () => {
-  it('holds the existing owner before progress/history and releases only after preparation cleanup', async () => {
-    const history = deferred<never>()
+  it('holds the existing owner before progress and input persistence and releases only after preparation cleanup', async () => {
+    const append = deferred<never>()
     const { params, hooks } = turn()
-    mocks.history.mockReturnValue(history.promise)
+    mocks.persist.mockReturnValue(append.promise)
     const running = processChannelMessage(params).catch(error => error)
-    await vi.waitFor(() => expect(mocks.history).toHaveBeenCalledOnce())
+    await vi.waitFor(() => expect(mocks.persist).toHaveBeenCalledOnce())
     expect(mocks.claim).toHaveBeenCalledExactlyOnceWith('session', 'assistant', expect.any(Date))
     expect(hooks.onProcessingStart).toHaveBeenCalledOnce()
     expect(mocks.claim.mock.invocationCallOrder[0]).toBeLessThan(hooks.onProcessingStart.mock.invocationCallOrder[0])
-    expect(hooks.onProcessingStart.mock.invocationCallOrder[0]).toBeLessThan(mocks.history.mock.invocationCallOrder[0])
+    expect(hooks.onProcessingStart.mock.invocationCallOrder[0]).toBeLessThan(mocks.persist.mock.invocationCallOrder[0])
     expect(mocks.release).not.toHaveBeenCalled()
-    history.reject(new Error('Synthetic preparation failure'))
+    append.reject(new Error('Synthetic preparation failure'))
     expect(await running).toMatchObject({ message: 'Synthetic preparation failure' })
     expect(hooks.onCleanup).toHaveBeenCalledOnce()
     expect(mocks.release).toHaveBeenCalledExactlyOnceWith('session', 'failed', 'processing-token')
@@ -187,7 +187,7 @@ describe('[COMP:api/turn-kernel] channel preparation under the original owner', 
 
   it('does not announce completion or run recovery after loss to a successor during preparation', async () => {
     const { params, hooks } = turn()
-    mocks.history.mockImplementation(async () => { params.abortController.abort(new TurnLeaseLostError()); throw params.abortController.signal.reason })
+    mocks.persist.mockImplementation(async () => { params.abortController.abort(new TurnLeaseLostError()); throw params.abortController.signal.reason })
     mocks.release.mockResolvedValue(null)
     await expect(processChannelMessage(params)).rejects.toBeInstanceOf(TurnLeaseLostError)
     expect(hooks.onCleanup).toHaveBeenCalledOnce()

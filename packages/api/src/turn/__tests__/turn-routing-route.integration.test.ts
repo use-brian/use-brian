@@ -24,6 +24,7 @@ import express from 'express'
 import request from 'supertest'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import type { LLMProvider, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
+import { askQuestionTool } from '@use-brian/agent-runtime/tools/base/ask-question.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -93,7 +94,17 @@ const results: unknown[] = []
 const usage = { inputTokens: 10, outputTokens: 2 }
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
-function provider(fixed: Fixed, calls: Record<Lane | 'other' | 'main', number>): LLMProvider {
+function toolCall(name: string, id: string, input: Record<string, unknown>): StreamChunk[] {
+  return [
+    { type: 'message_start', model: 'fixture' },
+    { type: 'tool_use_start', id, name },
+    { type: 'tool_use_delta', id, input: JSON.stringify(input) },
+    { type: 'tool_use_end', id },
+    { type: 'message_end', stopReason: 'tool_use', usage },
+  ]
+}
+
+function provider(fixed: Fixed, calls: Record<Lane | 'other' | 'main', number>, observePrompt?: (prompt: string) => void): LLMProvider {
   const reply = 'Fictional routed reply.'
   const text = (value: string): StreamChunk[] => [{ type: 'message_start', model: 'fixture' }, { type: 'text_delta', text: value },
     { type: 'message_end', stopReason: 'end_turn', usage }]
@@ -101,6 +112,7 @@ function provider(fixed: Fixed, calls: Record<Lane | 'other' | 'main', number>):
     name: 'fictional-routing', models: ['fixture'],
     async *stream(options) {
       const lane = laneOf(options)
+      if (lane !== 'other') expect(calls.main).toBeGreaterThan(0)
       calls[lane]++
       if (lane === 'research') {
         // A late verdict lets the speculative split reach the provider first,
@@ -116,8 +128,21 @@ function provider(fixed: Fixed, calls: Record<Lane | 'other' | 'main', number>):
       }
       yield* text('Fictional title')
     },
-    createSession() {
-      return { send() { calls.main++; return (async function* () { yield* text(reply) })() } }
+    createSession(options) {
+      return { async *send(messages) {
+        calls.main++
+        observePrompt?.(options.systemPrompt + '\n' + (options.runtimeSystemContext ?? ''))
+        if (options.tools?.some(tool => tool.name === 'requestConversationContext')) {
+          expect(options.tools.map(tool => tool.name)).toEqual(['requestConversationContext'])
+          expect(messages).toHaveLength(1)
+          expect(JSON.stringify(messages)).not.toContain('Earlier fictional question about tools.')
+          if (fixed.reply || fixed.message !== 'thanks') {
+            yield* toolCall('requestConversationContext', 'fixture-context', {})
+            return
+          }
+        }
+        yield* text(reply)
+      } }
     },
   }
 }
@@ -195,6 +220,57 @@ describe.sequential('[COMP:api/turn-kernel] turn routing through the real routes
     } finally { await f.cleanup() }
   }, 120_000)
 
+  it('resolves an unthreaded Telegram question answer through the first model dispatch and discovery', async () => {
+    const f = await persistentContextFixture('internal')
+    try {
+      const assistant = await findAssistantById(f.assistantId)
+      if (!assistant) throw new Error('Missing fixture assistant')
+      const channelId = `1555${Date.now()}`
+      const interactionScope = { channelType: 'telegram', integrationId: randomUUID(), conversationId: channelId, senderId: 'fixture-sender' }
+      const question = 'Which fictional badge color should the sample use?'
+      const reply = 'The sample badge will be blue.'
+      const responses: string[] = [], errors: Error[] = []
+      const calls = { research: 0, topic: 0, split: 0, other: 0, main: 0 }
+      const llm = provider(FIXED[0]!, calls)
+      const frames: Array<{ messages: string; prompt: string }> = []
+      let answering = false
+      llm.createSession = options => ({ async *send(messages) {
+        calls.main++
+        const prompt = [options.systemPrompt, options.runtimeSystemContext].join('\n')
+        if (answering) frames.push({ messages: JSON.stringify(messages), prompt })
+        if (options.tools?.some(tool => tool.name === 'requestConversationContext')) {
+          yield* toolCall('requestConversationContext', answering ? 'answer-context' : 'question-context', {})
+        } else if (!answering) {
+          yield* toolCall('askQuestion', 'fixture-badge-question', { question, options: ['Blue', 'Green'] })
+        } else {
+          yield { type: 'message_start', model: 'fixture' }
+          yield { type: 'text_delta', text: reply }
+          yield { type: 'message_end', stopReason: 'end_turn', usage }
+        }
+      } })
+      const send = (text: string) => processChannelMessage({
+        userId: f.ownerId, ownerId: f.ownerId, assistant, isIdentified: true, channelType: 'telegram', channelId,
+        senderUserId: f.ownerId, isGroupChat: false, messageText: text, userContentBlocks: [{ type: 'text', text }],
+        incomingMessage: { channelId, userId: interactionScope.senderId, text, isGroupChat: false, timestamp: Date.now(), raw: {} },
+        interactionScope, modelAlias: undefined, abortController: new AbortController(), provider: llm, systemPrompt: 'Continue the fictional conversation.',
+        tools: new Map([['askQuestion', askQuestionTool]]), memoryStore: createDbMemoryStore(), capabilityStore: createDbCapabilityStore(),
+        hooks: { async onConfirmationRequired() { throw new Error('Unexpected fixture confirmation') },
+          async sendResponse(content) { responses.push(content) }, async sendError(error) { errors.push(error) } },
+      })
+      await send('Ask me to choose a color for the sample.')
+      expect(responses.at(-1)).toContain(question)
+      answering = true
+      await send('blue')
+      expect(errors).toEqual([])
+      expect(frames).toHaveLength(2)
+      expect(frames[0]?.prompt).toContain('This message has a conversation reference.')
+      expect(frames[0]?.messages).toContain('Blue')
+      expect(frames[0]?.messages).not.toContain(question)
+      expect(frames[1]?.messages).toContain(question)
+      expect(responses.at(-1)).toBe(reply)
+    } finally { await f.cleanup() }
+  }, 120_000)
+
   it('defers ambient indexes for a bare Pro greeting while the charter can retrieve Memory', async () => {
     await initializeConversationVisibility()
     const f = await persistentContextFixture('internal')
@@ -220,8 +296,12 @@ describe.sequential('[COMP:api/turn-kernel] turn routing through the real routes
         main.push({ system: `${options.systemPrompt}\n${options.runtimeSystemContext ?? ''}`, messages: JSON.stringify(messages),
           tools: (options.tools ?? []).map(tool => tool.name) })
         return (async function* () {
+          if (options.tools?.some(tool => tool.name === 'requestConversationContext')) {
+            yield* toolCall('requestConversationContext', 'fictional-context-call', {})
+            return
+          }
           yield { type: 'message_start', model: 'fixture' }
-          if (main.length === 1) {
+          if (main.length === 2) {
             yield { type: 'tool_use_start', id: 'fictional-memory-call', name: 'getMemory' }
             yield { type: 'tool_use_delta', id: 'fictional-memory-call', input: JSON.stringify({ id: requested.id }) }
             yield { type: 'tool_use_end', id: 'fictional-memory-call' }
@@ -253,11 +333,14 @@ describe.sequential('[COMP:api/turn-kernel] turn routing through the real routes
       expect(greeting).not.toContain('event: error')
       expect(greeting).toContain('Fictional greeting reply.')
       expect(main[0]?.system).toContain(charter)
-      expect(main[0]?.system).toContain('Use getMemory to read a known memory ID')
-      expect(main[0]?.tools).toContain('getMemory')
-      expect(main[0]?.messages).toContain('Fictional retained conversation input.')
+      expect(main[0]?.tools).toEqual(['requestConversationContext'])
+      expect(main[0]?.messages).not.toContain('Fictional retained conversation input.')
+      expect(main[1]?.system).toContain('Use getMemory to read a known memory ID')
+      expect(main[1]?.tools).toContain('getMemory')
+      expect(main[1]?.messages).toContain('Fictional retained conversation input.')
+      expect(main[1]?.messages).toContain('fictional-context-call')
       expect(main[0]?.system).not.toContain(ambient.summary)
-      expect(main[1]?.messages).toContain(requested.summary)
+      expect(main[2]?.messages).toContain(requested.summary)
       const greetingFloor = await directFloor()
       expect(greetingFloor.some(row => row.source_kind === 'conversation_record')).toBe(true)
       expect(greetingFloor.some(row => row.type_key === 'memory' && row.selection === 'query_domain')).toBe(false)
@@ -284,11 +367,12 @@ describe.sequential('[COMP:api/turn-kernel] turn routing through the real routes
         originatingAssistantId: f.assistantId, approverUserId: f.ownerId, deliveryChannelType: 'web',
         question: 'Which fictional color?', toolUseId: 'fixture-blocks-input' })
       const calls = { research: 0, topic: 0, split: 0, other: 0, main: 0 }
+      const modelPrompts: string[] = []
       const app = express()
       app.use(express.json()); app.use((req, _res, next) => {
         req.userId = f.ownerId; req.authSessionId = device.id; req.authVersion = device.authVersion; next()
       })
-      app.use('/chat', chatRoutes({ provider: provider(FIXED[0]!, calls), systemPrompt: 'Continue the fictional conversation.',
+      app.use('/chat', chatRoutes({ provider: provider(FIXED[0]!, calls, prompt => modelPrompts.push(prompt)), systemPrompt: 'Continue the fictional conversation.',
         tools: new Map(), memoryStore: createDbMemoryStore(), capabilityStore: createDbCapabilityStore(), pendingApprovalsStore: approvals }))
       const send = async (message: string, replay?: string) => String((await request(app).post('/chat').send({
         sessionId: replay ? session.id : channelId, assistantId: f.assistantId, workspaceId: f.workspaceId,
@@ -328,7 +412,12 @@ describe.sequential('[COMP:api/turn-kernel] turn routing through the real routes
         { role: 'user', content: [{ type: 'text', text: 'thank you' }] },
         { role: 'assistant', content: [{ type: 'text', text: 'Fictional routed reply.' }] },
       ])
+      expect(modelPrompts[0]).not.toContain('the user edited their previous message')
+      expect(modelPrompts[1]?.match(/the user edited their previous message/g)).toHaveLength(1)
       expect(calls.main).toBe(2)
+      const repeated = await send('thank you', final.find(row => row.role === 'user')!.id)
+      expect(repeated).toContain('event: assistant_message_saved')
+      expect(modelPrompts[2]?.match(/the user retried this message/g)).toHaveLength(1)
     } finally { await f.cleanup() }
   }, 120_000)
 })

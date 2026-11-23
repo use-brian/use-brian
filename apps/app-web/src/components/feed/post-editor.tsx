@@ -20,7 +20,7 @@ import { FeedSources } from './feed-sources';
  * [COMP:app-web/feed-post-editor]
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -31,8 +31,8 @@ import {
   FileDown,
   Info,
   MoreHorizontal,
-  PanelRightClose,
-  PanelRightOpen,
+  Eye,
+  Sparkles,
   Heart,
   Link2,
   MessageCircle,
@@ -473,13 +473,18 @@ function PostPane({
   const [localPost, setLocalPost] = useState<LocalFeedPost | null>(null);
   const [localSaveError, setLocalSaveError] = useState(false);
   const [retryingSync, setRetryingSync] = useState(false);
-  const [chatCollapsed, setChatCollapsed] = useState(false);
+  const [chatCollapsed, setChatCollapsed] = useState(true);
   const [editorPanel, setEditorPanel] = useState<'comments' | 'thread' | 'details' | 'review' | 'learning' | null>(null);
   const lastPanel = useRef<typeof editorPanel>(null);
   const panelMode = editorPanel ?? lastPanel.current;
   const [panelAnchor, setPanelAnchor] = useState<HTMLElement | null>(null);
   const workspaceRef = useRef<HTMLElement>(null);
-  const documentRef = useRef<HTMLDivElement>(null);
+  const editDocumentRef = useRef<HTMLDivElement>(null);
+  const previewDocumentRef = useRef<HTMLDivElement>(null);
+  const editScrollTop = useRef(0);
+  useLayoutEffect(() => {
+    if (workspaceRef.current) workspaceRef.current.scrollTop = viewMode === "preview" ? 0 : editScrollTop.current;
+  }, [viewMode]);
   const commentsButtonRef = useRef<HTMLButtonElement>(null);
   const actionsButtonRef = useRef<HTMLButtonElement>(null);
   const [chatThreadId, setChatThreadId] = useState<string | null>(null);
@@ -627,6 +632,7 @@ function PostPane({
   const readOnly = status === "ready" || status === "posted" || !workspace.canDraft;
   const remoteBlocked = offline || !localPost || localPost.dirty || localSaveError || localSaving > 0;
   const showSyncRecovery = Boolean(localPost?.error || retryingSync || (readOnly && localPost?.dirty));
+  const hasCommentMarkers = collaboration.data?.threads.some(thread => !thread.resolved && thread.anchor.state !== 'detached');
   const syncRecoveryReason = localPost?.errorCode?.includes('source') || localPost?.errorCode?.includes('available_to_draft')
     ? te.sourceAccessBlocked
     : localPost?.error === 'conflict' ? te.syncConflict : readOnly && workspace.canDraft ? te.syncReadOnly : te.syncBlocked;
@@ -1089,138 +1095,142 @@ function PostPane({
           : undefined
       }
       className={cn(
-        "grid min-h-full lg:h-full lg:min-h-0",
+        "grid h-full min-h-0 grid-rows-[minmax(0,1fr)]",
         chatCollapsed ? "lg:grid-cols-[minmax(0,1fr)_0px]" : "lg:grid-cols-[minmax(0,1fr)_minmax(0,min(var(--feed-refine-rail,320px),45%))]",
         railResizing && "select-none",
       )}
     >
-      <main ref={workspaceRef} className="@container/feed-editor relative min-w-0 bg-background lg:overflow-y-auto" data-feed-editor-workspace>
-        <div className="mx-auto min-h-full max-w-5xl p-3 pb-24 sm:p-5 lg:pb-5">
-          <div className="space-y-4">
-            <header className="sticky top-0 z-20 flex flex-wrap items-center gap-2 border-b border-border/60 bg-background py-3" data-feed-document-header>
-              <div className="flex min-w-[min(100%,12rem)] flex-1 items-center gap-2">
-                <span className="inline-flex size-8 items-center justify-center rounded-xl border border-border/60 bg-muted/40">
-                  <PlatformIcon platform={platform} className="size-4" />
-                </span>
-                <div className="min-w-0 flex-1">
-                  {session ? (
-                    <div className="group/title flex min-w-0 items-center gap-1.5">
-                      <input
-                        type="text"
-                        value={titleDirty ? titleDraft : displayPostTitle(session.title)}
-                        maxLength={200}
-                        disabled={titleSaving || readOnly}
-                        aria-label={te.editTitle}
-                        title={te.editTitle}
-                        onFocus={() => {
-                          if (!titleDirty) setTitleDraft(displayPostTitle(session.title));
-                        }}
-                        onChange={(event) => {
-                          setTitleDraft(event.target.value);
-                          setTitleDirty(true);
-                          void persist({ title: event.target.value });
-                        }}
-                        onBlur={() => {
-                          if (cancelTitleBlurRef.current) {
-                            cancelTitleBlurRef.current = false;
-                            return;
-                          }
-                          void saveTitle();
-                        }}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") {
-                            event.preventDefault();
-                            event.currentTarget.blur();
-                          } else if (event.key === "Escape") {
-                            event.preventDefault();
-                            cancelTitleBlurRef.current = true;
-                            setTitleDraft(displayPostTitle(session.title));
-                            setTitleDirty(false);
-                            void persist({ title: displayPostTitle(session.title) });
-                            event.currentTarget.blur();
-                          }
-                        }}
-                        style={{ fieldSizing: "content" } as React.CSSProperties}
-                        className="h-9 md:h-7 min-w-0 max-w-[calc(100%_-_1.125rem)] w-auto truncate rounded-md border border-transparent bg-transparent px-1 text-[16px] md:text-[15px] font-semibold outline-none transition-colors hover:border-border/70 focus:border-border focus:bg-background disabled:opacity-60"
-                      />
-                      <Pencil className="size-3 shrink-0 text-muted-foreground/70" aria-hidden />
-                    </div>
-                  ) : (
-                    <h1 className="truncate text-[15px] font-semibold">{te.newPost}</h1>
-                  )}
-                  <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
-                    {session?.replyTarget
-                      ? format(te.replyingTo, { handle: session.replyTarget.authorHandle })
-                      : t.platformLabels[platform]}
-                    <span className="mx-1.5" aria-hidden>·</span>
-                    <span role="status">{localSaveError ? te.localSaveFailed : localSaving ? te.saving : showSyncRecovery ? te.syncPaused : localPost?.dirty ? te.savedLocally : te.synced}</span>
-                  </p>
-                </div>
-              </div>
-              <div
-                role="group"
-                aria-label={te.viewModeAria}
-                className="inline-flex items-center rounded-lg border border-border/70 bg-muted/60 p-0.5"
-              >
-                {(["edit", "preview"] as const).map((mode) => (
-                  <Button variant="ghost" size="sm"
-                    key={mode}
-                    type="button"
-                    onClick={() => setViewMode(mode)}
-                    aria-pressed={viewMode === mode}
-                    className={cn(
-                      "min-h-11 md:min-h-8 rounded-md px-3 md:px-2.5 text-xs font-medium",
-                      viewMode === mode
-                        ? "bg-background text-foreground shadow-xs"
-                        : "text-muted-foreground hover:text-foreground",
-                    )}
-                  >
-                    {mode === "edit" ? te.editMode : te.previewMode}
-                  </Button>
-                ))}
-              </div>
-              {structured ? <Tooltip label={tc.comments}><Button ref={commentsButtonRef} type="button" variant="outline" size="icon" className="size-11 md:size-9 gap-1" aria-label={tc.comments} aria-expanded={editorPanel === 'comments' || editorPanel === 'thread'} onClick={showComments}><MessageSquareText className="size-4" aria-hidden /><span className="text-[10px]">{collaboration.data?.threads.filter(thread => !thread.resolved).length || ''}</span></Button></Tooltip> : null}
-              <div className="flex flex-wrap items-center justify-end gap-1.5">
-                <DropdownMenu>
-                  <DropdownMenuTrigger render={<Button ref={actionsButtonRef} type="button" variant="ghost" size="icon" className="size-11 md:size-9" aria-label={tc.postActions} />}><MoreHorizontal className="size-4" aria-hidden /></DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" finalFocus={() => editorPanel ? false : actionsButtonRef.current}>
-                    <DropdownMenuItem className="min-h-11 md:min-h-9" onClick={() => showPanel('details')}><Info aria-hidden />{tc.details}</DropdownMenuItem>
-                    {structured ? <><DropdownMenuItem className="min-h-11 md:min-h-9" onClick={() => showPanel('learning')}>{tl.title}</DropdownMenuItem></> : null}
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem className="min-h-11 md:min-h-9" disabled={!compositionText} onClick={() => void copyCaption()}><Copy aria-hidden />{copied ? te.copied : te.copyCaption}</DropdownMenuItem>
-                    {structured ? <DropdownMenuItem className="min-h-11 md:min-h-9" disabled={busy || remoteBlocked} onClick={() => void exportArticle()}><FileDown aria-hidden />{tg.exportArticle}</DropdownMenuItem> : null}
-                    <DropdownMenuItem className="min-h-11 md:min-h-9" onClick={railHandleProps.onDoubleClick}>{tc.resetChatWidth}</DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    {status === 'review' ? <DropdownMenuItem variant="destructive" className="min-h-11 md:min-h-9" disabled={busy || remoteBlocked} onClick={() => void act('reject')}><X aria-hidden />{te.reject}</DropdownMenuItem> : null}
-                    <DropdownMenuItem variant="destructive" className="min-h-11 md:min-h-9" disabled={busy || remoteBlocked} onClick={() => void removePost()}><Trash2 aria-hidden />{te.delete}</DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-                <Tooltip label={isLg && !chatCollapsed ? tc.hideChat : tc.showChat}><Button type="button" variant="ghost" size="icon" className="size-11 md:size-9" aria-label={isLg && !chatCollapsed ? tc.hideChat : tc.showChat} aria-expanded={isLg ? !chatCollapsed : refineOpen} onClick={() => { setEditorPanel(null); if (isLg) setChatCollapsed(value => !value); else setRefineOpen(true); }}>{isLg && !chatCollapsed ? <PanelRightClose className="size-4" aria-hidden /> : <PanelRightOpen className="size-4" aria-hidden />}</Button></Tooltip>
-              </div>
+      <main ref={workspaceRef} className="@container/feed-editor relative min-w-0 overflow-y-auto bg-background" data-feed-editor-workspace>
+        <div className="mx-auto min-h-full max-w-[76ch] px-4 pb-12 sm:px-6">
+          <div className="space-y-3 md:space-y-4">
+            <header className="sticky top-0 z-20 flex flex-wrap items-center gap-1 border-b border-border/60 bg-background py-1.5" data-feed-document-header>
               <FeedPostWorkflow approveLabel={platform==='linkedin'?localPost?.content.linkedin?.mode==='newsletter_edition'?linkedinCopy.prepare:localPost?.content.linkedin?.destinationId?linkedinCopy.publish:undefined:undefined} status={status} hasEdits={compositionDirty}
                 actionDisabled={Boolean(busy || remoteBlocked || !workspace.canDraft || ((status === 'drafting' || (status === 'review' && compositionDirty)) && !compositionValid) || (status === 'review' && !compositionDirty && (missingSlots.length > 0 || platform==='linkedin'&&(linkedinPreview.blocked||localPost?.content.linkedin?.destinationId&&localPost.content.linkedin.mode!=='newsletter_edition'&&!linkedinPreview.hash))))}
                 reviewOpen={editorPanel === 'review'}
                 onReview={structured ? anchor => showPanel('review', anchor) : undefined}
                 onCommit={() => void commitVersion()} onApprove={() => void act('approve')} onPosted={() => void act('posted')} />
+              <Tooltip label={viewMode === "preview" ? te.editMode : te.previewMode}>
+                <Button variant="ghost" size="sm" type="button" className="min-h-11 min-w-11 md:min-h-9 md:min-w-9"
+                  onClick={() => {
+                    if (viewMode === "edit") editScrollTop.current = workspaceRef.current?.scrollTop ?? 0;
+                    setViewMode(viewMode === "edit" ? "preview" : "edit");
+                  }}>
+                  {viewMode === "preview" ? <Pencil aria-hidden /> : <Eye aria-hidden />}
+                  <span className="sr-only @xl/feed-editor:not-sr-only">{viewMode === "preview" ? te.editMode : te.previewMode}</span>
+                </Button>
+              </Tooltip>
             </header>
 
-            {showSyncRecovery ? (
-              <section aria-label={te.syncPaused} className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-3 @lg/feed-editor:p-4" data-feed-sync-recovery>
+            <div data-feed-title>
+              {session ? (
+                <div className="group/title flex min-w-0 items-center gap-1.5">
+                  <input
+                    type="text"
+                    value={titleDirty ? titleDraft : displayPostTitle(session.title)}
+                    maxLength={200}
+                    disabled={titleSaving || readOnly}
+                    aria-label={te.editTitle}
+                    title={te.editTitle}
+                    onFocus={() => {
+                      if (!titleDirty) setTitleDraft(displayPostTitle(session.title));
+                    }}
+                    onChange={(event) => {
+                      setTitleDraft(event.target.value);
+                      setTitleDirty(true);
+                      void persist({ title: event.target.value });
+                    }}
+                    onBlur={() => {
+                      if (cancelTitleBlurRef.current) {
+                        cancelTitleBlurRef.current = false;
+                        return;
+                      }
+                      void saveTitle();
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        event.currentTarget.blur();
+                      } else if (event.key === "Escape") {
+                        event.preventDefault();
+                        cancelTitleBlurRef.current = true;
+                        setTitleDraft(displayPostTitle(session.title));
+                        setTitleDirty(false);
+                        void persist({ title: displayPostTitle(session.title) });
+                        event.currentTarget.blur();
+                      }
+                    }}
+                    style={{ fieldSizing: "content" } as React.CSSProperties}
+                    className="h-11 md:h-10 min-w-0 max-w-[calc(100%_-_1.125rem)] w-auto truncate rounded-sm border-0 bg-transparent px-0 text-xl md:text-2xl font-semibold outline-none transition-colors focus:bg-muted/40 disabled:opacity-60"
+                  />
+                  <Pencil className="size-3 shrink-0 text-muted-foreground/70" aria-hidden />
+                </div>
+              ) : (
+                <h1 className="truncate text-[15px] font-semibold">{te.newPost}</h1>
+              )}
+              <div className="flex flex-wrap items-center justify-between gap-x-2">
+                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-muted-foreground">
+                  <PlatformIcon platform={platform} className="size-3.5" />
+                  <span>{session?.replyTarget ? format(te.replyingTo, { handle: session.replyTarget.authorHandle }) : t.platformLabels[platform]}</span>
+                  <span aria-hidden>·</span>
+                  <span role="status">{localSaveError ? te.saveFailed : localSaving ? te.saving : showSyncRecovery ? te.syncPaused : localPost?.dirty ? te.savedLocally : te.synced}</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  {structured ? <Tooltip label={tc.comments}><Button ref={commentsButtonRef} type="button" variant="ghost" size="icon" className="size-11 md:size-9 gap-1" aria-label={tc.comments} aria-expanded={editorPanel === 'comments' || editorPanel === 'thread'} onClick={showComments}><MessageSquareText className="size-4" aria-hidden /><span className="text-[10px]">{collaboration.data?.threads.filter(thread => !thread.resolved).length || ''}</span></Button></Tooltip> : null}
+                  <Button type="button" variant="ghost" size="sm" className="min-h-11 md:min-h-9"
+                    aria-expanded={isLg ? !chatCollapsed : refineOpen}
+                    onClick={() => {
+                      setEditorPanel(null);
+                      if (isLg) setChatCollapsed(value => !value);
+                      else setRefineOpen(true);
+                    }}>
+                    <Sparkles aria-hidden />{tc.askBrian}
+                  </Button>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger render={<Button ref={actionsButtonRef} type="button" variant="ghost" size="icon" className="size-11 md:size-9" aria-label={tc.postActions} />}><MoreHorizontal className="size-4" aria-hidden /></DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" finalFocus={() => editorPanel ? false : actionsButtonRef.current}>
+                      <DropdownMenuItem className="min-h-11 md:min-h-9" onClick={() => showPanel('details')}><Info aria-hidden />{tc.details}</DropdownMenuItem>
+                      {platform === "linkedin" && structured ? (
+                        <DropdownMenuItem className="min-h-11 md:min-h-9" onClick={() => {
+                          const publishing = workspaceRef.current?.querySelector<HTMLElement>("[data-feed-linkedin-publishing]");
+                          requestAnimationFrame(() => {
+                            publishing?.focus({ preventScroll: true });
+                            publishing?.scrollIntoView({ block: "start" });
+                          });
+                        }}>
+                          <PlatformIcon platform="linkedin" />{linkedinCopy.title}
+                        </DropdownMenuItem>
+                      ) : null}
+                      {structured ? <><DropdownMenuItem className="min-h-11 md:min-h-9" onClick={() => showPanel('learning')}>{tl.title}</DropdownMenuItem></> : null}
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem className="min-h-11 md:min-h-9" disabled={!compositionText} onClick={() => void copyCaption()}><Copy aria-hidden />{copied ? te.copied : te.copyCaption}</DropdownMenuItem>
+                      {structured ? <DropdownMenuItem className="min-h-11 md:min-h-9" disabled={busy || remoteBlocked} onClick={() => void exportArticle()}><FileDown aria-hidden />{tg.exportArticle}</DropdownMenuItem> : null}
+                      <DropdownMenuItem className="min-h-11 md:min-h-9" onClick={railHandleProps.onDoubleClick}>{tc.resetChatWidth}</DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      {status === 'review' ? <DropdownMenuItem variant="destructive" className="min-h-11 md:min-h-9" disabled={busy || remoteBlocked} onClick={() => void act('reject')}><X aria-hidden />{te.reject}</DropdownMenuItem> : null}
+                      <DropdownMenuItem variant="destructive" className="min-h-11 md:min-h-9" disabled={busy || remoteBlocked} onClick={() => void removePost()}><Trash2 aria-hidden />{te.delete}</DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+              </div>
+            </div>
+
+            {localSaveError ? <p role="alert" className="text-sm font-medium text-destructive">{te.localSaveFailed}</p> : null}
+            {showSyncRecovery && !localSaveError ? (
+              <section aria-label={te.syncPaused} className="border-s-2 border-amber-500/60 ps-3" data-feed-sync-recovery>
                 <div className="flex items-start gap-2.5">
                   <CloudOff className="mt-0.5 size-4 shrink-0 text-amber-700 dark:text-amber-400" aria-hidden />
-                  <div className="min-w-0 flex-1 space-y-3">
+                  <div className="min-w-0 flex-1 space-y-1">
                     <div role="status" className="space-y-1">
-                      <p className="text-sm font-medium text-foreground">{retryingSync ? te.retryingSync : te.syncPaused}</p>
+                      <p className="text-sm font-medium text-foreground">{retryingSync ? te.retryingSync : localSaving ? te.syncPaused : te.savedSyncPaused}</p>
                       <p className="text-xs leading-relaxed text-muted-foreground">{syncRecoveryReason}</p>
                     </div>
                     {workspace.canDraft ? (
-                      <div className="flex flex-col gap-2 @md/feed-editor:flex-row @md/feed-editor:flex-wrap">
-                        {!readOnly ? <Button type="button" size="sm" disabled={offline || localSaving > 0} onClick={() => void retrySync()} className="min-h-[44px] md:min-h-9 gap-2 bg-foreground px-3 text-background !shadow-none [background-image:none] hover:bg-foreground/90">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        {!readOnly ? <Button type="button" size="sm" disabled={offline || localSaving > 0} onClick={() => void retrySync()} className="min-h-11 md:min-h-8 gap-1.5 px-3" variant="secondary">
                           <RotateCw className={cn("size-3.5", retryingSync && "animate-spin")} aria-hidden />
                           {retryingSync ? te.retryingSync : te.retrySync}
                         </Button> : null}
-                        <Button type="button" size="sm" variant="outline" disabled={localSaving > 0} onClick={() => void saveAsNewPost()} className="min-h-[44px] md:min-h-9 gap-2 bg-background/70 px-3 !shadow-none">
-                          <Copy className="size-3.5" aria-hidden />
+                        <Button type="button" size="sm" variant="ghost" disabled={localSaving > 0} onClick={() => void saveAsNewPost()} className="min-h-11 md:min-h-8 px-2 text-muted-foreground underline underline-offset-4">
                           {te.saveAsNewPost}
                         </Button>
                       </div>
@@ -1230,24 +1240,18 @@ function PostPane({
               </section>
             ) : null}
 
-            {platform==='linkedin' && structured && localPost ? <LinkedInPublishing workspaceId={workspaceId} workspaceName={workspace.name} assistantId={assistantId} sessionId={sessionId} revision={localPost.revision} content={localPost.content} ready={status==='ready'} readOnly={readOnly} disabled={Boolean(remoteBlocked)||!workspace.canDraft||busy} onCommand={runCommands} onPreview={setLinkedinPreview} onRefresh={()=>{void collaboration.refresh();void load();}} onPromotion={async url=>{
-              const result=await linkedinRequest<{sessionId:string}>(`${linkedinDraftPath(assistantId,sessionId)}/linkedin-promotion`,{expectedRevision:localPost.revision,sessionId:crypto.randomUUID()});
-              router.push(feedPostPath(workspaceId,'linkedin',result.sessionId));
-            }}/> : null}
-            {structured && localPost ? <FeedSources workspaceId={workspaceId} assistantId={assistantId} sessionId={sessionId} selected={localPost.content.selectedMemoryIds ?? []} disabled={Boolean(remoteBlocked) || readOnly} onCommand={runCommands} /> : null}
             {missingSlots.length ? <div role="status" className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground"><span>{tg.draftSlots}</span>{missingSlots.map((id, index) => <button key={id} className="min-h-8 max-sm:min-h-11 rounded-md px-2 text-xs underline decoration-dotted underline-offset-4 hover:bg-muted" onClick={() => { setViewMode('edit'); requestAnimationFrame(() => { const target = document.querySelector<HTMLElement>(`[data-placeholder-id="${id}"]`); target?.scrollIntoView({ block: 'center' }); target?.querySelector<HTMLInputElement>('input')?.focus(); }); }}>{tg.openSlot} {index + 1}</button>)}</div> : null}
 
-            {error ? (
+            {error && !(showSyncRecovery && error === syncRecoveryReason) ? (
               <div role="alert" className="rounded-xl border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
                 {error}
               </div>
             ) : null}
 
             <div className="relative min-w-0">
-            <div ref={documentRef} className={cn("min-w-0", structured && "md:pr-12")}>
+            <div className={cn("min-w-0", hasCommentMarkers && "md:pr-12")}>
             <section className="min-w-0 space-y-4">
-              {viewMode === "edit" ? (
-                <>
+              <div ref={editDocumentRef} hidden={viewMode !== "edit"} inert={viewMode !== "edit"} className={cn("space-y-4", hasCommentMarkers && "max-md:[&_.ProseMirror]:pr-12")}>
                 {!structured && versions.length > 1 && postFormat !== "thread" ? (
                   <div className="flex flex-wrap items-center gap-1.5">
                     <span className="mr-1 text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
@@ -1288,21 +1292,18 @@ function PostPane({
                     onChange={(next) => { setThreadSegments(next); void persist({ threadSegments: next }); }}
                   />
                 ) : (
-                  <div className="rounded-xl border border-border/60 bg-card p-5 shadow-xs transition focus-within:border-ring [&_:focus-visible]:shadow-none">
-                    <CaptionEditor
-                      value={selected?.text ?? ""}
-                      platform={platform}
-                      readOnly={readOnly}
-                      onChange={(next) => {
-                        setOwnText(next);
-                        setSelectedId("mine");
-                        void persist({ text: next });
-                      }}
-                      onSave={async () => true}
-                      deferSave
-                      saveHint={te.autosaveHint}
-                    />
-                  </div>
+                  <CaptionEditor
+                    value={selected?.text ?? ""}
+                    platform={platform}
+                    readOnly={readOnly}
+                    onChange={(next) => {
+                      setOwnText(next);
+                      setSelectedId("mine");
+                      void persist({ text: next });
+                    }}
+                    onSave={async () => true}
+                    deferSave
+                  />
                 )}
 
                 {postFormat === "thread" ? (
@@ -1336,9 +1337,9 @@ function PostPane({
                     void persist({ media: next });
                   }}
                 /></div> : null}
-                </>
-              ) : (
-                <div className="mx-auto w-full max-w-4xl space-y-3">
+              </div>
+              {viewMode === "preview" && (
+                <div ref={previewDocumentRef} className="mx-auto w-full max-w-4xl space-y-3">
                   <div className="flex items-center justify-between text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
                     <span>{te.previewLabel}</span>
                     <span className="normal-case tracking-normal">
@@ -1347,7 +1348,7 @@ function PostPane({
                         : te.manualDelivery}
                     </span>
                   </div>
-                  {structured && localPost?.content.composition ? <div className="pr-12 md:pr-0"><FeedCompositionPreview composition={localPost.content.composition} workspaceId={workspaceId} /></div> : <PlatformPostPreview
+                  {structured && localPost?.content.composition ? <div className={hasCommentMarkers ? "max-md:pr-12" : undefined}><FeedCompositionPreview composition={localPost.content.composition} workspaceId={workspaceId} /></div> : <PlatformPostPreview
                     platform={platform}
                     postFormat={postFormat}
                     text={selected?.text ?? ""}
@@ -1367,13 +1368,20 @@ function PostPane({
               </div>
             </section>
             </div>
-            {structured ? <FeedDocumentAnnotations documentRef={documentRef} threads={collaboration.data?.threads ?? []} onThread={openThread} /> : null}
+            {structured ? <FeedDocumentAnnotations documentRef={viewMode === "edit" ? editDocumentRef : previewDocumentRef} threads={collaboration.data?.threads ?? []} onThread={openThread} /> : null}
             </div>
+            {platform==='linkedin' && structured && localPost ? <LinkedInPublishing workspaceId={workspaceId} workspaceName={workspace.name} assistantId={assistantId} sessionId={sessionId} revision={localPost.revision} content={localPost.content} ready={status==='ready'} readOnly={readOnly} disabled={Boolean(remoteBlocked)||!workspace.canDraft||busy} onCommand={runCommands} onPreview={setLinkedinPreview} onRefresh={()=>{void collaboration.refresh();void load();}} onPromotion={async url=>{
+              const result=await linkedinRequest<{sessionId:string}>(`${linkedinDraftPath(assistantId,sessionId)}/linkedin-promotion`,{expectedRevision:localPost.revision,sessionId:crypto.randomUUID()});
+              router.push(feedPostPath(workspaceId,'linkedin',result.sessionId));
+            }}/> : null}
           </div>
         </div>
         <FeedEditorPanel open={editorPanel !== null} title={panelMode === 'details' ? tc.details : panelMode === 'review' ? tc.review : panelMode === 'learning' ? tl.title : tc.comments} anchor={panelAnchor} passage={panelMode === 'thread'} onClose={() => setEditorPanel(null)}>
           <div hidden={panelMode !== 'details'} inert={panelMode !== 'details'} className="space-y-5" data-feed-details>
-            <StatusLabel status={status} label={t.posts.status[status]} />
+            <ol aria-label={te.workflow} className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+              {(["drafting", "review", "ready", "posted"] as const).map(stage => <li key={stage} aria-current={stage === status ? "step" : undefined} className="aria-[current=step]:font-semibold aria-[current=step]:text-foreground">{t.posts.status[stage]}</li>)}
+            </ol>
+            {structured && localPost ? <FeedSources workspaceId={workspaceId} assistantId={assistantId} sessionId={sessionId} selected={localPost.content.selectedMemoryIds ?? []} disabled={Boolean(remoteBlocked) || readOnly} onCommand={runCommands} /> : null}
             {privateBrief ? <section className="space-y-2"><h3 className="text-sm font-semibold">{te.privateBriefBadge}</h3><p className="text-xs text-muted-foreground">{te.privateBriefNotice}</p><p className="whitespace-pre-wrap text-sm leading-relaxed">{privateBrief}</p></section> : null}
             {!readOnly && platform!=='linkedin' ? <FormatPicker platform={platform} value={postFormat} onChange={next => { setPostFormat(next); void persist({ postFormat: next }); if (next === 'thread' && threadSegments.every(part => !part)) { const parts = [selected?.text ?? '', '']; setThreadSegments(parts); void persist({ threadSegments: parts }); } }} /> : null}
                 {postFormat === "article" && localPost?.content.linkedin?.mode!=='newsletter_edition' ? (
@@ -1413,12 +1421,7 @@ function PostPane({
         </FeedEditorPanel>
       </main>
 
-      {/* The refine chat, hosted ONCE: the resizable rail at `lg+`, and below
-          it a FAB -> bottom sheet (responsive contract M5, the
-          `MobileChatDrawer` shape) instead of a 520-680px block under the
-          whole editor with its composer beneath the keyboard. `keepMounted`
-          keeps a streaming turn alive while the sheet is closed; the `isLg`
-          gate keeps exactly one panel subscribed to the post's session. */}
+      {/* Both hosts retain the post conversation while closed. */}
       {(() => {
         const conversationPanel =
           offline || localPost?.newSession ? (
@@ -1465,21 +1468,7 @@ function PostPane({
             {refinePanel}
           </aside>
         ) : (
-          <div className="lg:hidden" data-post-refine-mobile-host>
-            <button
-              type="button"
-              onClick={() => { setEditorPanel(null); setRefineOpen(true); }}
-              aria-label={te.refineOpenAria}
-              aria-expanded={refineOpen}
-              className={cn(
-                "fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] right-4 z-30",
-                "inline-flex h-14 w-14 items-center justify-center rounded-full bg-action text-action-foreground shadow-lg",
-                "transition-[opacity,transform] duration-150 ease-out",
-                refineOpen ? "pointer-events-none scale-90 opacity-0" : "scale-100 opacity-100",
-              )}
-            >
-              <MessageSquareText className="size-5" aria-hidden />
-            </button>
+          <div className="contents lg:hidden" data-post-refine-mobile-host>
             <PlanMobileSheet
               open={refineOpen}
               keepMounted

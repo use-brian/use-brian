@@ -2,7 +2,8 @@
 
 /** Shared person avatar with the app's profile-photo and initials fallback. */
 
-import { useState } from "react";
+import { AvatarImage } from "./AvatarImage.js";
+
 function getInitials(nameOrEmail: string): string {
   if (!nameOrEmail) return "?";
   const source = nameOrEmail.includes("@") ? nameOrEmail.split("@")[0].replace(/[._-]+/g, " ") : nameOrEmail;
@@ -24,36 +25,38 @@ export function UserAvatar({
   size?: number;
   className?: string;
 }) {
-  const [failed, setFailed] = useState(false);
   const initials = getInitials(name || email || "?");
   const label = name || email || undefined;
 
   const dimension = { width: size, height: size };
 
-  if (avatarUrl && !failed) {
-    return (
-      <img
+  return avatarUrl
+    ? (
+      <AvatarImage
+        key={avatarUrl}
         src={avatarUrl}
         alt={label}
         width={size}
         height={size}
         style={dimension}
-        onError={() => setFailed(true)}
         className={cn("rounded-full object-cover shrink-0", className)}
+        fallback={renderInitials}
       />
+    )
+    : renderInitials();
+
+  function renderInitials() {
+    return (
+      <div
+        style={{ ...dimension, fontSize: Math.max(10, Math.round(size * 0.42)) }}
+        aria-hidden
+        className={cn(
+          "rounded-full bg-primary text-primary-foreground flex items-center justify-center font-bold shrink-0",
+          className,
+        )}
+      >
+        {initials}
+      </div>
     );
   }
-
-  return (
-    <div
-      style={{ ...dimension, fontSize: Math.max(10, Math.round(size * 0.42)) }}
-      aria-hidden
-      className={cn(
-        "rounded-full bg-primary text-primary-foreground flex items-center justify-center font-bold shrink-0",
-        className,
-      )}
-    >
-      {initials}
-    </div>
-  );
 }

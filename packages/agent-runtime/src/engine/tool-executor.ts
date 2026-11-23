@@ -752,8 +752,11 @@ export function createToolExecutor(options: ToolExecutorOptions) {
     // here would turn a slow send into a duplicate send).
     const toolTimeout = toolDef.timeoutMs ?? 30_000
     const timeoutController = new AbortController()
-    const timer = Number.isFinite(toolTimeout) && toolTimeout > 0
-      ? setTimeout(() => timeoutController.abort(), Math.min(toolTimeout, MAX_TIMER_MS))
+    const timeoutMs = Math.min(toolTimeout, MAX_TIMER_MS)
+    let deadline = performance.now() + timeoutMs
+    const abortTool = () => timeoutController.abort()
+    let timer = Number.isFinite(toolTimeout) && toolTimeout > 0
+      ? setTimeout(abortTool, timeoutMs)
       : undefined
 
     // Merge abort signals: parent context + sibling abort + per-tool timeout
@@ -900,6 +903,13 @@ export function createToolExecutor(options: ToolExecutorOptions) {
       // real work runs. Same prompt-parallel / execute-serial ordering the
       // executor's own confirmation gate above already has.
       const parkForConfirmation = async <T>(wait: () => Promise<T>): Promise<T> => {
+        // Only active execution spends the tool budget. Human decisions
+        // have their own deadline, including when a gateway raises the card.
+        const remainingMs = deadline - performance.now()
+        if (timer) {
+          clearTimeout(timer)
+          if (remainingMs <= 0) abortTool()
+        }
         t.status = 'pending_confirmation'
         wake()
         tryStartQueued()
@@ -916,6 +926,10 @@ export function createToolExecutor(options: ToolExecutorOptions) {
             }
           }
           t.status = 'executing'
+          if (timer && !mergedSignal.aborted) {
+            deadline = performance.now() + remainingMs
+            timer = setTimeout(abortTool, remainingMs)
+          }
           wake()
         }
       }

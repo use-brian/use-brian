@@ -802,8 +802,7 @@ describe("[COMP:app-web/feed-sdk] feed SDK", () => {
         platform: "threads",
         platformHandle: "acme",
         enabled: true,
-        autoReplyMode: "draft-only",
-        replyPolicy: { whitelistHandles: ["bob"], blockedTopics: [] },
+        replyPolicy: { topic_blocklist: [] },
       },
     ];
     authFetch.mockResolvedValueOnce(jsonResponse({ profiles }));
@@ -823,8 +822,7 @@ describe("[COMP:app-web/feed-sdk] feed SDK", () => {
 
   it("policy update: PATCHes mode + replyPolicy verbatim; failure surfaces the server error", async () => {
     const body = {
-      autoReplyMode: "auto-whitelisted" as const,
-      replyPolicy: { whitelistHandles: ["bob"], blockedTopics: ["pricing"] },
+      replyPolicy: { topic_blocklist: ["pricing"] },
     };
     authFetch.mockResolvedValueOnce(jsonResponse({ profile: {} }));
     await expect(

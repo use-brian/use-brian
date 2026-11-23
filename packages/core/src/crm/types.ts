@@ -17,6 +17,7 @@ import type { CrmAmount, DealStage, CrmExternalRef, CrmCustomFieldType, CrmCusto
  */
 
 import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import type { ResourceScope } from '@use-brian/agent-runtime/security/derived-scope.js'
 import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.js'
 import type { StableExternalIdentity } from '../decision-learning/types.js'
 
@@ -189,6 +190,9 @@ export type DealUpdateFields = {
 
 // ── Store ──────────────────────────────────────────────────────────
 
+/** Episode audience captured by the extraction producer before it writes CRM. */
+export type CrmEpisodeScope = ResourceScope & { scopeVersion?: string }
+
 export type CrmStore = {
   // Companies
   createCompany(params: {
@@ -209,6 +213,7 @@ export type CrmStore = {
     source?: 'user' | 'extracted'
     /** Extraction provenance anchor — the Episode this row derives from (Pipeline B / compose / synthesis). */
     sourceEpisodeId?: string | null
+    sourceEpisodeScope?: CrmEpisodeScope
     /** Interactive-write provenance anchor (mig 316) — the creating conversation's session (chat saves). */
     sourceSessionId?: string | null
     /** The assistant that mediated the write. */
@@ -263,6 +268,7 @@ export type CrmStore = {
     source?: 'user' | 'extracted'
     /** Extraction provenance anchor — the Episode this row derives from (Pipeline B / compose / synthesis). */
     sourceEpisodeId?: string | null
+    sourceEpisodeScope?: CrmEpisodeScope
     /** Interactive-write provenance anchor (mig 316) — the creating conversation's session (chat saves). */
     sourceSessionId?: string | null
     /** The assistant that mediated the write. */

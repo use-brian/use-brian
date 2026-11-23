@@ -46,7 +46,7 @@ const saveCharterSchema = z.object({
     .min(1)
     .max(CHARTER_FIELD_LIMITS.success)
     .describe(
-      "What a good result looks like - the owner's criteria and/or example. This becomes the rubric the weekly reflection grades the assistant's work against.",
+      "The owner's criteria or examples for a good result. These guide the assistant during its work.",
     ),
   audience: z
     .string()

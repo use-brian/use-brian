@@ -17,7 +17,7 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
  * [COMP:app-web/knowledge-tab]
  */
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { authFetch } from "@/lib/auth-fetch";
 import { SensitivityBadge, type Sensitivity } from "@/components/sensitivity-badge";
 import { Skeleton } from "@/components/skeleton";
@@ -31,6 +31,7 @@ const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 type KnowledgeEntry = {
   id: string;
   path: string;
+  sourceId?: string | null;
   title: string;
   summary: string | null;
   tags: string[];
@@ -126,10 +127,12 @@ export function KnowledgeTab({
     [tabKey],
   );
   const [currentPath, setCurrentPath] = useState("");
+  const [currentSourceId, setCurrentSourceId] = useState<string | null>();
   const [searchQuery, setSearchQuery] = useState("");
   const [searching, setSearching] = useState(false);
   const [expandedEntryId, setExpandedEntryId] = useState<string | null>(null);
   const [expandedContent, setExpandedContent] = useState<string | null>(null);
+  const entriesRequest = useRef(0);
 
   // Per-source sync state — viewer-only; source CRUD lives at /studio/knowledge.
   const [syncingId, setSyncingId] = useState<string | null>(null);
@@ -178,14 +181,18 @@ export function KnowledgeTab({
   const fetchSources = root.refresh;
 
   const fetchEntries = useCallback(
-    async (path = "") => {
+    async (path = "", sourceId?: string | null) => {
+      const requestId = ++entriesRequest.current;
+      setSearching(false);
       try {
+        const query = new URLSearchParams({ path });
+        if (sourceId !== undefined) query.set("sourceId", sourceId ?? "manual");
         const res = await authFetch(
-          `${API_URL}/api/assistants/${assistantId}/knowledge/entries?path=${encodeURIComponent(path)}`
+          `${API_URL}/api/assistants/${assistantId}/knowledge/entries?${query}`
         );
         if (res.ok) {
           const data = await res.json();
-          setEntries(data.entries ?? []);
+          if (requestId === entriesRequest.current) setEntries(data.entries ?? []);
         }
       } catch {
         // ignore
@@ -196,31 +203,35 @@ export function KnowledgeTab({
 
   async function handleSearch() {
     if (!searchQuery.trim()) {
-      fetchEntries(currentPath);
+      fetchEntries(currentPath, currentSourceId);
       return;
     }
+    const requestId = ++entriesRequest.current;
     setSearching(true);
     try {
+      const query = new URLSearchParams({ q: searchQuery });
+      if (currentSourceId !== undefined) query.set("sourceId", currentSourceId ?? "manual");
       const res = await authFetch(
-        `${API_URL}/api/assistants/${assistantId}/knowledge/entries?q=${encodeURIComponent(searchQuery)}`
+        `${API_URL}/api/assistants/${assistantId}/knowledge/entries?${query}`
       );
       if (res.ok) {
         const data = await res.json();
-        setEntries(data.entries ?? []);
+        if (requestId === entriesRequest.current) setEntries(data.entries ?? []);
       }
     } catch {
       // ignore
     } finally {
-      setSearching(false);
+      if (requestId === entriesRequest.current) setSearching(false);
     }
   }
 
-  async function handleBrowse(path: string) {
+  async function handleBrowse(path: string, sourceId?: string | null) {
     setCurrentPath(path);
+    setCurrentSourceId(sourceId);
     setSearchQuery("");
     setExpandedEntryId(null);
     setExpandedContent(null);
-    await fetchEntries(path);
+    await fetchEntries(path, sourceId);
   }
 
   async function handleReadEntry(entryId: string) {
@@ -244,6 +255,7 @@ export function KnowledgeTab({
   }
 
   async function handleSync(sourceId: string) {
+    const requestId = entriesRequest.current;
     setSyncingId(sourceId);
     try {
       await authFetch(
@@ -253,7 +265,9 @@ export function KnowledgeTab({
       // Refresh after a brief delay to allow sync to process
       setTimeout(() => {
         void fetchSources();
-        void fetchEntries(currentPath);
+        if (requestId === entriesRequest.current && !searchQuery.trim()) {
+          void fetchEntries(currentPath, currentSourceId);
+        }
         setSyncingId(null);
       }, 2000);
     } catch {
@@ -274,6 +288,17 @@ export function KnowledgeTab({
     label: part,
     path: pathParts.slice(0, i + 1).join("/"),
   }));
+  const manualLabel = t.studioPage.knowledgePage.manualTitle;
+  function sourceLabel(sourceId: string | null | undefined) {
+    if (sourceId === null) return manualLabel;
+    return sources.find((source) => source.id === sourceId)?.repo ?? sourceId;
+  }
+  const pathCounts = new Map<string, number>();
+  for (const entry of entries) pathCounts.set(entry.path, (pathCounts.get(entry.path) ?? 0) + 1);
+  const hasDuplicatePath = (entry: KnowledgeEntry) => (pathCounts.get(entry.path) ?? 0) > 1;
+  function duplicateSourceLabel(entry: KnowledgeEntry) {
+    return hasDuplicatePath(entry) ? sourceLabel(entry.sourceId) : undefined;
+  }
 
   return (
     <div className="space-y-6">
@@ -313,7 +338,7 @@ export function KnowledgeTab({
               sources.map((s) => (
                 <div
                   key={s.id}
-                  className="flex items-start justify-between gap-3"
+                  className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"
                 >
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
@@ -346,7 +371,7 @@ export function KnowledgeTab({
                       </div>
                     )}
                   </div>
-                  <div className="flex items-center gap-3 shrink-0">
+                  <div className="flex flex-wrap items-center gap-3 shrink-0">
                     <div
                       className="flex items-center gap-2"
                       title={t.workspace.brain.enabledHelp}
@@ -371,7 +396,7 @@ export function KnowledgeTab({
                     <button
                       onClick={() => handleSync(s.id)}
                       disabled={syncingId === s.id}
-                      className="inline-flex h-9 items-center text-[12px] font-medium border border-border px-2.5 rounded-lg text-muted-foreground hover:bg-muted transition-colors disabled:opacity-50 shrink-0 sm:h-7"
+                      className="inline-flex h-11 items-center text-[12px] font-medium border border-border px-2.5 rounded-lg text-muted-foreground hover:bg-muted transition-colors disabled:opacity-50 shrink-0 sm:h-7"
                     >
                       {syncingId === s.id ? t.workspace.brain.syncNow + "…" : t.workspace.brain.syncNow}
                     </button>
@@ -400,12 +425,12 @@ export function KnowledgeTab({
                 onChange={(e) => setSearchQuery(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && handleSearch()}
                 placeholder={t.workspace.brain.searchPlaceholder}
-                className="flex-1 text-[16px] md:text-sm bg-muted/50 border border-border rounded-lg px-3 py-2"
+                className="min-w-0 flex-1 text-[16px] md:text-sm bg-muted/50 border border-border rounded-lg px-3 py-2"
               />
               <button
                 onClick={handleSearch}
                 disabled={searching}
-                className="text-sm font-medium bg-muted hover:bg-muted/80 px-3 py-2 rounded-lg transition-colors disabled:opacity-50"
+                className="min-h-11 text-sm font-medium bg-muted hover:bg-muted/80 px-3 py-2 rounded-lg transition-colors disabled:opacity-50 md:min-h-0"
               >
                 {searching ? "..." : t.workspace.brain.search}
               </button>
@@ -413,7 +438,7 @@ export function KnowledgeTab({
                 <button
                   onClick={() => {
                     setSearchQuery("");
-                    fetchEntries(currentPath);
+                    fetchEntries(currentPath, currentSourceId);
                   }}
                   className="text-sm text-muted-foreground hover:text-foreground"
                 >
@@ -423,7 +448,7 @@ export function KnowledgeTab({
             </div>
 
             {/* Breadcrumb navigation */}
-            <div className="flex items-center gap-1 text-[12px] text-muted-foreground">
+            <div className="flex flex-wrap items-center gap-1 text-[12px] text-muted-foreground">
               <button
                 onClick={() => handleBrowse("")}
                 className={`hover:text-foreground transition-colors ${
@@ -436,7 +461,7 @@ export function KnowledgeTab({
                 <span key={b.path} className="flex items-center gap-1">
                   <span>/</span>
                   <button
-                    onClick={() => handleBrowse(b.path)}
+                    onClick={() => handleBrowse(b.path, currentSourceId)}
                     className={`hover:text-foreground transition-colors ${
                       i === breadcrumbs.length - 1
                         ? "text-foreground font-medium"
@@ -448,6 +473,9 @@ export function KnowledgeTab({
                 </span>
               ))}
             </div>
+            {currentSourceId !== undefined && (
+              <p className="break-all text-[12px] text-muted-foreground">{sourceLabel(currentSourceId)}</p>
+            )}
 
             {/* Entry list */}
             {entries.length === 0 ? (
@@ -470,7 +498,7 @@ export function KnowledgeTab({
                       {folders.map((entry) => (
                         <button
                           key={entry.id}
-                          onClick={() => handleBrowse(entry.path)}
+                          onClick={() => handleBrowse(entry.path, hasDuplicatePath(entry) ? entry.sourceId : currentSourceId)}
                           className="w-full flex items-center gap-3 py-2.5 px-3 rounded-lg hover:bg-interaction/5 border border-transparent hover:border-interaction/15 transition-all text-left group"
                         >
                           <div className="w-7 h-7 rounded-lg bg-primary/10 flex items-center justify-center text-primary shrink-0">
@@ -478,6 +506,7 @@ export function KnowledgeTab({
                           </div>
                           <div className="flex-1 min-w-0">
                             <div className="text-[13px] font-medium group-hover:text-foreground transition-colors">{entry.title}</div>
+                            {duplicateSourceLabel(entry) && <div className="break-all text-[11px] text-muted-foreground">{duplicateSourceLabel(entry)}</div>}
                             {entry.summary && <div className="text-[11px] text-muted-foreground truncate">{entry.summary}</div>}
                           </div>
                           {entry.tags.length > 0 && (
@@ -501,6 +530,7 @@ export function KnowledgeTab({
                   {/* Files */}
                   {files.map((entry) => {
                     const isExpanded = expandedEntryId === entry.id;
+                    const label = duplicateSourceLabel(entry);
                     return (
                       <div key={entry.id}>
                         <div className="flex items-center gap-3 py-2 px-3 rounded-lg hover:bg-muted/30 transition-colors">
@@ -508,7 +538,10 @@ export function KnowledgeTab({
                             <FileIcon />
                           </div>
                           <div className="flex-1 min-w-0">
-                            <button onClick={() => handleReadEntry(entry.id)} className="text-[13px] font-medium hover:underline text-left truncate block w-full">{entry.title}</button>
+                            <button onClick={() => handleReadEntry(entry.id)} className="min-h-11 text-[13px] font-medium hover:underline text-left block w-full md:min-h-0">
+                              <span className="block truncate">{entry.title}</span>
+                              {label && <span className="block break-all text-[11px] font-normal text-muted-foreground">{label}</span>}
+                            </button>
                             {entry.summary && <div className="text-[11px] text-muted-foreground truncate">{entry.summary}</div>}
                           </div>
                           {searchQuery && <span className="text-[10px] text-muted-foreground bg-muted px-1.5 py-0.5 rounded font-mono shrink-0">{entry.path}</span>}

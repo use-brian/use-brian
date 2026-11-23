@@ -45,21 +45,24 @@ beforeEach(() => vi.clearAllMocks())
 
 type Captured = { config: Record<string, unknown>; sends: Message[][] }
 /** Real provider boundary: records exactly what a session is constructed and sent with. */
-function capturingProvider(script: 'text' | 'tool' = 'text', toolName = 'readThing') {
+function capturingProvider(script: 'text' | 'tool' | readonly string[] = 'text', toolName = 'readThing',
+  toolStopReason: 'tool_use' | 'end_turn' = 'tool_use') {
   const captured: Captured[] = []
+  let calls = 0
   const provider: LLMProvider = { name: 'fixture-run-provider', models: [], stream() { throw new Error('Unexpected stateless dispatch') },
     createSession(config) {
       const entry: Captured = { config: config as unknown as Record<string, unknown>, sends: [] }; captured.push(entry)
-      let calls = 0
       return { send(messages) {
         entry.sends.push(messages); const call = calls++
         return (async function* () {
           yield { type: 'message_start' as const, model: 'fixture' }
-          if (script === 'tool' && call === 0) {
-            yield { type: 'tool_use_start' as const, id: 'fixture-call', name: toolName }
-            yield { type: 'tool_use_delta' as const, id: 'fixture-call', input: '{}' }
-            yield { type: 'tool_use_end' as const, id: 'fixture-call' }
-            yield { type: 'message_end' as const, stopReason: 'tool_use' as const, usage: { inputTokens: 1, outputTokens: 1 } }
+          const name = Array.isArray(script) ? script[call] : script === 'tool' && call === 0 ? toolName : undefined
+          if (name) {
+            const id = call ? `fixture-call-${call}` : 'fixture-call'
+            yield { type: 'tool_use_start' as const, id, name }
+            yield { type: 'tool_use_delta' as const, id, input: '{}' }
+            yield { type: 'tool_use_end' as const, id }
+            yield { type: 'message_end' as const, stopReason: toolStopReason, usage: { inputTokens: 1, outputTokens: 1 } }
           } else {
             yield { type: 'text_delta' as const, text: 'Fictional prepared answer.' }
             yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } }
@@ -142,6 +145,165 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
     expect(last.role).toBe('user')
     expect(last.content).toEqual([{ type: 'text', text: expect.stringContaining('<user_visible_context>') }, { type: 'text', text: 'Give a concise answer.' }])
     expect(JSON.stringify([session.config, session.sends]).split('<user_visible_context>').length - 1).toBe(1)
+  })
+
+  it.each(['web', 'channel'] as const)('answers a self-contained %s turn on the initial main-model dispatch', async lane => {
+    const f = await fixture({ lane })
+    const brief = briefResolver()
+    configureBriefTurnContext(brief)
+    const discover = vi.fn(async () => { throw new Error('Unexpected discovery') })
+    const messages: Message[] = [{ role: 'user', content: 'What is two plus two?' }]
+    await f.owner.prepareRun({ systemPrompt: 'Initial', messages, candidateTools: new Map(), contextDiscovery: discover })
+    const result = await f.owner.run({ loop: owned(f.context), sink: { kind: 'adapter' } })
+    expect(result.finalText).toBe('Fictional prepared answer.')
+    expect(f.captured).toHaveLength(1)
+    expect(sent(f.captured[0])).toEqual(messages)
+    expect(toolNames(f.captured[0])).toEqual(['requestConversationContext'])
+    expect(discover).not.toHaveBeenCalled()
+    expect(brief).not.toHaveBeenCalled()
+  })
+
+  it.each(['tool_use', 'end_turn'] as const)('continues a completed discovery call with its receipt, model settings and scoped history after %s', async stopReason => {
+    const scripted = capturingProvider('tool', 'requestConversationContext', stopReason)
+    const f = await fixture({ provider: scripted.provider, custom: true })
+    const initial: Message = { role: 'user', content: 'Continue that work.' }
+    const previous = bindScopeSources<Message>({ role: 'user', content: 'Earlier fixture work' }, [source('earlier')])
+    const brief = briefResolver()
+    configureBriefTurnContext(brief)
+    const discover = vi.fn(async () => {
+      expect(scripted.captured).toHaveLength(1)
+      expect(sent(scripted.captured[0])).toEqual([initial])
+      expect(brief).not.toHaveBeenCalled()
+      const tools = f.owner.prepareTools(new Map([['readThing', readTool()]]))
+      return { systemPrompt: 'Expanded', messages: [previous, initial], candidateTools: tools,
+        trustedContributions: [{ name: 'facts', content: 'Private permitted context' }] }
+    })
+    const view = await f.owner.prepareRun({ systemPrompt: 'Initial', messages: [initial], candidateTools: new Map(), contextDiscovery: discover })
+    const result = await f.owner.run({ loop: owned(f.context), sink: { kind: 'adapter' } })
+    expect(result.finalText).toBe('Fictional prepared answer.')
+    expect(discover).toHaveBeenCalledOnce()
+    expect(scripted.captured).toHaveLength(2)
+    const continuation = scripted.captured[1]
+    expect(toolNames(continuation)).toEqual(['readThing'])
+    expect(continuation.config).toMatchObject({ model: scripted.captured[0].config.model, maxTokens: 2_048, inputTokenLimit: 16_000, runtimeSystemContext: expect.stringContaining('Private permitted context') })
+    expect(sent(continuation)).toMatchObject([previous, initial,
+      { role: 'assistant', content: [{ type: 'tool_use', name: 'requestConversationContext', id: 'fixture-call' }] },
+      { role: 'user', content: [{ type: 'tool_result', toolUseId: 'fixture-call', name: 'requestConversationContext' }] }])
+    expect(boundScopeSources(sent(continuation)[0])).toEqual([source('earlier')])
+    expect(view.grounding.runtimeContext).toContain('Private permitted context')
+    expect(f.owner.usage?.totalUsage).toMatchObject({ inputTokens: 2, outputTokens: 2 })
+  })
+
+  it('keeps worker readers available for delegation while the coordinator sees only its narrowed tools', async () => {
+    const scripted = capturingProvider(['requestConversationContext', 'delegateRead'])
+    const f = await fixture({ provider: scripted.provider })
+    const workerReader = readTool('workerRead')
+    const seen = vi.fn()
+    const delegate = buildTool({ name: 'delegateRead', description: 'Inspect the worker roster', inputSchema: z.object({}), isReadOnly: true,
+      async execute(_input, context) {
+        seen([...context.requestTools!.keys()])
+        return { data: 'Read delegated' }
+      } })
+    const messages: Message[] = [{ role: 'user', content: 'Research this.' }]
+    await f.owner.prepareRun({ systemPrompt: 'Initial', messages, candidateTools: new Map(), contextDiscovery: async () => ({
+      systemPrompt: 'Coordinate', messages, candidateTools: new Map([[delegate.name, delegate]]),
+      context: { requestTools: new Map([[workerReader.name, workerReader], ['writeThing', writeTool()]]) },
+    }) })
+    await f.owner.run({ loop: owned(f.context), sink: { kind: 'adapter' } })
+    expect(toolNames(scripted.captured[1])).toEqual(['delegateRead'])
+    expect(seen).toHaveBeenCalledExactlyOnceWith(['workerRead'])
+  })
+
+  it('preserves the previous error receipt if the model requests context on a later round', async () => {
+    const scripted = capturingProvider(['missingFixtureTool', 'requestConversationContext'])
+    const f = await fixture({ provider: scripted.provider })
+    const messages: Message[] = [{ role: 'user', content: 'Continue earlier work.' }]
+    await f.owner.prepareRun({ systemPrompt: 'Initial', messages, candidateTools: new Map(), contextDiscovery: async () => ({
+      systemPrompt: 'Expanded', messages, candidateTools: new Map(),
+    }) })
+    await f.owner.run({ loop: owned(f.context), sink: { kind: 'adapter' } })
+    expect(scripted.captured).toHaveLength(2)
+    const continued = sent(scripted.captured[1])
+    expect(continued).toMatchObject([messages[0],
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'fixture-call' }] },
+      { role: 'user', content: [{ type: 'tool_result', toolUseId: 'fixture-call', isError: true }] },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'fixture-call-1' }] },
+      { role: 'user', content: [{ type: 'tool_result', toolUseId: 'fixture-call-1' }] }])
+  })
+
+  it('defers non-native PDF bytes until discovery and keeps the attachment source at both provider boundaries', async () => {
+    const scripted = capturingProvider('tool', 'requestConversationContext')
+    const f = await fixture({ provider: scripted.provider, custom: true })
+    const file = bindScopeSources({ type: 'image' as const, mimeType: 'application/pdf', data: 'ZmFrZSBwZGY=' }, [source('file')])
+    const messages: Message[] = [{ role: 'user', content: [{ type: 'text', text: 'Read this PDF.' }, file] }]
+    await f.owner.prepareRun({ systemPrompt: 'Initial', messages, candidateTools: new Map(), contextDiscovery: async () => ({
+      systemPrompt: 'Expanded', messages, candidateTools: new Map(),
+    }) })
+    await f.owner.run({ loop: owned(f.context), sink: { kind: 'adapter' } })
+    const first = sent(scripted.captured[0])[0].content
+    const second = sent(scripted.captured[1])[0].content
+    expect(first).toMatchObject([{ type: 'text', text: 'Read this PDF.' }, { type: 'text', text: expect.stringContaining('PDF attachment') }])
+    expect(JSON.stringify(first)).not.toContain(file.data)
+    expect(second).toMatchObject([{ type: 'text' }, file])
+    for (const blocks of [first, second]) {
+      expect(Array.isArray(blocks) && boundScopeSources(blocks[1])).toEqual([source('file')])
+    }
+  })
+
+  it('settles adaptive model spending under each provider round and charges the completion once', async () => {
+    const scripted = capturingProvider('tool', 'requestConversationContext')
+    const f = await fixture({ provider: scripted.provider })
+    const messages: Message[] = [{ role: 'user', content: 'Examine the earlier results in detail.' }]
+    await f.owner.prepareRun({ systemPrompt: 'Initial', messages, candidateTools: new Map(), contextDiscovery: async () => ({
+      systemPrompt: 'Expanded', messages, candidateTools: new Map(),
+      mainModel: { kind: 'web', plan: 'max_5x', budgetStatus: 'ok', researchMode: true, metered: null, hasImage: false },
+    }) })
+    const recordUsage = vi.fn(async () => {}), afterSettlement = vi.fn(async () => {})
+    f.owner.registerUsageBilling({ metadata: { userId: identity.user, assistantId: identity.assistant, sessionId: identity.session,
+      modelTier: 'pro', source: 'included', providerKeySource: 'platform' }, costPolicy: 'calculate', recordUsage, afterSettlement })
+    await f.owner.run({ loop: owned(f.context), sink: { kind: 'adapter' } })
+    await f.owner.settleUsage()
+    expect(recordUsage).toHaveBeenCalledTimes(2)
+    expect(recordUsage).toHaveBeenNthCalledWith(1, expect.objectContaining({ inputTokens: 1, outputTokens: 1, modelTier: 'pro' }))
+    expect(recordUsage).toHaveBeenNthCalledWith(2, expect.objectContaining({ inputTokens: 1, outputTokens: 1 }))
+    expect(afterSettlement).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ inputTokens: 2, outputTokens: 2 }))
+  })
+
+  it('withholds discovered material when authority is withdrawn before the next physical dispatch', async () => {
+    const scripted = capturingProvider('tool', 'requestConversationContext')
+    let revoked = false
+    const f = await fixture({ provider: scripted.provider, assertCurrent: async () => {
+      if (revoked) throw Object.assign(new Error('Revoked'), { reason: 'authority_changed', retrySafe: false })
+    } })
+    const messages: Message[] = [{ role: 'user', content: 'Continue.' }]
+    await f.owner.prepareRun({ systemPrompt: 'Initial', messages, candidateTools: new Map(),
+      contextDiscovery: async () => {
+        revoked = true
+        return { systemPrompt: 'Private discovered material', messages, candidateTools: new Map() }
+      } })
+    await expect(f.owner.run({ loop: owned(f.context), sink: { kind: 'adapter' } })).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(scripted.captured).toHaveLength(1)
+    expect(JSON.stringify(scripted.captured)).not.toContain('Private discovered material')
+  })
+
+  it('honors Stop during requested discovery before any enriched provider dispatch', async () => {
+    const scripted = capturingProvider('tool', 'requestConversationContext')
+    const f = await fixture({ provider: scripted.provider })
+    const entered = deferred(), gate = deferred()
+    await f.owner.prepareRun({ systemPrompt: 'Initial', messages: [{ role: 'user', content: 'Continue.' }], candidateTools: new Map(),
+      contextDiscovery: async signal => {
+        entered.resolve()
+        await gate.promise
+        signal.throwIfAborted()
+        return { systemPrompt: 'Expanded', messages: [], candidateTools: new Map() }
+      } })
+    const outcome = f.owner.run({ loop: owned(f.context), sink: { kind: 'adapter' } }).catch(error => error)
+    await entered.promise
+    abortLocalTurn(identity.session, 'run-token')
+    gate.resolve()
+    await outcome
+    expect(f.owner.abortKind).toBe('stop')
+    expect(scripted.captured).toHaveLength(1)
   })
 
   it('captures every supplied value and implementation before admission and Brief awaits', async () => {

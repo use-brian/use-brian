@@ -313,6 +313,8 @@ describe('[COMP:api/codex-provider] OSS Codex provider manager', () => {
         catalogModel('gpt-6-sol'),
         catalogModel('gpt-6.1-sol'),
         catalogModel('gpt-6-astra'),
+        catalogModel('gpt-6.2-sol'),
+        catalogModel('gpt-6.2-astra'),
         { ...catalogModel('gpt-5.5'), hidden: true },
         catalogModel('future-unreviewed-model'),
       ],
@@ -325,7 +327,7 @@ describe('[COMP:api/codex-provider] OSS Codex provider manager', () => {
     expect(availability.isModelAvailable('openai-codex', 'future-unreviewed-model')).toBe(false)
     expect(manager.provider.models).toContain('gpt-5.6-sol')
     expect(inference.outbound).toEqual([])
-    for (const model of ['gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6-astra']) {
+    for (const model of ['gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6-astra', 'gpt-6.2-sol', 'gpt-6.2-astra']) {
       expect(availability.isModelAvailable('openai-codex', model)).toBe(true)
     }
     expect(availability.isModelAvailable('openai-codex', 'gpt-5.5')).toBe(false)

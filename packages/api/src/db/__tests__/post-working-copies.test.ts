@@ -6,8 +6,10 @@ const input: WorkingCopyInput = { revision: 0, mutationId: 'mutation-1', create:
   content: { title: 'Launch notes', privateBrief: 'A private thought', text: 'Unfinished', postFormat: 'post', threadSegments: ['', ''], article: { sourceUrl: '', title: '', description: '' }, media: [] } }
 let previous: unknown
 let created: boolean
+let sessionTitle: string
 beforeEach(() => {
   vi.clearAllMocks(); previous = undefined; created = true
+  sessionTitle = '[threads] Launch notes'
   db.query.mockImplementation(async (sql: string) => {
     // Creation admission by anchor (L12) reads the assistant; no policy row = legacy.
     if (sql.includes('FROM assistants WHERE id=$1 FOR SHARE')) return { rows: [{ workspaceId: 'ws-1', clearance: 'internal' }] }
@@ -15,7 +17,7 @@ beforeEach(() => {
     if (sql.includes('SELECT feed_draft_audience_allowed')) return { rows: [{ allowed: true }] }
     if (sql.startsWith('INSERT INTO public.session_messages')) return { rows: [], rowCount: 1 }
     if (sql.startsWith('INSERT INTO sessions')) return { rows: created ? [{ id: 'session-1' }] : [] }
-    if (sql.includes('FOR UPDATE')) return { rows: [{ userId: 'user-1', title: '[threads] Launch notes' }] }
+    if (sql.includes('FOR UPDATE')) return { rows: [{ userId: 'user-1', title: sessionTitle }] }
     if (sql.includes('SELECT revision')) return { rows: previous ? [previous] : [] }
     return { rows: [] }
   })
@@ -52,6 +54,24 @@ describe('[COMP:feed/post-working-copies] transactional persistence', () => {
     await expect(postWorkingCopiesStore.put('assistant-1', 'session-1', 'user-1', {
       ...edit, baseTitle: '[threads] Earlier title',
     })).rejects.toMatchObject({ status: 409 })
+  })
+  it('accepts the first authored title when the session still displays the untitled placeholder', async () => {
+    sessionTitle = '[threads] New draft'
+    previous = { revision: 1, mutationId: 'mutation-1', content: { ...input.content, title: '', text: '' } }
+    const edit = { revision: 1, mutationId: 'mutation-2', content: input.content }
+    expect(await postWorkingCopiesStore.put('assistant-1', 'session-1', 'user-1', edit))
+      .toMatchObject({ revision: 2, content: edit.content })
+    expect(db.query).toHaveBeenCalledWith(expect.stringContaining('UPDATE sessions SET title'), ['session-1', '[threads] Launch notes'])
+  })
+  it('preserves a remote rename when a body edit only changes title whitespace', async () => {
+    const { create: _create, ...edit } = input
+    previous = { ...edit, revision: 1, content: { ...edit.content, title: 'Earlier title' } }
+    await postWorkingCopiesStore.put('assistant-1', 'session-1', 'user-1', {
+      revision: 1, mutationId: 'mutation-2',
+      content: { ...edit.content, title: ' Earlier title ', text: 'Updated body' },
+    })
+    expect(db.query.mock.calls.some(([sql]) => sql.startsWith('UPDATE sessions SET title'))).toBe(false)
+    expect(db.query.mock.calls.at(-1)?.[0]).toBe('COMMIT')
   })
   it('rolls back session creation if the seeded-message write fails', async () => {
     db.query.mockImplementation(async (sql: string) => {

@@ -2365,6 +2365,18 @@ function sourceEnvelope(episode: PipelineBEpisode): PipelineBSourceEnvelope {
   }
 }
 
+function crmEpisodeScope(episode: PipelineBEpisode) {
+  return {
+    workspaceId: episode.workspaceId,
+    userId: episode.userId,
+    assistantId: episode.assistantId,
+    sensitivity: episode.sensitivity,
+    compartments: episode.compartments ?? [],
+    projectIds: episode.projectIds ?? [],
+    scopeVersion: episode.scopeVersion,
+  }
+}
+
 function entityApplicationForExisting(
   envelope: PipelineBSourceEnvelope,
   ex: ExtractedEntity,
@@ -2423,7 +2435,8 @@ async function planEntityApplication(
       episode.workspaceId,
       ex.canonical_id,
     )
-    if (existing[0]) return entityApplicationForExisting(envelope, ex, existing[0])
+    const sameKind = existing.find((entity) => entity.kind === ex.kind)
+    if (sameKind) return entityApplicationForExisting(envelope, ex, sameKind)
   }
   const named = await deps.entities.findByNameSystem(
     actorUserId,
@@ -2540,6 +2553,12 @@ async function processDurableExtractionApplication(input: {
   const drafts: Parameters<typeof freezeExtractionPlan>[0]['candidates'] = []
   const entityKeys = new Map<string, string>()
   const plannedEntities = new Map<string, ExtractedEntity>()
+  const seenEntityNames = new Set<string>()
+  const ambiguousEntityNames = new Set<string>()
+  for (const entity of input.payload.entities) {
+    if (seenEntityNames.has(entity.display_name)) ambiguousEntityNames.add(entity.display_name)
+    seenEntityNames.add(entity.display_name)
+  }
   const classificationAnalytics = createClassificationAnalytics(deps.analytics)
 
   for (const [index, raw] of input.payload.entities.entries()) {
@@ -2583,7 +2602,10 @@ async function processDurableExtractionApplication(input: {
     const validation = sourceEntity && targetEntity
       ? validateEdgeKindTriple(edge.edge_type as EdgeType, sourceEntity.kind, targetEntity.kind)
       : null
-    const terminalReason = !sourceKey || !targetKey
+    const ambiguousReference = ambiguousEntityNames.has(edge.source_ref) || ambiguousEntityNames.has(edge.target_ref)
+    const terminalReason = ambiguousReference
+      ? 'ambiguous_entity_reference'
+      : !sourceKey || !targetKey
       ? 'dangling_entity_reference'
       : validation && !validation.ok
         ? validation.rule_id
@@ -2591,7 +2613,7 @@ async function processDurableExtractionApplication(input: {
     drafts.push({
       key: `edge:${index}`,
       primitiveKind: 'edge',
-      dependencyKeys: sourceKey && targetKey ? [sourceKey, targetKey] : [],
+      dependencyKeys: !ambiguousReference && sourceKey && targetKey ? [sourceKey, targetKey] : [],
       payload: {
         ...envelope,
         command: 'edge',
@@ -3224,16 +3246,12 @@ async function writeEntity(
       ...(matched?.phone ? { phone: matched.phone } : {}),
       source: 'extracted',
       sourceEpisodeId: episode.id,
+      sourceEpisodeScope: crmEpisodeScope(episode),
       createdByAssistantId: episode.createdByAssistantId,
       compartments: episode.compartments,
       projectIds: episode.projectIds,
     })
-    return deps.entities.getById({
-      workspaceId: episode.workspaceId,
-      userId: actorUserId,
-      assistantId: episode.assistantId ?? '',
-      assistantKind: 'primary',
-    }, contact.id)
+    return readCrmEntityForEpisode(deps, episode, actorUserId, contact.entityId ?? contact.id)
   }
 
   // Dedup by canonical_id when present — skip recreating an existing entity.
@@ -3247,7 +3265,11 @@ async function writeEntity(
       episode.workspaceId,
       ex.canonical_id,
     )
-    if (existing.length > 0) {
+    if (ex.kind === 'company') {
+      const companies = existing.filter((entity) => entity.kind === 'company')
+      if (companies.length > 1) return null
+      if (companies[0]) return reuseCompanyForEpisode(ex, companies[0], episode, deps, actorUserId)
+    } else if (existing.length > 0) {
       // First match wins for identity. WU-3.6: when re-extraction
       // surfaces new/changed attributes, bi-temporally supersede the
       // prior row so the audit chain records the update
@@ -3297,6 +3319,7 @@ async function writeEntity(
     { kind: ex.kind },
   )
   if (existingByName) {
+    if (ex.kind === 'company') return reuseCompanyForEpisode(ex, existingByName, episode, deps, actorUserId)
     // Alias learning (alias-path variant) — when findByNameSystem
     // resolved via an alias hit rather than a display_name match, the
     // extracted form is already a registered alias and there's nothing
@@ -3360,6 +3383,7 @@ async function writeEntity(
         && (resolved.tier === 'fuzzy' || resolved.tier === 'llm')) {
         const match = candidates.find((c) => c.id === resolved.entityId)
         if (match) {
+          if (ex.kind === 'company') return reuseCompanyForEpisode(ex, match, episode, deps, actorUserId)
           await learnAlias(deps, actorUserId, match, ex.display_name)
           const merged = mergeAttributes(match.attributes, ex.attributes)
           if (merged === null) return match
@@ -3384,7 +3408,7 @@ async function writeEntity(
     const domain = typeof ex.canonical_id === 'string' && !ex.canonical_id.includes('@')
       ? ex.canonical_id
       : null
-    await deps.crm.createCompany({
+    const company = await deps.crm.createCompany({
       userId: actorUserId,
       workspaceId: episode.workspaceId,
       name: ex.display_name,
@@ -3392,11 +3416,12 @@ async function writeEntity(
       // Extraction provenance — see createContact above.
       source: 'extracted',
       sourceEpisodeId: episode.id,
+      sourceEpisodeScope: crmEpisodeScope(episode),
       createdByAssistantId: episode.createdByAssistantId,
       compartments: episode.compartments,
       projectIds: episode.projectIds,
     })
-    return resolveCrmEntity(deps, actorUserId, episode.workspaceId, ex.display_name, domain, 'company')
+    return readCrmEntityForEpisode(deps, episode, actorUserId, company.entityId ?? company.id)
   }
 
   // kind === 'project' | 'product' | 'repository' — direct EntityStore write.
@@ -3418,33 +3443,40 @@ async function writeEntity(
   })
 }
 
-/**
- * After a CRM `createContact` / `createCompany` call commits, it has
- * written a single `entities` row with `kind='person'|'company'`, typed
- * fields in `attributes`, and (when supplied) `canonical_id` = email |
- * domain. Pipeline B needs the resulting entity-row id for edge
- * construction, but the core `CrmStore` ports return the CRM record
- * projection (`ContactRecord` / `CompanyRecord`), not the `EntityRecord`.
- * Look it up here.
- *
- * Resolution order: by canonical id when present → by display name. Both
- * lookups are workspace-scoped; the entities store filters on RLS so
- * results are the just-created row in the common case.
- */
-async function resolveCrmEntity(
+/** Read back the confirmed CRM id for relationship writes in the Episode's audience. */
+function readCrmEntityForEpisode(
+  deps: PipelineBDeps,
+  episode: PipelineBEpisode,
+  actorUserId: string,
+  entityId: string,
+): Promise<EntityRecord | null> {
+  return deps.entities.getById({
+    workspaceId: episode.workspaceId,
+    userId: actorUserId,
+    assistantId: episode.assistantId ?? '',
+    assistantKind: 'primary',
+    sharedAudience: episode.userId === null,
+    visibilityAssistantIds: episode.assistantId ? [episode.assistantId] : [],
+    clearance: episode.sensitivity,
+    compartments: episode.compartments ?? [],
+    projectIds: episode.projectIds ?? [],
+  }, entityId)
+}
+
+function reuseCompanyForEpisode(
+  ex: ExtractedEntity,
+  target: EntityRecord,
+  episode: PipelineBEpisode,
   deps: PipelineBDeps,
   actorUserId: string,
-  workspaceId: string,
-  displayName: string,
-  canonicalId: string | null,
-  kind: 'person' | 'company',
-): Promise<EntityRecord | null> {
-  if (canonicalId) {
-    const found = await deps.entities.findByCanonicalIdSystem(actorUserId, workspaceId, canonicalId)
-    const match = found.find((e) => e.kind === kind)
-    if (match) return match
-  }
-  return deps.entities.findByNameSystem(actorUserId, workspaceId, displayName, { kind })
+): Promise<EntityRecord | null> | null {
+  if (target.kind !== 'company' || mergeAttributes(target.attributes, ex.attributes) !== null) return null
+  const name = ex.display_name.trim().toLowerCase()
+  const canonical = ex.canonical_id ?? null
+  const canonicalMatch = canonical !== null && canonical === target.canonicalId
+  if (!canonicalMatch && ((canonical !== null && target.canonicalId !== null)
+    || (target.displayName.trim().toLowerCase() !== name && !target.aliases.includes(name)))) return null
+  return readCrmEntityForEpisode(deps, episode, actorUserId, target.id)
 }
 
 // ── Failure-path helpers ─────────────────────────────────────────────

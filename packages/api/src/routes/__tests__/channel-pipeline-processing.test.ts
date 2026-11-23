@@ -2,7 +2,7 @@ import { createExecutionContext } from '@use-brian/agent-runtime/security/execut
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
-  history: vi.fn(),
+  persist: vi.fn(), history: vi.fn(),
   current: vi.fn(),
   audience: vi.fn(),
   budget: vi.fn(),
@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('../../db/sessions.js', async original => ({
   ...(await original<typeof import('../../db/sessions.js')>()),
   findOrCreateSession: vi.fn(async () => ({ id: 'session', visibility: 'personal', channelType: 'feishu' })),
-  getSessionMessages: mocks.history,
+  addSessionMessage: mocks.persist, getSessionMessages: mocks.history,
   claimTurnLeaseOutcome: mocks.claim,
   releaseTurnOutcome: mocks.release,
   touchTurnLease: vi.fn(async () => ({ held: true, cancelRequested: false })),
@@ -98,7 +98,7 @@ describe('[COMP:api/channel-pipeline-audience-refusal] processing feedback lifet
     const { params, hooks } = turn()
     await processChannelMessage(params)
     expect(hooks.sendError).toHaveBeenCalledExactlyOnceWith(refusal)
-    expect(channelUserErrorText(hooks.sendError.mock.calls[0][0])).toContain('Check their status before repeating')
+    expect(channelUserErrorText(hooks.sendError.mock.calls[0][0])).toContain('before asking again')
     expect(channelUserErrorText(refusal)).not.toContain('PRIVATE')
     expect(hooks.sendResponse).not.toHaveBeenCalled()
     expect(hooks.onCleanup).toHaveBeenCalledOnce()
@@ -149,7 +149,7 @@ describe('[COMP:api/channel-pipeline-audience-refusal] processing feedback lifet
     expect(hooks.sendError).toHaveBeenCalledOnce()
     const error = hooks.sendError.mock.calls[0][0]
     expect(error).toMatchObject({ reason: 'delivery_audience_unverified', retrySafe: false, detail: undefined })
-    expect(channelUserErrorText(error)).toContain("access to some information couldn't be verified")
+    expect(channelUserErrorText(error)).toContain("show the result in this chat")
     expect(hooks.sendResponse).not.toHaveBeenCalled()
     expect(hooks.onProcessingStart).not.toHaveBeenCalled()
     expect(hooks.onCleanup).toHaveBeenCalledOnce()
@@ -157,17 +157,18 @@ describe('[COMP:api/channel-pipeline-audience-refusal] processing feedback lifet
   })
 
   it('shows progress while setup is pending and cleans it once when setup fails', async () => {
-    const failure = new Error('Synthetic history failure')
-    let rejectHistory!: (error: Error) => void
-    mocks.history.mockImplementation(() => new Promise((_resolve, reject) => { rejectHistory = reject }))
+    const failure = new Error('Synthetic append failure')
+    let rejectAppend!: (error: Error) => void
+    mocks.persist.mockImplementation(() => new Promise((_resolve, reject) => { rejectAppend = reject }))
     const { params, hooks } = turn()
     const running = processChannelMessage(params)
     const outcome = running.then(() => null, error => error)
-    await vi.waitFor(() => expect(mocks.history).toHaveBeenCalledOnce())
+    await vi.waitFor(() => expect(mocks.persist).toHaveBeenCalledOnce())
     expect(hooks.onProcessingStart).toHaveBeenCalledOnce()
-    expect(mocks.audience).toHaveBeenCalledTimes(3) // initial, post-claim, and owner model preparation admissions
+    expect(mocks.audience).toHaveBeenCalledTimes(2) // admission before and after claiming the lease
+    expect(mocks.history).not.toHaveBeenCalled()
     expect(hooks.onCleanup).not.toHaveBeenCalled()
-    rejectHistory(failure)
+    rejectAppend(failure)
     expect(await outcome).toBe(failure)
     expect(hooks.onCleanup).toHaveBeenCalledOnce()
     expect(channelConfirmations.handle(scope, { kind: 'text', text: 'stop' }).handled).toBe(false)

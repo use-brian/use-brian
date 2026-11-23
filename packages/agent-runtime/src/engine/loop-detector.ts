@@ -54,8 +54,7 @@ export const FAIL_STREAK_LIMIT = 5
  */
 export const FAIL_TOTAL_LIMIT = 8
 
-export function createLoopDetector(opts?: { hardLimit?: number }) {
-  const hardLimit = opts?.hardLimit ?? DEFAULT_HARD_LIMIT
+export function createLoopDetector(limits?: { hardLimit?: number }) {
   const callCounts = new Map<string, number>() // hash(name+input) → count
   const failStreaks = new Map<string, number>() // toolName → consecutive errors
   const failTotals = new Map<string, number>() // toolName → total errors this turn
@@ -82,7 +81,7 @@ export function createLoopDetector(opts?: { hardLimit?: number }) {
         return 'hard_stop'
       }
 
-      if (totalCalls >= hardLimit) {
+      if (totalCalls >= (limits?.hardLimit ?? DEFAULT_HARD_LIMIT)) {
         return 'hard_stop'
       }
 
@@ -106,7 +105,7 @@ export function createLoopDetector(opts?: { hardLimit?: number }) {
         return 'hard_stop'
       }
 
-      if (totalCalls >= hardLimit) {
+      if (totalCalls >= (limits?.hardLimit ?? DEFAULT_HARD_LIMIT)) {
         return 'hard_stop'
       }
 

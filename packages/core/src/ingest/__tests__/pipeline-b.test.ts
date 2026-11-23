@@ -10,6 +10,7 @@ import type {
   ContactListRow,
   ContactRecord,
   ContactUpdateFields,
+  CrmEpisodeScope,
   CrmStore,
   DealListFilters,
   DealListRow,
@@ -251,6 +252,7 @@ type SpyCrm = {
     phone?: string
   }>
   companies: Array<{ name: string; domain: string | null }>
+  episodeScopes: Array<CrmEpisodeScope | undefined>
   contactReturns: ContactRecord[]
   companyReturns: CompanyRecord[]
 }
@@ -260,20 +262,23 @@ function spyCrm(world?: World): SpyCrm {
     store: {} as CrmStore,
     contacts: [],
     companies: [],
+    episodeScopes: [],
     contactReturns: [],
     companyReturns: [],
   }
   c.store = {
     async createCompany(params) {
       c.companies.push({ name: params.name, domain: params.domain ?? null })
+      c.episodeScopes.push(params.sourceEpisodeScope)
+      const entityId = `ent-co-${c.companies.length}`
       const rec = makeCompany({
-        id: `co-${c.companies.length}`,
+        id: entityId,
+        entityId,
         name: params.name,
         domain: params.domain ?? null,
       })
       c.companyReturns.push(rec)
       if (world) {
-        const entityId = `ent-co-${c.companies.length}`
         const entityRow = makeEntity({
           id: entityId,
           kind: 'company',
@@ -283,6 +288,7 @@ function spyCrm(world?: World): SpyCrm {
         })
         if (params.domain) world.byCanonical.set(params.domain, [entityRow])
         world.byName.set(`${params.name}|company`, entityRow)
+        world.byId.set(entityId, entityRow)
       }
       return rec
     },
@@ -296,6 +302,7 @@ function spyCrm(world?: World): SpyCrm {
       return null
     },
     async createContact(params) {
+      c.episodeScopes.push(params.sourceEpisodeScope)
       c.contacts.push({
         name: params.name,
         email: params.email ?? null,
@@ -306,6 +313,7 @@ function spyCrm(world?: World): SpyCrm {
       const entityId = `ent-con-${c.contacts.length}`
       const rec = makeContact({
         id: entityId,
+        entityId,
         name: params.name,
         email: params.email ?? null,
       })
@@ -740,17 +748,17 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     const episodes = spyEpisodes()
 
     const extraction = JSON.stringify({
-      summary: 'Sarah at Notion shipped the new blocks API; we want to integrate.',
+      summary: 'Avery at Orchard Software shipped the new blocks API; we want to integrate.',
       entities: [
-        { kind: 'person', display_name: 'Sarah Lee', canonical_id: 'sarah@notion.so' },
-        { kind: 'company', display_name: 'Notion', canonical_id: 'notion.so' },
+        { kind: 'person', display_name: 'Avery Reed', canonical_id: 'avery@orchard.example.test' },
+        { kind: 'company', display_name: 'Orchard Software', canonical_id: 'orchard.example.test' },
         { kind: 'project', display_name: 'Blocks API integration', canonical_id: null, attributes: { quarter: 'Q3' } },
       ],
       edges: [
-        { source_ref: 'Sarah Lee', target_ref: 'Notion', edge_type: 'works_at' },
+        { source_ref: 'Avery Reed', target_ref: 'Orchard Software', edge_type: 'works_at' },
       ],
       memories: [
-        { scope: 'user', summary: 'Plan integration with Notion Blocks API.', detail: 'Sarah will share docs next week.', tags: ['integration'], why_not_entity: 'plan is about a workstream — Notion entity already captured', why_not_task: 'descriptive plan, not an actionable TODO' },
+        { scope: 'user', summary: 'Plan integration with Orchard Software Blocks API.', detail: 'Avery will share docs next week.', tags: ['integration'], why_not_entity: 'plan is about a workstream — Orchard Software entity already captured', why_not_task: 'descriptive plan, not an actionable TODO' },
       ],
       tags: ['domain:product'],
     })
@@ -770,14 +778,19 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
       episodes: episodes.port,
     }
 
-    const result = await processEpisode(baseEpisode({ preStampedTags: ['domain:engineering'] }), 'meeting notes … sarah@notion.so', deps)
+    const result = await processEpisode(baseEpisode({ preStampedTags: ['domain:engineering'], scopeVersion: '7',
+      compartments: ['team:fixture'], projectIds: ['fixture-project'] }), 'meeting notes … avery@orchard.example.test', deps)
 
     expect(result.extracted).toBe(true)
-    expect(result.summaryText).toContain('Sarah at Notion')
+    expect(result.summaryText).toContain('Avery at Orchard Software')
 
     // CRM-routed writes.
-    expect(crm.contacts).toEqual([{ name: 'Sarah Lee', email: 'sarah@notion.so', externalRef: null }])
-    expect(crm.companies).toEqual([{ name: 'Notion', domain: 'notion.so' }])
+    expect(crm.contacts).toEqual([{ name: 'Avery Reed', email: 'avery@orchard.example.test', externalRef: null }])
+    expect(crm.companies).toEqual([{ name: 'Orchard Software', domain: 'orchard.example.test' }])
+    expect(crm.episodeScopes).toEqual(Array.from({ length: 2 }, () => ({
+      workspaceId: 'ws-1', userId: 'u-1', assistantId: 'a-1', sensitivity: 'internal',
+      compartments: ['team:fixture'], projectIds: ['fixture-project'], scopeVersion: '7',
+    })))
     // Project went through EntityStore.create with source='extracted'.
     expect(entities.created).toHaveLength(1)
     expect(entities.created[0]).toMatchObject({
@@ -789,7 +802,7 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
       workspaceId: 'ws-1',
     })
 
-    // Edge: works_at(Sarah → Notion) using resolved entity ids from the
+    // Edge: works_at(Avery → Orchard Software) using resolved entity ids from the
     // simulated CRM-stamped entity rows.
     expect(links.created).toHaveLength(1)
     expect(links.created[0]).toMatchObject({
@@ -1603,7 +1616,7 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     entities.findByCanonicalIdReturns.set('acme.com', [
       makeEntity({
         id: 'ent-acme',
-        kind: 'company',
+        kind: 'project',
         displayName: 'Acme',
         canonicalId: 'acme.com',
         attributes: { headcount: 50 },
@@ -1613,7 +1626,7 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     const extraction = JSON.stringify({
       summary: 'Acme doubled headcount',
       entities: [
-        { kind: 'company', display_name: 'Acme', canonical_id: 'acme.com', attributes: { headcount: 120 } },
+        { kind: 'project', display_name: 'Acme', canonical_id: 'acme.com', attributes: { headcount: 120 } },
       ],
       edges: [],
       memories: [],
@@ -1638,16 +1651,14 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
 
   it('does not supersede an existing entity when re-extracted attributes are unchanged', async () => {
     const crm = spyCrm()
-    const entities = spyEntities()
-    entities.findByCanonicalIdReturns.set('acme.com', [
-      makeEntity({
-        id: 'ent-acme',
-        kind: 'company',
-        displayName: 'Acme',
-        canonicalId: 'acme.com',
-        attributes: { headcount: 50 },
-      }),
-    ])
+    const world = makeWorld()
+    const entities = spyEntities(world)
+    const existing = makeEntity({
+      id: 'ent-acme', kind: 'company', displayName: 'Acme', canonicalId: 'acme.com', attributes: { headcount: 50 },
+    })
+    world.byCanonical.set('acme.com', [existing])
+    world.byId.set(existing.id, existing)
+    const lookup = vi.spyOn(entities.store, 'getById')
 
     const extraction = JSON.stringify({
       summary: 'Acme unchanged',
@@ -1668,6 +1679,7 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
 
     expect(entities.superseded).toEqual([])
     expect(result.entitiesWritten[0].id).toBe('ent-acme')
+    expect(lookup).toHaveBeenCalledWith(expect.objectContaining({ userId: 'u-1', visibilityAssistantIds: ['a-1'] }), 'ent-acme')
   })
 
   it('logs sensitivity_drift_flagged when classifier infers a higher tier than the channel', async () => {
@@ -1939,7 +1951,7 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     entities.findByCanonicalIdReturns.set('deltadefi.com', [
       makeEntity({
         id: 'ent-ddf',
-        kind: 'company',
+        kind: 'project',
         displayName: 'DeltaDeFi',
         canonicalId: 'deltadefi.com',
         aliases: ['dd'],
@@ -1949,7 +1961,7 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     const extraction = JSON.stringify({
       summary: 'Sync with deltadefi-protocol',
       entities: [{
-        kind: 'company',
+        kind: 'project',
         display_name: 'deltadefi-protocol',
         canonical_id: 'deltadefi.com',
       }],
@@ -1973,7 +1985,7 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     entities.findByCanonicalIdReturns.set('deltadefi.com', [
       makeEntity({
         id: 'ent-ddf',
-        kind: 'company',
+        kind: 'project',
         displayName: 'DeltaDeFi',
         canonicalId: 'deltadefi.com',
         aliases: ['dd', 'deltadefi-protocol'],
@@ -1984,7 +1996,7 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
       summary: 'Mentions',
       entities: [
         // case-variant of displayName — lower-vs-lower equals → skip
-        { kind: 'company', display_name: 'deltadefi', canonical_id: 'deltadefi.com' },
+        { kind: 'project', display_name: 'deltadefi', canonical_id: 'deltadefi.com' },
       ],
       edges: [],
       memories: [],
@@ -2180,6 +2192,40 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     expect(entities.created).toHaveLength(1) // unchanged
     // Attributes unchanged → no supersede write either (mergeAttributes returns null).
     expect(entities.superseded).toHaveLength(0)
+  })
+
+  it('binds canonical matches within the extracted kind and rejects an ambiguous relationship label', async () => {
+    const ep = baseEpisode({ scopeVersion: '1' })
+    const entities = spyEntities()
+    const canonicalId = 'example.test/fixture'
+    entities.findByCanonicalIdReturns.set(canonicalId, [
+      makeEntity({ id: 'product-id', kind: 'product', displayName: 'Fictional product', canonicalId }),
+      makeEntity({ id: 'project-id', kind: 'project', displayName: 'Fictional project', canonicalId }),
+    ])
+    const application = { apply: vi.fn(async (input: Parameters<PipelineBApplicationPort['apply']>[0]) => ({
+      id: 'fixture-run', workspaceId: input.workspaceId, episodeId: ep.id, attemptKey: input.attemptKey,
+      planHash: input.plan.planHash, extractionState: 'succeeded' as const, applicationState: 'complete' as const,
+      errorCode: null, counts: { pending: 0, committed: 0, already_applied: 0, held: 0, rejected: 0, failed: 0 }, items: [],
+    })) }
+    const output = JSON.stringify({
+      summary: 'A fictional project and product share a label.',
+      entities: [
+        { kind: 'project', display_name: 'Fictional name', canonical_id: canonicalId },
+        { kind: 'product', display_name: 'Fictional name' },
+        { kind: 'repository', display_name: 'Fictional repository' },
+      ],
+      edges: [{ source_ref: 'Fictional name', target_ref: 'Fictional repository', edge_type: 'mentioned' }],
+      memories: [], tags: [],
+    })
+    await processEpisode(ep, 'The project and product share a name.', makeDeps({
+      provider: sequencedProvider([output]), classifierModel: null, entities: entities.store, application,
+      episodes: { ...spyEpisodes().port, getEpisodeByIdSystem: async () => ({ ...ep, status: 'archived' as const }) },
+    }))
+    const candidates = application.apply.mock.calls[0][0].plan.candidates
+    expect(candidates[0].payload).toMatchObject({ entityKind: 'project', targetEntityId: 'project-id' })
+    expect(candidates.find((candidate) => candidate.primitiveKind === 'edge')).toMatchObject({
+      terminalDisposition: 'rejected', terminalReason: 'ambiguous_entity_reference', dependencyIds: [],
+    })
   })
 
   it.each([false, true])('keeps room memories workspace-visible with author attribution (durable=%s)', async (durable) => {

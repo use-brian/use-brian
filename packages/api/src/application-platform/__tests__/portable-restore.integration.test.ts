@@ -34,7 +34,7 @@ const sha=(value:string)=>createHash('sha256').update(value).digest('hex')
 type Claims={userId:string;sessionId:string;authVersion:number}
 type Saved={workspaceId:string;sessionId:string;assistantId:string;private:boolean;ownerClaims:Claims;through:number;turnToken:string}
 type Observation=Record<string,unknown>
-type State={harness?:HarnessHistory;sessions:Saved[];actors:Record<string,Claims>;workspaces:string[];observations:Record<string,Observation>;
+type State={knowledgeChunk?:{id:string;entryId:string};harness?:HarnessHistory;sessions:Saved[];actors:Record<string,Claims>;workspaces:string[];observations:Record<string,Observation>;
  export:{manifestSha256:string;transactionHorizon:string;rows:number;populatedTables:number};moduleExport:{manifestSha256:string};
  checkpoint:{checkpointSha256:string;records:number};erasedAfterExport:string;erasedBeforeExport:string;
  compiledRecordCount?:number;contractModule:string;contractSlots:string[];oids:{metadata:string;catalog:string;root:string};families:SeededFamilies}
@@ -119,6 +119,14 @@ describe.skipIf(phase!=='source').sequential('[COMP:api/portable-restore] portab
   // One admitted row per validator family that refused historical rows before the validator audit.
   const families=await seedRefusedFamilies()
   const harness=await seedHarnessHistory()
+  let knowledgeChunk: State['knowledgeChunk']
+  if ((await getPool().query("SELECT 1 FROM _migrations WHERE name='8339_knowledge_source_path_identity.sql'")).rowCount) {
+   const entryId=randomUUID(), chunkId=randomUUID(), workspaceId=workspaces[0], userId=actors['shared-owner'].userId
+   await getPool().query("INSERT INTO knowledge_entries(id,workspace_id,path,title,content) VALUES($1,$2,'fixture-guide','Guide','Fixture body')",[entryId,workspaceId])
+   await getPool().query(`INSERT INTO kb_chunks(id,workspace_id,knowledge_entry_id,source_path,chunk_text,created_by_user_id,user_id,source)
+    VALUES($1,$2,$3,'fixture-guide','Fixture excerpt',$4,$4,'user')`,[chunkId,workspaceId,entryId,userId])
+   knowledgeChunk={id:chunkId,entryId}
+  }
   const observations=await observe({sessions,actors,workspaces})
   expect(Object.values(observations).filter(value=>value.admitted===true).length).toBeGreaterThanOrEqual(3)
   expect(Object.values(observations).filter(value=>value.admitted===false).length).toBeGreaterThanOrEqual(3)
@@ -165,7 +173,7 @@ describe.skipIf(phase!=='source').sequential('[COMP:api/portable-restore] portab
    const checkpoint=await restore.exportErasureCheckpoint({ownerClient:client,destination:join(stateDirectory!,'checkpoint.enc'),key,roster:reviewedRoster})
    expect(checkpoint.records).toBeGreaterThan(0)
    const oids=(await client.query(`SELECT $1::regprocedure::oid::text metadata,$2::regprocedure::oid::text catalog,'public.native_turn_helpers_current()'::regprocedure::oid::text root`,contractSlots)).rows[0]
-   const state:State={sessions,actors,workspaces,observations,export:exported,moduleExport,checkpoint,erasedAfterExport,erasedBeforeExport,compiledRecordCount,contractModule,contractSlots,oids,families,harness}
+   const state:State={knowledgeChunk,sessions,actors,workspaces,observations,export:exported,moduleExport,checkpoint,erasedAfterExport,erasedBeforeExport,compiledRecordCount,contractModule,contractSlots,oids,families,harness}
    await writeFile(join(stateDirectory!,'state.json'),JSON.stringify(state),{mode:0o600})
   }finally{await client.end()}
  },300_000)
@@ -256,7 +264,12 @@ describe.skipIf(phase!=='target').sequential('[COMP:api/portable-restore] authen
      ['acl',`GRANT EXECUTE ON FUNCTION public.harness_execution_human(uuid,uuid) TO app_user`,'portable_successor_catalog_changed'],
      ['trigger',`ALTER TABLE public.project_harness_runs DISABLE TRIGGER harness_run_audit`,'portable_successor_catalog_changed'],
      ['unknown-prefix',`CREATE FUNCTION public.harness_execution_unreviewed() RETURNS int LANGUAGE sql AS 'SELECT 1'`,'portable_successor_unknown_catalog_object'],
-     ...(head==='8338_native_workspace_skill_receipts.sql'?[
+     ...(head==='8339_knowledge_source_path_identity.sql'?[
+      ['source-path-writer',`ALTER FUNCTION public.apply_knowledge_source_sync_worker(jsonb,jsonb) COST 101`,'installation_additional_catalog_changed'],
+      ['source-path-index',`ALTER INDEX public.idx_kb_chunks_knowledge_entry RENAME TO fictional_chunk_index`,'installation_additional_catalog_changed'],
+      ['source-path-receipt',`DELETE FROM public._migrations WHERE name='8339_knowledge_source_path_identity.sql'`,'portable_successor_migration_tail_missing'],
+     ]:[]),
+     ...(head>='8338_native_workspace_skill_receipts.sql'?[
       ['skill-receipt',`DELETE FROM public._migrations WHERE name='8338_native_workspace_skill_receipts.sql'`,'skill_scope_release_missing'],
      ]:[]),
      ...['8335_project_harnesses.sql','8336_project_harness_verification.sql','8337_project_chat_creation_admission.sql'].map(name=>['receipt:'+name,`DELETE FROM public._migrations WHERE name='${name}'`,'portable_successor_migration_tail_missing']),
@@ -319,6 +332,10 @@ describe.skipIf(phase!=='target').sequential('[COMP:api/portable-restore] authen
    // Each conversation's 8277 completion header arrives exactly and stays committed for its old token.
    const completions=(await client.query('SELECT session_id,turn_token FROM native_turn_completions ORDER BY session_id')).rows
    expect(completions.map(row=>row.session_id).sort()).toEqual(s.sessions.map(session=>session.sessionId).sort())
+   if(s.knowledgeChunk){
+    const chunk=await client.query('SELECT knowledge_entry_id FROM kb_chunks WHERE id=$1',[s.knowledgeChunk.id])
+    expect(chunk.rows).toEqual([{knowledge_entry_id:s.knowledgeChunk.entryId}])
+   }
    if(s.harness)await verifyHarnessHistory(s.harness,client)
    // Every seeded validator family arrives (record digests already proved each table exact).
    for(const row of s.families.rows)expect((await client.query(`SELECT count(*)::int n FROM public.${row.table} WHERE ${row.column}=$1`,[row.id])).rows[0].n,row.family+' '+row.table).toBe(row.count)

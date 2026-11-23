@@ -38,7 +38,7 @@ function searchSourceSql(projectScoped = false, countsOnly = false, conversation
           || CASE WHEN p.shared_project_id IS NULL THEN '{}'::text[] ELSE ARRAY['project:'||p.shared_project_id::text] END,NULL::uuid)`,
   knowledge: `${select('knowledge', 'k', 'k.title', `concat_ws(' ',k.summary,k.content,
       (SELECT string_agg(c.chunk_text,' ' ORDER BY c.chunk_index) FROM kb_chunks c
-        WHERE c.workspace_id=k.workspace_id AND c.source_path=k.path AND ${live('c')} AND ${department('c')}))`,
+        WHERE c.workspace_id=k.workspace_id AND c.knowledge_entry_id=k.id AND ${live('c')} AND ${department('c')}))`,
     'k.updated_at', "jsonb_build_object('type','knowledge','id',k.id,'path',k.path)")}
     FROM knowledge_entries k WHERE k.workspace_id=$1${project('k')} AND ${department('k', 'NULL::uuid')}
     UNION ALL

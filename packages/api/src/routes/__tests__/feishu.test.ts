@@ -254,9 +254,9 @@ describe('[COMP:api/feishu-route] bridge route', () => {
     await request(app).post('/internal/feishu/inbound').set('X-Connector-Secret', 'shared-secret')
       .send({ channelId: CHANNEL_ROW_ID, message: normalizedMessage() }).expect(202)
     await vi.waitFor(() => expect(complete).toBe(true))
-    expect(mocks.api.editPost).toHaveBeenLastCalledWith('om_status', expect.stringContaining('they may already be saved'))
+    expect(mocks.api.editPost).toHaveBeenLastCalledWith('om_status', expect.stringContaining('check whether it went through'))
     const shown = mocks.api.editPost.mock.calls.at(-1)![1] as string
-    expect(shown).toContain('Check their status before repeating the request')
+    expect(shown).toContain('before asking again')
     expect(shown).not.toMatch(/Something went wrong|source_held|DeliveryAudienceUnverifiedError/)
     expect(mocks.processChannelMessage).toHaveBeenCalledTimes(1)
     expect(mocks.api.send).toHaveBeenCalledTimes(1)

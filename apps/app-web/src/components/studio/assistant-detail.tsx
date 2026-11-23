@@ -10,6 +10,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams, useParams } from "next/navigation";
 import { authFetch } from "@/lib/auth-fetch";
 import { ScrollableNav } from "@/components/scrollable-nav";
+import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { useWorkspaces } from "@/contexts/workspace-context";
@@ -2189,9 +2190,9 @@ export function DecisionPlaybookRuleCard({
       <div className="flex items-start justify-between gap-3">
         <div className="text-[14px] text-foreground">
           {rule.rule}
-          {!learned && rule.status === "active" && !rule.decidedByUserId && (
+          {rule.createdBy === "reflection" && rule.status === "active" && !rule.decidedByUserId && (
             <span className="ml-2 align-middle text-[10px] font-medium uppercase tracking-wide text-muted-foreground border border-border rounded px-1 py-0.5">
-              {t.assistant.settings.playbookAutoBadge}
+              {t.assistant.settings.playbookLegacyAutoBadge}
             </span>
           )}
         </div>
@@ -2199,7 +2200,7 @@ export function DecisionPlaybookRuleCard({
           <button
             onClick={() => onDecision("retire")}
             disabled={deciding}
-            className="shrink-0 px-2.5 py-1.5 text-[12px] font-medium rounded-md border border-border text-muted-foreground hover:bg-muted disabled:opacity-50 transition-colors"
+            className="min-h-11 shrink-0 px-2.5 py-1.5 text-[12px] font-medium rounded-md border border-border text-muted-foreground hover:bg-muted disabled:opacity-50 transition-colors md:min-h-0"
           >
             {t.assistant.settings.playbookRetire}
           </button>
@@ -2236,14 +2237,14 @@ export function DecisionPlaybookRuleCard({
             <button
               onClick={() => onDecision("approve")}
               disabled={deciding}
-              className="px-2.5 py-1.5 text-[12px] font-medium rounded-md bg-action text-action-foreground hover:bg-action/80 disabled:opacity-50 transition-colors"
+              className="min-h-11 px-2.5 py-1.5 text-[12px] font-medium rounded-md bg-action text-action-foreground hover:bg-action/80 disabled:opacity-50 transition-colors md:min-h-0"
             >
               {t.assistant.settings.playbookApprove}
             </button>
             <button
               onClick={() => onDecision("reject")}
               disabled={deciding}
-              className="px-2.5 py-1.5 text-[12px] font-medium rounded-md border border-border text-muted-foreground hover:bg-muted disabled:opacity-50 transition-colors"
+              className="min-h-11 px-2.5 py-1.5 text-[12px] font-medium rounded-md border border-border text-muted-foreground hover:bg-muted disabled:opacity-50 transition-colors md:min-h-0"
             >
               {t.assistant.settings.playbookReject}
             </button>
@@ -2271,7 +2272,7 @@ type AssistantSettingsSnapshot = {
   workspaceId: string | null;
   workspaceName: string | null;
   defaultModelAlias: string | null;
-  playbook: DecisionPlaybookRuleView[];
+  playbook: DecisionPlaybookRuleView[] | null;
 };
 
 /** The Settings tab's one read: the assistant row and its playbook in parallel. */
@@ -2287,10 +2288,10 @@ export async function fetchAssistantSettings(assistantId: string): Promise<Assis
     workspaceId?: string | null;
     defaultModelAlias?: string;
   };
-  let playbook: DecisionPlaybookRuleView[] = [];
+  let playbook: DecisionPlaybookRuleView[] | null = null;
   if (playbookRes?.ok) {
     const pb = (await playbookRes.json().catch(() => null)) as { rules?: DecisionPlaybookRuleView[] } | null;
-    playbook = pb?.rules ?? [];
+    if (Array.isArray(pb?.rules)) playbook = pb.rules;
   }
   let workspaceName: string | null = null;
   if (data.workspaceId) {
@@ -2368,11 +2369,7 @@ function SettingsTab({
   const [savedCharter, setSavedCharter] = useState<Charter>(initial?.charter ?? emptyCharter);
   const loaded = settings.data !== undefined;
   const [saving, setSaving] = useState<"name" | "charter" | null>(null);
-  // Playbook (growth loop Phase 3): rules the weekly reflection learned
-  // from the team's feedback. Auto-admitted up to the active cap (badged
-  // "Auto"; decidedByUserId NULL marks auto-admission); overflow waits as
-  // suggestions. Deciding is owner-only, mirroring the API gate.
-  const [playbook, setPlaybook] = useState<DecisionPlaybookRuleView[]>(initial?.playbook ?? []);
+  const playbook = settings.data?.playbook ?? null;
   const [decidingRule, setDecidingRule] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState("");
@@ -2417,7 +2414,6 @@ function SettingsTab({
     if (draftClean) setCharter(next.charter);
     if (name === (prev?.name ?? assistantName)) setName(next.name ?? assistantName);
     if (!savingModel && isModelAlias(next.defaultModelAlias)) setDefaultModel(next.defaultModelAlias);
-    setPlaybook(next.playbook);
     if (next.workspaceId) {
       setCurrentTeamId(next.workspaceId);
       if (next.workspaceName) setCurrentTeamName(next.workspaceName);
@@ -2441,10 +2437,11 @@ function SettingsTab({
         body: JSON.stringify({ decision }),
       });
       if (res.ok) {
-        const data = await res.json();
-        const nextPlaybook = playbook.map((r) => (r.id === ruleId ? { ...r, status: data.rule.status } : r));
-        setPlaybook(nextPlaybook);
-        patchSettings({ playbook: nextPlaybook });
+        const { rule } = (await res.json()) as { rule: DecisionPlaybookRuleView };
+        mutateSurfaceCache<AssistantSettingsSnapshot>(settingsKey, (current) => ({
+          ...current,
+          playbook: current.playbook?.map((r) => (r.id === ruleId ? rule : r)) ?? null,
+        }));
       } else {
         const err = await res.json().catch(() => ({}));
         showFeedback("error", err.message ?? err.error ?? t.assistant.settings.playbookDecisionFailed);
@@ -2795,13 +2792,28 @@ function SettingsTab({
         </div>
       </Section>
 
-      {/* Playbook — the growth loop's admission gate (suggestion-first, D8).
-          The weekly reflection proposes rules; only owner-approved ones reach
-          the assistant's prompt. Mirrors the API rule: view any member,
-          decide owner-only. */}
       <Section title={t.assistant.settings.playbookTitle} description={t.assistant.settings.playbookDesc}>
         <div className="px-5 py-4 space-y-4">
-          {playbook.filter((r) => r.status !== "rejected").length === 0 ? (
+          {playbook === null ? (
+            settings.loading || settings.revalidating ? (
+              <div aria-busy="true">
+                <Skeleton className="h-4 w-48 max-w-full" />
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-[13px] text-muted-foreground">{t.assistant.settings.playbookReadFailed}</p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void settings.refresh()}
+                  className="min-h-11 md:min-h-0"
+                >
+                  {t.assistant.settings.playbookRetry}
+                </Button>
+              </div>
+            )
+          ) : playbook.filter((r) => r.status !== "rejected").length === 0 ? (
             <p className="text-[13px] text-muted-foreground">{t.assistant.settings.playbookEmpty}</p>
           ) : (
             <>

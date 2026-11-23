@@ -7,7 +7,8 @@
   "description": "A local brain for your work, that dreams.",
   "license": "AGPL-3.0-only",
   "scripts": {
-    "build": "turbo run build",
+    "build": "pnpm check:migration-size && turbo run build",
+    "check:migration-size": "node scripts/hooks/check-migration-size.mjs --files",
     "start": "node scripts/launch.mjs",
     "support": "node scripts/support.mjs",
     "dev": "node scripts/launch.mjs",

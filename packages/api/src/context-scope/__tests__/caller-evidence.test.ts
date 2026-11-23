@@ -118,7 +118,7 @@ describe('[COMP:api/caller-scope-evidence] model-context history withholds held 
     // non-native lane, durable resume and delegated consults included.
     const lanes: Record<string, string | null> = {
       '../../routes/chat.ts': 'ownedTurn.prepareHistory({',
-      '../../routes/public-turn.ts': 'turnOwner.prepareHistory({ native: null,',
+      '../../routes/public-turn.ts': 'capabilityOwner.prepareHistory({ native: null,',
       '../../routes/channel-pipeline.ts': 'turnOwner.prepareHistory({',
       '../../routes/session-resume-replay.ts': 'owner.prepareHistory({ native: null,',
       '../../routes/_reply-context.ts': null,

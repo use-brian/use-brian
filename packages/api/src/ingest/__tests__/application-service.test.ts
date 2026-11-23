@@ -200,4 +200,18 @@ describe('[COMP:api/ingest-application] application recovery service', () => {
     })).rejects.toMatchObject({ code: 'forbidden' })
     expect(owner.mutateCandidate).not.toHaveBeenCalled()
   })
+
+  it('I4/I5 offers the old alias receipt for replay and passes current mutation authority to the writer', async () => {
+    const fixture = service()
+    fixture.store.run.applicationState = 'blocked'
+    Object.assign(fixture.store.run.items[0], {
+      primitiveKind: 'entity', failureCode: 'application_policy_changed', retryable: false,
+    })
+    const ctx = access({ projectIds: ['55555555-5555-4555-8555-555555555555'] })
+    expect(await fixture.value.get(ctx, episodeId)).toMatchObject({
+      resumable: true, items: [{ retryable: true }],
+    })
+    await fixture.value.retry({ ctx, episodeId, runId: fixture.store.run.id, expectedPlanHash: fixture.store.run.planHash })
+    expect(fixture.mutateCandidate).toHaveBeenCalledWith(expect.objectContaining({ actorAccess: ctx }))
+  })
 })

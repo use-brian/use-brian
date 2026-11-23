@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { createKnowledgeTools } from '../base/knowledge.js'
 import type { KnowledgeStoreInterface, KnowledgeRepoWriter } from '../../knowledge/types.js'
 import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 
 const mockStore: KnowledgeStoreInterface = {
   search: vi.fn(),
@@ -115,6 +116,25 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
       expect(result.data).toContain('No knowledge entries found')
     })
 
+    it('includes only authorized source names for otherwise identical search hits', async () => {
+      const hit = { path: 'guide', title: 'Guide', summary: null, tags: [], sensitivity: 'internal' as const }
+      vi.mocked(mockStore.search).mockResolvedValueOnce([
+        { ...hit, id: 'one', sourceId: 'source-one' }, { ...hit, id: 'two', sourceId: 'source-two' },
+      ])
+      const getSourceForViewer = vi.fn(async (_ctx, id: string) => id === 'source-one' ? { id, repo: 'example-org/guide' } : null)
+      const scopedContext: ToolContext = {
+        ...ctx,
+        executionContext: {} as NonNullable<ToolContext['executionContext']>,
+        scopeAccumulator: new ContextScopeAccumulator(),
+      }
+      const search = byName(createKnowledgeTools({ ...mockStore, getSourceForViewer }), 'searchKnowledge')
+      const result = await search.execute({ query: 'guide' }, scopedContext)
+      expect(result.data).toMatchObject([
+        { id: 'one', sourceLabel: 'example-org/guide' }, { id: 'two', sourceLabel: undefined },
+      ])
+      expect(getSourceForViewer.mock.calls.map(([, id]) => id)).toEqual(['source-one', 'source-two'])
+    })
+
     it('short-circuits when assistant has no team', async () => {
       const tools = createKnowledgeTools(mockStore)
       const result = await tools[0].execute({ query: 'anything' }, { ...ctx, workspaceId: null })
@@ -172,6 +192,19 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
         { workspaceId: 't1', userId: 'u1', assistantId: 'a1', assistantKind: 'standard', clearance: undefined },
         'products',
       )
+    })
+
+    it('returns entry IDs by source and forwards the selected namespace', async () => {
+      const sourceId = '712567a7-385d-454e-80cc-37719f1d16d2'
+      const manual = { id: 'manual-entry', path: 'guide', title: 'Guide', summary: null, tags: [], sensitivity: 'internal' as const, sourceId: null }
+      const synced = { ...manual, id: 'synced-entry', sourceId }
+      vi.mocked(mockStore.listByPath).mockResolvedValueOnce([manual, synced]).mockResolvedValueOnce([manual])
+      const browse = byName(createKnowledgeTools(mockStore), 'browseKnowledge')
+      expect((await browse.execute({ path: 'guide' }, ctx)).data).toMatchObject([
+        { id: manual.id, sourceId: null }, { id: synced.id, sourceId },
+      ])
+      expect((await browse.execute({ path: 'guide', sourceId: null }, ctx)).data).toMatchObject([{ id: manual.id, sourceId: null }])
+      expect(mockStore.listByPath).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: 't1' }), 'guide', undefined, null)
     })
   })
 

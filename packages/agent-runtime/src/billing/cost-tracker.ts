@@ -51,6 +51,12 @@ export function calculateCost(model: string, usage: TokenUsage): number {
 // source missing from the CHECK makes its INSERTs fail 23514 silently
 // (the exact failure class migration 305 closed for synthesis + goals).
 
+/** Retired emitters whose historical rows remain valid and unbilled. */
+export const RETIRED_OVERHEAD_SOURCES = [
+  'overhead:distribution-draft',
+  'overhead:distribution-safety',
+] as const
+
 export const OVERHEAD_SOURCES = [
   'overhead:compaction',
   'overhead:extraction',
@@ -65,8 +71,6 @@ export const OVERHEAD_SOURCES = [
   'overhead:recovery-message',
   'overhead:empty-turn-synthesis',
   'overhead:distribution-classifier',
-  'overhead:distribution-safety',
-  'overhead:distribution-draft',
   'overhead:skill-review',
   'overhead:playbook-reflection',
   // Migration 305 additions (2026-07-07): async embedding-worker batches,
@@ -86,6 +90,7 @@ export const OVERHEAD_SOURCES = [
   'overhead:pdf-distill',
   // Migration 461 (2026-08-24): stateless delegated document-edit attempts.
   'overhead:doc-edit',
+  ...RETIRED_OVERHEAD_SOURCES,
 ] as const
 
 export type OverheadSource = typeof OVERHEAD_SOURCES[number]

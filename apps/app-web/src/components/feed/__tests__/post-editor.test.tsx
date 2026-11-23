@@ -133,10 +133,10 @@ describe("[COMP:app-web/feed-post-editor] proposal replay", () => {
     })).toBe(true);
   });
 
-  it("keeps lifecycle actions in the header above the edit/preview canvas", () => {
+  it("keeps lifecycle actions and post controls above the edit/preview canvas", () => {
     const header = postEditorSource.indexOf("<header");
     const copyAction = postEditorSource.indexOf('onClick={() => void copyCaption()}');
-    const canvas = postEditorSource.indexOf('viewMode === "edit"');
+    const canvas = postEditorSource.indexOf('ref={editDocumentRef}');
     expect(header).toBeGreaterThan(-1);
     expect(copyAction).toBeGreaterThan(header);
     expect(copyAction).toBeLessThan(canvas);

@@ -413,10 +413,9 @@ export function memoryRoutes(): Router {
   // the assistant's team. Intended for "team voice" curation on the team
   // page — admins type concrete voice notes ("we always sign off with —
   // the DeltaDeFi team", "never use the word 'leverage'") and those land
-  // as team identity memories. Distribution L5 draft generation pulls them
-  // in via `getWorkspaceIdentity`.
+  // as team identity memories for operator-requested writing.
   //
-  // See docs/architecture/feed/defense-pipeline.md → "Team voice".
+  // See docs/architecture/feed/voice-learning.md.
 
   router.post<AssistantParams>('/team', async (req, res) => {
     const access = await verifyTeamAccess(req, res)

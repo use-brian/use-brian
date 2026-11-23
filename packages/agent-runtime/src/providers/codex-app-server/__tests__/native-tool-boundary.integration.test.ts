@@ -69,7 +69,7 @@ describe('[COMP:providers/codex-native-tool-boundary] pinned runtime tool surfac
     try {
       const catalog = await new CodexCatalogClient(client.rpc).listModels()
       expect(catalog.models.map(model => model.model)).toEqual(expect.arrayContaining([
-        'gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-astra',
+        'gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-astra', 'gpt-6.2-sol', 'gpt-6.2-astra',
       ]))
       for (const method of ['thread/start', 'turn/start']) {
         await expect(client.rpc.request(method, {}, z.unknown())).rejects.toThrow(`RPC method is not enabled: ${method}`)

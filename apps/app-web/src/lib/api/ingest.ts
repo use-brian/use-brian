@@ -585,7 +585,7 @@ export async function reingestStoredFile(
 type IngestApplicationCounts = {
   pending: number;
   committed: number;
-  alreadyApplied: number;
+  already_applied: number;
   held: number;
   rejected: number;
   failed: number;
@@ -617,19 +617,22 @@ export type IngestApplicationStatus =
       }>;
     };
 
+export type IngestApplicationPage = { applications: IngestApplicationStatus[]; nextCursor: string | null };
+
 export async function listIngestApplications(
   workspaceId: string,
-): Promise<IngestApplicationStatus[]> {
-  const res = await authFetch(
-    `${API_URL}/api/ingest/applications?workspaceId=${encodeURIComponent(workspaceId)}`,
-  );
+  cursor?: string,
+): Promise<IngestApplicationPage> {
+  const params = new URLSearchParams({ workspaceId });
+  if (cursor) params.set("cursor", cursor);
+  const res = await authFetch(`${API_URL}/api/ingest/applications?${params}`);
   const data = (await res.json().catch(() => null)) as
-    | { items?: IngestApplicationStatus[]; error?: string; message?: string }
+    | (Partial<IngestApplicationPage> & { error?: string; message?: string })
     | null;
-  if (!res.ok || !Array.isArray(data?.items)) {
+  if (!res.ok || !Array.isArray(data?.applications) || !(data.nextCursor === null || typeof data.nextCursor === "string")) {
     throw new Error(data?.message ?? data?.error ?? `Application status failed (HTTP ${res.status})`);
   }
-  return data.items;
+  return { applications: data.applications, nextCursor: data.nextCursor };
 }
 
 export async function retryIngestApplication(input: {

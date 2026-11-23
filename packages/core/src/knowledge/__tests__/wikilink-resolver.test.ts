@@ -27,6 +27,13 @@ describe('[COMP:knowledge/wikilink-resolver] buildPathIndex', () => {
     const index = buildPathIndex(['guides/overview', 'reference/overview'])
     expect(index.get('overview')).toBe('guides/overview')
   })
+
+  it('keeps exact paths and drops ambiguous aliases for source sync', () => {
+    const index = buildPathIndex(['guides/overview', 'reference/overview', 'notes/setup'], { uniqueAliases: true })
+    expect(resolveWikilink('overview', 'index', index)).toBeNull()
+    expect(resolveWikilink('reference/overview.md', 'index', index)).toBe('reference/overview')
+    expect(resolveWikilink('setup', 'index', index)).toBe('notes/setup')
+  })
 })
 
 describe('[COMP:knowledge/wikilink-resolver] resolveWikilink', () => {

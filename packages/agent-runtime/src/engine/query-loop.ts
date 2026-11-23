@@ -3,7 +3,7 @@ import { registryRow } from '@use-brian/shared/model-registry'
 import { debugDocumentFlow, withDocumentFlowDebug } from './document-flow-debug.js'
 import { askQuestionPayload, askQuestionSchema } from '../tools/base/ask-question.js'
 import { filterToolsByCapabilities } from '../tools/capability-gate.js'
-import { requireQueryLoopPort, type HostReadReceipt, type QueryLoopPorts, type RoutineReadConfig, type RoutineReadPhaseResult, type ToolSelectionConfig, type ToolSelectionResult } from './query-loop-ports.js'
+import { requireQueryLoopPort, type HostReadReceipt, type QueryLoopPorts, type RoutineReadConfig, type ToolSelectionConfig, type ToolSelectionResult } from './query-loop-ports.js'
 import { createToolDiscovery } from './tool-discovery.js'
 import { getHeapStatistics } from 'node:v8'
 import { renderSystemContext } from '../providers/system-context.js'
@@ -36,6 +36,7 @@ import {
 import { compactConversation } from '../compaction/compact.js'
 import { isContextOverflowError } from '../providers/context-budget.js'
 import { calculateCost } from '../billing/cost-tracker.js'
+import { inheritScopeSources } from '../security/source-evidence.js'
 import { sanitizeUnicode } from '../security/sanitize.js'
 import { getMcpInputJsonSchema } from '../mcp/input-schema.js'
 
@@ -303,7 +304,19 @@ export type QueryEvent =
 
 // ── Query loop options ─────────────────────────────────────────
 
+export const CONVERSATION_CONTEXT_TOOL = 'requestConversationContext'
+
+/** Prepared by the original host after a real in-loop discovery tool call. */
+export type DiscoveredQueryContext = Pick<QueryLoopOptions,
+  'provider' | 'model' | 'systemPrompt' | 'runtimeSystemContext' | 'messages' | 'tools' |
+  'maxTokens' | 'inputTokenLimit' | 'maxTurns' | 'maxToolCalls' | 'suppressIntermediateText' |
+  'routineCalendarRead' | 'toolSelection' | 'workerDrainPrompt' | 'planNudgeCap' | 'groundingGate'> & {
+    context?: Pick<ToolContext, 'activeCapabilities' | 'preferredChannel' | 'workflowProposalReceipt' | 'workerRuntime' | 'researchMode' | 'requestTools'>
+  }
+
 export type QueryLoopOptions = {
+  /** Host-only, one-shot handoff. Neither the model nor nested tools can install a frame. */
+  takeDiscoveredContext?: () => DiscoveredQueryContext | undefined
   /** Complete host output operation, including admission and physical handoff.
    * When supplied, events go to this operation instead of being yielded.
    * Never inherited by nested loops through ToolContext. */
@@ -765,68 +778,11 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
   }
 }
 
-async function* queryLoopCore(
-  options: QueryLoopOptions & { stallWatchdog?: StallWatchdog; outputOwner: ReturnType<typeof createQueryOutputOwner> },
-): AsyncGenerator<QueryEvent> {
-  const {
-    provider: originalProvider,
-    model,
-    systemPrompt,
-    runtimeSystemContext,
-    tools: admittedTools,
-    context,
-    maxTurns = DEFAULT_MAX_TURNS,
-    maxToolCalls = DEFAULT_HARD_LIMIT,
-    stallWatchdog,
-  } = options
-  const provider = captureInputAdmissionProvider(originalProvider)
-  // Every event the loop hands its consumer is progress; so is every
-  // provider chunk (below) and every tool start / end (tool-executor).
-  const tools = new Map(admittedTools)
-  const progress = context.progress
-
-  const loopDetector = createLoopDetector({ hardLimit: maxToolCalls })
-  const totalUsage: TokenUsage = { inputTokens: 0, outputTokens: 0 }
-  const recordUsage = (usage: TokenUsage, responseModel: string): void => {
-    addUsage(totalUsage, usage, responseModel)
-    try { options.observeUsage?.(structuredClone({ model: responseModel, totalUsage })) }
-    catch { console.warn('[query-loop] usage observer failed') }
-  }
-  // WU-6.3 — monotonic position in this loop's tool-call sequence. Stamped
-  // onto each `awaiting_approval` event so the resume worker can re-enter
-  // the loop at the right step. Bumped each time a tool_use_end is seen.
-  let loopStepIndex = 0
-  let hasAttemptedReactiveCompact = false
-  let truncationContinuations = 0
-  let emptyResponseRetries = 0
-  let transientRetries = 0
-  const loopStartTime = Date.now()
-  // Thinking-level override for the next turn. Undefined = provider default.
-  // Set on empty-response retries per EMPTY_RETRY_PLAN.
-  let nextThinkingLevel: ThinkingLevel | undefined
-  // Suppress text streaming while workers are pending (coordinator intermediate chatter).
-  // Only stream text on the final synthesis turn after Phase 4b drains all results.
-  //
-  // When `suppressIntermediateText` is set, start suppressed so leading
-  // thinking-style preambles ("Be concise…", "Let me draft…") emitted BEFORE
-  // the first spawnWorker tool_use_start chunk are caught. Without this,
-  // Gemini's part order `[text, functionCall]` leaks the text portion before
-  // the reactive flip in the spawnWorker branch can fire.
-  let suppressText = options.suppressIntermediateText === true
-  // True while THIS session has background workers running or undrained
-  // worker results. Phase 4b will wait/drain and run a synthesis turn, so an
-  // empty or suppressed turn in that state is the correct "wait", not a
-  // failure to recover from.
-  const sessionWorkersBusy = (): boolean => {
-    const wm = context.workerManager
-    return wm
-      ? (wm.pendingCountFor(context.sessionId) > 0 || wm.hasNotificationsFor(context.sessionId))
-      : false
-  }
-
+async function prepareQueryTools(options: QueryLoopOptions, provider: LLMProvider, model: string, tools: Map<string, Tool>) {
+  const context = options.context
   // Only explicitly capable drivers opt in. In particular, an eager/legacy
   // driver must not gain a new reserved tool name or auxiliary executor.
-  const registrationMode = options.deferToolSchemas ? provider.toolSchemaMode?.(model) ?? 'eager' : 'eager'
+  const registrationMode = options.deferToolSchemas && !options.takeDiscoveredContext ? provider.toolSchemaMode?.(model) ?? 'eager' : 'eager'
   const deferToolSchemas = registrationMode === 'dynamic' || registrationMode === 'native-deferred'
 
   // Bind metadata search only after all route/worker/capability narrowing.
@@ -891,6 +847,66 @@ async function* queryLoopCore(
     })
   }
 
+  return { catalog, registrationMode, toolDefinitions, toolRegistration }
+}
+
+async function* queryLoopCore(
+  options: QueryLoopOptions & { stallWatchdog?: StallWatchdog; outputOwner: ReturnType<typeof createQueryOutputOwner> },
+): AsyncGenerator<QueryEvent> {
+  let { model, systemPrompt, runtimeSystemContext, maxTurns = DEFAULT_MAX_TURNS, maxToolCalls = DEFAULT_HARD_LIMIT } = options
+  const {
+    provider: originalProvider,
+    tools: admittedTools,
+    context,
+    stallWatchdog,
+  } = options
+  let provider = captureInputAdmissionProvider(originalProvider)
+  // Every event the loop hands its consumer is progress; so is every
+  // provider chunk (below) and every tool start / end (tool-executor).
+  let tools = new Map(admittedTools)
+  const progress = context.progress
+
+  const loopDetector = createLoopDetector({ get hardLimit() { return maxToolCalls } })
+  const totalUsage: TokenUsage = { inputTokens: 0, outputTokens: 0 }
+  const recordUsage = (usage: TokenUsage, responseModel: string): void => {
+    addUsage(totalUsage, usage, responseModel)
+    try { options.observeUsage?.(structuredClone({ model: responseModel, totalUsage })) }
+    catch { console.warn('[query-loop] usage observer failed') }
+  }
+  // WU-6.3 — monotonic position in this loop's tool-call sequence. Stamped
+  // onto each `awaiting_approval` event so the resume worker can re-enter
+  // the loop at the right step. Bumped each time a tool_use_end is seen.
+  let loopStepIndex = 0
+  let hasAttemptedReactiveCompact = false
+  let truncationContinuations = 0
+  let emptyResponseRetries = 0
+  let transientRetries = 0
+  const loopStartTime = Date.now()
+  // Thinking-level override for the next turn. Undefined = provider default.
+  // Set on empty-response retries per EMPTY_RETRY_PLAN.
+  let nextThinkingLevel: ThinkingLevel | undefined
+  // Suppress text streaming while workers are pending (coordinator intermediate chatter).
+  // Only stream text on the final synthesis turn after Phase 4b drains all results.
+  //
+  // When `suppressIntermediateText` is set, start suppressed so leading
+  // thinking-style preambles ("Be concise…", "Let me draft…") emitted BEFORE
+  // the first spawnWorker tool_use_start chunk are caught. Without this,
+  // Gemini's part order `[text, functionCall]` leaks the text portion before
+  // the reactive flip in the spawnWorker branch can fire.
+  let suppressText = options.suppressIntermediateText === true
+  // True while THIS session has background workers running or undrained
+  // worker results. Phase 4b will wait/drain and run a synthesis turn, so an
+  // empty or suppressed turn in that state is the correct "wait", not a
+  // failure to recover from.
+  const sessionWorkersBusy = (): boolean => {
+    const wm = context.workerManager
+    return wm
+      ? (wm.pendingCountFor(context.sessionId) > 0 || wm.hasNotificationsFor(context.sessionId))
+      : false
+  }
+
+  let { catalog, registrationMode, toolDefinitions, toolRegistration } = await prepareQueryTools(options, provider, model, tools)
+
   // In stateless mode, use provider.stream() each turn (no rawHistory accumulation).
   // In stateful mode, use a persistent session that preserves thought signatures.
   // `context.abortSignal` rides through to the provider's underlying `fetch`
@@ -901,6 +917,9 @@ async function* queryLoopCore(
   // Preserve the ordinary admission/constructor order before recording input.
   // Routine reads delay construction until their real observations are ready.
   await assertModelInputPreparation(context, provider, model, options.messages)
+  // Stateful drivers can park native tool calls between sends. End the initial
+  // session when its immutable prompt/catalog is replaced.
+  const initialSession = options.takeDiscoveredContext ? new AbortController() : undefined
   const createPreparedSession = () => provider.createSession({
     assertInputAuthority: () => assertModelInputAuthority(context),
     model,
@@ -910,8 +929,9 @@ async function* queryLoopCore(
     toolRegistration,
     maxTokens: options.maxTokens,
     inputTokenLimit: options.inputTokenLimit,
-    signal: context.abortSignal,
+    signal: initialSession && options.takeDiscoveredContext ? AbortSignal.any([context.abortSignal, initialSession.signal]) : context.abortSignal,
   })
+  if (initialSession) context.registerInvocationFinalizer?.('initial-context-session', () => initialSession.abort())
   let session = !options.routineCalendarRead && !options.stateless ? createPreparedSession() : null
 
   // Turn-ledger trace for this invocation. Fire-and-forget by contract; a
@@ -940,9 +960,14 @@ async function* queryLoopCore(
 
   // Messages to send on each turn. In stateless mode, this accumulates the
   // full conversation history. In stateful mode, only the new turn is sent.
-  let nextMessages: Message[] = [...options.messages]
+  let nextMessages: Message[] = inheritScopeSources([...options.messages], options.messages)
+  let nextRequestReplacesSession = false
+  // The model may request context after a retry or inbox steer. Keep every
+  // already-completed round for the one transition to the expanded session.
+  const initialExchange: Message[] = []
+  const initialMessageCount = options.messages.length
   // Full history for stateless mode — rebuilt each turn with assistant + tool results
-  let statelessHistory: Message[] = options.stateless ? [...options.messages] : []
+  let statelessHistory: Message[] = options.stateless ? inheritScopeSources([...options.messages], options.messages) : []
   let lastResponse: AssistantResponse | undefined
   const terminalConversationMessages: Message[] = [...options.messages]
   // Bounded, successful evidence only. This is the only tool-derived state an
@@ -1004,21 +1029,32 @@ async function* queryLoopCore(
     }
   }
 
-  const routine: RoutineReadPhaseResult = options.routineCalendarRead
-    ? yield* requireQueryLoopPort(options.ports,'routineRead','routineCalendarRead')({options,tools,loopDetector,deniedTools,ledger:ledgerTrace,
-      assertInputAuthority:()=>assertModelInputAuthority(context)})
-    : {messages:[],complete:false,records:[],calls:0}
-  loopStepIndex+=routine.calls
-  for(const observation of routine.records){
-    if(!observation.isError && observation.content.trim())terminalEvidence.push({tool:observation.name,input:serializeTerminalToolInput(observation.input),result:observation.content.slice(0,MAX_TERMINAL_EVIDENCE_CHARS)})
-  }
-  if(terminalEvidence.length>MAX_TERMINAL_EVIDENCE)terminalEvidence.splice(0,terminalEvidence.length-MAX_TERMINAL_EVIDENCE)
-  if(routine.messages.length){nextMessages.push(...routine.messages);if(options.stateless)statelessHistory.push(...routine.messages)}
-  if(routine.complete){toolDefinitions.length=0;toolRegistration=undefined;tools.clear()}
-  if(options.routineCalendarRead){
+  let routineComplete = false
+  async function* applyRoutineRead(): AsyncGenerator<QueryEvent, void> {
+    if (!options.routineCalendarRead) return
+    const routine = yield* requireQueryLoopPort(options.ports, 'routineRead', 'routineCalendarRead')({
+      options, tools, loopDetector, deniedTools, ledger: ledgerTrace, assertInputAuthority: () => assertModelInputAuthority(context),
+    })
+    loopStepIndex += routine.calls
+    for (const observation of routine.records) {
+      if (!observation.isError && observation.content.trim()) {
+        terminalEvidence.push({ tool: observation.name, input: serializeTerminalToolInput(observation.input),
+          result: observation.content.slice(0, MAX_TERMINAL_EVIDENCE_CHARS) })
+      }
+    }
+    if (terminalEvidence.length > MAX_TERMINAL_EVIDENCE) terminalEvidence.splice(0, terminalEvidence.length - MAX_TERMINAL_EVIDENCE)
+    nextMessages.push(...routine.messages)
+    if (options.stateless) statelessHistory.push(...routine.messages)
+    routineComplete = routine.complete
+    if (routineComplete) {
+      toolDefinitions.length = 0
+      toolRegistration = undefined
+      tools.clear()
+    }
     await assertModelInputPreparation(context, provider, model, nextMessages)
-    session=options.stateless?null:createPreparedSession()
+    session = options.stateless ? null : createPreparedSession()
   }
+  yield* applyRoutineRead()
 
   for (let turn = 0; turn < maxTurns; turn++) {
     // A rejected call may recover into another model turn; cancellation must
@@ -1160,13 +1196,11 @@ async function* queryLoopCore(
       // Ledger: record what is about to go on the wire — the delta in
       // stateful mode (recorder reconstructs full = start.messages + deltas),
       // the complete history in stateless mode.
-      safeTrace(ledgerTrace, (t) =>
-        t.request(
-          session
-            ? { turn, messages: nextMessages, full: false }
-            : { turn, messages: statelessHistory, full: true },
-        ),
-      )
+      safeTrace(ledgerTrace, (trace) => trace.request({
+        turn, messages: session ? nextMessages : statelessHistory, full: !session || nextRequestReplacesSession,
+        ...(nextRequestReplacesSession ? { systemPrompt: renderSystemContext({ systemPrompt, runtimeSystemContext }) } : {}),
+      }))
+      nextRequestReplacesSession = false
       debugDocumentFlow('request', { sessionId: context.sessionId, model, turn, mode: session ? 'stateful_delta' : 'stateless_full', messages: session ? nextMessages : statelessHistory })
       // Raw provider read-ahead never executes tools or admits output. The
       // shared loop owns it once, independently of the selected provider.
@@ -1350,7 +1384,7 @@ async function* queryLoopCore(
       debugDocumentFlow('stream_error', { sessionId: context.sessionId, model, turn, error: true, providerError: stallWatchdog?.error ?? err, timeout: !!stallWatchdog?.error, aborted: context.abortSignal?.aborted })
       if (isAuthorityBoundaryError(err)) throw err
       // Layer 4: reactive compact on context overflow — compact and retry once
-      if (isContextOverflowError(err) && !routine.complete && !hasAttemptedReactiveCompact && options.compactModel) {
+      if (isContextOverflowError(err) && !routineComplete && !hasAttemptedReactiveCompact && options.compactModel) {
         hasAttemptedReactiveCompact = true
         yield { type: 'status', message: 'Context too large, compacting...' }
         try {
@@ -1702,6 +1736,10 @@ async function* queryLoopCore(
     const persistedResponse = persistedContent === response.content
       ? response
       : { ...response, content: persistedContent }
+    if (options.takeDiscoveredContext) {
+      if (initialExchange.length) initialExchange.push(...nextMessages)
+      initialExchange.push({ role: 'assistant', content: persistedContent })
+    }
     options.outputOwner.project(response, persistedResponse, () => ({ ...response,
       content: response.content.filter(block => !(block.type === 'tool_use' && transientToolUseIds.has(block.id))),
     }))
@@ -1936,7 +1974,14 @@ async function* queryLoopCore(
       return
     }
 
-    if ((!hasToolUse || response.stopReason !== 'tool_use') && rejectedToolInputs.size===0) {
+    // A stream wrapper can finish with end_turn after executing discovery.
+    // The admitted frame still needs a provider round to answer the user.
+    const discoveryReceipt = options.takeDiscoveredContext && allToolResults.find(block =>
+      block.type === 'tool_result' && response.content.some(call => call.type === 'tool_use' &&
+        call.name === CONVERSATION_CONTEXT_TOOL && call.id === block.toolUseId))
+    const discovery = discoveryReceipt ? options.takeDiscoveredContext?.() : undefined
+    if (discoveryReceipt?.type === 'tool_result' && discoveryReceipt.isError) throw new Error('Conversation context discovery failed.')
+    if (!discovery && (!hasToolUse || response.stopReason !== 'tool_use') && rejectedToolInputs.size === 0) {
       // ── Phase 4b: Worker notification drain ────────────────
       // If background workers are still running, wait for them and
       // inject their results as a user message for a synthesis turn.
@@ -2301,6 +2346,38 @@ async function* queryLoopCore(
       }
     }
 
+    if (discovery) {
+      context.abortSignal.throwIfAborted()
+      initialSession?.abort()
+      const { context: enrichment, ...frame } = discovery
+      Object.assign(context, enrichment)
+      maxTurns = frame.maxTurns ?? maxTurns
+      maxToolCalls = frame.maxToolCalls ?? maxToolCalls
+      options.outputOwner.setTurnLimit(maxTurns)
+      suppressText = frame.suppressIntermediateText ?? suppressText
+      tools = filterToolsByCapabilities(frame.tools, context.activeCapabilities ?? new Set())
+      context.requestTools = enrichment?.requestTools
+        ? filterToolsByCapabilities(enrichment.requestTools, context.activeCapabilities ?? new Set())
+        : tools
+      options = { ...options, ...frame, tools, takeDiscoveredContext: undefined,
+        planNudgeCap: frame.planNudgeCap ?? options.planNudgeCap, groundingGate: frame.groundingGate ?? options.groundingGate,
+        workerDrainPrompt: frame.workerDrainPrompt ?? options.workerDrainPrompt, maxTurns, maxToolCalls }
+      model = frame.model
+      systemPrompt = frame.systemPrompt
+      runtimeSystemContext = frame.runtimeSystemContext
+      provider = captureInputAdmissionProvider(frame.provider)
+      const surface = await prepareQueryTools(options, provider, model, tools)
+      ;({ catalog, registrationMode, toolDefinitions, toolRegistration } = surface)
+      nextRequestReplacesSession = true
+      nextMessages = inheritScopeSources([...frame.messages, ...initialExchange, ...nextMessages], frame.messages)
+      initialExchange.length = 0
+      statelessHistory = options.stateless ? inheritScopeSources([...nextMessages], nextMessages) : []
+      terminalConversationMessages.splice(0, initialMessageCount, ...frame.messages)
+      await assertModelInputPreparation(context, provider, model, nextMessages)
+      session = !options.routineCalendarRead && !options.stateless ? createPreparedSession() : null
+      yield* applyRoutineRead()
+    }
+
     // Stateless mode: accumulate full history for next provider.stream() call.
     // Preserve providerSignature on tool_use blocks — Gemini 3 family models
     // (3 Pro, 3.1 Pro, 3 Flash) REQUIRE thoughtSignature when re-sending a
@@ -2311,7 +2388,7 @@ async function* queryLoopCore(
     // "save memory" comment was a false economy — signatures are ~50-200
     // bytes per turn, three orders of magnitude smaller than the thought-
     // text bodies that the stateful Gemini session strips from rawHistory.
-    if (options.stateless) {
+    if (options.stateless && !discovery) {
       statelessHistory.push({ role: 'assistant', content: response.content })
       if (nextMessages.length > 0) {
         statelessHistory.push(...nextMessages)

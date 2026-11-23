@@ -71,7 +71,7 @@ export function createQueryOutputOwner(maxTurns: number) {
   const aliases = new WeakMap<AssistantResponse, ProducerRecord>()
   const records: ProducerRecord[] = []
   // Normal loop responses plus one isolated finalizer/static terminal notice.
-  const originBudget = Number.isSafeInteger(maxTurns) && maxTurns >= 0 ? maxTurns + 1 : 0
+  let originBudget = Number.isSafeInteger(maxTurns) && maxTurns >= 0 ? maxTurns + 1 : 0
   let qualified = originBudget > 0
   let disposition: OutputDisposition | undefined
   function register(response: AssistantResponse): ProducerRecord {
@@ -92,6 +92,10 @@ export function createQueryOutputOwner(maxTurns: number) {
       ...(changed ? { response: structuredClone(response) } : {}) }
   }
   return {
+    setTurnLimit(limit: number) {
+      originBudget = Number.isSafeInteger(limit) && limit >= 0 ? limit + 1 : 0
+      if (records.length > originBudget) qualified = false
+    },
     register,
     project(raw: AssistantResponse, projected: AssistantResponse, project: () => AssistantResponse) {
       const record = register(raw)

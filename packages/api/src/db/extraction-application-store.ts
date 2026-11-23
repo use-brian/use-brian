@@ -7,7 +7,9 @@ import { randomUUID } from 'node:crypto'
 import type pg from 'pg'
 import {
   emptyApplicationCounts,
+  extractionDependencyState,
   ExtractionApplicationError,
+  isRetryableExtractionItem,
   type ExtractionApplicationClaim,
   type ExtractionApplicationItem,
   type ExtractionApplicationMutation,
@@ -329,7 +331,7 @@ export function createExtractionApplicationStore(): DbExtractionApplicationStore
       if (!result.rows[0]) {
         const current = await loadRun(getPool(), runId)
         if (current?.applicationState === 'complete') {
-          return { runId, planHash: expectedPlanHash, leaseToken, authority }
+          return { runId, planHash: expectedPlanHash, leaseToken, authority, alreadyComplete: true }
         }
         throw new ExtractionApplicationError('application_claim_conflict', undefined, true)
       }
@@ -338,6 +340,11 @@ export function createExtractionApplicationStore(): DbExtractionApplicationStore
 
     async applyItem(claim, candidate, mutate) {
       return transaction(async (client) => {
+        // Entity admission locks the workspace before touching the Episode.
+        // Match that order while fencing the durable receipt and source.
+        if (candidate.primitiveKind === 'entity' && claim.authority?.workspaceId) {
+          await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [claim.authority.workspaceId])
+        }
         await lockClaim(client, claim)
         const locked = await client.query<ItemRow>(
           `SELECT ${ITEM_COLUMNS} FROM episode_extraction_items
@@ -349,25 +356,33 @@ export function createExtractionApplicationStore(): DbExtractionApplicationStore
         if (row.payloadHash !== candidate.payloadHash || row.primitiveKind !== candidate.primitiveKind) {
           throw new ExtractionApplicationError('application_candidate_conflict')
         }
-        if (['committed', 'already_applied', 'held', 'rejected'].includes(row.disposition)) {
-          return { ...toItem(row), disposition: 'already_applied' }
+        if (!isRetryableExtractionItem(row)) {
+          const item = toItem(row)
+          return item.disposition === 'committed' ? { ...item, disposition: 'already_applied' } : item
         }
-        if (row.disposition === 'failed' && !row.retryable) return toItem(row)
 
-        if (candidate.dependencyIds.length > 0) {
-          const dependencies = await client.query<{ candidateId: string; disposition: string }>(
-            `SELECT candidate_id AS "candidateId",disposition
+        let blocked = false
+        if (!candidate.terminalDisposition && row.dependencyIds.length > 0) {
+          const dependencies = await client.query<ItemRow>(
+            `SELECT ${ITEM_COLUMNS}
                FROM episode_extraction_items
               WHERE run_id=$1 AND candidate_id=ANY($2::text[]) FOR SHARE`,
-            [claim.runId, candidate.dependencyIds],
+            [claim.runId, row.dependencyIds],
           )
-          if (dependencies.rows.length !== candidate.dependencyIds.length
-            || dependencies.rows.some((dependency) => !['committed','already_applied'].includes(dependency.disposition))) {
+          const state = extractionDependencyState(row.dependencyIds, new Map(dependencies.rows.map(
+            (dependency) => [dependency.candidateId, toItem(dependency)],
+          )))
+          if (state === 'pending') {
             throw new ExtractionApplicationError('application_dependency_pending', undefined, true)
           }
+          blocked = state === 'blocked'
         }
 
-        const mutation = await mutate(client)
+        const mutation: ExtractionApplicationMutation = candidate.terminalDisposition
+          ? { disposition: candidate.terminalDisposition, safeCode: candidate.terminalReason ?? candidate.terminalDisposition }
+          : blocked
+            ? { disposition: 'held', safeCode: 'application_dependency_unavailable' }
+            : await mutate(client)
         const disposition = mutation.disposition ?? 'committed'
         if (!['committed', 'held', 'rejected'].includes(disposition)) {
           throw new ExtractionApplicationError('application_disposition_invalid')

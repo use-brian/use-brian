@@ -41,9 +41,13 @@ describe.sequential('[COMP:api/application-persistence] actual derived manual Kn
   return{source,remote,effects,writer,create:all.find(tool=>tool.name==='addKnowledgeEntry')!,update:all.find(tool=>tool.name==='updateKnowledgeEntry')!,input:(path:string)=>({...input(path),captureRuleId:capture.id})}
  }
  it('publishes a source-backed write under the actual retained actor with every original observation and an independent current reader',async()=>{
-  const c=await setup(),repo=await repository(c),context=await consumed(c),original=structuredClone(context.scopeAccumulator.evidence.sources!),path='fictional-repo-published'
+  const c=await setup(),repo=await repository(c),context=await consumed(c),original=structuredClone(context.scopeAccumulator.evidence.sources!),path=c.row.path
   const result=await repo.create.execute(repo.input(path),context);expect(result.isError,JSON.stringify(result)).not.toBe(true);expect(repo.effects).toHaveLength(1)
-  const [row]=await rows(c,path),stored=(await c.f.pool.query('SELECT source_id,created_by,scope_version FROM knowledge_entries WHERE id=$1',[row.id])).rows[0]
+  const matches = await rows(c,path)
+  expect(matches).toHaveLength(2)
+  const row = matches.find(entry => entry.id !== c.row.id)!
+  expect((await c.f.pool.query('SELECT content,source_id FROM knowledge_entries WHERE id=$1',[c.row.id])).rows[0]).toEqual({content:c.row.content,source_id:null})
+  const stored=(await c.f.pool.query('SELECT source_id,created_by,scope_version FROM knowledge_entries WHERE id=$1',[row.id])).rows[0]
   expect(stored).toMatchObject({source_id:repo.source.id,created_by:c.f.ownerId})
   const graph=(await c.f.pool.query('SELECT * FROM application_scope_lineage($1,$2,$3,$4)',[c.f.workspaceId,['knowledge_entry'],[row.id],[String(stored.scope_version)]])).rows
   for(const source of original)expect(graph).toContainEqual({kind:source.resourceKind,id:source.resourceId,version:source.version})

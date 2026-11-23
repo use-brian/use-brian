@@ -20,7 +20,7 @@ describe('[COMP:api/decision-playbook-context] prompt-path wiring', () => {
   it('keeps application ids out of prompt text and freezes the exact id on approvals', () => {
     const chat = source('../chat.ts')
     expect(chat).toContain('playbookRules = decisionPlaybookContext.playbookRules')
-    expect(chat).toContain('{ decisionApplicationId: decisionPlaybookContext.decisionApplicationId }')
+    expect(chat).toContain('{ decisionApplicationId: discovered?.decisionPlaybookContext.decisionApplicationId }')
     expect(chat).not.toContain('playbookRules: decisionPlaybookContext.appliedRuleIds')
   })
 

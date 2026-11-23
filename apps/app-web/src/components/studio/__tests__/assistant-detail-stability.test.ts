@@ -67,4 +67,12 @@ describe("[COMP:app-web/assistant-detail] row-switch stability", () => {
     // read must ride that family to revalidate with the header.
     expect(assistantSettingsCacheKey("w-1", "a-1").startsWith("assistant:w-1")).toBe(true);
   });
+
+  it("distinguishes a failed playbook read from an empty playbook", async () => {
+    mocks.fetch.mockImplementation(async (url: string) => {
+      if (url.endsWith("/playbook")) return new Response(null, { status: 503 });
+      return route(url);
+    });
+    await expect(fetchAssistantSettings("a-1")).resolves.toMatchObject({ name: "First", playbook: null });
+  });
 });

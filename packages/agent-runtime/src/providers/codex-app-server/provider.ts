@@ -406,7 +406,7 @@ class CodexProviderSession implements ProviderSession {
         this.#closedReason = error
         this.#activeQueue?.fail(error)
         this.#failParked('Brian cancelled the tool call.')
-        void this.#interruptActiveTurn()
+        void this.dispose()
       }
       options.signal.addEventListener('abort', onAbort, { once: true })
       this.#abortListener = () => options.signal?.removeEventListener('abort', onAbort)
@@ -503,7 +503,21 @@ class CodexProviderSession implements ProviderSession {
       }
       await this.#startThread()
       const history = messages.slice(0, -1)
-      currentMessages = messages.slice(-1)
+      const latest = messages[messages.length - 1]!
+      currentMessages = [latest]
+      if (latest.role === 'user' && Array.isArray(latest.content)) {
+        const previous = history.at(-1)
+        const calls = new Set(previous?.role === 'assistant' && Array.isArray(previous.content)
+          ? previous.content.flatMap(block => block.type === 'tool_use' ? [block.id] : []) : [])
+        const paired = latest.content.filter(block => block.type === 'tool_result' && calls.has(block.toolUseId))
+        if (paired.length) {
+          // turn/start has no function_call_output input variant. Replay real
+          // matched results beside their calls, with any new user text on the wire.
+          history.push({ role: 'user', content: paired })
+          const remaining = latest.content.filter(block => !paired.includes(block))
+          currentMessages = [{ role: 'user', content: remaining.length ? remaining : 'Continue with the preceding tool results.' }]
+        }
+      }
       await this.#injectHistory(history)
     }
 

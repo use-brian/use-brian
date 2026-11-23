@@ -318,8 +318,8 @@ export function ingestSourcesCacheKey(workspaceId: string): string {
   return `ingest-sources:${workspaceId}${viewerSuffix()}`;
 }
 
-export function ingestApplicationsCacheKey(workspaceId: string): string {
-  return `ingest-applications:${workspaceId}${viewerSuffix()}`;
+export function ingestApplicationsCacheKey(workspaceId: string, cursor?: string): string {
+  return `ingest-applications:${workspaceId}:${cursor ?? "latest"}${viewerSuffix()}`;
 }
 
 export function whatsappIngestCacheKey(workspaceId: string): string {

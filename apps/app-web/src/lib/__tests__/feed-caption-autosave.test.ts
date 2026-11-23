@@ -49,6 +49,16 @@ afterEach(async () => {
 });
 
 describe("[COMP:app-web/caption-editor] mounted autosave", () => {
+  it.each([true, false])("fits a replacement draft with native content sizing %s", async (nativeSizing) => {
+    vi.stubGlobal("CSS", { supports: () => nativeSizing });
+    const area = host.querySelector("textarea")!;
+    area.style.removeProperty("height");
+    Object.defineProperty(area, "scrollHeight", { value: 480 });
+
+    await act(async () => replaceDraft("A longer draft.\n".repeat(30)));
+    expect(area.style.height).toBe(nativeSizing ? "" : "480px");
+  });
+
   it("saves controlled edits after the idle window, including clearing the caption", async () => {
     await act(async () => vi.advanceTimersByTimeAsync(900));
     expect(save).not.toHaveBeenCalled();

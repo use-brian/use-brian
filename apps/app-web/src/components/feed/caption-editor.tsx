@@ -94,7 +94,6 @@ export function CaptionEditor({
   readOnly,
   placeholder,
   deferSave = false,
-  saveHint,
   onChange,
   onSave,
 }: {
@@ -104,7 +103,6 @@ export function CaptionEditor({
   placeholder?: string;
   /** Keep edits local until the parent commits the complete format payload. */
   deferSave?: boolean;
-  saveHint?: string;
   /** Every keystroke; the parent owns the text. */
   onChange: (next: string) => void;
   /** Debounced commit. Returns false to surface a save error. */
@@ -159,10 +157,10 @@ export function CaptionEditor({
     setState("idle");
   }, [value]);
 
-  // Auto-grow. Reset to `auto` first or the box can only ever get taller.
+  // Older browsers need an explicit height to fit the whole draft.
   useEffect(() => {
     const el = areaRef.current;
-    if (!el) return;
+    if (!el || window.CSS?.supports("field-sizing", "content")) return;
     el.style.height = "auto";
     el.style.height = `${el.scrollHeight}px`;
   }, [value]);
@@ -203,12 +201,12 @@ export function CaptionEditor({
   const counter = counterState(value, platform);
 
   return (
-    <div className="space-y-2">
+    <div className="w-full space-y-3">
       {!readOnly ? (
         <div
           role="toolbar"
           aria-label={t.formattingToolbar}
-          className="flex items-center gap-1 border-b border-border/60 pb-3"
+          className="inline-flex max-w-full items-center"
         >
           {([
             ["bold", t.formatBold, Bold],
@@ -223,7 +221,7 @@ export function CaptionEditor({
               onClick={() => applyFormatting(formatting)}
               aria-label={label}
               title={label}
-              className="inline-flex size-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              className="inline-flex size-11 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:text-foreground md:size-8"
             >
               <Icon className="size-4" aria-hidden />
             </button>
@@ -248,15 +246,15 @@ export function CaptionEditor({
           void flush();
         }}
         placeholder={placeholder ?? t.captionPlaceholder}
+        aria-label={placeholder ?? t.captionPlaceholder}
         rows={4}
         className={cn(
-          "w-full resize-none border-0 bg-transparent p-0 text-[16px] md:text-[15px] leading-relaxed",
-          !readOnly && "pt-3",
+          "block min-h-[6lh] w-full field-sizing-content resize-none border-0 bg-transparent p-0 text-base leading-7 text-foreground",
           "placeholder:text-muted-foreground/50 focus:outline-none focus-visible:shadow-none",
-          readOnly && "cursor-default opacity-80",
+          readOnly && "cursor-default",
         )}
       />
-      <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-xs text-muted-foreground">
         <span
           className={cn(
             "tabular-nums",
@@ -271,18 +269,12 @@ export function CaptionEditor({
         {counter.over ? (
           <span className="text-destructive">{t.overLimit}</span>
         ) : null}
-        <span aria-hidden>·</span>
-        <span aria-live="polite">
-          {state === "saving"
-            ? t.saving
-            : state === "saved"
-              ? t.saved
-              : state === "error"
-                ? t.saveFailed
-                : deferSave
-                  ? (saveHint ?? t.saveWithVersion)
-                  : t.autosaveHint}
-        </span>
+        {!deferSave ? <>
+          <span aria-hidden>·</span>
+          <span aria-live="polite">
+            {state === "saving" ? t.saving : state === "saved" ? t.saved : state === "error" ? t.saveFailed : t.autosaveHint}
+          </span>
+        </> : null}
       </div>
     </div>
   );

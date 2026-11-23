@@ -79,6 +79,23 @@ Claude Code lists the active project hook in `/hooks`. Codex patches and
 Claude Edit or Write operations on registered files run the check automatically.
 A failure gives the agent the test diagnostic and rerun command.
 
+### SQL migration size
+
+New files in `packages/api/migrations/` have a **64 KiB (65,536-byte)** limit.
+Put the SQL that changes the database in the migration. When a verifier already
+exists, reference a versioned copy instead of pasting its full text into each
+successor. The size check recognizes historical oversized files by their exact
+path and content.
+
+The project editor hooks reject oversized file additions before a Codex patch
+or Claude Write runs. They also check files after edits and shell commands.
+Run `pnpm check:migration-size` to check the working tree, including generated
+SQL. The build and CI run the same check. To enable the staged-file check on a
+fresh clone, run `git config --local core.hooksPath .githooks` if you use Git's
+default hooks. If you already use custom hooks, have your pre-commit hook run
+`node scripts/hooks/check-migration-size.mjs --staged` and propagate its exit
+status.
+
 ## Reporting security issues
 
 See [`SECURITY.md`](./SECURITY.md): please do **not** file security reports as

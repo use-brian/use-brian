@@ -6,7 +6,6 @@ import {getPool,getAppPool} from '../client.js'
 import {ensureOfficeArtifactSessionSystem,findOfficeArtifactForSessionSystem} from '../office-artifact-sessions.js'
 import {createMemory,getMemoryById} from '../memories.js'
 import {gateSessionRead} from '../../session-read-authority.js'
-import {samplePlaybookEvidence} from '../playbook-store.js'
 import {selectCandidateSessions} from '../../workers/skill-review-worker.js'
 import {liveWorkRoutes} from '../../routes/live-work.js'
 import {sessionRoutes} from '../../routes/sessions.js'
@@ -128,7 +127,7 @@ describe('[COMP:api/office-chat-lane] a lane read never exceeds the file',()=>{
 })
 
 describe('[COMP:api/office-chat-session] the thread is never listed outside the file (D4)',()=>{
-  it('is absent from the Chat list, the Live roster, playbook evidence and skill review, where a web chat is present',async()=>{
+  it('is absent from the Chat list, the Live roster and skill review, where a web chat is present',async()=>{
     const f=await fixture()
     const link=await ensureOfficeArtifactSessionSystem({artifactId:f.artifact,assistantId:f.assistant,userId:f.owner})
     const web=(await pool.query("INSERT INTO sessions(assistant_id,user_id,channel_type,channel_id,workspace_id,app_origin) VALUES($1,$2,'web',gen_random_uuid()::text,$3,'chat') RETURNING id",[f.assistant,f.owner,f.workspace])).rows[0].id
@@ -149,10 +148,6 @@ describe('[COMP:api/office-chat-session] the thread is never listed outside the 
     const roster=(live.body.items as Array<{id:string;sessionId?:string}>).map(item=>item.sessionId??item.id)
     expect(roster).toContain(web)
     expect(roster).not.toContain(link.sessionId)
-
-    const evidence=(await samplePlaybookEvidence(f.assistant,7,100)).map(row=>row.sessionId)
-    expect(evidence).toContain(web)
-    expect(evidence).not.toContain(link.sessionId)
 
     const candidates=(await selectCandidateSessions(1,24)).map(row=>row.sessionId)
     expect(candidates).toContain(web)

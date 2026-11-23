@@ -99,7 +99,7 @@ describe('[COMP:api/knowledge-store] canonical knowledge ready-mode admission (p
     const authority = (await store.captureSourceSync(source))!
     const entry = await store.upsertByPath(f.input({ path: 'owned', sourceId: source.id, sourceSha: 'head', compartments: [] }), authority)
     const manual = await store.create(f.input({ compartments: [] }))
-    await expect(store.deleteByTeamAndPath(f.workspaceId, manual.path, authority)).rejects.toThrow('knowledge_source_target_conflict')
+    expect(await store.deleteByTeamAndPath(f.workspaceId, manual.path, authority)).toBe(false)
     await expect(store.updateRelatedIds(manual.id, [entry.id], authority)).rejects.toThrow('knowledge_source_target_conflict')
     const foreign = await fixture('departments')
     const foreignEntry = await store.create(foreign.input({ compartments: [] }))
@@ -153,8 +153,8 @@ describe('[COMP:api/knowledge-store] canonical knowledge ready-mode admission (p
     await store.updateSourceSync(source.id, 'base')
     const current = (await store.getSource(source.id))!
     const authority = (await store.captureSourceSync(current))!
-    await expect(store.deleteByTeamAndPath(f.workspaceId, manual.path, authority)).rejects.toThrow('knowledge_source_target_conflict')
-    await expect(store.deleteByTeamAndPath(f.workspaceId, foreign.path, authority)).rejects.toThrow('knowledge_source_target_conflict')
+    expect(await store.deleteByTeamAndPath(f.workspaceId, manual.path, authority)).toBe(false)
+    expect(await store.deleteByTeamAndPath(f.workspaceId, foreign.path, authority)).toBe(false)
     expect(await store.deleteByTeamAndPath(f.workspaceId, owned.path, authority)).toBe(true)
     await store.updateSourceSync(source.id, 'base', null, authority)
     const legacyErrors: string[] = []
@@ -163,11 +163,13 @@ describe('[COMP:api/knowledge-store] canonical knowledge ready-mode admission (p
         getRepoPermissions: async () => ({ push: false }), getBranchHead: async () => 'new',
         compareCommits: async () => ({ headSha: 'new', files: [{ filename: 'manual.md', status: 'removed' }] }),
       } as never }).tick()
-    expect(legacyErrors).toContain('knowledge_source_target_conflict')
+    expect(legacyErrors).toEqual([])
+    const latest = (await store.getSource(source.id))!
+    expect(latest.lastSyncedSha).toBe('new')
     await pool.query("UPDATE workspace_access_policies SET setup_state='ready' WHERE workspace_id=$1", [f.workspaceId])
     const events: Array<{ type: string }> = []
     let io = 0
-    await createKnowledgeSyncWorker({ store: { ...store, getSourcesDueForSync: async () => [current] },
+    await createKnowledgeSyncWorker({ store: { ...store, getSourcesDueForSync: async () => [latest] },
       credentials: { getPat: async () => { io++; return 'test' } }, onEvent: e => events.push(e), api: {
         getRepoPermissions: async () => ({ push: false }), getBranchHead: async () => 'new',
         compareCommits: async () => ({ headSha: 'new', files: [{ filename: 'manual.md', status: 'removed' }] }),
@@ -241,6 +243,109 @@ describe('[COMP:api/knowledge-store] canonical knowledge ready-mode admission (p
     expect(trees).toBe(1)
     expect((await pool.query('SELECT path,content FROM knowledge_entries WHERE workspace_id=$1', [f.workspaceId])).rows).toEqual([{ path: 'page', content: 'restored base' }])
     expect((await store.getSource(source.id))!).toMatchObject({ lastSyncedSha: 'base', syncDirty: false, syncRunId: null })
+  })
+
+  it('reconciles overlapping source paths independently and clears ambiguous or denied links', async () => {
+    const f = await fixture('departments')
+    const binding = { sensitivity: 'internal' as const, compartments: [], projectIds: [] }
+    const first = await store.createSource({
+      workspaceId: f.workspaceId, sourceType: 'github', repo: 'fixture/alpha-kb', rootPath: 'docs', binding,
+    }, { actorUserId: f.userId })
+    const second = await store.createSource({
+      workspaceId: f.workspaceId, sourceType: 'github', repo: 'fixture/beta-kb', rootPath: 'pages', binding,
+    }, { actorUserId: f.userId })
+    const third = await store.createSource({
+      workspaceId: f.workspaceId, sourceType: 'github', repo: 'fixture/gamma-kb', rootPath: 'guides', binding,
+    }, { actorUserId: f.userId })
+    const activeSourceIds = [first.id, second.id]
+    const manual = await store.create(f.input({ path: 'index', content: 'Manual index', compartments: [] }))
+    const reference = await store.create(f.input({ path: 'reference', compartments: [] }))
+    const resource = await store.create(f.input({ path: 'resource', compartments: [] }))
+    const restricted = await store.create(f.input({ path: 'restricted', sensitivity: 'confidential', compartments: [] }))
+    const abandoned = (await store.captureSourceSync(second))!
+    const partial = await store.upsertByPath(f.input({ path: 'index', sourceId: second.id, sourceSha: 'abandoned', compartments: [] }), abandoned)
+    await store.upsertByPath(f.input({ path: 'vanished', sourceId: second.id, sourceSha: 'abandoned', compartments: [] }), abandoned)
+    await store.releaseSourceSync(abandoned)
+    expect(await store.getSource(second.id)).toMatchObject({ lastSyncedSha: null, syncDirty: true })
+
+    let secondHead = 'beta-one'
+    let secondLinks = '[[index]] [[reference]] [[resource]] [[restricted]]'
+    const errors: string[] = []
+    const trees: Record<string, { path: string; sha: string }[]> = {
+      'alpha-kb': [{ path: 'docs/index.md', sha: 'alpha-index' }],
+      'beta-kb': [{ path: 'pages/index.md', sha: 'beta-index' }, { path: 'pages/links.md', sha: 'beta-links' }],
+      'gamma-kb': [{ path: 'guides/reference.md', sha: 'gamma-reference' }],
+    }
+    const readTree = vi.fn(async (_pat: string, _owner: string, repo: string) => trees[repo])
+    const compare = vi.fn(async () => ({
+      headSha: secondHead, files: secondHead === 'beta-two'
+        ? [{ filename: 'pages/index.md', status: 'removed' }]
+        : [{ filename: 'pages/links.md', status: 'modified' }],
+    }))
+    const worker = createKnowledgeSyncWorker({
+      store: {
+        ...store,
+        getSourcesDueForSync: async () => (await Promise.all(activeSourceIds.map(id => store.getSource(id)))).filter(row => row !== null),
+      },
+      credentials: { getPat: async () => 'fixture-token' },
+      api: {
+        getRepoPermissions: async () => ({ push: false }),
+        getBranchHead: async (_pat, _owner, repo) => repo === 'beta-kb' ? secondHead : `${repo}-one`,
+        getRepoTree: readTree,
+        getFileContents: async (_pat, _owner, repo, path) => ({
+          content: path === 'pages/links.md' ? secondLinks : `Index for ${repo}`,
+        }),
+        compareCommits: compare,
+      },
+      onEvent: event => { if (event.type === 'sync_error') errors.push(event.error!) },
+    })
+    await worker.tick()
+
+    expect(errors).toEqual([])
+    expect(await store.getSource(second.id)).toMatchObject({ lastSyncedSha: 'beta-one', syncDirty: false, syncError: null })
+    expect(await store.getByPathSystem(f.workspaceId, 'index')).toBeNull()
+    const alpha = (await store.getByPathSystem(f.workspaceId, 'index', first.id))!
+    expect(alpha.content).toBe('Index for alpha-kb')
+    expect(await store.getByPathSystem(f.workspaceId, 'index', second.id)).toMatchObject({
+      id: partial.id, content: 'Index for beta-kb', sourceSha: 'beta-one',
+    })
+    expect(await store.getByPathSystem(f.workspaceId, 'vanished', second.id)).toBeNull()
+    const links = (await store.getByPathSystem(f.workspaceId, 'links', second.id))!
+    expect(links.relatedIds).toEqual([partial.id, reference.id, resource.id])
+    const captured = (await store.captureSourceSync((await store.getSource(second.id))!))!
+    await expect(store.updateRelatedIds(links.id, [restricted.id], captured)).rejects.toThrow('knowledge_source_target_conflict')
+    await store.updateSourceSync(second.id, 'beta-one', null, captured)
+
+    const manualUpdate = await store.upsertByPath(f.input({ path: 'index', content: 'Updated manual index', compartments: [] }))
+    expect(manualUpdate.id).toBe(manual.id)
+    secondHead = 'beta-two'
+    await worker.tick()
+    expect(errors).toEqual([])
+    expect(await store.getSource(second.id)).toMatchObject({ lastSyncedSha: 'beta-two', syncDirty: false })
+    expect(await store.getByPathSystem(f.workspaceId, 'index', second.id)).toBeNull()
+    expect(await store.getByPathSystem(f.workspaceId, 'links', second.id)).toMatchObject({ id: links.id, relatedIds: [reference.id, resource.id] })
+
+    activeSourceIds.push(third.id)
+    await worker.tick()
+    expect(await store.getByPathSystem(f.workspaceId, 'reference', third.id)).not.toBeNull()
+    expect(await store.getByPathSystem(f.workspaceId, 'links', second.id)).toMatchObject({ relatedIds: [reference.id, resource.id] })
+    readTree.mockClear()
+    compare.mockClear()
+    await worker.tick()
+    expect(await store.getByPathSystem(f.workspaceId, 'links', second.id)).toMatchObject({ relatedIds: [resource.id] })
+    expect(await store.getSource(second.id)).toMatchObject({ lastSyncedSha: 'beta-two', syncDirty: false })
+    expect(readTree).not.toHaveBeenCalled()
+    expect(compare).not.toHaveBeenCalled()
+
+    secondHead = 'beta-three'
+    secondLinks = 'This page no longer links to another entry.'
+    await worker.tick()
+    expect(errors).toEqual([])
+    expect(await store.getByPathSystem(f.workspaceId, 'links', second.id)).toMatchObject({ id: links.id, relatedIds: [] })
+    expect(await store.deleteSource(second.id)).toBe(true)
+    expect(await store.getByPathSystem(f.workspaceId, 'links', second.id)).toBeNull()
+    expect(await store.getByPathSystem(f.workspaceId, 'index', first.id)).toMatchObject({ id: alpha.id, content: 'Index for alpha-kb' })
+    expect(await store.getByPathSystem(f.workspaceId, 'index', null)).toMatchObject({ id: manual.id, content: 'Updated manual index' })
   })
 
   it.each(['no actor', 'foreign member', 'read-only member'] as const)('denies direct app-role legacy entry points for %s', async caller => {
@@ -438,7 +543,10 @@ describe('[COMP:api/knowledge-store] canonical knowledge ready-mode admission (p
     const source = await store.createSource({workspaceId:f.workspaceId,sourceType:'local',repo:'test'})
     const prior = await store.create(f.input({sourceId:source.id,compartments:[f.team.compartmentKey]}))
     await pool.query("UPDATE workspace_access_policies SET setup_state='ready' WHERE workspace_id=$1",[f.workspaceId])
-    await expect(store.upsertByPath(f.input({path:prior.path}))).rejects.toThrow('knowledge_source_admission_required')
+    await expect(store.upsertByPath(f.input({path:prior.path,sourceId:source.id}))).rejects.toThrow('knowledge_sync_authority_required')
+    const manual = await store.upsertByPath(f.input({path:prior.path}))
+    expect(manual.id).not.toBe(prior.id)
+    expect(manual.sourceId).toBeNull()
     await expect(store.create(f.input({sourceId:source.id}))).rejects.toThrow('knowledge_source_admission_required')
     await expect(runWithAgentAccess({userId:f.userId,workspaceId:f.workspaceId,clearance:'confidential',compartments:null,projectIds:null},()=>store.createSource({workspaceId:f.workspaceId,sourceType:'local',repo:'blocked'}))).rejects.toThrow('knowledge_source_admission_required')
     expect((await pool.query('SELECT source_id FROM knowledge_entries WHERE id=$1',[prior.id])).rows[0].source_id).toBe(source.id)

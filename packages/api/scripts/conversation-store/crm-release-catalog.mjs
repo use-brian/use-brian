@@ -143,9 +143,9 @@ export async function authenticateCrmSuccessor(owner, source) {
     const { scopeSha256, ...expected } = source.crmInventory
     if (Object.entries(actual).some(([key,value])=>expected[key]!==value)) throw Error('crm_installation_catalog_changed')
     let localDigests = row.local_digest + actual.sha256
-    if (source.additionalCatalog) {
-      const catalog = await readReviewedCrmCatalog(owner, source.additionalCatalog.scope)
-      if (catalog.sha256 !== source.additionalCatalog.sha256) throw Error('installation_additional_catalog_changed')
+    for (const expectedCatalog of source.additionalCatalogs ?? (source.additionalCatalog ? [source.additionalCatalog] : [])) {
+      const catalog = await readReviewedCrmCatalog(owner, expectedCatalog.scope)
+      if (catalog.sha256 !== expectedCatalog.sha256) throw Error('installation_additional_catalog_changed')
       localDigests += catalog.sha256
     }
     if (source.portableSuccessor) {

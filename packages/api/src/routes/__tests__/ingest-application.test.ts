@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import {
   IngestApplicationServiceError,
+  type IngestApplicationProjection,
   type IngestApplicationService,
 } from '../../ingest/application-service.js'
 import { createIngestApplicationRecoveryRoutes } from '../ingest-application.js'
@@ -37,16 +38,16 @@ function setup() {
     extractionState: 'succeeded' as const,
     applicationState: 'partial' as const,
     errorCode: 'write_failed',
-    counts: { pending: 0, committed: 2, alreadyApplied: 0, held: 0, rejected: 0, failed: 1 },
+    counts: { pending: 0, committed: 1, already_applied: 1, held: 0, rejected: 0, failed: 1 },
     resumable: true,
     items: [{
       candidateId: '0002:memory:fixture', primitiveKind: 'memory' as const,
       disposition: 'failed' as const, attemptCount: 1, failureCode: 'write_failed', retryable: true,
     }],
-  }
+  } satisfies IngestApplicationProjection
   const service = {
     get: vi.fn().mockResolvedValue(projection),
-    list: vi.fn().mockResolvedValue({ items: [projection], nextCursor: null }),
+    list: vi.fn<IngestApplicationService['list']>().mockResolvedValue({ applications: [projection], nextCursor: null }),
     retry: vi.fn().mockResolvedValue({ ...projection, applicationState: 'complete', counts: {
       ...projection.counts, committed: 3, failed: 0,
     } }),
@@ -70,7 +71,7 @@ describe('[COMP:api/ingest-application] authenticated application recovery', () 
     const list = await request(app).get(`/api/ingest/applications?workspaceId=${WORKSPACE}`)
     const detail = await request(app).get(`/api/ingest/episodes/${EPISODE}/application`)
     expect(list.status).toBe(200)
-    expect(list.body.items[0]).toEqual(projection)
+    expect(list.body.applications[0]).toEqual(projection)
     expect(detail.status).toBe(200)
     expect(detail.body).toEqual(projection)
     expect(service.list).toHaveBeenCalledWith(access(), { cursor: undefined })

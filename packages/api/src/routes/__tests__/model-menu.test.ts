@@ -88,18 +88,23 @@ describe('[COMP:api/model-menu] GET /models/menu', () => {
     expect(res.body.classes['standard-pro'].length).toBeGreaterThan(0)
   })
 
-  it('offers GPT-6.1 Terra and Sol for Pro while preserving the existing Sol Max route', async () => {
+  it('offers entitled Sol selectors and Astra, and removes them when entitlement changes', async () => {
     const availability = new MutableProviderAvailability()
-    availability.setModelCatalog('openai-codex', new Set(['gpt-6.1-terra', 'gpt-6.1-sol']))
+    availability.setModelCatalog('openai-codex', new Set(['gpt-6.1-terra', 'gpt-6.1-sol', 'gpt-6.2-sol', 'gpt-6.2-astra']))
     const app = makeApp({ configuredProviders: availability })
     const menu = await request(app)
       .get('/api/models/menu?workspaceId=00000000-0000-0000-0000-000000000001').expect(200)
     expect(menu.body.classes['standard-pro']).toEqual([
       expect.objectContaining({ alias: 'gpt-6.1-terra', displayName: 'GPT-6.1 Terra', tier: 'pro' }),
+      expect.objectContaining({ alias: 'gpt-6.2-sol-pro', apiModelId: 'gpt-6.2-sol', displayName: 'GPT-6.2 Sol', tier: 'pro' }),
       expect.objectContaining({ alias: 'gpt-6.1-sol-pro', apiModelId: 'gpt-6.1-sol', displayName: 'GPT-6.1 Sol', tier: 'pro' }),
     ])
     expect(menu.body.classes.max).toEqual([
+      expect.objectContaining({ alias: 'gpt-6.2-sol', tier: 'max' }),
       expect.objectContaining({ alias: 'gpt-6.1-sol', tier: 'max' }),
+    ])
+    expect(menu.body.classes.research).toEqual([
+      expect.objectContaining({ alias: 'gpt-6.2-astra', displayName: 'GPT-6.2 Astra', tier: 'research' }),
     ])
 
     availability.setModelCatalog('openai-codex', new Set(['gpt-6.1-sol']))
@@ -108,6 +113,8 @@ describe('[COMP:api/model-menu] GET /models/menu', () => {
     expect(refreshed.body.classes['standard-pro']).toEqual([
       expect.objectContaining({ alias: 'gpt-6.1-sol-pro', tier: 'pro' }),
     ])
+    expect(refreshed.body.classes.max).toEqual([expect.objectContaining({ alias: 'gpt-6.1-sol' })])
+    expect(refreshed.body.classes.research).toEqual([])
     availability.setModelCatalog('openai-codex', new Set([]))
     const disconnected = await request(app)
       .get('/api/models/menu?workspaceId=00000000-0000-0000-0000-000000000001').expect(200)
@@ -283,14 +290,26 @@ describe('[COMP:api/model-menu] workspace tier routes', () => {
     expect(endpointStore.setManagedTierRoute).not.toHaveBeenCalled()
   })
 
-  it('promotes the legacy Codex preference once when no workspace routes exist', async () => {
+  it.each([
+    {
+      scenario: 'disconnected account',
+      entitled: [],
+      expected: { standard: 'gpt-5.6-luna', pro: 'gpt-6.1-terra', max: 'gpt-5.6-sol', research: 'gpt-5.5' },
+    },
+    {
+      scenario: 'partially entitled account',
+      entitled: ['gpt-6.1-sol', 'gpt-6.2-sol', 'gpt-6-astra'],
+      expected: { standard: 'gpt-5.6-luna', pro: 'gpt-6.2-sol-pro', max: 'gpt-6.2-sol', research: 'gpt-6-astra' },
+    },
+  ])('promotes the legacy Codex preference for a $scenario when no workspace routes exist', async ({ entitled, expected }) => {
     getRole.mockResolvedValue('owner')
     const availability = new MutableProviderAvailability()
     availability.setPreferredProvider('openai-codex')
+    if (entitled.length) availability.setModelCatalog('openai-codex', new Set(entitled))
     endpointStore.listModelRoutes
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([
-        { workspaceId: WID, tier: 'max', profileId: null, modelAlias: 'gpt-5.6-sol', updatedAt: new Date() },
+        { workspaceId: WID, tier: 'max', profileId: null, modelAlias: expected.max, updatedAt: new Date() },
       ])
 
     const res = await request(makeApp({
@@ -299,10 +318,9 @@ describe('[COMP:api/model-menu] workspace tier routes', () => {
     })).get(`/api/models/menu?workspaceId=${WID}`).expect(200)
 
     expect(endpointStore.setManagedTierRoute).toHaveBeenCalledTimes(4)
-    expect(endpointStore.setManagedTierRoute).toHaveBeenCalledWith(expect.objectContaining({
-      tier: 'max',
-      modelAlias: 'gpt-5.6-sol',
-    }))
+    for (const [tier, modelAlias] of Object.entries(expected)) {
+      expect(endpointStore.setManagedTierRoute).toHaveBeenCalledWith(expect.objectContaining({ tier, modelAlias }))
+    }
     expect(res.body.modelRoutes).toHaveLength(1)
   })
 })

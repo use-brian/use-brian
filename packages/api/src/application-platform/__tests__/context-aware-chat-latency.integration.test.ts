@@ -50,13 +50,14 @@ beforeAll(async () => {
     createSession(options) {
       return { async *send(messages) {
         providerInputs.push(JSON.stringify({ options, messages }))
-        if (requestedFileId) {
+        const discover = options.tools?.some(tool => tool.name === 'requestConversationContext')
+        if (discover || requestedFileId) {
           const fileId = requestedFileId
-          requestedFileId = undefined
-          const id = 'fixture_file_lookup'
+          if (!discover) requestedFileId = undefined
+          const id = discover ? 'fixture_context_lookup' : 'fixture_file_lookup'
           yield { type: 'message_start', model: 'fixture' }
-          yield { type: 'tool_use_start', id, name: 'readFileContent' }
-          yield { type: 'tool_use_delta', id, input: JSON.stringify({ fileId }) }
+          yield { type: 'tool_use_start', id, name: discover ? 'requestConversationContext' : 'readFileContent' }
+          yield { type: 'tool_use_delta', id, input: JSON.stringify(discover ? {} : { fileId }) }
           yield { type: 'tool_use_end', id }
           yield { type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 1, outputTokens: 1 } }
           return
@@ -123,14 +124,16 @@ it.each(['sparse', 'dense'] as const)('finishes two context-aware turns within f
       expect(body).toContain('event: text_delta\ndata: ' + JSON.stringify({ text: answer }))
       if (firstTextMs === undefined) throw new Error('Missing first text frame')
       samples.push({ firstTextMs, completionMs })
-      expect(providerInputs).toHaveLength(turn === 0 ? 2 : 1)
-      expect(providerInputs[0]).toContain(colorFact)
-      expect(providerInputs[0]).toContain(reference)
+      expect(providerInputs).toHaveLength(turn === 0 ? 3 : 2)
+      expect(providerInputs[0]).not.toContain(colorFact)
+      expect(providerInputs[0]).not.toContain(reference)
+      expect(providerInputs[1]).toContain(colorFact)
+      expect(providerInputs[1]).toContain(reference)
       if (turn === 0) {
         expect(providerInputs[0]).toContain(attachment.id)
-        expect(providerInputs[1]).toContain(attachmentText)
+        expect(providerInputs[2]).toContain(attachmentText)
       }
-      if (turn > 0) expect(providerInputs[0]).toContain(replies[turn - 1])
+      if (turn > 0) expect(providerInputs[1]).toContain(replies[turn - 1])
       const reopened = await request(boot.app).get('/api/sessions/' + session.id + '/messages')
         .set('Authorization', 'Bearer ' + token).expect(200)
       expect(reopened.body.at(-1)).toMatchObject({ role: 'assistant', content: [{ type: 'text', text: answer }] })
@@ -223,7 +226,9 @@ it.each(['native_proof','ancestry'] as const)('reports a PostgreSQL proof timeou
     expect(observedSqlstate).toBe('57014')
     expect(timedProofs).toBe(1)
     if (phase === 'ancestry') expect(ancestryBatches).toEqual([100])
-    expect(providerInputs).toEqual([])
+    expect(providerInputs).toHaveLength(1)
+    expect(providerInputs[0]).toContain(requestText)
+    expect(providerInputs[0]).not.toContain('Fictional retained context')
     const errors = [...response.text.matchAll(/^event: error\r?\ndata: ([^\r\n]+)/gm)].map(frame => JSON.parse(frame[1]))
     expect(errors).toEqual([{ code: 'context_verification_unavailable',
       error: 'We couldn’t finish checking the context for this reply.', retrySafe: false, turnId: expect.stringMatching(/^[0-9a-f]{64}$/) }])
@@ -278,8 +283,9 @@ it('delivers a private chat reply with both a CRM self profile and an offered sk
       )
       const { stream, messages } = await greet()
       expect(stream).toContain('event: done')
-      expect(providerInputs).toHaveLength(1)
-      expect(providerInputs[0].includes('fixture-inventory')).toBe(enabled)
+      expect(providerInputs).toHaveLength(2)
+      expect(providerInputs[0]).not.toContain('fixture-inventory')
+      expect(providerInputs[1].includes('fixture-inventory')).toBe(enabled)
       expect(messages.at(-1)).toMatchObject({ role: 'assistant', content: [{ type: 'text', text: answer }] })
     }
 
@@ -289,7 +295,7 @@ it('delivers a private chat reply with both a CRM self profile and an offered sk
       await f.pool.query('UPDATE workspace_skills SET content=$2 WHERE id=$1', [skill.rows[0].id, 'Revised fixture instructions.'])
     }
     const { stream, messages } = await greet()
-    expect(providerInputs[0]).toContain('fixture-inventory')
+    expect(providerInputs[1]).toContain('fixture-inventory')
     expect(stream).toContain('event: error')
     expect(stream).not.toContain('event: done')
     expect(messages.map((row: { role: string }) => row.role)).toEqual(['user'])

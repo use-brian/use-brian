@@ -1,11 +1,17 @@
 import { describe, it, expect } from 'vitest'
-import { calculateCost, isOverheadSource, OVERHEAD_SOURCES } from '../cost-tracker.js'
+import { calculateCost, isOverheadSource, OVERHEAD_SOURCES, RETIRED_OVERHEAD_SOURCES } from '../cost-tracker.js'
 
 describe('[COMP:billing/cost-tracker] isOverheadSource', () => {
   it('returns true for every enshrined overhead source', () => {
     for (const src of OVERHEAD_SOURCES) {
       expect(isOverheadSource(src)).toBe(true)
     }
+  })
+
+  it.each(['overhead:distribution-draft', 'overhead:distribution-safety'] as const)('keeps %s historical usage unbilled', (source) => {
+    expect(RETIRED_OVERHEAD_SOURCES).toContain(source)
+    expect(OVERHEAD_SOURCES).toContain(source)
+    expect(isOverheadSource(source)).toBe(true)
   })
 
   it('returns false for billable source values', () => {

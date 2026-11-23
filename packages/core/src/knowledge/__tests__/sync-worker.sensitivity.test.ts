@@ -18,6 +18,7 @@ const mockStore: SyncStore = {
   upsertByPath: vi.fn(),
   deleteByTeamAndPath: vi.fn(),
   listPathsSystem: vi.fn().mockResolvedValue([]),
+  listSyncLinkEntries: vi.fn(async () => []),
   updateRelatedIds: vi.fn(),
   getByPathSystem: vi.fn(),
   updateSourceSync: vi.fn(),

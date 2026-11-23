@@ -7,6 +7,7 @@
  */
 
 import React from "react";
+import { AvatarImage } from "./AvatarImage.js";
 import { pixelLandmarkGrid } from "./pixel-landmark";
 
 function landmarkRects(seed: number, size: number): React.ReactElement[] {
@@ -48,38 +49,38 @@ export function TeamAvatar({
   iconUrl?: string | null;
   size?: "xs" | "sm" | "md" | "lg";
 }) {
-  const [imageFailed, setImageFailed] = React.useState(false);
-  React.useEffect(() => setImageFailed(false), [iconUrl]);
-
-  const seed = iconSeed ?? Array.from(id).reduce((h, c) => ((h << 5) - h + c.charCodeAt(0)) | 0, 0);
   // xs (18px) is the compact switcher size — roughly the label's cap height
   // beside it, Notion-style, so the icon doesn't dominate the row.
   const s = size === "xs" ? 18 : size === "sm" ? 28 : size === "md" ? 40 : 56;
 
-  if (iconUrl && !imageFailed) {
-    return (
-      <img
+  return iconUrl
+    ? (
+      <AvatarImage
+        key={iconUrl}
         src={iconUrl}
         alt={name}
         width={s}
         height={s}
         className="shrink-0 object-cover"
         style={{ width: s, height: s, borderRadius: s * 0.18 }}
-        onError={() => setImageFailed(true)}
+        fallback={renderLandmark}
       />
+    )
+    : renderLandmark();
+
+  function renderLandmark() {
+    const seed = iconSeed ?? Array.from(id).reduce((h, c) => ((h << 5) - h + c.charCodeAt(0)) | 0, 0);
+    return (
+      <svg
+        width={s}
+        height={s}
+        viewBox={`0 0 ${s} ${s}`}
+        className="shrink-0"
+        style={{ borderRadius: s * 0.18 }}
+        aria-label={name}
+      >
+        {landmarkRects(seed, s)}
+      </svg>
     );
   }
-
-  return (
-    <svg
-      width={s}
-      height={s}
-      viewBox={`0 0 ${s} ${s}`}
-      className="shrink-0"
-      style={{ borderRadius: s * 0.18 }}
-      aria-label={name}
-    >
-      {landmarkRects(seed, s)}
-    </svg>
-  );
 }

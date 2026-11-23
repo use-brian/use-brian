@@ -127,7 +127,7 @@ function FeedSegmentEditor(props: Parameters<typeof CompositionEditor>[0] & { se
         }, ignoreMutation: () => true, destroy() { setSlotMounts(mounts => mounts.filter(item => item.dom !== dom)); } };
       } } : undefined,
       editable: () => !latest.current.readOnly,
-      attributes: { role: 'textbox', 'aria-label': t.editor, 'aria-multiline': 'true', class: 'min-h-[max(20rem,calc(100dvh-16rem))] p-5 pr-14 md:pr-5 text-base leading-relaxed outline-none [&_p]:my-3 [&_h1]:text-2xl [&_h2]:text-xl [&_h3]:text-lg [&_h4]:font-semibold [&_h5]:font-semibold [&_h6]:font-semibold [&_ul]:list-disc [&_ol]:list-decimal [&_li]:ml-5 [&_blockquote]:border-l-2 [&_blockquote]:pl-4' },
+      attributes: { role: 'textbox', 'aria-label': t.editor, 'aria-multiline': 'true', class: 'min-h-[max(20rem,calc(100dvh-16rem))] py-1 text-base leading-relaxed outline-none [&_p]:my-3 [&>:first-child]:mt-0 [&_h1]:text-2xl [&_h2]:text-xl [&_h3]:text-lg [&_h4]:font-semibold [&_h5]:font-semibold [&_h6]:font-semibold [&_ul]:list-disc [&_ol]:list-decimal [&_li]:ml-5 [&_blockquote]:border-l-2 [&_blockquote]:pl-4' },
       handleClick(_view, _pos, event) { const hit = (event.target as HTMLElement).closest<HTMLElement>('[data-feed-thread]'); if (hit?.dataset.feedThread && hit.dataset.feedThread !== 'draft') latest.current.onOpenThread(hit.dataset.feedThread); return false; },
       handleKeyDown(_view, event) { return slashMenu.current?.onKeyDown(event) ?? false; },
       handleDOMEvents: {

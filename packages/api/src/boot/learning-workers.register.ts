@@ -42,7 +42,6 @@ import type { LearningWorkersScope } from './scope.js'
 // composition" -> "Lazy routers and workers"); `--no-workers` never loads them.
 const createFeedEditorialWorker = lazyWorker(() => import('../workers/feed-editorial-worker.js'), 'createFeedEditorialWorker', '[feed-editorial]')
 const createSkillReviewWorker = lazyWorker(() => import('../workers/skill-review-worker.js'), 'createSkillReviewWorker', '[skill-review]')
-const createPlaybookReflectionWorker = lazyWorker(() => import('../workers/playbook-reflection-worker.js'), 'createPlaybookReflectionWorker', '[playbook-reflection]')
 
 export function registerLearningWorkers(scope: LearningWorkersScope) {
   const {
@@ -337,61 +336,6 @@ export function registerLearningWorkers(scope: LearningWorkersScope) {
   })
   if (runWorkers) skillReviewWorker.start()
 
-  // ── Playbook reflection worker (growth loop Phase 3) ──
-  // Weekly per-assistant reflection: grades recent work against
-  // `charter.success` and proposes playbook rules as suggestions the owner
-  // admits on the assistant detail page. Cost rides
-  // `overhead:playbook-reflection` (migration 420). See
-  // docs/architecture/context-engine/assistant-playbook.md.
-  const playbookReflectionWorker = createPlaybookReflectionWorker({
-    modelCall: async ({ systemPrompt, prompt, maxTokens, attribution }) => {
-      const workspaceId = await workspaceForAssistant(attribution.assistantId)
-      const customRuntime = await resolveBackgroundRuntime(workspaceId)
-      const callProvider = customRuntime?.provider ?? provider
-      const callModel = customRuntime?.selector ?? BACKGROUND_MODEL
-      const response = await collectStream(callProvider.stream({
-        model: callModel,
-        messages: [{ role: 'user', content: prompt }],
-        systemPrompt,
-        maxTokens,
-      }))
-      if (response.usage && usageStore) {
-        const servedModel = response.model || callModel
-        const cost = customRuntime?.providerKeySource === 'user'
-          ? 0
-          : calculateCost(servedModel, response.usage)
-        usageStore.recordUsage({
-          userId: attribution.userId,
-          assistantId: attribution.assistantId,
-          sessionId: null,
-          model: servedModel,
-          modelTier: 'standard',
-          inputTokens: response.usage.inputTokens,
-          outputTokens: response.usage.outputTokens,
-          cacheReadTokens: response.usage.cacheReadTokens,
-          cacheWriteTokens: response.usage.cacheWriteTokens,
-          actualCostUsd: cost,
-          source: 'overhead:playbook-reflection',
-          providerKeySource: customRuntime?.providerKeySource ?? 'platform',
-        }).catch((err) => console.error('[playbook-reflection] usage tracking failed:', err))
-      }
-      return response.content
-        .filter((b) => b.type === 'text')
-        .map((b) => (b.type === 'text' ? b.text : ''))
-        .join('')
-    },
-    onEvent: (event) => {
-      if (event.type === 'assistant_processed' && event.activated + event.suggested > 0) {
-        console.log(`[playbook-reflection] auto-admitted ${event.activated} rule(s) (+${event.suggested} overflow) for assistant ${event.assistantId}`)
-      } else if (event.type === 'error') {
-        console.error(`[playbook-reflection] error for assistant ${event.assistantId ?? '<global>'}: ${event.error}`)
-      } else if (event.type === 'tick_complete') {
-        console.log(`[playbook-reflection] tick complete: processed=${event.processedCount} suggested=${event.suggestedCount} skipped=${event.skippedCount} errors=${event.errorCount}`)
-      }
-    },
-  })
-  if (runWorkers) playbookReflectionWorker.start()
-
   // ── Decision reflection worker (human-decision learning Phase 4) ──
   // Daily user-scoped projection from minimized, deliberate decision evidence.
   // The store independently enforces thresholds and prohibited output.
@@ -599,7 +543,7 @@ export function registerLearningWorkers(scope: LearningWorkersScope) {
   }
 
   return {
-    consolidationWorker, skillReviewWorker, playbookReflectionWorker, feedEditorialWorker,
+    consolidationWorker, skillReviewWorker, feedEditorialWorker,
     decisionReflectionWorker, researchReflectionWorker,
   } as const
 }

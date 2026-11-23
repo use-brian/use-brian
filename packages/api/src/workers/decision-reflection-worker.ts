@@ -1,7 +1,6 @@
 /**
- * Daily, bounded reflection over deliberate member decisions. This is
- * additive to transcript playbook reflection and can only project scoped
- * behavioral rules validated again by the store.
+ * Daily, bounded reflection over deliberate member decisions. It projects
+ * scoped behavioral rules that the store validates against the evidence.
  *
  * [COMP:workers/decision-reflection]
  */

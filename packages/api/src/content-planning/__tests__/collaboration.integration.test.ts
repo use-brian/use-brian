@@ -6,7 +6,7 @@ import express from 'express'
 import request from 'supertest'
 import { getAppPool, getPool, queryWithRLS } from '../../db/client.js'
 import { executeFeedCommands, getFeedCollaboration, getFeedThreadMessages, type FeedActor, type StructuredFeedContent } from '../../db/feed-collaboration-store.js'
-import { postWorkingCopiesStore, type PostWorkingContent } from '../../db/post-working-copies.js'
+import { postWorkingCopiesStore, type PostWorkingContent, type WorkingCopyInput } from '../../db/post-working-copies.js'
 import { conversationAnchorWriteAdmissionActive, initializeConversationVisibility } from '../../db/conversation-visibility.js'
 import { authSessionStore } from '../../db/auth-session-store.js'
 import { createTokens } from '../../auth/jwt.js'
@@ -32,7 +32,7 @@ afterAll(async () => {
   await getAppPool().end()
   await pool.end()
 })
-async function fixture(text = 'First paragraph.\n\nThe same phrase.\n\nThe same phrase.') {
+async function fixture(text = 'First paragraph.\n\nThe same phrase.\n\nThe same phrase.', title = 'Fixture draft') {
   const workspaceId = randomUUID(); const userId = randomUUID(); const otherId = randomUUID(); const assistantId = randomUUID(); const sessionId = randomUUID()
   createdWorkspaces.push(workspaceId); users.push(userId, otherId)
   await pool.query('INSERT INTO users(id,auth_provider_id,name) VALUES($1::uuid,$1::text,\'Author fixture\'),($2::uuid,$2::text,\'Editor fixture\')', [userId, otherId])
@@ -40,12 +40,42 @@ async function fixture(text = 'First paragraph.\n\nThe same phrase.\n\nThe same 
   await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,can_draft) VALUES($1,$2,'owner',true),($1,$3,'member',true)", [workspaceId, userId, otherId])
   await pool.query("INSERT INTO assistants(id,name,workspace_id,owner_user_id,kind,app_type,clearance) VALUES($1,'Feed fixture',$2,$3,'app','distribution','internal')", [assistantId, workspaceId, userId])
   const actor: FeedActor = { userId, assistantId, sessionId, kind: 'user' }; const other = { ...actor, userId: otherId }
-  const content: PostWorkingContent = { title: 'Fixture draft', privateBrief: 'Private direction', text, postFormat: 'post', threadSegments: [], article: { sourceUrl: '', title: '', description: '' }, media: [] }
+  const content: PostWorkingContent = { title, privateBrief: 'Private direction', text, postFormat: 'post', threadSegments: [], article: { sourceUrl: '', title: '', description: '' }, media: [] }
   await postWorkingCopiesStore.put(assistantId, sessionId, userId, { revision: 0, mutationId: randomUUID(), create: { platform: 'threads' }, content })
   const command = async (commands: FeedCommand[], expectedRevision?: number, who = actor, mutationId = randomUUID()) => executeFeedCommands(who, { commands, expectedRevision: expectedRevision ?? (await getFeedCollaboration(actor)).copy!.revision, mutationId })
   const upgrade = async () => { await command([{ kind: 'upgrade' }], 1); return (await getFeedCollaboration(actor)).copy!.content as StructuredFeedContent }
   return { workspaceId, actor, other, command, upgrade, content }
 }
+describe('[COMP:feed/post-working-copies] first title and concurrent renames', () => {
+  it('saves an untitled draft, acknowledges replay, and preserves a competing rename', async () => {
+    const { actor, content } = await fixture('', '')
+    const secret = 'fictional-feed-working-copy-signing-key'
+    const device = (await authSessionStore.create(actor.userId, { deviceLabel: 'Feed fixture', userAgent: null, ipAddress: null }))!
+    const bearer = `Bearer ${createTokens(actor.userId, secret, { id: device.id, authVersion: device.authVersion }).accessToken}`
+    const app = express()
+    app.use(express.json())
+    app.use('/api/distribution', requireAuth(secret), postWorkingCopiesRoutes())
+    const path = `/api/distribution/${actor.assistantId}/post-working-copies/${actor.sessionId}`
+    const save = (input: WorkingCopyInput) => request(app).put(path).set('Authorization', bearer).send(input)
+    const read = () => request(app).get(path).set('Authorization', bearer).expect(200)
+    const firstEdit = { revision: 1, mutationId: randomUUID(),
+      content: { ...content, title: '  Orchard notes  ', text: 'First paragraph.' } }
+    await save(firstEdit).expect(200)
+    expect((await save(firstEdit).expect(200)).body.copy).toMatchObject({ revision: 2, mutationId: firstEdit.mutationId })
+    expect((await read()).body.copy).toMatchObject({ revision: 2, content: firstEdit.content })
+    const sessionTitle = async () => (await pool.query('SELECT title FROM sessions WHERE id=$1', [actor.sessionId])).rows[0].title
+    expect(await sessionTitle()).toBe('[threads] Orchard notes')
+
+    const secondEdit = { revision: 2, mutationId: randomUUID(), content: { ...firstEdit.content, title: 'Harvest' } }
+    await save(secondEdit).expect(200)
+    await pool.query('UPDATE sessions SET title=$2 WHERE id=$1', [actor.sessionId, '[threads] Market report'])
+    await save({ ...secondEdit, revision: 3, mutationId: randomUUID(),
+      content: { ...secondEdit.content, title: 'Field report' } }).expect(409)
+    expect(await sessionTitle()).toBe('[threads] Market report')
+    expect((await read()).body.copy).toMatchObject({ revision: 3, content: secondEdit.content })
+  })
+})
+
 function replace(content: StructuredFeedContent, block: number, text: string): FeedEdit {
   const segment = content.composition.segments[0]!; const node = segment.content[block]!
   if (node.type !== 'paragraph' && node.type !== 'heading') throw new Error('text required')

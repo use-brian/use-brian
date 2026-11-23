@@ -29,8 +29,8 @@ export function createDbCrmStore(deps: { entityLinks?: EntityLinksStore } = {}):
   const { entityLinks } = deps
   return {
     // Companies
-    createCompany({ userId, ...params }) {
-      return createCompany(userId, params)
+    createCompany({ userId, sourceEpisodeScope, ...params }) {
+      return createCompany(userId, params, undefined, sourceEpisodeScope && { sourceScope: sourceEpisodeScope })
     },
     getCompanyById(ctx, id) {
       return getCompanyById(ctx, id)
@@ -43,8 +43,8 @@ export function createDbCrmStore(deps: { entityLinks?: EntityLinksStore } = {}):
     },
 
     // Contacts
-    createContact({ userId, ...params }) {
-      return createContact(userId, params, entityLinks)
+    createContact({ userId, sourceEpisodeScope, ...params }) {
+      return createContact(userId, params, entityLinks, undefined, sourceEpisodeScope && { sourceScope: sourceEpisodeScope })
     },
     getContactById(ctx, id) {
       return getContactById(ctx, id)

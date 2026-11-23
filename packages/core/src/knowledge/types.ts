@@ -20,6 +20,7 @@ import type {KnowledgeWriteActor} from '../workflow/knowledge-event-trigger.js'
 export type KnowledgeSearchResult = {
   id: string
   path: string
+  sourceId?: string | null
   title: string
   summary: string | null
   tags: string[]
@@ -46,8 +47,9 @@ export type KnowledgeEntryDetail = {
 }
 
 export type KnowledgeStoreInterface = {
-  search(ctx: AccessContext, query: string, limit?: number, authority?: SessionContextAuthority): Promise<KnowledgeSearchResult[]>
-  listByPath(ctx: AccessContext, pathPrefix: string, authority?: SessionContextAuthority): Promise<KnowledgeSearchResult[]>
+  search(ctx: AccessContext, query: string, limit?: number, authority?: SessionContextAuthority, sourceId?: string | null): Promise<KnowledgeSearchResult[]>
+  listByPath(ctx: AccessContext, pathPrefix: string, authority?: SessionContextAuthority, sourceId?: string | null): Promise<KnowledgeSearchResult[]>
+  getSourceForViewer?(ctx: AccessContext, id: string, authority: SessionContextAuthority): Promise<{ id: string; repo: string } | null>
   getById(ctx: AccessContext, id: string, authority?: SessionContextAuthority): Promise<KnowledgeEntryDetail | null>
   create(params: {
     workspaceId: string

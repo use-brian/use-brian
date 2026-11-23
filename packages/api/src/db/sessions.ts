@@ -1703,12 +1703,17 @@ export async function readSessionMessageScopeSource(
   workspaceId: string | null | undefined,
   messageId: string,
   client?: Pick<pg.ClientBase, 'query'>,
+  authoredInput?: {sessionId: string; sequenceNum: number},
 ): Promise<ScopeSource | null> {
   if (!workspaceId) return null
   const db = client ?? { query }
   const result = await db.query<{ source: ScopeSource | null }>(
-    `SELECT read_scope_source($1,'session_message',$2) AS source`,
-    [workspaceId, messageId],
+    authoredInput
+      ? `SELECT read_scope_source($1,'session_message',$2) AS source
+           FROM session_messages WHERE id=$2 AND session_id=$3 AND sequence_num=$4 AND role='user'
+             AND (workspace_id=$1 OR workspace_id IS NULL)`
+      : `SELECT read_scope_source($1,'session_message',$2) AS source`,
+    authoredInput ? [workspaceId, messageId, authoredInput.sessionId, authoredInput.sequenceNum] : [workspaceId, messageId],
   )
   const source = result.rows[0]?.source as (ScopeSource & { held?: boolean }) | null | undefined
   if (!source || source.held === true) return null
