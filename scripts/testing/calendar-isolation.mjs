@@ -1,5 +1,4 @@
 // [COMP:ci/execution-topology] One real history followed by independent failure cases.
-import { availableParallelism } from 'node:os'
 import { isDeepStrictEqual } from 'node:util'
 import { cloneLocalFixture } from '../crm/local-fixture.mjs'
 
@@ -26,16 +25,14 @@ export function calendarPartition(assertions, pattern, expectedNames) {
 }
 
 export async function runCalendarIsolation(env, runTests) {
-  const workers = Math.min(controls.length, availableParallelism())
-  if (workers === 1) return runTests(env)
   const started = performance.now()
   const prefix = await runTests({ ...env, BRIAN_CALENDAR_STAGE: 'history' }, history, 'history')
   const { selected, names } = calendarPartition(prefix, history)
   if (selected.some(row => row.status !== 'passed')) throw new Error('Calendar checkpoint tests did not pass')
 
-  // The prefix process has closed its pools. Each worker changes a different
-  // copy of exactly that committed state, including the second delivered reply.
-  console.log(`Calendar history passed in ${Math.round((performance.now() - started) / 1000)}s. Running ${controls.length} controls on ${workers} workers.`)
+  // Each control starts from the same committed state. Running the copies
+  // together can make the shared cluster miss the unchanged SQL deadline.
+  console.log(`Calendar history passed in ${Math.round((performance.now() - started) / 1000)}s. Running ${controls.length} controls in order.`)
   async function runControl(pattern, index) {
     const clone = await cloneLocalFixture(env, { fromCurrent: true })
     try {
@@ -45,14 +42,16 @@ export async function runCalendarIsolation(env, runTests) {
       return calendarPartition(rows, pattern, names).selected
     } finally { await clone.dispose() }
   }
-  const outcomes = []
-  for (let first = 0; first < controls.length; first += workers) {
-    const batch = controls.slice(first, first + workers)
-    outcomes.push(...await Promise.allSettled(batch.map((pattern, i) => runControl(pattern, first + i))))
+  const failures = []
+  const actual = [...selected]
+  for (const [index, pattern] of controls.entries()) {
+    try {
+      actual.push(...await runControl(pattern, index))
+    } catch (error) {
+      failures.push(error instanceof Error ? error.message : String(error))
+    }
   }
-  const failures = outcomes.filter(outcome => outcome.status === 'rejected')
-  if (failures.length) throw new Error(failures.map(outcome => outcome.reason.message).join('; '))
-  const actual = selected.concat(...outcomes.map(outcome => outcome.value))
+  if (failures.length) throw new Error(failures.join('; '))
   if (!isDeepStrictEqual(actual.map(row => row.fullName).sort(), names)) {
     throw new Error('Calendar shard did not account for every test exactly once')
   }
