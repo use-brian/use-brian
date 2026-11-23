@@ -258,6 +258,24 @@ async function crmSourceOutputs(input: Fixture) {
     FROM entities WHERE source_episode_id=$1 ORDER BY kind`, [input.episodeId])).rows
 }
 
+async function removeFixtureWorkspacePolicy(workspaceId: string) {
+  // New authority rows initialize settings today. Recreate a pre-policy fixture
+  // under the table lock and restore the named guard before exercising writes.
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query('ALTER TABLE workspace_access_policies DISABLE TRIGGER workspace_access_mode_guard')
+    await client.query('DELETE FROM workspace_access_policies WHERE workspace_id=$1', [workspaceId])
+    await client.query('ALTER TABLE workspace_access_policies ENABLE TRIGGER workspace_access_mode_guard')
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
+}
+
 function frozenContactPlan(f: Awaited<ReturnType<typeof crmSourceFixture>>, overrides: Partial<PipelineBSourceEnvelope> = {}) {
   const { source } = f
   const sourceScope = {
@@ -506,21 +524,7 @@ describe('[COMP:brain/extraction-application-store] PostgreSQL receipt fencing',
 
   it('initializes the legacy policy revision for an installation with no setup row', async () => {
     const f = await crmSourceFixture('legacy', true)
-    // New authority rows initialize settings today. Recreate a pre-policy fixture
-    // under the table lock and restore the named guard before exercising writes.
-    const client = await pool.connect()
-    try {
-      await client.query('BEGIN')
-      await client.query('ALTER TABLE workspace_access_policies DISABLE TRIGGER workspace_access_mode_guard')
-      await client.query('DELETE FROM workspace_access_policies WHERE workspace_id=$1', [f.input.workspaceId])
-      await client.query('ALTER TABLE workspace_access_policies ENABLE TRIGGER workspace_access_mode_guard')
-      await client.query('COMMIT')
-    } catch (error) {
-      await client.query('ROLLBACK')
-      throw error
-    } finally {
-      client.release()
-    }
+    await removeFixtureWorkspacePolicy(f.input.workspaceId)
     const policy = async () => (await pool.query('SELECT setup_state FROM workspace_access_policies WHERE workspace_id=$1', [f.input.workspaceId])).rows
     expect(await policy()).toEqual([])
 
@@ -531,6 +535,19 @@ describe('[COMP:brain/extraction-application-store] PostgreSQL receipt fencing',
       FROM scope_derivations d JOIN workspace_access_policies p USING (workspace_id)
       WHERE d.workspace_id=$1 AND d.resource_kind='entity'`, [f.input.workspaceId])).rows)
       .toEqual([{ valid_revision: true }, { valid_revision: true }])
+  })
+
+  it('holds direct CRM writes when the app-role source workspace has no policy', async () => {
+    const f = await crmSourceFixture('legacy', true)
+    await removeFixtureWorkspacePolicy(f.input.workspaceId)
+    const input = { workspaceId: f.input.workspaceId, sourceEpisodeId: f.input.episodeId,
+      source: 'extracted' as const, sensitivity: 'confidential' as const, compartments: f.compartments, projectIds: f.projectIds }
+    await expect(createContact(f.input.sourceActorId, { ...input, name: CONTACT_NAME, email: CONTACT_EMAIL }))
+      .rejects.toMatchObject({ code: 'application_crm_policy_unavailable' })
+    await expect(createCompany(f.input.sourceActorId, { ...input, name: COMPANY_NAME, domain: COMPANY_DOMAIN }))
+      .rejects.toMatchObject({ code: 'application_crm_policy_unavailable' })
+    expect(await crmSourceOutputs(f.input)).toEqual([])
+    expect((await pool.query('SELECT workspace_id FROM workspace_access_policies WHERE workspace_id=$1', [f.input.workspaceId])).rows).toEqual([])
   })
 
   it.each(['legacy', 'ready'] as const)('preserves scope on the direct Pipeline B CRM compatibility path (%s)', async (mode) => {
