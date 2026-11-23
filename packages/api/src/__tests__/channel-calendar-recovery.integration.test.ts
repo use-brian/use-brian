@@ -540,8 +540,8 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
   expect(await readRetainedBindings()).toEqual(retainedBindings)
   expect(await readRetainedLegacyAnnotation()).toEqual(retainedLegacyAnnotation)
  },retainedJourneyTestTimeout)
+ const nextEvent='Fictional telescope handover'
  it('uses the delivered Calendar answer in another real Calendar turn and records its new provider answer',async()=>{
-  const nextEvent='Fictional telescope handover'
   const result=await runCalendarTurn('3101-followup',undefined,nextEvent)
   expect(result.error).toBeUndefined()
   expect(result.mainRequests).toHaveLength(3);expect(result.googleRequests).toHaveLength(1)
@@ -555,6 +555,9 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
   const stored=(await query(`SELECT role,content FROM session_messages WHERE session_id=$1 AND channel_message_id=$2`,
    [recovered,result.providerMessageId])).rows
   expect(stored).toEqual([{role:'assistant',content:[{type:'text',text:result.replyText}]}])
+  expect((await query('SELECT status,turn_lease_token FROM sessions WHERE id=$1',[recovered])).rows[0]).toEqual({status:'idle',turn_lease_token:null})
+ },retainedJourneyTestTimeout)
+ it('reopens the full retained history after the second delivered Calendar reply',async()=>{
   const retainedReadStarted=performance.now()
   const authority=await recordingAuthority()
   const history=await readAdmittedSessionQuery({sessionId:recovered,throughSequence:historyRows+36,authority})
@@ -568,7 +571,7 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
    credentialKey:credentialKey.toString('hex'),nextTelegramMessageId,
   }),{mode:0o600,flag:'wx'})
   console.info('[recovered Telegram Calendar follow-up reopen]',{
-   elapsedMs:Math.round(result.elapsedMs),retainedReadMs:Math.round(performance.now()-retainedReadStarted),
+   retainedReadMs:Math.round(performance.now()-retainedReadStarted),
    historyRows:history.history.length,
   })
  },retainedJourneyTestTimeout)

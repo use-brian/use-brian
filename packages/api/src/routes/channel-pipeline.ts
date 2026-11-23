@@ -3036,12 +3036,15 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
       },
       sink: { kind: 'adapter', ...(nativeTranscriptAuthority ? { admitOutput: async (_context, eventKind) => {
         // The managed recorder suppresses the live mirror and keeps these
-        // events inside the turn. Status and tool hooks can still be outward
-        // effects. The terminal send always checks the complete audience
+        // events inside the turn. Progress becomes an outward effect only
+        // when its adapter hook exists. The terminal send checks the audience
         // again after reading any attachments and before provider I/O.
         if (params.recording && !params.conversationContext && !researchObserver
           && (eventKind === 'assistant_turn' || eventKind === 'question' || eventKind === 'thinking_delta'
-            || eventKind === 'turn_complete' || (eventKind === 'text_delta' && !hooks.onTextDelta))) {
+            || eventKind === 'turn_complete' || (eventKind === 'text_delta' && !hooks.onTextDelta)
+            || (eventKind === 'status' && !hooks.onStatus)
+            || (eventKind === 'tool_start' && !hooks.onToolStart)
+            || (eventKind === 'tool_input' && !hooks.onToolInput))) {
           await authority.assertCurrent()
           return
         }
