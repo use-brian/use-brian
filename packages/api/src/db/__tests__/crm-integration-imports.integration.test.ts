@@ -68,14 +68,16 @@ describe('[COMP:crm/production-import] Actual machine source, job and row author
     const staged = await sources.stage(context, randomUUID(), Buffer.from('Name,Email\nFictional imported person,imported@example.com\n'))
     const input = { sourceId: staged.sourceId, entityKind: 'contact' as const, mapping: { columns: { 0: 'name', 1: 'email' } } }
     const preflight = await imports.dryRun(context, input)
-    const job = await imports.confirm(context, { ...input, confirmed: true, dryRunHash: preflight.dryRunHash })
+    const indexed = createCrmProductionImportService({ pool, sources: { ...sources, read: async () => { throw new Error('The complete machine source was already indexed.') } },
+      operationsForTransaction: client => createCrmOperationsService(createDbCrmOperationsStore(pool, client)) })
+    const job = await indexed.confirm(context, { ...input, confirmed: true, dryRunHash: preflight.dryRunHash })
     await pool.query('DELETE FROM assistants WHERE id=$1', [assistantId])
-    await expect(imports.resume(context, job.id)).rejects.toMatchObject({ code: 'not_authorized' })
+    await expect(indexed.resume(context, job.id)).rejects.toMatchObject({ code: 'not_authorized' })
     expect((await pool.query('SELECT id FROM entities WHERE workspace_id=$1', [f.workspaceId])).rows).toEqual([])
     expect((await pool.query('SELECT id FROM crm_import_rows WHERE job_id=$1', [job.id])).rows).toEqual([])
     expect((await pool.query('SELECT id FROM crm_import_chunks WHERE job_id=$1', [job.id])).rows).toEqual([])
     await restore()
-    expect(await imports.resume(context, job.id)).toMatchObject({ status: 'completed', succeededRows: 1, failedRows: 0 })
+    expect(await indexed.resume(context, job.id)).toMatchObject({ status: 'completed', succeededRows: 1, failedRows: 0 })
     expect((await pool.query('SELECT id FROM entities WHERE workspace_id=$1', [f.workspaceId])).rowCount).toBe(1)
   })
 

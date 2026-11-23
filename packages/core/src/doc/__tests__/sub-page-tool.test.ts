@@ -135,7 +135,6 @@ function fakeSavedViewStore(opts: { parentExists?: boolean } = {}): SavedViewSto
     reorderSiblings: vi.fn().mockResolvedValue(undefined),
     pruneExpiredDraftsSystem: vi.fn().mockResolvedValue([]),
     getBrainSyncStateSystem: vi.fn().mockResolvedValue(null),
-    markBrainIngestedSystem: vi.fn().mockResolvedValue(true),
     getPageEventContextSystem: vi.fn().mockResolvedValue(null),
   }
 }

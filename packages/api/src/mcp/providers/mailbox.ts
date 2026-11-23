@@ -4,7 +4,7 @@
  * The injector body below moved verbatim from `mcp/inject.ts`. It builds the
  * family's tools into a provider-local map (never the turn's shared map):
  * credentials bound per lane, build-time action-grant gate, health probe,
- * policy (`applyPolicyOrSkip`) and instance variants. The lane function and
+ * policy (`applyToolPolicies`) and instance variants. The lane function and
  * `ProviderModule` at the end are the family's activation surface.
  *
  * See docs/architecture/integrations/mcp.md → "Provider activation".
@@ -26,7 +26,7 @@ import type { ConnectorActionAudit, ConnectorActionPreflight } from '../../conne
 import { gateToolsOnActionGrants } from '../../safety/assert-action-allowed.js'
 import { classifyConnectorAuthError, type HealthReporter } from '../connector-health.js'
 import { connectorInstanceGovernanceId } from '../../db/connector-instance-store.js'
-import { applyPolicyOrSkip } from '../activation.js'
+import { applyToolPolicies } from '../activation.js'
 import { instanceToolSuffix } from '../tool-names.js'
 import { notConnectedNotice } from './notices.js'
 import type { ProviderModule, ProviderActivationContext } from './types.js'
@@ -372,28 +372,17 @@ async function collectMailboxTools(params: {
       }
 
       const suffix = index === 0 ? '' : instanceToolSuffix(mailbox.instanceId, mailbox.email)
-      for (const rawTool of accountTools) {
-        const canonicalName = rawTool.name
-        const tool: Tool = {
-          ...rawTool,
-          name: `${canonicalName}${suffix}`,
-          description: `[${mailbox.email}] ${rawTool.description}`,
-        }
-        if (
-          await applyPolicyOrSkip(
-            tool,
-            governanceId,
-            settingsStore,
-            assistantId,
-            userId,
-            unavailable,
-            canonicalName,
-            workspacePolicyScoped ? governanceId : 'imap',
-            'imap',
-          ) === 'include'
-        ) {
-          tools.set(tool.name, tool)
-        }
+      const candidates = accountTools.map(rawTool => ({
+        ...rawTool,
+        name: `${rawTool.name}${suffix}`,
+        description: `[${mailbox.email}] ${rawTool.description}`,
+      }))
+      for (const tool of await applyToolPolicies(candidates, governanceId, settingsStore, assistantId, userId, unavailable, {
+        canonicalName: tool => tool.name.slice(0, tool.name.length - suffix.length),
+        appServerName: workspacePolicyScoped ? governanceId : 'imap',
+        assistantFallbackServerName: 'imap',
+      })) {
+        tools.set(tool.name, tool)
       }
     }
     console.debug(`[mcp-inject] Company mailbox (imap): injected ${bound.length} account-bound tool set(s)`)

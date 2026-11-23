@@ -1,6 +1,6 @@
 import { captureProviderConversationEvidence } from './provider-conversation-evidence.js'
 import type {SessionAuthorityFactsInput} from './session-authority-facts.js'
-import { isConversationEvidenceRoot,readConversationEvidence,readConversationPublicationCohorts,readMixedConversationEvidenceRoute,readHybridConversationEvidence,readPageClosureEvidence } from '../application-platform/conversation-evidence.js'
+import { isConversationEvidenceRoot,readConversationEvidence,readConversationPreparation,readConversationPublicationCohorts,readMixedConversationEvidenceRoute,readHybridConversationEvidence,readPageClosureEvidence,type PreparationCohortEvidence } from '../application-platform/conversation-evidence.js'
 import {readNativeTitleGroupEvidence,type NativeTitleHead} from '../application-platform/native-title-group-evidence.js'
 import { readPersistentSessionContextAncestors } from '../db/session-context-ancestry.js'
 import {
@@ -175,6 +175,17 @@ async function validateScopeEvidence(
   pageAudience?: PageThreadAudience,
   closure?: ClosureAdmission,
 ): Promise<ScopeEvidence> {
+  const historyBatchSize = 8
+  const readHistoryCohorts = async (roots: readonly ScopeSource[]): Promise<PreparationCohortEvidence[]> => {
+    if (!roots.length) return []
+    if (!client) throw unavailable(kind, 'source_unverifiable')
+    const result: PreparationCohortEvidence[] = []
+    for (let offset = 0; offset < roots.length; offset += historyBatchSize) {
+      const cohorts = roots.slice(offset,offset+historyBatchSize).map(root=>[root])
+      result.push(...(await readConversationPreparation(client,ceiling.workspaceId,{cohorts})).cohorts)
+    }
+    return result
+  }
   const exactPageThread = kind === 'audience' && ceiling.userId === '' ? pageAudience : undefined
   const currentVisibility = (scope: ResourceScope, receiver: AccessCeiling) => {
     const pageSource = exactPageThread && 'resourceKind' in scope && pageKinds.has(String(scope.resourceKind))
@@ -293,8 +304,7 @@ async function validateScopeEvidence(
         const history = rootsFor('history')
         const projectSelectedHistory = async () => {
           const scopes: ResourceScope[] = []
-          for (const root of history) {
-            const proof = await readConversationEvidence(client, ceiling.workspaceId, [root])
+          for (const proof of await readHistoryCohorts(history)) {
             if (proof?.kind !== 'memory_history' || !proof.available) throw unavailable(kind, 'source_unverifiable')
             for (const scope of proof.scopes) {
               const refused = currentVisibility(scope, ceiling) ?? labelFailure(scope, ceiling)
@@ -316,7 +326,13 @@ async function validateScopeEvidence(
         }
         // The purpose proof supplies high-water labels. The current field
         // snapshot independently admits the exact historical observation.
-        snapshot = await validateCurrent(checked.evidence, history)
+        // Keep the current-source reader's latest observation per resource
+        // and bound the SQL that independently replays those history proofs.
+        const historyFields = [...new Map(history.map(source => [source.resourceId,source])).values()]
+        snapshot = checked.evidence
+        for (let offset = 0; offset < historyFields.length; offset += historyBatchSize) {
+          snapshot = await validateCurrent(snapshot,historyFields.slice(offset,offset+historyBatchSize))
+        }
         if (originalSources.some(root => !residual.includes(root))) {
           checkMixedRoute = async () => {
             const current = await readMixedConversationEvidenceRoute(client, ceiling.workspaceId, originalSources)
@@ -367,9 +383,8 @@ async function validateScopeEvidence(
       WHERE workspace_id=$1 AND id=ANY($2::uuid[])
         AND NOT (origin='{"kind":"native","moduleKey":"native"}'::jsonb
           AND type_key='memory' AND selection='history')`,[ceiling.workspaceId,fields.map(source=>source.resourceId)])).rows.map(row=>row.id))
-    for(const source of fields){
-      if(ordinaryIds.has(source.resourceId))continue
-      const value=await readConversationEvidence(client,ceiling.workspaceId,[source])
+    for(const value of await readHistoryCohorts(fields.filter(source=>!ordinaryIds.has(source.resourceId)))){
+      if(value?.kind==='refused')throw unavailable(kind,'source_unverifiable')
       if(value?.kind!=='memory_history')continue
       if(!value.available)throw unavailable(kind,'source_unverifiable')
       if(workflowRunId)throw unavailable(kind,'source_unverifiable')

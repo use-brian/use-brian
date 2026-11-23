@@ -211,6 +211,22 @@ export function createS3FilesClient({
       }
     },
 
+    async readBlobRange(key, version, start, end) {
+      const { sdk, s3 } = await client()
+      try {
+        const out = await s3.send(new sdk.GetObjectCommand({ Bucket: bucket, Key: key, IfMatch: version,
+          Range: `bytes=${start}-${end - 1}` }))
+        if (out.ContentLength !== end - start || out.ETag !== version) {
+          (out.Body as { destroy?(): void } | undefined)?.destroy?.()
+          return null
+        }
+        return streamToBuffer(out.Body)
+      } catch (err: unknown) {
+        if (isNotFound(err) || [412, 416].includes((err as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode ?? 0)) return null
+        throw err
+      }
+    },
+
     async statBlob(key) {
       // HeadObject is S3's `getMetadata` — same request as GetObject minus the
       // body, so a 500 MB recording is sized without moving a byte through
@@ -229,6 +245,7 @@ export function createS3FilesClient({
             custom.mime ||
             'application/octet-stream',
           updatedAt: out.LastModified ?? null,
+          version: out.ETag,
         }
       } catch (err: unknown) {
         if (isNotFound(err)) return null

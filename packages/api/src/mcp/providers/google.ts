@@ -4,7 +4,7 @@
  * The injector body below moved verbatim from `mcp/inject.ts`. It builds the
  * family's tools into a provider-local map (never the turn's shared map):
  * credentials bound per lane, build-time action-grant gate, health probe,
- * policy (`applyPolicyOrSkip`) and instance variants. The lane function and
+ * policy (`applyToolPolicies`) and instance variants. The lane function and
  * `ProviderModule` at the end are the family's activation surface.
  *
  * See docs/architecture/integrations/mcp.md → "Provider activation".
@@ -30,7 +30,7 @@ import { wrapToolsWithHealthProbe, type HealthReporter } from '../connector-heal
 import { refreshGoogleAccessToken, unpackGoogleRefreshCredential, listCalendarList, listCalendarEventColors, listCalendarEvents, getCalendarEvent, queryCalendarFreeBusy, createCalendarEvent, updateCalendarEvent, deleteCalendarEvent, listGmailMessages, getGmailMessage, sendGmailMessage, listDriveFiles, getDriveFile, getDriveFileContentWithMetadata, createDriveFile, updateDriveFileContent, getDocContent, appendToDoc, replaceInDoc, createDocument, getSpreadsheetInfo, readSheetRange, writeSheetRange, appendSheetRows, createSpreadsheet, formatSpreadsheet, batchUpdateSpreadsheet, getPresentationInfo, getSlideContent, getSlideThumbnail, createSlide as slidesCreateSlide, updateSlideContent as slidesUpdateSlideContent, insertImage as slidesInsertImage, deleteSlide as slidesDeleteSlide, reorderSlides as slidesReorderSlides, duplicateSlide as slidesDuplicateSlide, batchUpdateSlides, createPresentation } from '../../google/client.js'
 import { connectorInstanceGovernanceId, parseConnectorInstanceGovernanceId } from '../../db/connector-instance-store.js'
 import { getConnectorConfig } from '../../connector-config.js'
-import { applyPolicyOrSkip, injectInstanceVariants } from '../activation.js'
+import { applyToolPolicies, injectInstanceVariants } from '../activation.js'
 import { baseToolName, instanceToolSuffix, type ConnectorInstanceRef } from '../tool-names.js'
 import { notConnectedNotice, googleNotConnectedForCall, expiredCredentialsNotice } from './notices.js'
 import type { ProviderModule, ProviderActivationContext } from './types.js'
@@ -489,10 +489,8 @@ async function collectGoogleTools(
       }, userTimezone), 'gcal', assistantConnectorGrantsStore, assistantId, governanceId)
       if (gcalEnabled) {
         const calTools = buildCalTools(() => getAccessToken('gcal'))
-        for (const tool of calTools) {
-          if (await applyPolicyOrSkip(tool, 'gcal', settingsStore, assistantId, userId, unavailable) === 'include') {
-            tools.set(tool.name, tool)
-          }
+        for (const tool of await applyToolPolicies(calTools, 'gcal', settingsStore, assistantId, userId, unavailable)) {
+          tools.set(tool.name, tool)
         }
       }
 
@@ -648,10 +646,8 @@ async function collectGoogleTools(
           () => getAccessToken('gmail'),
           gmail.connectedEmail,
         )
-        for (const tool of gmailTools) {
-          if (await applyPolicyOrSkip(tool, 'gmail', settingsStore, assistantId, userId, unavailable) === 'include') {
-            tools.set(tool.name, tool)
-          }
+        for (const tool of await applyToolPolicies(gmailTools, 'gmail', settingsStore, assistantId, userId, unavailable)) {
+          tools.set(tool.name, tool)
         }
       }
 
@@ -888,14 +884,6 @@ async function collectGoogleTools(
           return updateDriveFileContent(token, fileId, params)
         },
       }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId, governanceId)
-      if (gdriveEnabled) {
-        const driveTools = buildDriveTools(() => getAccessToken('gdrive'))
-        for (const tool of driveTools) {
-          if (await applyPolicyOrSkip(tool, 'gdrive', settingsStore, assistantId, userId, unavailable) === 'include') {
-            tools.set(tool.name, tool)
-          }
-        }
-      }
 
       // Docs tools
       const buildDocsTools = (
@@ -926,14 +914,6 @@ async function collectGoogleTools(
           return doc
         },
       }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId, governanceId)
-      if (gdriveEnabled) {
-        const docsTools = buildDocsTools(() => getAccessToken('gdrive'))
-        for (const tool of docsTools) {
-          if (await applyPolicyOrSkip(tool, 'gdrive', settingsStore, assistantId, userId, unavailable) === 'include') {
-            tools.set(tool.name, tool)
-          }
-        }
-      }
 
       // Sheets tools
       const buildSheetsTools = (
@@ -978,14 +958,6 @@ async function collectGoogleTools(
           return batchUpdateSpreadsheet(token, spreadsheetId, requests)
         },
       }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId, governanceId)
-      if (gdriveEnabled) {
-        const sheetsTools = buildSheetsTools(() => getAccessToken('gdrive'))
-        for (const tool of sheetsTools) {
-          if (await applyPolicyOrSkip(tool, 'gdrive', settingsStore, assistantId, userId, unavailable) === 'include') {
-            tools.set(tool.name, tool)
-          }
-        }
-      }
 
       // Slides tools — structured read + placeholder-targeted, atomic write.
       // See docs/architecture/integrations/google-slides.md.
@@ -1051,13 +1023,18 @@ async function collectGoogleTools(
           return pres
         },
       }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId, governanceId)
-      if (gdriveEnabled) {
-        const slidesTools = buildSlidesTools(() => getAccessToken('gdrive'))
-        for (const tool of slidesTools) {
-          if (await applyPolicyOrSkip(tool, 'gdrive', settingsStore, assistantId, userId, unavailable) === 'include') {
-            tools.set(tool.name, tool)
-          }
-        }
+
+      const getPrimaryToken = () => getAccessToken('gdrive')
+      const primaryTools = gdriveEnabled ? [
+        ...buildDriveTools(getPrimaryToken),
+        ...buildDocsTools(getPrimaryToken),
+        ...buildSheetsTools(getPrimaryToken),
+        ...buildSlidesTools(getPrimaryToken),
+      ] : []
+      const findTools = gdriveFilesStore ? createGDriveFilesTools(gdriveFilesStore, userId) : []
+      const visiblePrimary = await applyToolPolicies([...primaryTools, ...findTools], 'gdrive', settingsStore, assistantId, userId, unavailable)
+      for (const tool of visiblePrimary) {
+        if (!findTools.includes(tool)) tools.set(tool.name, tool)
       }
 
       // Extra Drive accounts → label-qualified variants of all four families,
@@ -1085,13 +1062,8 @@ async function collectGoogleTools(
 
       // findGDriveFiles — local index of files this assistant has created.
       // Only inject when a store is wired (unit tests without DB skip this).
-      if (gdriveFilesStore) {
-        const findTools = createGDriveFilesTools(gdriveFilesStore, userId)
-        for (const tool of findTools) {
-          if (await applyPolicyOrSkip(tool, 'gdrive', settingsStore, assistantId, userId, unavailable) === 'include') {
-            tools.set(tool.name, tool)
-          }
-        }
+      for (const tool of visiblePrimary) {
+        if (findTools.includes(tool)) tools.set(tool.name, tool)
       }
 
       console.debug(`[mcp-inject] Google Drive (Drive/Docs/Sheets/Slides): injected tools${gdriveExtras.length ? ` (+${gdriveExtras.length} extra account(s))` : ''}`)

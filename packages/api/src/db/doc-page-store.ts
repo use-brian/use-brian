@@ -41,6 +41,7 @@ import { readPageThreadAudienceAuthority } from '../context-scope/page-thread-au
 // ── Row projections ────────────────────────────────────────────────────
 
 type VersionedPageRow = {
+  collaborative?: boolean
   pageRevision?: string
   source?: (ScopeSource & { requiredSources: ScopeSource[] }) | null
   page: Page | null
@@ -85,6 +86,7 @@ export function createDbDocPageStore(): DocPageStore {
         // versions. Cast to int so `version` is a JS number on both branches.
         `SELECT COALESCE(cd.snapshot_json, sv.page)   AS page,
                 COALESCE(cd.seq::int, sv.version)     AS version,
+                cd.page_id IS NOT NULL                AS collaborative,
                 COALESCE(cd.snapshot_title, sv.name)  AS name,
                 sv.name_origin                        AS "nameOrigin",
                 sv.icon                               AS icon
@@ -150,6 +152,7 @@ export function createDbDocPageStore(): DocPageStore {
         // an empty page rather than not-found; surface the empty
         // structure here so callers don't special-case.
         return {
+          ...(row.collaborative && { collaborative: true as const }),
           page: { blocks: [] },
           version: row.version ?? 1,
           title: row.name ?? 'Untitled',
@@ -158,6 +161,7 @@ export function createDbDocPageStore(): DocPageStore {
         }
       }
       return {
+        ...(row.collaborative && { collaborative: true as const }),
         page: row.page,
         version: row.version,
         title: row.name ?? 'Untitled',

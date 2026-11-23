@@ -2,8 +2,8 @@
   "format": 1,
   "status": "reviewed contract; fail closed on any unknown table, sequence, trigger, policy or reference",
   "inventory": {
-    "ledgerCount": 815,
-    "ledgerHead": "8339_knowledge_source_path_identity.sql"
+    "ledgerCount": 818,
+    "ledgerHead": "8342_memory_history_terminal_proof.sql"
   },
   "rules": {
     "D1-ledger": "Migration ledger. The target ledger is produced by the shipped installer; the archived source ledger is retained as original proof and must name the same shipped release.",
@@ -12,6 +12,7 @@
     "D4-canonical-registry": "Canonical executable registry. Target records are rendered and authenticated by the shipped installer and installation authenticator; archived records are original proof only, never imported or repinned.",
     "D5-display-fingerprints": "Historical display fingerprint owner. Target rows come from the shipped installer; archived rows are original proof only; signatures must match, fingerprints are never blanket repinned.",
     "D6-enrollment-maintenance": "Conversion enrollment queue. Maintenance state the shipped enrollment trigger re-derives while restored units are imported; archived keys must be a subset of the re-derived keys and the generation counter is installation-local. Re-enrolled units are reconverted idempotently.",
+    "D-import-csv-index": "Rebuildable CSV record offsets and private chunk staging. The target recreates these from the authorized source on next use.",
     "D9-envelope-scan": "Derived historical envelope scan cursor. The target restarts its bounded inventory scan after restoring durable envelopes.",
     "D10-crm-summary-projection": "CRM summary projection. Rebuild atomically from exact restored facts and verify current leaves against archived history.",
     "D11-crm-summary-credential": "CRM summary signing material. Sealed and restored through its bounded encrypted credential artifact.",
@@ -289,9 +290,9 @@
     "native_conversation_conversion_pending": "D6-enrollment-maintenance"
   },
   "counts": {
-    "tables": 604,
+    "tables": 606,
     "durable": 581,
-    "derived": 20,
+    "derived": 22,
     "rebound": 2,
     "rederived": 1,
     "durableOrRebound": 583,
@@ -303,8 +304,8 @@
     "authorityEpochTables": 6,
     "transactionBoundTables": 13,
     "sequences": 6,
-    "triggers": 1444,
-    "suspendedTriggers": 395,
+    "triggers": 1447,
+    "suspendedTriggers": 398,
     "deferredReferences": 23
   },
   "tables": {
@@ -1212,6 +1213,14 @@
     "crm_import_chunks": {
       "class": "durable",
       "rule": "F1-durable-fact"
+    },
+    "crm_import_csv_index_chunks": {
+      "class": "derived",
+      "rule": "D-import-csv-index"
+    },
+    "crm_import_csv_indexes": {
+      "class": "derived",
+      "rule": "D-import-csv-index"
     },
     "crm_import_errors": {
       "class": "durable",
@@ -7106,6 +7115,14 @@
         "update"
       ]
     },
+    "crm_import_jobs.crm_import_csv_index_job_cancelled": {
+      "function": "crm_import_csv_index_cleanup()",
+      "tgtype": 17,
+      "class": "suspended:derived-effect",
+      "events": [
+        "update"
+      ]
+    },
     "crm_import_jobs.crm_import_job_input_no_update": {
       "function": "crm_import_job_input_immutable()",
       "tgtype": 19,
@@ -7181,6 +7198,14 @@
       "class": "fires:recovery-capture",
       "events": [
         "insert",
+        "update"
+      ]
+    },
+    "crm_import_sources.crm_import_csv_index_source_retired": {
+      "function": "crm_import_csv_index_cleanup()",
+      "tgtype": 17,
+      "class": "suspended:derived-effect",
+      "events": [
         "update"
       ]
     },
@@ -14457,6 +14482,14 @@
       "class": "suspended:origin-validator",
       "events": [
         "insert"
+      ]
+    },
+    "workspace_files.crm_import_csv_index_file_closed": {
+      "function": "crm_import_csv_index_cleanup()",
+      "tgtype": 17,
+      "class": "suspended:derived-effect",
+      "events": [
+        "update"
       ]
     },
     "workspace_files.crm_privacy_write_admission": {

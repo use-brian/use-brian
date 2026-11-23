@@ -1567,17 +1567,42 @@ export async function getMemoryHistory(id: string, access?:AccessContext, author
       ...await readExternalSourceAncestors(access.workspaceId,[...discovery,...fields])]
     return readRetainedQueryFrame(authority,roots,async client=>{
       await validateCallerScopeEvidence(highWater,execution.security.ceiling,client)
-      const chain:Memory[]=[],sources:ScopeSource[]=[]
-      for (const root of initial) {
-        const raw=(await client.query<{value:unknown}>('SELECT read_native_memory_history_projection($1,$2,$3) AS value',
-          [access.workspaceId,root.resourceId,root.version])).rows[0]?.value
-        if (!raw) throw new DerivedScopeError('scope_source_changed')
-        const captured=memoryQueryCapture.parse(raw)
-        if (!captured.row || captured.source?.resourceKind!=='memory' || captured.source.resourceId!==root.resourceId
-          || captured.source.version!==root.version || captured.sources.some(source=>source.workspaceId!==access.workspaceId)) throw new DerivedScopeError('scope_evidence_missing')
-        const row=(await client.query<Memory>(`SELECT ${MEMORY_SELECT} FROM jsonb_populate_record(NULL::public.memories,$1::jsonb)`,[JSON.stringify(captured.row)])).rows[0]
-        if (!row) throw new DerivedScopeError('scope_evidence_missing')
-        bindScopeSources(row,captured.sources);chain.push(row);sources.push(...captured.sources)
+      const chain: Memory[] = [], sources: ScopeSource[] = []
+      // An entire 99-version chain can exceed the interactive SQL deadline
+      // while the history proof revisits each root's shared ancestry.
+      const batchSize = 8
+      for (let offset = 0; offset < initial.length; offset += batchSize) {
+        const batch = initial.slice(offset, offset + batchSize)
+        const { rows: projections } = await client.query<Memory & { ordinal: number; capture: unknown }>(
+          `WITH projected AS MATERIALIZED (
+             SELECT requested.ordinal::integer AS ordinal,
+                    public.read_native_memory_history_projection($1, requested.id, requested.version) AS capture
+             FROM unnest($2::uuid[], $3::text[]) WITH ORDINALITY AS requested(id, version, ordinal)
+           )
+           SELECT ${MEMORY_SELECT}, projected.ordinal, projected.capture
+           FROM projected
+           LEFT JOIN LATERAL jsonb_populate_record(NULL::public.memories,
+             CASE WHEN jsonb_typeof(projected.capture->'row')='object' THEN projected.capture->'row' END
+           ) AS memory ON true
+           ORDER BY projected.ordinal`,
+          [access.workspaceId, batch.map(root => root.resourceId), batch.map(root => root.version)],
+        )
+        if (projections.length !== batch.length) throw new DerivedScopeError('scope_evidence_missing')
+        for (const [index, { ordinal, capture, ...row }] of projections.entries()) {
+          if (!capture) throw new DerivedScopeError('scope_source_changed')
+          const root = batch[index]
+          const captured = memoryQueryCapture.parse(capture)
+          if (ordinal !== index + 1 || !captured.row || captured.source?.resourceKind !== 'memory'
+            || captured.source.workspaceId !== access.workspaceId || captured.source.resourceId !== root.resourceId
+            || captured.source.version !== root.version || row.workspaceId !== access.workspaceId
+            || row.id !== root.resourceId || row.scopeVersion !== root.version
+            || captured.sources.some(source => source.workspaceId !== access.workspaceId)) {
+            throw new DerivedScopeError('scope_evidence_missing')
+          }
+          bindScopeSources(row, captured.sources)
+          chain.push(row)
+          sources.push(...captured.sources)
+        }
       }
       await validateCallerScopeEvidence({...highWater,sources:[...(highWater.sources??[]),...sources]},execution.security.ceiling,client)
       chain.sort((a,b)=>a.validFrom.getTime()-b.validFrom.getTime() || a.createdAt.getTime()-b.createdAt.getTime())

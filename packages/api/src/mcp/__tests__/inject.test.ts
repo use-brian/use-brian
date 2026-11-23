@@ -140,7 +140,7 @@ function settingsStoreStub() {
   // returning safe defaults keeps the test resilient to internal calls.
   return new Proxy(
     {},
-    { get: () => vi.fn().mockResolvedValue(undefined) },
+    { get: (_target, key) => vi.fn().mockResolvedValue(key === 'getPolicies' ? [] : undefined) },
   )
 }
 
@@ -1396,7 +1396,7 @@ describe('[COMP:api/mcp-surface] multi-account Google built-ins', () => {
 
     const result = await tools.get('gmailSendMessage')!.execute(
       { to: ['client@example.com'], subject: 'Hello', body: 'sk_live_secret' },
-      {} as never,
+      { confirmedToolName: 'gmailSendMessage' } as never,
     )
 
     expect(result.isError).toBeFalsy()

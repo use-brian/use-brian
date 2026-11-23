@@ -94,6 +94,9 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
       LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
       DECLARE schema entity_types; policy application_native_policy_fixture_catalog;
       BEGIN
+        IF current_setting('app.fixture_catalog_pause_type',true)=o->>'entityTypeId' THEN
+          PERFORM pg_advisory_xact_lock(2488340);
+        END IF;
         SELECT * INTO schema FROM entity_types WHERE workspace_id=w AND id=(o->>'entityTypeId')::uuid;
         IF NOT FOUND THEN RETURN NULL; END IF;
         SELECT * INTO policy FROM application_native_policy_fixture_catalog WHERE type_id=schema.id;
@@ -485,6 +488,45 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
     expect((await legacy.listEntityTypes(workspaceId)).find(type => type.id === fixture.schema.id)?.properties.map(property => property.name)).toEqual(['title'])
     await assign('finance')
     expect((await legacy.getEntityType(workspaceId,fixture.schema.id))?.properties.map(property => property.name)).toEqual(['title','cost'])
+  })
+  it('observes role withdrawal during the type list and refuses a stale managed mask', async () => {
+    await clearRoles()
+    const fixture = await catalogType()
+    const grant = await assign()
+    const client = await getAppPool().connect()
+    const blocker = await owner.connect()
+    let result: Promise<unknown> | undefined
+    try {
+      await client.query('BEGIN')
+      const reader = createDbDocEntityStore({ actorUserId: memberId, transaction: client })
+      expect((await reader.listEntityTypes(workspaceId)).find(type => type.id === fixture.schema.id)?.properties)
+        .toEqual(fixture.schema.properties)
+      await client.query("SELECT set_config('app.fixture_catalog_pause_type',$1,true)", [fixture.schema.id])
+      await blocker.query('SELECT pg_advisory_lock(2488340)')
+      const pid = (await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
+      result = reader.listEntityTypes(workspaceId).catch(error => error)
+      await expect.poll(async () => (await owner.query(
+        "SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory' AND NOT granted", [pid],
+      )).rowCount).toBe(1)
+      await owner.query("UPDATE application_native_role_assignments SET status='revoked' WHERE id=$1", [grant])
+      await blocker.query('SELECT pg_advisory_unlock(2488340)')
+      expect(await result).toEqual(expect.arrayContaining([expect.objectContaining({
+        id: fixture.schema.id,
+        properties: [fixture.schema.properties[0]],
+      })]))
+      try {
+        await owner.query('UPDATE application_native_policy_fixture_catalog SET override=$2 WHERE type_id=$1', [fixture.schema.id, { schemaVersion: '0' }])
+        await expect(reader.listEntityTypes(workspaceId)).rejects.toMatchObject({ code: 'access_unavailable' })
+      } finally {
+        await owner.query("UPDATE application_native_policy_fixture_catalog SET override='{}' WHERE type_id=$1", [fixture.schema.id])
+      }
+    } finally {
+      await blocker.query('SELECT pg_advisory_unlock_all()')
+      blocker.release()
+      await result
+      await client.query('ROLLBACK')
+      client.release()
+    }
   })
   it('Q02 projects actual native history and retains its private wrapper observations for independent readers', async () => {
     await clearRoles()
@@ -1101,6 +1143,18 @@ describe('[COMP:security/native-field-policy] current canonical native field mas
       })
     } finally { releaseApplicationTransactionBinding(client);await client.query('ROLLBACK');client.release() }
   }
+  it('projects only requested application-bound catalog masks with exact versions', async () => {
+    await clearRoles()
+    const first = await record(), second = await record(), unrelated = await catalogType()
+    const app = await application(first, 'member', undefined, ['read','query'], undefined, second)
+    await asApplication(app, async client => {
+      const { rows } = await client.query(`SELECT * FROM read_generic_application_catalog_states($1,$2)
+        ORDER BY type_id`, [workspaceId,[first.schema.id,second.schema.id,unrelated.schema.id,randomUUID()]])
+      expect(rows).toEqual([first,second].map(({ schema }) => ({
+        type_id: schema.id, state: { schemaVersion: String(schema.schemaVersion), fields: ['title'] },
+      })).sort((a,b) => a.type_id.localeCompare(b.type_id)))
+    })
+  })
   it('admits ID-selected empty query metadata without claiming that the selected record exists',async () => {
     await clearRoles();const fixture = await catalogType(),id = randomUUID()
     const app = await application(fixture,'external_user',undefined,['query'],{ kind: 'ids',ids: [id] })

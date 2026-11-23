@@ -1,8 +1,9 @@
 import { createMemory } from '../../db/memories.js'
 import { randomUUID } from 'node:crypto'
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it, vi } from 'vitest'
 import { getAppPool, getPool, queryWithRLS } from '../../db/client.js'
 import { createSearchAdapters, readSearchItem } from '../adapters.js'
+import * as searchDb from '../database.js'
 import { createWorkspaceSearchService } from '../service.js'
 import { projectOfficeSearchBatch } from '../office-projection.js'
 import type { WorkspaceSearchFamily } from '@use-brian/shared'
@@ -120,10 +121,13 @@ describe('[COMP:search/workspace-service] Real PostgreSQL search authority and s
 
   it('keeps a pending Office projection partial instead of returning an empty complete result',async()=>{
     const f=await fixture()
-    await q("INSERT INTO office_artifacts(workspace_id,family,title,creator_user_id,owner_user_id,capability_version,sensitivity) VALUES($1,'document','needle Office',$2,$2,1,'internal')",[f.workspaceId,f.userId])
+    const id = (await q("INSERT INTO office_artifacts(workspace_id,family,title,creator_user_id,owner_user_id,capability_version,sensitivity) VALUES($1,'document','needle Office',$2,$2,1,'internal') RETURNING id",[f.workspaceId,f.userId])).rows[0].id
+    const read = () => readSearchItem(f,'office',`office:${id}`,new AbortController().signal)
     expect(await search(f,{q:'needle',kind:'office'})).toMatchObject({items:[],completeness:'partial',unavailableFamilies:['office']})
+    expect(await read()).toBeNull()
     await projectAll()
     expect(await run(f,'office')).toHaveLength(1)
+    expect(await read()).toMatchObject({id,text:'',target:{type:'office',id,family:'document'}})
   })
 
   it('searches extracted file text and recording transcripts once per canonical artifact',async()=>{
@@ -139,8 +143,67 @@ describe('[COMP:search/workspace-service] Real PostgreSQL search authority and s
     for(let i=0;i<3;i++)await q(`INSERT INTO transcript_segments(workspace_id,recording_id,segment_index,start_ms,end_ms,segment_text,user_id,created_by_user_id)
       VALUES($1,$2,$3,0,1000,'needle transcript',$4,$4)`,[f.workspaceId,episode,i,f.userId])
     expect((await run(f,'files')).map(row=>row.id).sort()).toEqual([file,episode].sort())
+    expect(await readSearchItem(f,'files',`recording:${episode}`,new AbortController().signal))
+      .toMatchObject({id:episode,text:'needle transcript needle transcript needle transcript',target:{type:'recording',id:episode}})
     await q('UPDATE workspace_files SET user_id=$2 WHERE id=$1',[file,f.other])
     expect((await run(f,'files')).map(row=>row.id)).toEqual([episode])
+  })
+
+  it('assembles one file and four segments despite unrelated files, with current authority', async () => {
+    const f = await fixture()
+    const addFiles = async (first: number, last: number) => {
+      const result = await q(`WITH inserted AS (
+          INSERT INTO workspace_files(workspace_id, name, path, storage_uri, user_id, created_by_user_id)
+          SELECT $1, 'Fixture ' || n, '/fixture-' || n, 'fixture://text', $2, $2
+          FROM generate_series($3::int, $4::int) n RETURNING id, path
+        ), segments AS (
+          INSERT INTO file_segments(workspace_id, file_id, segment_index, char_start, char_end, content, user_id, created_by_user_id)
+          SELECT $1, inserted.id, n, n * 9, n * 9 + 9, 'segment ' || n, $2, $2
+          FROM inserted CROSS JOIN generate_series(0, 3) n
+        ) SELECT id FROM inserted WHERE path = concat('/fixture-', $4::int)`, [f.workspaceId, f.userId, first, last])
+      return result.rows[0].id as string
+    }
+    const id = await addFiles(1, 256)
+    const signal = new AbortController().signal
+    const key = `file:${id}`
+    type Plan = { 'Relation Name'?: string; 'Actual Rows': number; 'Actual Loops': number; Plans?: Plan[] }
+    const nodes = (plan: Plan): Plan[] => [plan, ...(plan.Plans ?? []).flatMap(nodes)]
+    const search = vi.spyOn(searchDb, 'searchDatabase')
+    const explainRead = async (lookedUpKey: string, expected: unknown, parentRows: number, segmentRows: number) => {
+      expect(await readSearchItem(f, 'files', lookedUpKey, signal)).toEqual(expected)
+      const [, , sql, values] = search.mock.calls.at(-1)!
+      const { rows } = await queryWithRLS<{ 'QUERY PLAN': [{ Plan: Plan }] }>(
+        f.userId, `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${sql}`, values,
+      )
+      const plan = nodes(rows[0]!['QUERY PLAN'][0].Plan)
+      const projected = plan.find(node => node['Relation Name'] === 'workspace_files')!
+      const segments = plan.find(node => node['Relation Name'] === 'file_segments')!
+      expect(projected['Actual Rows'] * projected['Actual Loops']).toBe(parentRows)
+      expect(segments['Actual Rows'] * segments['Actual Loops']).toBe(segmentRows)
+      expect(plan.some(node => node['Relation Name'] === 'recordings')).toBe(false)
+    }
+    const allowed = {
+      key, id, title: 'Fixture 256', text: 'segment 0 segment 1 segment 2 segment 3', kind: 'files', status: null,
+      target: { type: 'brain', id, primitive: 'files' },
+    }
+    try {
+      await explainRead(key, allowed, 1, 4)
+      await addFiles(257, 512)
+      await explainRead(key, allowed, 1, 4)
+      await explainRead(`file:${randomUUID()}`, null, 0, 0)
+      await q('UPDATE workspace_files SET user_id=$2 WHERE id=$1', [id, f.other])
+      await explainRead(key, null, 0, 0)
+      expect(await readSearchItem({ ...f, userId: f.other }, 'files', key, signal)).toMatchObject({ id })
+      await q('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [f.workspaceId, f.other])
+      expect(await readSearchItem({ ...f, userId: f.other }, 'files', key, signal)).toBeNull()
+      search.mockClear()
+      for (const invalid of [`record:${id}`, `file:${id}\n`, 'file:malformed-uuid']) {
+        expect(await readSearchItem(f, 'files', invalid, signal)).toBeNull()
+      }
+      expect(search).not.toHaveBeenCalled()
+    } finally {
+      search.mockRestore()
+    }
   })
 
   it('searches visible Personal/shared messages but never another persons Personal chat, reasoning or tool payloads',async()=>{

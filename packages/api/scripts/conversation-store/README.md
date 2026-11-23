@@ -228,7 +228,7 @@ node packages/api/scripts/conversation-store/build-portable-harness-catalog.mjs 
 This generator accepts no database URL/catalog input, verifies source pins and
 reviewed classification before cluster creation, checks fixture ownership and
 ordinary-owner privileges, builds both outputs before writing, and always
-cleans up its cluster. Check mode also authenticates the current installation, including both Knowledge tables and the four source writers changed in 8339.
+cleans up its cluster. Check mode also authenticates the current installation, including the Knowledge catalog, batch schema reader and CRM CSV indexes.
 Expected field counts are fixed: 23 routines, 8 relations, 0 types, 11 triggers.
 Source or expected-artifact changes require source review, never rebaselining
 from a failing/live catalog. Generating new bytes does not authorize them: the
@@ -275,7 +275,7 @@ deferred column or the whole row become `suspended:restoration-placeholder`.
 Any new table, sequence, insert/update trigger or FORCE-RLS policy refuses
 import until the roster is regenerated and reviewed. The builder also refuses an
 inventory whose `ledgerCount` differs from the fresh chain and records the chain
-head (815 entries, `8339_knowledge_source_path_identity.sql`). The 8276 witness is
+head (818 entries, `8342_memory_history_terminal_proof.sql`). The 8276 witness is
 installation-derived (D7): a head import ends with the owner-only refresh, and an
 8273-cohort transfer is refreshed by 8276 itself as the runner moves forward.
 `portableTableDigests` returns the canonical per-table rows and record digests
@@ -494,6 +494,10 @@ callers already run with as a function-level setting (which stops inlining; bodi
 outcomes are unchanged), rewrites their typed registry records directly (nothing pins them) and ends
 with the witness refresh. `installation-authentication.mjs` still verifies 392 functions and compiles
 the tuned references with the same setting; the 8290 and 8294 recipes refuse each other's installation.
+
+## Bounded catalog and CRM import indexes
+
+The 8341 release authenticates the 8340 batch catalog and the 8341 private CSV index storage and cleanup triggers. Portable restore treats the two index tables as rebuildable. Source bytes, permissions and committed job receipts retain their own recovery rules.
 
 ## Verified retained graph adjacency
 

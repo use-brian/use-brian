@@ -79,7 +79,7 @@ function imapConnectorRow() {
 }
 
 function settingsStoreStub() {
-  return new Proxy({}, { get: () => vi.fn().mockResolvedValue(undefined) })
+  return new Proxy({}, { get: (_target, key) => vi.fn().mockResolvedValue(key === 'getPolicies' ? [] : undefined) })
 }
 
 function instanceStoreStub(): ConnectorInstanceStore {
@@ -250,14 +250,14 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     expect(opsSend.description).toMatch(/^\[ops@harborlane\.example\]/)
 
     // The variant itself fixes the sender; no account router input is needed.
-    await opsSend.execute({ to: ['x@y.z'], subject: 's', body: 'b' }, {} as never)
+    await opsSend.execute({ to: ['x@y.z'], subject: 's', body: 'b' }, { confirmedToolName: opsSend.name } as never)
     expect(emit).toHaveBeenLastCalledWith(
       { userId: 'u-1', assistantId: 'a-1' },
       expect.objectContaining({ status: 'executed', payload: expect.objectContaining({ from: 'ops@harborlane.example' }) }),
     )
 
     // The primary retains canonical names for compatibility and is bound too.
-    await primarySend.execute({ to: ['x@y.z'], subject: 's', body: 'b' }, {} as never)
+    await primarySend.execute({ to: ['x@y.z'], subject: 's', body: 'b' }, { confirmedToolName: primarySend.name } as never)
     expect(emit).toHaveBeenLastCalledWith(
       { userId: 'u-1', assistantId: 'a-1' },
       expect.objectContaining({ status: 'executed', payload: expect.objectContaining({ from: 'maya@harborlane.example' }) }),
@@ -440,7 +440,7 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     expect(sendNames).toHaveLength(2)
     const opsSendName = sendNames.find((name) => name !== 'imapSendMessage')!
     const opsSend = tools.get(opsSendName)!
-    await opsSend.execute({ to: ['x@y.z'], subject: 's', body: 'b' }, {} as never)
+    await opsSend.execute({ to: ['x@y.z'], subject: 's', body: 'b' }, { confirmedToolName: opsSend.name } as never)
     expect(emit).toHaveBeenLastCalledWith(
       { userId: 'u-1', assistantId: 'a-1' },
       expect.objectContaining({ payload: expect.objectContaining({ from: 'ops@harborlane.example' }) }),
@@ -525,7 +525,7 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     const send = tools.get('imapSendMessage')!
     const result = await send.execute(
       { to: ['recipient@example.com'], subject: 's', body: 'sk_live_secret' },
-      {} as never,
+      { confirmedToolName: send.name } as never,
     )
     expect(result.isError, JSON.stringify(result)).toBeFalsy()
     expect(mailboxSendMessage).toHaveBeenCalledTimes(1)
@@ -559,7 +559,7 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
         body: 'Attached.',
         attachments: ['file-1'],
       },
-      { workspaceId: 'ws-1', userId: 'u-1', assistantId: 'a-1' } as never,
+      { workspaceId: 'ws-1', userId: 'u-1', assistantId: 'a-1', confirmedToolName: send.name } as never,
     )
 
     expect(result.isError, JSON.stringify(result)).toBeFalsy()

@@ -89,7 +89,8 @@ export function azureBlobOptionsFromEnv(env: AzureBlobEnv): AzureBlobClientOptio
 export type AzureBlobContainer = {
   upload(key: string, bytes: Buffer, opts: { mime: string; metadata: Record<string, string> }): Promise<void>
   download(key: string): Promise<{ bytes: Buffer; mime: string; metadata: Record<string, string> } | null>
-  head(key: string): Promise<{ sizeBytes: number; mime: string; metadata: Record<string, string>; updatedAt: Date | null } | null>
+  head(key: string): Promise<(GcsBlobStat & { metadata: Record<string, string> }) | null>
+  downloadRange?(key: string, version: string, start: number, end: number): Promise<Buffer | null>
   delete(key: string): Promise<void>
   sasUrl(key: string, opts: { permissions: 'r' | 'cw'; expiresOn: Date }): Promise<string>
   uploadStream(key: string, stream: Readable, opts: { mime: string; metadata: Record<string, string> }): Promise<void>
@@ -191,6 +192,20 @@ export async function createAzureBlobContainer(opts: AzureBlobClientOptions): Pr
         throw err
       }
     },
+
+    async downloadRange(key, version, start, end) {
+      try {
+        const result = await blob(key).download(start, end - start, { conditions: { ifMatch: version } })
+        if (result.contentLength !== end - start || result.etag !== version) {
+          (result.readableStreamBody as { destroy?(): void } | undefined)?.destroy?.()
+          return null
+        }
+        return streamToBuffer(result.readableStreamBody)
+      } catch (err: unknown) {
+        if (isNotFound(err) || [412, 416].includes((err as { statusCode?: number })?.statusCode ?? 0)) return null
+        throw err
+      }
+    },
     async head(key) {
       try {
         const props = await blob(key).getProperties()
@@ -200,6 +215,7 @@ export async function createAzureBlobContainer(opts: AzureBlobClientOptions): Pr
           mime: resolveMime(props.contentType, props.metadata),
           metadata: props.metadata ?? {},
           updatedAt: props.lastModified ?? null,
+          version: props.etag,
         }
       } catch (err: unknown) {
         if (isNotFound(err)) return null
@@ -262,13 +278,18 @@ export function createAzureBlobFilesClient(
       return { bytes: got.bytes, mime: got.mime, metadata: fromAzureMetadata(got.metadata, got.mime) }
     },
 
+    async readBlobRange(key, version, start, end) {
+      const c = await container()
+      return c.downloadRange?.(key, version, start, end) ?? null
+    },
+
     async statBlob(key): Promise<GcsBlobStat | null> {
       // Get Blob Properties is a HEAD: a large recording is sized without
       // moving a byte through this process.
       const c = await container()
       const got = await c.head(key)
       if (!got) return null
-      return { sizeBytes: got.sizeBytes, mime: got.mime, updatedAt: got.updatedAt }
+      return { sizeBytes: got.sizeBytes, mime: got.mime, updatedAt: got.updatedAt, version: got.version }
     },
 
     async deleteBlob(key) {

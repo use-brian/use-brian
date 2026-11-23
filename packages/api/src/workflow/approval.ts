@@ -464,6 +464,7 @@ async function continueAfterDecision(
     scopeAccumulator,
     abortSignal: abortSignal ?? new AbortController().signal,
     ...(resumedExecution ? executionToolContext(resumedExecution, { appId: 'Use Brian' }) : {}),
+    confirmedToolName: updated.toolName,
   }
 
   let result

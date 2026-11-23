@@ -102,6 +102,8 @@ type EntityTypeRow = {
   createdBy: string | null
 }
 
+const entityTypeCatalogSchema = z.object({ schemaVersion: z.string(), fields: z.array(z.string()).max(128) }).strict()
+
 type EntityInstanceRow = {
   id: string
   entityTypeId: string
@@ -129,6 +131,15 @@ function rowToType(row: EntityTypeRow): DocEntityType {
     createdAt: row.createdAt.toISOString(),
     createdBy: row.createdBy,
   }
+}
+
+function projectCanonicalType(row: EntityTypeRow, state: unknown): DocEntityType {
+  const catalog = entityTypeCatalogSchema.safeParse(state)
+  if (!catalog.success || catalog.data.schemaVersion !== String(row.schemaVersion)) {
+    throw new ApplicationPlatformError('access_unavailable', 'The schema is unavailable.')
+  }
+  const keys = new Set(catalog.data.fields)
+  return { ...rowToType(row), properties: row.properties.filter(property => keys.has(property.name)) }
 }
 
 function rowToInstance(row: EntityInstanceRow): DocEntityInstance {
@@ -223,14 +234,11 @@ export function createDbDocEntityStore(boundActor?: { actorUserId: string; trans
     if (projection.ref.version !== row.recordVersion) throw new ApplicationPlatformError('access_unavailable', 'The record changed.')
     return projectedInstance(row,rowToType(schemas.rows[0]),projection)
   }
-  async function projectCanonicalType(client: PoolClient,row: EntityTypeRow): Promise<DocEntityType> {
-    const catalog = z.object({ schemaVersion: z.string(),fields: z.array(z.string()).max(128) }).strict().safeParse(
-      (await client.query<{ value: unknown }>('SELECT read_generic_application_catalog_state($1,$2) AS value',[row.workspaceId,row.id])).rows[0]?.value)
-    if (!catalog.success || catalog.data.schemaVersion !== String(row.schemaVersion)) {
-      throw new ApplicationPlatformError('access_unavailable','The schema is unavailable.')
-    }
-    const keys = new Set(catalog.data.fields)
-    return { ...rowToType(row),properties: row.properties.filter(property => keys.has(property.name)) }
+  async function projectCanonicalTypeById(client: PoolClient, row: EntityTypeRow): Promise<DocEntityType> {
+    const { rows } = await client.query<{ value: unknown }>(
+      'SELECT public.read_generic_application_catalog_state($1,$2) AS value', [row.workspaceId, row.id],
+    )
+    return projectCanonicalType(row, rows[0]?.value)
   }
   return {
     // ── EntityType CRUD ───────────────────────────────────────────────
@@ -277,23 +285,27 @@ export function createDbDocEntityStore(boundActor?: { actorUserId: string; trans
     async getEntityType(workspaceId, id, options) {
       return canonicalTransaction(actor(workspaceId,options),async client => {
         const result = await client.query<EntityTypeRow>(`SELECT ${ENTITY_TYPE_SELECT} FROM public.entity_types WHERE id=$1 AND workspace_id=$2`,[id,workspaceId])
-        return result.rows[0] ? projectCanonicalType(client,result.rows[0]) : null
+        return result.rows[0] ? projectCanonicalTypeById(client,result.rows[0]) : null
       })
     },
 
     async getEntityTypeByName(workspaceId, name, options) {
       return canonicalTransaction(actor(workspaceId,options),async client => {
         const result = await client.query<EntityTypeRow>(`SELECT ${ENTITY_TYPE_SELECT} FROM public.entity_types WHERE workspace_id=$1 AND name=$2`,[workspaceId,name])
-        return result.rows[0] ? projectCanonicalType(client,result.rows[0]) : null
+        return result.rows[0] ? projectCanonicalTypeById(client,result.rows[0]) : null
       })
     },
 
     async listEntityTypes(workspaceId, options) {
       return canonicalTransaction(actor(workspaceId,options),async client => {
-        const result = await client.query<EntityTypeRow>(`SELECT ${ENTITY_TYPE_SELECT} FROM public.entity_types WHERE workspace_id=$1 ORDER BY created_at DESC,id DESC`,[workspaceId])
-        const types: DocEntityType[] = []
-        for (const row of result.rows) types.push(await projectCanonicalType(client,row))
-        return types
+        const { rows } = await client.query<EntityTypeRow & { catalog: unknown }>(`
+          WITH types AS MATERIALIZED (SELECT * FROM public.entity_types WHERE workspace_id=$1)
+          SELECT ${ENTITY_TYPE_SELECT}, masks.state AS catalog
+          FROM types
+          LEFT JOIN public.read_generic_application_catalog_states($1,ARRAY(SELECT id FROM types)) masks
+            ON masks.type_id=types.id
+          ORDER BY created_at DESC,id DESC`, [workspaceId])
+        return rows.map(({ catalog, ...row }) => projectCanonicalType(row, catalog))
       })
     },
 
@@ -339,7 +351,7 @@ export function createDbDocEntityStore(boundActor?: { actorUserId: string; trans
           const current = await client.query<EntityTypeRow>(
             `SELECT ${ENTITY_TYPE_SELECT} FROM public.entity_types WHERE id=$1 AND workspace_id=$2`,[id,workspaceId])
           if (!current.rows[0]) throw new ApplicationPlatformError('access_unavailable','The schema is unavailable.')
-          return projectCanonicalType(client,current.rows[0])
+          return projectCanonicalTypeById(client,current.rows[0])
         })
       }
 

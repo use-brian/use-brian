@@ -43,6 +43,7 @@ export const rosterRules=Object.freeze({
  'D4-canonical-registry':'Canonical executable registry. Target records are rendered and authenticated by the shipped installer and installation authenticator; archived records are original proof only, never imported or repinned.',
  'D5-display-fingerprints':'Historical display fingerprint owner. Target rows come from the shipped installer; archived rows are original proof only; signatures must match, fingerprints are never blanket repinned.',
  'D6-enrollment-maintenance':'Conversion enrollment queue. Maintenance state the shipped enrollment trigger re-derives while restored units are imported; archived keys must be a subset of the re-derived keys and the generation counter is installation-local. Re-enrolled units are reconverted idempotently.',
+ 'D-import-csv-index':'Rebuildable CSV record offsets and private chunk staging. The target recreates these from the authorized source on next use.',
  'D9-envelope-scan':'Derived historical envelope scan cursor. The target restarts its bounded inventory scan after restoring durable envelopes.',
  [crmSummaryProjectionRule]:'CRM summary projection. Rebuild atomically from exact restored facts and verify current leaves against archived history.',
  [crmSummaryCredentialRule]:'CRM summary signing material. Sealed and restored through its bounded encrypted credential artifact.',
@@ -211,7 +212,8 @@ const contractRoots=['native_turn_helpers_current()','native_retained_helpers_cu
 // Polymorphic source references carry no foreign key; their contract-bound
 // validators read the current source row, so they import after every table.
 const polymorphicLate=['scope_resource_states','scope_derivations','scope_derivation_sources']
-const derivedRule={...crmSummaryDerivedRules,_migrations:'D1-ledger',crm_erasure_journal_targets:'D2-capture-targets',native_retained_contract_helpers:'D3-retained-fingerprints',
+const derivedRule={...crmSummaryDerivedRules,
+ crm_import_csv_indexes:'D-import-csv-index',crm_import_csv_index_chunks:'D-import-csv-index',_migrations:'D1-ledger',crm_erasure_journal_targets:'D2-capture-targets',native_retained_contract_helpers:'D3-retained-fingerprints',
  native_turn_contract_helpers:'D4-canonical-registry',private_session_display_contract:'D5-display-fingerprints',native_turn_contract_witness:'D7-contract-witness',
  conversation_settings_transitions:'D8-transaction-scratch',native_memory_query_write_intents:'D8-transaction-scratch',
  conversation_envelope_backfill_checkpoint:'D9-envelope-scan'}

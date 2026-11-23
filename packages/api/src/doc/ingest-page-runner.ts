@@ -29,7 +29,6 @@
 import {
   distillPageToBrain,
   type DistillPageResult,
-  type PageSourceChunk,
   type RunSectionEpisode,
   type UpsertPageSource,
 } from '@use-brian/core/ingest/ingest-page.js'
@@ -154,17 +153,19 @@ export async function runIngestPage(
   // shape (keyed by page + block). The page-level clearance maps straight to the
   // chunk sensitivity (kb_chunks.sensitivity is free text — the three clearance
   // values are valid).
-  const upsertPageSource: UpsertPageSource = async ({ pageId, chunks }) => {
+  const upsertPageSource: UpsertPageSource = async ({ pageId, chunks, contentHash }) => {
     await deps.docPageSourceStore.upsertPageChunks({
       pageId,
+      version: read.version,
+      collaborative: read.collaborative === true,
+      contentHash,
+      teamspaceId: view.teamspaceId ?? null,
       workspaceId: view.workspaceId,
       ownerUserId: view.createdBy,
       sensitivity: view.clearance,
       compartments: pageCompartments,
       projectIds: pageProjectIds,
-      chunks: chunks.map(
-        (c): PageSourceChunk => c, // structural — DocPageSourceChunk == PageSourceChunk shape
-      ),
+      chunks,
     })
   }
 
@@ -180,8 +181,6 @@ export async function runIngestPage(
     )
 
     if (result.ingested) {
-      // Stamp the dedup/cooldown anchors so the next save can short-circuit.
-      await deps.savedViewStore.markBrainIngestedSystem(args.pageId, result.contentHash)
       console.log(
         `[ingest-page] ${args.pageId}: ingested ${result.sectionsProcessed} section(s), ${result.chunksUpserted} chunk(s) → brain (hash ${result.contentHash.slice(0, 8)})`,
       )

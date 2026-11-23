@@ -231,6 +231,8 @@ export type ToolContext = {
     approverUserId: string
     toolName: string
   }
+  /** Host-stamped confirmation or workflow grant for the tool currently executing. */
+  confirmedToolName?: string
   /** Server-stamped exact staged-write review, supplied only by authenticated
    * native approval apply. A credential or tool input cannot construct it. */
   approvedStagedWrite?: { approvalId: string; approverUserId: string; authSessionId: string }

@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
-import { OFFICIAL_CONNECTOR_TOOLS } from '@use-brian/shared'
+import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTOR_TOOLS } from '@use-brian/shared'
 
 const runtime = vi.hoisted(() => ({ assertCurrent: vi.fn(async () => {}), allows: vi.fn((_binding: unknown) => true) }))
 vi.mock('../../application-platform/connector-runtime-authority.js', () => ({
@@ -25,11 +25,14 @@ vi.mock('../client.js', () => ({
 }))
 
 import {
-  connectorBindingFingerprint, connectorBindingKey, createActivation, createTurnAuthority,
+  applyToolPolicies, connectorBindingFingerprint, connectorBindingKey, createActivation, createTurnAuthority,
   type ProviderRegistry, type TurnAuthority,
 } from '../activation.js'
 import { PROVIDER_MODULES, type ProviderActivationContext, type ProviderModule } from '../providers/index.js'
 import type { GitHubLane } from '../providers/github.js'
+import { activateShopifyLane } from '../providers/shopify.js'
+import { createDbMcpSettingsStore } from '../../db/mcp-settings-store.js'
+import * as db from '../../db/client.js'
 import { runLanes } from '../providers/lanes.js'
 import { AuthorityChangedError } from '../../context-scope/authority-lease.js'
 import { CONNECTOR_SCOPE_RESTRICTION } from '../discovery-diagnostics.js'
@@ -174,6 +177,66 @@ describe('[COMP:api/mcp-surface] activate() over the GitHub provider', () => {
     const tools = await runLanes([githubLane(), githubLane({ connectors: [], reportUnavailable: false, supersedes: ['github'] })],
       (lane) => PROVIDER_MODULES.github.activate(makeCtx(), [lane] as never) as Promise<Tool[]>)
     expect(tools).toEqual([])
+  })
+})
+
+describe('[COMP:api/mcp-surface] connector policy batch and effect boundary', () => {
+  it('reads all Shopify tool settings in one statement and counts connector enablement separately', async () => {
+    const policyQuery = vi.spyOn(db, 'query').mockResolvedValue({ rows: [] } as never)
+    const isEnabled = vi.fn(async () => true)
+    const ctx = makeCtx({ assistantConnectorStore: { isEnabled } as never })
+    try {
+      const tools = await activateShopifyLane(ctx, {
+        connectors: [{ connectorId: 'shopify', connected: true }],
+        userId: ctx.userId, settingsStore: createDbMcpSettingsStore(), reportUnavailable: true,
+      })
+      expect(tools).toHaveLength(43)
+      expect(policyQuery).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('FROM mcp_tool_settings'), [
+        ctx.userId, [APP_LEVEL_ASSISTANT_ID, ctx.assistantId], ['shopify', 'shopify'], tools.map(tool => tool.name),
+      ])
+      expect(isEnabled).toHaveBeenCalledExactlyOnceWith(ctx.assistantId, 'shopify')
+      expect(ctx.stores.connectorStore.getCredentials).not.toHaveBeenCalled()
+    } finally {
+      policyQuery.mockRestore()
+    }
+  })
+
+  it('checks the chosen variant using current exact, legacy and app settings at execution', async () => {
+    type Policy = 'allow' | 'ask' | 'block'
+    const ctx = { userId: 'u-1', assistantId: 'a-1' } as ToolContext
+    const toolName = 'githubSearchRepositories'
+    const name = `${toolName}__alternate_ci2`
+    const serverName = 'github:ci-2'
+    let exact: Policy | undefined = 'allow'
+    let legacy: Policy = 'block'
+    let app: Policy | undefined
+    const getPolicies = vi.fn(async () => [
+      ...(exact ? [{ assistantId: ctx.assistantId, serverName, toolName, policy: exact }] : []),
+      { assistantId: ctx.assistantId, serverName: 'github', toolName, policy: legacy },
+      ...(app ? [{ assistantId: APP_LEVEL_ASSISTANT_ID, serverName: 'github', toolName, policy: app }] : []),
+    ])
+    const execute = vi.fn(async () => ({ data: 'executed' }))
+    const [tool] = await applyToolPolicies([{ name, execute } as unknown as Tool], serverName,
+      { getPolicies } as never, ctx.assistantId, ctx.userId, undefined, {
+        canonicalName: () => toolName, appServerName: 'github', assistantFallbackServerName: 'github',
+      })
+    expect(getPolicies).toHaveBeenCalledExactlyOnceWith({
+      userId: ctx.userId, toolNames: [toolName], scopes: [
+        { assistantId: APP_LEVEL_ASSISTANT_ID, serverName: 'github' },
+        { assistantId: ctx.assistantId, serverName },
+        { assistantId: ctx.assistantId, serverName: 'github' },
+      ],
+    })
+    expect(await tool!.resolveConfirmation!(ctx)).toBe(false)
+    exact = undefined
+    expect(await tool!.execute({}, { ...ctx, confirmedToolName: name })).toMatchObject({ isError: true, data: expect.stringContaining("'block'") })
+    legacy = 'allow'
+    app = 'ask'
+    expect(await tool!.execute({}, { ...ctx, confirmedToolName: toolName })).toMatchObject({ isError: true, data: expect.stringContaining('requires approval') })
+    expect(execute).not.toHaveBeenCalled()
+    expect(await tool!.resolveConfirmation!(ctx)).toBe(true)
+    expect(await tool!.execute({}, { ...ctx, confirmedToolName: name })).toEqual({ data: 'executed' })
+    expect(execute).toHaveBeenCalledTimes(1)
   })
 })
 

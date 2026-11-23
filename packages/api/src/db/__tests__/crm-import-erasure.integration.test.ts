@@ -20,8 +20,15 @@ await assertLocalFixture()
 const pool = getPool(), app = getAppPool(), sources = createCrmImportSources(pool), privacy = createCrmPrivacyService()
 const keys = createCrmIntegrationStore(pool, app), operations = createCrmOperationsService(createDbCrmOperationsStore(pool))
 const workspaces: string[] = [], users: string[] = []
-const importer = (sourcePort: CrmImportSources = sources) => createCrmProductionImportService({ pool, sources: sourcePort,
+const importer = (sourcePort: CrmImportSources = sources, indexPool = pool) => createCrmProductionImportService({ pool: indexPool, sources: sourcePort,
   operationsForTransaction: client => createCrmOperationsService(createDbCrmOperationsStore(pool, client)) })
+const holdIndexRead = (chunkLookup: boolean, afterRead: () => Promise<void>) => ({
+  async query(sql: string, values?: unknown[]) {
+    const result = await pool.query(sql, values)
+    if (sql.includes('FROM crm_import_csv_index_chunks') && sql.includes('AND chunk_index=$2') === chunkLookup) await afterRead()
+    return result
+  },
+}) as typeof pool
 async function fixture(count = 1, mixed = false) {
   const workspaceId = randomUUID(), userId = randomUUID(), contactId = randomUUID(), sourceKey = randomUUID()
   workspaces.push(workspaceId); users.push(userId)
@@ -69,6 +76,7 @@ describe('[COMP:crm/privacy-copies] Real CRM source erasure and consumer admissi
     const row = (await pool.query('SELECT content_bytes,source_hash,integration_grants,privacy_erased,retired_at,replay_expires_at,replay_policy_version FROM crm_import_sources WHERE id=$1', [f.sourceId])).rows[0]
     expect(row).toMatchObject({ content_bytes: Buffer.alloc(0), source_hash: '0'.repeat(64), integration_grants: [], privacy_erased: true, replay_policy_version: 1 })
     expect(row.retired_at).toBeInstanceOf(Date); expect(row.replay_expires_at.getTime() - row.retired_at.getTime()).toBe(3600000)
+    expect((await pool.query('SELECT id FROM crm_import_csv_indexes WHERE source_id=$1', [f.sourceId])).rowCount).toBe(0)
     expect(await importer().resume(f.machine, f.job.id)).toMatchObject({ status: 'completed', privacyErased: true, mapping: { columns: {} } })
     expect((await importer().list(f.machine)).jobs).toEqual([expect.objectContaining({ id: f.job.id, privacyErased: true })])
     expect(await importer().get(f.context, f.job.id)).toMatchObject({ privacyErased: true })
@@ -116,7 +124,7 @@ describe('[COMP:crm/privacy-copies] Real CRM source erasure and consumer admissi
     expect((await f.preview()).blockers.some(b => b.reason === 'import_source_execution_dependency')).toBe(true)
     let enter!: () => void, release!: () => void
     const ready = new Promise<void>(resolve => { enter = resolve }), gate = new Promise<void>(resolve => { release = resolve })
-    const held = importer({ ...sources, read: async (...args) => { const result = await sources.read(...args); enter(); await gate; return result } }).resume(f.machine, f.job.id)
+    const held = importer(sources, holdIndexRead(true, async () => { enter(); await gate })).resume(f.machine, f.job.id)
     try { await Promise.race([ready, held.then(() => { throw new Error('Reader ended before barrier') })]); await f.finish(); await f.erase() }
     finally { release(); await Promise.allSettled([held]) }
     expect(await held).toMatchObject({ privacyErased: true, status: 'completed', succeededRows: 51 })
@@ -134,9 +142,9 @@ describe('[COMP:crm/privacy-copies] Real CRM source erasure and consumer admissi
   })
   it('returns a typed retired-source conflict when confirmation held bytes before erasure', async () => {
     const f = await fixture(); await f.finish(); await f.approve()
-    let reads = 0, enter!: () => void, release!: () => void
+    let enter!: () => void, release!: () => void
     const ready = new Promise<void>(resolve => { enter = resolve }), gate = new Promise<void>(resolve => { release = resolve })
-    const held = importer({ ...sources, read: async (...args) => { const result = await sources.read(...args); if (++reads === 2) { enter(); await gate }; return result } })
+    const held = importer(sources, holdIndexRead(false, async () => { enter(); await gate }))
       .confirm(f.machine, { ...f.input, confirmed: true, dryRunHash: f.checked.dryRunHash })
     try { await Promise.race([ready, held.then(() => { throw new Error('Confirmation ended before barrier') })]); await f.erase() }
     finally { release(); await Promise.allSettled([held]) }

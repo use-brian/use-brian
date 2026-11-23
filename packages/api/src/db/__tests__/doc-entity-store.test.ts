@@ -119,14 +119,20 @@ const store = createDbDocEntityStore({ actorUserId: USER_ID })
 
 // SQL-shape fixture only. Admission itself is covered by the guarded real
 // application/native-field integration matrix, not these database doubles.
-function canonicalReadFixture(options: { missing?: boolean; missingSchema?: boolean; changes?: DocEntityInstance['data']; schemaRows?: unknown[] } = {}) {
+function canonicalReadFixture(options: { missing?: boolean; missingSchema?: boolean; changes?: DocEntityInstance['data']; schemaRows?: ReturnType<typeof entityTypeRow>[] } = {}) {
   clientResponder = text => {
     if (text.includes('pg_catalog.pg_roles')) return { rows: [{ bypass: false }], rowCount: 1 }
     if (text.trim().startsWith('INSERT INTO entity_instances') || text.trim().startsWith('UPDATE entity_instances')) {
       return { rows: options.missing ? [] : [entityInstanceRow({ recordVersion: '1' })], rowCount: options.missing ? 0 : 1 }
     }
     if (text.trim().startsWith('DELETE FROM entity_instances')) return { rows: [], rowCount: 1 }
-    if (text.includes('FROM public.entity_types')) return { rows: options.missingSchema ? [] : options.schemaRows ?? [entityTypeRow()], rowCount: options.missingSchema ? 0 : options.schemaRows?.length ?? 1 }
+    if (text.includes('FROM public.entity_types')) {
+      const types = options.missingSchema ? [] : options.schemaRows ?? [entityTypeRow()]
+      const rows = text.includes('read_generic_application_catalog_states(')
+        ? types.map(type => ({ ...type, catalog: { schemaVersion: String(type.schemaVersion), fields: type.properties.map(property => property.name) } }))
+        : types
+      return { rows, rowCount: rows.length }
+    }
     if (text.includes('read_generic_application_catalog_state(')) return { rows: [{ value: { schemaVersion: '1',fields: SAMPLE_PROPERTIES.map(property => property.name) } }],rowCount: 1 }
     if (text.includes('FROM public.entity_instances')) return { rows: options.missing ? [] : [entityInstanceRow({ recordVersion: '1' })], rowCount: options.missing ? 0 : 1 }
     if (text.includes('read_generic_application_record(')) return { rows: [{ value: {
@@ -232,7 +238,7 @@ describe('[COMP:api/doc-entity-store] EntityType CRUD', () => {
     const list = await store.listEntityTypes(WORKSPACE_ID)
     expect(list).toHaveLength(2)
     expect(list[0].name).toBe('Movie')
-    expect(clientQueries.filter(query => query.text.includes('read_generic_application_catalog_state'))).toHaveLength(2)
+    expect(clientQueries.filter(query => query.text.includes('read_generic_application_catalog_states('))).toHaveLength(1)
   })
 
   it('updateEntityType bumps schema_version when properties change', async () => {

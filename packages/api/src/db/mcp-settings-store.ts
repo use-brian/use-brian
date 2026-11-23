@@ -1,19 +1,33 @@
 import type { McpSettingsStore, McpToolSetting } from '@use-brian/agent-runtime/mcp/types.js'
 import { query } from './client.js'
 
+const SETTING_COLUMNS = `id, assistant_id AS "assistantId", user_id AS "userId",
+  server_name AS "serverName", tool_name AS "toolName", policy, classification,
+  times_allowed AS "timesAllowed", times_denied AS "timesDenied"`
+
 export function createDbMcpSettingsStore(): McpSettingsStore {
   return {
     async getPolicy(params) {
       const result = await query<McpToolSetting>(
-        `SELECT id, assistant_id as "assistantId", user_id as "userId",
-                server_name as "serverName", tool_name as "toolName",
-                policy, classification, times_allowed as "timesAllowed",
-                times_denied as "timesDenied"
+        `SELECT ${SETTING_COLUMNS}
          FROM mcp_tool_settings
          WHERE assistant_id = $1 AND user_id = $2 AND server_name = $3 AND tool_name = $4`,
         [params.assistantId, params.userId, params.serverName, params.toolName],
       )
       return result.rows[0] ?? null
+    },
+
+    async getPolicies({ userId, scopes, toolNames }) {
+      if (scopes.length === 0 || toolNames.length === 0) return []
+      const result = await query<McpToolSetting>(
+        `SELECT ${SETTING_COLUMNS} FROM mcp_tool_settings
+         WHERE user_id = $1 AND tool_name = ANY($4::text[])
+           AND (assistant_id, server_name) IN (
+             SELECT * FROM unnest($2::uuid[], $3::text[])
+           )`,
+        [userId, scopes.map(scope => scope.assistantId), scopes.map(scope => scope.serverName), toolNames],
+      )
+      return result.rows
     },
 
     async setPolicy(params) {
@@ -53,10 +67,7 @@ export function createDbMcpSettingsStore(): McpSettingsStore {
  */
 export async function listMcpToolSettings(assistantId: string, userId: string): Promise<McpToolSetting[]> {
   const result = await query<McpToolSetting>(
-    `SELECT id, assistant_id as "assistantId", user_id as "userId",
-            server_name as "serverName", tool_name as "toolName",
-            policy, classification, times_allowed as "timesAllowed",
-            times_denied as "timesDenied"
+    `SELECT ${SETTING_COLUMNS}
      FROM mcp_tool_settings
      WHERE assistant_id = $1 AND user_id = $2
      ORDER BY server_name, tool_name`,

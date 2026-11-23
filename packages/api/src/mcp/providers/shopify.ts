@@ -4,7 +4,7 @@
  * The injector body below moved verbatim from `mcp/inject.ts`. It builds the
  * family's tools into a provider-local map (never the turn's shared map):
  * credentials bound per lane, build-time action-grant gate, health probe,
- * policy (`applyPolicyOrSkip`) and instance variants. The lane function and
+ * policy (`applyToolPolicies`) and instance variants. The lane function and
  * `ProviderModule` at the end are the family's activation surface.
  *
  * See docs/architecture/integrations/mcp.md → "Provider activation".
@@ -23,7 +23,7 @@ import { gateToolsOnActionGrants } from '../../safety/assert-action-allowed.js'
 import { wrapToolsWithHealthProbe, type HealthReporter } from '../connector-health.js'
 import { createShopifyTokenManager, isManagedShopifyTokens, unpackShopifyTokens, packShopifyTokens, getShop as getShopifyShop, listProducts as listShopifyProducts, getProduct as getShopifyProduct, listOrders as listShopifyOrders, getOrder as getShopifyOrder, searchCustomers as searchShopifyCustomers, getCustomer as getShopifyCustomer, previewCustomerSegment as previewShopifyCustomerSegment, createCustomerSegment as createShopifyCustomerSegment, getInventoryLevels as getShopifyInventoryLevels, listCollections as listShopifyCollections, listDraftOrders as listShopifyDraftOrders, listDiscounts as listShopifyDiscounts, listAbandonedCheckouts as listShopifyAbandonedCheckouts, getPayoutsSummary as getShopifyPayoutsSummary, listDisputes as listShopifyDisputes, listContent as listShopifyContent, fetchOrdersRange as fetchShopifyOrdersRange, storefrontFunnel as shopifyStorefrontFunnelQuery, runShopifyqlQuery, updateProduct as updateShopifyProduct, createProduct as createShopifyProduct, createDraftOrder as createShopifyDraftOrder, sendDraftOrderInvoice as sendShopifyDraftOrderInvoice, addTags as addShopifyTags, updateCustomer as updateShopifyCustomer, setInventoryQuantity as setShopifyInventoryQuantity, createFulfillment as createShopifyFulfillment, createDiscountCode as createShopifyDiscountCode, createContent as createShopifyContent, cancelOrder as cancelShopifyOrder, refundOrder as refundShopifyOrder, completeDraftOrder as completeShopifyDraftOrder, addProductImage as addShopifyProductImage, setVariantPrice as setShopifyVariantPrice, publishProduct as publishShopifyProduct, setProductMetafields as setShopifyProductMetafields, setProductOptions as setShopifyProductOptions, listThemes as listShopifyThemes, listProductTemplates as listShopifyProductTemplates, readProductTemplate as readShopifyProductTemplate, createProductTemplate as createShopifyProductTemplate, setProductTemplate as setShopifyProductTemplate } from '../../shopify/client.js'
 import { getConnectorConfig } from '../../connector-config.js'
-import { applyPolicyOrSkip, injectInstanceVariants } from '../activation.js'
+import { applyToolPolicies, injectInstanceVariants } from '../activation.js'
 import type { ConnectorInstanceRef } from '../tool-names.js'
 import { notConnectedNotice } from './notices.js'
 import type { ProviderModule, ProviderActivationContext } from './types.js'
@@ -234,10 +234,8 @@ async function collectShopifyTools(
         ? wrapToolsWithHealthProbe(built, primaryInstanceId, healthProbe.report)
         : built
 
-      for (const tool of shopifyTools) {
-        if (await applyPolicyOrSkip(tool, 'shopify', settingsStore, assistantId, userId, unavailable) === 'include') {
-          tools.set(tool.name, tool)
-        }
+      for (const tool of await applyToolPolicies(shopifyTools, 'shopify', settingsStore, assistantId, userId, unavailable)) {
+        tools.set(tool.name, tool)
       }
     }
 

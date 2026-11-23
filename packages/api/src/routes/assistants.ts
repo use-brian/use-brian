@@ -38,6 +38,7 @@ import { AssistantTeardownBlockedError, deleteAssistantFootprint, type Assistant
 import type { CapabilityStore } from '@use-brian/core/authorization/types.js'
 import type { JobStore } from '@use-brian/core/scheduling/types.js'
 import type { McpSettingsStore } from '@use-brian/agent-runtime/mcp/types.js'
+import { readToolPolicies, type ToolPolicy } from '@use-brian/agent-runtime/mcp/policy.js'
 import {
   APP_LEVEL_ASSISTANT_ID,
   ALL_EXACT_INSTANCE_GOVERNANCE_CONNECTOR_IDS,
@@ -1241,9 +1242,22 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
   // ── GET /:assistantId/connectors/:connectorId/tools ─────────
   // Returns tools with the EFFECTIVE policy (strictest of L1 + L2).
 
-  const STRICTNESS: Record<string, number> = { allow: 0, ask: 1, block: 2 }
-  function strictest(a: string, b: string): 'allow' | 'ask' | 'block' {
-    return (STRICTNESS[a] ?? 0) >= (STRICTNESS[b] ?? 0) ? a as 'allow' | 'ask' | 'block' : b as 'allow' | 'ask' | 'block'
+  async function toolPickerPolicies(
+    store: McpSettingsStore,
+    keys: Parameters<typeof readToolPolicies>[1],
+    entries: readonly { name: string; description: string; classification: string; defaultPolicy: ToolPolicy }[],
+  ) {
+    const policies = await readToolPolicies(store, keys, entries)
+    return entries.map(({ name, description, classification }, index) => ({
+      name, description, classification, ...policies[index]!,
+    }))
+  }
+
+  function classifyPickerTools(tools: { name: string; description: string }[]) {
+    return tools.map(({ name, description }) => {
+      const classification = classifyTool(name, description)
+      return { name, description, classification, defaultPolicy: defaultPolicy(classification) }
+    })
   }
 
   router.get('/:assistantId/connectors/:connectorId/tools', async (req, res) => {
@@ -1309,71 +1323,18 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         }, instance.label)
         policyServerName ??= server.name
 
-        const tools = await Promise.all(server.tools.map(async (tool) => {
-          const classification = classifyTool(tool.name, tool.description)
-          const fallback = defaultPolicy(classification)
-          const appOverride = await policyStore!.getPolicy({
-            assistantId: APP_LEVEL_ASSISTANT_ID,
-            userId: policyUserId,
-            serverName: policyServerName,
-            toolName: tool.name,
-          })
-          const assistantOverride = await policyStore!.getPolicy({
-            assistantId,
-            userId: policyUserId,
-            serverName: policyServerName,
-            toolName: tool.name,
-          })
-          const appPolicy = appOverride?.policy ?? fallback
-          const assistantPolicy = assistantOverride?.policy ?? fallback
-          return {
-            name: tool.name,
-            description: tool.description,
-            classification,
-            appPolicy,
-            assistantPolicy,
-            effectivePolicy: strictest(appPolicy, assistantPolicy),
-          }
-        }))
+        const tools = await toolPickerPolicies(policyStore, {
+          assistantId, userId: policyUserId, serverName: policyServerName,
+        }, classifyPickerTools(server.tools))
         res.json({ tools, serverName: server.name, providerId, instanceId })
         return
       }
 
       if (OFFICIAL_CONNECTOR_TOOLS[providerId]) {
-        const tools = await Promise.all(
-          OFFICIAL_CONNECTOR_TOOLS[providerId].map(async (t) => {
-            // L1: app-level policy (sentinel assistant ID)
-            let appPolicy: string = t.defaultPolicy
-            const appOverride = await options.mcpSettingsStore!.getPolicy({
-              assistantId: APP_LEVEL_ASSISTANT_ID, userId: member.userId,
-              serverName: providerId, toolName: t.name,
-            })
-            if (appOverride) appPolicy = appOverride.policy
-
-            // L2: assistant-level policy
-            let assistantPolicy: string = t.defaultPolicy
-            let override = await options.mcpSettingsStore!.getPolicy({
-              assistantId, userId: member.userId,
-              serverName: governanceId, toolName: t.name,
-            })
-            if (!override && governanceId !== providerId) {
-              override = await options.mcpSettingsStore!.getPolicy({
-                assistantId, userId: member.userId,
-                serverName: providerId, toolName: t.name,
-              })
-            }
-            if (override) assistantPolicy = override.policy
-
-            return {
-              name: t.name,
-              description: t.description,
-              classification: t.classification,
-              appPolicy,
-              assistantPolicy,
-              effectivePolicy: strictest(appPolicy, assistantPolicy),
-            }
-          }),
-        )
+        const tools = await toolPickerPolicies(options.mcpSettingsStore, {
+          assistantId, userId: member.userId, serverName: governanceId,
+          appServerName: providerId, assistantFallbackServerName: providerId,
+        }, OFFICIAL_CONNECTOR_TOOLS[providerId])
         res.json({ tools, serverName: governanceId, providerId })
         return
       }
@@ -1455,37 +1416,9 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       const server = await discoverMcpServer(mcpUrl, mcpName, authHeaders)
       policyServerName ??= server.name
 
-      const tools = await Promise.all(
-        server.tools.map(async (t) => {
-          const classification = classifyTool(t.name, t.description)
-          const defPolicy = defaultPolicy(classification)
-
-          // L1: app-level (sentinel assistant ID)
-          let appPolicy: string = defPolicy
-          const appOverride = await policyStore!.getPolicy({
-            assistantId: APP_LEVEL_ASSISTANT_ID, userId: policyUserId,
-            serverName: policyServerName, toolName: t.name,
-          })
-          if (appOverride) appPolicy = appOverride.policy
-
-          // L2: assistant-level
-          let assistantPolicy: string = defPolicy
-          const o = await policyStore!.getPolicy({
-            assistantId, userId: policyUserId,
-            serverName: policyServerName, toolName: t.name,
-          })
-          if (o) assistantPolicy = o.policy
-
-          return {
-            name: t.name,
-            description: t.description,
-            classification,
-            appPolicy,
-            assistantPolicy,
-            effectivePolicy: strictest(appPolicy, assistantPolicy),
-          }
-        }),
-      )
+      const tools = await toolPickerPolicies(policyStore, {
+        assistantId, userId: policyUserId, serverName: policyServerName,
+      }, classifyPickerTools(server.tools))
       res.json({ tools, serverName: server.name })
     } catch (err) {
       console.error('[assistants] tool discovery failed:', err)

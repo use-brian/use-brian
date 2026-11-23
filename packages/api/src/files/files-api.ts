@@ -630,6 +630,44 @@ export function createFilesApi(deps: CreateFilesApiDeps): DerivedFilesApi {
       return readCurrentBytes(ctx, idOrPath)
     },
 
+    async statByteVersion(ctx, id) {
+      const unavailable = () => err<{ file: WorkspaceFile; version: string; byteCount: number; rangeReads: boolean }>({ kind: 'not_found', reference: id })
+      const file = await executeWithCurrentAuthority(() => resolveByIdOrPath(ctx, id))
+      if (!file || file.validTo || file.retractedAt || file.supersededBy) return unavailable()
+      const revision = readRevision(file)
+      const storage = await resolver.forUri(ctx.workspaceId, file.storageUri)
+      const blob = await storage.statBlob(storageKeyForWorkspaceFile(file))
+      if (!blob?.version) return unavailable()
+      return executeWithCurrentAuthority(async () => {
+        const current = await resolveByIdOrPath(ctx, id)
+        if (!current || readRevision(current) !== revision) return unavailable()
+        return ok({ file: current, version: blob.version!, byteCount: blob.sizeBytes, rangeReads: !!storage.readBlobRange })
+      })
+    },
+
+    async readByteVersion(ctx, head, range) {
+      const file = head.file
+      const unavailable = () => err<FilesReadBytesResult>({ kind: 'not_found', reference: file.id })
+      const start = range?.start ?? 0, end = range?.end ?? head.byteCount
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end > head.byteCount) return unavailable()
+      const revision = readRevision(file)
+      const admitted = await executeWithCurrentAuthority(() => resolveByIdOrPath(ctx, file.id))
+      if (!admitted || readRevision(admitted) !== revision) return unavailable()
+      const storage = await resolver.forUri(ctx.workspaceId, file.storageUri)
+      const key = storageKeyForWorkspaceFile(file)
+      const bytes = start === end ? Buffer.alloc(0) : storage.readBlobRange
+        ? await storage.readBlobRange(key, head.version, start, end)
+        : range ? null : (await storage.readBlob(key))?.bytes
+      if (!bytes || bytes.byteLength !== end - start) return unavailable()
+      const blob = await storage.statBlob(key)
+      if (blob?.version !== head.version || blob.sizeBytes !== head.byteCount) return unavailable()
+      return executeWithCurrentAuthority(async () => {
+        const current = await resolveByIdOrPath(ctx, file.id)
+        if (!current || readRevision(current) !== revision) return unavailable()
+        return ok({ file: current, bytes })
+      })
+    },
+
     async search(ctx, params: FilesSearchParams): Promise<WorkspaceFileIndexRow[]> {
       return store.searchByText(accessCtx(ctx), {
         query: params.query,

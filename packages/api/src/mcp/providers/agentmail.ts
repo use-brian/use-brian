@@ -4,7 +4,7 @@
  * The injector body below moved verbatim from `mcp/inject.ts`. It builds the
  * family's tools into a provider-local map (never the turn's shared map):
  * credentials bound per lane, build-time action-grant gate, health probe,
- * policy (`applyPolicyOrSkip`) and instance variants. The lane function and
+ * policy (`applyToolPolicies`) and instance variants. The lane function and
  * `ProviderModule` at the end are the family's activation surface.
  *
  * See docs/architecture/integrations/mcp.md → "Provider activation".
@@ -16,7 +16,7 @@ import type { EmailInboxProvider } from '../../agentmail/provider.js'
 import { renderEmailBody } from '@use-brian/channels'
 import type { ConnectorActionAudit, ConnectorActionPreflight } from '../../connector-action-port.js'
 import { parseConnectorInstanceGovernanceId } from '../../db/connector-instance-store.js'
-import { applyPolicyOrSkip } from '../activation.js'
+import { applyToolPolicies } from '../activation.js'
 import type { ProviderModule, ProviderActivationContext } from './types.js'
 import { describeFactoryTools, inertPort, memoDescribe } from './describe.js'
 import { runLanes } from './lanes.js'
@@ -243,17 +243,11 @@ async function collectAgentmailTools(params: {
         for (const action of grant?.allowedActions ?? []) grantedActions.add(action)
       }
     }
-    for (const tool of createAgentmailTools(api)) {
-      if (
-        assistantConnectorGrantsStore
-        && (tool.name === 'agentmailSendMessage' || tool.name === 'agentmailCreateDraft')
-        && !grantedActions.has(tool.name)
-      ) {
-        continue
-      }
-      if (await applyPolicyOrSkip(tool, 'agentmail', settingsStore, assistantId, userId, unavailable) === 'include') {
-        tools.set(tool.name, tool)
-      }
+    const writeTools = new Set(['agentmailSendMessage', 'agentmailCreateDraft'])
+    const candidates = createAgentmailTools(api).filter(tool =>
+      !assistantConnectorGrantsStore || !writeTools.has(tool.name) || grantedActions.has(tool.name))
+    for (const tool of await applyToolPolicies(candidates, 'agentmail', settingsStore, assistantId, userId, unavailable)) {
+      tools.set(tool.name, tool)
     }
     console.debug(`[mcp-inject] Assistant Email: injected tools over ${inboxes.length} inbox(es)`)
   } catch (err) {

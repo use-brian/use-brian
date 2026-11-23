@@ -15,6 +15,8 @@ export type McpToolSetting = {
   timesDenied: number
 }
 
+export type McpPolicyScope = { assistantId: string; serverName: string }
+
 /**
  * MCP tool settings store interface.
  */
@@ -25,6 +27,13 @@ export type McpSettingsStore = {
     serverName: string
     toolName: string
   }): Promise<McpToolSetting | null>
+
+  /** Retrieve overrides for the requested scope pairs and tool names in one snapshot. */
+  getPolicies?(params: {
+    userId: string
+    scopes: readonly McpPolicyScope[]
+    toolNames: readonly string[]
+  }): Promise<McpToolSetting[]>
 
   setPolicy(params: {
     assistantId: string

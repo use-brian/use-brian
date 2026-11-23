@@ -15,7 +15,7 @@
  * ephemeral `/tmp` fallback off Cloud Run; Cloud Run remains fail-closed.
  */
 
-import { createReadStream, createWriteStream, mkdirSync, promises as fs, writeFileSync } from 'node:fs'
+import { createReadStream, createWriteStream, mkdirSync, promises as fs, writeFileSync, type BigIntStats } from 'node:fs'
 import type { Readable, Writable } from 'node:stream'
 import { tmpdir } from 'node:os'
 import * as path from 'node:path'
@@ -23,6 +23,8 @@ import type { GcsBlob, GcsFilesClient, GcsObjectMetadata } from './gcs-client.js
 import { buildLocalFileTransferUrl } from './local-files-signing.js'
 
 const DEFAULT_META: GcsObjectMetadata = { workspaceId: '', mime: 'application/octet-stream' }
+
+const contentVersion = (stat: BigIntStats): string => [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':')
 
 export function resolveLocalFilesBaseDir(configured?: string): string {
   return path.resolve(configured?.trim() || path.join(tmpdir(), 'sidanclaw-files'))
@@ -98,18 +100,39 @@ export function createLocalFilesClient(opts: {
       }
     },
 
+    async readBlobRange(key, version, start, end) {
+      try {
+        const file = await fs.open(blobPath(key), 'r')
+        try {
+          if (contentVersion(await file.stat({ bigint: true })) !== version) return null
+          const bytes = Buffer.allocUnsafe(end - start)
+          let offset = 0
+          while (offset < bytes.length) {
+            const read = await file.read(bytes, offset, bytes.length - offset, start + offset)
+            if (read.bytesRead === 0) return null
+            offset += read.bytesRead
+          }
+          if (contentVersion(await file.stat({ bigint: true })) !== version) return null
+          return bytes
+        } finally { await file.close() }
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null
+        throw err
+      }
+    },
+
     async statBlob(key) {
       try {
         // stat(), not readFile() — the point of statBlob is size WITHOUT
         // pulling the object into memory.
-        const st = await fs.stat(blobPath(key))
+        const st = await fs.stat(blobPath(key), { bigint: true })
         let metadata = DEFAULT_META
         try {
           metadata = JSON.parse(await fs.readFile(metaPath(key), 'utf8')) as GcsObjectMetadata
         } catch {
           // Missing/corrupt sidecar — fall back to the default mime.
         }
-        return { sizeBytes: st.size, mime: metadata.mime, updatedAt: st.mtime }
+        return { sizeBytes: Number(st.size), mime: metadata.mime, updatedAt: st.mtime, version: contentVersion(st) }
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null
         throw err

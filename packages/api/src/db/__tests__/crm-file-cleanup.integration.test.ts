@@ -21,6 +21,9 @@ import {createDbCrmIntakeReadStore} from '../crm-intake-store.js'
 import {crmOperationsRoutes} from '../../routes/crm-operations.js'
 import {_resetCoalescerForTests} from '../../brain-stream/notify.js'
 import type {FilesClientResolver} from '../../files/files-api.js'
+import {createFilesApi} from '../../files/files-api.js'
+import {createDbWorkspaceFilesStore} from '../workspace-files-store.js'
+import {createCrmCsvIndexStore} from '../crm-import-csv-index.js'
 
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -187,7 +190,29 @@ describe('[COMP:crm/file-cleanup] Actual reviewed source and storage lifecycle',
     try {
       const storage=createLocalFilesClient({baseDir}),key=`${f.workspaceId}/${f.fileId}`
       await storage.writeBlob(key,Buffer.from('email\nfictional@example.com\n'),{workspaceId:f.workspaceId,mime:'text/csv'})
-      const p=await f.preview();await f.execute(p)
+      const files = createFilesApi({gcs:storage,store:createDbWorkspaceFilesStore(),auditStore:{append:async()=>{}} as never,bucket:'fixture'})
+      const fileContext = {workspaceId:f.workspaceId,userId:f.userId,clearance:'confidential' as const}
+      const found = await files.statByteVersion!(fileContext,f.fileId)
+      if(!found.ok)throw new Error('Fixture file version is unavailable')
+      const head=found.value
+      const indexStore=createCrmCsvIndexStore(pool)
+      const index=await indexStore.ensure({workspaceId:f.workspaceId,file:head.file,byteCount:head.byteCount,version:'d'.repeat(64),rangeReads:true},async()=>{
+        const source=await files.readByteVersion!(fileContext,head)
+        if(!source.ok)throw new Error('Fixture source changed')
+        return Buffer.from(source.value.bytes)
+      })
+      const span=await indexStore.chunk(index.id,0)
+      const range=await files.readByteVersion!(fileContext,head,span)
+      expect(range.ok && Buffer.from(range.value.bytes).toString()).toBe('fictional@example.com')
+      await expect(queryWithRLS(f.userId,'SELECT id FROM crm_import_csv_indexes WHERE id=$1',[index.id])).rejects.toMatchObject({code:'42501'})
+      // An older cleanup binary's foreign-reference census must find no file dependency for this processing copy.
+      expect((await pool.query(`SELECT 1 FROM pg_constraint WHERE conrelid='crm_import_csv_indexes'::regclass
+        AND confrelid='workspace_files'::regclass`)).rowCount).toBe(0)
+      const p=await f.preview()
+      expect(p.domains).toContainEqual({domain:'crm_import_csv_indexes',action:'delete',count:1})
+      await f.execute(p)
+      expect(await count('crm_import_csv_indexes',f.workspaceId)).toBe(0)
+      expect((await pool.query('SELECT 1 FROM crm_import_csv_index_chunks WHERE index_id=$1',[index.id])).rowCount).toBe(0)
       expect((await storage.readBlob(key))?.bytes.toString()).toContain('fictional@example.com')
       await createCrmImportFileCleanupWorker({resolver:{forUri:async()=>storage}}).tick()
       expect(await storage.readBlob(key)).toBeNull()

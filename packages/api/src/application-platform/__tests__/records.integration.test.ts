@@ -1,6 +1,6 @@
 import { previewApplicationSchema,applyApplicationSchema } from '../schema-changes.js'
 import { randomUUID } from 'node:crypto'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { ApplicationModuleDefinition } from '@use-brian/core/application-platform/contracts.js'
 import type { CellValue, PropertyDef } from '@use-brian/core/entities/doc-types.js'
 import { createExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
@@ -130,6 +130,46 @@ describe('[COMP:api/application-records] real canonical generic record transacti
       await expect(unsafe.listEntityTypes(workspaceId)).rejects.toMatchObject({ code: 'access_unavailable' })
       await client.query('ROLLBACK')
     } finally { client.release() }
+  })
+  it('uses one catalog statement for 1, 100 and 500 RLS-visible schema types', async () => {
+    const workspace = randomUUID()
+    const client = await getAppPool().connect()
+    const properties: PropertyDef[] = [
+      { name: 'priority', config: { kind: 'number' } }, title,
+    ]
+    try {
+      await owner.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Catalog fixture',$2,false)", [workspace,userId])
+      await owner.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'member','internal')", [workspace,readerId])
+      await client.query('BEGIN')
+      const reader = createDbDocEntityStore({ actorUserId: readerId, transaction: client })
+      let previous = 0
+      for (const count of [1, 100, 500]) {
+        await owner.query(`INSERT INTO entity_types(workspace_id,name,properties,created_by,created_at)
+          SELECT $1,'Catalog fixture '||n,$2,$3,to_timestamp(n/2) FROM generate_series($4::int,$5::int) n`,
+        [workspace,JSON.stringify(properties),userId,previous+1,count])
+        previous = count
+        const expected = (await owner.query(
+          'SELECT id FROM entity_types WHERE workspace_id=$1 ORDER BY created_at DESC,id DESC', [workspace],
+        )).rows.map(row => row.id)
+        const queries = vi.spyOn(client, 'query')
+        try {
+          const types = await reader.listEntityTypes(workspace)
+          expect(types.map(type => type.id)).toEqual(expected)
+          expect(types.every(type => type.workspaceId === workspace && type.schemaVersion === 1)).toBe(true)
+          for (const type of types) expect(type.properties).toEqual(properties)
+          expect(queries.mock.calls.filter(call => String(call[0]).includes('read_generic_application_catalog_state'))).toHaveLength(1)
+        } finally {
+          queries.mockRestore()
+        }
+      }
+      expect((await reader.getEntityType(workspace,randomUUID()))).toBeNull()
+      await owner.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [workspace,readerId])
+      expect(await reader.listEntityTypes(workspace)).toEqual([])
+    } finally {
+      await client.query('ROLLBACK')
+      client.release()
+      await owner.query('DELETE FROM workspaces WHERE id=$1', [workspace])
+    }
   })
   it('queries actual cell values and paginates mixed numeric ordering, ties and nulls without duplicates',async()=>{
     const schema=await type([title,{name:'quantity',config:{kind:'number'}},{name:'tags',config:{kind:'multi_select',options:[{id:'red',name:'Red'},{id:'blue',name:'Blue'}]}}])

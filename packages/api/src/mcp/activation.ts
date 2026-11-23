@@ -4,7 +4,7 @@
  * Owns everything between "the catalog admitted these bindings" and "the
  * model may call this tool":
  *
- * - policy (`strictestPolicy`, `resolveEffectivePolicy`, `applyPolicyOrSkip`)
+ * - policy (`applyToolPolicies`)
  *   and instance variants (`injectInstanceVariants`), called by the provider
  *   modules while they build a lane;
  * - binding fingerprints shared with the catalog (`connectorBindingKey`,
@@ -31,7 +31,8 @@ import { projectMailboxAuthorityConfig } from '../mailbox/config-authority.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import { filterToolsByActionGrants } from '../safety/assert-action-allowed.js'
 import { buildConnectorAuthHeaders, type ActorIdentity } from './auth-headers.js'
-import { APP_LEVEL_ASSISTANT_ID } from '@use-brian/shared'
+import { hasToolConfirmation, readToolPolicies } from '@use-brian/agent-runtime/mcp/policy.js'
+import { policyBlockedToolResult } from '@use-brian/agent-runtime/engine/decline-copy.js'
 import { connectorInstanceGovernanceId, type ConnectorInstanceStore } from '../db/connector-instance-store.js'
 import { CONNECTOR_SCOPE_RESTRICTION, CONNECTOR_SOURCE_RESTRICTION } from './discovery-diagnostics.js'
 import { createConnectorRuntimeAuthority } from '../application-platform/connector-runtime-authority.js'
@@ -43,88 +44,46 @@ import type { ProviderModule, ProviderActivationContext, ActivationAuthority, Pr
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import type { DescriptorRecord } from './descriptors.js'
 
-/**
- * Check the user's policy for a built-in tool. Returns 'skip' if the tool
- * should be excluded entirely (blocked), or applies resolveConfirmation
- * for dynamic 'ask'/'allow' policy resolution.
- */
-const STRICTNESS: Record<string, number> = { allow: 0, ask: 1, block: 2 }
-export function strictestPolicy(a: string, b: string): 'allow' | 'ask' | 'block' {
-  return (STRICTNESS[a] ?? 0) >= (STRICTNESS[b] ?? 0) ? a as 'allow' | 'ask' | 'block' : b as 'allow' | 'ask' | 'block'
-}
-
-export async function resolveEffectivePolicy(
-  settingsStore: McpSettingsStore,
-  userId: string,
-  assistantId: string,
-  serverName: string,
-  toolName: string,
-  fallback: string,
-  appServerName: string = serverName,
-  assistantFallbackServerName?: string,
-): Promise<'allow' | 'ask' | 'block'> {
-  const l1 = await settingsStore.getPolicy({
-    assistantId: APP_LEVEL_ASSISTANT_ID, userId, serverName: appServerName, toolName,
-  })
-  const appPolicy = l1?.policy ?? fallback
-
-  let l2 = await settingsStore.getPolicy({
-    assistantId, userId, serverName, toolName,
-  })
-  if (!l2 && assistantFallbackServerName && assistantFallbackServerName !== serverName) {
-    l2 = await settingsStore.getPolicy({
-      assistantId, userId, serverName: assistantFallbackServerName, toolName,
-    })
-  }
-  const assistantPolicy = l2?.policy ?? fallback
-
-  return strictestPolicy(appPolicy, assistantPolicy)
-}
-
-export async function applyPolicyOrSkip(
-  tool: Tool,
+/** Admit one instance's tool set, then re-read the selected tool at each use. */
+export async function applyToolPolicies(
+  candidates: Tool[],
   serverName: string,
   settingsStore: McpSettingsStore,
   assistantId: string,
   userId: string,
   unavailable?: string[],
-  /**
-   * Tool name to resolve policy against. Defaults to `tool.name`. Multi-instance
-   * variants pass the CANONICAL base name while `serverName` selects either the
-   * provider or one concrete instance-governance record.
-   */
-  policyToolName?: string,
-  /** Canonical provider key for app-level policy; defaults to `serverName`. */
-  appPolicyServerName?: string,
-  /** Legacy provider-level L2 key used only when the exact instance has no row. */
-  assistantFallbackServerName?: string,
-): Promise<'skip' | 'include'> {
-  const policyName = policyToolName ?? tool.name
-  const fallback = tool.requiresConfirmation ? 'ask' : 'allow'
-  const effective = await resolveEffectivePolicy(
-    settingsStore, userId, assistantId, serverName, policyName, fallback,
-    appPolicyServerName ?? serverName,
-    assistantFallbackServerName,
-  )
-
-  if (effective === 'block') {
-    unavailable?.push(`${tool.name} (blocked by policy)`)
-    return 'skip'
-  }
-
-  // Add dynamic confirmation resolution so policy changes mid-session
-  // take effect (e.g. user changes from 'allow' to 'ask').
-  tool.resolveConfirmation = async () => {
-    const current = await resolveEffectivePolicy(
-      settingsStore, userId, assistantId, serverName, policyName, fallback,
-      appPolicyServerName ?? serverName,
-      assistantFallbackServerName,
-    )
-    return current === 'ask'
-  }
-
-  return 'include'
+  options: {
+    canonicalName?: (tool: Tool) => string
+    appServerName?: string
+    assistantFallbackServerName?: string
+  } = {},
+): Promise<Tool[]> {
+  const keys = { assistantId, userId, serverName, ...options }
+  const policyTools = candidates.map(tool => ({
+    name: options.canonicalName?.(tool) ?? tool.name,
+    defaultPolicy: tool.requiresConfirmation ? 'ask' as const : 'allow' as const,
+  }))
+  const policies = await readToolPolicies(settingsStore, keys, policyTools)
+  return candidates.filter((tool, index) => {
+    if (policies[index]!.effectivePolicy === 'block') {
+      unavailable?.push(`${tool.name} (blocked by policy)`)
+      return false
+    }
+    const readCurrent = async () => (await readToolPolicies(settingsStore, keys, [policyTools[index]!]))[0]!.effectivePolicy
+    tool.resolveConfirmation = async () => await readCurrent() === 'ask'
+    const execute = tool.execute
+    tool.execute = async (input, context) => {
+      const current = await readCurrent()
+      if (current === 'block') return { data: policyBlockedToolResult(tool.name), isError: true }
+      if (current === 'ask' && !hasToolConfirmation(context, tool.name, input)) {
+        return { data: `"${tool.name}" requires approval for this invocation. The tool did not run.`, isError: true }
+      }
+      return execute.call(tool, input, context)
+    }
+    return true
+  })
 }
+
 /**
  * Inject label-qualified tool variants for each additional connector instance.
  * `buildToolsForInstance` returns the provider's canonical tool set already
@@ -154,28 +113,17 @@ export async function injectInstanceVariants(opts: {
       continue
     }
     const suffix = instanceToolSuffix(extra.id, extra.label)
-    for (const tool of variantTools) {
-      const canonical = tool.name
-      const variant: Tool = inheritRoutineCalendarRead(tool,{
-        ...tool,
-        name: `${canonical}${suffix}`,
-        description: `[${extra.label}] ${tool.description}`,
-      })
-      if (
-        (await applyPolicyOrSkip(
-          variant,
-          governanceId,
-          opts.settingsStore,
-          opts.assistantId,
-          opts.userId,
-          undefined,
-          canonical,
-          opts.provider,
-          opts.provider,
-        )) === 'include'
-      ) {
-        opts.tools.set(variant.name, variant)
-      }
+    const variants = variantTools.map(tool => inheritRoutineCalendarRead(tool, {
+      ...tool,
+      name: `${tool.name}${suffix}`,
+      description: `[${extra.label}] ${tool.description}`,
+    }))
+    for (const variant of await applyToolPolicies(variants, governanceId, opts.settingsStore, opts.assistantId, opts.userId, undefined, {
+      canonicalName: tool => tool.name.slice(0, -suffix.length),
+      appServerName: opts.provider,
+      assistantFallbackServerName: opts.provider,
+    })) {
+      opts.tools.set(variant.name, variant)
     }
   }
 }

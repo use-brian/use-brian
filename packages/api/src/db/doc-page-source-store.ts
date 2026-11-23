@@ -14,16 +14,14 @@
  * embeds `kb_chunks` rows with `embedding IS NULL` on its own cadence, exactly
  * like every other primitive. So this store does a plain content upsert.
  *
- * System-level: the doc-page ingest runner already resolved + authorised the
- * page owner (`created_by_user_id`), so writes use the bare `query()` (owner
- * role, RLS-bypass) like other ingest-side writers. `user_id` is set to the
- * page owner so the `kb_chunks_visibility_check` (user_id OR assistant_id) is
- * satisfied and RLS scopes reads to the owner's workspace.
+ * The ingest runner resolves the page owner. An owner-role transaction locks
+ * the page and rechecks its version, owner and scope before publishing chunks
+ * and the ingest stamp together. Each chunk carries the page owner's user ID.
  *
  * [COMP:api/doc-page-source-store]
  */
 
-import { query } from './client.js'
+import { commitTransaction, getPool, rollbackAndRelease } from './client.js'
 
 export type DocPageSourceChunk = {
   pageId: string
@@ -36,6 +34,10 @@ export type DocPageSourceChunk = {
 export type DocPageSourceUpsertInput = {
   pageId: string
   workspaceId: string
+  version: number
+  collaborative: boolean
+  contentHash: string
+  teamspaceId: string | null
   /** The page owner — `kb_chunks.user_id` + `created_by_user_id`. */
   ownerUserId: string
   /** Page-level clearance mapped to a `kb_chunks.sensitivity` value. */
@@ -55,87 +57,76 @@ export type DocPageSourceStore = {
   upsertPageChunks(input: DocPageSourceUpsertInput): Promise<void>
 }
 
-/** The stable `(page, block)` key stored in `kb_chunks.source_path`. */
-function sourcePath(pageId: string, blockId: string): string {
-  return `${pageId}#${blockId}`
-}
-
 export function createDbDocPageSourceStore(): DocPageSourceStore {
   return {
     async upsertPageChunks(input) {
-      const {
-        pageId,
-        workspaceId,
-        ownerUserId,
-        sensitivity,
-        compartments = [],
-        projectIds = [],
-        chunks,
-      } = input
-      const keptPaths = chunks.map((c) => sourcePath(pageId, c.blockId))
-      const pagePrefix = `${pageId}#%`
+      const { pageId, workspaceId, chunks, compartments = [], projectIds = [] } = input
+      // Historical snapshots can contain a repeated block ID. Sequential upserts
+      // used its last value; PostgreSQL cannot update one conflict key twice.
+      const byBlock = new Map(chunks.map(chunk => [chunk.blockId, chunk]))
+      const rows = Array.from(byBlock.values(), chunk => ({
+        path: `${pageId}#${chunk.blockId}`,
+        body: chunk.text,
+        episode: chunk.sectionEpisodeId,
+        hash: chunk.contentHash,
+      }))
 
-      // Upsert each chunk by its (page, block) source_path. On a content change
-      // we reset `embedding = NULL` so the worker re-embeds; an unchanged
-      // content_hash leaves the existing embedding intact (cheap re-ingest).
-      for (const chunk of chunks) {
-        await query(
-          `INSERT INTO kb_chunks
-             (chunk_text, source, source_path, source_episode_id, content_hash,
-              title, sensitivity, workspace_id, user_id, created_by_user_id,
-              compartments, project_ids)
-           VALUES ($1, 'doc_page', $2, $3, $4, $5, $6, $7, $8, $8, $9, $10)
-           ON CONFLICT (source_path) WHERE source = 'doc_page'
-           DO UPDATE SET
-             chunk_text        = EXCLUDED.chunk_text,
-             source_episode_id = EXCLUDED.source_episode_id,
-             sensitivity       = EXCLUDED.sensitivity,
-             compartments      = ARRAY(
-               SELECT DISTINCT value
-                 FROM unnest(COALESCE(kb_chunks.compartments, '{}') ||
-                             COALESCE(EXCLUDED.compartments, '{}')) AS u(value)
-                ORDER BY value
-             ),
-             project_ids       = ARRAY(
-               SELECT DISTINCT value
-                 FROM unnest(COALESCE(kb_chunks.project_ids, '{}') ||
-                             COALESCE(EXCLUDED.project_ids, '{}')) AS u(value)
-                ORDER BY value
-             ),
-             updated_at        = now(),
-             embedding         = CASE
-               WHEN kb_chunks.content_hash IS DISTINCT FROM EXCLUDED.content_hash
-                 THEN NULL ELSE kb_chunks.embedding END,
-             embedding_failed_at = CASE
-               WHEN kb_chunks.content_hash IS DISTINCT FROM EXCLUDED.content_hash
-                 THEN NULL ELSE kb_chunks.embedding_failed_at END,
-             content_hash      = EXCLUDED.content_hash`,
-          [
-            chunk.text,
-            sourcePath(pageId, chunk.blockId),
-            chunk.sectionEpisodeId,
-            chunk.contentHash,
-            // A short title aids retrieval ranking (embedding worker prefixes it).
-            `doc page block`,
-            sensitivity,
-            workspaceId,
-            ownerUserId,
-            compartments,
-            projectIds,
-          ],
+      const client = await getPool().connect()
+      let committed = false
+      try {
+        await client.query('BEGIN')
+        // Serialize publishers before opening the statement snapshot that checks
+        // the version. A waiter must see the previous publisher's committed rows.
+        await client.query('SELECT id FROM saved_views WHERE id=$1 AND workspace_id=$2 FOR UPDATE', [pageId, workspaceId])
+        const stamped = await client.query(
+          `UPDATE saved_views sv SET brain_last_ingest_hash=$3, brain_last_ingest_at=now()
+            WHERE sv.id=$1 AND sv.workspace_id=$2 AND sv.created_by=$4
+              AND sv.clearance=$5 AND sv.teamspace_id IS NOT DISTINCT FROM $6::uuid
+              AND sv.project_id IS NOT DISTINCT FROM ($7::uuid[])[1]
+              AND ARRAY(SELECT g.compartment_key FROM teamspaces t JOIN workspace_groups g
+                         ON g.id=t.workspace_group_id AND g.workspace_id=t.workspace_id
+                         WHERE t.id=sv.teamspace_id AND t.workspace_id=sv.workspace_id)=$8::text[]
+              AND CASE WHEN $9::boolean
+                THEN EXISTS (SELECT 1 FROM documents d WHERE d.page_id=sv.id AND d.seq=$10)
+                ELSE sv.version=$10 AND NOT EXISTS (SELECT 1 FROM documents d WHERE d.page_id=sv.id)
+              END`,
+          [pageId, workspaceId, input.contentHash, input.ownerUserId, input.sensitivity,
+            input.teamspaceId, projectIds, compartments, input.collaborative, input.version],
         )
-      }
+        if (!stamped.rowCount) throw new Error('page_source_changed')
 
-      // Prune rows for this page whose block no longer survives (deleted /
-      // now-trivial). `keptPaths` may be empty (a page emptied of prose) — the
-      // `<> ALL ('{}')` form keeps the predicate valid and prunes everything.
-      await query(
-        `DELETE FROM kb_chunks
-          WHERE source = 'doc_page'
-            AND source_path LIKE $1
-            AND NOT (source_path = ANY($2::text[]))`,
-        [pagePrefix, keptPaths],
-      )
+        await client.query(
+          `INSERT INTO kb_chunks AS existing
+             (chunk_text,source,source_path,source_episode_id,content_hash,title,
+              sensitivity,workspace_id,user_id,created_by_user_id,compartments,project_ids)
+           SELECT r.body,'doc_page',r.path,r.episode,r.hash,'doc page block',
+                  $2,$3,$4,$4,$5::text[],$6::uuid[]
+             FROM jsonb_to_recordset($1::jsonb) AS r(body text,path text,episode uuid,hash text)
+           ON CONFLICT (source_path) WHERE source='doc_page' DO UPDATE SET
+             chunk_text=EXCLUDED.chunk_text, source_episode_id=EXCLUDED.source_episode_id,
+             content_hash=EXCLUDED.content_hash, sensitivity=EXCLUDED.sensitivity, updated_at=now(),
+             compartments=ARRAY(SELECT DISTINCT value FROM unnest(existing.compartments || EXCLUDED.compartments) value ORDER BY value),
+             project_ids=ARRAY(SELECT DISTINCT value FROM unnest(existing.project_ids || EXCLUDED.project_ids) value ORDER BY value),
+             embedding=CASE WHEN existing.content_hash IS NOT DISTINCT FROM EXCLUDED.content_hash THEN existing.embedding END,
+             embedding_failed_at=CASE WHEN existing.content_hash IS NOT DISTINCT FROM EXCLUDED.content_hash THEN existing.embedding_failed_at END
+           WHERE existing.workspace_id=EXCLUDED.workspace_id AND (
+             (existing.chunk_text,existing.source_episode_id,existing.content_hash,existing.sensitivity)
+               IS DISTINCT FROM (EXCLUDED.chunk_text,EXCLUDED.source_episode_id,EXCLUDED.content_hash,EXCLUDED.sensitivity)
+             OR NOT EXCLUDED.compartments <@ COALESCE(existing.compartments,'{}')
+             OR NOT EXCLUDED.project_ids <@ COALESCE(existing.project_ids,'{}'))`,
+          [JSON.stringify(rows), input.sensitivity, workspaceId, input.ownerUserId, compartments, projectIds],
+        )
+        await client.query(
+          `DELETE FROM kb_chunks WHERE workspace_id=$1 AND source='doc_page'
+              AND source_path LIKE $2 AND NOT (source_path=ANY($3::text[]))`,
+          [workspaceId, `${pageId}#%`, rows.map(row => row.path)],
+        )
+        await commitTransaction(client)
+        committed = true
+      } finally {
+        if (committed) client.release()
+        else await rollbackAndRelease(client)
+      }
     },
   }
 }

@@ -27,6 +27,7 @@ import {
   type LocalToolResolution,
 } from '@use-brian/core/mcp/tool-search.js'
 import { createKnowledgeTools, type KnowledgeWriteCaptureRule } from '@use-brian/core/tools/base/knowledge.js'
+import { resolveToolPolicy, type ToolPolicy as Policy } from '@use-brian/agent-runtime/mcp/policy.js'
 import { classifyTool, defaultPolicy } from '@use-brian/agent-runtime/mcp/classifier.js'
 import type { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import type { ExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
@@ -138,7 +139,6 @@ export function surfaceProfile(surface: CapabilitySurface, narrow: {
 
 // ── Bulk reads ───────────────────────────────────────────────
 
-type Policy = 'allow' | 'ask' | 'block'
 
 export type CatalogPolicyRow =
   | { scope: 'user'; assistantId: string; userId: string; serverName: string; toolName: string; policy: Policy }
@@ -437,9 +437,6 @@ export type CapabilityCatalog = {
 
 // ── Helpers ──────────────────────────────────────────────────
 
-const STRICTNESS: Record<Policy, number> = { allow: 0, ask: 1, block: 2 }
-const strictest = (left: Policy, right: Policy): Policy => (STRICTNESS[left] >= STRICTNESS[right] ? left : right)
-
 const officialName = new Map(OFFICIAL_CONNECTORS.map((connector) => [connector.id, connector.name]))
 const officialEnabled = new Set(OFFICIAL_CONNECTORS.filter((connector) => connector.enabled).map((connector) => connector.id))
 
@@ -627,10 +624,10 @@ export async function prepareCapabilityCatalog(input: PrepareCapabilityCatalogIn
     const read = (assistant: string, server: string) => principal.kind === 'workspace'
       ? workspacePolicy.get(`${server}\u0000${opts.toolName}`)
       : userPolicy.get(`${assistant}\u0000${principal.userId}\u0000${server}\u0000${opts.toolName}`)
-    const l1 = read(APP_LEVEL_ASSISTANT_ID, opts.appServer)
-    const l2 = read(assistantId, opts.assistantServer)
-      ?? (opts.assistantFallback && opts.assistantFallback !== opts.assistantServer ? read(assistantId, opts.assistantFallback) : undefined)
-    return strictest(l1 ?? opts.fallback, l2 ?? opts.fallback)
+    return resolveToolPolicy({
+      assistantId, serverName: opts.assistantServer, appServerName: opts.appServer,
+      assistantFallbackServerName: opts.assistantFallback,
+    }, opts.fallback, read).effectivePolicy
   }
   const grants = grantRows === null || grantRows === 'failed' ? null : new Map(grantRows.map((row) => [row.connectorId, row.allowedActions]))
   const actionGranted = (governanceId: string, toolName: string) => grantRows === null

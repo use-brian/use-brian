@@ -44,6 +44,7 @@ const COLS = `
 export type WorkspaceToolPolicyStore = {
   /** Resolve the workspace's policy for one tool. Null when unset (→ caller fallback). */
   getPolicy(workspaceId: string, serverName: string, toolName: string): Promise<WorkspaceToolPolicy | null>
+  getPolicies?(workspaceId: string, serverNames: readonly string[], toolNames: readonly string[]): Promise<WorkspaceToolPolicy[]>
 
   /** Upsert the workspace's policy for one tool. */
   setPolicy(params: {
@@ -68,6 +69,16 @@ export function createWorkspaceToolPolicyStore(): WorkspaceToolPolicyStore {
         [workspaceId, serverName, toolName],
       )
       return result.rows[0] ?? null
+    },
+
+    async getPolicies(workspaceId, serverNames, toolNames) {
+      if (serverNames.length === 0 || toolNames.length === 0) return []
+      const result = await query<WorkspaceToolPolicy>(
+        `SELECT ${COLS} FROM workspace_tool_policy
+         WHERE workspace_id = $1 AND server_name = ANY($2::text[]) AND tool_name = ANY($3::text[])`,
+        [workspaceId, serverNames, toolNames],
+      )
+      return result.rows
     },
 
     async setPolicy(params) {
@@ -96,15 +107,11 @@ export function createWorkspaceToolPolicyStore(): WorkspaceToolPolicyStore {
 
 /**
  * Adapt a `WorkspaceToolPolicyStore` to the `McpSettingsStore` interface the
- * per-provider injectors expect, keyed to one workspace. Used ONLY in the
- * team-native injection branch (`inject.ts`) so a `scope='workspace'`
- * connector's tools resolve policy from `workspace_tool_policy` instead of a
- * user's `mcp_tool_settings`.
+ * connector activation expects, keyed to one workspace. Team-native lanes and
+ * their picker reads use workspace policy instead of a user's settings.
  *
- * `getPolicy` ignores `assistantId`/`userId` and keys on the bound workspace.
- * `resolveEffectivePolicy` calls it twice (L1 with APP_LEVEL, L2 with the real
- * assistant) and takes the strictest — both return the same row, so the strict
- * combine is a no-op. Usage counters and auto-promotion are intentionally
+ * The adapter reads rows once by workspace and server name, then maps them
+ * back to the caller's requested scope keys. Usage counters and auto-promotion are intentionally
  * inert here: the shared policy changes only via the explicit clearance-gated
  * route, never by one member's confirmations silently graduating the team's
  * tool to always-allow.
@@ -113,23 +120,31 @@ export function workspacePolicyAsSettingsStore(
   store: WorkspaceToolPolicyStore,
   workspaceId: string,
 ): McpSettingsStore {
+  const toSetting = (row: WorkspaceToolPolicy, assistantId: string, userId: string): McpToolSetting => ({
+    id: row.id,
+    assistantId,
+    userId,
+    serverName: row.serverName,
+    toolName: row.toolName,
+    policy: row.policy,
+    classification: row.classification ?? 'unknown',
+    timesAllowed: 0,
+    timesDenied: 0,
+  })
+
   return {
     async getPolicy({ assistantId, userId, serverName, toolName }) {
       const row = await store.getPolicy(workspaceId, serverName, toolName)
-      if (!row) return null
-      const setting: McpToolSetting = {
-        id: row.id,
-        assistantId,
-        userId,
-        serverName,
-        toolName,
-        policy: row.policy,
-        classification: (row.classification ?? 'unknown') as ToolClassification,
-        timesAllowed: 0,
-        timesDenied: 0,
-      }
-      return setting
+      return row ? toSetting({ ...row, serverName, toolName }, assistantId, userId) : null
     },
+    ...(store.getPolicies ? {
+      async getPolicies({ userId, scopes, toolNames }) {
+        const rows = await store.getPolicies!(workspaceId, [...new Set(scopes.map(scope => scope.serverName))], toolNames)
+        return scopes.flatMap(({ assistantId, serverName }) => rows
+          .filter(row => row.serverName === serverName)
+          .map(row => toSetting(row, assistantId, userId)))
+      },
+    } : {}),
     // The shared policy is only ever set through the clearance-gated route.
     async setPolicy() { /* inert — see doc comment */ },
     async recordUsage() { /* inert */ },

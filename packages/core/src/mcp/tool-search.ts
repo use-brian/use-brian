@@ -1,4 +1,5 @@
 import {inheritRoutineCalendarRead,assertRoutineCalendarAdapterCurrent} from '../engine/routine-read-ownership.js'
+import { withToolConfirmation } from '@use-brian/agent-runtime/mcp/policy.js'
 import { missingToolCapability } from '@use-brian/agent-runtime/tools/capability-gate.js'
 /**
  * MCP tool search — Pattern E adapted for Gemini.
@@ -1416,10 +1417,12 @@ async function dispatchLocal(params: {
   let needsConfirmation = targetTool.resolveConfirmation
     ? await targetTool.resolveConfirmation(context, args)
     : targetTool.requiresConfirmation
+  let confirmed = false
 
   if (needsConfirmation && allowedTools.has(toolKey)) {
     // User said "always allow" earlier in this session — bypass.
     needsConfirmation = false
+    confirmed = true
   }
 
   if (needsConfirmation && !params.skipConfirmation) {
@@ -1515,7 +1518,7 @@ async function dispatchLocal(params: {
         ? await context.parkForConfirmation(awaitDecision)
         : await awaitDecision()
 
-      if (decision === 'deny' || decision === 'always_deny') {
+      if (decision !== 'allow' && decision !== 'always_allow') {
         blockedTools.add(toolKey)
         return {
           data: declinedToolResult(tool, comment),
@@ -1532,6 +1535,7 @@ async function dispatchLocal(params: {
         // persistence is the per-tool job (e.g. `assistant_connector_grants`).
         allowedTools.add(toolKey)
       }
+      confirmed = true
       // 'allow' or 'always_allow' — fall through to execution
     } catch {
       blockedTools.add(toolKey)
@@ -1546,5 +1550,6 @@ async function dispatchLocal(params: {
   // and sensitivity checks live inside its `execute()` — `mcp_call` is a
   // transparent dispatcher at this point.
   assertRoutineCalendarAdapterCurrent(context,targetTool)
-  return targetTool.execute(args, context)
+  const execute = () => targetTool.execute(args, context)
+  return confirmed ? withToolConfirmation(context, targetTool.name, args, execute) : execute()
 }

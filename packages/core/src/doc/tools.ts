@@ -167,6 +167,8 @@ function sanitizeOpsFollowups(ops: Ops): Ops {
  * `null` covers both "not found" and "not visible".
  */
 export type DocPageRead = {
+  /** Present when the version belongs to the collaborative document sequence. */
+  collaborative?: true
   page: Page
   version: number
   title: string

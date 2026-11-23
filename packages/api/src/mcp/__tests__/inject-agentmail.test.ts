@@ -20,7 +20,7 @@ vi.mock('../../db/channels-store.js', () => ({
 import { composeForTest } from './surface-harness.js'
 
 function settingsStoreStub() {
-  return new Proxy({}, { get: () => vi.fn().mockResolvedValue(undefined) })
+  return new Proxy({}, { get: (_target, key) => vi.fn().mockResolvedValue(key === 'getPolicies' ? [] : undefined) })
 }
 
 const INSTANCES = [
@@ -165,7 +165,7 @@ describe('[COMP:tools/agentmail] Channel-owned mailbox injection', () => {
         subject: 'Hello',
         body: 'Checking in.',
       },
-      {} as never,
+      { confirmedToolName: 'agentmailSendMessage' } as never,
     )
 
     expect(result.isError).toBe(true)
@@ -194,7 +194,7 @@ describe('[COMP:tools/agentmail] Channel-owned mailbox injection', () => {
         subject: 'Hello',
         body: 'sk_live_secret',
       },
-      {} as never,
+      { confirmedToolName: 'agentmailSendMessage' } as never,
     )
 
     expect(result.isError).toBeFalsy()

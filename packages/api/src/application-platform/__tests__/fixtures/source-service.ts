@@ -25,18 +25,19 @@ import { ApplicationPlatformService } from '../../service.js'
 import { createCanonicalNativeApplicationModule } from '../../native-adapters.js'
 import { validateDerivedWriteInputs } from '../../../db/derived-scope-store.js'
 import { independentSourceSchema,independentSourceReplayConsumer,startIndependentSource } from './independent-source.js'
+import { withBootstrap } from '../../../__tests__/fixtures/bootstrap-role.js'
 const pool=getPool()
 export const sourceServiceFixtureCleanups=new Set<()=>Promise<void>>()
 const cleanups=sourceServiceFixtureCleanups
 export async function sourceServiceFixture(options:{readOnly?:boolean;fields?:string[];mutate?:boolean;attendedActions?:{idempotencyMetadataKey:string}}={}){
  const workspace=randomUUID(),owner=randomUUID(),reader=randomUUID(),assistant=randomUUID(),department=randomUUID(),app=randomUUID(),parent=randomUUID(),leaf=randomUUID()
  const role='service_source_'+randomBytes(7).toString('hex'),password=randomBytes(24).toString('hex')
- await pool.query(`CREATE ROLE ${role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD '${password}'`)
- await pool.query(`CREATE SCHEMA ${role} AUTHORIZATION ${role}`)
+ await withBootstrap(client => client.query(`CREATE ROLE ${role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD '${password}';
+   CREATE SCHEMA ${role} AUTHORIZATION ${role}`))
  const url=new URL(process.env.DATABASE_URL!);url.username=role;url.password=password
  const sourcePool=new pg.Pool({connectionString:url.href,options:`-c search_path=${role},pg_catalog`,max:3})
  let source:Awaited<ReturnType<typeof startIndependentSource>>|undefined
- const cleanup=async()=>{if(!cleanups.delete(cleanup))return;configureConnectorSourceRuntimeFactory(undefined);await source?.close();await sourcePool.end();await pool.query('DELETE FROM workspaces WHERE id=$1',[workspace]);await pool.query('DELETE FROM users WHERE id=ANY($1::uuid[])',[[owner,reader]]);await pool.query(`DROP SCHEMA IF EXISTS ${role} CASCADE`);await pool.query(`DROP ROLE IF EXISTS ${role}`)}
+ const cleanup=async()=>{if(!cleanups.delete(cleanup))return;configureConnectorSourceRuntimeFactory(undefined);await source?.close();await sourcePool.end();await pool.query('DELETE FROM workspaces WHERE id=$1',[workspace]);await pool.query('DELETE FROM users WHERE id=ANY($1::uuid[])',[[owner,reader]]);await withBootstrap(client=>client.query(`DROP SCHEMA IF EXISTS ${role} CASCADE; DROP ROLE IF EXISTS ${role}`))}
  cleanups.add(cleanup)
  await sourcePool.query(independentSourceSchema)
  for(const id of [owner,reader])await pool.query("INSERT INTO users(id,auth_provider,auth_provider_id) VALUES($1::uuid,'email',$1::text)",[id])

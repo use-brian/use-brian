@@ -63,6 +63,7 @@ export async function inspectCrmImportFileCleanup(client:PoolClient,workspaceId:
     }
     const parts:[string,string,string,unknown[],CrmPrivacyDomainReview['action']][]=[
       ['crm_import_jobs','t.workspace_id=$1 AND t.id IN(SELECT id FROM pg_temp.crm_file_cleanup_jobs)','id',[workspaceId],'delete'],
+      ['crm_import_csv_indexes','t.workspace_id=$1 AND t.staged_file_id=$2','id',[workspaceId,fileId],'delete'],
       ...['crm_import_rows','crm_import_chunks','crm_import_errors'].map(table=>[table,'t.workspace_id=$1 AND t.job_id IN(SELECT id FROM pg_temp.crm_file_cleanup_jobs)','id',[workspaceId],'delete'] as [string,string,string,unknown[],'delete']),
       ['workspace_audit_log','t.workspace_id=$1 AND t.subject_id=$2','id',[workspaceId,fileId],'redact'],
       ['correction_audit',"t.workspace_id=$1 AND t.primitive='workspace_file' AND t.row_id=$2",'id',[workspaceId,fileId],'redact'],

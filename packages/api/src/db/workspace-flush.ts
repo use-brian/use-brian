@@ -116,6 +116,7 @@ export const WORKSPACE_FLUSH_TABLES = [
   'crm_import_errors',
   'crm_import_rows',
   'crm_import_chunks',
+  'crm_import_csv_indexes', // staged byte chunks cascade
   'crm_import_jobs',
   'crm_import_sources',
   'crm_privacy_previews',
