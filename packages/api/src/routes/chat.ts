@@ -1,5 +1,5 @@
 import { admitCurrentAuthoredInput, readAttendedSessionHistory } from './attended-session-context.js'
-import type { DiscoveredTurnFrame } from '../turn/prepare.js'
+import { readsNativePdf, type DiscoveredTurnFrame } from '../turn/prepare.js'
 import { routeAttendedTurn, type AttendedTurnRoute } from './attended-turn-routing.js'
 import {bindPrivateResponderTranscript,privateTranscriptText,resumePrivateLegacySession,PRIVATE_TRANSCRIPT_INSTRUCTION} from '../db/private-transcript.js'
 import { attachWorkspaceFiles } from '../files/workspace-attachments.js'
@@ -96,7 +96,7 @@ import { calculateCost } from '@use-brian/agent-runtime/billing/cost-tracker.js'
 import { modelToCompactionTier } from '@use-brian/agent-runtime/compaction/compact.js'
 import { matchesDisputedFigure, buildDisputeContextNote } from '@use-brian/agent-runtime/engine/grounding-gate.js'
 import { isConnectionDropError, isEndpointUnreachableError, streamErrorCode } from '@use-brian/agent-runtime/engine/query-loop.js'
-import { ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, synthesizeMissingToolResults } from '@use-brian/agent-runtime/engine/tool-pairing.js'
+import { ensureToolResultPairing, synthesizeMissingToolResults } from '@use-brian/agent-runtime/engine/tool-pairing.js'
 import { createConfirmationResolver } from '@use-brian/agent-runtime/mcp/types.js'
 import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
 import { CompartmentAccumulator } from '@use-brian/agent-runtime/security/compartments.js'
@@ -3800,16 +3800,6 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         for (const file of validFiles) currentTurnAttachmentIds.add(file.id)
 
         if (validFiles.length > 0) {
-          // Only the PRE-FLIGHT needs this: whether the served model reads
-          // PDFs natively decides if there is anything to warn about or
-          // pre-warm. Correctness does not depend on it — the provider
-          // boundary swaps a PDF for text regardless of what happens here.
-          const resolvedTierModel = resolveModel(requestedModel, userPlan, 'ok')
-          const servedModel = turnOptions.configuredProviders
-            ? ensureServableModel(resolvedTierModel, turnOptions.configuredProviders)
-            : resolvedTierModel
-          const providerReadsPdfInline = registryRow(servedModel)?.capabilities.nativePdf ?? false
-
           /**
            * Probe, warn and cache the distillation when the agent requests the document.
            *
@@ -3911,7 +3901,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
                 textParts.push(
                   `<attached_file id="${file.id}" name="${file.fileName}" type="${file.mimeType}">[${isPdf ? 'pdf' : 'image'}]</attached_file>`,
                 )
-                if (isPdf && !providerReadsPdfInline && options.pdfPreflight) {
+                if (isPdf && options.pdfPreflight) {
                   prepareAttachedPdfs.push(() => prewarmPdf(Buffer.from(match[1]!, 'base64'), file.fileName))
                 }
               }
@@ -4832,10 +4822,12 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         const researchQuotaAvailable = !checkAdaptiveQuota || !assistant.workspaceId
           || (await getWorkspaceResearchUsed(assistant.workspaceId)) < FREE_RESEARCH_QUOTA
         const feedTurnContext = discoverFeedTurn ? await authority.execute(discoverFeedTurn) : null
-        for (const preparePdf of prepareAttachedPdfs) {
-          signal.throwIfAborted()
-          await assertDeliveryAudience()
-          await preparePdf()
+        if (!readsNativePdf(preparedModel)) {
+          for (const preparePdf of prepareAttachedPdfs) {
+            signal.throwIfAborted()
+            await assertDeliveryAudience()
+            await preparePdf()
+          }
         }
         // Attribute PDF distillation as overhead. One row per document actually
         // distilled — a cache hit records nothing, which is the whole point of
@@ -5047,25 +5039,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             console.error('[chat] plan lifecycle transition failed:', err)
           }
         }
-        // Load history. Run two repair passes unconditionally — both are
-        // idempotent and run on every request as defence-in-depth against
-        // legacy rows:
-        //
-        //   1. `ensureToolResultPairing` fills in synthetic tool_results for
-        //      any orphan tool_use and strips dangling tool_results. Without
-        //      this, every provider rejects the malformed history.
-        //
-        //   2. `stripUnsignedToolUses` drops pre-signature tool_use blocks
-        //      (plus their paired results). Gemini 3.x requires a
-        //      `thoughtSignature` on every functionCall that reappears in
-        //      history; rows persisted before the signature-round-trip fix
-        //      will fail the next call otherwise. Going forward, the Gemini
-        //      provider emits signatures which the accumulator attaches to
-        //      the ContentBlock and the chat route persists as-is into JSONB.
-        //
-        // See docs/architecture/engine/query-loop.md → "Tool-pairing
-        // invariant" and docs/architecture/engine/provider-abstraction.md →
-        // "Provider signatures".
+        // Compaction repairs dangling tool pairs. Keep the paired history
+        // intact for whichever provider serves the next model request.
         // `fromSequence` skips rows already compacted into the most recent
         // boundary; null (never compacted) loads full history.
         // The original turn owner selects and performs the main-turn history read
@@ -5145,9 +5120,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         // Proactive compaction check (web = 1.0× threshold, linear profile).
         // Web chat: the authenticated user IS the owner, so ownerId === user.id.
         // runProactiveCompaction owns stamping + pairing + summary-prepend
-        // internally. We apply web-only post-transforms (stripUnsignedToolUses,
-        // room-message coalescing) to the returned message array before the query
-        // loop.
+        // internally. Web applies room-message coalescing before the query loop.
         await assertDeliveryAudience()
         const compactionResult = pageBoundTurn
           ? { messages: toStampedMessages(dbMessages, user.timezone ?? 'UTC', sharedSenderNames, roomAssistantVoices) as Message[] }
@@ -5186,15 +5159,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           projectIds: writeProjectIds,
           authority,
         }))
-        // Gate on the serving provider: the signature strip is a Gemini-only
-        // workaround and would erase a Qwen (openai-compat) turn's tool calls
-        // from history. Resolve the requested model to its provider here (the
-        // budget-final model is resolved later; a pure-Qwen deploy still resolves
-        // to Qwen, and the unknown/gemini default fails safe). See tool-pairing.ts.
-        let messages: Message[] = stripUnsignedToolUses(
-          compactionResult.messages,
-          modelRequiresToolSignatures(resolveModel(requestedModel, userPlan, 'ok')),
-        )
+        let messages: Message[] = compactionResult.messages
 
         if (scopeAccumulator.evidence.sources?.some(source => source.resourceKind === 'private_transcript')) {
           messages = [{role:'system',content:PRIVATE_TRANSCRIPT_INSTRUCTION}, ...messages]
@@ -7295,7 +7260,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
           context: { preferredChannel, workflowProposalReceipt, requestTools: allTools, researchMode },
           suppressIntermediateText: coordinatorMode,
-          planNudgeCap: planNudgeCap({ model, researchMode }),
+          planNudgeCap: planNudgeCap({ model: logicalModel, researchMode }),
           groundingGate: !coordinatorMode && !researchMode && typeof message === 'string' && message.trim()
             ? { userMessage: message, draftDelivered: true } : undefined,
           workerDrainPrompt: researchMode
@@ -7572,9 +7537,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
                   suspendedToolName: event.toolName,
                   suspendedToolInput: event.toolInput,
                   connectorTarget: event.connectorTarget,
-                  selectedCustomModel: customLlmRuntime?.selector,
-                  selectedTier: logicalTier,
-                  selectedLegacyByo: usedLegacyByoKey,
+                  ...ownedTurn.checkpointModelSelection(),
                   selectedMeteredModel: meteredTurn?.alias,
                   startingAccessCeiling: pinAccessCeiling(turnScope.access),
                   workerRunIds: options.workerManager?.runIdsForSession(session.id) ?? [],
@@ -7652,7 +7615,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
                 },
               }
             : undefined,
-          planNudgeCap: planNudgeCap({ model, researchMode }),
+          planNudgeCap: planNudgeCap({ model: logicalModel, researchMode }),
           // Fresh-facts grounding gate — a figure-bearing answer about
           // current facts (prices, offers, rates, deadlines) produced with
           // zero tool calls gets one forced-verification nudge. Skipped in
@@ -8224,9 +8187,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
                   approvalId: event.approvalId,
                   suspendedToolName: event.toolName,
                   suspendedToolInput: event.toolInput,
-                  selectedCustomModel: customLlmRuntime?.selector,
-                  selectedTier: logicalTier,
-                  selectedLegacyByo: usedLegacyByoKey,
+                  ...ownedTurn.checkpointModelSelection(),
                   selectedMeteredModel: meteredTurn?.alias,
                   startingAccessCeiling: pinAccessCeiling(turnScope.access),
                   workerRunIds: options.workerManager?.runIdsForSession(session.id) ?? [],

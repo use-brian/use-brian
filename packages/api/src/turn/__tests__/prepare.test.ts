@@ -5,6 +5,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { NOOP_TURN_LEDGER } from '@use-brian/agent-runtime/engine/turn-ledger.js'
+import { createConfirmationResolver } from '@use-brian/agent-runtime/mcp/types.js'
+import { createGeminiProvider } from '@use-brian/agent-runtime/providers/gemini.js'
 import type { LLMProvider, Message } from '@use-brian/agent-runtime/providers/types.js'
 import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import {
@@ -18,7 +20,8 @@ import {
 import {
   buildTool,
   type CurrentAuthorityBoundary,
-  type Tool
+  type Tool,
+  type ToolContext
 } from '@use-brian/agent-runtime/tools/types.js'
 vi.mock('../lease.js', async importOriginal => ({ ...await importOriginal<typeof import('../lease.js')>(),
   takeTurnLease: vi.fn(async () => ({ taken: true, token: 'run-token', turnId: 'b'.repeat(64) })),
@@ -35,7 +38,9 @@ vi.mock('../../application-platform/model-source-authority.js', () => ({
 import { openAssistantTurn, type AssistantTurn } from '../kernel.js'
 import { abortLocalTurn, releaseTurn } from '../lease.js'
 import { configureBriefTurnContext, type BriefTurn, type BriefTurnResolver } from '../../briefs/context.js'
-import type { ResolvedWorkspaceCustomLlm } from '../../custom-llm-runtime.js'
+import { createWorkspaceCustomLlmResolver, type ResolvedWorkspaceCustomLlm, type WorkspaceCustomLlmResolver } from '../../custom-llm-runtime.js'
+import type { WorkspaceCustomLlmEndpointStore } from '../../db/workspace-custom-llm-endpoints.js'
+import { createWorkerManager } from '@use-brian/core/workers/worker.js'
 
 const identity = { workspace: '00000000-0000-4000-8000-000000000040', assistant: 'fixture-assistant', user: 'fixture-user', session: 'fixture-run-session' }
 const owners: AssistantTurn[] = [], pending: (() => void)[] = []
@@ -55,7 +60,7 @@ function capturingProvider(script: 'text' | 'tool' | readonly string[] = 'text',
       return { send(messages) {
         entry.sends.push(messages); const call = calls++
         return (async function* () {
-          yield { type: 'message_start' as const, model: 'fixture' }
+          yield { type: 'message_start' as const, model: config.model }
           const name = Array.isArray(script) ? script[call] : script === 'tool' && call === 0 ? toolName : undefined
           if (name) {
             const id = call ? `fixture-call-${call}` : 'fixture-call'
@@ -73,7 +78,7 @@ function capturingProvider(script: 'text' | 'tool' | readonly string[] = 'text',
   return { provider, captured }
 }
 
-async function fixture(options: { assertCurrent?: () => Promise<void>; lane?: 'web' | 'channel' | 'resume'; provider?: LLMProvider; custom?: boolean } = {}) {
+async function fixture(options: { assertCurrent?: () => Promise<void>; lane?: 'web' | 'channel' | 'resume'; provider?: LLMProvider; custom?: boolean; resolver?: WorkspaceCustomLlmResolver } = {}) {
   const abort = new AbortController(), assertCurrent = vi.fn(options.assertCurrent ?? (async () => {}))
   const authority: CurrentAuthorityBoundary = { assertCurrent, async execute(operation) { return operation() } }
   const lane = options.lane ?? 'web'
@@ -92,18 +97,19 @@ async function fixture(options: { assertCurrent?: () => Promise<void>; lane?: 'w
   const runtime = options.custom ? { provider, selector: 'custom:fixture', profileId: 'fixture-profile', modelTier: 'pro', inputTokenLimit: 16_000, maxTokens: 2_048,
     routeKind: 'custom', supportsVision: true, providerKeySource: 'user',
     fallback: { enabled: false, used: false, reason: null, status: null, detail: null, endpointName: 'fixture' } } as unknown as ResolvedWorkspaceCustomLlm : null
-  const services = { provider, configuredProviders: undefined, resolveWorkspaceCustomLlm: runtime ? async () => runtime : null,
+  const services = { provider, configuredProviders: undefined, resolveWorkspaceCustomLlm: options.resolver ?? (runtime ? async () => runtime : null),
     resolveLegacyByoKey: null, buildLegacyByoProvider: null }
+  let main
   if (lane === 'resume') {
     owner.bindModelPreparation({ kind: 'execution', toolProfile: 'resume', execution, assertCurrent: authority.assertCurrent.bind(authority) }, services)
-    await owner.prepareMainModel({ kind: 'resume', fallbackModel: 'fixture-model', selectedTier: 'pro' })
+    main = await owner.prepareMainModel({ kind: 'resume', fallbackModel: 'fixture-model', selectedTier: 'pro' })
   } else {
     owner.bindModelPreparation({ kind: 'execution', toolProfile: lane, execution, assertCurrent: () => authority.assertCurrent() }, services)
-    await owner.prepareMainModel(lane === 'web'
+    main = await owner.prepareMainModel(lane === 'web'
       ? { kind: 'web', requestedModel: options.custom ? 'custom:fixture' : 'pro', plan: 'max_5x', budgetStatus: 'ok', researchMode: false, metered: null, hasImage: false }
       : { kind: 'channel', plan: 'max_5x', budgetStatus: 'ok' })
   }
-  return { owner, abort, authority, assertCurrent, execution, context, captured }
+  return { owner, abort, authority, assertCurrent, execution, context, captured, main }
 }
 const readCalls: string[] = []
 function readTool(name = 'readThing', label = 'original') {
@@ -114,7 +120,7 @@ function writeTool() {
   return buildTool({ name: 'writeThing', description: 'Fictional write', inputSchema: z.object({}).passthrough(), isReadOnly: false,
     async execute() { readCalls.push('write'); return { data: { written: true } } } })
 }
-const owned = (context: ReturnType<typeof executionToolContext>) => ({ ledger: NOOP_TURN_LEDGER, maxTurns: 3, context })
+const owned = (context: ToolContext) => ({ ledger: NOOP_TURN_LEDGER, maxTurns: 3, context })
 function briefResolver(content = '<brief>Fictional accepted rules</brief>', incomplete = false): BriefTurnResolver {
   return vi.fn(async () => ({ workspaceId: identity.workspace, projectId: 'fixture-project', projectBindingId: 'fixture-binding',
     basis: {} as BriefTurn['basis'], fingerprint: 'fixture', incomplete, content }) as BriefTurn)
@@ -194,6 +200,37 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
     expect(f.owner.usage?.totalUsage).toMatchObject({ inputTokens: 2, outputTokens: 2 })
   })
 
+  it('sends admitted discovery evidence to Gemini after an unsigned call on another provider', async () => {
+    const first = capturingProvider('tool', 'requestConversationContext')
+    const getTierRouteSystem: WorkspaceCustomLlmEndpointStore['getTierRouteSystem'] = async ({ workspaceId, tier }) =>
+      tier === 'pro' ? { workspaceId, tier, modelAlias: 'gpt-6.1-terra', profileId: null, updatedAt: new Date() } : null
+    const resolver = createWorkspaceCustomLlmResolver({ getTierRouteSystem } as WorkspaceCustomLlmEndpointStore, { managedProvider: first.provider })
+    const f = await fixture({ provider: createGeminiProvider('fixture-key'), resolver })
+    const current: Message = { role: 'user', content: 'Which colour was chosen?' }
+    const earlier = bindScopeSources<Message>({ role: 'user', content: 'The chosen colour was violet.' }, [source('colour')])
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      'data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Violet."}]},"finishReason":"STOP"}]}\n\n',
+      { headers: { 'content-type': 'text/event-stream' } },
+    ))
+    try {
+      await f.owner.prepareRun({ systemPrompt: 'Initial', messages: [current], candidateTools: new Map(), contextDiscovery: async () => ({
+        systemPrompt: 'Expanded', messages: [earlier, current], candidateTools: new Map(),
+        trustedContributions: [{ name: 'instructions', content: 'Use the permitted conversation history.' }],
+        mainModel: { kind: 'web', plan: 'max_5x', budgetStatus: 'ok', researchMode: true, metered: null, hasImage: false },
+      }) })
+      const result = await f.owner.run({ loop: owned(f.context), sink: { kind: 'adapter' } })
+      expect(first.captured).toHaveLength(1)
+      expect(sent(first.captured[0])).toEqual([current])
+      expect(fetch).toHaveBeenCalledOnce()
+      const wire = JSON.parse(String(fetch.mock.calls[0][1]?.body))
+      expect(wire.contents.flatMap((message: { parts: unknown[] }) => message.parts)).toEqual([
+        { text: 'The chosen colour was violet.' }, { text: 'Which colour was chosen?' },
+      ])
+      expect(JSON.stringify(wire.systemInstruction)).toContain('Use the permitted conversation history.')
+      expect(result.finalText).toBe('Violet.')
+    } finally { fetch.mockRestore() }
+  })
+
   it('keeps worker readers available for delegation while the coordinator sees only its narrowed tools', async () => {
     const scripted = capturingProvider(['requestConversationContext', 'delegateRead'])
     const f = await fixture({ provider: scripted.provider })
@@ -250,23 +287,108 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
     }
   })
 
-  it('settles adaptive model spending under each provider round and charges the completion once', async () => {
-    const scripted = capturingProvider('tool', 'requestConversationContext')
-    const f = await fixture({ provider: scripted.provider })
-    const messages: Message[] = [{ role: 'user', content: 'Examine the earlier results in detail.' }]
+  it.each([
+    ['web', 'gpt-6-luna'],
+    ['channel', 'gpt-6.2-sol'],
+  ] as const)('uses the workspace route for promoted %s requests and spawned workers, charging each logical tier', async (lane, researchModel) => {
+    vi.stubEnv('USEBRIAN_EDITION', 'outpost')
+    try {
+      const proModel = 'gpt-6.2-sol'
+      const routes = { standard: proModel, pro: proModel, max: proModel, research: researchModel }
+      const scripted = capturingProvider(['requestConversationContext', 'inspectWithWorker'])
+      scripted.provider.stream = async function* (request) {
+        scripted.captured.push({ config: { model: request.model, allowProviderFallback: request.allowProviderFallback }, sends: [request.messages] })
+        yield { type: 'message_start', model: request.model }
+        yield { type: 'text_delta', text: 'Fictional worker finding.' }
+        yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 4, outputTokens: 2 } }
+      }
+      const getTierRouteSystem: WorkspaceCustomLlmEndpointStore['getTierRouteSystem'] = async ({ workspaceId, tier }) =>
+        ({ workspaceId, tier, modelAlias: routes[tier], profileId: null, updatedAt: new Date() })
+      const resolver = createWorkspaceCustomLlmResolver({ getTierRouteSystem } as WorkspaceCustomLlmEndpointStore, { managedProvider: scripted.provider })
+      const f = await fixture({ lane, provider: scripted.provider, resolver })
+      const initialWorkspaceRoute = f.main.customLlm!
+      const inheritedWorker = { provider: initialWorkspaceRoute.provider, model: initialWorkspaceRoute.selector,
+        modelTier: initialWorkspaceRoute.modelTier, providerKeySource: initialWorkspaceRoute.providerKeySource }
+      const workerUsage = vi.fn(async () => {})
+      const manager = createWorkerManager({ provider: capturingProvider().provider, model: 'independent-worker-model', tools: new Map(), onUsage: workerUsage })
+      const inspect = buildTool({ name: 'inspectWithWorker', description: 'Delegate the fictional inspection.', inputSchema: z.object({}), isReadOnly: true,
+        async execute(_input, context) {
+          const spawned = manager.spawn('Inspect the fictional material.', context)
+          if (!spawned) throw new Error('Worker was not admitted')
+          await manager.waitForNext(context.sessionId)
+          const [finished] = manager.drainNotifications(context.sessionId)
+          return { data: finished?.status }
+        } })
+      const messages: Message[] = [{ role: 'user', content: 'Examine the earlier results in detail.' }]
+      const mainModel = lane === 'channel'
+        ? { kind: 'channel' as const, requestedAlias: 'research', plan: 'max_5x', budgetStatus: 'ok' as const }
+        : { kind: 'web' as const, plan: 'max_5x', budgetStatus: 'ok' as const, researchMode: true, metered: null, hasImage: false }
+      await f.owner.prepareRun({ systemPrompt: 'Initial', messages, candidateTools: new Map(), contextDiscovery: async () => ({
+        systemPrompt: 'Expanded', messages, candidateTools: new Map([[inspect.name, inspect]]), mainModel,
+      }) })
+      const recordUsage = vi.fn(async () => {}), afterSettlement = vi.fn(async () => {})
+      f.owner.registerUsageBilling({ metadata: { userId: identity.user, assistantId: identity.assistant, sessionId: identity.session,
+        modelTier: 'pro', source: 'included', providerKeySource: 'platform' }, costPolicy: 'calculate', recordUsage, afterSettlement })
+      await f.owner.run({ loop: owned({ ...f.context, workerRuntime: inheritedWorker }), sink: { kind: 'adapter' } })
+      await f.owner.settleUsage()
+      expect(scripted.captured.map(c => [c.config.model, c.config.allowProviderFallback])).toEqual([
+        [proModel, false], [researchModel, false], [researchModel, false],
+      ])
+      expect(workerUsage).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ model: researchModel, modelTier: 'research', providerKeySource: 'platform' }))
+      expect(recordUsage).toHaveBeenCalledTimes(2)
+      expect(recordUsage).toHaveBeenNthCalledWith(1, expect.objectContaining({ model: proModel, inputTokens: 1, outputTokens: 1, modelTier: 'pro' }))
+      expect(recordUsage).toHaveBeenNthCalledWith(2, expect.objectContaining({ model: researchModel, inputTokens: 2, outputTokens: 2, modelTier: 'research' }))
+      expect(afterSettlement).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ inputTokens: 3, outputTokens: 3 }))
+    } finally { vi.unstubAllEnvs() }
+  })
+
+  it.each(['gpt-6.2-sol', 'gpt-6-luna'])('checkpoints the active Research tier and exact model %s when an approval parks', async researchModel => {
+    vi.stubEnv('USEBRIAN_EDITION', 'outpost')
+    try {
+      const scripted = capturingProvider(['requestConversationContext', 'writeThing'])
+      const getTierRouteSystem: WorkspaceCustomLlmEndpointStore['getTierRouteSystem'] = async ({ workspaceId, tier }) =>
+        ({ workspaceId, tier, modelAlias: tier === 'research' ? researchModel : 'gpt-6.2-sol', profileId: null, updatedAt: new Date() })
+      const resolver = createWorkspaceCustomLlmResolver({ getTierRouteSystem } as WorkspaceCustomLlmEndpointStore, { managedProvider: scripted.provider })
+      const f = await fixture({ provider: scripted.provider, resolver })
+      const confirmations = createConfirmationResolver()
+      const checkpoint = vi.fn()
+      const write = { ...writeTool(), requiresConfirmation: true }
+      const messages: Message[] = [{ role: 'user', content: 'Continue the earlier research.' }]
+      await f.owner.prepareRun({ systemPrompt: 'Initial', messages, candidateTools: new Map(), contextDiscovery: async () => ({
+        systemPrompt: 'Research', messages, candidateTools: new Map([[write.name, write]]),
+        mainModel: { kind: 'web', plan: 'max_5x', budgetStatus: 'ok', researchMode: true, metered: null, hasImage: false },
+      }) })
+      await f.owner.run({ loop: { ...owned({ ...f.context, createToolInvocationApproval: async () => 'fixture-approval' }),
+        confirmationResolver: confirmations }, sink: { kind: 'adapter', onEvent(event) {
+          if (event.type === 'awaiting_approval') checkpoint(event.approvalId, f.owner.checkpointModelSelection())
+          if (event.type === 'tool_confirmation_required') confirmations.resolve(event.request.toolCallId, 'allow')
+        } } })
+      expect(checkpoint).toHaveBeenCalledExactlyOnceWith('fixture-approval', {
+        selectedCustomModel: researchModel, selectedTier: 'research', selectedLegacyByo: false,
+      })
+    } finally { vi.unstubAllEnvs() }
+  })
+
+  it.each(['inherited', 'independent'] as const)('handles the %s worker lane on promotion to an automatic Research route', async lane => {
+    const scripted = capturingProvider(['requestConversationContext', 'inspectWorkerLane'])
+    const getTierRouteSystem: WorkspaceCustomLlmEndpointStore['getTierRouteSystem'] = async ({ workspaceId, tier }) => tier === 'pro'
+      ? { workspaceId, tier, modelAlias: 'gpt-6.1-terra', profileId: null, updatedAt: new Date() } : null
+    const resolver = createWorkspaceCustomLlmResolver({ getTierRouteSystem } as WorkspaceCustomLlmEndpointStore, { managedProvider: scripted.provider })
+    const f = await fixture({ provider: scripted.provider, resolver })
+    const initialRoute = f.main.customLlm!
+    const workerRuntime = lane === 'independent'
+      ? { provider: capturingProvider().provider, model: 'independent-worker-model' }
+      : { provider: initialRoute.provider, model: initialRoute.selector }
+    const observe = vi.fn()
+    const inspect = buildTool({ name: 'inspectWorkerLane', description: 'Observe the worker route.', inputSchema: z.object({}), isReadOnly: true,
+      async execute(_input, context) { observe(context.workerRuntime); return { data: 'observed' } } })
+    const messages: Message[] = [{ role: 'user', content: 'Research the fictional material.' }]
     await f.owner.prepareRun({ systemPrompt: 'Initial', messages, candidateTools: new Map(), contextDiscovery: async () => ({
-      systemPrompt: 'Expanded', messages, candidateTools: new Map(),
+      systemPrompt: 'Expanded', messages, candidateTools: new Map([[inspect.name, inspect]]),
       mainModel: { kind: 'web', plan: 'max_5x', budgetStatus: 'ok', researchMode: true, metered: null, hasImage: false },
     }) })
-    const recordUsage = vi.fn(async () => {}), afterSettlement = vi.fn(async () => {})
-    f.owner.registerUsageBilling({ metadata: { userId: identity.user, assistantId: identity.assistant, sessionId: identity.session,
-      modelTier: 'pro', source: 'included', providerKeySource: 'platform' }, costPolicy: 'calculate', recordUsage, afterSettlement })
-    await f.owner.run({ loop: owned(f.context), sink: { kind: 'adapter' } })
-    await f.owner.settleUsage()
-    expect(recordUsage).toHaveBeenCalledTimes(2)
-    expect(recordUsage).toHaveBeenNthCalledWith(1, expect.objectContaining({ inputTokens: 1, outputTokens: 1, modelTier: 'pro' }))
-    expect(recordUsage).toHaveBeenNthCalledWith(2, expect.objectContaining({ inputTokens: 1, outputTokens: 1 }))
-    expect(afterSettlement).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ inputTokens: 2, outputTokens: 2 }))
+    await f.owner.run({ loop: owned({ ...f.context, workerRuntime }), sink: { kind: 'adapter' } })
+    expect(observe).toHaveBeenCalledExactlyOnceWith(lane === 'inherited' ? undefined : workerRuntime)
   })
 
   it('withholds discovered material when authority is withdrawn before the next physical dispatch', async () => {

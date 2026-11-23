@@ -274,8 +274,7 @@ export function registerChatRoutes(scope: ChatRoutesScope) {
           assistantClearance: access.clearance, sensitivityAccumulator: context.sensitivity, connectorActionStore, episodesStore }),
       })
       if (context.activeCapabilities?.has('page')) {
-        const runtime = await resolveWorkspaceCustomLlm({ workspaceId: context.workspaceId,
-          requestedTier: 'standard', allowDefault: true, allowAnyDefault: true })
+        const runtime = await scope.resolveBackgroundRuntime(context.workspaceId)
         const plan = await getWorkspacePlan(context.workspaceId)
         const standardModel = resolveModel('standard', plan, 'ok')
         const pageTools = new Map<string, Tool>()

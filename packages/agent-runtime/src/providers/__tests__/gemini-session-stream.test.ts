@@ -2,7 +2,6 @@ import { chatTierDefaults, registryRow } from '@use-brian/shared/model-registry'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createGeminiProvider } from '../gemini.js'
 import { collectStream } from '../accumulator.js'
-import { stripUnsignedToolUses } from '../../engine/tool-pairing.js'
 import { bufferProviderStream } from '../stream-backpressure.js'
 import type { Message, StreamChunk, ToolDefinition } from '../types.js'
 
@@ -248,13 +247,17 @@ describe('[COMP:providers/gemini-session-stream] Gemini session streaming', () =
       await collect(session.send([results]))
     } else {
       const response = await collectStream(provider.stream({ ...options, messages: [start] }))
-      const messages = stripUnsignedToolUses([start, { role: 'assistant', content: response.content }, results])
+      const messages: Message[] = [start, { role: 'assistant', content: response.content }, results,
+        { role: 'assistant', content: [{ type: 'tool_use', id: 'foreign', name: 'requestConversationContext', input: {} }] },
+        { role: 'user', content: [{ type: 'tool_result', name: 'requestConversationContext', toolUseId: 'foreign', content: 'Ready' }] },
+      ]
       await collect(provider.stream({ ...options, messages }))
     }
     const body = JSON.parse(fetchMock.mock.calls[1][1].body)
     expect(body.generationConfig.maxOutputTokens).toBe(65_536)
     expect(body.contents.find((turn: { role: string }) => turn.role === 'model').parts).toEqual(parts)
     expect(body.contents.at(-1).parts).toHaveLength(2)
+    expect(JSON.stringify(body.contents)).not.toContain('foreign')
   })
 
   it.each([tiers.pro, tiers.research])('preserves signatures across %s tool turns and drops thought bodies', async model => {

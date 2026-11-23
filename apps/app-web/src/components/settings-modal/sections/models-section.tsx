@@ -444,7 +444,7 @@ export function ModelsSection() {
                     : tier === "max"
                       ? t.classMax
                       : t.classResearch;
-                const managedModels = Object.values(menuClasses)
+                const managedModels = menu?.managedRouteModels?.[tier] ?? Object.values(menuClasses)
                   .flat()
                   .filter((model, index, all) =>
                     model.tier === tier &&
@@ -497,6 +497,8 @@ export function ModelsSection() {
                       value={value}
                       onValueChange={(next) => void onModelRouteChange(tier, next)}
                       items={items}
+                      className="max-md:min-h-11"
+                      popupClassName="max-md:[&_[role=option]]:min-h-11 max-md:[&_input]:text-base"
                       placeholder={t.autoRouting}
                       aria-label={tierLabel}
                     />

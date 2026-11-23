@@ -2050,6 +2050,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
         requestedTier: 'standard',
         allowDefault: true,
         allowAnyDefault: true,
+        allowManagedRoutes: false,
       })
       const injected = mockInjectDoc.mock.calls[0][0]
       expect(injected).toMatchObject({

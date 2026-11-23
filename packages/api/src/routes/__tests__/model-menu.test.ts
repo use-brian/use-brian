@@ -3,7 +3,7 @@
  * registry gated by configured providers (L12), profiles CRUD is
  * membership-gated, estimates ride the injected closed seam.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { MutableProviderAvailability } from '@use-brian/shared/model-registry'
@@ -246,6 +246,45 @@ describe('[COMP:api/model-menu] workspace model defaults', () => {
 
 describe('[COMP:api/model-menu] workspace tier routes', () => {
   const WID = '00000000-0000-0000-0000-000000000001'
+  afterEach(() => vi.unstubAllEnvs())
+
+  it.each(['oss', 'outpost'])('lists and saves an entitled model once in every %s tier', async profile => {
+    vi.stubEnv('USEBRIAN_EDITION', profile)
+    getRole.mockResolvedValue('owner')
+    const availability = new MutableProviderAvailability()
+    availability.setModelCatalog('openai-codex', new Set(['gpt-6.2-sol', 'gpt-6.2-astra']))
+    availability.setStaticProvider('openai-compat:dashscope-intl', true)
+    const routes = new Map<string, { tier: string; modelAlias: string }>()
+    endpointStore.setManagedTierRoute.mockImplementation(async ({ tier, modelAlias }) => {
+      const route = { tier, modelAlias }
+      routes.set(tier, route)
+      return route
+    })
+    endpointStore.listModelRoutes.mockImplementation(async () => [...routes.values()])
+    const app = makeApp({ configuredProviders: availability, customLlmEndpointStore: endpointStore as never })
+    const menu = () => request(app).get(`/api/models/menu?workspaceId=${WID}`).expect(200)
+    const first = await menu()
+    for (const tier of ['standard', 'pro', 'max', 'research']) {
+      const choices = first.body.managedRouteModels[tier] as { alias: string; apiModelId: string; class: string }[]
+      expect(choices.filter(row => row.apiModelId === 'gpt-6.2-sol').map(row => row.alias))
+        .toEqual([tier === 'pro' ? 'gpt-6.2-sol-pro' : 'gpt-6.2-sol'])
+      expect(choices.some(row => row.apiModelId === 'gpt-6.2-astra')).toBe(true)
+      expect(choices.some(row => row.class === 'metered')).toBe(false)
+      const saved = await request(app).put(`/api/workspaces/${WID}/model-routes/${tier}`)
+        .send({ modelAlias: 'gpt-6.2-sol' }).expect(200)
+      expect(saved.body.route).toMatchObject({ tier, modelAlias: 'gpt-6.2-sol' })
+    }
+    const persisted = await menu()
+    expect(persisted.body.modelRoutes).toHaveLength(4)
+    expect(persisted.body.managedRouteModels.pro).toContainEqual(expect.objectContaining({ alias: 'gpt-6.2-sol' }))
+    expect(persisted.body.managedRouteModels.pro).not.toContainEqual(expect.objectContaining({ alias: 'gpt-6.2-sol-pro' }))
+    availability.setModelCatalog('openai-codex', new Set())
+    expect((await menu()).body.managedRouteModels.standard).not.toContainEqual(expect.objectContaining({ apiModelId: 'gpt-6.2-sol' }))
+    for (const modelAlias of ['gpt-6.2-sol', 'qwen3.7-plus', 'gemini-3.7-flash', 'typesafe-jev-1.13']) {
+      await request(app).put(`/api/workspaces/${WID}/model-routes/standard`).send({ modelAlias }).expect(400)
+    }
+    expect(endpointStore.setManagedTierRoute).toHaveBeenCalledTimes(4)
+  })
 
   it('stores an exact available managed model for its matching tier', async () => {
     getRole.mockResolvedValue('admin')
@@ -277,13 +316,18 @@ describe('[COMP:api/model-menu] workspace tier routes', () => {
   })
 
   it('rejects a cross-tier or unavailable managed alias', async () => {
+    vi.stubEnv('USEBRIAN_EDITION', 'hosted')
     getRole.mockResolvedValue('admin')
     const availability = new MutableProviderAvailability()
     availability.setModelCatalog('openai-codex', new Set(['gpt-5.6-sol']))
-    await request(makeApp({
+    const app = makeApp({
       configuredProviders: availability,
       customLlmEndpointStore: endpointStore as never,
-    }))
+    })
+    const menu = await request(app).get(`/api/models/menu?workspaceId=${WID}`).expect(200)
+    expect(menu.body.managedRouteModels.max).toContainEqual(expect.objectContaining({ alias: 'gpt-5.6-sol' }))
+    expect(menu.body.managedRouteModels.pro).toEqual([])
+    await request(app)
       .put(`/api/workspaces/${WID}/model-routes/pro`)
       .send({ modelAlias: 'gpt-5.6-sol' })
       .expect(400)

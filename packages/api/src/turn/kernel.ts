@@ -370,6 +370,13 @@ class AssistantTurnOwner {
     this.modelPreparations.push(prepared)
     return prepared
   }
+  /** The selection used by the suspended call, including a discovered Research route. */
+  checkpointModelSelection() {
+    const model = this.preparedMainModel
+    if (!model) throw new Error('A checkpoint requires a prepared main model.')
+    return { selectedTier: model.logicalTier, selectedCustomModel: model.customLlm?.selector,
+      selectedLegacyByo: model.usedLegacyByoKey }
+  }
   prepareTools(candidates: ReadonlyMap<string, Tool>): Map<string, Tool> {
     if (!this.modelPreparation || this.ran && !this.discovering || this.closed) throw new Error('Tool preparation requires the original prepared turn.')
     return this.modelPreparation.tools(candidates)
@@ -469,6 +476,20 @@ class AssistantTurnOwner {
               signal.throwIfAborted()
               preparation.assertLoopContext(toolContext)
               const context = frame.context
+              const previousWorker = toolContext.workerRuntime
+              const inheritsWorkspaceRoute = !previousWorker || (previousWorker.provider === model.customLlm?.provider
+                && previousWorker.model === model.customLlm.selector)
+              // A spawned worker inherits the promoted workspace selection. An
+              // Auto continuation clears its old pin and restores worker defaults.
+              let workerRuntime = previousWorker
+              if (frame.mainModel && inheritsWorkspaceRoute) {
+                const promoted = nextModel.customLlm
+                workerRuntime = promoted ? {
+                  provider: promoted.provider, model: promoted.selector, modelTier: promoted.modelTier,
+                  providerKeySource: promoted.providerKeySource, inputTokenLimit: promoted.inputTokenLimit,
+                  maxTokens: promoted.maxTokens,
+                } : undefined
+              }
               ready = {
                 provider: nextModel.provider, model: servedTurnModel(nextModel), systemPrompt: run.systemPrompt,
                 runtimeSystemContext: run.runtimeSystemContext, messages: run.messages, tools: new Map(run.tools),
@@ -482,7 +503,7 @@ class AssistantTurnOwner {
                   ...(context?.preferredChannel !== undefined ? { preferredChannel: context.preferredChannel } : {}),
                   ...(context?.workflowProposalReceipt ? { workflowProposalReceipt: context.workflowProposalReceipt } : {}),
                   ...(context?.researchMode !== undefined ? { researchMode: context.researchMode } : {}),
-                  ...(context?.workerRuntime ? { workerRuntime: context.workerRuntime } : {}),
+                  workerRuntime: context?.workerRuntime ?? workerRuntime,
                 },
               }
               this.preparedRun = run
