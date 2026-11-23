@@ -118,6 +118,7 @@ describe.sequential('[COMP:api/channel-recording] connector operational progress
    return Response.json({hits:[{instance_id:'fictional-archive',conversation_id:'fictional-room',source:'whatsapp',
     segment_text:resultMarker}],embedding_coverage:{partial:false,pending:0,capped:false,note:'complete'}})
   }})
+  const messageText='Review the archived messages and find the mailbox search capability.'
   vi.stubGlobal('fetch',vi.fn(async(raw:unknown,init?:RequestInit)=>{
    const url=new URL(String(raw));expect(url.origin).toBe('https://operational-model.example')
    const request=JSON.parse(String(init?.body)) as ModelRequest
@@ -125,8 +126,17 @@ describe.sequential('[COMP:api/channel-recording] connector operational progress
    if(main){
     mainRequests.push(request)
     mark('provider-dispatch',mainRequests.length)
-    expect(JSON.stringify(request.contents)).toContain(retainedMarker)
-    const round=mainRequests.length
+    const contents=JSON.stringify(request.contents)
+    if(mainRequests.length===1){
+     expect(contents).toContain(messageText)
+     expect(contents).not.toContain(retainedMarker)
+     expect(JSON.stringify(request.tools)).toContain('requestConversationContext')
+     expect(JSON.stringify(request.tools)).not.toContain('searchChatHistory')
+     return modelResponse([{functionCall:{id:'operational-context',name:'requestConversationContext',args:{}},thoughtSignature:'fictional-context'}])
+    }
+    expect(contents).toContain(retainedMarker)
+    expect(contents).toContain('operational-context')
+    const round=mainRequests.length-1
     if(round<=3)return modelResponse([{functionCall:{id:`archive-${id}-${round}`,name:'searchChatHistory',args:{query:`fictional observatory ${round}`}},thoughtSignature:`fictional-${round}`}])
     expect(archiveOwners).toEqual([owner,owner,owner])
     if(round===4){
@@ -153,7 +163,6 @@ describe.sequential('[COMP:api/channel-recording] connector operational progress
    }))}):'{"research":false,"operate_site":false,"reason":null,"topic_label":"fictional","state":"continue","confidence":1}'
    return modelResponse([{text}])
   }))
-  const messageText='Review the archived messages and find the mailbox search capability.'
   const recording=await incoming(id,messageText);expect(recording!.session.id).toBe(sessionId)
   const selected=await findAssistantById(assistant),linked=await linkedAccounts.findByProvider('telegram',sender)
   expect(linked!.userId).toBe(owner)
@@ -171,8 +180,7 @@ describe.sequential('[COMP:api/channel-recording] connector operational progress
     sendError:async(error:Error)=>{errors.push(error);notices.push(channelUserErrorText(error));mark('safe-terminal-error')},
     sendResponse:async(text:string)=>{sent.push(text);mark('reply-received');await delivered(`reply-${id}`,text);mark('reply-persisted');return{channelMessageId:`reply-${id}`}}}
   } as unknown as ChannelPipelineParams)
-  let failure:unknown
-  try{await pending}catch(error){if(!credentialCurrent)throw error;failure=error}
+  await pending
   mark('pipeline-finished')
   console.info('[connector operational acceptance boundary]',JSON.stringify({id,authorityChange,dispatchOrder,
    mainRequests:mainRequests.length,archiveCalls:archiveOwners.length,replyCount:sent.length,notices,
@@ -180,13 +188,13 @@ describe.sequential('[COMP:api/channel-recording] connector operational progress
    persistedReplies:(await query('SELECT count(*)::int count FROM session_messages WHERE session_id=$1 AND channel_message_id=$2',[sessionId,`reply-${id}`])).rows[0].count,
    session:(await query('SELECT status,turn_end_reason,turn_lease_token IS NULL AS lease_released FROM sessions WHERE id=$1',[sessionId])).rows[0],
    retainedHistoryUnchanged:JSON.stringify(await historySnapshot())===JSON.stringify(history),bindingsUnchanged:JSON.stringify(await bindingSnapshot())===JSON.stringify(bindings)}))
-  return{mainRequests,archiveOwners,sent,errors,notices,publishSessionEvent,onCleanup,failure}
+  return{mainRequests,archiveOwners,sent,errors,notices,publishSessionEvent,onCleanup}
  }
 
  it('delivers after three archive searches and MCP discovery despite ordinary mailbox status progress',async()=>{
   const result=await runTurn('operational-positive',false)
   expect(result.errors).toEqual([]);expect(result.notices).toEqual([])
-  expect(result.archiveOwners).toEqual([owner,owner,owner]);expect(result.mainRequests).toHaveLength(5)
+  expect(result.archiveOwners).toEqual([owner,owner,owner]);expect(result.mainRequests).toHaveLength(6)
   expect(result.sent).toEqual([finalText]);expect(result.onCleanup).toHaveBeenCalledOnce()
   const reply=(await query('SELECT role,content FROM session_messages WHERE session_id=$1 AND channel_message_id=$2',[sessionId,'reply-operational-positive'])).rows
   expect(reply).toEqual([{role:'assistant',content:[{type:'text',text:finalText}]}])
@@ -198,14 +206,14 @@ describe.sequential('[COMP:api/channel-recording] connector operational progress
  },90_000)
  it('refuses a genuine connector configuration change and sends a fixed safe terminal notice',async()=>{
   const result=await runTurn('authority-negative',true)
-  expect(result.archiveOwners).toEqual([owner,owner,owner]);expect(result.mainRequests).toHaveLength(4)
+  expect(result.archiveOwners).toEqual([owner,owner,owner]);expect(result.mainRequests).toHaveLength(5)
   expect(result.sent).toEqual([]);expect(result.errors).toHaveLength(1);expect(result.onCleanup).toHaveBeenCalledOnce()
   expect(result.errors[0].name).toBe('AuthorityChangedError');expect(result.notices).toEqual([safeNotice])
   expect((await query('SELECT id FROM session_messages WHERE session_id=$1 AND channel_message_id=$2',[sessionId,'reply-authority-negative'])).rows).toEqual([])
   expect(await historySnapshot()).toEqual(history);expect(await bindingSnapshot()).toEqual(bindings)
   expect((await query('SELECT status,turn_lease_token,turn_end_reason FROM sessions WHERE id=$1',[sessionId])).rows[0]).toEqual({status:'failed',turn_lease_token:null,turn_end_reason:'failed'})
  },90_000)
- it('rechecks the original channel credential after native evidence and withholds the provider request',async()=>{
+ it('rechecks the original channel credential after native evidence and withholds the continuation',async()=>{
   const app=getAppPool(),original=app.query.bind(app)
   let current=true,nativeCaptures=0
   const checks:boolean[]=[]
@@ -220,10 +228,12 @@ describe.sequential('[COMP:api/channel-recording] connector operational progress
    const result=await runTurn('channel-credential-withdrawn',false,async()=>{checks.push(current);return current})
    expect(nativeCaptures).toBe(1)
    expect(checks[0]).toBe(true);expect(checks.at(-1)).toBe(false)
-   expect(result.mainRequests).toEqual([]);expect(result.archiveOwners).toEqual([]);expect(result.sent).toEqual([])
-   expect(result.errors).toEqual([])
-   expect(result.failure).toMatchObject({code:'source_unavailable',reason:'authority_changed',retrySafe:false,
-    cause:{name:'AuthorityChangedError',operationMayHaveExecuted:false}})
+   expect(result.mainRequests).toHaveLength(1)
+   expect(result.archiveOwners).toEqual([]);expect(result.sent).toEqual([])
+   expect(result.errors).toHaveLength(1)
+   expect(result.errors[0]).toMatchObject({name:'AuthorityChangedError',reason:'authority_changed',retrySafe:false})
+   expect(result.notices).toEqual([safeNotice])
+   expect(result.onCleanup).toHaveBeenCalledOnce()
    expect((await query('SELECT id FROM session_messages WHERE session_id=$1 AND channel_message_id=$2',[sessionId,'reply-channel-credential-withdrawn'])).rows).toEqual([])
    expect(await historySnapshot()).toEqual(history);expect(await bindingSnapshot()).toEqual(bindings)
   }finally{observed.mockRestore()}
@@ -231,7 +241,7 @@ describe.sequential('[COMP:api/channel-recording] connector operational progress
  it('withholds and stores no final recorder reply when a source is held after the last model request',async()=>{
   try{
    const result=await runTurn('held-before-final-release',false,undefined,true)
-   expect(result.mainRequests).toHaveLength(5)
+   expect(result.mainRequests).toHaveLength(6)
    expect(result.archiveOwners).toEqual([owner,owner,owner])
    expect(result.sent).toEqual([]);expect(result.notices).toEqual([safeNotice])
    expect(result.errors[0]).toMatchObject({name:'DeliveryAudienceUnverifiedError',reason:'delivery_audience_unverified',retrySafe:false})

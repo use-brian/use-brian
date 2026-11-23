@@ -91,11 +91,14 @@ export async function pristineCache(directory, pgBin, run) {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const [, , option, pgBin] = process.argv
+async function main([option, pgBin]) {
   if (option && (option !== '--pg-bin' || !pgBin)) throw new Error('Expected --pg-bin <directory>')
   const key = await pristineKey(pgBin)
   await appendFile(process.env.GITHUB_OUTPUT, 'key=' + key + '\n')
   // A disposable local workflow replay intentionally exercises cold setup.
   if (process.env.GITHUB_ENV) await appendFile(process.env.GITHUB_ENV, 'BRIAN_CALENDAR_FIXTURE_CACHE=' + join(process.env.RUNNER_TEMP, 'calendar-pristine') + '\n')
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main(process.argv.slice(2)).catch((error) => { console.error(error.message); process.exitCode = 1 })
 }
