@@ -1032,8 +1032,8 @@ const eventSourceRefSchema = z.discriminatedUnion('type', [
   }),
   z.object({
     // Id-less: the workspace's task table. Lifecycle actions (created /
-    // completed / blocked / reopened / assigned / tagged / updated) are
-    // matched via `inChannels`; task tags via the task-only `tags` filter.
+    // completed / blocked / reopened / assigned / tagged / status_changed /
+    // updated) are matched via `inChannels`.
     type: z.literal('task'),
   }),
   z.object({
@@ -1070,6 +1070,7 @@ const eventMatchSchema = z.object({
   // Task-only persistent tag filter. Unlike `tags`, this reads the task's
   // complete live tag set on every lifecycle event.
   currentTags: z.array(z.string().min(1).max(64)).max(64).optional(),
+  taskProjectIds: z.array(z.string().uuid()).max(64).optional(),
   fromBots: z.boolean().optional(),
 })
 
@@ -1130,6 +1131,13 @@ export const EventSubscriptionSchema = z.preprocess(
         code: z.ZodIssueCode.custom,
         message: '`match.currentTags` is valid only for task event sources.',
         path: ['match', 'currentTags'],
+      })
+    }
+    if (subscription.match?.taskProjectIds !== undefined && subscription.source.type !== 'task') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: '`match.taskProjectIds` is valid only for task event sources.',
+        path: ['match', 'taskProjectIds'],
       })
     }
     if (subscription.source.type === 'crm') {
