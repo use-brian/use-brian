@@ -35,6 +35,10 @@ describe.sequential('[COMP:api/application-persistence] actual native manual Kno
   for(const source of original)expect(lineage).toContainEqual({kind:source.resourceKind,id:source.resourceId,version:source.version})
   expect(result.scopeEvidence?.sources?.some(source=>source.resourceKind==='knowledge_entry'&&source.resourceId===row.id&&source.version===row.version)).toBe(true)
   const current=await read.execute({id:row.id},await f.context(f.f.secondId,true));expect(current.isError,JSON.stringify(current)).not.toBe(true);expect(current.data).toMatchObject({content:input(row.id).content})
+  const search=tools.find(tool=>tool.name==='searchKnowledge')!
+  const found=await search.execute({query:'revised'},await f.context(f.f.secondId,true))
+  expect(found.isError,JSON.stringify(found)).not.toBe(true)
+  expect(found.data).toEqual(expect.arrayContaining([expect.objectContaining({id:row.id,path:f.row.path})]))
   await f.source.pool.query("DELETE FROM grants WHERE kind='human' AND account_id=$1",[f.f.ownerId])
   const held=await read.execute({id:row.id},await f.context(f.f.ownerId,true));expect(held.isError).toBe(true);expect(JSON.stringify(held)).not.toContain(input(row.id).content)
   const other=await read.execute({id:row.id},await f.context(f.f.secondId,true));expect(other.isError,JSON.stringify(other)).not.toBe(true);expect(other.data).toMatchObject({content:input(row.id).content})

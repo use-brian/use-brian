@@ -240,7 +240,9 @@ export function createKnowledgeTools(
           projectIds: context.projectIds,
         } as const
         const args = knowledgeCollectionArgs(context, input.sourceId)
-        const results = await store.search(
+        const search = store.searchForTool ?? store.search
+        const results = await search.call(
+          store,
           access,
           input.query,
           10,

@@ -264,7 +264,16 @@ describe.skipIf(phase!=='target').sequential('[COMP:api/portable-restore] authen
      ['acl',`GRANT EXECUTE ON FUNCTION public.harness_execution_human(uuid,uuid) TO app_user`,'portable_successor_catalog_changed'],
      ['trigger',`ALTER TABLE public.project_harness_runs DISABLE TRIGGER harness_run_audit`,'portable_successor_catalog_changed'],
      ['unknown-prefix',`CREATE FUNCTION public.harness_execution_unreviewed() RETURNS int LANGUAGE sql AS 'SELECT 1'`,'portable_successor_unknown_catalog_object'],
-     ...(head==='8344_conversation_domain_source_aggregation.sql'?[
+     ...(head>='8346_knowledge_field_proof_batch.sql'?[
+      ['knowledge-proof-private-field-check',`GRANT EXECUTE ON FUNCTION public.application_knowledge_exact_field_proofs(uuid,uuid[],text[]) TO app_user`,'installation_additional_catalog_changed'],
+      ['knowledge-projection-page-access',`GRANT EXECUTE ON FUNCTION public.read_native_knowledge_query_projection(uuid,text[],boolean,uuid,integer,integer) TO PUBLIC`,'installation_additional_catalog_changed'],
+      ['knowledge-proof-release-receipt',`DELETE FROM public._migrations WHERE name='8346_knowledge_field_proof_batch.sql'`,'portable_successor_migration_tail_missing'],
+     ]:[]),
+     ...(head>='8345_knowledge_query_scan_cost.sql'?[
+      ['knowledge-scan-private-field-state',`GRANT EXECUTE ON FUNCTION public.application_knowledge_admitted_fields(uuid,uuid,text[],jsonb,boolean) TO app_user`,'installation_additional_catalog_changed'],
+      ['knowledge-scan-release-receipt',`DELETE FROM public._migrations WHERE name='8345_knowledge_query_scan_cost.sql'`,'portable_successor_migration_tail_missing'],
+     ]:[]),
+     ...(head>='8344_conversation_domain_source_aggregation.sql'?[
       ['domain-aggregation-receipt',`DELETE FROM public._migrations WHERE name='8344_conversation_domain_source_aggregation.sql'`,'portable_successor_migration_tail_missing'],
      ]:[]),
      ...(head>='8343_conversation_capture_linear_aggregation.sql'?[

@@ -1,14 +1,22 @@
+import {randomBytes} from 'node:crypto'
 import type {PoolClient} from 'pg'
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
 import {createKnowledgeTools} from '@use-brian/core/tools/base/knowledge.js'
 import type {LLMProvider} from '@use-brian/agent-runtime/providers/types.js'
 import type {AccessContext} from '@use-brian/agent-runtime/security/access-context.js'
+import {executionToolContext} from '@use-brian/agent-runtime/security/execution-context.js'
+import type {Tool} from '@use-brian/agent-runtime/tools/types.js'
 import {getAppPool,getPool} from '../../db/client.js'
+import {createDbConnectorStore} from '../../db/connector-store.js'
 import {createDbKnowledgeStore,type KnowledgeEntry} from '../../db/knowledge-store.js'
+import {createDbMcpSettingsStore} from '../../db/mcp-settings-store.js'
 import {admitModelInput} from '../../context-scope/admission.js'
+import {composeSurfaceCapabilities} from '../../mcp/surface.js'
 import {generateTitle} from '../../routes/attended-session-title.js'
 import {configureConnectorSourceRuntimeFactory} from '../source-runtime.js'
-import {retainedKnowledgeFixture} from './fixtures/retained-knowledge.js'
+import {configuredKnowledgeEntryFixture} from './fixtures/configured-knowledge.js'
+import {persistentContextFixture} from './fixtures/persistent-context.js'
+import {retainedKnowledgeFixture,signedKnowledgeAuthority} from './fixtures/retained-knowledge.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 const store=createDbKnowledgeStore()
@@ -31,6 +39,110 @@ describe.sequential('[COMP:api/application-persistence] actual retained-source K
  let fixture:Fixture|undefined
  afterEach(async()=>{configureConnectorSourceRuntimeFactory(undefined);await fixture?.cleanup();fixture=undefined})
  afterAll(async()=>{await getAppPool().end();await getPool().end()})
+ it('searches a 917-entry knowledge cohort through signed native authority',async()=>{
+  const f=await persistentContextFixture('confidential')
+  try{
+   const role=(await getAppPool().query<{role:string;timeout:string}>(
+    "SELECT current_user AS role,current_setting('statement_timeout') AS timeout")).rows[0]
+   expect(role).toEqual({role:'app_user',timeout:'15s'})
+   const entryCount=917
+   const matchingPath='fictional-load/917'
+   // 805 linked entries carry three or four references apiece (2,966 edges).
+   await f.pool.query(`WITH entries AS MATERIALIZED (
+     SELECT n,gen_random_uuid() AS id FROM generate_series(1,$3::integer-1) n
+    ) INSERT INTO knowledge_entries(id,workspace_id,path,title,summary,content,tags,sensitivity,created_by,related_ids)
+    SELECT entry.id,$1,'fictional-load/'||CASE WHEN entry.n=$3-1 THEN $3 ELSE entry.n END,
+     'Fictional fixture entry '||entry.n,'Fictional fixture summary',
+     repeat('Fictional synthetic notes for an invented workspace. ',75)||CASE WHEN entry.n>=$3-1 THEN 'amberneedle' ELSE '' END,
+     ARRAY['fictional'],'internal',$2,ARRAY(
+      SELECT target.id FROM generate_series(1,CASE WHEN entry.n<=551 THEN 4 WHEN entry.n<=805 THEN 3 ELSE 0 END) step
+      JOIN entries target ON target.n=1+((entry.n-1+step)%($3::integer)) ORDER BY step
+     ) FROM entries entry`,[f.workspaceId,f.ownerId,entryCount])
+   const {source}=await configuredKnowledgeEntryFixture(f,{source:{repo:'fictional/knowledge-load'},
+    entry:{path:matchingPath,title:'Fictional synced Knowledge entry',content:'Fictional amberneedle body',sensitivity:'internal'}})
+   const sourceAuthority=await signedKnowledgeAuthority(f)
+   expect(await store.getSourceForViewer(sourceAuthority.execution.security.access,source.id,sourceAuthority)).toMatchObject({repo:source.repo})
+   const connectorStore=createDbConnectorStore(randomBytes(32)),settingsStore=createDbMcpSettingsStore()
+   for(const [query,match] of [['amberneedle',true],['violetneedle',false]] as const){
+    const {execution,accumulator}=await signedKnowledgeAuthority(f)
+    const context={...executionToolContext(execution,{appId:'fictional-knowledge-load'}),scopeAccumulator:accumulator}
+    const tools=new Map<string,Tool>()
+    await composeSurfaceCapabilities('channel',{userId:f.ownerId,assistantId:f.assistantId,assistantTeamId:f.workspaceId,tools,
+     connectorStore,settingsStore,knowledgeStore:store,executionContext:execution,scopeAccumulator:accumulator})
+    const discover=tools.get('mcp_search'),invoke=tools.get('mcp_call')
+    if(!discover||!invoke)throw new Error('The channel must register the MCP discovery and invocation tools')
+    const discovery=await discover.execute({query:'search workspace knowledge base'},context)
+    expect(discovery.isError).not.toBe(true)
+    const route=String(discovery.data).match(/\[(knowledge)\]\s+(searchKnowledge):/)
+    if(!route)throw new Error('The registered channel catalog must discover searchKnowledge')
+    const start=performance.now()
+    const result=await invoke.execute({server:route[1],tool:route[2],args:{query}},context)
+    const elapsedMs=Math.round(performance.now()-start)
+    console.info(JSON.stringify({scenario:match?'matching-search':'empty-search',entries:entryCount,elapsedMs,
+     failure:result.isError===true?result.data:null}))
+    expect(result.isError,result.isError?String(result.data):undefined).not.toBe(true)
+    if(match){
+     expect(result.data).toHaveLength(2)
+     expect(result.data).toEqual(expect.arrayContaining([
+      expect.objectContaining({path:matchingPath,sourceId:null,sourceLabel:'Manual entries'}),
+      expect.objectContaining({path:matchingPath,sourceId:source.id,sourceLabel:source.repo}),
+     ]))
+    }else{
+     expect(result.data).toMatch(/^No knowledge entries found for this query\./)
+    }
+    if(!result.scopeEvidence)throw new Error('Signed search must bind current query evidence')
+    if(match)expect(result.scopeEvidence.sources).toContainEqual(expect.objectContaining({resourceKind:'knowledge_source',resourceId:source.id}))
+    const sources=result.scopeEvidence.sources?.filter(source=>source.resourceKind==='application_field')??[]
+    const domains=(await f.pool.query<{size:number;fields:string[]}>(`SELECT jsonb_array_length(d.domain->'candidates') AS size,d.domain->'fields' AS fields
+     FROM application_field_resources r JOIN application_query_domains d ON d.workspace_id=r.workspace_id AND d.id=r.resource_id
+     WHERE r.workspace_id=$1 AND r.id=ANY($2::uuid[]) AND r.selection='query_domain'`,[f.workspaceId,sources.map(source=>source.resourceId)])).rows
+    expect(domains).toEqual([{size:entryCount,fields:['content','id','path','sourceId','summary','tags','title']}])
+    accumulator.note(result.scopeEvidence)
+    const admissionStart=performance.now()
+    try{await admitModelInput(context)}finally{
+     console.info(JSON.stringify({scenario:match?'matching-admission':'empty-admission',entries:entryCount,
+      elapsedMs:Math.round(performance.now()-admissionStart)}))
+    }
+   }
+  }finally{await f.cleanup()}
+ },180_000)
+ it('holds paged search when the second SQL slice reports a different query domain',async()=>{
+  const f=await persistentContextFixture('confidential')
+  const originalQueries=new Map<PoolClient,PoolClient['query']>()
+  let slices=0,matchingStatements=0
+  const trace=(client:PoolClient)=>{
+   if(originalQueries.has(client))return
+   const original=client.query
+   originalQueries.set(client,original)
+   client.query=function(...args:unknown[]){
+    const sql=typeof args[0]==='string'?args[0]:''
+    const result=Reflect.apply(original,client,args)
+    if(!Array.isArray(args[1])||args[1][0]!==f.workspaceId)return result
+    if(sql.includes('WITH knowledge_viewer_rows')&&sql.includes('plainto_tsquery'))matchingStatements++
+    if(!sql.includes('read_native_knowledge_query_projection($1,$2,$3,$4,$5,$6)'))return result
+    slices++
+    if(slices!==2)return result
+    return Promise.resolve(result).then(response=>{
+     const [header,...points]=response.rows
+     const sources=header.value.sources.map((source:{version:string},index:number)=>index===0?{...source,version:'fictional-different-query-domain'}:source)
+     return {...response,rows:[{...header,value:{...header.value,sources}},...points]}
+    })
+   } as typeof client.query
+  }
+  try{
+   await f.pool.query(`INSERT INTO knowledge_entries(workspace_id,path,title,content,sensitivity,created_by)
+    SELECT $1,'fictional-stale-slice/'||n,'Fictional entry','Fictional body','internal',$2 FROM generate_series(1,385) n`,[f.workspaceId,f.ownerId])
+   const authority=await signedKnowledgeAuthority(f)
+   getAppPool().on('acquire',trace)
+   await expect(store.searchForTool(authority.execution.security.access,'fictional',10,authority)).rejects.toThrow('scope_source_changed')
+   expect(slices).toBe(2)
+   expect(matchingStatements).toBe(0)
+  }finally{
+   getAppPool().off('acquire',trace)
+   for(const [client,query] of originalQueries)client.query=query
+   await f.cleanup()
+  }
+ },45_000)
  for(const reader of legacyReaders)it(`holds retained content before the actual legacy ${reader.name} computation while preserving an ordinary authorized control`,async()=>{
   fixture=await retainedKnowledgeFixture();const c=fixture,context=await c.context(c.f.ownerId,true),access=context.executionContext!.security.access
   const before=await c.snapshot()

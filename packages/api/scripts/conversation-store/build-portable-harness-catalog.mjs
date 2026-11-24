@@ -10,7 +10,7 @@ import {parseArgs} from 'node:util'
 import {createLocalFixture,assertLocalFixture} from '../../../../scripts/crm/local-fixture.mjs'
 import {harnessMigrationPins,readPinnedHarnessScope} from './installation-authentication-8337.mjs'
 import {authenticateConversationInstallation} from './installation-release.mjs'
-import { envelopeClassification } from './installation-authentication-8344.mjs'
+import { knowledgeFieldProofClassification } from './installation-authentication-8346.mjs'
 import {readReviewedCrmCatalog} from './crm-release-catalog.mjs'
 import {currentInstallationAuthenticationSource as predecessor} from './installation-authentication-8334.mjs'
 import {authenticateCrmSuccessor} from './crm-release-catalog.mjs'
@@ -54,7 +54,7 @@ try{
  await assertLocalFixture(fixture.env)
  const owner=new pg.Client({connectionString:fixture.adminUrl});await owner.connect()
  try{
-  const roster=await buildRoster(owner,envelopeClassification(classification))
+  const roster=await buildRoster(owner,knowledgeFieldProofClassification(classification))
   // Compute everything before changing either committed output.
   for(const [name,value] of [['portable-harness-catalog-8337.json',artifact],['portable-restore-roster.json',roster]]){
    const text=JSON.stringify(value,null,name.includes('catalog')?1:2)+'\n',path=new URL(name,here)

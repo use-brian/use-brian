@@ -93,6 +93,27 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
       ])
     })
 
+    it('passes the requested source and original authority to the tool projection', async () => {
+      const searchForTool = vi.fn<NonNullable<KnowledgeStoreInterface['searchForTool']>>().mockResolvedValue([])
+      const search = vi.fn<KnowledgeStoreInterface['search']>().mockResolvedValue([])
+      const tool = byName(createKnowledgeTools({ ...mockStore, search, searchForTool }), 'searchKnowledge')
+      const scopeAccumulator = new ContextScopeAccumulator()
+      const executionContext = {} as NonNullable<ToolContext['executionContext']>
+      const sourceId = '8a05eaf4-71c1-4337-9dfb-06948792db1a'
+
+      const result = await tool.execute({ query: 'vault', sourceId }, { ...ctx, executionContext, scopeAccumulator })
+
+      expect(result.data).toContain('No knowledge entries found')
+      expect(searchForTool).toHaveBeenCalledWith(
+        expect.objectContaining({ workspaceId: 't1', userId: 'u1', assistantId: 'a1' }),
+        'vault',
+        10,
+        { execution: executionContext, accumulator: scopeAccumulator },
+        sourceId,
+      )
+      expect(search).toHaveBeenCalledTimes(0)
+    })
+
     it('a failed search is never reported as an empty knowledge base', async () => {
       vi.mocked(mockStore.search).mockRejectedValueOnce(new Error('ETIMEDOUT'))
 

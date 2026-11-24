@@ -64,7 +64,7 @@ describe.sequential('[COMP:crm/r2-store] single-capture summary on real PostgreS
     expect(boundScopeSources(result.value).length).toBeGreaterThanOrEqual(3)
     expect(result.sql.filter(sql => sql.includes('SELECT observe_native_application_query_domain('))).toHaveLength(3)
     expect(result.sql.filter(sql => sql.includes('SELECT * FROM read_native_application_query_candidates('))).toHaveLength(3)
-    expect(result.sql.filter(sql => sql.includes('SELECT ord,snapshot FROM read_native_session_field_snapshots('))).toHaveLength(2)
+    expect(result.sql.filter(sql => sql.includes('SELECT ord,snapshot FROM read_admitted_application_field_snapshots('))).toHaveLength(2)
     expect(result.sql.filter(sql => sql === 'COMMIT')).toHaveLength(1)
   })
 
@@ -153,7 +153,7 @@ describe.sequential('[COMP:crm/r2-store] single-capture summary on real PostgreS
         const original = pg.Client.prototype.query
         const spy = vi.spyOn(pg.Client.prototype, 'query').mockImplementation(function(this: pg.Client, ...args: Parameters<typeof original>) {
           const text = typeof args[0] === 'string' ? args[0] : String((args[0] as { text?: string })?.text ?? '')
-          if (text.includes('SELECT ord,snapshot FROM read_native_session_field_snapshots(') && ++reached === boundary) {
+          if (text.includes('SELECT ord,snapshot FROM read_admitted_application_field_snapshots(') && ++reached === boundary) {
             return owner.query('UPDATE crm_summary_policy_fixture SET restricted=true WHERE workspace_id=$1', [f.workspaceId])
               .then(() => Reflect.apply(original, this, args))
           }
@@ -218,7 +218,7 @@ describe.sequential('[COMP:crm/r2-store] single-capture summary on real PostgreS
         const original = pg.Client.prototype.query
         const spy = vi.spyOn(pg.Client.prototype, 'query').mockImplementation(function(this: pg.Client, ...args: Parameters<typeof original>) {
           const text = typeof args[0] === 'string' ? args[0] : String((args[0] as { text?: string })?.text ?? '')
-          if (text.includes('SELECT ord,snapshot FROM read_native_session_field_snapshots(') && ++reached === boundary) {
+          if (text.includes('SELECT ord,snapshot FROM read_admitted_application_field_snapshots(') && ++reached === boundary) {
             // Time advances; no entity, policy, registry or function write occurs
             // between capture and this independent final validation.
             return owner.query(`SELECT pg_sleep(GREATEST(0,EXTRACT(EPOCH FROM(expires_at-clock_timestamp())))::double precision+0.05)

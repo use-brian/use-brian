@@ -14,6 +14,23 @@ import {persistentContextFixture} from './persistent-context.js'
 import {persistentSourceFixture} from './persistent-source.js'
 const {assertLocalFixture}=await import(new URL('../../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 const store=createDbKnowledgeStore()
+
+/** Original member and device authority for actual private Knowledge reads. */
+export async function signedKnowledgeAuthority(current:Awaited<ReturnType<typeof persistentContextFixture>>,userId=current.ownerId){
+ const auth=await authSessionStore.create(userId,{deviceLabel:'Fictional Knowledge device',userAgent:'Fixture',ipAddress:'127.0.0.1'})
+ if(!auth)throw new Error('Missing actual Knowledge authentication session')
+ const session=await createPersonalWebSession({assistantId:current.assistantId,userId,workspaceId:current.workspaceId,channelType:'web',channelId:crypto.randomUUID(),appOrigin:'chat'},
+  {actorUserId:userId,authSessionId:auth.id,authVersion:auth.authVersion})
+ const claims=Object.freeze({userId,sessionId:auth.id,authVersion:auth.authVersion})
+ const assistant=await findAssistantById(current.assistantId)
+ if(!assistant)throw new Error('Missing actual Knowledge assistant')
+ const execution=(await resolveExecutionContextSystem({userId,workspaceId:current.workspaceId,assistant,memberMode:'member',sharedAudience:false,
+  session,sessionAuthority:session,identity:{kind:'attended',principal:{kind:'workspace_member',userId,authenticationKind:'native_session'}},
+  ownership:{kind:'workspace',workspaceId:current.workspaceId},lifecycle:{sessionId:session.id,sessionPersisted:true,channelType:'web',channelId:session.channelId,abortSignal:new AbortController().signal},
+  credentialCurrent:()=>authSessionStore.validateAccess(claims)})).executionContext
+ return{execution,accumulator:new ContextScopeAccumulator()}
+}
+
 /** Actual canonical retained Knowledge with an independent source and original native contexts. */
 export async function retainedKnowledgeFixture(){
  await assertLocalFixture()
@@ -36,21 +53,7 @@ export async function retainedKnowledgeFixture(){
    await client.query('COMMIT')
   })}catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
   async function context(userId=current.ownerId,personal=false){
-   let authority=await current.modelContext(userId)
-   if(personal){
-    const auth=await authSessionStore.create(userId,{deviceLabel:'Fictional Knowledge device',userAgent:'Fixture',ipAddress:'127.0.0.1'})
-    if(!auth)throw new Error('Missing actual Knowledge authentication session')
-    const session=await createPersonalWebSession({assistantId:current.assistantId,userId,workspaceId:current.workspaceId,channelType:'web',channelId:crypto.randomUUID(),appOrigin:'chat'},
-     {actorUserId:userId,authSessionId:auth.id,authVersion:auth.authVersion})
-    const claims=Object.freeze({userId,sessionId:auth.id,authVersion:auth.authVersion})
-    const assistant=await findAssistantById(current.assistantId)
-    if(!assistant)throw new Error('Missing actual Knowledge assistant')
-    const execution=(await resolveExecutionContextSystem({userId,workspaceId:current.workspaceId,assistant,memberMode:'member',sharedAudience:false,
-     session,sessionAuthority:session,identity:{kind:'attended',principal:{kind:'workspace_member',userId,authenticationKind:'native_session'}},
-     ownership:{kind:'workspace',workspaceId:current.workspaceId},lifecycle:{sessionId:session.id,sessionPersisted:true,channelType:'web',channelId:session.channelId,abortSignal:new AbortController().signal},
-     credentialCurrent:()=>authSessionStore.validateAccess(claims)})).executionContext
-    authority={execution,accumulator:new ContextScopeAccumulator()}
-   }
+   const authority=personal?await signedKnowledgeAuthority(current,userId):await current.modelContext(userId)
    bindSessionContextRetainedAuthority(authority.execution,(execution,sources,action)=>source.coordinator.prepare(execution,sources,action))
    return{...executionToolContext(authority.execution,{appId:'fictional-knowledge-reader'}),scopeAccumulator:authority.accumulator}
   }

@@ -48,6 +48,8 @@ export type KnowledgeEntryDetail = {
 
 export type KnowledgeStoreInterface = {
   search(ctx: AccessContext, query: string, limit?: number, authority?: SessionContextAuthority, sourceId?: string | null): Promise<KnowledgeSearchResult[]>
+  /** Admits all fields consumed by ranking and the tool's summary results. */
+  searchForTool?(ctx: AccessContext, query: string, limit?: number, authority?: SessionContextAuthority, sourceId?: string | null): Promise<KnowledgeSearchResult[]>
   listByPath(ctx: AccessContext, pathPrefix: string, authority?: SessionContextAuthority, sourceId?: string | null): Promise<KnowledgeSearchResult[]>
   getSourceForViewer?(ctx: AccessContext, id: string, authority: SessionContextAuthority): Promise<{ id: string; repo: string } | null>
   getById(ctx: AccessContext, id: string, authority?: SessionContextAuthority): Promise<KnowledgeEntryDetail | null>

@@ -51,6 +51,7 @@ import { readAdmissionPolicy } from '../workspace-access/admission-policy-read.j
 import { admitKnowledgeWrite, lockKnowledgePrior, admitKnowledgeSourceConfiguration, type KnowledgeSourceBindingInput, type KnowledgeConfigureAuthority } from '../workspace-access/knowledge-create-admission.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { captureKnowledgeSyncAuthority, knowledgeSyncCapture, admitKnowledgeSync } from '../workspace-access/knowledge-sync-admission.js'
+import type { KnowledgeSearchResult } from '@use-brian/core/knowledge/types.js'
 import type { RepoWriterStore } from '../knowledge/repo-writer.js'
 import { admitWorkspaceResource } from '../workspace-access/resource-admission.js'
 import { publishKnowledgeLifecycle } from '../knowledge-event-fanout.js'
@@ -201,6 +202,7 @@ async function queryKnowledgeViewer<T extends QueryResultRow>(ctx:AccessContext,
 
 const KNOWLEDGE_FIELDS=['id','path','title','summary','content','tags','relatedIds','metadata','sourceId','sourceSha','createdBy','createdAt','updatedAt'] as const
 type KnowledgeField=typeof KNOWLEDGE_FIELDS[number]
+const KNOWLEDGE_TOOL_SEARCH_FIELDS = ['id', 'path', 'title', 'summary', 'content', 'tags', 'sourceId'] as const
 const querySource=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nullable(),assistantId:z.string().uuid().nullable(),
  sensitivity:z.enum(['public','internal','confidential']),compartments:z.array(z.string()),projectIds:z.array(z.string().uuid()),
  resourceKind:z.enum(['application_field','external_source']),resourceId:z.string().uuid(),version:z.string().min(1)}).strict()
@@ -216,6 +218,43 @@ const knowledgePointValues=z.object({id:z.string().uuid(),path:z.string(),title:
  tags:z.array(z.string()),relatedIds:z.array(z.string().uuid()),metadata:z.record(z.unknown()),sourceId:z.string().uuid().nullable(),sourceSha:z.string().nullable(),
  createdBy:z.string().uuid().nullable(),createdAt:z.string().datetime({offset:true}).transform(value=>new Date(value)),
  updatedAt:z.string().datetime({offset:true}).transform(value=>new Date(value))}).strict()
+
+/** Keep the per-entry work bounded while preserving the complete domain proof. */
+async function captureKnowledgeSearch(
+  client: PoolClient, params: unknown[], authority?: SessionContextAuthority,
+) {
+  const pageSize = 384
+  const snapshots: z.infer<typeof knowledgeCapture>[] = []
+  let domain: string | undefined
+  let previousId = ''
+  for (let offset = 0; offset <= 4096; offset += pageSize) {
+    await authority?.execution.security.authority.assertCurrent()
+    const result = await client.query<{ value: unknown }>(
+      'SELECT value FROM read_native_knowledge_query_projection($1,$2,$3,$4,$5,$6)',
+      [...params, offset, pageSize],
+    )
+    const [header, ...points] = result.rows.map(row => knowledgeCapture.parse(row.value))
+    if (!header || header.row !== null || points.length > pageSize || offset + points.length > 4096) {
+      throw new DerivedScopeError('scope_evidence_missing')
+    }
+    const currentDomain = JSON.stringify(header.sources)
+    if (domain === undefined) {
+      domain = currentDomain
+      snapshots.push(header)
+    } else if (domain !== currentDomain) {
+      throw new DerivedScopeError('scope_source_changed')
+    }
+    for (const point of points) {
+      if (!point.row || !point.source || point.source.resourceId <= previousId) {
+        throw new DerivedScopeError('scope_evidence_missing')
+      }
+      previousId = point.source.resourceId
+      snapshots.push(point)
+    }
+    if (points.length < pageSize) return snapshots
+  }
+  throw new DerivedScopeError('scope_evidence_missing')
+}
 
 /** Query evaluation sees only a captured, current, field-admitted native domain. */
 async function queryKnowledgeCollection<T extends QueryResultRow>(ctx:AccessContext,authority:SessionContextAuthority|undefined,
@@ -243,7 +282,10 @@ async function queryKnowledgeCollection<T extends QueryResultRow>(ctx:AccessCont
    await runWithAgentAccess({...authority.execution.security.access,...ceiling},()=>applyRLSGucs(client,ctx.userId))
    if(JSON.stringify(boundScopeSources((await discover(client)).rows))!==JSON.stringify(roots))throw new DerivedScopeError('scope_source_changed')
   }
-  const snapshots=(await client.query<{value:unknown}>('SELECT value FROM read_native_knowledge_query_projection($1,$2,$3,$4)',[ctx.workspaceId,[...fields],!!authority,appliesDenylist(ctx)?ctx.assistantId:null])).rows.map(row=>knowledgeCapture.parse(row.value))
+  const captureParams = [ctx.workspaceId, [...fields], !!authority, appliesDenylist(ctx) ? ctx.assistantId : null]
+  const snapshots = fields === KNOWLEDGE_TOOL_SEARCH_FIELDS
+    ? await captureKnowledgeSearch(client, captureParams, authority)
+    : (await client.query<{value:unknown}>('SELECT value FROM read_native_knowledge_query_projection($1,$2,$3,$4)', captureParams)).rows.map(row=>knowledgeCapture.parse(row.value))
   if(!snapshots.length||snapshots[0].row!==null||snapshots.some(row=>row.sources.some(source=>source.workspaceId!==ctx.workspaceId)))throw new DerivedScopeError('scope_evidence_missing')
   const sources=snapshots.flatMap(row=>row.sources)
   if(authority&&ceiling){
@@ -510,6 +552,42 @@ function appliesDenylist(ctx: AccessContext): boolean {
   return ctx.assistantKind !== 'primary'
 }
 
+async function queryKnowledgeSearch<T extends KnowledgeSearchResult>(
+  ctx: AccessContext,
+  queryStr: string,
+  limit: number,
+  authority: SessionContextAuthority | undefined,
+  sourceId: string | null | undefined,
+  projection: {
+    fields: readonly KnowledgeField[]
+    columns: (relatedScope: string) => string
+  },
+): Promise<T[]> {
+  const clearance = ctx.clearance ?? DEFAULT_CLEARANCE
+  const scopedAssistant = appliesDenylist(ctx)
+  const deny = scopedAssistant ? `AND ${sourceNotDisabled(5)}` : ''
+  const params: unknown[] = [ctx.workspaceId, queryStr, limit, clearance]
+  if (scopedAssistant) params.push(ctx.assistantId)
+  const scope = contentScopeProjection(ctx, params.length + 1)
+  params.push(...scope.params)
+  const sourceFilter = knowledgeSourceFilter(params, sourceId)
+  const result = await queryKnowledgeCollection<T>(ctx, authority, projection.fields,
+    `SELECT ${projection.columns(scope.sql('ke2'))},
+            ts_rank_cd(ke.search_vector, plainto_tsquery('english', $2)) AS rank
+     FROM knowledge_entries ke
+     WHERE ke.workspace_id = $1
+       AND ke.search_vector @@ plainto_tsquery('english', $2)
+       AND sensitivity_rank(ke.sensitivity) <= sensitivity_rank($4)
+       ${deny}
+       ${scope.sql('ke')}
+       ${sourceFilter}
+     ORDER BY rank DESC, ke.id
+     LIMIT $3`,
+    params,
+  )
+  return result.rows
+}
+
 const SOURCE_COLUMNS = `
   id, workspace_id AS "workspaceId", source_type AS "sourceType",
   repo, branch, root_path AS "rootPath",
@@ -535,6 +613,7 @@ export type KnowledgeStore = {
   // Viewer-facing entry reads — gated by ctx (workspace + clearance).
   // `ctx.clearance === undefined` is treated as passthrough ('confidential').
   search(ctx: AccessContext, queryStr: string, limit?: number, authority?:SessionContextAuthority, sourceId?: string | null): Promise<KnowledgeEntry[]>
+  searchForTool(ctx: AccessContext, queryStr: string, limit?: number, authority?: SessionContextAuthority, sourceId?: string | null): Promise<KnowledgeSearchResult[]>
   listByPath(ctx: AccessContext, pathPrefix: string, authority?:SessionContextAuthority, sourceId?: string | null): Promise<Array<KnowledgeEntry & { childCount: number }>>
   getById(ctx: AccessContext, id: string, authority?: SessionContextAuthority): Promise<KnowledgeEntry | null>
   getByPath(ctx: AccessContext, path: string, authority?:SessionContextAuthority, sourceId?: string | null): Promise<KnowledgeEntry | null>
@@ -823,29 +902,19 @@ export function createDbKnowledgeStore(): KnowledgeStore {
     },
     // ── Entries ──────────────────────────────────────────────
 
-    async search(ctx, queryStr, limit = 10, authority, sourceId) {
-      const clearance = ctx.clearance ?? DEFAULT_CLEARANCE
-      const deny = appliesDenylist(ctx) ? `AND ${sourceNotDisabled(5)}` : ''
-      const params: unknown[] = [ctx.workspaceId, queryStr, limit, clearance]
-      if (appliesDenylist(ctx)) params.push(ctx.assistantId)
-      const scope = contentScopeProjection(ctx, params.length + 1)
-      params.push(...scope.params)
-      const sourceFilter = knowledgeSourceFilter(params, sourceId)
-      const result = await queryKnowledgeCollection<KnowledgeEntry>(ctx,authority,KNOWLEDGE_FIELDS,
-        `SELECT ${entryColumnsClearanceScoped(4, scope.sql('ke2'))},
-                ts_rank_cd(ke.search_vector, plainto_tsquery('english', $2)) AS rank
-         FROM knowledge_entries ke
-         WHERE ke.workspace_id = $1
-           AND ke.search_vector @@ plainto_tsquery('english', $2)
-           AND sensitivity_rank(ke.sensitivity) <= sensitivity_rank($4)
-           ${deny}
-           ${scope.sql('ke')}
-           ${sourceFilter}
-         ORDER BY rank DESC, ke.id
-         LIMIT $3`,
-        params,
-      )
-      return result.rows
+    search(ctx, queryStr, limit = 10, authority, sourceId) {
+      return queryKnowledgeSearch<KnowledgeEntry>(ctx, queryStr, limit, authority, sourceId, {
+        fields: KNOWLEDGE_FIELDS,
+        columns: scope => entryColumnsClearanceScoped(4, scope),
+      })
+    },
+
+    searchForTool(ctx, queryStr, limit = 10, authority, sourceId) {
+      return queryKnowledgeSearch<KnowledgeSearchResult>(ctx, queryStr, limit, authority, sourceId, {
+        fields: KNOWLEDGE_TOOL_SEARCH_FIELDS,
+        columns: () => `${knowledgeSourceColumns('ke')}, ke.id, ke.path, ke.title, ke.summary, ke.tags,
+          ke.source_id AS "sourceId", ke.sensitivity, ke.compartments, ke.project_ids AS "projectIds"`,
+      })
     },
 
     async listByPath(ctx, pathPrefix, authority, sourceId) {
