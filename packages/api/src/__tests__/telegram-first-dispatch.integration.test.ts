@@ -1,5 +1,5 @@
 /** [COMP:api/channel-recording] A signed Telegram webhook with 300 retained
- * messages. Only the Telegram transport and the model's answers are fictional. */
+ * messages. The model, Telegram transport and public lookup responses are fictional. */
 import { randomBytes, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import type { AddressInfo } from 'node:net'
@@ -11,8 +11,11 @@ import { createRoutingProvider } from '@use-brian/agent-runtime/providers/routin
 import { wrapProvider } from '@use-brian/agent-runtime/providers/wrappers.js'
 import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import { bindScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
+import { AnalyticsLogger } from '@use-brian/core/analytics/logger.js'
+import { calculateTool, createUrlReaderTool, createWebSearchTool } from '@use-brian/core/tools/index.js'
 import { persistentContextFixture } from '../application-platform/__tests__/fixtures/persistent-context.js'
 import { admitTelegramRecording, changeChannelRecording, confirmChannelRecordingOwner, recordDeliveredTelegramMessage } from '../channel-recording.js'
+import { createDbAnalyticsStore } from '../db/analytics-store.js'
 import { createConnectorInstanceStore } from '../db/connector-instance-store.js'
 import { createDbAssistantConnectorStore } from '../db/assistant-connector-store.js'
 import { createConnectorGrantStore } from '../db/connector-grant-store.js'
@@ -51,8 +54,12 @@ const privateMarker = 'PERSONAL_DISPATCH_FIXTURE'
 const mailSubject = 'Fictional spectrometer shipment'
 const mailQuestion = 'What emails arrived in the past day?'
 const mailReply = 'Your recent mail includes ' + mailSubject + '.'
+const lookupQuestion = 'Look up the posted North Star Observatory ticket price and calculate the total for three people.'
+const lookupPage = 'General admission is 12.50 credits per person.'
+const guestReply = 'I can answer without using the lookup tools.'
 const rows = Number(process.env.BRIAN_TELEGRAM_HISTORY_ROWS ?? 300)
 const mailboxSamples = Number(process.env.BRIAN_TELEGRAM_MAILBOX_SAMPLES ?? 1)
+const lookupSamples = Number(process.env.BRIAN_TELEGRAM_LOOKUP_SAMPLES ?? 1)
 
 async function seedConversation() {
   await initializeConversationVisibility()
@@ -163,7 +170,7 @@ type ModelRequest = {
     role: string, parts: Array<{
       text?: string
       functionCall?: { name: string, id: string }
-      functionResponse?: { name: string, id: string }
+      functionResponse?: { name: string, id: string, response: { result: string } }
     }>
   }>
   tools?: unknown[]
@@ -177,6 +184,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
   beforeAll(async () => {
     expect(Number.isSafeInteger(rows) && rows > 0).toBe(true)
     expect(Number.isSafeInteger(mailboxSamples) && mailboxSamples >= 1 && mailboxSamples <= 100).toBe(true)
+    expect(Number.isSafeInteger(lookupSamples) && lookupSamples >= 1 && lookupSamples <= 100).toBe(true)
     await assertLocalFixture()
     recording = await seedConversation()
   }, 180_000)
@@ -201,27 +209,48 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       phase: 'mail-dispatch', incomingId: 4003 },
     { title: 'withholds a mail-derived reply if the connection is revoked before delivery',
       phase: 'mail-release', incomingId: 4002 },
+    ...Array.from({ length: lookupSamples }, (_, sample) => ({
+      title: 'executes a public lookup and sends its answer across three tool rounds without retained history, sample ' + (sample + 1),
+      phase: 'lookup' as const, incomingId: 5001 + sample,
+    })),
+    { title: 'keeps the public lookup tools unavailable to an explicitly allowed conversation-only guest',
+      phase: 'lookup-guest', incomingId: 5200 },
     { title: 'receives the main request within ten seconds and delivers the retained answer', phase: 'ordinary', incomingId: 2000 },
     { title: 'withholds the physical request when the current Telegram input is held after admission', phase: 'headers', incomingId: 2001 },
     { title: 'withholds the answer when the current Telegram input is held after model dispatch', phase: 'response', incomingId: 2002 },
     { title: 'resolves an unquoted numeric question choice through authenticated context discovery', phase: 'choice', incomingId: 2003 },
-    { title: 'withholds the answer after the recorded sender loses workspace membership', phase: 'member', incomingId: 2004 },
+    { title: 'loses workspace membership before the public tool can run or reply', phase: 'member', incomingId: 2004 },
     { title: 'withholds the answer after the audience binding moves to another group', phase: 'audience', incomingId: 2005 },
     { title: 'denies an unlinked sender on an owner-only bot', phase: 'unlinked', incomingId: 2006 },
   ] as const)('$title', async ({ phase, incomingId }) => {
     const { pool, workspaceId, sessionId, channelId, integrationId, config, ownerId, secondId, assistantId,
       linkedAccountStore, integrationStore, stats } = recording
     const isMail = phase === 'mailbox' || phase === 'mail-revoked' || phase === 'mail-release' || phase === 'mail-dispatch'
+    const isLookup = phase === 'lookup' || phase === 'lookup-guest'
+    // Unique target per sample so URL cache hits cannot stand in for tool execution.
+    const lookupUrl = 'https://observatory.example.invalid/admission?receipt=' + incomingId
+    const lookupReply = 'Three tickets cost 37.50 credits. ' + lookupUrl
+    const lookupSteps = [
+      { name: 'webSearch', id: 'fixture-web-search', args: { query: 'North Star Observatory admission ' + incomingId, provider: 'duckduckgo' } },
+      { name: 'urlReader', id: 'fixture-url-reader', args: { url: lookupUrl } },
+      { name: 'calculate', id: 'fixture-calculator', args: { expression: '12.50 * 3' } },
+    ]
+    const lookupEvidence = [lookupUrl, lookupPage, '"result":"37.5"']
+    const analytics = phase === 'lookup' ? new AnalyticsLogger(createDbAnalyticsStore()) : undefined
+    const lookupTools = isLookup || phase === 'member'
+      ? new Map([createWebSearchTool(), createUrlReaderTool(), calculateTool].map(tool => [tool.name, tool]))
+      : new Map()
     if (isMail) {
       mailbox ??= await seedCoveredMailbox(recording)
       await mailbox.refresh()
     }
     const unavailableReply = 'I could not access that mailbox.'
-    const expectedReply = phase === 'mail-revoked' ? unavailableReply : isMail ? mailReply : reply
+    const expectedReply = phase === 'mail-revoked' ? unavailableReply : isMail ? mailReply
+      : phase === 'lookup' ? lookupReply : phase === 'lookup-guest' ? guestReply : reply
     const hold = phase === 'headers' || phase === 'response' || phase === 'member' || phase === 'audience'
-    const telegramSender = phase === 'member' ? otherMember : phase === 'unlinked' ? unlinkedSender : sender
+    const telegramSender = phase === 'member' ? otherMember : phase === 'unlinked' || phase === 'lookup-guest' ? unlinkedSender : sender
     const choice = 'Use our earlier calibration decision'
-    const authored = phase === 'choice' ? '1' : isMail ? mailQuestion : question
+    const authored = phase === 'choice' ? '1' : isMail ? mailQuestion : isLookup ? lookupQuestion : question
     const pendingQuestion = {
       integrationId: channelId, assistantId, userId: ownerId, incoming: {
         userId: String(sender), channelId: conversationId, text: 'Select the next step', isGroupChat: true, timestamp: Date.now(), raw: {},
@@ -233,7 +262,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
     let revokedAtDispatch = false
     let memberRevoked = false
     let configChanged = false
-    async function changeConfig(next: typeof config | (typeof config & { userAccessMode: 'allowlist' })) {
+    async function changeConfig(next: typeof config & { userAccessMode?: 'allowlist', allowedUserIds?: string[] }) {
       const changed = await pool.query('UPDATE channel_integrations SET config=$2 WHERE id=$1', [integrationId, next])
       expect(changed.rowCount).toBe(1)
       configChanged = true
@@ -268,6 +297,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
     app.use(express.json({ limit: '8mb' }))
     const modelCalls: Array<{ body: ModelRequest, elapsedMs: number, sqlCalls?: { top: number, nested: number } }> = []
     const backgroundCalls: number[] = []
+    const lookupNetwork: string[] = []
     app.post('/model/:model', async (req, res) => {
       const body = req.body as ModelRequest
       const elapsedMs = performance.now() - ingress
@@ -293,7 +323,9 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
             ...config,
             deliveryAudienceBindings: config.deliveryAudienceBindings.map(binding => ({ ...binding, channelId: String(chat - 1) })),
           })
-          parts = [{ text: heldAnswer }]
+          parts = phase === 'member'
+            ? [{ functionCall: lookupSteps[0], thoughtSignature: 'fixture-revoked-sender-signature' }]
+            : [{ text: heldAnswer }]
         } else if (isMail) {
           if (modelCalls.length === 1) {
             readsAtFirstRequest = credentialRead?.mock.calls.length
@@ -311,6 +343,19 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
             }
             if (phase === 'mailbox') mailboxMs.push(ingress + elapsedMs - mailCallAt!)
           }
+        } else if (phase === 'lookup') {
+          const step = modelCalls.length - 1
+          const previousResult = body.contents?.at(-1)?.parts
+            .find(part => part.functionResponse?.id === lookupSteps[step - 1]?.id)?.functionResponse?.response.result
+          // Demand evidence from each real tool result before issuing the
+          // next call or composing a successful answer.
+          const admitted = step === 0 || previousResult?.includes(lookupEvidence[step - 1])
+          if (!admitted) parts = [{ text: 'The public lookup did not return the requested evidence.' }]
+          else if (step < lookupSteps.length) {
+            parts = [{ functionCall: lookupSteps[step], thoughtSignature: 'fixture-lookup-signature' }]
+          } else parts = [{ text: lookupReply }]
+        } else if (phase === 'lookup-guest') {
+          parts = [{ text: guestReply }]
         } else if (modelCalls.length === 1 && JSON.stringify(body.tools ?? []).includes('requestConversationContext')) {
           parts = [{ functionCall: { name: 'requestConversationContext', args: {}, id: 'fixture-context' }, thoughtSignature: 'fixture-context-signature' }]
         } else {
@@ -352,8 +397,8 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
     app.use('/webhook/telegram', telegramByoRoutes({
       provider, configuredProviders: new Set(['gemini']),
       decisionRuntime: createDecisionRuntime({ llmProvider: provider, defaultLlmModel: standardGemini.alias }),
-      systemPrompt: 'Answer the speaker using admitted evidence.', tools: new Map(), memoryStore: createDbMemoryStore(),
-      capabilityStore: createDbCapabilityStore(), integrationStore, linkedAccountStore,
+      systemPrompt: 'Answer the speaker using admitted evidence.', tools: lookupTools, memoryStore: createDbMemoryStore(),
+      capabilityStore: createDbCapabilityStore(), integrationStore, linkedAccountStore, analytics,
       channelUserStore: createDbChannelUserStore(), apiUrl: origin, ...(isMail ? mailbox?.stores : {}),
     }))
     const delivered: string[] = []
@@ -363,6 +408,18 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
     const stub = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = new URL(input instanceof Request ? input.url : String(input))
       if (url.origin === origin) return network(input, init)
+      if (url.origin === 'https://html.duckduckgo.com' && url.pathname === '/html/') {
+        lookupNetwork.push('webSearch')
+        expect(url.searchParams.get('q')).toBe(lookupSteps[0].args.query)
+        return new Response(`<div class="result__body"><a class="result__a" href="${lookupUrl}">North Star Observatory admission</a></div>`)
+      }
+      if (url.href === lookupUrl) {
+        lookupNetwork.push('urlReader')
+        return new Response(`<html><head><title>North Star Observatory admission</title></head><body><article>
+          <h1>North Star Observatory admission</h1><p>${lookupPage} Tickets include the telescope demonstration and guided visit.
+          Admission is open to the public every Saturday, with the last visitor group entering one hour before closing.</p>
+          </article></body></html>`, { headers: { 'Content-Type': 'text/html' } })
+      }
       if (url.origin !== 'https://api.telegram.org' || !url.pathname.startsWith('/bot' + token + '/')) throw new Error('Unexpected benchmark network destination')
       if (url.pathname.endsWith('/sendMessage')) {
         const body = JSON.parse(String(init?.body))
@@ -376,12 +433,13 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       }
       return Response.json({ ok: true, result: true })
     })
-    const historyRead = isMail ? vi.spyOn(conversationStore, 'readAdmittedSessionQuery') : undefined
-    const recordRead = isMail ? vi.spyOn(conversationAdmission, 'tryReadTurnConversationRecord') : undefined
+    const historyRead = isMail || phase === 'lookup' ? vi.spyOn(conversationStore, 'readAdmittedSessionQuery') : undefined
+    const recordRead = isMail || phase === 'lookup' ? vi.spyOn(conversationAdmission, 'tryReadTurnConversationRecord') : undefined
     const linkRead = vi.spyOn(linkedAccountStore, 'findByProvider')
     configureTelegramTextDeliveryObserver(recordDeliveredTelegramMessage)
     try {
       if (phase === 'unlinked') await changeConfig({ ...config, userAccessMode: 'allowlist' })
+      if (phase === 'lookup-guest') await changeConfig({ ...config, userAccessMode: 'allowlist', allowedUserIds: [String(unlinkedSender)] })
       const result = await network(origin + '/webhook/telegram/' + channelId, {
         method: 'POST', headers: {
           'content-type': 'application/json',
@@ -407,6 +465,15 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
         expect(delivered).toHaveLength(0)
         return
       }
+      if (phase === 'lookup-guest') {
+        await vi.waitFor(() => expect(delivered).toContain(guestReply), { interval: 100, timeout: 15_000 })
+        expect(await linkRead.mock.results[0].value).toBeNull()
+        expect(modelCalls).toHaveLength(1)
+        for (const { name } of lookupSteps) expect(JSON.stringify(modelCalls[0].body.tools ?? [])).not.toContain(name)
+        expect(JSON.stringify(modelCalls[0].body.contents)).not.toContain(historicalAnswer)
+        expect(lookupNetwork).toEqual([])
+        return
+      }
       if (phase === 'mail-release' || phase === 'mail-dispatch') {
         await vi.waitFor(async () => {
           if (phase === 'mail-dispatch') expect(revokedAtDispatch).toBe(true)
@@ -429,6 +496,10 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
         }, { interval: 100, timeout: 15_000 })
         expect(modelCalls).toHaveLength(phase === 'headers' ? 0 : 1)
         expect(backgroundCalls).toHaveLength(0)
+        if (phase === 'member') {
+          expect(JSON.stringify(modelCalls[0].body.tools)).toContain('webSearch')
+          expect(lookupNetwork).toEqual([])
+        }
         expect(JSON.stringify(delivered)).not.toContain(heldAnswer)
         const leaked = await pool.query("SELECT id FROM session_messages WHERE session_id=$1 AND role='assistant' AND content::text LIKE $2", [sessionId, '%' + heldAnswer + '%'])
         expect(leaked.rows).toHaveLength(0)
@@ -442,10 +513,10 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
         expect(row.status).toBe('idle')
         expect(row.added).toBeGreaterThanOrEqual(2)
       }, { interval: 250, timeout: 180_000 })
-      expect(modelCalls).toHaveLength(2)
+      expect(modelCalls).toHaveLength(phase === 'lookup' ? lookupSteps.length + 1 : 2)
       expect(deliveredMs, JSON.stringify({ delivered, toolResponse: modelCalls[1].body.contents?.at(-1)?.parts })).toBeDefined()
       console.info('[Telegram first dispatch]', JSON.stringify({
-        stats, mainMs: modelCalls.map(row => Math.round(row.elapsedMs)),
+        phase, incomingId, stats, mainMs: modelCalls.map(row => Math.round(row.elapsedMs)),
         betweenMainMs: Math.round(modelCalls[1].elapsedMs - modelCalls[0].elapsedMs),
         sqlCallsSinceBaseline: before ? modelCalls.map(row => row.sqlCalls) : undefined,
         deliveredMs: Math.round(deliveredMs!),
@@ -454,6 +525,34 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       expect(modelCalls[0].elapsedMs).toBeLessThan(10_000)
       expect(backgroundCalls.every(time => time > modelCalls[0].elapsedMs)).toBe(true)
       expect(JSON.stringify(modelCalls[0].body.contents)).toContain(phase === 'choice' ? choice : authored)
+      expect(JSON.stringify(modelCalls)).not.toContain(privateMarker)
+      expect(delivered).toContain(expectedReply)
+      expect(replyReceiptId).toBeDefined()
+      const stored = await pool.query("SELECT content FROM session_messages WHERE session_id=$1 AND channel_message_id=$2 AND role='assistant'", [sessionId, replyReceiptId])
+      expect(stored.rows).toEqual([{ content: [{ type: 'text', text: expectedReply }] }])
+      if (phase === 'lookup') {
+        expect(deliveredMs).toBeLessThan(60_000)
+        expect(historyRead).not.toHaveBeenCalled()
+        expect(recordRead).not.toHaveBeenCalled()
+        expect(lookupNetwork).toEqual(['webSearch', 'urlReader'])
+        expect(JSON.stringify(modelCalls)).not.toContain(historicalAnswer)
+        await analytics!.flush()
+        const { rows: [completion] } = await pool.query<{ metadata: {
+          context_discovery_count?: number, channel_reply_receipt_at_ms?: number
+        } }>("SELECT metadata FROM analytics_events WHERE session_id=$1 AND event_name='turn_completed' ORDER BY created_at DESC LIMIT 1", [sessionId])
+        expect(completion.metadata.context_discovery_count ?? 0).toBe(0)
+        expect(completion.metadata.channel_reply_receipt_at_ms).toBeGreaterThan(0)
+        for (const [index, { name, id }] of lookupSteps.entries()) {
+          expect(JSON.stringify(modelCalls[index].body.tools)).toContain(name)
+          expect(modelCalls[index + 1].body.contents?.at(-2)).toMatchObject({
+            role: 'model', parts: expect.arrayContaining([expect.objectContaining({ functionCall: expect.objectContaining({ name, id }) })]),
+          })
+          expect(modelCalls[index + 1].body.contents?.at(-1)).toMatchObject({
+            role: 'user', parts: expect.arrayContaining([expect.objectContaining({ functionResponse: expect.objectContaining({ name, id }) })]),
+          })
+        }
+        return
+      }
       if (phase === 'choice') {
         expect(channelQuestions.has(pendingQuestion)).toBe(false)
         expect(JSON.stringify(modelCalls[0].body.systemInstruction)).toContain('Request conversation context to resolve it')
@@ -484,14 +583,10 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
           expect.objectContaining({ functionResponse: expect.objectContaining(call) }),
         ])
       })
-      expect(JSON.stringify(modelCalls)).not.toContain(privateMarker)
-      expect(delivered).toContain(expectedReply)
-      expect(replyReceiptId).toBeDefined()
-      const stored = await pool.query("SELECT content FROM session_messages WHERE session_id=$1 AND channel_message_id=$2 AND role='assistant'", [sessionId, replyReceiptId])
-      expect(stored.rows).toEqual([{ content: [{ type: 'text', text: expectedReply }] }])
     } finally {
       if (phase === 'choice') channelQuestions.invalidate(channelId, pendingQuestion.incoming)
       configureTelegramTextDeliveryObserver()
+      await analytics?.shutdown()
       if (phase === 'mail-revoked' || phase === 'mail-release' || phase === 'mail-dispatch') await pool.query('UPDATE connector_instance SET connected=true WHERE id=$1', [mailbox!.id])
       credentialRead?.mockRestore()
       recordRead?.mockRestore()

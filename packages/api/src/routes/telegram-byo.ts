@@ -2306,26 +2306,28 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     void statusUpdates.then(discardStatus)
   }
 
-  async function updateToolStatus(): Promise<void> {
+  async function updateToolStatus(dispatch: (write: () => Promise<void>) => Promise<void>): Promise<void> {
     await queueStatus(async () => {
-      const now = Date.now()
-      if (now - lastStatusUpdate < STATUS_THROTTLE_MS) return
-      lastStatusUpdate = now
+      if (Date.now() - lastStatusUpdate < STATUS_THROTTLE_MS) return
       const latest = toolTimeline.at(-1)
       const response = {
         ephemeral: true,
         text: latest ? `${latest.done ? '✓' : '⏳'} ${humanizeToolName(latest.name)}` : 'Thinking...',
         collapsibleDetails: latest ? `Watch more\n${formatToolTimeline()}` : undefined,
       }
-      try {
-        if (statusMessageId) {
-          await adapter.editMessage(incoming.channelId, statusMessageId, response)
-        } else {
-          statusMessageId = await adapter.sendMessage(incoming.channelId, response)
+      await dispatch(async () => {
+        if (statusClosed) return
+        lastStatusUpdate = Date.now()
+        try {
+          if (statusMessageId) {
+            await adapter.editMessage(incoming.channelId, statusMessageId, response)
+          } else {
+            statusMessageId = await adapter.sendMessage(incoming.channelId, response)
+          }
+        } catch {
+          // Edit/send failed — non-critical
         }
-      } catch {
-        // Edit/send failed — non-critical
-      }
+      })
     })
   }
 
@@ -2436,26 +2438,23 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
         })
       },
       onCleanup: cleanupStatus,
-      async onToolStart(id, name) {
-        toolTimeline.push({ id, name, done: false })
-        await updateToolStatus()
-      },
-      async onToolInput(id, name, input) {
-        const desc = describeToolInput(name, input)
-        if (desc) {
-          const entry = toolTimeline.find((t) => t.id === id)
+      async onToolProgress(event, dispatch) {
+        if (event.type === 'tool_start') {
+          toolTimeline.push({ id: event.id, name: event.name, done: false })
+        } else if (event.type === 'tool_input') {
+          const desc = describeToolInput(event.name, event.input)
+          if (!desc) return
+          const entry = toolTimeline.find((t) => t.id === event.id)
           if (entry) entry.description = desc
-          await updateToolStatus()
-        }
-      },
-      async onToolResult(results) {
-        for (const block of results) {
-          if (block.type === 'tool_result') {
-            const entry = toolTimeline.find((t) => t.id === (block as ContentBlock & { toolUseId?: string }).toolUseId)
-            if (entry) entry.done = true
+        } else {
+          for (const block of event.results) {
+            if (block.type === 'tool_result') {
+              const entry = toolTimeline.find((t) => t.id === block.toolUseId)
+              if (entry) entry.done = true
+            }
           }
         }
-        await updateToolStatus()
+        await updateToolStatus(dispatch)
       },
       async onGoalAccepted(message) {
         await adapter.sendMessage(incoming.channelId, { text: message })

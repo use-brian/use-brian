@@ -247,6 +247,8 @@ const pipelineCalls: Array<{
 let pipelineError: Error | undefined
 let pipelineHookRun: ((hooks: ChannelHooks) => Promise<void>) | undefined
 let deliverChannelResponse: typeof import('../channel-pipeline.js')['deliverChannelResponse']
+type ProgressDispatch = Parameters<NonNullable<ChannelHooks['onToolProgress']>>[1]
+const dispatchProgress: ProgressDispatch = write => write()
 
 beforeAll(async () => {
   // Load before any webhook starts: importing inside the fire-and-forget
@@ -314,7 +316,7 @@ vi.mock('../channel-pipeline.js', () => ({
     if (pipelineHookRun) {
       await pipelineHookRun(params.hooks)
     } else if (pipelineConfirmation) {
-      await params.hooks.onToolStart?.(pipelineConfirmation.toolCallId, pipelineConfirmation.toolName)
+      await params.hooks.onToolProgress?.({ type: 'tool_start', id: pipelineConfirmation.toolCallId, name: pipelineConfirmation.toolName }, dispatchProgress)
       pipelineConfirmationDispose = channelConfirmations.register(params.interactionScope!, pipelineConfirmation, pipelineResolver as unknown as ConfirmationResolver)
       await params.hooks.onConfirmationRequired?.(pipelineConfirmation, pipelineResolver as unknown as ConfirmationResolver)
     } else if (pipelineError) {
@@ -647,7 +649,7 @@ describe('[COMP:api/telegram-byo-route] safe error delivery', () => {
         } finally { await hooks.onCleanup?.() }
         await hooks.onCleanup?.()
         await hooks.onStatus?.('Late search')
-        await hooks.onToolStart?.('late-tool', 'mcp_search')
+        await hooks.onToolProgress?.({ type: 'tool_start', id: 'late-tool', name: 'mcp_search' }, dispatchProgress)
         finished = true
       }
       await startSyntheticTurn()
@@ -662,6 +664,61 @@ describe('[COMP:api/telegram-byo-route] safe error delivery', () => {
     },
   )
 
+  it('admits only actual tool card writes and refuses a revoked edit', async () => {
+    let finished = false
+    const dispatch = vi.fn<ProgressDispatch>(dispatchProgress)
+    const refusal = new AuthorityChangedError(false)
+    pipelineHookRun = async hooks => {
+      let now = Date.now()
+      const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
+      try {
+        await hooks.onStatus?.('Searching tools')
+        await hooks.onToolProgress!({ type: 'tool_start', id: 'search', name: 'webSearch' }, dispatch)
+        await hooks.onToolProgress!({ type: 'tool_input', id: 'search', name: 'webSearch', input: { query: 'fictional observatory' } }, dispatch)
+        now += 1600
+        await hooks.onToolProgress!({ type: 'tool_input', id: 'search', name: 'mcp_search', input: {} }, dispatch)
+        expect(dispatch).toHaveBeenCalledOnce()
+        expect(adapterEditCalls).toHaveLength(1)
+
+        dispatch.mockRejectedValueOnce(refusal)
+        await expect(hooks.onToolProgress!({ type: 'tool_input', id: 'search', name: 'webSearch', input: { query: 'private observation' } }, dispatch)).rejects.toBe(refusal)
+        expect(dispatch).toHaveBeenCalledTimes(2)
+        expect(adapterEditCalls).toHaveLength(1)
+        await hooks.sendError(refusal)
+      } finally {
+        clock.mockRestore()
+        await hooks.onCleanup?.()
+        finished = true
+      }
+    }
+    await startSyntheticTurn()
+    await vi.waitFor(() => expect(finished).toBe(true))
+    expect(adapterEditCalls[0]?.[2]).toMatchObject({ ephemeral: true, collapsibleDetails: expect.stringContaining('Watch more') })
+    expect(adapterDeleteCalls).toEqual([['42', 'status_stub']])
+    expect(adapterSendCalls.map(call => call.text)).toEqual([channelUserErrorText(refusal)])
+    expect(JSON.stringify(adapterEditCalls)).not.toContain('private observation')
+  })
+
+  it('does not write a tool card when Stop closes its queue during admission', async () => {
+    let finished = false
+    let release!: () => void
+    const admission = new Promise<void>(resolve => { release = resolve })
+    const dispatch = vi.fn<ProgressDispatch>(async write => { await admission; await write() })
+    pipelineHookRun = async hooks => {
+      const progress = hooks.onToolProgress!({ type: 'tool_start', id: 'search', name: 'webSearch' }, dispatch)
+      await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce())
+      await hooks.sendResponse('Stopped.')
+      release()
+      await progress
+      await hooks.onCleanup?.()
+      finished = true
+    }
+    await startSyntheticTurn()
+    await vi.waitFor(() => expect(finished).toBe(true))
+    expect(adapterSendCalls.map(call => call.text)).toEqual(['Stopped.'])
+    expect(adapterEditCalls).toHaveLength(0)
+  })
+
   it('deletes an in-flight card after it gets its id without recreating it from queued status', async () => {
     let resolveStatus!: (id: string) => void
     adapterStatusPending = new Promise(resolve => { resolveStatus = resolve })
@@ -669,7 +726,7 @@ describe('[COMP:api/telegram-byo-route] safe error delivery', () => {
     pipelineHookRun = async hooks => {
       const sending = hooks.onStatus?.('Searching tools')
       await vi.waitFor(() => expect(adapterStatusCalls).toBe(1))
-      const queued = hooks.onToolStart?.('queued-tool', 'mcp_search')
+      const queued = hooks.onToolProgress?.({ type: 'tool_start', id: 'queued-tool', name: 'mcp_search' }, dispatchProgress)
       const cleaning = hooks.onCleanup?.()
       resolveStatus('owned-progress')
       await Promise.all([sending, queued, cleaning])
@@ -697,7 +754,7 @@ describe('[COMP:api/telegram-byo-route] safe error delivery', () => {
       else await hooks.sendError(new AuthorityChangedError(true))
       await hooks.onCleanup?.()
       await hooks.onStatus?.('Late status')
-      await hooks.onToolStart?.('late-tool', 'mcp_search')
+      await hooks.onToolProgress?.({ type: 'tool_start', id: 'late-tool', name: 'mcp_search' }, dispatchProgress)
       finished = true
     }
     await startSyntheticTurn()

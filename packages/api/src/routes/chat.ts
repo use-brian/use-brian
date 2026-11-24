@@ -7339,7 +7339,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         const preparedRun = await ownedTurn.prepareRun({
           systemPrompt: initialPrompt,
           messages: [initialMessage],
-          candidateTools: new Map(),
+          candidateTools: !programmatic && !hasExplicitTarget && !reuseGroupInput && !researchMode && classifySession(session).surface === 'chat'
+            ? options.tools : new Map(),
           trustedContributions: initialContributions,
           initialMailboxCapabilities: !programmatic && options.connectorStore && options.mcpSettingsStore
             ? async () => createConnectorCapabilityRequest(await resolveConnectorUserId(), new Map())

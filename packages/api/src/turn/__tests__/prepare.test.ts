@@ -182,6 +182,42 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
     expect(brief).not.toHaveBeenCalled()
   })
 
+  it.each(['web', 'channel'] as const)('uses admitted current-turn tools on %s before history is needed', async lane => {
+    const scripted = capturingProvider(['webSearch', 'urlReader', 'calculate'], undefined, 'end_turn')
+    const f = await fixture({ lane, provider: scripted.provider })
+    const message: Message = { role: 'user', content: 'Use current public figures to calculate the difference.' }
+    const discover = vi.fn(async () => { throw new Error('Unexpected history load') })
+    const candidates = [readTool('webSearch', 'public search'), readTool('urlReader', 'public page'),
+      readTool('calculate', 'calculation'), readTool('privateWorkspaceRead'), writeTool()]
+    await f.owner.prepareRun({ systemPrompt: 'Initial', messages: [message],
+      candidateTools: new Map(candidates.map(tool => [tool.name, tool])), contextDiscovery: discover })
+    await expect(f.owner.run({ loop: { ...owned(f.context), maxTurns: 4 }, sink: { kind: 'adapter' } }))
+      .resolves.toMatchObject({ finalText: 'Fictional prepared answer.' })
+    expect(discover).not.toHaveBeenCalled()
+    expect(scripted.captured).toHaveLength(1)
+    const [session] = scripted.captured
+    expect(toolNames(session)).toEqual(['requestConversationContext', 'webSearch', 'urlReader', 'calculate'])
+    expect(session.sends[0]).toEqual([message])
+    expect(session.sends.slice(1)).toMatchObject(['webSearch', 'urlReader', 'calculate'].map((name, index) => [
+      { role: 'user', content: [{ type: 'tool_result', name,
+        toolUseId: index ? `fixture-call-${index}` : 'fixture-call' }] },
+    ]))
+  })
+
+  it('exposes only visible current-turn reads without additional grants or approval', async () => {
+    const f = await fixture()
+    const discover = vi.fn(async () => { throw new Error('Unexpected history load') })
+    await f.owner.prepareRun({ systemPrompt: 'Initial', messages: [{ role: 'user', content: 'Answer from this request.' }],
+      candidateTools: new Map([
+        ['webSearch', { ...readTool('webSearch'), requiresCapability: 'fixture-grant' }],
+        ['urlReader', { ...readTool('urlReader'), hiddenFromModel: true }],
+        ['calculate', { ...readTool('calculate'), resolveConfirmation: async () => true }],
+      ]), contextDiscovery: discover })
+    await f.owner.run({ loop: owned(f.context), sink: { kind: 'adapter' } })
+    expect(toolNames(f.captured[0])).toEqual(['requestConversationContext'])
+    expect(discover).not.toHaveBeenCalled()
+  })
+
   it.each(['tool_use', 'end_turn'] as const)('continues a completed discovery call with its receipt, model settings and scoped history after %s', async stopReason => {
     const scripted = capturingProvider('tool', 'requestConversationContext', stopReason)
     const f = await fixture({ provider: scripted.provider, custom: true })

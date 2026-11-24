@@ -75,7 +75,7 @@ import { randomUUID } from 'node:crypto'
 import { currentTurnFrame, readTurnSqlLedger, turnSqlRecordingEnabled, withTurnFrame, type TurnSqlLedger } from '../db/turn-sql-accounting.js'
 import type { SessionMessage } from '../db/sessions.js'
 import { writeTurnPublication, type TurnPublicationRequest } from './publication.js'
-import { captureCapabilityComposition, captureInitialMailboxTools, type TurnCapabilityProfile, type TurnCapabilityRequest, type TurnCapabilityResult } from './capabilities.js'
+import { captureCapabilityComposition, captureInitialMailboxTools, initialCurrentTurnTools, type TurnCapabilityProfile, type TurnCapabilityRequest, type TurnCapabilityResult } from './capabilities.js'
 import { captureTurnHistory, type CapturedTurnHistory, type TurnHistoryRequest } from './history.js'
 import { assertInitialMailboxEvidenceCurrent, closeInitialMailboxEvidence } from './mailbox-read-authority.js'
 import { resumePredecessorSlotWait, type ResumeSlotWaitOptions } from './resume-recovery.js'
@@ -435,7 +435,7 @@ class AssistantTurnOwner {
         throw new Error('The initial context-discovery frame requires one current user message.')
       }
       const lane = preparation.lane
-      if ((lane !== 'web' && lane !== 'channel' && lane !== 'public') || input.candidateTools.size) {
+      if (lane !== 'web' && lane !== 'channel' && lane !== 'public') {
         throw new Error('Context discovery requires an attended turn with an owner-managed tool roster.')
       }
       let ready: DiscoveredQueryContext | undefined
@@ -459,7 +459,7 @@ class AssistantTurnOwner {
       }
       const discoveryTool: Tool = {
         name: CONVERSATION_CONTEXT_TOOL,
-        description: 'Load the permitted conversation history, referenced material, and additional tools. Use for follow-ups, earlier work, and actions that cannot be completed with the current input and tools.',
+        description: 'Load permitted conversation history, referenced material, and additional tools. Use when the current request depends on earlier work or needs a tool that is not already available.',
         inputSchema: z.object({}).strict(), isReadOnly: true, isConcurrencySafe: false, requiresConfirmation: false,
         timeoutMs: NO_TOOL_TIMEOUT,
         execute: async (_input, toolContext) => {
@@ -522,10 +522,11 @@ class AssistantTurnOwner {
           return { data: 'The permitted conversation context and available tools are ready.' }
         },
       }
-      const tools = [discoveryTool, ...(mailbox ? captureInitialMailboxTools(lane, mailbox, preparation.assertCurrent) : [])]
+      const tools = [discoveryTool, ...initialCurrentTurnTools(input.candidateTools),
+        ...(mailbox ? captureInitialMailboxTools(lane, mailbox, preparation.assertCurrent) : [])]
       initial = { ...input, candidateTools: new Map(tools.map(tool => [tool.name, tool])),
         trustedContributions: [...input.trustedContributions ?? [], { name: 'context_discovery',
-          content: `You have the current user message. Answer directly when it is self-contained. Use an available tool directly when the current message provides enough information for the operation. Call ${CONVERSATION_CONTEXT_TOOL} to resolve earlier references or obtain additional context or tools. Use the resulting evidence to complete the request.` }] }
+          content: `For a self-contained request, answer using the current message and any available tools. You can use tool results in subsequent calls. Call ${CONVERSATION_CONTEXT_TOOL} when the request depends on earlier conversation, referenced material, or a tool that is not already available.` }] }
     }
     const assemble = preparation.captureRun(initial, model, this.retainedPreparationAccumulator, Boolean(discover))
     const prepared = this.frame('preparation', () => Promise.resolve().then(assemble).then((run): PreparedTurnRunView => {

@@ -30,6 +30,7 @@ export type NamedRunContribution = {
 }
 
 export type TurnRunPreparationInput = TurnRunFrame & {
+  /** With discovery, only the current-turn reads eligible on this surface enter the initial roster. */
   contextDiscovery?: (signal: AbortSignal) => Promise<DiscoveredTurnFrame>
   initialMailboxCapabilities?: InitialMailboxCapabilities
 }

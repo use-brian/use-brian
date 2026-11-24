@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('../../db/client.js', () => ({query:mocks.query,queryWithRLS:mocks.query,
   runWithAgentAccess:(_access:unknown,run:()=>unknown)=>run(),currentAgentAccess:()=>undefined}))
 vi.mock('../../db/users.js', () => ({findAssistantById:mocks.assistant,
-  findUserById:async () => ({id:'public-payer',timezone:'UTC'}),findUserByEmail:vi.fn(),findUserByAuthProvider:vi.fn()}))
+  findUserById:async (id:string) => ({id,timezone:'UTC'}),findUserByEmail:vi.fn(),findUserByAuthProvider:vi.fn()}))
 vi.mock('../../db/workspace-store.js', () => ({getWorkspacePlan:async () => 'free',
   getConnectorUserId:async () => 'public-payer',getWorkspaceMembershipSystem:async () => ({role:'member'})}))
 vi.mock('../../billing-party.js', () => ({billingPartyForAssistant:async () => 'public-payer'}))
@@ -35,6 +35,9 @@ vi.mock('../../context-scope/execution-context.js', () => ({resolveExecutionCont
 vi.mock('../../context-scope/delivery-authority.js', async original => ({
   ...await original<typeof import('../../context-scope/delivery-authority.js')>(),createDeliveryAudienceAuthorizer:() => mocks.audience,
 }))
+vi.mock('../../context-scope/attended-audience.js', async original => ({
+  ...await original<typeof import('../../context-scope/attended-audience.js')>(),createAttendedDeliveryAudienceAuthorizer:() => mocks.audience,
+}))
 vi.mock('../route-helpers.js', () => ({checkUsageBudget:async () => ({status:'ok'}),applyMcpInjection:mocks.inject,
   buildUnavailableCapabilitiesPrompt:() => '',injectSkills:vi.fn()}))
 vi.mock('../../model-resolution.js', async original => ({
@@ -56,6 +59,7 @@ import type {LLMProvider} from '@use-brian/agent-runtime/providers/types.js'
 import type {AccessCeiling} from '@use-brian/agent-runtime/security/access-ceiling.js'
 import {createExecutionContext} from '@use-brian/agent-runtime/security/execution-context.js'
 import {buildTool} from '@use-brian/agent-runtime/tools/types.js'
+import {createBaseTools} from '@use-brian/core/tools/base/index.js'
 import {createAuthorityLease} from '../../context-scope/authority-lease.js'
 import {abortLocalTurn} from '../../turn/lease.js'
 import {executePublicTurn,upsertClientMemory,type PublicTurnInput} from '../public-turn.js'
@@ -174,6 +178,15 @@ describe('[COMP:api/public-turn] complete public operation ownership',()=>{
     expect(offeredTools.shift()).toEqual(['requestConversationContext'])
     expect(offeredTools.length).toBeGreaterThan(0)
     for(const names of offeredTools){expect(names).toContain('fixtureEcho');expect(names).not.toContain('fixtureConfirmedWrite')}
+  })
+  it.each([false,true])('offers initial current-turn reads according to internal member attribution (%s)',async internal=>{
+    extraTools=[...createBaseTools({}).values()]
+    const run=start(internal ? {contextScope:'internal-member',internalActor:{email:null,defaultUserId:session.userId}} : {})
+    await run.promise
+    expect(run.res.body).toMatchObject({reply:'Fictional public answer'})
+    expect(offeredTools).toEqual([internal ? ['requestConversationContext','webSearch','urlReader','calculate'] : ['requestConversationContext']])
+    expect(mocks.capabilities).not.toHaveBeenCalled()
+    expect(mocks.history).not.toHaveBeenCalled()
   })
   it('holds the original owner across preparation, actual tools/provider, publication and awaited billing',async()=>{
     const gate=deferred<null>();mocks.custom.mockImplementationOnce(()=>gate.promise)

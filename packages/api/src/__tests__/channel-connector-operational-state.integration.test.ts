@@ -170,6 +170,10 @@ describe.sequential('[COMP:api/channel-recording] connector operational progress
   expect(linked!.userId).toBe(owner)
   const senderLinkedIdentity=await channelLinkBindsHere(linked,assistant,owner,workspace);expect(senderLinkedIdentity).toBe(true)
   const publishSessionEvent=vi.fn(),onCleanup=vi.fn(async()=>{}),onToolStart=vi.fn(async(_id:string,_name:string)=>{})
+  const onToolProgress:NonNullable<ChannelPipelineParams['hooks']['onToolProgress']>=async(event,dispatch)=>{
+   if(event.type!=='tool_start')return
+   await dispatch(()=>onToolStart(event.id,event.name))
+  }
   pending=processChannelMessage({recording,admittedAnswerContext:{kind:'continue'},assistant:selected!,userId:owner,ownerId:owner,
    isIdentified:true,senderLinkedIdentity,externalGuest:false,channelType:'telegram',channelId:conversation,isGroupChat:true,
    channelIntegrationId:integration,channelIntegrationStore:integrationStore,incomingChannelMessageId:id,messageText,credentialCurrent,
@@ -179,7 +183,7 @@ describe.sequential('[COMP:api/channel-recording] connector operational progress
    tools:new Map(createChatArchiveTools({client:archive}).map(tool=>[tool.name,tool])),memoryStore:createDbMemoryStore(),capabilityStore,
    connectorStore,mcpSettingsStore:settings,assistantConnectorStore:assistantConnectors,connectorInstanceStore:instances,connectorGrantStore:grants,
    publishSessionEvent,hooks:{onCleanup,onConfirmationRequired:async()=>{throw new Error('Read-only discovery unexpectedly requested confirmation')},
-    ...(hold==='before-progress'?{onToolStart}:{}),
+    ...(hold==='before-progress'?{onToolProgress}:{}),
     sendError:async(error:Error)=>{errors.push(error);notices.push(channelUserErrorText(error));mark('safe-terminal-error')},
     sendResponse:async(text:string)=>{sent.push(text);mark('reply-received');await delivered(`reply-${id}`,text);mark('reply-persisted');return{channelMessageId:`reply-${id}`}}}
   } as unknown as ChannelPipelineParams)
@@ -241,7 +245,7 @@ describe.sequential('[COMP:api/channel-recording] connector operational progress
    expect(await historySnapshot()).toEqual(history);expect(await bindingSnapshot()).toEqual(bindings)
   }finally{observed.mockRestore()}
  },90_000)
- it('withholds adapter tool progress when a retained source is held before the hook',async()=>{
+ it('withholds an adapter-owned tool progress write when a retained source is held',async()=>{
   try{
    const result=await runTurn('held-before-tool-progress',false,undefined,'before-progress')
    expect(result.onToolStart).toHaveBeenCalledWith(expect.any(String),'searchChatHistory')

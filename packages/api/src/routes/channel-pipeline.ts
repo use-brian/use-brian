@@ -2,6 +2,7 @@ import { bindProviderConversationTurn, withProviderConversationEvidence } from '
 import { assertTelegramConversationCurrent } from '../telegram-conversation-context.js'
 import { recordingInputScope, type RecordingAdmission } from '../channel-recording.js'
 import { assembleTurnPublication } from '../turn/publication.js'
+import { createTurnTiming } from './turn-timings.js'
 import { isInputAuthorityError } from '@use-brian/agent-runtime/providers/input-authority.js'
 import { admitCurrentAuthoredInput } from './attended-session-context.js'
 import { routeAttendedTurn } from './attended-turn-routing.js'
@@ -69,6 +70,7 @@ import { buildWorkspaceFilesContext, selectWorkspaceFilesContextRows } from '@us
 import { buildUploadPolicyBlock } from '@use-brian/core/workspace-files/upload-policy-block.js'
 import { calculateCost } from '@use-brian/agent-runtime/billing/cost-tracker.js'
 import { modelToCompactionTier } from '@use-brian/agent-runtime/compaction/compact.js'
+import type { QueryEvent } from '@use-brian/agent-runtime/engine/query-loop.js'
 import {
   matchesDisputedFigure,
   buildDisputeContextNote,
@@ -254,6 +256,9 @@ export function deliverChannelResponse(
  *
  * The pipeline calls both in order; channels opt in to whichever fits.
  */
+type ChannelToolProgress = Extract<QueryEvent, { type: 'tool_start' | 'tool_input' | 'tool_result' }>
+type DispatchChannelToolProgress = (write: () => Promise<void>) => Promise<void>
+
 export type ChannelHooks = {
   /** Called once after admission, before classification and context setup. */
   onProcessingStart?(): Promise<void>
@@ -292,6 +297,9 @@ export type ChannelHooks = {
 
   /** Called on `tool_result`. */
   onToolResult?(results: ContentBlock[]): Promise<void>
+
+  /** Owns the local tool timeline and dispatches each external write through the pipeline. */
+  onToolProgress?(event: ChannelToolProgress, dispatch: DispatchChannelToolProgress): Promise<void>
 
   /** Called once when a confirmed goal has been armed and kicked off. */
   onGoalAccepted?(message: string, goalId: string): Promise<void>
@@ -1194,6 +1202,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
 
 async function processChannelMessageTurn(params: ChannelPipelineParams, channelStopRequested: () => boolean, sqlScope?: TurnSqlScope): Promise<void> {
   const turnStartedAt = new Date()
+  const timing = createTurnTiming()
   const {
     userId, ownerId, assistant, isIdentified,
     channelType, channelId, actorChannelId, actorDisplayName, mediaEpisodeId, isGroupChat,
@@ -1504,7 +1513,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
   const authority = executionContext.security.authority
   const originalIdentity = executionContext.identity
   const originalOwnership = executionContext.ownership
-  const assertDeliveryAudience = async (): Promise<void> => {
+  const assertDeliveryAudience = (): Promise<void> => timing.time('audience_check', async () => {
     if (params.conversationContext) await assertTelegramConversationCurrent(params.conversationContext)
     // The native authorizer owns the same original lease at entry and return.
     if (!nativeTranscriptAuthority) await authority.assertCurrent()
@@ -1528,7 +1537,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     if (recordEnvelope && !channelEvidenceFitsEnvelope(recordEnvelope,scopeAccumulator.evidence)) {
       throw new DeliveryAudienceUnverifiedError(undefined,'source_reclassified')
     }
-  }
+  })
   /**
    * Every pre-generation audience check refuses the same way: one analytics
    * row and a reply to the person waiting. A refusal that escapes instead
@@ -2119,6 +2128,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     const channelMessageId = result && typeof result === 'object'
       ? result.channelMessageId
       : undefined
+    if (channelMessageId) timing.observe('channel_reply_receipt')
     if (channelMessageId && lastFlushedAssistantRowId) {
       try {
         await setSessionMessageChannelId(lastFlushedAssistantRowId, channelMessageId)
@@ -2250,7 +2260,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     : undefined
 
   // The owner invokes this only for an actual main-model discovery tool call.
-  const discoverContext = async () => {
+  const discoverContext = () => timing.time('context_discovery', async () => {
     const { backgroundLlmRuntime, backgroundProvider, backgroundLaneModel, backgroundUsageAttribution } = await getBackground()
     // D16: a room is hydrated once from what the provider still shows.
     const roomHistory = !params.recording && room && audienceEnvelope?.allowed
@@ -2977,14 +2987,29 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
         ...chatTierBudget({ model: logicalModel, researchMode: true }),
       } : {}),
     }
-  }
+  })
 
   // ── Query loop ──
   if (abortController.signal.aborted) return
+  const dispatchToolProgress: DispatchChannelToolProgress = async (write) => {
+    await assertDeliveryAudience()
+    abortController.signal.throwIfAborted()
+    return write()
+  }
+  const observeToolProgress = (event: ChannelToolProgress) => {
+    if (hooks.onToolProgress) return hooks.onToolProgress(event, dispatchToolProgress)
+    switch (event.type) {
+      case 'tool_start': return hooks.onToolStart?.(event.id, event.name)
+      case 'tool_input': return hooks.onToolInput?.(event.id, event.name, event.input)
+      case 'tool_result': return hooks.onToolResult?.(event.results)
+    }
+  }
   try {
     const initialPrompt = buildSplitSystemPrompt({ ...channelPrompt, memoryContext: '' })
     const initialContext = [initialPrompt.privateRuntimeContext, ...channelPolicy]
-    if (questionAnswer !== undefined || replyToMessageId != null || params.realtimeThreadTarget || params.providerVisibleContext) {
+    const hasConversationReference = questionAnswer !== undefined || replyToMessageId != null
+      || params.realtimeThreadTarget || params.providerVisibleContext
+    if (hasConversationReference) {
       initialContext.push('This message has a conversation reference. Request conversation context to resolve it before answering.')
     }
     const currentMessage = bindScopeSources<Message>({ role: 'user', content: userContentBlocks },
@@ -2994,7 +3019,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     await turnOwner.prepareRun({
       systemPrompt: initialPrompt.stablePrompt,
       messages: [currentMessage],
-      candidateTools: new Map(),
+      candidateTools: senderIsWorkspaceMember && !isolatedAudience && !hasConversationReference ? tools : new Map(),
       trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
       userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
       initialMailboxCapabilities: createConnectorCapabilityRequest && isIdentified && !isolatedAudience
@@ -3057,15 +3082,16 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
       },
       sink: { kind: 'adapter', ...(nativeTranscriptAuthority ? { admitOutput: async (_context, eventKind) => {
         // The managed recorder suppresses the live mirror and keeps these
-        // events inside the turn. Progress becomes an outward effect only
-        // when its adapter hook exists. The terminal send checks the audience
-        // again after reading any attachments and before provider I/O.
+        // events inside the turn. A guarded timeline independently admits its
+        // physical writes; other progress hooks use this admission. The final
+        // send checks the audience after attachments and before provider I/O.
         if (params.recording && !params.conversationContext && !researchObserver
           && (eventKind === 'assistant_turn' || eventKind === 'question' || eventKind === 'thinking_delta'
             || eventKind === 'turn_complete' || (eventKind === 'text_delta' && !hooks.onTextDelta)
             || (eventKind === 'status' && !hooks.onStatus)
-            || (eventKind === 'tool_start' && !hooks.onToolStart)
-            || (eventKind === 'tool_input' && !hooks.onToolInput))) {
+            || (eventKind === 'tool_start' && (!hooks.onToolStart || hooks.onToolProgress))
+            || (eventKind === 'tool_input' && (!hooks.onToolInput || hooks.onToolProgress))
+            || (eventKind === 'tool_result' && hooks.onToolProgress))) {
           await authority.assertCurrent()
           return
         }
@@ -3164,12 +3190,12 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
           publishChannelActivity('status', { message: event.message })
           break
         case 'tool_start':
-          await hooks.onToolStart?.(event.id, event.name)
+          await observeToolProgress(event)
           turnStream.onToolStart(event.name)
           publishChannelActivity('tool_start', { id: event.id, name: event.name })
           break
         case 'tool_input':
-          await hooks.onToolInput?.(event.id, event.name, event.input)
+          await observeToolProgress(event)
           publishChannelActivity('tool_input', { id: event.id, name: event.name, input: event.input })
           break
         case 'tool_result':
@@ -3187,7 +3213,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
             userPlan: workspacePlan,
             channelType, pendingUsage,
           })
-          await hooks.onToolResult?.(event.results)
+          await observeToolProgress(event)
           for (const block of event.results) {
             if (block.type === 'tool_result') {
               publishChannelActivity('tool_result', {
@@ -3412,6 +3438,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
               userId, assistantId: assistant.id, sessionId: session.id,
               eventName: 'turn_completed', channelType,
               metadata: {
+                ...timing.snapshot(),
                 model: sanitizeAnalytics(event.response.model),
                 input_tokens: usage.inputTokens,
                 output_tokens: usage.outputTokens,
@@ -3507,6 +3534,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
         metadata: {
           error_type: sanitizeAnalytics((err as Error).name),
           stage: sanitizeAnalytics('live_authority'),
+          ...timing.snapshot(),
           ...Object.fromEntries(Object.entries(deliveryFailureAnalytics(err)).map(([key, value]) => [key, sanitizeAnalytics(value)])),
           ...(isDeliveryAudienceUnverifiedError(err) && err.diagnostic
             ? { denial_diagnostic: sanitizeAnalytics(err.diagnostic) }
@@ -3528,6 +3556,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
         error_type: sanitizeAnalytics((err as Error)?.name ?? 'unknown'),
         error_message: sanitizeAnalytics(((err as Error)?.message ?? '').slice(0, 200)),
         stage: sanitizeAnalytics('query_loop'),
+        ...timing.snapshot(),
       },
     })
 

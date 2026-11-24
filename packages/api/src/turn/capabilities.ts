@@ -27,6 +27,7 @@
  */
 import { routeTurn, type CapabilityDescriptorRef, type TurnRoute, type TurnRoutingInput } from '@use-brian/core/workers/turn-routing.js'
 import type { ConnectorResumeTarget, Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { missingToolCapability } from '@use-brian/agent-runtime/tools/capability-gate.js'
 import { mailboxGetMessageInput, mailboxSearchInput } from '@use-brian/core/tools/base/mailbox.js'
 import { AuthorityChangedError, isAuthorityChangedError } from '../context-scope/authority-lease.js'
 import type { ApplyMcpInjectionParams } from '../routes/route-helpers.js'
@@ -56,6 +57,20 @@ export type TurnCapabilityRequest =
 
 export type TurnCapabilityResult = SurfaceCapabilities
 export type InitialMailboxCapabilities = () => Promise<TurnCapabilityRequest | null>
+
+const CURRENT_TURN_TOOLS = ['webSearch', 'urlReader', 'calculate']
+
+/** Select the already registered reads that need no private context or capability lookup. */
+export function initialCurrentTurnTools(candidates: ReadonlyMap<string, Tool>): Tool[] {
+  const tools: Tool[] = []
+  for (const name of CURRENT_TURN_TOOLS) {
+    const tool = candidates.get(name)
+    if (tool && tool.name === name && tool.isReadOnly && !tool.hiddenFromModel
+      && !tool.deferredSchemaOnly && !missingToolCapability(tool)
+      && !tool.requiresConfirmation && !tool.resolveConfirmation && !tool.resolveToolCall) tools.push(tool)
+  }
+  return tools
+}
 
 const identityEnricher: SurfaceCapabilities['enrichConfirmation'] = async (_toolName, input) => input
 
