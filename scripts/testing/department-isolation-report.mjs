@@ -107,7 +107,8 @@ function evidenceFor(selectors, assertions) {
   })
 }
 
-export function createAcceptanceReport({ metadata, suites, assertions, foundation = false, shard = null, profile = 'full' }) {
+export function createAcceptanceReport({ metadata, suites, assertions, foundation = false, shard = null, profile = 'full', calendarWorkload = 'extended' }) {
+  if (!['compact', 'extended'].includes(calendarWorkload)) throw new Error('Unknown Calendar workload')
   const manifestCoverage = departmentIsolationManifestCoverage()
   suitesForShard(shard, profile)
   const historicalIds = new Set(DEPARTMENT_ISOLATION_SUITES.filter(suite => suite.packageDir === 'apps/api').map(suite => suite.id))
@@ -134,13 +135,15 @@ export function createAcceptanceReport({ metadata, suites, assertions, foundatio
       const result = suites.find(result => result.id === suite.id)
       const actual = assertions.filter(assertion => assertion.suiteId === suite.id)
       return result && !result.executionError && actual.length > 0
+        && (suite.id !== 'recovered-calendar-history'
+          || actual.every(assertion => assertion.fullName.includes('recovered Telegram Calendar continuation (compact)') === (calendarWorkload === 'compact')))
         && isDeepStrictEqual(result.testFiles, [...suite.testFiles])
         && actual.every(assertion => suite.testFiles.includes(assertion.testFile))
         && suite.testFiles.every(file => actual.some(assertion => assertion.testFile === file))
     })
   return {
     ...metadata,
-    formatVersion: 3, profile, mode: foundation ? 'foundation' : shard ? 'shard' : 'full',
+    formatVersion: 3, profile, calendarWorkload, mode: foundation ? 'foundation' : shard ? 'shard' : 'full',
     createdAt: new Date().toISOString(), shard,
     manifestRevision: DEPARTMENT_ISOLATION_MANIFEST_REVISION,
     manifestCoverage: { ...manifestCoverage, caseIds: [...DEPARTMENT_ISOLATION_CASE_IDS],
@@ -154,13 +157,13 @@ export function createAcceptanceReport({ metadata, suites, assertions, foundatio
     profileAccepted: !partial && manifestCoverage.complete && suitesPassed
       && cases.every(entry => entry.passed || (entry.evidence.length === 0 && entry.deferred.length > 0))
       && boundaries.every(entry => entry.passed || (entry.evidence.length === 0 && entry.deferred.length > 0)),
-    fullMatrixAccepted: profile === 'full' && !partial && manifestCoverage.complete && suitesPassed
+    fullMatrixAccepted: profile === 'full' && calendarWorkload === 'extended' && !partial && manifestCoverage.complete && suitesPassed
       && cases.length === DEPARTMENT_ISOLATION_CASE_IDS.length && cases.every(entry => entry.passed)
       && boundaries.length === DEPARTMENT_ISOLATION_BOUNDARIES.length && boundaries.every(entry => entry.passed),
   }
 }
 
-export function mergeAcceptanceReports(reports, expectedMetadata, profile = 'full') {
+export function mergeAcceptanceReports(reports, expectedMetadata, profile = 'full', calendarWorkload = 'extended') {
   if (!reports.length) throw new Error('No acceptance shard reports found')
   const total = reports[0].shard?.total
   parseShard(`1/${total}`)
@@ -170,6 +173,7 @@ export function mergeAcceptanceReports(reports, expectedMetadata, profile = 'ful
     if (report.formatVersion !== 3 || report.profile !== profile || report.mode !== 'shard' || report.fullMatrixAccepted !== false) {
       throw new Error('Expected a partial acceptance shard receipt')
     }
+    if ((report.calendarWorkload ?? 'extended') !== calendarWorkload) throw new Error('Acceptance Calendar workload mismatch')
     const shard = parseShard(`${report.shard?.index}/${report.shard?.total}`)
     if (shard.total !== total || seen.has(shard.index)) throw new Error('Duplicate or inconsistent acceptance shards')
     seen.add(shard.index)
@@ -180,13 +184,13 @@ export function mergeAcceptanceReports(reports, expectedMetadata, profile = 'ful
     if (!report.migration?.ledgerHash || !isDeepStrictEqual(report.migration, reports[0].migration)) {
       throw new Error('Acceptance migration mismatch')
     }
-    const checked = createAcceptanceReport({ metadata: {}, suites: report.suites, assertions: report.assertions, shard, profile })
+    const checked = createAcceptanceReport({ metadata: {}, suites: report.suites, assertions: report.assertions, shard, profile, calendarWorkload })
     if (!checked.suitesPassed) throw new Error(`Acceptance shard ${shard.index} has incomplete or failed execution`)
   }
   const ordered = [...reports].sort((a, b) => a.shard.index - b.shard.index)
   return createAcceptanceReport({
     metadata: { ...expectedMetadata, migration: reports[0].migration, shards: ordered.map(report => report.shard),
       shardTimings: ordered.filter(report => report.timing).map(report => ({ shard: report.shard.index, ...report.timing })) },
-    suites: ordered.flatMap(report => report.suites), assertions: ordered.flatMap(report => report.assertions), profile,
+    suites: ordered.flatMap(report => report.suites), assertions: ordered.flatMap(report => report.assertions), profile, calendarWorkload,
   })
 }

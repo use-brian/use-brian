@@ -16,14 +16,16 @@ import { acceptanceMatrices, acceptanceShards, createAcceptanceReport, fixtureCh
 const metadata = { revision: 'fixture-revision', sourceHashes: { 'fixture.ts': 'hash' }, dirtySourceHashes: {},
   migration: { latest: 'fixture.sql', count: 1, ledgerHash: 'fixture-ledger' } }
 
-function receipts(profile = 'full') {
+function receipts(profile = 'full', calendarWorkload = 'extended') {
   const indexes = acceptanceShards(profile)
   const total = indexes.length
   return indexes.map(index => {
     const shard = parseShard(`${index}/${total}`)
     const suites = suitesForShard(shard, profile).map(suite => ({ id: suite.id, testFiles: [...suite.testFiles], executionError: null }))
     const assertions = suites.flatMap(suite => suite.testFiles.map(testFile => ({
-      suiteId: suite.id, testFile, fullName: 'fixture coverage', status: 'passed', durationMs: 1,
+      suiteId: suite.id, testFile, status: 'passed', durationMs: 1,
+      fullName: suite.id === 'recovered-calendar-history' && calendarWorkload === 'compact'
+        ? 'recovered Telegram Calendar continuation (compact) fixture coverage' : 'fixture coverage',
     })))
     for (const selector of [
       ...DEPARTMENT_ISOLATION_CASES.flatMap(entry => entry.assertions),
@@ -33,7 +35,7 @@ function receipts(profile = 'full') {
         ...selector, fullName: selector.titleIncludes, status: 'passed', durationMs: 1,
       })
     }
-    return createAcceptanceReport({ metadata, suites, assertions, shard, profile })
+    return createAcceptanceReport({ metadata, suites, assertions, shard, profile, calendarWorkload })
   })
 }
 
@@ -143,14 +145,16 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
     const directory = join(root, 'receipts')
     mkdirSync(directory)
     const timing = { platform: 'linux', arch: 'x64', node: 'v22.23.5', fixturePreparationMs: 1000, fixtureChecksMs: 200 }
-    for (const part of receipts('current')) {
+    for (const part of receipts('current', 'compact')) {
       writeFileSync(join(directory, `department-isolation-${part.shard.index}.json`),
         JSON.stringify({ ...part, revision, sourceHashes, dirtySourceHashes: {}, timing }))
     }
     const report = join(root, 'merged.json')
     const args = [cli, '--profile', 'current', '--merge', directory, '--report', report]
+    options.env.GITHUB_EVENT_NAME = 'push'
     execFileSync(process.execPath, args, options)
     const merged = JSON.parse(readFileSync(report, 'utf8'))
+    assert.equal(merged.calendarWorkload, 'compact')
     assert.equal(merged.profileAccepted, true)
     assert.deepEqual(merged.shardTimings, acceptanceShards('current').map(shard => ({ shard, ...timing })))
     rmSync(join(directory, 'department-isolation-1.json'))
@@ -253,6 +257,17 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
     assert.equal(merged.mode, 'full')
     assert.equal(merged.cases.length, 18)
     assert.equal(merged.boundaries.length, DEPARTMENT_ISOLATION_BOUNDARIES.length)
+  })
+
+  it('accepts compact Calendar evidence without certifying or mixing it with extended runs', () => {
+    const parts = receipts('full', 'compact')
+    const merged = mergeAcceptanceReports(parts, metadata, 'full', 'compact')
+    assert.equal(merged.profileAccepted, true)
+    assert.equal(merged.fullMatrixAccepted, false)
+    parts[0].calendarWorkload = 'extended'
+    assert.throws(() => mergeAcceptanceReports(parts, metadata, 'full', 'compact'), /workload mismatch/)
+    for (const part of parts) part.calendarWorkload = 'extended'
+    assert.throws(() => mergeAcceptanceReports(parts, metadata), /incomplete or failed/)
   })
 
   it('accepts current scope explicitly without certifying deferred historical coverage', () => {
