@@ -26,8 +26,9 @@
  * preparation". [COMP:api/turn-kernel]
  */
 import { routeTurn, type CapabilityDescriptorRef, type TurnRoute, type TurnRoutingInput } from '@use-brian/core/workers/turn-routing.js'
-import type { ConnectorResumeTarget, Tool } from '@use-brian/agent-runtime/tools/types.js'
-import { isAuthorityChangedError } from '../context-scope/authority-lease.js'
+import type { ConnectorResumeTarget, Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { mailboxGetMessageInput, mailboxSearchInput } from '@use-brian/core/tools/base/mailbox.js'
+import { AuthorityChangedError, isAuthorityChangedError } from '../context-scope/authority-lease.js'
 import type { ApplyMcpInjectionParams } from '../routes/route-helpers.js'
 import type { SurfaceCapabilities, SurfaceCapabilityOptions } from '../mcp/surface.js'
 import { CONNECTOR_PREPARATION_UNAVAILABLE } from '../mcp/discovery-diagnostics.js'
@@ -54,6 +55,7 @@ export type TurnCapabilityRequest =
   | { profile: 'resume'; composition: { kind: 'resume'; params: ResumeCapabilityParams } }
 
 export type TurnCapabilityResult = SurfaceCapabilities
+export type InitialMailboxCapabilities = () => Promise<TurnCapabilityRequest | null>
 
 const identityEnricher: SurfaceCapabilities['enrichConfirmation'] = async (_toolName, input) => input
 
@@ -140,6 +142,46 @@ export function captureCapabilityComposition(request: TurnCapabilityRequest): {
       }
     },
   }
+}
+
+/** Static schemas let the main model request a read before any connector
+ * lookup. The dispatcher is the ordinary catalog-backed MCP read path. */
+export function captureInitialMailboxTools(profile: 'web' | 'channel' | 'public', requestCapabilities: InitialMailboxCapabilities,
+  assertCurrent: () => Promise<void>): Tool[] {
+  let dispatcher: Promise<Tool | undefined> | undefined
+  const prepare = async (context: ToolContext) => {
+    const request = await requestCapabilities()
+    if (!request) return undefined
+    if (request.profile !== profile) throw new AuthorityChangedError()
+    const { composition } = request
+    const options = composition.kind === 'route-params' ? surfaceOptionsFromRoute(composition.params) : composition.params
+    if (!options) return undefined
+    const scopedActorId = options.contextScope?.access?.userId
+    const identityActorId = options.actorIdentity?.userId
+    if (!context.executionContext || options.executionContext !== context.executionContext
+      || options.scopeAccumulator !== context.scopeAccumulator || options.assistantId !== context.assistantId
+      || (options.assistantTeamId ?? null) !== (context.workspaceId ?? null)
+      || (scopedActorId !== undefined && scopedActorId !== context.userId)
+      || (identityActorId !== undefined && identityActorId !== context.userId)) throw new AuthorityChangedError()
+    return (await import('../mcp/surface.js')).prepareMailboxReadDispatcher(profile, options, assertCurrent)
+  }
+  const schemaTools = [
+    { name: 'imapSearchMessages', inputSchema: mailboxSearchInput.strict(),
+      description: 'Search the primary email account available to this assistant through IMAP. Use for a current email request with clear filters or dates. Pass since for a recent range. Resolve a reference to earlier conversation before using it as a filter. Request conversation context for another mailbox or connector.' },
+    { name: 'imapGetMessage', inputSchema: mailboxGetMessageInput.strict(),
+      description: 'Read the full email in the primary IMAP account by an exact folder:uid returned by imapSearchMessages or given in the current message. Resolve a reference to earlier conversation before using its message id.' },
+  ]
+  return schemaTools.map(({ name, inputSchema, description }): Tool => ({
+    name, inputSchema, description, isReadOnly: true, isConcurrencySafe: false, requiresConfirmation: false,
+    async execute(input, context) {
+      context.abortSignal.throwIfAborted()
+      await assertCurrent()
+      const call = await (dispatcher ??= prepare(context))
+      context.abortSignal.throwIfAborted()
+      if (!call) return { data: 'The primary IMAP mailbox is unavailable for this turn.', isError: true }
+      return call.execute({ server: 'imap', tool: name, args: input }, context)
+    },
+  }))
 }
 
 /**

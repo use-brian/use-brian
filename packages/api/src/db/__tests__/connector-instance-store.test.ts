@@ -13,6 +13,10 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { randomBytes } from 'node:crypto'
+import { PGlite } from '@electric-sql/pglite'
+import express from 'express'
+import request from 'supertest'
+import { createConnectorLifecycleService } from '../../connectors/lifecycle-service.js'
 
 vi.mock('../client.js', () => ({
   query: vi.fn(),
@@ -26,6 +30,7 @@ import {
   type ConnectorInstance,
 } from '../connector-instance-store.js'
 import { query, queryWithRLS } from '../client.js'
+import { createDbConnectorStore } from '../connector-store.js'
 import { decryptCredentials, encryptCredentials } from '../channel-integrations.js'
 
 const mockQuery = vi.mocked(query)
@@ -425,9 +430,66 @@ describe('[COMP:api/connector-instance-store] createConnectorInstanceStore', () 
       await store.setConfig('u_1', 'ci_1', { connectedEmail: 'new@example.com' })
 
       const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
-      expect(sql).toContain("|| $2::jsonb")
+      expect(sql).toContain("COALESCE(config, '{}') ||")
       expect(params[1]).toBe(JSON.stringify({ connectedEmail: 'new@example.com' }))
     })
+  })
+
+  it('keeps mailbox sync state server-owned through actor creation and config patches', async () => {
+    const db = new PGlite()
+    try {
+      await db.exec(`CREATE TABLE connector_instance (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(), scope text, user_id text, workspace_id text,
+        provider text, label text, connected_email text, url text, custom boolean, config jsonb,
+        sensitivity text, connected boolean, ingestion_enabled boolean, ingest_workspace_id text,
+        credentials bytea, credentials_type text, health_status text, last_error text, last_checked_at timestamptz,
+        compartments text[], project_ids uuid[], created_by text, created_at timestamptz, updated_at timestamptz
+      )`)
+      mockQueryWithRLS.mockImplementation(async (_actor, sql, params) => await db.query(sql, params) as never)
+      mockQuery.mockImplementation(async (sql, params) => {
+        const result = await db.query(sql, params)
+        return { ...result, rowCount: result.affectedRows } as never
+      })
+      const instances = createConnectorInstanceStore(key)
+      const incoming = {
+        provider: 'imap',
+        label: 'Fixture inbox',
+        config: { sendAsAliases: ['initial@example.test'], mailboxSync: { searchCoverage: { forged: true } } },
+      }
+      const personal = await instances.createUserInstance({ ...incoming, userId: 'u_1' })
+      const workspace = await instances.createWorkspaceInstance({ ...incoming, workspaceId: 'w_1', createdBy: 'u_1' })
+      for (const mailbox of [personal, workspace]) {
+        expect(mailbox.config).toEqual({ sendAsAliases: ['initial@example.test'] })
+      }
+      const sync = { folders: {}, searchCoverage: { verified: true } }
+      expect(await instances.setMailboxSyncStateSystem(personal.id, sync, null)).toBe(true)
+      const legacyStore = createDbConnectorStore(key)
+      const lifecycle = createConnectorLifecycleService({
+        instanceStore: instances, legacyStore, registry: [], policy: { directoryInstall: 'reuse_primary' },
+      })
+      const config = await lifecycle.configure('u_1', { kind: 'instance', instanceId: personal.id }, {
+        sendAsAliases: ['updated@example.test'], mailboxSync: { archiveResetToken: 'forged' },
+      })
+      expect(config).toEqual({ sendAsAliases: ['updated@example.test'], mailboxSync: sync })
+      const { connectorRoutes } = await import('../../routes/connectors.js')
+      const app = express()
+      app.use(express.json())
+      app.use((req, _res, next) => { req.userId = 'u_1'; next() })
+      app.use('/api/connectors', connectorRoutes({ connectorStore: legacyStore, connectorInstanceStore: instances }))
+      const response = await request(app).patch('/api/connectors/imap/config').send({
+        sendAsAliases: ['primary@example.test'], mailboxSync: { searchCoverage: { forged: true } },
+      }).expect(200)
+      expect(response.body.config).toEqual({ sendAsAliases: ['primary@example.test'], mailboxSync: sync })
+      await instances.setConfig('u_1', personal.id, { sendAsAliases: ['final@example.test'], mailboxSync: null })
+      await instances.setConfig('u_1', personal.id, [] as never)
+      expect((await instances.get('u_1', personal.id))?.config).toEqual({
+        sendAsAliases: ['final@example.test'], mailboxSync: sync,
+      })
+    } finally {
+      mockQuery.mockReset()
+      mockQueryWithRLS.mockReset()
+      await db.close()
+    }
   })
 
   describe('getCredentials / getCredentialsSystem', () => {

@@ -51,6 +51,19 @@ afterEach(() => {
 })
 
 describe('[COMP:api/mailbox-imap-client] Per-turn IMAP session reuse (D12 #1)', () => {
+  it('opens a fresh authenticated session after an instance changes IMAP host', async () => {
+    const first = makeFakeClient()
+    const second = makeFakeClient()
+    const createClient = vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second)
+    const cache = createMailboxSessionCache({ createClient })
+    try {
+      expect(await cache.withClient('inst-1', SETTINGS, async (client) => client)).toBe(first)
+      expect(await cache.withClient('inst-1', { ...SETTINGS, imapHost: 'other.example.invalid' }, async (client) => client)).toBe(second)
+      expect(createClient).toHaveBeenCalledTimes(2)
+    } finally {
+      await cache.closeAll()
+    }
+  })
   it('reuses the authenticated connection across calls under the same key', async () => {
     const clients: Array<ReturnType<typeof makeFakeClient>> = []
     const cache = createMailboxSessionCache({

@@ -15,6 +15,7 @@ import { attachUserVisibleContext, formatUserVisibleContext } from './user-visib
 import { captureHarnessRunPreparation } from '../project-harness/turn-context.js'
 import type { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import { captureBriefRunPreparation } from '../briefs/context.js'
+import type { InitialMailboxCapabilities } from './capabilities.js'
 
 export type PreparedModelSelection = {
   provider: LLMProvider
@@ -30,6 +31,7 @@ export type NamedRunContribution = {
 
 export type TurnRunPreparationInput = TurnRunFrame & {
   contextDiscovery?: (signal: AbortSignal) => Promise<DiscoveredTurnFrame>
+  initialMailboxCapabilities?: InitialMailboxCapabilities
 }
 
 /** Only orchestration and capability data may change after the initial round.
@@ -293,6 +295,7 @@ export function captureTurnModelPreparation(invocation: TurnModelInvocation, inp
   }
   return {
     tools: bindTools,
+    assertCurrent: current,
     /** Workers execute as their own delegated identity. Capture exactly the
      * caller's request-scoped reader implementations; the worker's ordinary
      * capability, delegated execution and source gates apply at invocation. */

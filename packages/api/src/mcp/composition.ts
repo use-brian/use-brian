@@ -111,6 +111,7 @@ export type CompositionHandle = {
    * late Calendar activation (`mcp/surface.ts`).
    */
   runActivation<T>(plan: CatalogActivationPlan, context: ToolContext, operation: () => Promise<T>): Promise<T>
+  assertActivationCurrent(plan: CatalogActivationPlan): Promise<void>
   /**
    * The winning Google lane's confirmation enricher, inside the turn
    * authority. Identity until a family that supplies one has activated.
@@ -188,6 +189,10 @@ function createComposition(ports: CompositionPorts): CompositionHandle {
       })
       await carrier.execute({}, context)
       return value as T
+    },
+    async assertActivationCurrent(plan) {
+      const { authority } = await open(plan)
+      await authority.assertActivationCurrent()
     },
     async enrichConfirmation(toolName, input) {
       const turn = opened ? await opened.catch(() => undefined) : undefined

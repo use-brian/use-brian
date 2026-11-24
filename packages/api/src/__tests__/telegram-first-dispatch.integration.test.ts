@@ -13,6 +13,14 @@ import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/conte
 import { bindScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { persistentContextFixture } from '../application-platform/__tests__/fixtures/persistent-context.js'
 import { admitTelegramRecording, changeChannelRecording, confirmChannelRecordingOwner, recordDeliveredTelegramMessage } from '../channel-recording.js'
+import { createConnectorInstanceStore } from '../db/connector-instance-store.js'
+import { createDbAssistantConnectorStore } from '../db/assistant-connector-store.js'
+import { createConnectorGrantStore } from '../db/connector-grant-store.js'
+import { createDbConnectorStore } from '../db/connector-store.js'
+import { createDbMcpSettingsStore } from '../db/mcp-settings-store.js'
+import * as conversationAdmission from '../context-scope/conversation-record-admission.js'
+import * as conversationStore from '../db/conversation-store.js'
+import { mailboxSearchAccountKey } from '../mailbox/search-coverage.js'
 import { createDbCapabilityStore } from '../db/capability-store.js'
 import { createDbChannelIntegrationStore, encryptCredentials } from '../db/channel-integrations.js'
 import { createDbChannelUserStore } from '../db/channel-user-store.js'
@@ -40,7 +48,11 @@ const question = 'Which instrument did we agree to use during the final calibrat
 const historicalAnswer = 'the violet spectrometer'
 const reply = 'We agreed to use ' + historicalAnswer + '.'
 const privateMarker = 'PERSONAL_DISPATCH_FIXTURE'
-const rows = 300
+const mailSubject = 'Fictional spectrometer shipment'
+const mailQuestion = 'What emails arrived in the past day?'
+const mailReply = 'Your recent mail includes ' + mailSubject + '.'
+const rows = Number(process.env.BRIAN_TELEGRAM_HISTORY_ROWS ?? 300)
+const mailboxSamples = Number(process.env.BRIAN_TELEGRAM_MAILBOX_SAMPLES ?? 1)
 
 async function seedConversation() {
   await initializeConversationVisibility()
@@ -100,10 +112,49 @@ async function seedConversation() {
     (SELECT count(*)::int FROM session_context_scope_revisions WHERE session_id=$1 AND parent_kind='message_annotation') revisions
     FROM session_messages WHERE session_id=$1`, [sessionId])).rows[0]
   expect(stats.messages).toBe(rows)
-  expect(stats.revisions).toBe(37)
+  expect(stats.revisions).toBe(Math.floor((rows + 1) / 8))
   console.info('[Telegram benchmark history]', stats)
-  return { pool, workspaceId, sessionId, channelId, integrationId, config, ownerId, secondId, assistantId,
+  return { pool, workspaceId, sessionId, channelId, integrationId, config, key, ownerId, secondId, assistantId,
     linkedAccountStore, integrationStore: createDbChannelIntegrationStore(key), stats }
+}
+
+async function seedCoveredMailbox(recording: Awaited<ReturnType<typeof seedConversation>>) {
+  const { workspaceId, ownerId, key, pool } = recording
+  const instances = createConnectorInstanceStore(key)
+  const settings = { email: 'observatory@example.invalid', appPassword: 'fictional-test-password',
+    imapHost: 'imap.example.invalid', imapPort: 993, smtpHost: 'smtp.example.invalid', smtpPort: 465 }
+  const assistantConnectorStore = createDbAssistantConnectorStore()
+  await assistantConnectorStore.setEnabled(recording.assistantId, 'imap', true)
+  const grants = createConnectorGrantStore()
+  const instance = await instances.createUserInstance({ userId: ownerId, createdBy: ownerId, provider: 'imap',
+    label: 'Observatory mail', connectedEmail: settings.email, connected: true,
+    credentials: { type: 'imap', ...settings }, sensitivity: 'internal' })
+  await grants.create({ actingUserId: ownerId, connectorInstanceId: instance.id, targetType: 'workspace',
+    targetId: workspaceId, compartments: [], projectIds: [] })
+  await pool.query(`INSERT INTO email_archive_messages
+    (workspace_id, instance_id, owner_user_id, folder, provider_message_id, from_addr, subject, body_text, sent_at)
+    VALUES ($1,$2,$3,'INBOX','INBOX:1','shipping@example.invalid',$4,'The instrument is in transit.',now())`,
+    [workspaceId, instance.id, ownerId, mailSubject])
+  await pool.query(`INSERT INTO email_archive_messages
+    (workspace_id, instance_id, owner_user_id, folder, provider_message_id, from_addr, subject, body_text, sent_at)
+    SELECT $1,$2,$3,'INBOX','INBOX:' || n,'shipping@example.invalid','Previous shipment','','2020-01-01'
+    FROM generate_series(2,20001) n`, [workspaceId, instance.id, ownerId])
+  await pool.query('ANALYZE email_archive_messages')
+  async function refresh() {
+    const today = new Date()
+    const yesterday = new Date(today.getTime() - 86_400_000)
+    const coverage = {
+      version: 1, ownerUserId: ownerId, accountKey: mailboxSearchAccountKey(settings),
+      archivedAfter: '2000-01-01T00:00:00.000Z', completeRoster: true, listedFolders: ['INBOX'],
+      folders: { INBOX: { uidValidity: '1', verifiedAt: today.toISOString(), futureUids: [],
+        days: { [yesterday.toISOString().slice(0, 10)]: [], [today.toISOString().slice(0, 10)]: [1] } } },
+    }
+    const searchCoverageSeal = instances.mailboxArchiveProofSystem!(instance.id, 'coverage', coverage)
+    await pool.query(`UPDATE connector_instance SET ingestion_enabled=true, ingest_workspace_id=$3, config=$2 WHERE id=$1`,
+      [instance.id, { mailboxSync: { searchCoverage: coverage, searchCoverageSeal } }, workspaceId])
+  }
+  return { id: instance.id, refresh, stores: { assistantConnectorStore, connectorInstanceStore: instances, connectorStore: createDbConnectorStore(key),
+    mcpSettingsStore: createDbMcpSettingsStore(), connectorGrantStore: grants } }
 }
 
 type ModelRequest = {
@@ -121,12 +172,35 @@ type ModelRequest = {
 
 describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api/channel-recording] Telegram first model dispatch', () => {
   let recording: Awaited<ReturnType<typeof seedConversation>>
+  let mailbox: Awaited<ReturnType<typeof seedCoveredMailbox>> | undefined
+  const mailboxMs: number[] = []
   beforeAll(async () => {
+    expect(Number.isSafeInteger(rows) && rows > 0).toBe(true)
+    expect(Number.isSafeInteger(mailboxSamples) && mailboxSamples >= 1 && mailboxSamples <= 100).toBe(true)
     await assertLocalFixture()
     recording = await seedConversation()
   }, 180_000)
-  afterAll(async () => { await getAppPool().end(); await getPool().end() })
+  afterAll(async () => {
+    await getAppPool().end()
+    await getPool().end()
+    if (mailboxMs.length) {
+      const samples = [...mailboxMs].sort((a, b) => a - b)
+      const p95 = samples[Math.ceil(samples.length * 0.95) - 1]
+      console.info('[Telegram indexed mailbox]', { samples: samples.length, historyRows: rows, p95Ms: Math.round(p95) })
+      expect(p95).toBeLessThan(1_000)
+    }
+  })
   it.each([
+    ...Array.from({ length: mailboxSamples }, (_, sample) => ({
+      title: 'answers recent mail without conversation discovery, sample ' + (sample + 1),
+      phase: 'mailbox' as const, incomingId: 3000 + sample,
+    })),
+    { title: 'withholds mailbox contents when the connection is disabled before the first tool call',
+      phase: 'mail-revoked', incomingId: 4001 },
+    { title: 'withholds the mail result from the provider after revocation at the next dispatch',
+      phase: 'mail-dispatch', incomingId: 4003 },
+    { title: 'withholds a mail-derived reply if the connection is revoked before delivery',
+      phase: 'mail-release', incomingId: 4002 },
     { title: 'receives the main request within ten seconds and delivers the retained answer', phase: 'ordinary', incomingId: 2000 },
     { title: 'withholds the physical request when the current Telegram input is held after admission', phase: 'headers', incomingId: 2001 },
     { title: 'withholds the answer when the current Telegram input is held after model dispatch', phase: 'response', incomingId: 2002 },
@@ -137,10 +211,17 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
   ] as const)('$title', async ({ phase, incomingId }) => {
     const { pool, workspaceId, sessionId, channelId, integrationId, config, ownerId, secondId, assistantId,
       linkedAccountStore, integrationStore, stats } = recording
+    const isMail = phase === 'mailbox' || phase === 'mail-revoked' || phase === 'mail-release' || phase === 'mail-dispatch'
+    if (isMail) {
+      mailbox ??= await seedCoveredMailbox(recording)
+      await mailbox.refresh()
+    }
+    const unavailableReply = 'I could not access that mailbox.'
+    const expectedReply = phase === 'mail-revoked' ? unavailableReply : isMail ? mailReply : reply
     const hold = phase === 'headers' || phase === 'response' || phase === 'member' || phase === 'audience'
     const telegramSender = phase === 'member' ? otherMember : phase === 'unlinked' ? unlinkedSender : sender
     const choice = 'Use our earlier calibration decision'
-    const authored = phase === 'choice' ? '1' : question
+    const authored = phase === 'choice' ? '1' : isMail ? mailQuestion : question
     const pendingQuestion = {
       integrationId: channelId, assistantId, userId: ownerId, incoming: {
         userId: String(sender), channelId: conversationId, text: 'Select the next step', isGroupChat: true, timestamp: Date.now(), raw: {},
@@ -149,6 +230,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
     if (phase === 'choice') channelQuestions.create(pendingQuestion, [choice, 'Run a new calibration'])
     const heldAnswer = 'Protected fictional sensor result ' + incomingId
     let heldInputId: string | undefined
+    let revokedAtDispatch = false
     let memberRevoked = false
     let configChanged = false
     async function changeConfig(next: typeof config | (typeof config & { userAccessMode: 'allowlist' })) {
@@ -164,6 +246,9 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
     }
     const app = express()
     let ingress = 0
+    const credentialRead = isMail ? vi.spyOn(mailbox!.stores.connectorInstanceStore, 'getAuthCredentialsSystem') : undefined
+    let readsAtFirstRequest: number | undefined
+    let mailCallAt: number | undefined
     let deliveredMs: number | undefined
     // Collect on the disposable database only. The first request is timed before
     // sampling, and SQL observation is excluded from the statement counts.
@@ -209,6 +294,23 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
             deliveryAudienceBindings: config.deliveryAudienceBindings.map(binding => ({ ...binding, channelId: String(chat - 1) })),
           })
           parts = [{ text: heldAnswer }]
+        } else if (isMail) {
+          if (modelCalls.length === 1) {
+            readsAtFirstRequest = credentialRead?.mock.calls.length
+            parts = [{ functionCall: { name: 'imapSearchMessages', id: 'fixture-search',
+              args: { since: new Date(Date.now() - 86_400_000).toISOString().slice(0, 10) } }, thoughtSignature: 'fixture-mail-signature' }]
+            if (phase === 'mail-revoked') {
+              await pool.query('UPDATE connector_instance SET connected=false WHERE id=$1', [mailbox!.id])
+            }
+            mailCallAt = performance.now()
+          } else {
+            parts = [{ text: JSON.stringify(body.contents).includes(mailSubject) ? mailReply : unavailableReply }]
+            if (phase === 'mail-release') {
+              expect(JSON.stringify(body.contents)).toContain(mailSubject)
+              await pool.query('UPDATE connector_instance SET connected=false WHERE id=$1', [mailbox!.id])
+            }
+            if (phase === 'mailbox') mailboxMs.push(ingress + elapsedMs - mailCallAt!)
+          }
         } else if (modelCalls.length === 1 && JSON.stringify(body.tools ?? []).includes('requestConversationContext')) {
           parts = [{ functionCall: { name: 'requestConversationContext', args: {}, id: 'fixture-context' }, thoughtSignature: 'fixture-context-signature' }]
         } else {
@@ -238,6 +340,10 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
         kind: 'ai-studio',
         endpoint: model => origin + '/model/' + model, headers: async () => {
           // Gemini's actual HTTP retry callback rechecks input authority after credentials resolve.
+          if (phase === 'mail-dispatch' && modelCalls.length === 1 && !revokedAtDispatch) {
+            await pool.query('UPDATE connector_instance SET connected=false WHERE id=$1', [mailbox!.id])
+            revokedAtDispatch = true
+          }
           if (phase === 'headers' && !heldInputId) await holdPersistedInput()
           return { 'Content-Type': 'application/json' }
         }
@@ -248,7 +354,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       decisionRuntime: createDecisionRuntime({ llmProvider: provider, defaultLlmModel: standardGemini.alias }),
       systemPrompt: 'Answer the speaker using admitted evidence.', tools: new Map(), memoryStore: createDbMemoryStore(),
       capabilityStore: createDbCapabilityStore(), integrationStore, linkedAccountStore,
-      channelUserStore: createDbChannelUserStore(), apiUrl: origin,
+      channelUserStore: createDbChannelUserStore(), apiUrl: origin, ...(isMail ? mailbox?.stores : {}),
     }))
     const delivered: string[] = []
     let messageId = incomingId * 10
@@ -262,7 +368,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
         const body = JSON.parse(String(init?.body))
         delivered.push(body.text)
         messageId++
-        if (body.text === reply) {
+        if (body.text === expectedReply) {
           replyReceiptId = String(messageId)
           deliveredMs = performance.now() - ingress
         }
@@ -270,6 +376,8 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       }
       return Response.json({ ok: true, result: true })
     })
+    const historyRead = isMail ? vi.spyOn(conversationStore, 'readAdmittedSessionQuery') : undefined
+    const recordRead = isMail ? vi.spyOn(conversationAdmission, 'tryReadTurnConversationRecord') : undefined
     const linkRead = vi.spyOn(linkedAccountStore, 'findByProvider')
     configureTelegramTextDeliveryObserver(recordDeliveredTelegramMessage)
     try {
@@ -299,6 +407,18 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
         expect(delivered).toHaveLength(0)
         return
       }
+      if (phase === 'mail-release' || phase === 'mail-dispatch') {
+        await vi.waitFor(async () => {
+          if (phase === 'mail-dispatch') expect(revokedAtDispatch).toBe(true)
+          expect(modelCalls).toHaveLength(phase === 'mail-dispatch' ? 1 : 2)
+          const session = await pool.query('SELECT status,turn_lease_token FROM sessions WHERE id=$1', [sessionId])
+          expect(session.rows[0].turn_lease_token).toBeNull()
+          expect(session.rows[0].status).not.toBe('running')
+        }, { interval: 50, timeout: 15_000 })
+        expect(replyReceiptId).toBeUndefined()
+        expect(JSON.stringify(delivered)).not.toContain(mailSubject)
+        return
+      }
       if (hold) {
         await vi.waitFor(async () => {
           if (phase === 'member') expect(memberRevoked).toBe(true)
@@ -315,25 +435,25 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
         return
       }
       await vi.waitFor(async () => {
-        const row = (await pool.query(`SELECT s.status, (SELECT count(*)::int FROM session_messages m WHERE m.session_id=s.id AND m.sequence_num>300) added
-           FROM sessions s WHERE s.id=$1`, [sessionId])).rows[0]
+        const row = (await pool.query(`SELECT s.status, (SELECT count(*)::int FROM session_messages m WHERE m.session_id=s.id AND m.sequence_num>$2) added
+           FROM sessions s WHERE s.id=$1`, [sessionId, rows])).rows[0]
         expect(delivered.length).toBeGreaterThan(0)
         if (row.status === 'failed') throw new Error('Telegram turn failed after ' + modelCalls.length + ' main model requests')
         expect(row.status).toBe('idle')
         expect(row.added).toBeGreaterThanOrEqual(2)
       }, { interval: 250, timeout: 180_000 })
       expect(modelCalls).toHaveLength(2)
-      expect(deliveredMs).toBeDefined()
+      expect(deliveredMs, JSON.stringify({ delivered, toolResponse: modelCalls[1].body.contents?.at(-1)?.parts })).toBeDefined()
       console.info('[Telegram first dispatch]', JSON.stringify({
         stats, mainMs: modelCalls.map(row => Math.round(row.elapsedMs)),
         betweenMainMs: Math.round(modelCalls[1].elapsedMs - modelCalls[0].elapsedMs),
         sqlCallsSinceBaseline: before ? modelCalls.map(row => row.sqlCalls) : undefined,
         deliveredMs: Math.round(deliveredMs!),
-        backgroundMs: backgroundCalls.map(Math.round), delivered: delivered.includes(reply)
+        backgroundMs: backgroundCalls.map(Math.round), delivered: delivered.includes(expectedReply)
       }))
       expect(modelCalls[0].elapsedMs).toBeLessThan(10_000)
       expect(backgroundCalls.every(time => time > modelCalls[0].elapsedMs)).toBe(true)
-      expect(JSON.stringify(modelCalls[0].body.contents)).toContain(phase === 'choice' ? choice : question)
+      expect(JSON.stringify(modelCalls[0].body.contents)).toContain(phase === 'choice' ? choice : authored)
       if (phase === 'choice') {
         expect(channelQuestions.has(pendingQuestion)).toBe(false)
         expect(JSON.stringify(modelCalls[0].body.systemInstruction)).toContain('Request conversation context to resolve it')
@@ -343,8 +463,19 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       expect(JSON.stringify(modelCalls[0].body)).not.toContain(historicalAnswer)
       expect(JSON.stringify(modelCalls[0].body.tools)).toContain('requestConversationContext')
       const continuation = modelCalls[1].body.contents ?? []
-      expect(JSON.stringify(continuation)).toContain(historicalAnswer)
-      const call = { name: 'requestConversationContext', id: 'fixture-context' }
+      if (isMail) {
+        expect(readsAtFirstRequest).toBe(0)
+        if (phase === 'mailbox') expect(credentialRead).toHaveBeenCalledWith(mailbox!.id)
+        expect(historyRead).not.toHaveBeenCalled()
+        expect(recordRead).not.toHaveBeenCalled()
+        expect(JSON.stringify(modelCalls[0].body.tools)).toContain('imapSearchMessages')
+        expect(JSON.stringify(modelCalls[0].body)).not.toContain(mailSubject)
+        expect(JSON.stringify(continuation)).not.toContain(historicalAnswer)
+      }
+      if (phase === 'mail-revoked') expect(JSON.stringify(continuation)).not.toContain(mailSubject)
+      else expect(JSON.stringify(continuation)).toContain(isMail ? mailSubject : historicalAnswer)
+      const call = isMail ? { name: 'imapSearchMessages', id: 'fixture-search' }
+        : { name: 'requestConversationContext', id: 'fixture-context' }
       const callIndex = continuation.findIndex(message => message.role === 'model' && message.parts.some(part => part.functionCall?.id === call.id))
       expect(callIndex).toBeGreaterThanOrEqual(0)
       expect(continuation[callIndex].parts).toContainEqual(expect.objectContaining({ functionCall: expect.objectContaining(call) }))
@@ -354,13 +485,17 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
         ])
       })
       expect(JSON.stringify(modelCalls)).not.toContain(privateMarker)
-      expect(delivered).toContain(reply)
+      expect(delivered).toContain(expectedReply)
       expect(replyReceiptId).toBeDefined()
       const stored = await pool.query("SELECT content FROM session_messages WHERE session_id=$1 AND channel_message_id=$2 AND role='assistant'", [sessionId, replyReceiptId])
-      expect(stored.rows).toEqual([{ content: [{ type: 'text', text: reply }] }])
+      expect(stored.rows).toEqual([{ content: [{ type: 'text', text: expectedReply }] }])
     } finally {
       if (phase === 'choice') channelQuestions.invalidate(channelId, pendingQuestion.incoming)
       configureTelegramTextDeliveryObserver()
+      if (phase === 'mail-revoked' || phase === 'mail-release' || phase === 'mail-dispatch') await pool.query('UPDATE connector_instance SET connected=true WHERE id=$1', [mailbox!.id])
+      credentialRead?.mockRestore()
+      recordRead?.mockRestore()
+      historyRead?.mockRestore()
       linkRead.mockRestore()
       stub.mockRestore()
       await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))

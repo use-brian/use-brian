@@ -54,17 +54,18 @@ describe('[COMP:api/context-scope-entrypoints] execution entry-point parity', ()
 })
 
 describe('[COMP:api/telegram-byo-route] external guest connector scope', () => {
-  it('keeps the assistant-derived scope inside connector injection', async () => {
+  it('keeps the current actor connector scope inside the shared capability request', async () => {
     const content = await source('packages/api/src/routes/channel-pipeline.ts')
-    const connectorStart = content.indexOf('// ── MCP tools')
-    const skillsStart = content.indexOf('// ── Skills', connectorStart)
+    const connectorStart = content.indexOf('const createConnectorCapabilityRequest =')
+    const discoveryStart = content.indexOf('const discoverContext =', connectorStart)
     expect(connectorStart).toBeGreaterThan(-1)
-    expect(skillsStart).toBeGreaterThan(connectorStart)
-    const connectorBlock = content.slice(connectorStart, skillsStart)
-    const outsideConnectorBlock = content.slice(0, connectorStart) + content.slice(skillsStart)
+    expect(discoveryStart).toBeGreaterThan(connectorStart)
+    const connectorBlock = content.slice(connectorStart, discoveryStart)
+    const outsideConnectorBlock = content.slice(0, connectorStart) + content.slice(discoveryStart)
 
     expect(connectorBlock).toContain('resolveConnectorTurnScopeForChannelTurn')
     expect(connectorBlock).toContain('contextScope: turnScope')
+    expect(connectorBlock).toContain("profile: 'channel'")
     expect(outsideConnectorBlock).not.toMatch(/\bturnScope\s*\./)
     expect(outsideConnectorBlock).not.toMatch(/\b(?:const|let)\s+turnScope\b/)
     expect(content).toContain('const viewerCtx = automaticContextAccess(dataTurnScope.access, dataTurnScope.activeProjectId)')
@@ -78,7 +79,9 @@ describe('[COMP:api/telegram-byo-route] external guest connector scope', () => {
     // Feishu, WeChat, WhatsApp, Discord, custom bridge and the hosted channel
     // routes) enters through processChannelMessage in this file.
     expect(content).toContain("turnOwner.bindModelPreparation({ kind: 'execution', toolProfile: 'channel', execution: executionContext,")
-    expect(content).toContain("turnOwner.prepareCapabilities({ profile: 'channel'")
+    expect(content).toContain('turnOwner.prepareCapabilities(await createConnectorCapabilityRequest(')
+    expect(content).toContain('initialMailboxCapabilities: createConnectorCapabilityRequest && isIdentified && !isolatedAudience')
+    expect(content).toContain('createConnectorCapabilityRequest(await resolveConnectorUserId(), new Map())')
     expect(content).toContain('turnOwner.prepareTools(allTools)')
     expect(content).toContain('candidateTools: allTools')
     expect(content).not.toContain('bindToolsToAgentAccess(')

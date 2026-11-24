@@ -1984,7 +1984,12 @@ async function* queryLoopCore(
         call.name === CONVERSATION_CONTEXT_TOOL && call.id === block.toolUseId))
     const discovery = discoveryReceipt ? options.takeDiscoveredContext?.() : undefined
     if (discoveryReceipt?.type === 'tool_result' && discoveryReceipt.isError) throw new Error('Conversation context discovery failed.')
-    if (!discovery && (!hasToolUse || response.stopReason !== 'tool_use') && rejectedToolInputs.size === 0) {
+    // A provider can likewise stop with end_turn after an independent initial
+    // read. Feed its paired result back while leaving discovery available.
+    const initialToolReceipt = options.takeDiscoveredContext && response.stopReason === 'end_turn'
+      && allToolResults.some(block => block.type === 'tool_result' && response.content.some(call =>
+        call.type === 'tool_use' && call.id === block.toolUseId && tools.has(call.name)))
+    if (!discovery && !initialToolReceipt && (!hasToolUse || response.stopReason !== 'tool_use') && rejectedToolInputs.size === 0) {
       // ── Phase 4b: Worker notification drain ────────────────
       // If background workers are still running, wait for them and
       // inject their results as a user message for a synthesis turn.

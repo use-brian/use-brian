@@ -53,6 +53,8 @@ describe.sequential('[COMP:api/native-chat-read-cost] packed retained acquisitio
     expect(await annotate(messageIds[2], 'Fictional final topic')).not.toBeNull()
     await f.pool.query(`CREATE FUNCTION ${helper}(action text,arg jsonb DEFAULT NULL) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER
       SET search_path=pg_catalog,public,pg_temp AS $fixture$
+      DECLARE w constant uuid:='${f.workspaceId}'; s constant uuid:='${f.session.id}';
+        fields text[]; bounds jsonb; visibility jsonb; memo jsonb; ordered jsonb; empty jsonb; invalid jsonb;
       BEGIN
         IF action='hidden' THEN UPDATE session_messages SET sensitivity='confidential' WHERE id='${messageIds[0]}'::uuid;
         ELSIF action='drift' THEN ALTER FUNCTION native_turn_build_query_capture(uuid,uuid,text,integer,text[],jsonb,jsonb,jsonb,jsonb) COST 101;
@@ -60,6 +62,18 @@ describe.sequential('[COMP:api/native-chat-read-cost] packed retained acquisitio
         ELSIF action='prepare' THEN RETURN conversation_prepare_publications('${f.workspaceId}'::uuid,'${f.session.id}'::uuid,
           jsonb_build_array(jsonb_build_object('producer','fixture:authenticated-retained-port','sources',arg,'target','${JSON.stringify(f.envelope).replaceAll("'", "''")}'::jsonb)))->0;
         ELSIF action='hold' THEN UPDATE session_messages SET scope_held=true WHERE id='${messageIds[1]}'::uuid;
+        ELSIF action='hold-message' THEN UPDATE session_messages SET scope_held=true WHERE session_id='${f.session.id}'::uuid AND id=(arg#>>'{}')::uuid;
+        ELSIF action='selection' THEN
+          fields:=ARRAY(SELECT f FROM unnest(application_session_field_keys('session_message')) f ORDER BY f);
+          bounds:=application_session_query_bounds(w,application_session_query_parent(w,s));
+          visibility:=jsonb_build_object('userId',NULL,'assistants',NULL);
+          memo:=conversation_dag(w,'[]',jsonb_build_array(jsonb_build_object('type','session_message','sessionId',s,'through',3)))
+            ||jsonb_build_object('opaque',repeat('Fictional opaque retained graph ',32768));
+          ordered:=capture_conversation_selection(w,s,'session_message',3,fields,bounds,visibility,memo);
+          empty:=capture_conversation_selection(w,s,'session_message',0,fields,bounds,visibility,memo);
+          invalid:=capture_conversation_selection(w,s,'session_message',-1,fields,bounds,visibility,memo);
+          RETURN jsonb_build_object('ordered',ordered-'memo','empty',empty-'memo','invalid',invalid-'memo',
+            'copiedMemo',jsonb_build_array(ordered?'memo',empty?'memo',invalid?'memo'));
         ELSIF action='forge-port' THEN
           EXECUTE $definition$CREATE OR REPLACE FUNCTION public.read_native_retained_requirements(w uuid,roots jsonb,selectors jsonb)
             RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $forged$
@@ -141,10 +155,130 @@ describe.sequential('[COMP:api/native-chat-read-cost] packed retained acquisitio
       AND has_function_privilege(current_user,p.oid,'EXECUTE')`, [[
       'conversation_dag(uuid,jsonb,jsonb)', 'conversation_capture_privacy(uuid,jsonb)',
       'conversation_dag_edges(uuid,jsonb)',
+      'conversation_dag_envelope(uuid,text,uuid,text,text[],jsonb,jsonb,jsonb[])',
       'native_retained_helpers_current()',
+      'capture_conversation_selection(uuid,uuid,text,integer,text[],jsonb,jsonb,jsonb)',
       'native_turn_build_query_capture(uuid,uuid,text,integer,text[],jsonb,jsonb,jsonb,jsonb)',
       'application_materialize_field_envelope(uuid,jsonb,integer)',
     ]])).rows
     expect(rows).toEqual([])
   }))
+
+  it('returns only selection results without copying the graph memo', async () => frame(async client => {
+    const { ordered, empty, invalid, copiedMemo } = (await client.query<{ value: Json }>(`SELECT ${helper}('selection') value`)).rows[0].value
+    for (const key of ['candidates', 'points', 'policies']) {
+      expect(ordered.value[key].map((row: { id: string }) => row.id)).toEqual(messageIds)
+      expect(empty.value[key]).toEqual([])
+    }
+    expect(ordered.children).toHaveLength(messageIds.length)
+    expect(empty.children).toEqual([])
+    expect(invalid).toEqual({})
+    expect(copiedMemo).toEqual([false, false, false])
+  }))
+
+  it('preserves the admitted domain proof for repeated child roots in any order', async () => {
+    const { history } = await frame(client => original(client))
+    const [{ sources: [root, ...sources] }, ...points] = history
+    expect(points).toHaveLength(3)
+    expect(sources).toHaveLength(3)
+    expect(sources).toEqual(expect.arrayContaining(points.map(point => point.sources[0])))
+    const [inherited, second, third] = sources
+    const children = [
+      { source: third, sources: [inherited, second, inherited] },
+      { source: second, sources: [third] },
+    ]
+    async function rebuildDomain(children: unknown[]) {
+      // Reuse the real immutable domain state with a controlled child order and overlap.
+      return (await f.pool.query<{ envelope: { value?: { source: ScopeSource; sources: ScopeSource[] } } }>(`
+        SELECT conversation_dag_envelope(r.workspace_id,r.type_key,r.resource_id,r.selection,r.fields,
+          '{"hasExternal":false}',jsonb_build_object('domains:'||r.resource_id,1),
+          ARRAY[jsonb_build_object('value',jsonb_build_object('source',o.source_scope,
+            'sourceKind',o.source_kind,'sourceId',o.source_id,'sourceVersion',o.source_version,
+            'recordVersion',o.record_version,'policyVersion',o.policy_version,'fieldIdentity',r.field_identity),
+            'children',$4::jsonb)]) envelope
+        FROM application_field_resources r JOIN application_field_observations o
+          ON o.workspace_id=r.workspace_id AND o.resource_id=r.id
+        WHERE r.workspace_id=$1 AND r.id=$2 AND o.version=$3`,
+      [f.workspaceId, root.resourceId, root.version, JSON.stringify(children)])).rows[0].envelope
+    }
+    expect((await rebuildDomain(children)).value).toMatchObject({ source: root, sources })
+    expect((await rebuildDomain([...children].reverse())).value).toMatchObject({ source: root, sources })
+    expect(await rebuildDomain(Array.from({ length: 4097 }, () => ({ source: null })))).toEqual({})
+    expect(await rebuildDomain([{ source: root, sources: Array.from({ length: 4096 }, (_, index) => index) }])).toEqual({})
+
+    await frame(async client => {
+      expect(await sourceProof(client, [root])).toMatchObject({
+        admitted: true,
+        immutable: expect.arrayContaining([root, ...sources]),
+        current: expect.arrayContaining([root, ...sources]),
+      })
+      await client.query('SAVEPOINT held_domain_child')
+      try {
+        await client.query(`SELECT ${helper}('hold')`)
+        expect((await sourceProof(client, [root]))?.admitted).not.toBe(true)
+      } finally { await client.query('ROLLBACK TO SAVEPOINT held_domain_child; RELEASE SAVEPOINT held_domain_child') }
+      expect((await sourceProof(client, [root]))?.admitted).toBe(true)
+    })
+  })
+
+  it('preserves ordered body and topic selections around a held annotated message', async () => {
+    const messages: Awaited<ReturnType<typeof addSessionMessage>>[] = []
+    const topics = ['Fictional early topic', 'Fictional held topic', 'Fictional later topic']
+    const current = authority()
+    const prior = await readAdmittedSessionQuery({ sessionId: f.session.id, throughSequence: 3, topicThroughSequence: 0, authority: current })
+    for (const [index, topic] of topics.entries()) {
+      const message = await addSessionMessage({ sessionId: f.session.id, role: 'user',
+        content: [{ type: 'text', text: `Fictional ordered body ${index}` }], scope: f.envelope })
+      messages.push(message)
+      expect(await writeSessionContextRevision({ sessionId: f.session.id, parentId: message.id, kind: 'message_annotation',
+        content: { topicLabel: topic, topicConfidence: 0.8, replyToText: null }, authority: authority(),
+        derivation: { producer: 'fixture:ordered-topic', sources: boundScopeSources(prior) } })).not.toBeNull()
+    }
+    const [first, held, last] = messages
+    await frame(async client => {
+      const before = await original(client, last.sequenceNum)
+      expect(before.history.slice(-3).map(point => point.row?.id)).toEqual(messages.map(message => message.id))
+      expect(before.annotations.slice(-3).map(point => point.row?.topicLabel)).toEqual(topics)
+    })
+    await frame(async client => {
+      await client.query('SAVEPOINT held_annotation_fixture')
+      try {
+        await client.query(`SELECT ${helper}('hold-message',$1::jsonb)`, [JSON.stringify(held.id)])
+        const captured = await original(client, last.sequenceNum)
+        expect(captured.history.slice(-2).map(point => point.row)).toMatchObject([first, last].map(message => ({
+          id: message.id, sequenceNum: message.sequenceNum, content: message.content,
+        })))
+        expect(captured.annotations.slice(-2).map(point => point.row)).toEqual([
+          { id: first.id, sequenceNum: first.sequenceNum, topicLabel: topics[0], topicConfidence: 0.8, replyToText: null },
+          { id: last.id, sequenceNum: last.sequenceNum, topicLabel: topics[2], topicConfidence: 0.8, replyToText: null },
+        ])
+        expect(captured.history.some(point => point.row?.id === held.id)).toBe(false)
+        expect(captured.annotations.some(point => point.row?.id === held.id)).toBe(false)
+        const earlierTopics = await original(client, last.sequenceNum, held.sequenceNum)
+        expect(earlierTopics.history).toEqual(captured.history)
+        expect(earlierTopics.annotations.at(-1)?.row?.id).toBe(first.id)
+        expect(earlierTopics.annotations.some(point => point.row?.id === last.id)).toBe(false)
+        const roots = conversationCaptureSources(captured, f.workspaceId)
+        expect(await sourceProof(client, roots)).toMatchObject({ admitted: true })
+      } finally { await client.query('ROLLBACK TO SAVEPOINT held_annotation_fixture; RELEASE SAVEPOINT held_annotation_fixture') }
+    })
+  }, 120_000)
+
+  it('captures more than one hundred messages with growing payloads in the runtime SQL budget', async () => {
+    const messages: Awaited<ReturnType<typeof addSessionMessage>>[] = []
+    for (let index = 0; index < 101; index++) {
+      messages.push(await addSessionMessage({ sessionId: f.session.id, role: 'user',
+        content: [{ type: 'text', text: `Fictional retained request ${index} ${'payload '.repeat(index * 8)}` }], scope: f.envelope }))
+    }
+    const high = messages.at(-1)!.sequenceNum
+    await frame(async client => {
+      expect((await client.query("SELECT current_setting('statement_timeout') value")).rows[0].value).toBe('15s')
+      const captured = await original(client, high)
+      expect(captured.history.filter(row => row.row !== null)).toHaveLength(high)
+      expect(captured.history.slice(-messages.length).map(point => point.row)).toMatchObject(messages.map(message => ({
+        id: message.id, sequenceNum: message.sequenceNum, content: message.content,
+      })))
+      expect(captured.annotations.map(point => point.row?.topicLabel)).toContain('Fictional final topic')
+    })
+  }, 120_000)
 })

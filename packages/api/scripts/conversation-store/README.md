@@ -275,7 +275,7 @@ deferred column or the whole row become `suspended:restoration-placeholder`.
 Any new table, sequence, insert/update trigger or FORCE-RLS policy refuses
 import until the roster is regenerated and reviewed. The builder also refuses an
 inventory whose `ledgerCount` differs from the fresh chain and records the chain
-head (818 entries, `8342_memory_history_terminal_proof.sql`). The 8276 witness is
+head (820 entries, `8344_conversation_domain_source_aggregation.sql`). The 8276 witness is
 installation-derived (D7): a head import ends with the owner-only refresh, and an
 8273-cohort transfer is refreshed by 8276 itself as the runner moves forward.
 `portableTableDigests` returns the canonical per-table rows and record digests

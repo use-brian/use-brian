@@ -41,6 +41,7 @@
  * [COMP:api/mailbox-sync-worker]
  */
 
+import { randomUUID } from 'node:crypto'
 import type { AnalyticsLogger } from '@use-brian/core/analytics/logger.js'
 import type { CrmStore } from '@use-brian/core/crm/types.js'
 import type { EntityLinksStore, EntityStore } from '@use-brian/core/entities/types.js'
@@ -80,6 +81,7 @@ import {
   deleteEmailArchiveFolder,
   findArchivedEmailUids,
   insertEmailArchiveMessage,
+  listEmailArchiveFolderPaths,
   type EmailArchiveMessageInput,
 } from '../db/email-archive-store.js'
 import {
@@ -93,6 +95,10 @@ import {
 } from './imap-session.js'
 import { htmlToText, loadSimpleParser, messageRef, parseReferencesHeader } from './mailbox-api.js'
 import { bareEmailAddress, readSendAsAliases } from './send-as.js'
+import {
+  captureMailboxSearchCoverage, mailboxSearchAccountKey, readVerifiedMailboxArchiveAccount,
+  type MailboxArchiveAccount, type MailboxSearchCoverage,
+} from './search-coverage.js'
 import type { MailboxAccountSettings } from './types.js'
 
 // ── Sync-state (the opaque cursor, D13) ─────────────────────────
@@ -154,6 +160,13 @@ export type MailboxSkip = {
 
 export type MailboxSyncState = {
   folders: Record<string, MailboxFolderCursor>
+  /** Invalidates pre-reset writes when a provider reuses folder UIDs. */
+  archiveResetToken?: string
+  archiveAccount?: MailboxArchiveAccount
+  /** Bounded provider arrival-day and folder evidence for indexed recent reads. */
+  searchCoverage?: MailboxSearchCoverage
+  searchCoverageSeal?: string
+  searchCoverageCheckedAt?: string
   /**
    * Consecutive direct-open failures for archive-known paths that have no
    * cursor yet. They cannot use `MailboxFolderCursor.consecutiveListMisses`:
@@ -180,6 +193,11 @@ export function readMailboxSyncState(config: Record<string, unknown> | null | un
   const raw = (config?.mailboxSync ?? {}) as Partial<MailboxSyncState>
   return {
     folders: (raw.folders ?? {}) as Record<string, MailboxFolderCursor>,
+    ...(raw.archiveResetToken ? { archiveResetToken: raw.archiveResetToken } : {}),
+    ...(raw.archiveAccount ? { archiveAccount: raw.archiveAccount } : {}),
+    ...(raw.searchCoverage ? { searchCoverage: raw.searchCoverage } : {}),
+    ...(raw.searchCoverageSeal ? { searchCoverageSeal: raw.searchCoverageSeal } : {}),
+    ...(raw.searchCoverageCheckedAt ? { searchCoverageCheckedAt: raw.searchCoverageCheckedAt } : {}),
     ...(raw.folderDiscoveryMisses ? { folderDiscoveryMisses: raw.folderDiscoveryMisses } : {}),
     ...(raw.backfill ? { backfill: raw.backfill } : {}),
     ...(raw.lastSyncAt ? { lastSyncAt: raw.lastSyncAt } : {}),
@@ -757,6 +775,9 @@ export type MailboxSyncWorkerDeps = {
   deleteFolder?: typeof deleteEmailArchiveFolder
   findArchivedUids?: typeof findArchivedEmailUids
   countArchive?: typeof countEmailArchiveMessages
+  /** Override the provider evidence capture with a fixture implementation. */
+  captureSearchCoverage?: typeof captureMailboxSearchCoverage
+  listArchiveFolderPaths?: typeof listEmailArchiveFolderPaths
   intervalMs?: number
   /** Max NEW (delta) messages fetched per folder per tick. */
   deltaChunk?: number
@@ -878,6 +899,8 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
   const deleteFolder = deps.deleteFolder ?? deleteEmailArchiveFolder
   const findArchivedUids = deps.findArchivedUids ?? findArchivedEmailUids
   const countArchive = deps.countArchive ?? countEmailArchiveMessages
+  const captureSearchCoverage = deps.captureSearchCoverage ?? captureMailboxSearchCoverage
+  const listArchiveFolderPaths = deps.listArchiveFolderPaths ?? listEmailArchiveFolderPaths
   const intervalMs = deps.intervalMs ?? DEFAULT_INTERVAL_MS
   const deltaChunk = deps.deltaChunk ?? DEFAULT_DELTA_CHUNK
   const backfillChunk = deps.backfillChunk ?? DEFAULT_BACKFILL_CHUNK
@@ -928,6 +951,10 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
     const { client, inst, settings, folder, state, workspaceId, assistantId } = params
     const ownerUserId = inst.userId
     if (!ownerUserId) return { deltaInserted: 0, backfillFailed: false }
+    const archivedAfter = state.archiveAccount?.replaced ? state.archiveAccount.archivedAfter : undefined
+    const findCurrentArchiveUids = (uids: number[]) => archivedAfter
+      ? findArchivedUids(inst.id, folder, uids, archivedAfter)
+      : findArchivedUids(inst.id, folder, uids)
     // Count of NEW (delta) mail archived this pass — the "N new messages"
     // reported by an on-demand `syncMailboxNow`. Backfill (historical) inserts
     // are archive-only catch-up, not new arrivals, and are not counted.
@@ -943,7 +970,14 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
     // UIDVALIDITY change: the server reassigned this folder's UIDs — every
     // stored provider id is invalid. Rebuild the folder, touch nothing else.
     if (cursor && cursor.uidvalidity !== uidvalidity) {
-      await deleteFolder(inst.id, folder)
+      const next = randomUUID()
+      const deleted = await deleteFolder(inst.id, folder, {
+        previous: state.archiveResetToken ?? null, next, lastSyncAt: state.lastSyncAt ?? null,
+      })
+      if (deleted === null) throw new Error('Mailbox archive generation changed during sync')
+      state.archiveResetToken = next
+      delete state.searchCoverage
+      delete state.searchCoverageSeal
       cursor = undefined
     }
 
@@ -1004,6 +1038,8 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
               instanceId: inst.id,
               workspaceId,
               ownerUserId,
+              archiveResetToken: state.archiveResetToken ?? null,
+              ...(archivedAfter ? { archiveReplaceBefore: archivedAfter } : {}),
             })
             if (inserted) deltaInserted++
             // Brain flow: NEW mail only, rule-selected, only when ingestion is
@@ -1070,7 +1106,7 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
           if (!inScopeSet.has(uid)) clearUidRetry(cursor, uid)
         }
         const remainingRetryCandidates = retryUidNumbers(cursor)
-        const archivedRetries = await findArchivedUids(inst.id, folder, remainingRetryCandidates)
+        const archivedRetries = await findCurrentArchiveUids(remainingRetryCandidates)
         for (const uid of archivedRetries) clearUidRetry(cursor, uid)
         // While the main scan is unfinished, reserve most of the body budget
         // for discovering fresh gaps. A large retry ledger must not starve the
@@ -1092,7 +1128,7 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
             fullyScannedPending = true
           } else {
             const window = pending.slice(0, backfillReconcileWindow)
-            const archived = await findArchivedUids(inst.id, folder, window)
+            const archived = await findCurrentArchiveUids(window)
             let examined = 0
             for (const uid of window) {
               if (archived.has(uid)) {
@@ -1153,6 +1189,8 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
                     instanceId: inst.id,
                     workspaceId,
                     ownerUserId,
+                    archiveResetToken: state.archiveResetToken ?? null,
+                    ...(archivedAfter ? { archiveReplaceBefore: archivedAfter } : {}),
                   })
                   clearUidRetry(cursor, uid)
                   backfill.lastProgressAt = passNow
@@ -1204,12 +1242,44 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
       return { newMessages: 0 }
     }
     const assistantId = deps.resolveAssistantId ? await deps.resolveAssistantId(workspaceId) : null
-    const state = readMailboxSyncState(inst.config)
+    let state = readMailboxSyncState(inst.config)
+    const sign = (purpose: 'account' | 'coverage', value: unknown) => deps.connectorInstanceStore.mailboxArchiveProofSystem?.(inst.id, purpose, value)
+    const archiveAccount = readVerifiedMailboxArchiveAccount(state.archiveAccount, (value) => sign('account', value))
+    const accountKey = mailboxSearchAccountKey(settings)
+    if (archiveAccount?.accountKey !== accountKey && deps.connectorInstanceStore.mailboxArchiveClockSystem) {
+      const cutoff = await deps.connectorInstanceStore.mailboxArchiveClockSystem()
+      const claim = { accountKey, archivedAfter: cutoff, replaced: archiveAccount !== null }
+      const seal = sign('account', claim)
+      if (seal) {
+        const next: MailboxSyncState = { ...state, archiveAccount: { ...claim, seal }, archiveResetToken: randomUUID() }
+        delete next.searchCoverage
+        delete next.searchCoverageSeal
+        delete next.searchCoverageCheckedAt
+        if (claim.replaced) {
+          // The new server can reuse every existing folder UID. Start its
+          // independent cursor and wait for separate history consent.
+          next.folders = {}
+          delete next.backfill
+          delete next.folderDiscoveryMisses
+          delete next.recentSkips
+          delete next.skippedCount
+        }
+        const adopted = await deps.connectorInstanceStore.setMailboxSyncStateSystem(inst.id, next,
+          state.backfill?.requestedAt ?? null,
+          { lastSyncAt: state.lastSyncAt ?? null, archiveResetToken: state.archiveResetToken ?? null })
+        if (!adopted) return { newMessages: 0 }
+        state = next
+      }
+    }
+    const trustedAccount = readVerifiedMailboxArchiveAccount(state.archiveAccount, (value) => sign('account', value))
+    if (!trustedAccount) delete state.archiveAccount
+    const archivedAfter = trustedAccount?.replaced ? trustedAccount.archivedAfter : undefined
     // This is the generation token for the state this pass may persist. The
     // user can explicitly restart `all` while the pass is in flight; a
     // conditional write below prevents this older cursor from winning that
     // race and erasing the newer request.
     const expectedBackfillRequestedAt = state.backfill?.requestedAt ?? null
+    const expectedLastSyncAt = state.lastSyncAt ?? null
 
     // Older workers treated `backfillLow` / `backfillDone` as proof that every
     // traversed UID landed. Reopen those cursors exactly once after upgrade so
@@ -1233,11 +1303,14 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
     let unresolvedOmittedFolders = 0
     let backfillPassFailed = false
     try {
+      const observedAt = now()
+      const coverageAge = observedAt.getTime() - Date.parse(state.searchCoverageCheckedAt ?? '')
+      const refreshCoverage = !Number.isFinite(coverageAge) || coverageAge < 0 || coverageAge >= DEFAULT_INTERVAL_MS
       // The archive is durable evidence of folders the mutable cursor config
       // may have forgotten. Read it only when history has been armed;
       // delta-only mailboxes need no recovery roster.
       archiveFolderPaths = state.backfill
-        ? Object.keys((await countArchive(inst.id)).byFolder)
+        ? Object.keys((await (archivedAfter ? countArchive(inst.id, archivedAfter) : countArchive(inst.id))).byFolder)
         : []
       await sessions.withClient(`sync:${inst.id}`, settings, async (client) => {
         const listed = await client.list()
@@ -1374,6 +1447,33 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
             `${folderErrors.length}/${syncable.length} folder(s) failed — ${folderErrors.join('; ')}`,
           )
         }
+
+        if (refreshCoverage && inst.userId && trustedAccount?.accountKey === accountKey) {
+          delete state.searchCoverage
+          delete state.searchCoverageSeal
+          state.searchCoverageCheckedAt = now().toISOString()
+          // Check unresolved known paths off the turn, so the indexed reader
+          // never has to scan the mailbox to rediscover the folder roster.
+          const archived = state.backfill ? archiveFolderPaths
+            : await listArchiveFolderPaths(inst.id, 64, archivedAfter).catch(() => null)
+          if (!archived) return
+          const active = new Set(activeFolderPaths)
+          const unresolved = [...new Set([...durableFolderPaths, ...archived])].filter((path) => {
+            if (listedPaths.has(path) || active.has(path)) return false
+            const misses = state.folders[path]?.consecutiveListMisses ?? state.folderDiscoveryMisses?.[path] ?? 0
+            return misses < MAX_CONSECUTIVE_FOLDER_LIST_MISSES
+          })
+          const observed = await captureSearchCoverage({
+            client, listed, paths: [...new Set([...activeFolderPaths, ...unresolved])],
+            getUidValidity: (path) => state.folders[path]?.uidvalidity,
+            ownerUserId: inst.userId, settings, observedAt: now(), archivedAfter: trustedAccount.archivedAfter, now,
+          }).catch(() => undefined)
+          const seal = observed && sign('coverage', observed)
+          if (observed && seal) {
+            state.searchCoverage = observed
+            state.searchCoverageSeal = seal
+          }
+        }
       })
       if (state.backfill) {
         if (!backfillPassFailed) {
@@ -1408,6 +1508,7 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
         inst.id,
         state,
         expectedBackfillRequestedAt,
+        { lastSyncAt: expectedLastSyncAt, archiveResetToken: state.archiveResetToken ?? null },
       )
       if (!persisted) {
         console.info(`[mailbox-sync] instance ${inst.id}: preserved a newer mailbox history request`)
@@ -1416,10 +1517,13 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
       return { newMessages }
     } catch (err) {
       const message = errText(err)
+      delete state.searchCoverage
+      delete state.searchCoverageSeal
       state.lastError = message
       state.lastFailedSyncAt = now().toISOString()
       await deps.connectorInstanceStore
-        .setMailboxSyncStateSystem(inst.id, state, expectedBackfillRequestedAt)
+        .setMailboxSyncStateSystem(inst.id, state, expectedBackfillRequestedAt,
+          { lastSyncAt: expectedLastSyncAt, archiveResetToken: state.archiveResetToken ?? null })
         .catch(() => false)
       // `auth_failed` stays reserved for a DEAD CREDENTIAL. inject.ts withholds
       // every mailbox tool from an `auth_failed` instance, so marking it on an

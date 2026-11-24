@@ -1,6 +1,7 @@
 /** Operational mailbox state is not connector authority. [COMP:api/mcp-inject] */
 import { z } from 'zod'
 import type { MailboxIdleStatus } from './idle-watcher.js'
+import { mailboxArchiveAccountSchema, mailboxSearchCoverageSchema } from './search-coverage.js'
 import type { MailboxBackfillState, MailboxFolderCursor, MailboxSkip, MailboxSyncState, MailboxUidRetry } from './sync-worker.js'
 
 const count = z.number().int().nonnegative()
@@ -42,6 +43,11 @@ const idle = z.object({
 const sync = z.object({
   // The reader defaults missing/null sync state to an empty folder map.
   folders: z.record(cursor).optional(),
+  archiveResetToken: z.string().uuid().optional(),
+  archiveAccount: mailboxArchiveAccountSchema.optional(),
+  searchCoverage: mailboxSearchCoverageSchema.optional(),
+  searchCoverageSeal: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  searchCoverageCheckedAt: z.string().optional(),
   folderDiscoveryMisses: z.record(count).optional(),
   backfill: backfill.optional(),
   lastSyncAt: z.string().optional(),

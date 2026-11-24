@@ -9,6 +9,9 @@ import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/atten
 import { bindVerifiedTelegramEvidence, bindVerifiedThreadRoomEvidence } from '../context-scope/native-invocation-evidence.js'
 import { bindScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { resourceScopeKey } from '@use-brian/agent-runtime/security/derived-scope.js'
+import type { TurnCapabilityRequest } from '../turn/capabilities.js'
+import type { SurfaceCapabilityOptions } from '../mcp/surface.js'
+import { assertInitialMailboxEvidenceCurrent } from '../turn/mailbox-read-authority.js'
 import { runTurnSessionStateDiff } from '../turn/session-state.js'
 import { withTurnInference } from '../turn/runtime.js'
 import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
@@ -2061,7 +2064,10 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
       completion: { lane: 'channel', input: { kind: 'session_message', ref: userMessageRow.id }, assistantId: assistant.id },
       execute: operation => authority.execute(operation), afterCommit: async (rows) => {
       const savedTurns = [...assembled.assistantRows].flatMap(([index, turn]) => rows[index] ? [{ row: rows[index]!, content: turn.content }] : [])
-      if (savedTurns.length) await assertDeliveryAudience()
+      if (savedTurns.length) {
+        await assertDeliveryAudience()
+        await assertInitialMailboxEvidenceCurrent(executionContext)
+      }
       for (const saved of savedTurns) {
         lastFlushedAssistantRowId = saved.row.id
         // Streaming channels surface the persisted row so the client
@@ -2108,6 +2114,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     const pendingNotice = imageFallbackNotice ?? endpointNotice
     imageFallbackNotice = null
     const actions = questionBinding ? channelQuestionActions(questionBinding, terminalQuestion) : undefined
+    await assertInitialMailboxEvidenceCurrent(executionContext)
     const result = await deliverChannelResponse({ sendResponse: deliverResponse }, text, documents, terminalQuestion, pendingNotice, actions)
     const channelMessageId = result && typeof result === 'object'
       ? result.channelMessageId
@@ -2166,6 +2173,81 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     { type: 'claim_ledger' }
   >['claims'] | null = null
   const acknowledgedGoalIds = new Set<string>()
+
+  const resolveConnectorUserId = () => connectorToolsAllowed
+    ? getConnectorUserId(billingUserId, assistant.workspaceId)
+    : Promise.resolve(userId)
+  const createConnectorCapabilityRequest = connectorToolsAllowed && connectorStore && mcpSettingsStore
+    ? async (
+        connectorUserId: string,
+        tools: Map<string, Tool>,
+        knowledgeRepoWriter?: SurfaceCapabilityOptions['knowledgeRepoWriter'],
+      ): Promise<TurnCapabilityRequest> => {
+        // Independently impose the actual sender's current native floor. A legacy
+        // assistant-mode toggle or room audience cannot confer staff connectors.
+        const turnScope = await resolveConnectorTurnScopeForChannelTurn({
+          useAssistantConnectorAuthority: useAssistantConnectorAuthority && !room,
+          dataTurnScope,
+          userId,
+          assistant: {
+            ...assistant,
+            compartments: assistant.compartments ?? null,
+          },
+          workspaceId: assistant.workspaceId,
+          session,
+        })
+        return { profile: 'channel', composition: { kind: 'surface-options', params: {
+          userId: connectorUserId,
+          executionContext,
+          scopeAccumulator,
+          assistantId: assistant.id,
+          tools,
+          connectorStore,
+          settingsStore: mcpSettingsStore,
+          assistantConnectorStore,
+          userTimezone: channelUser?.timezone ?? undefined,
+          knowledgeStore,
+          knowledgeCaptureRuleStore,
+          knowledgeRepoWriter,
+          allowKnowledgeWrites: true,
+          knowledgeCaptureText: params.rawUserText ?? messageText,
+          gdriveFilesStore,
+          connectorGrantStore,
+          connectorInstanceStore,
+          workspaceToolPolicyStore,
+          assistantTeamId: assistant.workspaceId ?? null,
+          contextScope: turnScope,
+          exposeLocalReadTools: true,
+          // Workspace-files byte layer — `gmailSendMessage` attachments on
+          // channel turns (docs/architecture/integrations/gmail.md).
+          filesApi,
+          readCachedFile,
+          // Actor identity for opted-in connectors. `actorChannelId` is the
+          // channel-native id captured from the inbound webhook by the channel
+          // route (Slack user id / Telegram @handle / Feishu-Lark open id / WhatsApp phone); email +
+          // userId come from the resolved channel user. Only a registered account
+          // contributes an email; a cached shadow profile is not account proof.
+          // Server-resolved, never model output. See
+          // docs/architecture/engine/tool-hooks.md.
+          actorIdentity: {
+            channel: channelType,
+            id: actorChannelId ?? null,
+            email: speakerAccount.email,
+            userId,
+            // Short-lived, user-scoped media capability token. Emitted only to
+            // connectors the user granted media access (`sendMediaToken`); lets
+            // them fetch this user's latest recording via /internal/media without
+            // any shared secret. The endpoint derives the user from the token's
+            // signed `sub`. See packages/api-platform/src/media-token.ts.
+            mediaToken: mintActorMediaToken({
+              sub: userId,
+              episodeId: mediaEpisodeId ?? undefined,
+              ttlMs: 5 * 60_000,
+            }) ?? undefined,
+          },
+        } } }
+      }
+    : undefined
 
   // The owner invokes this only for an actual main-model discovery tool call.
   const discoverContext = async () => {
@@ -2615,13 +2697,11 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     // `billingPartyForAssistant` took above, so passing `billingUserId` resolves
     // identically to the old `ownerId` on every non-null case and stays non-null
     // on the workspace-owned case where `ownerId` is NULL.
-    const connectorUserId = connectorToolsAllowed
-      ? await getConnectorUserId(billingUserId, assistant.workspaceId)
-      : userId
+    const connectorUserId = await resolveConnectorUserId()
     let unavailableCapabilities: string[] = []
     let searchableSources: string[] = []
     let admittedConnectorIds: ReadonlySet<string> = new Set()
-    if (connectorToolsAllowed && connectorStore && mcpSettingsStore) {
+    if (createConnectorCapabilityRequest) {
       // Built every turn so local filesystem sources remain writable even when
       // GitHub credential stores are absent. GitHub targets fail closed without
       // the optional credential provider.
@@ -2641,71 +2721,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
         },
       })
       try {
-        // Independently impose the actual sender's current native floor. A legacy
-        // assistant-mode toggle or room audience cannot confer staff connectors.
-        const turnScope = await resolveConnectorTurnScopeForChannelTurn({
-          useAssistantConnectorAuthority: useAssistantConnectorAuthority && !room,
-          dataTurnScope,
-          userId,
-          assistant: {
-            ...assistant,
-            compartments: assistant.compartments ?? null,
-          },
-          workspaceId: assistant.workspaceId,
-          session,
-        })
-        // Prepared by the original turn owner through the M3 capability surface
-        // (`channel` profile, catalog-only until a call), from the surface options.
-        const injection = await turnOwner.prepareCapabilities({ profile: 'channel', composition: { kind: 'surface-options', params: {
-          userId: connectorUserId,
-          executionContext,
-          scopeAccumulator,
-          assistantId: assistant.id,
-          tools: allTools,
-          connectorStore,
-          settingsStore: mcpSettingsStore,
-          assistantConnectorStore,
-          userTimezone: channelUser?.timezone ?? undefined,
-          knowledgeStore,
-          knowledgeCaptureRuleStore,
-          knowledgeRepoWriter,
-          allowKnowledgeWrites: true,
-          knowledgeCaptureText: params.rawUserText ?? messageText,
-          gdriveFilesStore,
-          connectorGrantStore,
-          connectorInstanceStore,
-          workspaceToolPolicyStore,
-          assistantTeamId: assistant.workspaceId ?? null,
-          contextScope: turnScope,
-          exposeLocalReadTools: true,
-          // Workspace-files byte layer — `gmailSendMessage` attachments on
-          // channel turns (docs/architecture/integrations/gmail.md).
-          filesApi,
-          readCachedFile,
-          // Actor identity for opted-in connectors. `actorChannelId` is the
-          // channel-native id captured from the inbound webhook by the channel
-          // route (Slack user id / Telegram @handle / Feishu-Lark open id / WhatsApp phone); email +
-          // userId come from the resolved channel user. Only a registered account
-          // contributes an email; a cached shadow profile is not account proof.
-          // Server-resolved, never model output. See
-          // docs/architecture/engine/tool-hooks.md.
-          actorIdentity: {
-            channel: channelType,
-            id: actorChannelId ?? null,
-            email: speakerAccount.email,
-            userId,
-            // Short-lived, user-scoped media capability token. Emitted only to
-            // connectors the user granted media access (`sendMediaToken`); lets
-            // them fetch this user's latest recording via /internal/media without
-            // any shared secret. The endpoint derives the user from the token's
-            // signed `sub`. See packages/api-platform/src/media-token.ts.
-            mediaToken: mintActorMediaToken({
-              sub: userId,
-              episodeId: mediaEpisodeId ?? undefined,
-              ttlMs: 5 * 60_000,
-            }) ?? undefined,
-          },
-        } } })
+        const injection = await turnOwner.prepareCapabilities(await createConnectorCapabilityRequest(
+          connectorUserId, allTools, knowledgeRepoWriter,
+        ))
         unavailableCapabilities = injection.unavailable
         searchableSources = injection.searchableSources
         admittedConnectorIds = injection.admittedConnectorIds ?? admittedConnectorIds
@@ -2979,6 +2997,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
       candidateTools: new Map(),
       trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
       userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
+      initialMailboxCapabilities: createConnectorCapabilityRequest && isIdentified && !isolatedAudience
+        ? async () => createConnectorCapabilityRequest(await resolveConnectorUserId(), new Map())
+        : undefined,
       contextDiscovery: discoverContext,
     })
     replyEvidence.note(initialPrompt.stablePrompt)

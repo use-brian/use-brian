@@ -1,4 +1,6 @@
 import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/attended-audience.js'
+import type { TurnCapabilityRequest } from '../turn/capabilities.js'
+import { assertInitialMailboxEvidenceCurrent } from '../turn/mailbox-read-authority.js'
 import { withTurnInference } from '../turn/runtime.js'
 import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
 import { bindScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
@@ -1084,6 +1086,54 @@ async function executePublicTurnInScope(
     // model treat its own colleague as an unauthenticated stranger.
     const endUserContext = internalScope ? '' : buildEndUserIdentityContext(body, { isIdentified })
 
+    const resolveConnectorUserId = () => getConnectorUserId(user.id, assistant.workspaceId ?? null)
+    const createConnectorCapabilityRequest = (connectorUserId: string, tools: Map<string, Tool>): TurnCapabilityRequest => ({
+      profile: 'public', composition: { kind: 'route-params', params: {
+        scope: 'public-api',
+        executionContext,
+        scopeAccumulator,
+        connectorUserId,
+        assistant: { id: assistant.id, workspaceId: assistant.workspaceId ?? null },
+        userTimezone: owner.timezone ?? undefined,
+        tools,
+        stores: deps,
+        engineHooks: deps.engineHooks,
+        contextScope: turnScope,
+        // End-user identity on the wire. A consumer serving its own clients
+        // points this assistant at a bridge MCP server; the bridge maps
+        // `X-UseBrian-Actor-Id` back to its own user record and scopes every
+        // fetch to that person. Without it the bridge cannot tell one client
+        // from another and the scoping has to be attempted in the prompt,
+        // which is not a guarantee.
+        //
+        // `id` is the consumer's own opaque `externalUserId` — the value the
+        // bridge already indexes on — while `userId` is the stable Use Brian
+        // UUID that survives the same human arriving on another channel.
+        // Server-resolved from the authenticated key, never from model output;
+        // the `X-UseBrian-*` namespace is unsettable from user connector config
+        // (`preflightHeadersToRecord`) and merges at highest precedence, so
+        // neither the model nor the end user can forge it. Still opt-in per
+        // connector via `config.sendActorIdentity`.
+        //
+        // `roles` is deliberately absent: identity is forwarded, authorization
+        // is derived. See `ActorIdentity.org`.
+        actorIdentity: {
+          channel: 'api',
+          id: body.externalUserId,
+          // Internal lane: the actor is the resolved member, so the wire carries
+          // their real email (the tier fields that feed claimedEmail are rejected
+          // at the route for internal keys).
+          email: internalScope ? (user.email ?? null) : (claimedEmail ?? null),
+          userId: user.id,
+          org: body.claims?.orgId ?? null,
+        },
+        // KB write tools are chat-only (D2): the API consumer has no
+        // Approve/Deny loop, so this surface never exposes them, neither
+        // directly nor in the `mcp_search` index.
+        allowKnowledgeWrites: false,
+      } },
+    })
+
     const capabilityOwner = turnOwner
     const discoverContext = async () => {
       const background = await capabilityOwner.prepareBackgroundModel({})
@@ -1114,7 +1164,7 @@ async function executePublicTurnInScope(
         allowPublicResearch: body.allowPublicResearch === true,
       })
 
-      const connectorUserId = await getConnectorUserId(user.id, assistant.workspaceId ?? null)
+      const connectorUserId = await resolveConnectorUserId()
       // Read-side clearance (incident 2026-06-01): read ceiling =
       // min(member, assistant). The API key's principal is typically the
       // workspace owner (resolves to the assistant's clearance), but a
@@ -1141,50 +1191,9 @@ async function executePublicTurnInScope(
           }
         // Prepared by the original turn owner through the M3 capability surface
         // (`public` profile, catalog-only until a call), from the route parameter block.
-        : await withCurrentTurn(() => capabilityOwner.prepareCapabilities({ profile: 'public', composition: { kind: 'route-params', params: {
-            scope: 'public-api',
-            executionContext,
-            scopeAccumulator,
-            connectorUserId,
-            assistant: { id: assistant.id, workspaceId: assistant.workspaceId ?? null },
-            userTimezone: owner.timezone ?? undefined,
-            tools: baseTools,
-            stores: deps,
-            engineHooks: deps.engineHooks,
-            contextScope: turnScope,
-            // End-user identity on the wire. A consumer serving its own clients
-            // points this assistant at a bridge MCP server; the bridge maps
-            // `X-UseBrian-Actor-Id` back to its own user record and scopes every
-            // fetch to that person. Without it the bridge cannot tell one client
-            // from another and the scoping has to be attempted in the prompt,
-            // which is not a guarantee.
-            //
-            // `id` is the consumer's own opaque `externalUserId` — the value the
-            // bridge already indexes on — while `userId` is the stable Use Brian
-            // UUID that survives the same human arriving on another channel.
-            // Server-resolved from the authenticated key, never from model output;
-            // the `X-UseBrian-*` namespace is unsettable from user connector config
-            // (`preflightHeadersToRecord`) and merges at highest precedence, so
-            // neither the model nor the end user can forge it. Still opt-in per
-            // connector via `config.sendActorIdentity`.
-            //
-            // `roles` is deliberately absent: identity is forwarded, authorization
-            // is derived. See `ActorIdentity.org`.
-            actorIdentity: {
-              channel: 'api',
-              id: body.externalUserId,
-              // Internal lane: the actor is the resolved member, so the wire carries
-              // their real email (the tier fields that feed claimedEmail are rejected
-              // at the route for internal keys).
-              email: internalScope ? (user.email ?? null) : (claimedEmail ?? null),
-              userId: user.id,
-              org: body.claims?.orgId ?? null,
-            },
-            // KB write tools are chat-only (D2): the API consumer has no
-            // Approve/Deny loop, so this surface never exposes them, neither
-            // directly nor in the `mcp_search` index.
-            allowKnowledgeWrites: false,
-          } } }))
+        : await withCurrentTurn(() => capabilityOwner.prepareCapabilities(
+            createConnectorCapabilityRequest(connectorUserId, baseTools),
+          ))
 
       // Strip confirmation-required tools AFTER preparation (D11-10 decision:
       // kept). The `public` surface already never indexes a confirmation-required
@@ -1593,6 +1602,9 @@ async function executePublicTurnInScope(
         candidateTools: new Map(),
         trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
         userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
+        initialMailboxCapabilities: internalScope && deps.connectorStore && deps.mcpSettingsStore
+          ? async () => createConnectorCapabilityRequest(await resolveConnectorUserId(), new Map())
+          : undefined,
         contextDiscovery: discoverContext,
       })
       await assertTurnCurrent()
@@ -1735,6 +1747,8 @@ async function executePublicTurnInScope(
     const finalModel = responseModel ?? model
     try {
       await assertDeliveryAudience()
+      await assertTurnCurrent()
+      await assertInitialMailboxEvidenceCurrent(executionContext)
     } catch (err) {
       if (!isAuthorityChangedError(err) && !isDeliveryAudienceUnverifiedError(err)) throw err
       const error = isAuthorityChangedError(err)
@@ -1748,7 +1762,6 @@ async function executePublicTurnInScope(
       }
       return fail(res, 409, error)
     }
-    await assertTurnCurrent()
     if (sendEvent) {
       sendEvent('turn_complete', {
         sessionId: channelId,

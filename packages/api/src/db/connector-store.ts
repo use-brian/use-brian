@@ -302,6 +302,14 @@ const PUBLIC_COLS = `
 
 type ConnectorRow = McpConnector
 
+/** Actor-facing config accepts mailbox settings, while sync state is worker-owned. */
+export function editableConnectorConfigSql(parameter: string, provider = 'provider'): string {
+  const value = `${parameter}::jsonb`
+  return `CASE WHEN ${provider} = 'imap' THEN
+    CASE WHEN jsonb_typeof(${value}) = 'object' THEN ${value} - 'mailboxSync' ELSE '{}'::jsonb END
+    ELSE ${value} END`
+}
+
 export function createDbConnectorStore(encryptionKey: Buffer | null): ConnectorStore {
   return {
     async list(userId) {
@@ -471,7 +479,7 @@ export function createDbConnectorStore(encryptionKey: Buffer | null): ConnectorS
       await queryWithRLS(
         userId,
         `UPDATE connector_instance
-           SET config = COALESCE(config, '{}') || $3::jsonb
+           SET config = COALESCE(config, '{}') || (${editableConnectorConfigSql('$3')})
          WHERE id = (
            SELECT id FROM connector_instance
            WHERE scope = 'user' AND user_id = $1 AND provider = $2

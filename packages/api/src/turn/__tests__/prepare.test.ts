@@ -35,7 +35,12 @@ vi.mock('../../db/brief-store.js', async importOriginal => ({ ...await importOri
 vi.mock('../../application-platform/model-source-authority.js', () => ({
   admitModelSourceEvidence: async (context: { authority?: CurrentAuthorityBoundary }) => { await context.authority?.assertCurrent() },
 }))
+const mailbox = vi.hoisted(() => ({ dispatcher: vi.fn() }))
+vi.mock('../../mcp/surface.js', async importOriginal => ({ ...await importOriginal<typeof import('../../mcp/surface.js')>(),
+  prepareMailboxReadDispatcher: mailbox.dispatcher }))
 import { openAssistantTurn, type AssistantTurn } from '../kernel.js'
+import type { InitialMailboxCapabilities } from '../capabilities.js'
+import type { SurfaceCapabilityOptions } from '../../mcp/surface.js'
 import { abortLocalTurn, releaseTurn } from '../lease.js'
 import { configureBriefTurnContext, type BriefTurn, type BriefTurnResolver } from '../../briefs/context.js'
 import { createWorkspaceCustomLlmResolver, type ResolvedWorkspaceCustomLlm, type WorkspaceCustomLlmResolver } from '../../custom-llm-runtime.js'
@@ -130,6 +135,14 @@ const source = (id: string): ScopeSource => ({ workspaceId: identity.workspace, 
 const toolNames = (entry: Captured) => ((entry.config.tools as Array<{ name: string }> | undefined) ?? []).map(tool => tool.name)
 const sent = (entry: Captured) => entry.sends[0]!
 
+function initialMailbox(f: Awaited<ReturnType<typeof fixture>>, overrides?: Partial<SurfaceCapabilityOptions>) {
+  return vi.fn<InitialMailboxCapabilities>(async () => ({ profile: 'channel', composition: { kind: 'surface-options', params: {
+    assistantId: identity.assistant, assistantTeamId: identity.workspace, executionContext: f.execution,
+    actorIdentity: { channel: 'telegram', id: 'fixture-account', email: null, userId: identity.user },
+    ...overrides,
+  } as SurfaceCapabilityOptions } }))
+}
+
 describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
   it('delivers the owner-assembled prompt, messages, tools and model limits to the actual provider', async () => {
     const f = await fixture({ custom: true })
@@ -198,6 +211,53 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
     expect(boundScopeSources(sent(continuation)[0])).toEqual([source('earlier')])
     expect(view.grounding.runtimeContext).toContain('Private permitted context')
     expect(f.owner.usage?.totalUsage).toMatchObject({ inputTokens: 2, outputTokens: 2 })
+  })
+
+  it.each([false, true])('reads mail in the initial frame and retains the pair when context is requested later (%s)', async useHistory => {
+    const scripted = capturingProvider(useHistory ? ['imapSearchMessages', 'requestConversationContext'] : ['imapSearchMessages'], undefined, 'end_turn')
+    const f = await fixture({ lane: 'channel', provider: scripted.provider })
+    const initial: Message = { role: 'user', content: 'Find the newest email.' }
+    const earlier: Message = { role: 'user', content: 'Earlier fictional conversation.' }
+    const capabilities = initialMailbox(f)
+    const execute = vi.fn(async () => ({ data: 'Fictional mailbox receipt' }))
+    mailbox.dispatcher.mockResolvedValue({ execute })
+    const discover = vi.fn(async () => ({ systemPrompt: 'Expanded', messages: [earlier, initial], candidateTools: new Map() }))
+    await f.owner.prepareRun({ systemPrompt: 'Initial', messages: [initial], candidateTools: new Map(),
+      initialMailboxCapabilities: capabilities, contextDiscovery: discover })
+    expect(capabilities).not.toHaveBeenCalled()
+    expect(mailbox.dispatcher).not.toHaveBeenCalled()
+    await expect(f.owner.run({ loop: owned(f.context), sink: { kind: 'adapter' } })).resolves.toMatchObject({ finalText: 'Fictional prepared answer.' })
+    expect(toolNames(scripted.captured[0])).toEqual(['requestConversationContext', 'imapSearchMessages', 'imapGetMessage'])
+    expect(scripted.captured[0].sends[0]).toEqual([initial])
+    expect(scripted.captured[0].sends[1]).toMatchObject([{ role: 'user', content: [{ type: 'tool_result', name: 'imapSearchMessages', toolUseId: 'fixture-call', content: 'Fictional mailbox receipt' }] }])
+    expect(capabilities).toHaveBeenCalledOnce()
+    expect(execute).toHaveBeenCalledExactlyOnceWith({ server: 'imap', tool: 'imapSearchMessages', args: {} }, expect.objectContaining({ executionContext: f.execution }))
+    if (useHistory) {
+      expect(discover).toHaveBeenCalledOnce()
+      expect(sent(scripted.captured[1])).toMatchObject([earlier, initial,
+        { role: 'assistant', content: [{ type: 'tool_use', name: 'imapSearchMessages', id: 'fixture-call' }] },
+        { role: 'user', content: [{ type: 'tool_result', name: 'imapSearchMessages', toolUseId: 'fixture-call', content: 'Fictional mailbox receipt' }] },
+        { role: 'assistant', content: [{ type: 'tool_use', name: 'requestConversationContext', id: 'fixture-call-1' }] },
+        { role: 'user', content: [{ type: 'tool_result', name: 'requestConversationContext', toolUseId: 'fixture-call-1' }] }])
+    } else {
+      expect(discover).not.toHaveBeenCalled()
+      expect(scripted.captured).toHaveLength(1)
+    }
+  })
+
+  it.each(['actor', 'assistant', 'profile'] as const)('refuses a substituted mailbox %s before connector lookup', async field => {
+    const scripted = capturingProvider('tool', 'imapSearchMessages')
+    const f = await fixture({ lane: 'channel', provider: scripted.provider })
+    const messages: Message[] = [{ role: 'user', content: 'Read email.' }]
+    const capabilities = field === 'profile'
+      ? async () => ({ profile: 'web', composition: { kind: 'route-params', params: {} } } as never)
+      : initialMailbox(f, field === 'assistant' ? { assistantId: 'other-assistant' }
+        : { actorIdentity: { channel: 'telegram', id: 'other-account', email: null, userId: 'other-user' } })
+    await f.owner.prepareRun({ systemPrompt: 'Initial', messages, candidateTools: new Map(), initialMailboxCapabilities: capabilities,
+      contextDiscovery: async () => ({ systemPrompt: 'Expanded', messages, candidateTools: new Map() }) })
+    await expect(f.owner.run({ loop: owned(f.context), sink: { kind: 'adapter' } })).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(mailbox.dispatcher).not.toHaveBeenCalled()
+    expect(scripted.captured[0].sends).toHaveLength(1)
   })
 
   it('sends admitted discovery evidence to Gemini after an unsigned call on another provider', async () => {

@@ -338,6 +338,8 @@ export class CapabilityActivationUnavailableError extends Error {
 
 export type PrepareCapabilityCatalogInput = {
   profile: SurfaceProfile
+  /** Narrow metadata and activation to one native connector for a requested operation. */
+  onlyNativeConnector?: string
   assistant: { id: string; workspaceId: string | null }
   /** Credential owner and personal policy principal (the workspace owner for a workspace assistant). */
   connectorUserId: string
@@ -484,7 +486,8 @@ function nativeToolVersion(version: string | null, binding: unknown): string {
 // ── Catalog ──────────────────────────────────────────────────
 
 export async function prepareCapabilityCatalog(input: PrepareCapabilityCatalogInput): Promise<CapabilityCatalog> {
-  const { profile, assistant, connectorUserId, contextScope, bindingMaximum, onAdmittedBinding, stores } = input
+  const { profile, assistant, connectorUserId, contextScope, bindingMaximum, onAdmittedBinding, stores, onlyNativeConnector } = input
+  const includesConnector = (id: string) => onlyNativeConnector === undefined || onlyNativeConnector === id
   const assistantId = assistant.id
   const workspaceId = assistant.workspaceId
   const lifecycle = input.descriptorLifecycle ?? getSharedDescriptorLifecycle()
@@ -550,6 +553,7 @@ export async function prepareCapabilityCatalog(input: PrepareCapabilityCatalogIn
   if (!workspaceId) {
     try {
       for (const row of await stores.connectorStore.list(connectorUserId)) {
+        if (!includesConnector(row.connectorId)) continue
         admitted.push({ lane: 'personal', instanceId: row.id, provider: row.connectorId, label: row.name, url: row.url,
           custom: row.custom, connected: row.connected, config: row.config ?? {}, updatedAt: row.updatedAt ?? null,
           createdAt: row.createdAt ?? null, connectedEmail: row.connectedEmail, personalRow: row })
@@ -572,14 +576,14 @@ export async function prepareCapabilityCatalog(input: PrepareCapabilityCatalogIn
     ])
     if (instances === null || grants === null) listingFailed = true
     for (const instance of instances ?? []) {
-      if (!exposureAllowed(instance)) continue
+      if (!includesConnector(instance.provider) || !exposureAllowed(instance)) continue
       // A snapshot: activation pins exactly what was admitted, whatever later happens to the listed object.
       admitted.push({ ...toInstanceRow(instance, 'workspace'), bindingKey: connectorBindingKey(instance), fingerprint: connectorBindingFingerprint(instance), binding: structuredClone(instance) })
     }
     const orderedGrants = [...(grants ?? [])].sort((a, b) => (a.instance.createdAt?.getTime() ?? 0) - (b.instance.createdAt?.getTime() ?? 0)
       || String(a.instance.id).localeCompare(String(b.instance.id)))
     for (const grant of orderedGrants) {
-      if (!exposureAllowed(grant)) continue
+      if (!includesConnector(grant.instance.provider) || !exposureAllowed(grant)) continue
       admitted.push({ ...toInstanceRow(grant.instance, 'grant', grant), bindingKey: connectorBindingKey(grant), fingerprint: connectorBindingFingerprint(grant), binding: structuredClone(grant) })
     }
   }
@@ -641,7 +645,7 @@ export async function prepareCapabilityCatalog(input: PrepareCapabilityCatalogIn
     && (descriptor.requiresConfirmation || descriptor.effectivePolicy === 'ask'))
 
   // 6a. Static native descriptors, by winning lane per provider.
-  const nativeRecords = new Map(staticNativeDescriptorRecords(input.providers ?? []).map((record) => [record.connectorId, record]))
+  const nativeRecords = new Map(staticNativeDescriptorRecords(input.providers ?? [], onlyNativeConnector).map((record) => [record.connectorId, record]))
   const nativeSources: Array<{ connectorId: string; descriptors: CatalogDescriptor[] }> = []
   let agentmailInboxIds: string[] | undefined
   const configured = input.isConnectorConfigured ?? deploymentServesConnector
@@ -748,7 +752,7 @@ export async function prepareCapabilityCatalog(input: PrepareCapabilityCatalogIn
     governanceId: string; policyServer: string; record: DescriptorRecord }
   const dynamicSources: DynamicSource[] = []
   const seenDynamic = new Set<string>()
-  for (const row of admitted) {
+  for (const row of onlyNativeConnector ? [] : admitted) {
     const isCli = row.provider === 'cli'
     const isRemote = !isCli && row.connected && !!row.url && (row.lane === 'personal' || row.custom)
     if (!row.connected || (!isCli && !isRemote) || seenDynamic.has(row.instanceId)) continue
@@ -778,7 +782,7 @@ export async function prepareCapabilityCatalog(input: PrepareCapabilityCatalogIn
   // 7. Knowledge base presence; capture rules only with capture text.
   let knowledgeTools: Tool[] = []
   let knowledgeCapturePrompt: string | undefined
-  if (input.knowledge) {
+  if (!onlyNativeConnector && input.knowledge) {
     const { store, repoWriter, captureRuleStore, captureText, requesterLabel } = input.knowledge
     const captureMode = profile.knowledgeWrites === 'capture'
     try {
@@ -866,7 +870,17 @@ export async function prepareCapabilityCatalog(input: PrepareCapabilityCatalogIn
 
   const resolveNative = async (name: string): Promise<LocalToolResolution> => {
     let result
-    try { result = await activateWithRecords({ toolNames: [name] }) } catch (error) {
+    try {
+      if (onlyNativeConnector) {
+        // The direct first-frame read uses the admitted primary's exact
+        // binding. A failed primary activation must never select a sibling.
+        const target = descriptors.find(descriptor => descriptor.name === name && descriptor.canonicalName === name)
+        const exact = plan.admitted.filter(row => row.instanceId === target?.instanceId && row.lane === target?.lane)
+        if (!input.activator || exact.length !== 1) throw new CapabilityActivationUnavailableError()
+        const outcome = await input.activator({ ...plan, admitted: exact }, { toolNames: [name] })
+        result = { tools: Array.isArray(outcome) ? outcome : outcome.tools }
+      } else result = await activateWithRecords({ toolNames: [name] })
+    } catch (error) {
       if (error instanceof CapabilityActivationUnavailableError) return { status: 'unavailable', reason: 'activation is not available on this surface' }
       if (isImplementationUnavailable(error)) return { status: 'unavailable', reason: IMPLEMENTATION_UNAVAILABLE_REASON }
       throw error
@@ -938,7 +952,7 @@ export async function prepareCapabilityCatalog(input: PrepareCapabilityCatalogIn
         resolve: resolveNative })
     }
     if (knowledgeTools.length > 0) sources.push({ kind: 'local', serverName: 'knowledge', tools: knowledgeTools })
-    for (const local of input.localSources ?? []) {
+    for (const local of onlyNativeConnector ? [] : input.localSources ?? []) {
       const tools = profile.excludeConfirmationRequired
         ? local.tools.filter((tool) => !tool.requiresConfirmation && !tool.resolveConfirmation)
         : local.tools
