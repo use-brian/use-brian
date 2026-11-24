@@ -42,8 +42,8 @@ import type { ChannelQuestionStore } from '../workflow/channel-questions.js'
  */
 
 import { Router, type Request, type Response } from 'express'
-import { createTelegramAdapter, createTelegramApi, verifyTelegramWebhook, validateTelegramCredentials, describeTelegramDownloadFailure, TelegramApiError, TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES } from '@use-brian/channels'
-import type { IncomingMessage, TelegramAdapterConfig, RequireMentionConfig, ChatSeenEvent } from '@use-brian/channels'
+import { createTelegramAdapter, createTelegramApi, verifyTelegramWebhook, validateTelegramCredentials, describeTelegramDownloadFailure, isTelegramThreadNotFoundError, TelegramApiError, TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES } from '@use-brian/channels'
+import type { IncomingMessage, TelegramAdapterConfig, RequireMentionConfig, ChatSeenEvent, TelegramDispatchScope } from '@use-brian/channels'
 import { findAssistantById, findUserById } from '../db/users.js'
 import { getWorkspaceMembershipWithClearanceSystem, getWorkspaceRoleSystem } from '../db/workspace-store.js'
 import { query } from '../db/client.js'
@@ -779,10 +779,12 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
             : {}),
         },
       })
+      if (isTelegramThreadNotFoundError(err)) return
       adapter.sendMessage(channelId, {
         text: telegramIncomingFailureText(channelId, err),
+        ...(/:(?:topic|discussion):/.test(channelId) ? {telegramDispatch: {}} : {}),
       }).catch((sendErr) => {
-        console.error('[telegram-byo] failure notice send failed:', sendErr)
+        if (!isTelegramThreadNotFoundError(sendErr)) console.error('[telegram-byo] failure notice send failed:', sendErr)
       })
     }
 
@@ -2306,26 +2308,29 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     void statusUpdates.then(discardStatus)
   }
 
-  async function updateToolStatus(): Promise<void> {
+  async function updateToolStatus(dispatch: (write: (telegramDispatch?: TelegramDispatchScope) => Promise<void>) => Promise<void>): Promise<void> {
     await queueStatus(async () => {
-      const now = Date.now()
-      if (now - lastStatusUpdate < STATUS_THROTTLE_MS) return
-      lastStatusUpdate = now
+      if (Date.now() - lastStatusUpdate < STATUS_THROTTLE_MS) return
       const latest = toolTimeline.at(-1)
       const response = {
         ephemeral: true,
         text: latest ? `${latest.done ? '✓' : '⏳'} ${humanizeToolName(latest.name)}` : 'Thinking...',
         collapsibleDetails: latest ? `Watch more\n${formatToolTimeline()}` : undefined,
       }
-      try {
-        if (statusMessageId) {
-          await adapter.editMessage(incoming.channelId, statusMessageId, response)
-        } else {
-          statusMessageId = await adapter.sendMessage(incoming.channelId, response)
+      await dispatch(async (telegramDispatch) => {
+        if (statusClosed) return
+        lastStatusUpdate = Date.now()
+        const guarded = telegramDispatch ? { ...response, telegramDispatch } : response
+        try {
+          if (statusMessageId) {
+            await adapter.editMessage(incoming.channelId, statusMessageId, guarded)
+          } else {
+            statusMessageId = await adapter.sendMessage(incoming.channelId, guarded)
+          }
+        } catch {
+          // Edit/send failed — non-critical
         }
-      } catch {
-        // Edit/send failed — non-critical
-      }
+      })
     })
   }
 
@@ -2369,6 +2374,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     channelId: incoming.channelId,
     channelIntegrationId: params.integrationId,
     channelIntegrationStore: params.integrationStore,
+    telegramProviderIdentity: params.providerIdentity,
     actorChannelId: byoUsername ? `@${byoUsername}` : null,
     messageText: combinedText,
     userContentBlocks,
@@ -2430,40 +2436,40 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
       async onProcessingStart() {
         await adapter.sendTypingIndicator(incoming.channelId)
       },
-      async onStatus(message) {
+      async onStatus(message, telegramDispatch) {
         await queueStatus(async () => {
-          if (!statusMessageId) statusMessageId = await adapter.sendStatus(incoming.channelId, message)
+          if (!statusMessageId) statusMessageId = telegramDispatch
+            ? await adapter.sendMessage(incoming.channelId, { text: message, ephemeral: true, telegramDispatch })
+            : await adapter.sendStatus(incoming.channelId, message)
         })
       },
       onCleanup: cleanupStatus,
-      async onToolStart(id, name) {
-        toolTimeline.push({ id, name, done: false })
-        await updateToolStatus()
-      },
-      async onToolInput(id, name, input) {
-        const desc = describeToolInput(name, input)
-        if (desc) {
-          const entry = toolTimeline.find((t) => t.id === id)
+      async onToolProgress(event, dispatch) {
+        if (event.type === 'tool_start') {
+          toolTimeline.push({ id: event.id, name: event.name, done: false })
+        } else if (event.type === 'tool_input') {
+          const desc = describeToolInput(event.name, event.input)
+          if (!desc) return
+          const entry = toolTimeline.find((t) => t.id === event.id)
           if (entry) entry.description = desc
-          await updateToolStatus()
-        }
-      },
-      async onToolResult(results) {
-        for (const block of results) {
-          if (block.type === 'tool_result') {
-            const entry = toolTimeline.find((t) => t.id === (block as ContentBlock & { toolUseId?: string }).toolUseId)
-            if (entry) entry.done = true
+        } else {
+          for (const block of event.results) {
+            if (block.type === 'tool_result') {
+              const entry = toolTimeline.find((t) => t.id === block.toolUseId)
+              if (entry) entry.done = true
+            }
           }
         }
-        await updateToolStatus()
+        await updateToolStatus(dispatch)
       },
-      async onGoalAccepted(message) {
-        await adapter.sendMessage(incoming.channelId, { text: message })
+      async onGoalAccepted(message, _goalId, telegramDispatch) {
+        await adapter.sendMessage(incoming.channelId, { text: message, ...(telegramDispatch ? {telegramDispatch} : {}) })
       },
-      async onConfirmationRequired(req) {
-        await adapter.sendMessage(incoming.channelId, confirmationMessage(req, { compactDetails: true }))
+      async onConfirmationRequired(req, _resolver, telegramDispatch) {
+        const response = confirmationMessage(req, { compactDetails: true })
+        await adapter.sendMessage(incoming.channelId, telegramDispatch ? {...response, telegramDispatch} : response)
       },
-      async sendResponse(text, documents, _question, actions) {
+      async sendResponse(text, documents, _question, actions, telegramDispatch) {
         if (conversationContext) await assertTelegramConversationCurrent(conversationContext)
         await cleanupStatus()
         // Strip zero-width spaces (U+200B, U+FEFF) that some models emit as "empty" responses
@@ -2478,6 +2484,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
             format: 'markdown',
             documents,
             actions,
+            ...(telegramDispatch ? { telegramDispatch } : {}),
           })
           return { channelMessageId }
         } else {
@@ -2485,6 +2492,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
           // See telegram.ts comment + docs/architecture/engine/query-loop.md.
           await adapter.sendMessage(incoming.channelId, {
             text: "I couldn't generate a reply — please rephrase or try again.",
+            ...(telegramDispatch ? { telegramDispatch } : {}),
           })
         }
       },
@@ -2505,8 +2513,17 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
           await adapter.unpinMessage?.(incoming.channelId, pinMessageId)
         }
       },
-      async sendError(err) {
+      async sendError(err, telegramDispatch) {
         await cleanupStatus()
+        if (telegramDispatch) {
+          if (isTelegramThreadNotFoundError(err)) return
+          const text = isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)
+            ? telegramIncomingFailureText(incoming.channelId, err) : TELEGRAM_GUARDED_FAILURE_NOTICE
+          await adapter.sendMessage(incoming.channelId, {text, telegramDispatch}).catch(error => {
+            if (!isTelegramThreadNotFoundError(error)) throw error
+          })
+          return
+        }
         // Server-authored messages (usage limit, custom-model image refusal)
         // surface verbatim; arbitrary provider/runtime wording stays hidden.
         // The whitelist lives in _channel-error-text.ts — shared, because a
@@ -2521,6 +2538,9 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     },
   })
 }
+
+const TELEGRAM_GUARDED_FAILURE_NOTICE =
+  'I could not finish this reply. If you asked me to take an action, check whether it went through before asking again.'
 
 const TELEGRAM_RETRY_NOTICE =
   'Sorry, something went wrong while handling that message. Please send it again.'

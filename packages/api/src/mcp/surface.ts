@@ -218,7 +218,7 @@ export function prepareSurfaceCatalog(surface: CapabilitySurface, options: Surfa
     // No grants store wired (legacy call sites, tests) ⇒ no grant visibility filter, as before.
     actionGrantReader: options.actionGrantReader !== undefined ? options.actionGrantReader
       : options.assistantConnectorGrantsStore ? undefined : null,
-    ...(!onlyNativeConnector && options.knowledgeStore ? { knowledge: {
+    ...((!onlyNativeConnector || onlyNativeConnector === 'knowledge') && options.knowledgeStore ? { knowledge: {
       store: options.knowledgeStore,
       repoWriter: options.knowledgeRepoWriter,
       captureRuleStore: options.knowledgeCaptureRuleStore,
@@ -310,6 +310,22 @@ export async function prepareMailboxReadDispatcher(surface: 'web' | 'channel' | 
       } }
     },
   }])
+  const call = createMcpSearchTools({ index, settingsStore: options.settingsStore, assistantId: catalog.plan.assistantId,
+    appLevelAssistantId: APP_LEVEL_ASSISTANT_ID, userId: catalog.plan.connectorUserId, hooks: options.engineHooks,
+  }).find(tool => tool.name === 'mcp_call')
+  if (!call) return undefined
+  return (await unavailableAsEmpty(() => composition.wrapTools(catalog.plan, [call], index)))[0]
+}
+
+/** Activate only the ordinary Knowledge search entry after the model requests it. */
+export async function prepareKnowledgeReadDispatcher(surface: 'web' | 'channel', options: SurfaceCapabilityOptions): Promise<Tool | undefined> {
+  const { catalog, composition } = await prepareSurfaceCatalog(surface, {
+    ...options, allowKnowledgeWrites: false, keepBuiltinsDirect: false, keepDynamicToolsDirect: false,
+  }, 'knowledge')
+  const knowledge = catalog.sources.find(source => source.serverName === 'knowledge')
+  const search = knowledge?.tools.find(tool => tool.name === 'searchKnowledge' && tool.isReadOnly && !tool.requiresConfirmation)
+  if (!knowledge || !search) return undefined
+  const index = buildToolIndex([{ ...knowledge, tools: [search] }])
   const call = createMcpSearchTools({ index, settingsStore: options.settingsStore, assistantId: catalog.plan.assistantId,
     appLevelAssistantId: APP_LEVEL_ASSISTANT_ID, userId: catalog.plan.connectorUserId, hooks: options.engineHooks,
   }).find(tool => tool.name === 'mcp_call')

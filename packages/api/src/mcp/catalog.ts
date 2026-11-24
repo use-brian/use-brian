@@ -488,6 +488,7 @@ function nativeToolVersion(version: string | null, binding: unknown): string {
 export async function prepareCapabilityCatalog(input: PrepareCapabilityCatalogInput): Promise<CapabilityCatalog> {
   const { profile, assistant, connectorUserId, contextScope, bindingMaximum, onAdmittedBinding, stores, onlyNativeConnector } = input
   const includesConnector = (id: string) => onlyNativeConnector === undefined || onlyNativeConnector === id
+  const onlyKnowledge = onlyNativeConnector === 'knowledge'
   const assistantId = assistant.id
   const workspaceId = assistant.workspaceId
   const lifecycle = input.descriptorLifecycle ?? getSharedDescriptorLifecycle()
@@ -550,7 +551,7 @@ export async function prepareCapabilityCatalog(input: PrepareCapabilityCatalogIn
 
   const admitted: AdmittedConnector[] = []
   let listingFailed = false
-  if (!workspaceId) {
+  if (!onlyKnowledge && !workspaceId) {
     try {
       for (const row of await stores.connectorStore.list(connectorUserId)) {
         if (!includesConnector(row.connectorId)) continue
@@ -563,7 +564,7 @@ export async function prepareCapabilityCatalog(input: PrepareCapabilityCatalogIn
       console.error('[mcp-catalog] failed to list connectors:', error)
       listingFailed = true
     }
-  } else {
+  } else if (!onlyKnowledge && workspaceId) {
     const [instances, grants] = await Promise.all([
       stores.connectorInstanceStore
         ? stores.connectorInstanceStore.listByWorkspaceSystem(workspaceId).catch((error) => {
@@ -593,14 +594,14 @@ export async function prepareCapabilityCatalog(input: PrepareCapabilityCatalogIn
   const hasAgentmailInbox = admitted.some(row => row.lane === 'workspace' && row.provider === 'agentmail'
     && row.connected && row.healthStatus !== 'auth_failed')
   const [enablementRows, policyRows, grantRows, assignedAgentmailIds] = await Promise.all([
-    stores.assistantConnectorStore
+    !onlyKnowledge && stores.assistantConnectorStore
       ? stores.assistantConnectorStore.listForAssistant(assistantId).catch((error) => {
         // Fail closed: an unknown enablement state hides connector tools this turn.
         console.error('[mcp-catalog] enablement read failed:', error); return null })
       : Promise.resolve([]),
-    (input.policyReader ?? readPoliciesSystem)({ assistantIds: [APP_LEVEL_ASSISTANT_ID, assistantId], userIds: policyUsers, workspaceId })
+    onlyKnowledge ? Promise.resolve([]) : (input.policyReader ?? readPoliciesSystem)({ assistantIds: [APP_LEVEL_ASSISTANT_ID, assistantId], userIds: policyUsers, workspaceId })
       .catch((error) => { console.error('[mcp-catalog] policy read failed:', error); return null }),
-    input.actionGrantReader === null
+    onlyKnowledge || input.actionGrantReader === null
       ? Promise.resolve(null)
       : (input.actionGrantReader ?? readActionGrantsSystem)(assistantId)
         .catch((error) => { console.error('[mcp-catalog] action-grant read failed:', error); return 'failed' as const }),
@@ -782,7 +783,7 @@ export async function prepareCapabilityCatalog(input: PrepareCapabilityCatalogIn
   // 7. Knowledge base presence; capture rules only with capture text.
   let knowledgeTools: Tool[] = []
   let knowledgeCapturePrompt: string | undefined
-  if (!onlyNativeConnector && input.knowledge) {
+  if (includesConnector('knowledge') && input.knowledge) {
     const { store, repoWriter, captureRuleStore, captureText, requesterLabel } = input.knowledge
     const captureMode = profile.knowledgeWrites === 'capture'
     try {

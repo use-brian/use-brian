@@ -2,11 +2,13 @@ import { bindProviderConversationTurn, withProviderConversationEvidence } from '
 import { assertTelegramConversationCurrent } from '../telegram-conversation-context.js'
 import { recordingInputScope, type RecordingAdmission } from '../channel-recording.js'
 import { assembleTurnPublication } from '../turn/publication.js'
+import { createTurnTiming } from './turn-timings.js'
 import { isInputAuthorityError } from '@use-brian/agent-runtime/providers/input-authority.js'
 import { admitCurrentAuthoredInput } from './attended-session-context.js'
 import { routeAttendedTurn } from './attended-turn-routing.js'
 import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/attended-audience.js'
 import { bindVerifiedTelegramEvidence, bindVerifiedThreadRoomEvidence } from '../context-scope/native-invocation-evidence.js'
+import { bindTelegramKnowledgeGroup, telegramKnowledgeGroup, telegramKnowledgeUsed } from '../context-scope/telegram-knowledge-audience.js'
 import { bindScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { resourceScopeKey } from '@use-brian/agent-runtime/security/derived-scope.js'
 import type { TurnCapabilityRequest } from '../turn/capabilities.js'
@@ -69,6 +71,7 @@ import { buildWorkspaceFilesContext, selectWorkspaceFilesContextRows } from '@us
 import { buildUploadPolicyBlock } from '@use-brian/core/workspace-files/upload-policy-block.js'
 import { calculateCost } from '@use-brian/agent-runtime/billing/cost-tracker.js'
 import { modelToCompactionTier } from '@use-brian/agent-runtime/compaction/compact.js'
+import type { QueryEvent } from '@use-brian/agent-runtime/engine/query-loop.js'
 import {
   matchesDisputedFigure,
   buildDisputeContextNote,
@@ -91,7 +94,8 @@ import type { RealtimeThreadTarget } from '@use-brian/core/ingest/realtime-threa
 import type { FilesApi } from '@use-brian/core/workspace-files/api.js'
 import type { OutboundAttachment } from '@use-brian/core/workspace-files/attachments.js'
 import { resolveBrandContext } from '../brand/prompt-context.js'
-import type { IncomingMessage, OutgoingDocument, OutgoingAction } from '@use-brian/channels'
+import type { IncomingMessage, OutgoingDocument, OutgoingAction, TelegramDispatchScope } from '@use-brian/channels'
+import { isTelegramThreadNotFoundError } from '@use-brian/channels'
 import type { ChannelInteractionScope } from '@use-brian/core/mcp/channel-confirmations.js'
 import type { ChannelQuestionStore } from '../workflow/channel-questions.js'
 import { channelConfirmations, ROOM_INTERACTION_SENDER } from './channel-interactions.js'
@@ -223,11 +227,13 @@ export function deliverChannelResponse(
   question?: ChannelQuestion,
   notice?: string | null,
   actions?: OutgoingAction[],
+  telegramDispatch?: TelegramDispatchScope,
 ) {
   // Some hooks ignore the structured third argument. Always include every option
   // in text; capable adapters may additionally render buttons.
   const body = question ? formatAssistantQuestion(question) : text
   const message = notice ? `${notice}\n\n${body}` : body
+  if (telegramDispatch) return hooks.sendResponse(message, documents, question, actions, telegramDispatch)
   return actions === undefined ? hooks.sendResponse(message, documents, question)
     : hooks.sendResponse(message, documents, question, actions)
 }
@@ -254,12 +260,15 @@ export function deliverChannelResponse(
  *
  * The pipeline calls both in order; channels opt in to whichever fits.
  */
+type ChannelToolProgress = Extract<QueryEvent, { type: 'tool_start' | 'tool_input' | 'tool_result' }>
+type DispatchChannelToolProgress = (write: (telegramDispatch?: TelegramDispatchScope) => Promise<void>) => Promise<void>
+
 export type ChannelHooks = {
   /** Called once after admission, before classification and context setup. */
   onProcessingStart?(): Promise<void>
 
   /** Called on `status` events from the query loop (e.g., "Researching..."). */
-  onStatus?(message: string): Promise<void>
+  onStatus?(message: string, telegramDispatch?: TelegramDispatchScope): Promise<void>
 
   /**
    * Called on every `text_delta` event from the query loop. Streaming
@@ -293,8 +302,11 @@ export type ChannelHooks = {
   /** Called on `tool_result`. */
   onToolResult?(results: ContentBlock[]): Promise<void>
 
+  /** Owns the local tool timeline and dispatches each external write through the pipeline. */
+  onToolProgress?(event: ChannelToolProgress, dispatch: DispatchChannelToolProgress): Promise<void>
+
   /** Called once when a confirmed goal has been armed and kicked off. */
-  onGoalAccepted?(message: string, goalId: string): Promise<void>
+  onGoalAccepted?(message: string, goalId: string, telegramDispatch?: TelegramDispatchScope): Promise<void>
 
   /**
    * Called immediately after the inbound user message is persisted to
@@ -353,6 +365,7 @@ export type ChannelHooks = {
       allowPersistentApproval?: boolean
     },
     resolver: ConfirmationResolver,
+    telegramDispatch?: TelegramDispatchScope,
   ): Promise<void>
 
   /**
@@ -376,7 +389,8 @@ export type ChannelHooks = {
    * reacted to. Channels that don't have a stable platform id
    * (web streaming, scheduled-job executor) return `void`.
    */
-  sendResponse(text: string, documents?: OutgoingDocument[], question?: ChannelQuestion, actions?: OutgoingAction[]): Promise<{ channelMessageId?: string } | void>
+  sendResponse(text: string, documents?: OutgoingDocument[], question?: ChannelQuestion, actions?: OutgoingAction[],
+    telegramDispatch?: TelegramDispatchScope): Promise<{ channelMessageId?: string } | void>
   /** @deprecated Legacy transport hook. Room setup never posts or prepends notices. */
   postNotice?(text: string): Promise<void>
 
@@ -398,7 +412,7 @@ export type ChannelHooks = {
   onBudgetOk?(pinMessageId: string | null): Promise<void>
 
   /** Called on `error` events from the query loop or budget-blocked. */
-  sendError(error: Error): Promise<void>
+  sendError(error: Error, telegramDispatch?: TelegramDispatchScope): Promise<void>
 
   /**
    * Called once in the `finally` block. Clean up typing indicators,
@@ -413,6 +427,8 @@ export type ChannelPipelineParams = AdmittedChannelMessage & {
   recording?: RecordingAdmission
   /** Newly admitted shared provider context; recorder/Brain consent stays separate. */
   conversationContext?: Session
+  /** Identity of the exact Telegram integration accepted by its signed webhook. */
+  telegramProviderIdentity?: NonNullable<Session['providerContextIdentity']>
 
   /**
    * Background-lane model, resolved once at boot against the configured
@@ -1194,6 +1210,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
 
 async function processChannelMessageTurn(params: ChannelPipelineParams, channelStopRequested: () => boolean, sqlScope?: TurnSqlScope): Promise<void> {
   const turnStartedAt = new Date()
+  const timing = createTurnTiming()
   const {
     userId, ownerId, assistant, isIdentified,
     channelType, channelId, actorChannelId, actorDisplayName, mediaEpisodeId, isGroupChat,
@@ -1504,7 +1521,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
   const authority = executionContext.security.authority
   const originalIdentity = executionContext.identity
   const originalOwnership = executionContext.ownership
-  const assertDeliveryAudience = async (): Promise<void> => {
+  const assertDeliveryAudience = (): Promise<void> => timing.time('audience_check', async () => {
     if (params.conversationContext) await assertTelegramConversationCurrent(params.conversationContext)
     // The native authorizer owns the same original lease at entry and return.
     if (!nativeTranscriptAuthority) await authority.assertCurrent()
@@ -1528,7 +1545,21 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     if (recordEnvelope && !channelEvidenceFitsEnvelope(recordEnvelope,scopeAccumulator.evidence)) {
       throw new DeliveryAudienceUnverifiedError(undefined,'source_reclassified')
     }
+  })
+  const checkTelegramDispatch = async () => {
+    await assertDeliveryAudience()
+    abortController.signal.throwIfAborted()
   }
+  const telegramDispatch = (): TelegramDispatchScope | undefined => {
+    if (!telegramKnowledgeGroup(executionContext)) return
+    return telegramKnowledgeUsed(executionContext) ? { assertCurrent: checkTelegramDispatch } : {}
+  }
+  const emitStatus = (message: string) => {
+    const check = telegramDispatch()
+    return check ? hooks.onStatus?.(message, check) : hooks.onStatus?.(message)
+  }
+  const sendTurnError = (error: Error) => telegramKnowledgeGroup(executionContext)
+    ? hooks.sendError(error, {}) : hooks.sendError(error)
   /**
    * Every pre-generation audience check refuses the same way: one analytics
    * row and a reply to the person waiting. A refusal that escapes instead
@@ -1680,6 +1711,17 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
   if (abortController.signal.aborted) return
   if (recordEnvelope && nativeTranscriptAuthority && audienceEnvelope?.allowed && audienceEnvelope.source === 'binding') {
     bindProviderConversationTurn(executionContext, turnOwner.token, recordEnvelope.version)
+    const telegram = params.telegramProviderIdentity
+    if (channelType === 'telegram' && room && isGroupChat && isIdentified && params.senderLinkedIdentity
+        && recordAddress?.member && executionContext.security.access.sharedAudience && !audienceEnvelope.ceiling.userId
+        && telegram && telegram.integrationId === params.channelIntegrationId
+        && session.channelId === channelId && incoming?.channelId === channelId && incoming.messageId && incoming.userId) {
+      bindTelegramKnowledgeGroup(executionContext, {
+        sessionId: session.id, address: channelId, integrationId: telegram.integrationId, botId: telegram.botId,
+        generation: telegram.generation, envelopeVersion: recordEnvelope.version, lease: turnOwner.token,
+        speakerId: incoming.userId, incomingId: incoming.messageId,
+      })
+    }
   }
 
   turnOwner.bindModelPreparation({ kind: 'execution', toolProfile: 'channel', execution: executionContext, scopeAccumulator, assertCurrent: assertDeliveryAudience },
@@ -2094,7 +2136,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
   let terminalQuestion: ChannelQuestion | undefined
   let endpointFallbackAnnounced = false
   const sendResponseAndStampChannelId = async (text: string, documents?: OutgoingDocument[]): Promise<void> => {
-    await assertDeliveryAudience()
+    await assertInitialMailboxEvidenceCurrent(executionContext)
+    const telegram = telegramDispatch()
+    if (!telegram?.assertCurrent) await assertDeliveryAudience()
     // A channel has no `notice` lane, so an announced fallback has to travel
     // in the message itself - once, on the first thing the user sees, then
     // cleared so a multi-part reply does not repeat it.
@@ -2114,11 +2158,11 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     const pendingNotice = imageFallbackNotice ?? endpointNotice
     imageFallbackNotice = null
     const actions = questionBinding ? channelQuestionActions(questionBinding, terminalQuestion) : undefined
-    await assertInitialMailboxEvidenceCurrent(executionContext)
-    const result = await deliverChannelResponse({ sendResponse: deliverResponse }, text, documents, terminalQuestion, pendingNotice, actions)
+    const result = await deliverChannelResponse({ sendResponse: deliverResponse }, text, documents, terminalQuestion, pendingNotice, actions, telegram)
     const channelMessageId = result && typeof result === 'object'
       ? result.channelMessageId
       : undefined
+    if (channelMessageId) timing.observe('channel_reply_receipt')
     if (channelMessageId && lastFlushedAssistantRowId) {
       try {
         await setSessionMessageChannelId(lastFlushedAssistantRowId, channelMessageId)
@@ -2250,7 +2294,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     : undefined
 
   // The owner invokes this only for an actual main-model discovery tool call.
-  const discoverContext = async () => {
+  const discoverContext = () => timing.time('context_discovery', async () => {
     const { backgroundLlmRuntime, backgroundProvider, backgroundLaneModel, backgroundUsageAttribution } = await getBackground()
     // D16: a room is hydrated once from what the provider still shows.
     const roomHistory = !params.recording && room && audienceEnvelope?.allowed
@@ -2908,7 +2952,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
               source: 'included', triggerKey: 'worker_run', providerKeySource: keySource,
             }).catch(error => console.error(`[${channelType}] worker usage tracking failed:`, error))
           },
-          onStatus: () => hooks.onStatus?.('Researching...') ?? Promise.resolve(),
+          onStatus: () => emitStatus('Researching...') ?? Promise.resolve(),
           onEvent: (event, workerId) => {
             if (event.type !== 'tool_result') return
             recordChannelToolResults({
@@ -2977,14 +3021,30 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
         ...chatTierBudget({ model: logicalModel, researchMode: true }),
       } : {}),
     }
-  }
+  })
 
   // ── Query loop ──
   if (abortController.signal.aborted) return
+  const dispatchToolProgress: DispatchChannelToolProgress = async (write) => {
+    const telegram = telegramDispatch()
+    if (!telegram?.assertCurrent) await assertDeliveryAudience()
+    abortController.signal.throwIfAborted()
+    return telegram ? write(telegram) : write()
+  }
+  const observeToolProgress = (event: ChannelToolProgress) => {
+    if (hooks.onToolProgress) return hooks.onToolProgress(event, dispatchToolProgress)
+    switch (event.type) {
+      case 'tool_start': return hooks.onToolStart?.(event.id, event.name)
+      case 'tool_input': return hooks.onToolInput?.(event.id, event.name, event.input)
+      case 'tool_result': return hooks.onToolResult?.(event.results)
+    }
+  }
   try {
     const initialPrompt = buildSplitSystemPrompt({ ...channelPrompt, memoryContext: '' })
     const initialContext = [initialPrompt.privateRuntimeContext, ...channelPolicy]
-    if (questionAnswer !== undefined || replyToMessageId != null || params.realtimeThreadTarget || params.providerVisibleContext) {
+    const hasConversationReference = questionAnswer !== undefined || replyToMessageId != null
+      || params.realtimeThreadTarget || params.providerVisibleContext
+    if (hasConversationReference) {
       initialContext.push('This message has a conversation reference. Request conversation context to resolve it before answering.')
     }
     const currentMessage = bindScopeSources<Message>({ role: 'user', content: userContentBlocks },
@@ -2994,10 +3054,18 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     await turnOwner.prepareRun({
       systemPrompt: initialPrompt.stablePrompt,
       messages: [currentMessage],
-      candidateTools: new Map(),
+      candidateTools: senderIsWorkspaceMember && !isolatedAudience && !hasConversationReference ? tools : new Map(),
       trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
       userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
       initialMailboxCapabilities: createConnectorCapabilityRequest && isIdentified && !isolatedAudience
+        ? async () => createConnectorCapabilityRequest(await resolveConnectorUserId(), new Map())
+        : undefined,
+      initialKnowledgeCapabilities: createConnectorCapabilityRequest && knowledgeStore && senderIsWorkspaceMember
+        && isIdentified && !isolatedAudience && !hasConversationReference
+        && executionContext.ownership.kind === 'workspace' && executionContext.identity.kind === 'attended'
+        && executionContext.identity.principal.kind === 'workspace_member'
+        && executionContext.identity.principal.authenticationKind === 'verified_channel'
+        && (!isGroupChat || telegramKnowledgeGroup(executionContext))
         ? async () => createConnectorCapabilityRequest(await resolveConnectorUserId(), new Map())
         : undefined,
       contextDiscovery: discoverContext,
@@ -3057,15 +3125,16 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
       },
       sink: { kind: 'adapter', ...(nativeTranscriptAuthority ? { admitOutput: async (_context, eventKind) => {
         // The managed recorder suppresses the live mirror and keeps these
-        // events inside the turn. Progress becomes an outward effect only
-        // when its adapter hook exists. The terminal send checks the audience
-        // again after reading any attachments and before provider I/O.
+        // events inside the turn. A guarded timeline independently admits its
+        // physical writes; other progress hooks use this admission. The final
+        // send checks the audience after attachments and before provider I/O.
         if (params.recording && !params.conversationContext && !researchObserver
           && (eventKind === 'assistant_turn' || eventKind === 'question' || eventKind === 'thinking_delta'
             || eventKind === 'turn_complete' || (eventKind === 'text_delta' && !hooks.onTextDelta)
             || (eventKind === 'status' && !hooks.onStatus)
-            || (eventKind === 'tool_start' && !hooks.onToolStart)
-            || (eventKind === 'tool_input' && !hooks.onToolInput))) {
+            || (eventKind === 'tool_start' && (!hooks.onToolStart || hooks.onToolProgress))
+            || (eventKind === 'tool_input' && (!hooks.onToolInput || hooks.onToolProgress))
+            || (eventKind === 'tool_result' && hooks.onToolProgress))) {
           await authority.assertCurrent()
           return
         }
@@ -3160,16 +3229,16 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
           await hooks.onCitation?.(event.sources)
           break
         case 'status':
-          await hooks.onStatus?.(event.message)
+          await emitStatus(event.message)
           publishChannelActivity('status', { message: event.message })
           break
         case 'tool_start':
-          await hooks.onToolStart?.(event.id, event.name)
+          await observeToolProgress(event)
           turnStream.onToolStart(event.name)
           publishChannelActivity('tool_start', { id: event.id, name: event.name })
           break
         case 'tool_input':
-          await hooks.onToolInput?.(event.id, event.name, event.input)
+          await observeToolProgress(event)
           publishChannelActivity('tool_input', { id: event.id, name: event.name, input: event.input })
           break
         case 'tool_result':
@@ -3187,7 +3256,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
             userPlan: workspacePlan,
             channelType, pendingUsage,
           })
-          await hooks.onToolResult?.(event.results)
+          await observeToolProgress(event)
           for (const block of event.results) {
             if (block.type === 'tool_result') {
               publishChannelActivity('tool_result', {
@@ -3208,8 +3277,10 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
             try {
               // The acknowledgement is an outbound send like any other: the
               // destination must still be authorized for this turn.
-              await assertDeliveryAudience()
-              await hooks.onGoalAccepted?.(GOAL_ACCEPTED_CHANNEL_MESSAGE, goalId)
+              const check = telegramDispatch()
+              if (!check?.assertCurrent) await assertDeliveryAudience()
+              if (check) await hooks.onGoalAccepted?.(GOAL_ACCEPTED_CHANNEL_MESSAGE, goalId, check)
+              else await hooks.onGoalAccepted?.(GOAL_ACCEPTED_CHANNEL_MESSAGE, goalId)
             } catch {
               // Best-effort acknowledgement only; the final response still
               // has its own authoritative delivery/error handling below.
@@ -3223,7 +3294,11 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
           if (params.interactionScope) {
             channelConfirmations.register(params.interactionScope, event.request, confirmationResolver, abortController.signal)
           }
-          await hooks.onConfirmationRequired(event.request, confirmationResolver)
+          {
+            const check = telegramDispatch()
+            if (check) await hooks.onConfirmationRequired(event.request, confirmationResolver, check)
+            else await hooks.onConfirmationRequired(event.request, confirmationResolver)
+          }
           break
         case 'assistant_turn':
           pendingAssistantTurns.push({
@@ -3412,6 +3487,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
               userId, assistantId: assistant.id, sessionId: session.id,
               eventName: 'turn_completed', channelType,
               metadata: {
+                ...timing.snapshot(),
                 model: sanitizeAnalytics(event.response.model),
                 input_tokens: usage.inputTokens,
                 output_tokens: usage.outputTokens,
@@ -3433,7 +3509,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
         }
         case 'error':
           console.error(`[${channelType}] query loop error:`, event.error)
-          await hooks.sendError(event.error)
+          await sendTurnError(event.error)
           break
       }
     } },
@@ -3507,6 +3583,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
         metadata: {
           error_type: sanitizeAnalytics((err as Error).name),
           stage: sanitizeAnalytics('live_authority'),
+          ...timing.snapshot(),
           ...Object.fromEntries(Object.entries(deliveryFailureAnalytics(err)).map(([key, value]) => [key, sanitizeAnalytics(value)])),
           ...(isDeliveryAudienceUnverifiedError(err) && err.diagnostic
             ? { denial_diagnostic: sanitizeAnalytics(err.diagnostic) }
@@ -3514,7 +3591,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
         },
       })
       if (!abortController.signal.aborted) {
-        await hooks.sendError(err)
+        await sendTurnError(err)
       }
       return
     }
@@ -3528,8 +3605,10 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
         error_type: sanitizeAnalytics((err as Error)?.name ?? 'unknown'),
         error_message: sanitizeAnalytics(((err as Error)?.message ?? '').slice(0, 200)),
         stage: sanitizeAnalytics('query_loop'),
+        ...timing.snapshot(),
       },
     })
+    if (telegramKnowledgeGroup(executionContext) && isTelegramThreadNotFoundError(err)) return
 
     // A recovery message is model output for this destination: if the turn's
     // authority or audience went stale while it failed, no synthesis runs,
@@ -3539,7 +3618,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     } catch (authErr) {
       if (!isAuthorityChangedError(authErr) && !isDeliveryAudienceUnverifiedError(authErr)) throw authErr
       console.warn(`[${channelType}] recovery withheld: live authority refused`, (authErr as Error).name)
-      if (!abortController.signal.aborted) await hooks.sendError(authErr)
+      if (!abortController.signal.aborted) await sendTurnError(authErr)
       return
     }
 
@@ -3557,7 +3636,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
       // whole point of the helper.
       await sendResponseAndStampChannelId(recovered.text)
     } else {
-      await hooks.sendError(err instanceof Error ? err : new Error(String(err)))
+      await sendTurnError(err instanceof Error ? err : new Error(String(err)))
     }
   } finally {
     channelConfirmations.clear(confirmationResolver)

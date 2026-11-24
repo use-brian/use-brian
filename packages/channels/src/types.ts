@@ -109,6 +109,8 @@ export type OutgoingMessage = {
   ephemeral?: boolean
   /** Telegram: plain-text details in a collapsed-by-default, expandable quote. */
   collapsibleDetails?: string
+  /** Telegram: keep each provider effect in the exact addressed topic. */
+  telegramDispatch?: TelegramDispatchScope
   format?: 'plain' | 'markdown'
   images?: Array<{ url: string; caption?: string }>
   /**
@@ -119,6 +121,8 @@ export type OutgoingMessage = {
   documents?: OutgoingDocument[]
   actions?: OutgoingAction[]
 }
+
+export type TelegramDispatchScope = { assertCurrent?: () => Promise<void> }
 
 // ── Adapter interface ──────────────────────────────────────────
 

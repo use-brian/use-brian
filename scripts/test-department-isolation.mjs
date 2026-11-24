@@ -21,6 +21,7 @@ let foundation = false
 let reportPath
 let shard = null
 let profile = 'full'
+const calendarWorkload = ['push', 'pull_request'].includes(process.env.GITHUB_EVENT_NAME) ? 'compact' : 'extended'
 let mergeDirectory
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--profile' && args[i + 1]) profile = args[++i]
@@ -142,7 +143,7 @@ async function saveReport(report) {
     await mkdir(dirname(reportPath), { recursive: true })
     await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 })
   }
-  console.log(JSON.stringify({ mode: report.mode, profile: report.profile, profileAccepted: report.profileAccepted, revision: report.revision, report: reportPath ?? null,
+  console.log(JSON.stringify({ mode: report.mode, profile: report.profile, calendarWorkload: report.calendarWorkload, profileAccepted: report.profileAccepted, revision: report.revision, report: reportPath ?? null,
     ...report.counts, fullMatrixAccepted: report.fullMatrixAccepted }))
 }
 
@@ -154,7 +155,7 @@ async function run() {
   if (mergeDirectory) {
     const paths = (await readdir(mergeDirectory)).filter(path => /^department-isolation-\d+\.json$/.test(path)).sort()
     const reports = await Promise.all(paths.map(async path => JSON.parse(await readFile(join(mergeDirectory, path), 'utf8'))))
-    const report = mergeAcceptanceReports(reports, metadata, profile)
+    const report = mergeAcceptanceReports(reports, metadata, profile, calendarWorkload)
     await saveReport(report)
     if (!report.profileAccepted) throw new Error(`Department isolation acceptance failed; report: ${reportPath}`)
     return
@@ -186,6 +187,7 @@ async function run() {
     const env = {
       ...runtime,...fixture.env,...(fixture.adminUrl ? { CONTEXT_SCOPE_TEST_DATABASE_URL:fixture.adminUrl } : {}),
       CI:'true',GEMINI_API_KEY:'',OPENAI_API_KEY:'',ANTHROPIC_API_KEY:'',BRIAN_TEST_NO_PAID:'1',
+      BRIAN_CALENDAR_WORKLOAD: calendarWorkload,
     }
     const fixtureChecksStarted = performance.now()
     if (native) await runCommand('node', ['--test', ...fixtureChecks], { cwd: root, env, inherit: true })
@@ -252,7 +254,7 @@ async function run() {
             return rows
           }
           try {
-            if (calendarShard) {
+            if (calendarShard && calendarWorkload === 'extended') {
               actual.push(...await runCalendarIsolation(env,runTests))
             } else {
               actual.push(...await runTests(env))
@@ -276,7 +278,7 @@ async function run() {
     const finalReport = createAcceptanceReport({
       metadata: { ...metadata, migration: await migrationRevision(fixture.adminUrl),
         timing: { platform: process.platform, arch: process.arch, node: process.version, fixturePreparationMs, fixtureChecksMs } },
-      suites: suiteResults, assertions, foundation, shard, profile,
+      suites: suiteResults, assertions, foundation, shard, profile, calendarWorkload,
     })
     await saveReport(finalReport)
     if (!finalReport.suitesPassed || (!foundation && !shard && !finalReport.profileAccepted)) {

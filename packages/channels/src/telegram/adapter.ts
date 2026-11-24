@@ -782,6 +782,25 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
    * Send a text message, retrying once without `message_thread_id` when the
    * topic was deleted between inbound and outbound.
    */
+  const dispatchRefusals = new WeakSet<Error>()
+  function guardTelegramAttempt(check: OutgoingMessage['telegramDispatch']) {
+    const authorize = check?.assertCurrent
+    if (!authorize) return undefined
+    return async () => {
+      try {
+        await authorize()
+      } catch (error) {
+        const refusal = error instanceof Error ? error : new Error('Telegram delivery was refused', { cause: error })
+        dispatchRefusals.add(refusal)
+        throw refusal
+      }
+    }
+  }
+
+  function exactDispatchRefused(error: unknown, check: OutgoingMessage['telegramDispatch']): boolean {
+    return !!check && (error instanceof Error && dispatchRefusals.has(error) || isTelegramThreadNotFoundError(error))
+  }
+
   async function sendMessageWithThreadFallback(
     api: TelegramApi,
     chatId: string,
@@ -792,11 +811,13 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
       messageThreadId?: number
       replyMarkup?: unknown
     },
+    check?: OutgoingMessage['telegramDispatch'],
   ): Promise<{ message_id: number; text?: string; threadFallback?: boolean }> {
+    const beforeAttempt = guardTelegramAttempt(check)
     try {
-      return await api.sendMessage(chatId, text, opts)
+      return await api.sendMessage(chatId, text, beforeAttempt ? {...opts, beforeAttempt} : opts)
     } catch (err) {
-      if (!options.strictTopic && opts.messageThreadId != null && isTelegramThreadNotFoundError(err)) {
+      if (!check && !options.strictTopic && opts.messageThreadId != null && isTelegramThreadNotFoundError(err)) {
         console.warn(
           `[telegram] sendMessage to chat ${chatId} failed because topic ${opts.messageThreadId} no longer exists; retrying without message_thread_id`,
         )
@@ -821,6 +842,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     format: string | undefined,
     replyToMessageId: number | undefined,
     messageThreadId: number | undefined,
+    check?: OutgoingMessage['telegramDispatch'],
   ): Promise<{ message_id: number; text?: string; threadFallback?: boolean }> {
     if (format === 'markdown') {
       try {
@@ -829,21 +851,22 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
           parseMode: 'HTML',
           replyToMessageId,
           messageThreadId,
-        })
+        }, check)
         return { ...result, text: result.text ?? stripMarkdown(text) }
-      } catch {
+      } catch (error) {
+        if (exactDispatchRefused(error, check)) throw error
         const plain = stripMarkdown(text)
         const result = await sendMessageWithThreadFallback(api, chatId, plain, {
           replyToMessageId,
           messageThreadId,
-        })
+        }, check)
         return { ...result, text: result.text ?? plain }
       }
     }
     const result = await sendMessageWithThreadFallback(api, chatId, text, {
       replyToMessageId,
       messageThreadId,
-    })
+    }, check)
     return { ...result, text: result.text ?? text }
   }
 
@@ -985,6 +1008,8 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
 
     async sendMessage(channelId: string, response: OutgoingMessage, opts?: { threadTs?: string }): Promise<string> {
       response = denormalizeActions(response)
+      const check = response.telegramDispatch
+      const beforeAttempt = guardTelegramAttempt(check)
       const { chatId, messageThreadId, discussionRootId } = parseTopicChannelId(channelId)
       const topicId = outboundThreadId(messageThreadId)
       // Telegram rejects empty text with a 400 — a documents-only send
@@ -1007,13 +1032,14 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
             try {
               const result = await sendMessageWithThreadFallback(api, chatId, chunk.html, {
                 parseMode: 'HTML', replyToMessageId: discussionRootId ?? (i === 0 ? replyToId : undefined), messageThreadId: topicId,
-              })
+              }, check)
               delivered = { ...result, text: result.text ?? stripMarkdown(chunk.text) }
-            } catch {
+            } catch (error) {
+              if (exactDispatchRefused(error, check)) throw error
               // Older API servers may not support expandable quotes. Unfold safely.
               const result = await sendMessageWithThreadFallback(api, chatId, chunk.text, {
                 replyToMessageId: discussionRootId ?? (i === 0 ? replyToId : undefined), messageThreadId: topicId,
-              })
+              }, check)
               delivered = { ...result, text: result.text ?? chunk.text }
             }
           } else {
@@ -1024,17 +1050,22 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
               response.format,
               discussionRootId ?? (i === 0 ? replyToId : undefined),
               topicId,
+              check,
             )
           }
           lastMessageId = delivered.message_id
         } catch (err) {
+          if (exactDispatchRefused(err, check)) throw err
           // Mid-chunk failure: earlier chunks have already landed, so a silent
           // truncation would leave the user with half a reply and no way to
           // tell. Mark the last successful chunk before re-throwing so the
           // caller's error path still runs. See adapter-pattern.md § 7.
           if (i > 0 && lastMessageId > 0) {
             const truncated = chunks[i - 1].text + '\n\n— message cut off, reply to continue'
-            await api.editMessageText(chatId, lastMessageId, truncated).catch(() => {})
+            await api.editMessageText(chatId, lastMessageId, truncated, beforeAttempt ? {beforeAttempt} : undefined)
+              .catch(error => {
+                if (exactDispatchRefused(error, check)) throw error
+              })
           }
           throw err
         }
@@ -1058,8 +1089,9 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
         if (replyMarkup) {
           // Preserve the exact rendered text and entities while attaching buttons.
           try {
-            await api.editMessageReplyMarkup(chatId, lastMessageId, replyMarkup)
-          } catch {
+            await api.editMessageReplyMarkup(chatId, lastMessageId, replyMarkup, beforeAttempt)
+          } catch (error) {
+            if (exactDispatchRefused(error, check)) throw error
             // The text alternative was already delivered; buttons are best-effort.
           }
         }
@@ -1076,9 +1108,9 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
           try {
             let docResult: { message_id: number }
             try {
-              docResult = await api.sendDocument(chatId, doc, { messageThreadId: topicId, replyToMessageId: discussionRootId })
+              docResult = await api.sendDocument(chatId, doc, { messageThreadId: topicId, replyToMessageId: discussionRootId, beforeAttempt })
             } catch (err) {
-              if (topicId != null && isTelegramThreadNotFoundError(err)) {
+              if (!check && topicId != null && isTelegramThreadNotFoundError(err)) {
                 docResult = await api.sendDocument(chatId, doc, {})
               } else {
                 throw err
@@ -1088,14 +1120,18 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
             // round-trip anchor falls back to the first document.
             if (lastMessageId === 0) lastMessageId = docResult.message_id
           } catch (err) {
+            if (exactDispatchRefused(err, check)) throw err
             console.warn(
               `[telegram] sendDocument failed for ${doc.filename}:`,
               err instanceof Error ? err.message : String(err),
             )
-            await sendMessageWithThreadFallback(api, chatId, `Could not attach ${doc.filename}.`, {
+            const notice = sendMessageWithThreadFallback(api, chatId, `Could not attach ${doc.filename}.`, {
               messageThreadId: topicId,
               replyToMessageId: discussionRootId,
-            }).catch(() => {})
+            }, check)
+            await notice.catch(error => {
+              if (exactDispatchRefused(error, check)) throw error
+            })
           }
         }
       }
@@ -1109,6 +1145,8 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
         return
       }
       response = denormalizeActions(response)
+      const check = response.telegramDispatch
+      const beforeAttempt = guardTelegramAttempt(check)
       // editMessageText is keyed by (chat_id, message_id) — no message_thread_id.
       const { chatId } = parseTopicChannelId(channelId)
       const prepared = response.collapsibleDetails
@@ -1121,13 +1159,16 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
       try {
         await api.editMessageText(chatId, Number(messageId), body, {
           parseMode: prepared.html || isMarkdown ? 'HTML' : undefined,
+          beforeAttempt,
           ...(response.actions ? { replyMarkup: { inline_keyboard: buildInlineKeyboard(response.actions) } } : {}),
         })
-      } catch {
+      } catch (error) {
+        if (exactDispatchRefused(error, check)) throw error
         try {
           const plain = stripMarkdown(raw)
-          await api.editMessageText(chatId, Number(messageId), plain)
-        } catch {
+          await api.editMessageText(chatId, Number(messageId), plain, beforeAttempt ? {beforeAttempt} : undefined)
+        } catch (plainError) {
+          if (exactDispatchRefused(plainError, check)) throw plainError
           if (response.actions?.length) {
             await this.sendMessage(channelId, { ...response, actions: undefined }, opts)
           }

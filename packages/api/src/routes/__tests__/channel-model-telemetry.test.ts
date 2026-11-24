@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import ts from 'typescript'
 import { calculateCost } from '@use-brian/agent-runtime/billing/cost-tracker.js'
 import { describe, expect, it, vi } from 'vitest'
+import { createTurnTiming } from '../turn-timings.js'
 
 const pipelineSource = readFileSync(new URL('../channel-pipeline.ts', import.meta.url), 'utf8')
 const tree = ts.createSourceFile('channel-pipeline.ts', pipelineSource, ts.ScriptTarget.Latest, true)
@@ -16,7 +17,12 @@ if (!telemetry) throw new Error('Missing actual channel terminal telemetry')
 
 describe('[COMP:api/codex-provider] channel model telemetry', () => {
   it.each(['platform', 'user'] as const)('records actual %s served model without an optional usage store', keySource => {
+    let elapsed = 0
+    const timing = createTurnTiming(() => elapsed)
+    elapsed = 250
+    timing.observe('channel_reply_receipt')
     const logEvent = vi.fn(), scope = {
+      timing,
       usageStore: undefined, analytics: { logEvent }, userId: 'actor', assistant: { id: 'assistant' }, session: { id: 'session' },
       channelType: 'fixture', logicalTier: 'pro', customLlmRuntime: { providerKeySource: keySource, fallback: { used: false } },
       usage: { inputTokens: 2, outputTokens: 3, calculatedCostUsd: 0.1 },
@@ -26,6 +32,7 @@ describe('[COMP:api/codex-provider] channel model telemetry', () => {
     new Function(...Object.keys(scope), ts.transpileModule(telemetry,
       { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText)(...Object.values(scope))
     expect(logEvent).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ eventName: 'turn_completed',
-      metadata: expect.objectContaining({ model: 'actual-served-model', input_tokens: 2, output_tokens: 3, cost_usd_micro: keySource === 'user' ? 0 : 100_000 }) }))
+      metadata: expect.objectContaining({ model: 'actual-served-model', input_tokens: 2, output_tokens: 3,
+        channel_reply_receipt_at_ms: 250, cost_usd_micro: keySource === 'user' ? 0 : 100_000 }) }))
   })
 })

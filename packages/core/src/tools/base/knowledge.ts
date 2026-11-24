@@ -73,6 +73,11 @@ const knowledgeSourceSelection = z.string().uuid().nullable().optional().describ
   'Select a source by its UUID, or use null for manual entries. Omit to include all accessible sources.',
 )
 
+export const knowledgeSearchInput = z.object({
+  query: z.string().describe('Search keywords (e.g. "vault fee structure", "deployment architecture").'),
+  sourceId: knowledgeSourceSelection,
+})
+
 function knowledgeCollectionArgs(context: ToolContext, sourceId?: string | null): [authority?: SessionContextAuthority, sourceId?: string | null] {
   const authority = context.executionContext && context.scopeAccumulator
     ? { execution: context.executionContext, accumulator: context.scopeAccumulator }
@@ -217,10 +222,7 @@ export function createKnowledgeTools(
     name: 'searchKnowledge',
     description:
       'Search the workspace knowledge base (KB) by keyword. Returns matching entries with titles, paths, and summaries. Use this when you need to find specific information in the team\'s knowledge base.',
-    inputSchema: z.object({
-      query: z.string().describe('Search keywords (e.g. "vault fee structure", "deployment architecture").'),
-      sourceId: knowledgeSourceSelection,
-    }),
+    inputSchema: knowledgeSearchInput,
     isConcurrencySafe: true,
     isReadOnly: true,
     timeoutMs: 5_000,
@@ -240,7 +242,9 @@ export function createKnowledgeTools(
           projectIds: context.projectIds,
         } as const
         const args = knowledgeCollectionArgs(context, input.sourceId)
-        const results = await store.search(
+        const search = store.searchForTool ?? store.search
+        const results = await search.call(
+          store,
           access,
           input.query,
           10,

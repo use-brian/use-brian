@@ -212,7 +212,7 @@ describe.sequential('[COMP:corrections/row-history] current native Memory audit 
     ]))
    }
    const projection = statements.mock.calls.filter(call => /read_native_memory_history_projection\(|jsonb_populate_record\(NULL::public.memories/.test(String(call[0])))
-   const currentFields = statements.mock.calls.filter(call => String(call[0]).includes('read_native_session_field_snapshots('))
+   const currentFields = statements.mock.calls.filter(call => String(call[0]).includes('read_admitted_application_field_snapshots('))
    expect(currentFields.length).toBeGreaterThan(0)
    for (const [,params] of currentFields) expect((params as [string,string[],string[]])[1].length).toBeLessThanOrEqual(8)
    const batches = projection.map(([, params]) => params as [string, string[], string[]])

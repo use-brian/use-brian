@@ -28,6 +28,7 @@
  * [COMP:workflow/task-event-trigger]
  */
 
+import type { TaskHome } from '../tasks/responsibility.js'
 import type { TaskRecordStatus, TaskWriteActor } from '../tasks/types.js'
 import type { DispatchEvent, WorkflowEventDispatcher } from './event-trigger.js'
 
@@ -39,6 +40,7 @@ export const TASK_LIFECYCLE_ACTIONS = [
   'reopened',
   'assigned',
   'tagged',
+  'status_changed',
   'updated',
 ] as const
 export type TaskLifecycleAction = (typeof TASK_LIFECYCLE_ACTIONS)[number]
@@ -55,6 +57,7 @@ const ACTION_PRECEDENCE: TaskLifecycleAction[] = [
   'reopened',
   'assigned',
   'tagged',
+  // Keep the existing primary action stable. status_changed is a match facet.
   'updated',
 ]
 
@@ -93,6 +96,8 @@ export type TaskLifecycleEvent = {
   due: Date | null
   /** Post-write parent task id. */
   parentId: string | null
+  /** Explicit operating home, if supplied by the task writer. Routing only. */
+  home?: TaskHome | null
   /**
    * Field names the write changed (store-computed diff of the patchable
    * fields). Empty on `created`.
@@ -140,6 +145,7 @@ export function deriveTaskActions(event: TaskLifecycleEvent): TaskLifecycleActio
     actions.push('assigned')
   }
   if (addedTags(event).length > 0) actions.push('tagged')
+  if (prev !== null && prev !== event.status) actions.push('status_changed')
   actions.push('updated')
   return actions
 }
@@ -182,6 +188,7 @@ export function taskLifecycleToDispatchEvent(
     mentions: event.assigneeId !== null ? [event.assigneeId] : [],
     tags: tagsAdded,
     currentTags: event.tags,
+    taskProjectId: event.home?.kind === 'project' ? event.home.id : undefined,
     isBot: event.writtenBy === 'system',
     payload: {
       taskId: event.taskId,

@@ -1,5 +1,5 @@
 /** [COMP:api/channel-recording] A signed Telegram webhook with 300 retained
- * messages. Only the Telegram transport and the model's answers are fictional. */
+ * messages. The model, Telegram transport and public lookup responses are fictional. */
 import { randomBytes, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import type { AddressInfo } from 'node:net'
@@ -10,9 +10,12 @@ import { createGeminiProvider } from '@use-brian/agent-runtime/providers/gemini.
 import { createRoutingProvider } from '@use-brian/agent-runtime/providers/routing.js'
 import { wrapProvider } from '@use-brian/agent-runtime/providers/wrappers.js'
 import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
-import { bindScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
+import { bindScopeSources, boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
+import { AnalyticsLogger } from '@use-brian/core/analytics/logger.js'
+import { calculateTool, createUrlReaderTool, createWebSearchTool } from '@use-brian/core/tools/index.js'
 import { persistentContextFixture } from '../application-platform/__tests__/fixtures/persistent-context.js'
 import { admitTelegramRecording, changeChannelRecording, confirmChannelRecordingOwner, recordDeliveredTelegramMessage } from '../channel-recording.js'
+import { createDbAnalyticsStore } from '../db/analytics-store.js'
 import { createConnectorInstanceStore } from '../db/connector-instance-store.js'
 import { createDbAssistantConnectorStore } from '../db/assistant-connector-store.js'
 import { createConnectorGrantStore } from '../db/connector-grant-store.js'
@@ -26,6 +29,7 @@ import { createDbChannelIntegrationStore, encryptCredentials } from '../db/chann
 import { createDbChannelUserStore } from '../db/channel-user-store.js'
 import { getAppPool, getPool } from '../db/client.js'
 import { initializeConversationVisibility } from '../db/conversation-visibility.js'
+import { createDbKnowledgeStore, type KnowledgeStore } from '../db/knowledge-store.js'
 import { createDbLinkedAccountStore } from '../db/linked-accounts.js'
 import { createDbMemoryStore } from '../db/memory-store.js'
 import { writeSessionMessageAnnotation } from '../db/session-message-annotations.js'
@@ -51,8 +55,21 @@ const privateMarker = 'PERSONAL_DISPATCH_FIXTURE'
 const mailSubject = 'Fictional spectrometer shipment'
 const mailQuestion = 'What emails arrived in the past day?'
 const mailReply = 'Your recent mail includes ' + mailSubject + '.'
+const lookupQuestion = 'Look up the posted North Star Observatory ticket price and calculate the total for three people.'
+const lookupPage = 'General admission is 12.50 credits per person.'
+const guestReply = 'I can answer without using the lookup tools.'
+const knowledgeQuestion = 'Use our earlier calibration conversation to identify the handbook, then look it up in workspace knowledge.'
+const standaloneKnowledgeQuestion = 'Search the workspace knowledge base for the current observatory handbook.'
+const knowledgeGuestReply = 'I can reply without accessing workspace knowledge.'
+const knowledgeTitle = 'Fictional observatory handbook'
+const heldKnowledgeTitle = 'Fictional restricted handbook'
+const projectKnowledgeTitle = 'Fictional project-only handbook'
+const knowledgeProviderFailure = 'Fictional confidential supplier response usage limit marker'
+const knowledgeHitReply = 'The current handbook is available.'
+const knowledgeMissReply = 'No knowledge entries match that query.'
 const rows = Number(process.env.BRIAN_TELEGRAM_HISTORY_ROWS ?? 300)
 const mailboxSamples = Number(process.env.BRIAN_TELEGRAM_MAILBOX_SAMPLES ?? 1)
+const lookupSamples = Number(process.env.BRIAN_TELEGRAM_LOOKUP_SAMPLES ?? 1)
 
 async function seedConversation() {
   await initializeConversationVisibility()
@@ -157,13 +174,34 @@ async function seedCoveredMailbox(recording: Awaited<ReturnType<typeof seedConve
     mcpSettingsStore: createDbMcpSettingsStore(), connectorGrantStore: grants } }
 }
 
+async function seedChannelKnowledge(recording: Awaited<ReturnType<typeof seedConversation>>, fullCohort: boolean) {
+  const { pool, workspaceId, ownerId } = recording
+  await pool.query(`INSERT INTO knowledge_entries(workspace_id,path,title,content,sensitivity,created_by,scope_held)
+    SELECT $1,'fictional-handbook/'||n,CASE n WHEN 916 THEN $3 WHEN 917 THEN $4 ELSE 'Fictional reference '||n END,
+      repeat('Synthetic observatory reference material. ',100)||CASE n WHEN 916 THEN 'amberneedle' WHEN 917 THEN 'amberneedle violetneedle' ELSE '' END,
+      'public',$2,n=917 FROM generate_series(1,917) n WHERE n>=916 OR $5 ON CONFLICT DO NOTHING`,
+  [workspaceId, ownerId, knowledgeTitle, heldKnowledgeTitle, fullCohort])
+  const { rows: [cohort] } = await pool.query<{ count: number }>('SELECT count(*)::int AS count FROM knowledge_entries WHERE workspace_id=$1', [workspaceId])
+  expect(cohort.count).toBe(fullCohort ? 917 : 2)
+  return { knowledgeStore: createDbKnowledgeStore(), connectorStore: createDbConnectorStore(recording.key), mcpSettingsStore: createDbMcpSettingsStore() }
+}
+
+async function scopeKnowledgeEntryToProject(recording: Awaited<ReturnType<typeof seedConversation>>) {
+  const { pool, workspaceId, ownerId } = recording
+  const { rows: [project] } = await pool.query<{ id: string }>(`INSERT INTO workspace_projects(workspace_id,name,normalized_name,created_by)
+    VALUES($1,'Fictional handbook project','fictional handbook project',$2) RETURNING id`, [workspaceId, ownerId])
+  const update = await pool.query(`UPDATE knowledge_entries SET title=$2,content='amberneedle violetneedle',project_ids=ARRAY[$3]::uuid[]
+    WHERE workspace_id=$1 AND path='fictional-handbook/915'`, [workspaceId, projectKnowledgeTitle, project.id])
+  expect(update.rowCount).toBe(1)
+}
+
 type ModelRequest = {
   systemInstruction?: unknown
   contents?: Array<{
     role: string, parts: Array<{
       text?: string
       functionCall?: { name: string, id: string }
-      functionResponse?: { name: string, id: string }
+      functionResponse?: { name: string, id: string, response: { result: string } }
     }>
   }>
   tools?: unknown[]
@@ -173,10 +211,14 @@ type ModelRequest = {
 describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api/channel-recording] Telegram first model dispatch', () => {
   let recording: Awaited<ReturnType<typeof seedConversation>>
   let mailbox: Awaited<ReturnType<typeof seedCoveredMailbox>> | undefined
+  let knowledge: Awaited<ReturnType<typeof seedChannelKnowledge>> | undefined
+  let knowledgeScaleSeeded = false
+  let knowledgeProjectSeeded = false
   const mailboxMs: number[] = []
   beforeAll(async () => {
     expect(Number.isSafeInteger(rows) && rows > 0).toBe(true)
     expect(Number.isSafeInteger(mailboxSamples) && mailboxSamples >= 1 && mailboxSamples <= 100).toBe(true)
+    expect(Number.isSafeInteger(lookupSamples) && lookupSamples >= 1 && lookupSamples <= 100).toBe(true)
     await assertLocalFixture()
     recording = await seedConversation()
   }, 180_000)
@@ -201,27 +243,101 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       phase: 'mail-dispatch', incomingId: 4003 },
     { title: 'withholds a mail-derived reply if the connection is revoked before delivery',
       phase: 'mail-release', incomingId: 4002 },
+    ...Array.from({ length: lookupSamples }, (_, sample) => ({
+      title: 'executes a public lookup and sends its answer across three tool rounds without retained history, sample ' + (sample + 1),
+      phase: 'lookup' as const, incomingId: 5001 + sample,
+    })),
+    { title: 'keeps the public lookup tools unavailable to an explicitly allowed conversation-only guest',
+      phase: 'lookup-guest', incomingId: 5200 },
     { title: 'receives the main request within ten seconds and delivers the retained answer', phase: 'ordinary', incomingId: 2000 },
     { title: 'withholds the physical request when the current Telegram input is held after admission', phase: 'headers', incomingId: 2001 },
     { title: 'withholds the answer when the current Telegram input is held after model dispatch', phase: 'response', incomingId: 2002 },
     { title: 'resolves an unquoted numeric question choice through authenticated context discovery', phase: 'choice', incomingId: 2003 },
-    { title: 'withholds the answer after the recorded sender loses workspace membership', phase: 'member', incomingId: 2004 },
+    { title: 'loses workspace membership before the public tool can run or reply', phase: 'member', incomingId: 2004 },
     { title: 'withholds the answer after the audience binding moves to another group', phase: 'audience', incomingId: 2005 },
     { title: 'denies an unlinked sender on an owner-only bot', phase: 'unlinked', incomingId: 2006 },
+    { title: 'compact Knowledge preserves the legacy Telegram group reply hold', phase: 'knowledge-group-control', incomingId: 4300 },
+    { title: 'compact Knowledge delivers a hit to the linked member in a verified Telegram DM', phase: 'knowledge-dm', incomingId: 4304 },
+    { title: 'direct Knowledge hit reaches the approved Telegram topic without history', phase: 'knowledge-initial-hit', incomingId: 4310 },
+    { title: 'direct Knowledge miss reaches the approved Telegram topic without history', phase: 'knowledge-initial-miss', incomingId: 4311 },
+    { title: 'direct Knowledge is absent for an allowlisted Telegram guest', phase: 'knowledge-initial-guest', incomingId: 4312 },
+    { title: 'compact Knowledge group hit reaches the approved Telegram topic', phase: 'knowledge-hit', incomingId: 4301 },
+    { title: 'compact Knowledge group miss reaches the approved Telegram topic', phase: 'knowledge-miss', incomingId: 4302 },
+    { title: 'compact Knowledge obeys a live Telegram group binding move after search', phase: 'knowledge-group-revoked', incomingId: 4303 },
+    { title: 'compact Knowledge refuses an unbound Telegram group before search', phase: 'knowledge-unbound', incomingId: 4305 },
+    { title: 'compact Knowledge withholds untrusted provider error text from the approved group', phase: 'knowledge-provider-error', incomingId: 4308 },
+    { title: 'compact Knowledge refuses a Telegram parent-chat retry when the approved topic disappears', phase: 'knowledge-topic-missing', incomingId: 4307 },
+    { title: 'compact Knowledge withholds a Telegram group reply if the hit is held after admission', phase: 'knowledge-source-held', incomingId: 4306 },
   ] as const)('$title', async ({ phase, incomingId }) => {
     const { pool, workspaceId, sessionId, channelId, integrationId, config, ownerId, secondId, assistantId,
       linkedAccountStore, integrationStore, stats } = recording
     const isMail = phase === 'mailbox' || phase === 'mail-revoked' || phase === 'mail-release' || phase === 'mail-dispatch'
+    const isLookup = phase === 'lookup' || phase === 'lookup-guest'
+    const standaloneLookup = phase === 'knowledge-initial-hit' || phase === 'knowledge-initial-miss'
+    const standaloneGuest = phase === 'knowledge-initial-guest'
+    const isKnowledge = phase === 'knowledge-hit' || phase === 'knowledge-miss' || phase === 'knowledge-dm'
+      || phase === 'knowledge-group-revoked' || phase === 'knowledge-group-control' || phase === 'knowledge-unbound'
+      || phase === 'knowledge-source-held' || phase === 'knowledge-topic-missing' || phase === 'knowledge-provider-error'
+      || standaloneLookup || standaloneGuest
+    const knowledgeModelResultRound = standaloneLookup ? 1 : 3
+    const knowledgeDm = phase === 'knowledge-dm'
+    const knowledgeRevoked = phase === 'knowledge-group-revoked'
+    const knowledgeControl = phase === 'knowledge-group-control'
+    const knowledgeUnbound = phase === 'knowledge-unbound'
+    const holdKnowledgeSource = phase === 'knowledge-source-held'
+    const knowledgeTopicMissing = phase === 'knowledge-topic-missing'
+    const untrustedKnowledgeError = phase === 'knowledge-provider-error'
+    const knowledgeMiss = phase === 'knowledge-miss' || phase === 'knowledge-initial-miss'
+    const knowledgeQuery = knowledgeMiss ? 'violetneedle' : 'amberneedle'
+    const knowledgeExpected = knowledgeMiss ? 'No knowledge entries found for this query.' : knowledgeTitle
+    // Unique target per sample so URL cache hits cannot stand in for tool execution.
+    const lookupUrl = 'https://observatory.example.invalid/admission?receipt=' + incomingId
+    const lookupReply = 'Three tickets cost 37.50 credits. ' + lookupUrl
+    const lookupSteps = [
+      { name: 'webSearch', id: 'fixture-web-search', args: { query: 'North Star Observatory admission ' + incomingId, provider: 'duckduckgo' } },
+      { name: 'urlReader', id: 'fixture-url-reader', args: { url: lookupUrl } },
+      { name: 'calculate', id: 'fixture-calculator', args: { expression: '12.50 * 3' } },
+    ]
+    const lookupEvidence = [lookupUrl, lookupPage, '"result":"37.5"']
+    const analytics = phase === 'lookup' || isKnowledge ? new AnalyticsLogger(createDbAnalyticsStore()) : undefined
+    const lookupTools = isLookup || phase === 'member'
+      ? new Map([createWebSearchTool(), createUrlReaderTool(), calculateTool].map(tool => [tool.name, tool]))
+      : new Map()
     if (isMail) {
       mailbox ??= await seedCoveredMailbox(recording)
       await mailbox.refresh()
     }
+    if (isKnowledge && (!knowledge || !knowledgeScaleSeeded && !knowledgeControl)) {
+      knowledge = await seedChannelKnowledge(recording, !knowledgeControl)
+      knowledgeScaleSeeded ||= !knowledgeControl
+    }
+    if (isKnowledge && !knowledgeControl && !knowledgeDm && !knowledgeUnbound && !knowledgeProjectSeeded) {
+      await scopeKnowledgeEntryToProject(recording)
+      knowledgeProjectSeeded = true
+    }
+    const knowledgeFieldIds: string[] = []
+    let knowledgeStoreStartedAt: number | undefined
+    let knowledgeStoreCompletedAt: number | undefined
+    const knowledgeStores = isKnowledge && knowledge ? { ...knowledge, knowledgeStore: {
+      ...knowledge.knowledgeStore,
+      searchForTool: async (...args: Parameters<KnowledgeStore['searchForTool']>) => {
+        const reader = knowledgeControl ? knowledge!.knowledgeStore.search : knowledge!.knowledgeStore.searchForTool
+        knowledgeStoreStartedAt = performance.now()
+        const results = await reader(...args)
+        knowledgeStoreCompletedAt = performance.now()
+        knowledgeFieldIds.push(...boundScopeSources(results).filter(source => source.resourceKind === 'application_field').map(source => source.resourceId))
+        return results
+      },
+    } } : undefined
     const unavailableReply = 'I could not access that mailbox.'
-    const expectedReply = phase === 'mail-revoked' ? unavailableReply : isMail ? mailReply : reply
+    const expectedReply = phase === 'mail-revoked' ? unavailableReply : isMail ? mailReply
+      : standaloneGuest ? knowledgeGuestReply : isKnowledge ? knowledgeMiss ? knowledgeMissReply : knowledgeHitReply
+      : phase === 'lookup' ? lookupReply : phase === 'lookup-guest' ? guestReply : reply
     const hold = phase === 'headers' || phase === 'response' || phase === 'member' || phase === 'audience'
-    const telegramSender = phase === 'member' ? otherMember : phase === 'unlinked' ? unlinkedSender : sender
+    const telegramSender = phase === 'member' ? otherMember : phase === 'unlinked' || phase === 'lookup-guest' || standaloneGuest ? unlinkedSender : sender
     const choice = 'Use our earlier calibration decision'
-    const authored = phase === 'choice' ? '1' : isMail ? mailQuestion : question
+    const authored = phase === 'choice' ? '1' : isMail ? mailQuestion : isLookup ? lookupQuestion
+      : standaloneLookup || standaloneGuest ? standaloneKnowledgeQuestion : isKnowledge ? knowledgeQuestion : question
     const pendingQuestion = {
       integrationId: channelId, assistantId, userId: ownerId, incoming: {
         userId: String(sender), channelId: conversationId, text: 'Select the next step', isGroupChat: true, timestamp: Date.now(), raw: {},
@@ -233,7 +349,8 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
     let revokedAtDispatch = false
     let memberRevoked = false
     let configChanged = false
-    async function changeConfig(next: typeof config | (typeof config & { userAccessMode: 'allowlist' })) {
+    let heldKnowledgeId: string | undefined
+    async function changeConfig(next: typeof config & { userAccessMode?: 'allowlist', allowedUserIds?: string[] }) {
       const changed = await pool.query('UPDATE channel_integrations SET config=$2 WHERE id=$1', [integrationId, next])
       expect(changed.rowCount).toBe(1)
       configChanged = true
@@ -268,12 +385,14 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
     app.use(express.json({ limit: '8mb' }))
     const modelCalls: Array<{ body: ModelRequest, elapsedMs: number, sqlCalls?: { top: number, nested: number } }> = []
     const backgroundCalls: number[] = []
+    const lookupNetwork: string[] = []
     app.post('/model/:model', async (req, res) => {
       const body = req.body as ModelRequest
       const elapsedMs = performance.now() - ingress
       const isMain = req.params.model === standardGemini.apiModelId && body.generationConfig?.responseMimeType !== 'application/json'
       let parts: unknown[]
       if (isMain) {
+        const response = (id: string) => body.contents?.at(-1)?.parts.find(part => part.functionResponse?.id === id)?.functionResponse?.response.result
         const current = await sqlCounts()
         const sqlCalls = current && before ? { top: current.top - before.top, nested: current.nested - before.nested } : undefined
         modelCalls.push({ body, elapsedMs, sqlCalls })
@@ -293,7 +412,9 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
             ...config,
             deliveryAudienceBindings: config.deliveryAudienceBindings.map(binding => ({ ...binding, channelId: String(chat - 1) })),
           })
-          parts = [{ text: heldAnswer }]
+          parts = phase === 'member'
+            ? [{ functionCall: lookupSteps[0], thoughtSignature: 'fixture-revoked-sender-signature' }]
+            : [{ text: heldAnswer }]
         } else if (isMail) {
           if (modelCalls.length === 1) {
             readsAtFirstRequest = credentialRead?.mock.calls.length
@@ -311,6 +432,53 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
             }
             if (phase === 'mailbox') mailboxMs.push(ingress + elapsedMs - mailCallAt!)
           }
+        } else if (standaloneGuest) {
+          parts = [{ text: knowledgeGuestReply }]
+        } else if (standaloneLookup) {
+          parts = modelCalls.length === 1
+            ? [{ functionCall: { name: 'searchKnowledge', id: 'fixture-knowledge-query', args: { query: knowledgeQuery } },
+              thoughtSignature: 'fixture-direct-knowledge-signature' }]
+            : [{ text: response('fixture-knowledge-query')?.includes(knowledgeExpected) ? expectedReply : 'Knowledge evidence unavailable.' }]
+        } else if (isKnowledge) {
+          if (modelCalls.length === 1) {
+            parts = [{ functionCall: { name: 'requestConversationContext', id: 'fixture-knowledge-context', args: {} },
+              thoughtSignature: 'fixture-knowledge-context-signature' }]
+          } else if (modelCalls.length === 2) {
+            parts = [{ functionCall: { name: 'mcp_search', id: 'fixture-knowledge-discover', args: { query: 'search workspace knowledge base' } },
+              thoughtSignature: 'fixture-knowledge-discovery-signature' }]
+          } else if (modelCalls.length === 3 && /\[knowledge\]\s+searchKnowledge:/.test(response('fixture-knowledge-discover') ?? '')) {
+            parts = [{ functionCall: { name: 'mcp_call', id: 'fixture-knowledge-query',
+              args: { server: 'knowledge', tool: 'searchKnowledge', args: { query: knowledgeQuery } } }, thoughtSignature: 'fixture-knowledge-query-signature' }]
+          } else {
+            const admitted = response('fixture-knowledge-query')?.includes(knowledgeExpected) === true
+            if (untrustedKnowledgeError && admitted) {
+              res.status(400).json({ error: { message: knowledgeProviderFailure } })
+              return
+            }
+            if (knowledgeRevoked && admitted) await changeConfig({ ...config,
+              deliveryAudienceBindings: config.deliveryAudienceBindings.map(binding => ({ ...binding, channelId: String(chat - 1) })),
+            })
+            if (holdKnowledgeSource && admitted) {
+              const held = await pool.query<{ id: string }>(`UPDATE knowledge_entries SET scope_held=true
+                WHERE workspace_id=$1 AND path='fictional-handbook/916' AND NOT scope_held RETURNING id`, [workspaceId])
+              expect(held.rowCount).toBe(1)
+              heldKnowledgeId = held.rows[0].id
+            }
+            parts = [{ text: admitted ? expectedReply : 'Knowledge evidence unavailable.' }]
+          }
+        } else if (phase === 'lookup') {
+          const step = modelCalls.length - 1
+          const previousResult = body.contents?.at(-1)?.parts
+            .find(part => part.functionResponse?.id === lookupSteps[step - 1]?.id)?.functionResponse?.response.result
+          // Demand evidence from each real tool result before issuing the
+          // next call or composing a successful answer.
+          const admitted = step === 0 || previousResult?.includes(lookupEvidence[step - 1])
+          if (!admitted) parts = [{ text: 'The public lookup did not return the requested evidence.' }]
+          else if (step < lookupSteps.length) {
+            parts = [{ functionCall: lookupSteps[step], thoughtSignature: 'fixture-lookup-signature' }]
+          } else parts = [{ text: lookupReply }]
+        } else if (phase === 'lookup-guest') {
+          parts = [{ text: guestReply }]
         } else if (modelCalls.length === 1 && JSON.stringify(body.tools ?? []).includes('requestConversationContext')) {
           parts = [{ functionCall: { name: 'requestConversationContext', args: {}, id: 'fixture-context' }, thoughtSignature: 'fixture-context-signature' }]
         } else {
@@ -352,23 +520,51 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
     app.use('/webhook/telegram', telegramByoRoutes({
       provider, configuredProviders: new Set(['gemini']),
       decisionRuntime: createDecisionRuntime({ llmProvider: provider, defaultLlmModel: standardGemini.alias }),
-      systemPrompt: 'Answer the speaker using admitted evidence.', tools: new Map(), memoryStore: createDbMemoryStore(),
-      capabilityStore: createDbCapabilityStore(), integrationStore, linkedAccountStore,
-      channelUserStore: createDbChannelUserStore(), apiUrl: origin, ...(isMail ? mailbox?.stores : {}),
+      systemPrompt: 'Answer the speaker using admitted evidence.', tools: lookupTools, memoryStore: createDbMemoryStore(),
+      capabilityStore: createDbCapabilityStore(), integrationStore, linkedAccountStore, analytics,
+      channelUserStore: createDbChannelUserStore(), apiUrl: origin, ...(isMail ? mailbox?.stores : {}), ...knowledgeStores,
     }))
     const delivered: string[] = []
+    const knowledgeReplyTargets: { chatId: string; topicId?: number }[] = []
+    const protectedReplyAttempts: { chatId: string; topicId?: number }[] = []
+    const vanishedTopicAttempts: { chatId: string; topicId?: number }[] = []
+    const knowledgeSendTargets: { chatId: string; topicId?: number }[] = []
     let messageId = incomingId * 10
     let replyReceiptId: string | undefined
     const network = globalThis.fetch
     const stub = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = new URL(input instanceof Request ? input.url : String(input))
       if (url.origin === origin) return network(input, init)
+      if (url.origin === 'https://html.duckduckgo.com' && url.pathname === '/html/') {
+        lookupNetwork.push('webSearch')
+        expect(url.searchParams.get('q')).toBe(lookupSteps[0].args.query)
+        return new Response(`<div class="result__body"><a class="result__a" href="${lookupUrl}">North Star Observatory admission</a></div>`)
+      }
+      if (url.href === lookupUrl) {
+        lookupNetwork.push('urlReader')
+        return new Response(`<html><head><title>North Star Observatory admission</title></head><body><article>
+          <h1>North Star Observatory admission</h1><p>${lookupPage} Tickets include the telescope demonstration and guided visit.
+          Admission is open to the public every Saturday, with the last visitor group entering one hour before closing.</p>
+          </article></body></html>`, { headers: { 'Content-Type': 'text/html' } })
+      }
       if (url.origin !== 'https://api.telegram.org' || !url.pathname.startsWith('/bot' + token + '/')) throw new Error('Unexpected benchmark network destination')
       if (url.pathname.endsWith('/sendMessage')) {
         const body = JSON.parse(String(init?.body))
+        const target = { chatId: String(body.chat_id), topicId: body.message_thread_id }
+        if (knowledgeTopicMissing && body.text === expectedReply) {
+          protectedReplyAttempts.push(target)
+        }
+        if (knowledgeTopicMissing && protectedReplyAttempts.length) {
+          vanishedTopicAttempts.push(target)
+          if (target.topicId === topic) return Response.json({
+            ok: false, error_code: 400, description: 'Bad Request: message thread not found',
+          }, { status: 400 })
+        }
         delivered.push(body.text)
+        if (isKnowledge) knowledgeSendTargets.push(target)
         messageId++
         if (body.text === expectedReply) {
+          if (isKnowledge) knowledgeReplyTargets.push(target)
           replyReceiptId = String(messageId)
           deliveredMs = performance.now() - ingress
         }
@@ -376,12 +572,14 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       }
       return Response.json({ ok: true, result: true })
     })
-    const historyRead = isMail ? vi.spyOn(conversationStore, 'readAdmittedSessionQuery') : undefined
-    const recordRead = isMail ? vi.spyOn(conversationAdmission, 'tryReadTurnConversationRecord') : undefined
+    const historyRead = isMail || phase === 'lookup' || standaloneLookup || standaloneGuest ? vi.spyOn(conversationStore, 'readAdmittedSessionQuery') : undefined
+    const recordRead = isMail || phase === 'lookup' || standaloneLookup || standaloneGuest ? vi.spyOn(conversationAdmission, 'tryReadTurnConversationRecord') : undefined
     const linkRead = vi.spyOn(linkedAccountStore, 'findByProvider')
     configureTelegramTextDeliveryObserver(recordDeliveredTelegramMessage)
     try {
       if (phase === 'unlinked') await changeConfig({ ...config, userAccessMode: 'allowlist' })
+      if (phase === 'lookup-guest' || standaloneGuest) await changeConfig({ ...config, userAccessMode: 'allowlist', allowedUserIds: [String(unlinkedSender)] })
+      if (knowledgeUnbound) await changeConfig({ ...config, deliveryAudienceBindings: [] })
       const result = await network(origin + '/webhook/telegram/' + channelId, {
         method: 'POST', headers: {
           'content-type': 'application/json',
@@ -389,13 +587,23 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
         }, body: JSON.stringify({
           update_id: 7000 + incomingId, message: {
             message_id: incomingId,
-            message_thread_id: topic, is_topic_message: true, chat: { id: chat, type: 'supergroup', is_forum: true, title: 'Fictional observatory' },
+            ...(knowledgeDm ? { chat: { id: telegramSender, type: 'private', first_name: 'Observer' } } : {
+              message_thread_id: topic, is_topic_message: true, chat: { id: chat, type: 'supergroup', is_forum: true, title: 'Fictional observatory' },
+            }),
             from: { id: telegramSender, first_name: 'Observer', is_bot: false }, date: Math.floor(Date.now() / 1000), text: authored
           }
         })
       })
       expect(result.status).toBe(200)
       await vi.waitFor(() => expect(linkRead).toHaveBeenCalledWith('telegram', String(telegramSender)))
+      if (knowledgeUnbound) {
+        await vi.waitFor(() => expect(delivered.join('\n')).toMatch(/can't show the result in this chat|group is not approved for workspace replies/i),
+          { timeout: 15_000 })
+        expect(modelCalls).toHaveLength(0)
+        expect(knowledgeFieldIds).toHaveLength(0)
+        expect(knowledgeReplyTargets).toEqual([])
+        return
+      }
       if (phase === 'unlinked') {
         const link = await linkRead.mock.results[0].value
         expect(link).toBeNull()
@@ -405,6 +613,33 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
         expect(modelCalls).toHaveLength(0)
         expect(backgroundCalls).toHaveLength(0)
         expect(delivered).toHaveLength(0)
+        return
+      }
+      if (phase === 'lookup-guest') {
+        await vi.waitFor(() => expect(delivered).toContain(guestReply), { interval: 100, timeout: 15_000 })
+        expect(await linkRead.mock.results[0].value).toBeNull()
+        expect(modelCalls).toHaveLength(1)
+        for (const { name } of lookupSteps) expect(JSON.stringify(modelCalls[0].body.tools ?? [])).not.toContain(name)
+        expect(JSON.stringify(modelCalls[0].body.contents)).not.toContain(historicalAnswer)
+        expect(lookupNetwork).toEqual([])
+        return
+      }
+      if (standaloneGuest) {
+        await vi.waitFor(async () => {
+          expect(delivered).toContain(knowledgeGuestReply)
+          const { rows: [active] } = await pool.query<{ count: number; locked: boolean }>(`SELECT count(*)::int AS count,
+            EXISTS(SELECT 1 FROM chat_turn_locks WHERE chat_key=$2) AS locked FROM sessions
+            WHERE assistant_id=$1 AND channel_type='telegram' AND (status='running' OR turn_lease_token IS NOT NULL)`,
+          [assistantId, `tg-byo:${conversationId}`])
+          expect(active).toEqual({ count: 0, locked: false })
+        }, { interval: 100, timeout: 15_000 })
+        expect(await linkRead.mock.results[0].value).toBeNull()
+        expect(modelCalls).toHaveLength(1)
+        expect(JSON.stringify(modelCalls[0].body.tools ?? [])).not.toContain('searchKnowledge')
+        expect(JSON.stringify(modelCalls[0].body)).not.toContain(knowledgeTitle)
+        expect(knowledgeFieldIds).toHaveLength(0)
+        expect(historyRead).not.toHaveBeenCalled()
+        expect(recordRead).not.toHaveBeenCalled()
         return
       }
       if (phase === 'mail-release' || phase === 'mail-dispatch') {
@@ -429,31 +664,154 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
         }, { interval: 100, timeout: 15_000 })
         expect(modelCalls).toHaveLength(phase === 'headers' ? 0 : 1)
         expect(backgroundCalls).toHaveLength(0)
+        if (phase === 'member') {
+          expect(JSON.stringify(modelCalls[0].body.tools)).toContain('webSearch')
+          expect(lookupNetwork).toEqual([])
+        }
         expect(JSON.stringify(delivered)).not.toContain(heldAnswer)
         const leaked = await pool.query("SELECT id FROM session_messages WHERE session_id=$1 AND role='assistant' AND content::text LIKE $2", [sessionId, '%' + heldAnswer + '%'])
         expect(leaked.rows).toHaveLength(0)
         return
       }
+      async function expectKnowledgeQueryProof() {
+        const domains = await pool.query<{ kind: string; digest: string }>(`SELECT d.domain->>'kind' AS kind,d.domain->>'digest' AS digest
+          FROM application_field_resources r JOIN application_query_domains d ON d.workspace_id=r.workspace_id AND d.id=r.resource_id
+          WHERE r.workspace_id=$1 AND r.id=ANY($2::uuid[]) AND r.selection='query_domain'`, [workspaceId, knowledgeFieldIds])
+        expect(domains.rows).toEqual(knowledgeControl ? [{ kind: 'knowledge_query_domain_v1', digest: null }]
+          : [{ kind: 'knowledge_search_domain_v1', digest: expect.stringMatching(/^[a-f0-9]{64}$/) }])
+      }
+      function expectKnowledgeModelResult() {
+        expect(JSON.stringify(modelCalls)).not.toContain(heldKnowledgeTitle)
+        if (!knowledgeDm) expect(JSON.stringify(modelCalls)).not.toContain(projectKnowledgeTitle)
+        const admittedResult = modelCalls[knowledgeModelResultRound].body.contents?.at(-1)?.parts
+          .find(part => part.functionResponse?.id === 'fixture-knowledge-query')
+        expect(admittedResult?.functionResponse?.name).toBe(standaloneLookup ? 'searchKnowledge' : 'mcp_call')
+        expect(admittedResult?.functionResponse?.response.result).toContain(knowledgeExpected)
+        expect(knowledgeStoreStartedAt).toBeDefined()
+        expect(knowledgeStoreCompletedAt).toBeDefined()
+        console.info('[Telegram Knowledge model admission]', {
+          phase,
+          storeMs: Math.round(knowledgeStoreCompletedAt! - knowledgeStoreStartedAt!),
+          storeStartToModelAdmissionMs: Math.round(ingress + modelCalls[knowledgeModelResultRound].elapsedMs - knowledgeStoreStartedAt!),
+          toolAndAdmissionMs: Math.round(modelCalls[knowledgeModelResultRound].elapsedMs - modelCalls[knowledgeModelResultRound - 1].elapsedMs),
+        })
+      }
+      if (knowledgeControl || knowledgeRevoked || holdKnowledgeSource || knowledgeTopicMissing || untrustedKnowledgeError) {
+        await vi.waitFor(async () => {
+          if (knowledgeRevoked) expect(configChanged).toBe(true)
+          if (holdKnowledgeSource) expect(heldKnowledgeId).toBeDefined()
+          if (knowledgeTopicMissing) expect(protectedReplyAttempts.length).toBeGreaterThan(0)
+          const session = await pool.query('SELECT status,turn_lease_token FROM sessions WHERE id=$1', [sessionId])
+          if (untrustedKnowledgeError) {
+            expect(delivered).toContain('I could not finish this reply. If you asked me to take an action, check whether it went through before asking again.')
+            expect(['idle', 'failed']).toContain(session.rows[0].status)
+            expect(session.rows[0].turn_lease_token).toBeNull()
+          } else expect(session.rows[0]).toEqual({ status: 'failed', turn_lease_token: null })
+        }, { interval: 100, timeout: 180_000 })
+        await expectKnowledgeQueryProof()
+        if (!knowledgeControl) expect(modelCalls).toHaveLength(4)
+        else expect([3, 4]).toContain(modelCalls.length)
+        if (modelCalls.length === 4) expectKnowledgeModelResult()
+        expect(delivered).not.toContain(expectedReply)
+        expect(replyReceiptId).toBeUndefined()
+        expect(knowledgeReplyTargets).toEqual([])
+        if (knowledgeRevoked) expect(knowledgeSendTargets.map(target => target.chatId)).not.toContain(String(chat - 1))
+        if (knowledgeTopicMissing) {
+          expect(protectedReplyAttempts).toEqual([{ chatId: String(chat), topicId: topic }])
+          expect(vanishedTopicAttempts.every(target => target.chatId === String(chat) && target.topicId === topic)).toBe(true)
+        }
+        if (untrustedKnowledgeError) {
+          expect(delivered.join('\n')).not.toContain(knowledgeProviderFailure)
+          expect(knowledgeSendTargets.every(target => target.chatId === String(chat) && target.topicId === topic)).toBe(true)
+        }
+        return
+      }
+      let receivingSessionId = sessionId
+      let receivingFailed = false
       await vi.waitFor(async () => {
+        if (knowledgeDm) {
+          const { rows: [direct] } = await pool.query<{ id: string }>(`SELECT id FROM sessions
+            WHERE workspace_id=$1 AND assistant_id=$2 AND channel_type='telegram' AND channel_id=$3`,
+          [workspaceId, assistantId, String(telegramSender)])
+          expect(direct?.id).toBeDefined()
+          receivingSessionId = direct.id
+        }
         const row = (await pool.query(`SELECT s.status, (SELECT count(*)::int FROM session_messages m WHERE m.session_id=s.id AND m.sequence_num>$2) added
-           FROM sessions s WHERE s.id=$1`, [sessionId, rows])).rows[0]
+           FROM sessions s WHERE s.id=$1`, [receivingSessionId, knowledgeDm ? 0 : rows])).rows[0]
+        if (isKnowledge && row.status === 'failed') {
+          receivingFailed = true
+          return
+        }
         expect(delivered.length).toBeGreaterThan(0)
         if (row.status === 'failed') throw new Error('Telegram turn failed after ' + modelCalls.length + ' main model requests')
         expect(row.status).toBe('idle')
         expect(row.added).toBeGreaterThanOrEqual(2)
       }, { interval: 250, timeout: 180_000 })
-      expect(modelCalls).toHaveLength(2)
-      expect(deliveredMs, JSON.stringify({ delivered, toolResponse: modelCalls[1].body.contents?.at(-1)?.parts })).toBeDefined()
+      if (receivingFailed) {
+        const latest = modelCalls.at(-1)?.body.contents?.at(-1)?.parts.find(part => part.functionResponse?.id === 'fixture-knowledge-query')
+        await analytics?.flush()
+        const { rows: [latestError] } = await pool.query(`SELECT metadata FROM analytics_events
+          WHERE session_id=$1 AND event_name='chat_route_error' ORDER BY created_at DESC LIMIT 1`, [receivingSessionId])
+        throw new Error(`Telegram Knowledge turn failed after ${modelCalls.length} model requests. ${latest?.functionResponse?.response.result ?? ''}
+          ${JSON.stringify(latestError?.metadata ?? {})}`)
+      }
+      expect(modelCalls, isKnowledge ? JSON.stringify({ tools: modelCalls[1]?.body.tools,
+        response: modelCalls[2]?.body.contents?.at(-1)?.parts }) : undefined)
+        .toHaveLength(phase === 'lookup' ? lookupSteps.length + 1 : isKnowledge ? knowledgeModelResultRound + 1 : 2)
+      expect(deliveredMs, JSON.stringify({ delivered, toolResponse: modelCalls.at(-1)?.body.contents?.at(-1)?.parts })).toBeDefined()
       console.info('[Telegram first dispatch]', JSON.stringify({
-        stats, mainMs: modelCalls.map(row => Math.round(row.elapsedMs)),
+        phase, incomingId, stats, mainMs: modelCalls.map(row => Math.round(row.elapsedMs)),
         betweenMainMs: Math.round(modelCalls[1].elapsedMs - modelCalls[0].elapsedMs),
         sqlCallsSinceBaseline: before ? modelCalls.map(row => row.sqlCalls) : undefined,
         deliveredMs: Math.round(deliveredMs!),
+        ...(standaloneLookup ? { retainedHistoryReads: historyRead?.mock.calls.length, retainedRecordReads: recordRead?.mock.calls.length } : {}),
         backgroundMs: backgroundCalls.map(Math.round), delivered: delivered.includes(expectedReply)
       }))
       expect(modelCalls[0].elapsedMs).toBeLessThan(10_000)
       expect(backgroundCalls.every(time => time > modelCalls[0].elapsedMs)).toBe(true)
       expect(JSON.stringify(modelCalls[0].body.contents)).toContain(phase === 'choice' ? choice : authored)
+      expect(JSON.stringify(modelCalls)).not.toContain(privateMarker)
+      expect(delivered).toContain(expectedReply)
+      expect(replyReceiptId).toBeDefined()
+      const stored = await pool.query("SELECT content FROM session_messages WHERE session_id=$1 AND channel_message_id=$2 AND role='assistant'", [receivingSessionId, replyReceiptId])
+      expect(stored.rows).toEqual([{ content: [{ type: 'text', text: expectedReply }] }])
+      if (isKnowledge) {
+        await expectKnowledgeQueryProof()
+        expectKnowledgeModelResult()
+        expect(knowledgeReplyTargets).toEqual([knowledgeDm ? { chatId: String(telegramSender) } : { chatId: String(chat), topicId: topic }])
+        if (standaloneLookup) {
+          expect(deliveredMs).toBeLessThan(60_000)
+          expect(historyRead).not.toHaveBeenCalled()
+          expect(recordRead).not.toHaveBeenCalled()
+          expect(JSON.stringify(modelCalls[0].body.tools)).toContain('searchKnowledge')
+          expect(JSON.stringify(modelCalls[0].body.tools)).not.toContain('mcp_search')
+          expect(JSON.stringify(modelCalls.map(call => call.body.contents))).not.toContain(historicalAnswer)
+        }
+        return
+      }
+      if (phase === 'lookup') {
+        expect(deliveredMs).toBeLessThan(60_000)
+        expect(historyRead).not.toHaveBeenCalled()
+        expect(recordRead).not.toHaveBeenCalled()
+        expect(lookupNetwork).toEqual(['webSearch', 'urlReader'])
+        expect(JSON.stringify(modelCalls)).not.toContain(historicalAnswer)
+        await analytics!.flush()
+        const { rows: [completion] } = await pool.query<{ metadata: {
+          context_discovery_count?: number, channel_reply_receipt_at_ms?: number
+        } }>("SELECT metadata FROM analytics_events WHERE session_id=$1 AND event_name='turn_completed' ORDER BY created_at DESC LIMIT 1", [sessionId])
+        expect(completion.metadata.context_discovery_count ?? 0).toBe(0)
+        expect(completion.metadata.channel_reply_receipt_at_ms).toBeGreaterThan(0)
+        for (const [index, { name, id }] of lookupSteps.entries()) {
+          expect(JSON.stringify(modelCalls[index].body.tools)).toContain(name)
+          expect(modelCalls[index + 1].body.contents?.at(-2)).toMatchObject({
+            role: 'model', parts: expect.arrayContaining([expect.objectContaining({ functionCall: expect.objectContaining({ name, id }) })]),
+          })
+          expect(modelCalls[index + 1].body.contents?.at(-1)).toMatchObject({
+            role: 'user', parts: expect.arrayContaining([expect.objectContaining({ functionResponse: expect.objectContaining({ name, id }) })]),
+          })
+        }
+        return
+      }
       if (phase === 'choice') {
         expect(channelQuestions.has(pendingQuestion)).toBe(false)
         expect(JSON.stringify(modelCalls[0].body.systemInstruction)).toContain('Request conversation context to resolve it')
@@ -484,14 +842,10 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
           expect.objectContaining({ functionResponse: expect.objectContaining(call) }),
         ])
       })
-      expect(JSON.stringify(modelCalls)).not.toContain(privateMarker)
-      expect(delivered).toContain(expectedReply)
-      expect(replyReceiptId).toBeDefined()
-      const stored = await pool.query("SELECT content FROM session_messages WHERE session_id=$1 AND channel_message_id=$2 AND role='assistant'", [sessionId, replyReceiptId])
-      expect(stored.rows).toEqual([{ content: [{ type: 'text', text: expectedReply }] }])
     } finally {
       if (phase === 'choice') channelQuestions.invalidate(channelId, pendingQuestion.incoming)
       configureTelegramTextDeliveryObserver()
+      await analytics?.shutdown()
       if (phase === 'mail-revoked' || phase === 'mail-release' || phase === 'mail-dispatch') await pool.query('UPDATE connector_instance SET connected=true WHERE id=$1', [mailbox!.id])
       credentialRead?.mockRestore()
       recordRead?.mockRestore()
@@ -500,6 +854,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       stub.mockRestore()
       await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
       if (heldInputId) await pool.query('UPDATE session_messages SET scope_held=false WHERE session_id=$1 AND id=$2', [sessionId, heldInputId])
+      if (heldKnowledgeId) await pool.query('UPDATE knowledge_entries SET scope_held=false WHERE workspace_id=$1 AND id=$2', [workspaceId, heldKnowledgeId])
       if (memberRevoked) await pool.query(
         "INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'member','confidential')",
         [workspaceId, secondId])

@@ -7,6 +7,8 @@ export type TelegramApiOptions = {
   baseUrl?: string
 }
 
+type BeforeTelegramAttempt = () => Promise<void>
+
 /**
  * Telegram Bot API hard limit on `getFile` downloads: a bot can only download
  * files up to 20 MB. A larger inbound file (e.g. a multi-hour recording) cannot
@@ -159,14 +161,17 @@ export function createTelegramApi(options: TelegramApiOptions) {
    * bodies (FormData) are rebuilt per attempt — a consumed body can't be
    * re-sent.
    */
-  async function perform<T>(method: string, makeInit: () => RequestInit): Promise<T> {
+  async function perform<T>(method: string, makeInit: () => RequestInit, beforeAttempt?: BeforeTelegramAttempt): Promise<T> {
     const allowRetry = !METHODS_SKIP_RETRY.has(method)
     const maxAttempts = allowRetry ? MAX_RETRY_ATTEMPTS : 1
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const init = makeInit()
+      // Authority travels with the effect and can change during backoff.
+      if (beforeAttempt) await beforeAttempt()
       let res: Response
       try {
-        res = await fetch(`${base}/${method}`, makeInit())
+        res = await fetch(`${base}/${method}`, init)
       } catch (err) {
         // No response exists, so nothing was consumed and a replay is safe.
         if (allowRetry && attempt < maxAttempts) {
@@ -220,12 +225,12 @@ export function createTelegramApi(options: TelegramApiOptions) {
     throw new TelegramApiError(method, 'retry budget exhausted', undefined)
   }
 
-  async function call<T>(method: string, params?: Record<string, unknown>): Promise<T> {
+  async function call<T>(method: string, params?: Record<string, unknown>, beforeAttempt?: BeforeTelegramAttempt): Promise<T> {
     return perform<T>(method, () => ({
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: params ? JSON.stringify(params) : undefined,
-    }))
+    }), beforeAttempt)
   }
 
   return {
@@ -236,6 +241,7 @@ export function createTelegramApi(options: TelegramApiOptions) {
       replyToMessageId?: number
       replyMarkup?: unknown
       messageThreadId?: number
+      beforeAttempt?: BeforeTelegramAttempt
     }) => call<{ message_id: number; text?: string }>('sendMessage', {
       chat_id: chatId,
       text,
@@ -243,25 +249,26 @@ export function createTelegramApi(options: TelegramApiOptions) {
       reply_parameters: opts?.replyToMessageId == null ? undefined : { message_id: opts.replyToMessageId, allow_sending_without_reply: false },
       reply_markup: opts?.replyMarkup,
       message_thread_id: opts?.messageThreadId,
-    }),
+    }, opts?.beforeAttempt),
 
     editMessageText: (chatId: string, messageId: number, text: string, opts?: {
       parseMode?: string
       replyMarkup?: unknown
+      beforeAttempt?: BeforeTelegramAttempt
     }) => call<true | { message_id: number }>('editMessageText', {
       chat_id: chatId,
       message_id: messageId,
       text,
       parse_mode: opts?.parseMode,
       reply_markup: opts?.replyMarkup,
-    }),
+    }, opts?.beforeAttempt),
 
-    editMessageReplyMarkup: (chatId: string, messageId: number, replyMarkup: unknown) =>
+    editMessageReplyMarkup: (chatId: string, messageId: number, replyMarkup: unknown, beforeAttempt?: BeforeTelegramAttempt) =>
       call<true | { message_id: number }>('editMessageReplyMarkup', {
         chat_id: chatId,
         message_id: messageId,
         reply_markup: replyMarkup,
-      }),
+      }, beforeAttempt),
 
     /**
      * Send a file as a Telegram document message (multipart upload).
@@ -274,7 +281,7 @@ export function createTelegramApi(options: TelegramApiOptions) {
       mime: string
       data: Uint8Array
       caption?: string
-    }, opts?: { messageThreadId?: number; replyToMessageId?: number }) =>
+    }, opts?: { messageThreadId?: number; replyToMessageId?: number; beforeAttempt?: BeforeTelegramAttempt }) =>
       perform<{ message_id: number }>('sendDocument', () => {
         const form = new FormData()
         form.append('chat_id', chatId)
@@ -287,7 +294,7 @@ export function createTelegramApi(options: TelegramApiOptions) {
           form.append('reply_parameters', JSON.stringify({ message_id: opts.replyToMessageId, allow_sending_without_reply: false }))
         }
         return { method: 'POST', body: form }
-      }),
+      }, opts?.beforeAttempt),
 
     sendChatAction: (chatId: string, action: string, opts?: { messageThreadId?: number }) =>
       call<true>('sendChatAction', {

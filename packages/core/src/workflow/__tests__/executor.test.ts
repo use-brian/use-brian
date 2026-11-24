@@ -18,6 +18,8 @@ import type {
 import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { createExecutionContext } from '@use-brian/agent-runtime/security/execution-context.js'
 import type { ConsultRequest, ConsultResponse, ConsultTransport, Task } from '../../a2a/types.js'
+import { createWorkflowEventDispatcher } from '../event-trigger.js'
+import { taskLifecycleToDispatchEvent } from '../task-event-trigger.js'
 
 // ── Fakes ────────────────────────────────────────────────────────────────
 
@@ -793,6 +795,43 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
         inReplyTo: 'INBOX:17',
       },
     })
+  })
+
+  it('delivers a selected Project status change without consulting a model', async () => {
+    const stores = makeFakeStores()
+    const capture = vi.fn()
+    const tool = makeFakeTool('getTask', { capture })
+    const consult = vi.fn()
+    const deliverToChannel = vi.fn<NonNullable<ExecutorDeps['deliverToChannel']>>().mockResolvedValue({
+      status: 'delivered', channelType: 'slack', channelId: 'D_APPROVED',
+    })
+    const deps = makeDeps({ ...stores, consultTransport: { send: consult },
+      buildToolRegistry: async () => new Map([[tool.name, tool]]), deliverToChannel })
+    const projectId = '97cc10ca-74bb-4aa2-bfb7-619203cb1297'
+    const workflow = await deps.workflowStore.create({ userId: USER_ID, workspaceId: WORKSPACE_ID, name: 'Status notification',
+      definition: { startStepId: 'notify', steps: [{ id: 'notify', type: 'tool_call', toolName: tool.name,
+        arguments: { id: '{{input.event.taskId}}' }, deliver: { channelType: 'slack', channelId: 'D_APPROVED' },
+        deliveryText: '{{input.event.title}}: {{input.event.previousStatus}} → {{input.event.status}}' }] },
+    })
+    const dispatch = createWorkflowEventDispatcher({
+      findEventTriggeredWorkflows: async () => [{ workflowId: workflow.id, workspaceId: WORKSPACE_ID, sources: [{ source: { type: 'task' },
+        match: { inChannels: ['status_changed'], taskProjectIds: [projectId] } }] }],
+      startWorkflowRun: async (args) => {
+        const run = await deps.runStore.createRun({ ...args, triggeredBy: USER_ID, triggerKind: 'event' })
+        await advanceWorkflowRun(deps, run.id)
+      },
+    })
+    await dispatch.dispatch(taskLifecycleToDispatchEvent({ workspaceId: WORKSPACE_ID, taskId: 'live-task', kind: 'updated',
+      title: 'Ship the report', status: 'in_review', previousStatus: 'in_progress', tags: [], previousTags: [],
+      assigneeId: null, previousAssigneeId: null, due: null, parentId: null, home: { kind: 'project', id: projectId },
+      changedFields: ['status'], actorId: USER_ID }))
+    expect(capture).toHaveBeenCalledExactlyOnceWith({ id: 'live-task' })
+    expect(deliverToChannel).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      channelId: 'D_APPROVED', text: 'Ship the report: in_progress → in_review',
+    }))
+    expect([...stores.runs.values()]).toMatchObject([{ status: 'completed' }])
+    expect(stores.stepRuns[0].output).toMatchObject({ __delivery: { status: 'delivered' } })
+    expect(consult).not.toHaveBeenCalled()
   })
 
   it('carries the deterministic parent receipt to its full-text thread without consulting a model', async () => {

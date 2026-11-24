@@ -2,7 +2,7 @@ import {afterAll,afterEach,beforeAll,beforeEach,describe,expect,it} from 'vitest
 import type {PoolClient} from 'pg'
 import type {AccessContext} from '@use-brian/agent-runtime/security/access-context.js'
 import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
-import {getAppPool,getPool} from '../../db/client.js'
+import {applyRLSGucs,getAppPool,getPool,rollbackAndRelease,runWithAgentAccess} from '../../db/client.js'
 import {createDbKnowledgeStore} from '../../db/knowledge-store.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
@@ -41,6 +41,64 @@ describe.sequential('[COMP:api/knowledge-store] real native query construction a
   expect(current().sql).toContain('assistant_disabled_knowledge_sources');expect(current().sql).toContain('adks.assistant_id = $5')
   expectValues(f.workspaceId,'vault fees',10,'confidential',f.assistantId)
   expect(JSON.parse(current().values.at(-1) as string).map((r:{id:string})=>r.id)).toEqual([row.id])
+ })
+ it('revalidates original Knowledge observations after edits, reclassification, holds, and deletion',async()=>{
+  const row=await seed('proof-point','Fictional proof point')
+  const hits=await store.searchForTool(ctx,'fictional')
+  expect(hits.map(hit=>hit.id)).toEqual([row.id])
+  const candidates=boundScopeSources(hits).filter(source=>source.resourceKind==='application_field')
+  const points=(await f.pool.query<{id:string}>(`SELECT id FROM application_field_resources
+    WHERE workspace_id=$1 AND resource_id=$2 AND selection='query'`,[f.workspaceId,row.id])).rows
+  const observation=candidates.find(source=>source.resourceId===points[0]?.id)
+  const domain=candidates.find(source=>source.resourceId!==observation?.resourceId)
+  if(!observation||!domain)throw new Error('A Knowledge query must retain its point and domain observations')
+  const history=await f.history()
+  const check=(clearance=ctx.clearance??'confidential')=>runWithAgentAccess({...ctx,clearance,compartments:ctx.compartments},async()=>{
+   const client=await getAppPool().connect()
+   try{
+    await client.query('BEGIN')
+    await applyRLSGucs(client,f.ownerId,f.assistantId)
+    await client.query('SELECT id FROM workspaces WHERE id=$1 FOR SHARE',[f.workspaceId])
+    const snapshot=(await client.query(`SELECT read_admitted_application_field_snapshot($1,$2,$3) AS snapshot`,
+     [f.workspaceId,observation.resourceId,observation.version])).rows[0].snapshot
+    const pair=async(ids:string[],versions:string[])=>{
+     const batched=(await client.query('SELECT ord,snapshot FROM read_admitted_application_field_snapshots($1,$2,$3)',
+      [f.workspaceId,ids,versions])).rows
+     const canonical=(await client.query('SELECT ord,snapshot FROM read_native_session_field_snapshots($1,$2,$3)',
+      [f.workspaceId,ids,versions])).rows
+     expect(batched).toEqual(canonical)
+     expect(batched.map(value=>value.ord)).toEqual(ids.map((_,index)=>index+1))
+    }
+    await pair([domain.resourceId,observation.resourceId,observation.resourceId],
+     [domain.version,observation.version,observation.version])
+    if(clearance==='confidential'){
+     const native=(await client.query<{native: typeof observation}>(`SELECT
+      capture_conversation_query($1,$2,$3,NULL)#>'{history,0,sources,0}' AS native`,
+      [f.workspaceId,f.session.id,history.at(-1)?.sequenceNum])).rows[0].native
+     expect(native.resourceKind).toBe('application_field')
+     await pair([observation.resourceId,native.resourceId,crypto.randomUUID()],
+      [observation.version,native.version,'1'])
+    }
+    const dependencies=(await client.query(`SELECT node_version,source FROM read_admitted_application_field_dependencies($1,$2,$3,$4)`,
+     [f.workspaceId,['application_field'],[observation.resourceId],[observation.version]])).rows
+    return{snapshot,dependencies}
+   }finally{await rollbackAndRelease(client)}
+  })
+
+  const currentPoint=await check()
+  expect(currentPoint.snapshot).toMatchObject({...observation,held:false})
+  expect(currentPoint.dependencies).toEqual([{node_version:observation.version,source:observation}])
+  await f.pool.query("UPDATE knowledge_entries SET content='Fictional revised body' WHERE id=$1",[row.id])
+  const revisedPoint=await check()
+  expect(revisedPoint.snapshot).toMatchObject({held:false,resourceId:observation.resourceId})
+  expect(revisedPoint.snapshot.version).not.toBe(observation.version)
+  expect(revisedPoint.dependencies).toEqual(currentPoint.dependencies)
+  await f.pool.query("UPDATE knowledge_entries SET sensitivity='confidential' WHERE id=$1",[row.id])
+  await expect(check('internal')).rejects.toMatchObject({code:'42501',message:'scope_operation_denied'})
+  await f.pool.query('UPDATE knowledge_entries SET scope_held=true WHERE id=$1',[row.id])
+  await expect(check()).rejects.toMatchObject({code:'42501',message:'scope_operation_denied'})
+  await store.delete(row.id)
+  await expect(check()).rejects.toMatchObject({code:'42501',message:'scope_operation_denied'})
  })
  it('lists top-level entries when pathPrefix is empty',async()=>{
   const row=await seed('index');await seed('index/child')

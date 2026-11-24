@@ -1599,7 +1599,7 @@ async function executePublicTurnInScope(
         systemPrompt: initialPrompt.stablePrompt,
         messages: [bindScopeSources<Message>({ role: 'user', content: retryHint ? retryHint + body.message : userContent },
           storedUserSource ? [storedUserSource] : [])],
-        candidateTools: new Map(),
+        candidateTools: internalScope && !body.truncateFromMessageId ? deps.tools : new Map(),
         trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
         userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
         initialMailboxCapabilities: internalScope && deps.connectorStore && deps.mcpSettingsStore
