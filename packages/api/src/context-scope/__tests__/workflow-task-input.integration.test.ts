@@ -11,6 +11,7 @@ import { setKnowledgeEventDispatcher } from '../../knowledge-event-fanout.js'
 import { createDbKnowledgeStore } from '../../db/knowledge-store.js'
 import { createDbWorkspaceGroupStore } from '../../db/workspace-group-store.js'
 import { briefFixture } from '../../briefs/__tests__/fixture.js'
+import { withTableTriggersSuspended } from '../../__tests__/fixtures/bootstrap-role.js'
 import { WorkflowTriggerSchema } from '@use-brian/core/workflow/schemas.js'
 import { captureAuthoringAuthoritySystem, resolveWorkflowRunScope } from '../workflow-authority.js'
 import { readWorkflowInputEvidence } from '../workflow-input-evidence.js'
@@ -301,7 +302,18 @@ describe('[COMP:api/workflow-input-evidence] primitive lifecycle receipts',()=>{
   })
   it('executes an authorized event while retaining its original floor after source relabeling',async()=>{
     const f=await fixture(),w=await f.workflow(f.owner),run=await f.create(w)
-    await pool.query("UPDATE tasks SET sensitivity='public',user_id=NULL WHERE id=$1",[f.task.id])
+    // Simulate historical drift behind a verified receipt. The current
+    // canonical task contract correctly forbids this raw declassification.
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      await withTableTriggersSuspended(client, ['tasks'], () =>
+        client.query("UPDATE tasks SET sensitivity='public',user_id=NULL WHERE id=$1", [f.task.id]))
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally { client.release() }
     const evidence=await readWorkflowInputEvidence(run.id,f.workspaceId)
     expect(evidence).toMatchObject({sensitivity:'confidential',sources:[expect.objectContaining({resourceKind:'task',resourceId:f.task.id,userId:f.owner,sensitivity:'confidential'})]})
     const scope=await resolveWorkflowRunScope({workspaceId:f.workspaceId,userId:f.owner,assistantId:w.assistantId,run})
