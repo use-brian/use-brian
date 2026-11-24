@@ -57,6 +57,7 @@ import { inheritScopeSources } from '@use-brian/agent-runtime/security/source-ev
 import type { ToolContext, Tool } from '@use-brian/agent-runtime/tools/types.js'
 import {createTerminalPublicationOwner} from './terminal-publication.js'
 import { committedTurnCompletion, type BufferedWebPublication } from '../db/conversation-publication-recovery.js'
+import { ConversationHistoryUnavailableError } from '../db/conversation-store.js'
 import { sanitizeDeliveryText } from '@use-brian/shared'
 import type { ProviderAvailability } from '@use-brian/shared/model-registry'
 import type { ResolvedWorkspaceCustomLlm } from '../custom-llm-runtime.js'
@@ -224,6 +225,14 @@ export function openTurnSqlScope(): TurnSqlScope {
 
 /** Values only the original owner's `prepareRun` supplies to its run. */
 const PREPARED_RUN_KEYS = ['systemPrompt', 'runtimeSystemContext', 'messages', 'tools', 'maxTokens', 'inputTokenLimit', 'takeDiscoveredContext'] as const
+
+/** The original tool attempted only the first-round history discovery. */
+export class PreActionConversationHistoryUnavailableError extends Error {
+  constructor(cause: ConversationHistoryUnavailableError) {
+    super('Conversation history could not be verified before action execution.', { cause })
+    this.name = 'PreActionConversationHistoryUnavailableError'
+  }
+}
 type PreparedRunKey = typeof PREPARED_RUN_KEYS[number]
 type KernelLoop = AssistantTurnLoopInput['loop']
 /** A prepared run's loop: the owner supplies tools, prompt, messages, runtime
@@ -414,7 +423,7 @@ class AssistantTurnOwner {
   private get preparationLocked(): boolean {
     return (this.runPreparationStarted || this.ran) && !this.discovering
   }
-  private takeDiscoveredContext: (() => DiscoveredQueryContext | undefined) | undefined
+  private takeDiscoveredContext: QueryLoopOptions['takeDiscoveredContext']
   private runPreparationStarted = false
   private preparedRun: PreparedTurnRun | undefined
   /** Final assembly under the original invocation and prepared main model. The
@@ -444,7 +453,10 @@ class AssistantTurnOwner {
       let continuationModel: PreparedTurnModel | undefined
       let loading: Promise<void> | undefined
       let failure: { error: unknown } | undefined
-      this.takeDiscoveredContext = () => {
+      this.takeDiscoveredContext = ({ firstAndOnlyCallFailed }) => {
+        if (lane === 'channel' && firstAndOnlyCallFailed && failure?.error instanceof ConversationHistoryUnavailableError) {
+          throw new PreActionConversationHistoryUnavailableError(failure.error)
+        }
         if (failure) throw failure.error
         const next = ready
         if (next && continuationModel) {
@@ -602,8 +614,8 @@ class AssistantTurnOwner {
     if (PREPARED_RUN_KEYS.some(key => key in supplied)) throw new Error('The original owner supplies the prepared run.')
     this.modelPreparation.assertLoopContext(supplied.context)
     const take = this.takeDiscoveredContext
-    const takeDiscoveredContext = take && (() => {
-      const next = take()
+    const takeDiscoveredContext: QueryLoopOptions['takeDiscoveredContext'] = take && (proof => {
+      const next = take(proof)
       if (!next) return undefined
       next.routineCalendarRead ??= adoptedRoutine(supplied.routineCalendarRead, this.preparedRun!)
       next.toolSelection ??= supplied.toolSelection

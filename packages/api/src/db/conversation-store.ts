@@ -2,7 +2,7 @@ import { hasWorkspaceConversationAudience } from '../session-kind.js'
 import {readPrivateTranscript,usesPrivateResponderTranscript} from './private-transcript.js'
 /** Current native session query captures. [COMP:api/application-persistence] */
 import {z} from 'zod'
-import type {PoolClient,ClientBase} from 'pg'
+import pg, {type PoolClient,type ClientBase} from 'pg'
 import {assertHostObservationPublication} from '@use-brian/core/engine/routine-read.js'
 import type {SessionContextAuthority} from '@use-brian/core/memory/session-state-types.js'
 import {ContextScopeAccumulator,type ScopeEvidence} from '@use-brian/agent-runtime/security/context-scope.js'
@@ -50,18 +50,39 @@ export function conversationCaptureSources(value:ConversationCaptures,workspaceI
 }
 
 
+/** A refusal from the native conversation capture's ancestry check. */
+export class ConversationHistoryUnavailableError extends Error {
+ constructor(cause: unknown) {
+  super('Conversation history could not be verified.', {cause})
+  this.name = 'ConversationHistoryUnavailableError'
+ }
+}
+
+async function captureConversationValue(client:Pick<PoolClient,'query'>,workspaceId:string,sessionId:string,
+ throughSequence:number|null,topicThroughSequence:number):Promise<unknown>{
+ const [sql,args]=throughSequence===null
+  ? ['SELECT capture_conversation_query($1,$2,NULL,$3) AS value',[workspaceId,sessionId,topicThroughSequence]] as const
+  : ['SELECT capture_conversation_query($1,$2,$3,$4) AS value',[workspaceId,sessionId,throughSequence,topicThroughSequence]] as const
+ try{
+  return (await client.query<{value:unknown}>(sql,[...args])).rows[0]?.value
+ }catch(error){
+  if(error instanceof pg.DatabaseError&&error.code==='42501'&&error.routine==='exec_stmt_raise'
+   &&error.message==='scope_ancestry_unavailable')throw new ConversationHistoryUnavailableError(error)
+  throw error
+ }
+}
+
 /** Only selector identities cross the SQL boundary; no caller supplies a proof. */
 export async function captureConversationQuery(client:Pick<PoolClient,'query'>,workspaceId:string,
  selection:ConversationSelection):Promise<ConversationCaptures>{
- const value=captures.parse((await client.query<{value:unknown}>('SELECT capture_conversation_query($1,$2,$3,$4) AS value',
-  [workspaceId,selection.sessionId,selection.throughSequence,selection.topicThroughSequence])).rows[0]?.value)
+ const value=captures.parse(await captureConversationValue(client,workspaceId,selection.sessionId,selection.throughSequence,selection.topicThroughSequence))
  conversationCaptureSources(value,workspaceId)
  return value
 }
 export type SessionQueryAnnotation=z.infer<typeof conversationAnnotationSchema>
 function changed():never{throw new DerivedScopeError('scope_source_changed')}
 async function captureSessionTopicRows(client:Pick<PoolClient,'query'>,workspaceId:string,sessionId:string,through:number):Promise<ConversationCaptures['annotations']>{
- const raw=(await client.query<{value:unknown}>('SELECT capture_conversation_query($1,$2,NULL,$3) AS value',[workspaceId,sessionId,through])).rows[0]?.value
+ const raw=await captureConversationValue(client,workspaceId,sessionId,null,through)
  const value=captures.extend({history:z.array(capture).length(0)}).parse(raw)
  const rows=value.annotations
  if(rows[0].row!==null||rows.slice(1).some(row=>row.row===null)

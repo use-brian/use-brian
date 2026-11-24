@@ -86,6 +86,7 @@ import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import { humanizeToolName, describeToolInput } from '@use-brian/shared'
 import { processChannelMessage } from './channel-pipeline.js'
+import { PreActionConversationHistoryUnavailableError } from '../turn/kernel.js'
 import { admitChannelMessage } from './channel-message-admission.js'
 import { channelUserErrorText } from './_channel-error-text.js'
 import { isDeliveryAudienceUnverifiedError } from '../context-scope/delivery-authority.js'
@@ -2518,7 +2519,9 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
         if (telegramDispatch) {
           if (isTelegramThreadNotFoundError(err)) return
           const text = isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)
-            ? telegramIncomingFailureText(incoming.channelId, err) : TELEGRAM_GUARDED_FAILURE_NOTICE
+            ? telegramIncomingFailureText(incoming.channelId, err)
+            : err instanceof PreActionConversationHistoryUnavailableError
+              ? TELEGRAM_HISTORY_UNAVAILABLE_NOTICE : TELEGRAM_GUARDED_FAILURE_NOTICE
           await adapter.sendMessage(incoming.channelId, {text, telegramDispatch}).catch(error => {
             if (!isTelegramThreadNotFoundError(error)) throw error
           })
@@ -2538,6 +2541,9 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     },
   })
 }
+
+const TELEGRAM_HISTORY_UNAVAILABLE_NOTICE =
+  'I couldn’t load this conversation’s history. I stopped before taking any action on your request.'
 
 const TELEGRAM_GUARDED_FAILURE_NOTICE =
   'I could not finish this reply. If you asked me to take an action, check whether it went through before asking again.'

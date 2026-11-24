@@ -4,6 +4,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import type { AddressInfo } from 'node:net'
 import express from 'express'
+import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { configureTelegramTextDeliveryObserver } from '@use-brian/channels'
 import { createGeminiProvider } from '@use-brian/agent-runtime/providers/gemini.js'
@@ -65,6 +66,8 @@ const knowledgeTitle = 'Fictional observatory handbook'
 const heldKnowledgeTitle = 'Fictional restricted handbook'
 const projectKnowledgeTitle = 'Fictional project-only handbook'
 const knowledgeProviderFailure = 'Fictional confidential supplier response usage limit marker'
+const historyUnavailableNotice = 'I couldn’t load this conversation’s history. I stopped before taking any action on your request.'
+const guardedFailureNotice = 'I could not finish this reply. If you asked me to take an action, check whether it went through before asking again.'
 const knowledgeHitReply = 'The current handbook is available.'
 const knowledgeMissReply = 'No knowledge entries match that query.'
 const rows = Number(process.env.BRIAN_TELEGRAM_HISTORY_ROWS ?? 300)
@@ -250,6 +253,10 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
     { title: 'keeps the public lookup tools unavailable to an explicitly allowed conversation-only guest',
       phase: 'lookup-guest', incomingId: 5200 },
     { title: 'receives the main request within ten seconds and delivers the retained answer', phase: 'ordinary', incomingId: 2000 },
+    { title: 'reports that no action ran on history failure', phase: 'history-failure', incomingId: 2010 },
+    { title: 'reports that no action ran on topic failure', phase: 'history-topic-failure', incomingId: 2013 },
+    { title: 'keeps action-check guidance for sibling tool', phase: 'history-sibling-tool', incomingId: 2011 },
+    { title: 'keeps action-check guidance after prior tool', phase: 'history-after-tool', incomingId: 2012 },
     { title: 'withholds the physical request when the current Telegram input is held after admission', phase: 'headers', incomingId: 2001 },
     { title: 'withholds the answer when the current Telegram input is held after model dispatch', phase: 'response', incomingId: 2002 },
     { title: 'resolves an unquoted numeric question choice through authenticated context discovery', phase: 'choice', incomingId: 2003 },
@@ -273,6 +280,8 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       linkedAccountStore, integrationStore, stats } = recording
     const isMail = phase === 'mailbox' || phase === 'mail-revoked' || phase === 'mail-release' || phase === 'mail-dispatch'
     const isLookup = phase === 'lookup' || phase === 'lookup-guest'
+    const historyBeforeAction = phase === 'history-failure' || phase === 'history-topic-failure'
+    const historyFailure = historyBeforeAction || phase === 'history-sibling-tool' || phase === 'history-after-tool'
     const standaloneLookup = phase === 'knowledge-initial-hit' || phase === 'knowledge-initial-miss'
     const standaloneGuest = phase === 'knowledge-initial-guest'
     const isKnowledge = phase === 'knowledge-hit' || phase === 'knowledge-miss' || phase === 'knowledge-dm'
@@ -302,7 +311,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
     const analytics = phase === 'lookup' || isKnowledge ? new AnalyticsLogger(createDbAnalyticsStore()) : undefined
     const lookupTools = isLookup || phase === 'member'
       ? new Map([createWebSearchTool(), createUrlReaderTool(), calculateTool].map(tool => [tool.name, tool]))
-      : new Map()
+      : historyFailure ? new Map([[calculateTool.name, calculateTool]]) : new Map()
     if (isMail) {
       mailbox ??= await seedCoveredMailbox(recording)
       await mailbox.refresh()
@@ -477,6 +486,12 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
           else if (step < lookupSteps.length) {
             parts = [{ functionCall: lookupSteps[step], thoughtSignature: 'fixture-lookup-signature' }]
           } else parts = [{ text: lookupReply }]
+        } else if (historyFailure) {
+          const discovery = { functionCall: { name: 'requestConversationContext', args: {}, id: 'fixture-context' }, thoughtSignature: 'fixture-context-signature' }
+          const unrelated = { functionCall: { name: 'calculate', args: { expression: 'not a calculation' }, id: 'fixture-other-call' }, thoughtSignature: 'fixture-other-signature' }
+          if (phase === 'history-sibling-tool') parts = [unrelated, discovery]
+          else if (phase === 'history-after-tool' && modelCalls.length === 1) parts = [unrelated]
+          else parts = [discovery]
         } else if (phase === 'lookup-guest') {
           parts = [{ text: guestReply }]
         } else if (modelCalls.length === 1 && JSON.stringify(body.tools ?? []).includes('requestConversationContext')) {
@@ -528,7 +543,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
     const knowledgeReplyTargets: { chatId: string; topicId?: number }[] = []
     const protectedReplyAttempts: { chatId: string; topicId?: number }[] = []
     const vanishedTopicAttempts: { chatId: string; topicId?: number }[] = []
-    const knowledgeSendTargets: { chatId: string; topicId?: number }[] = []
+    const guardedSendTargets: { chatId: string; topicId?: number }[] = []
     let messageId = incomingId * 10
     let replyReceiptId: string | undefined
     const network = globalThis.fetch
@@ -561,7 +576,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
           }, { status: 400 })
         }
         delivered.push(body.text)
-        if (isKnowledge) knowledgeSendTargets.push(target)
+        if (isKnowledge || historyFailure) guardedSendTargets.push(target)
         messageId++
         if (body.text === expectedReply) {
           if (isKnowledge) knowledgeReplyTargets.push(target)
@@ -573,7 +588,21 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       return Response.json({ ok: true, result: true })
     })
     const historyRead = isMail || phase === 'lookup' || standaloneLookup || standaloneGuest ? vi.spyOn(conversationStore, 'readAdmittedSessionQuery') : undefined
-    const recordRead = isMail || phase === 'lookup' || standaloneLookup || standaloneGuest ? vi.spyOn(conversationAdmission, 'tryReadTurnConversationRecord') : undefined
+    const recordRead = isMail || phase === 'lookup' || standaloneLookup || standaloneGuest || historyFailure
+      ? vi.spyOn(conversationAdmission, 'tryReadTurnConversationRecord') : undefined
+    const originalQuery = pg.Client.prototype.query
+    const rejectedCaptures: unknown[][] = []
+    const captureStatement = phase === 'history-topic-failure'
+      ? 'SELECT capture_conversation_query($1,$2,NULL,$3) AS value'
+      : 'SELECT capture_conversation_query($1,$2,$3,$4) AS value'
+    const captureSpy = historyFailure ? vi.spyOn(pg.Client.prototype, 'query').mockImplementation(function(this: pg.Client, ...args: unknown[]) {
+      if (modelCalls.length && args[0] === captureStatement && Array.isArray(args[1]) && args[1][1] === sessionId) {
+        rejectedCaptures.push(args[1])
+        return Reflect.apply(originalQuery, this, [`DO $$BEGIN RAISE EXCEPTION 'scope_ancestry_unavailable' USING ERRCODE='42501'; END$$`])
+      }
+      return Reflect.apply(originalQuery, this, args)
+    } as typeof originalQuery) : undefined
+    if (historyFailure) recordRead!.mockResolvedValue(null)
     const linkRead = vi.spyOn(linkedAccountStore, 'findByProvider')
     configureTelegramTextDeliveryObserver(recordDeliveredTelegramMessage)
     try {
@@ -596,6 +625,24 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       })
       expect(result.status).toBe(200)
       await vi.waitFor(() => expect(linkRead).toHaveBeenCalledWith('telegram', String(telegramSender)))
+      if (historyFailure) {
+        const notice = historyBeforeAction ? historyUnavailableNotice : guardedFailureNotice
+        await vi.waitFor(async () => {
+          expect(delivered).toContain(notice)
+          const session = await pool.query(`SELECT status,turn_lease_token,
+            EXISTS(SELECT 1 FROM chat_turn_locks WHERE chat_key=$2) AS locked FROM sessions WHERE id=$1`,
+          [sessionId, `tg-byo:${conversationId}`])
+          expect(session.rows[0]).toEqual({ status: 'failed', turn_lease_token: null, locked: false })
+        }, { interval: 100, timeout: 15_000 })
+        expect(rejectedCaptures).toHaveLength(1)
+        expect(modelCalls).toHaveLength(phase === 'history-after-tool' ? 2 : 1)
+        if (phase !== 'history-topic-failure') expect(backgroundCalls).toEqual([])
+        expect(delivered.filter(text => text.includes('I could not finish') || text.includes('I couldn’t load'))).toEqual([notice])
+        expect(delivered.join('\n')).not.toContain('scope_ancestry_unavailable')
+        expect(delivered.join('\n')).not.toContain(historicalAnswer)
+        expect(guardedSendTargets.every(target => target.chatId === String(chat) && target.topicId === topic)).toBe(true)
+        return
+      }
       if (knowledgeUnbound) {
         await vi.waitFor(() => expect(delivered.join('\n')).toMatch(/can't show the result in this chat|group is not approved for workspace replies/i),
           { timeout: 15_000 })
@@ -703,7 +750,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
           if (knowledgeTopicMissing) expect(protectedReplyAttempts.length).toBeGreaterThan(0)
           const session = await pool.query('SELECT status,turn_lease_token FROM sessions WHERE id=$1', [sessionId])
           if (untrustedKnowledgeError) {
-            expect(delivered).toContain('I could not finish this reply. If you asked me to take an action, check whether it went through before asking again.')
+            expect(delivered).toContain(guardedFailureNotice)
             expect(['idle', 'failed']).toContain(session.rows[0].status)
             expect(session.rows[0].turn_lease_token).toBeNull()
           } else expect(session.rows[0]).toEqual({ status: 'failed', turn_lease_token: null })
@@ -715,14 +762,14 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
         expect(delivered).not.toContain(expectedReply)
         expect(replyReceiptId).toBeUndefined()
         expect(knowledgeReplyTargets).toEqual([])
-        if (knowledgeRevoked) expect(knowledgeSendTargets.map(target => target.chatId)).not.toContain(String(chat - 1))
+        if (knowledgeRevoked) expect(guardedSendTargets.map(target => target.chatId)).not.toContain(String(chat - 1))
         if (knowledgeTopicMissing) {
           expect(protectedReplyAttempts).toEqual([{ chatId: String(chat), topicId: topic }])
           expect(vanishedTopicAttempts.every(target => target.chatId === String(chat) && target.topicId === topic)).toBe(true)
         }
         if (untrustedKnowledgeError) {
           expect(delivered.join('\n')).not.toContain(knowledgeProviderFailure)
-          expect(knowledgeSendTargets.every(target => target.chatId === String(chat) && target.topicId === topic)).toBe(true)
+          expect(guardedSendTargets.every(target => target.chatId === String(chat) && target.topicId === topic)).toBe(true)
         }
         return
       }
@@ -849,6 +896,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       if (phase === 'mail-revoked' || phase === 'mail-release' || phase === 'mail-dispatch') await pool.query('UPDATE connector_instance SET connected=true WHERE id=$1', [mailbox!.id])
       credentialRead?.mockRestore()
       recordRead?.mockRestore()
+      captureSpy?.mockRestore()
       historyRead?.mockRestore()
       linkRead.mockRestore()
       stub.mockRestore()
