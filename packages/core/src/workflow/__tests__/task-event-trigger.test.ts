@@ -87,7 +87,7 @@ describe('[COMP:workflow/task-event-trigger] deriveTaskActions', () => {
 
   it('done → archived is neither completed nor reopened', () => {
     const actions = deriveTaskActions(updated({ previousStatus: 'done', status: 'archived' }))
-    expect(actions).toEqual(['updated'])
+    expect(actions).toEqual(['status_changed', 'updated'])
   })
 
   it('assignee set (null → user) is assigned; reassignment too; unassign is not', () => {
@@ -148,6 +148,31 @@ describe('[COMP:workflow/task-event-trigger] taskLifecycleToDispatchEvent', () =
     )
     expect(ev.channelId).toBe('completed')
     expect(ev.actions).toEqual(expect.arrayContaining(['completed', 'tagged', 'updated']))
+  })
+
+  it('matches true status transitions only in the selected Project homes, without adding home to run input', () => {
+    const first = '97cc10ca-74bb-4aa2-bfb7-619203cb1297'
+    const second = '21b88b53-53cd-4621-989f-8c5ec6534981'
+    const sub = taskSub({ inChannels: ['status_changed'], taskProjectIds: [first.toUpperCase(), second] })
+    const transition = updated({ status: 'in_review', home: { kind: 'project', id: first } })
+    const ev = taskLifecycleToDispatchEvent(transition)
+    expect(matchesEvent(ev, sub)).toBe(true)
+    expect(matchesEvent(taskLifecycleToDispatchEvent({ ...transition, home: { kind: 'project', id: second } }), sub)).toBe(true)
+    expect(ev.channelId).toBe('updated')
+    expect(ev.payload).toMatchObject({ status: 'in_review', previousStatus: 'todo', actions: ['status_changed', 'updated'] })
+    expect(ev.payload).not.toHaveProperty('taskProjectId')
+    expect(ev.payload).not.toHaveProperty('home')
+
+    for (const noMatch of [
+      created({ home: transition.home }),
+      { ...transition, previousStatus: 'in_review' as const },
+      { ...transition, home: null },
+      { ...transition, home: { kind: 'department', id: first } as const },
+      { ...transition, home: { kind: 'project', id: 'a4c20324-690f-40eb-acec-90ccdbf1ca27' } as const },
+      { ...transition, writtenBy: 'system' as const },
+    ]) expect(matchesEvent(taskLifecycleToDispatchEvent(noMatch), sub)).toBe(false)
+    expect(matchesEvent(taskLifecycleToDispatchEvent({ ...transition, writtenBy: 'system' }),
+      taskSub({ ...sub.match, fromBots: true }))).toBe(true)
   })
 
   it('event tags carry only the ADDED set on update — appearance semantics', () => {

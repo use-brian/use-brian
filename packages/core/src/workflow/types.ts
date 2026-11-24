@@ -542,6 +542,8 @@ export type EventMatch = {
    * `tags`, whose appearance semantics remain unchanged.
    */
   currentTags?: string[]
+  /** Task only. Match any listed explicit post-write Project home ID. Empty means any home. */
+  taskProjectIds?: string[]
   /** Allow bot-authored events to fire this subscription. Default false. */
   fromBots?: boolean
 }

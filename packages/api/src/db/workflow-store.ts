@@ -761,6 +761,10 @@ export function validatePrimitiveEventMetadata(input: Record<string, unknown> | 
     canonical = Object.fromEntries(['pageId','title','parentId','action','actorId','sourceVersion'].map(key=>[key,saved[key]]))
   } else throw fail()
   for (const [key,value] of Object.entries(event)) {
+    // Older stored task events lack this additive facet. Keep their receipts
+    // valid when rechecking the run; no other action may be omitted or forged.
+    if (sourceType === 'task' && key === 'actions' && Array.isArray(canonical.actions)
+      && isDeepStrictEqual(value, canonical.actions.filter(action => action !== 'status_changed'))) continue
     if (!Object.hasOwn(canonical,key) || !isDeepStrictEqual(value,canonical[key])) throw fail()
   }
   const expectedTrigger: Record<string, unknown> = {sourceType,provider:sourceType,channelId:canonical.action,actorId:canonical.actorId}
