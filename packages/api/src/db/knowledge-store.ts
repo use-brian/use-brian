@@ -212,6 +212,18 @@ const knowledgeCapture=z.object({row:z.record(z.unknown()).nullable(),sources:z.
   held:z.literal(false).optional(),validTo:z.null().optional(),retractedAt:z.null().optional()}).strict().optional()}).strict()
 
 const knowledgeNativeSource=querySource.extend({resourceKind:z.literal('knowledge_entry')})
+const searchObservation = querySource.extend({resourceKind: z.literal('application_field')})
+const nativeSearchResult = z.object({
+  sources: z.array(searchObservation).min(1),
+  rows: z.array(z.object({
+    row: z.object({
+      id: z.string().uuid(), path: z.string(), title: z.string(), summary: z.string().nullable(),
+      tags: z.array(z.string()), sourceId: z.string().uuid().nullable(), rank: z.number(),
+    }),
+    source: knowledgeCapture.shape.source.unwrap(),
+    sources: z.array(searchObservation).min(1),
+  }).strict()),
+}).strict()
 const knowledgePointCapture=z.object({values:z.record(z.unknown()),sources:z.array(querySource).min(1),nativeSources:z.array(knowledgeNativeSource).min(1),
  policyVersion:z.string().regex(/^[a-f0-9]{64}$/),recordVersion:z.string().min(1)}).strict()
 const knowledgePointValues=z.object({id:z.string().uuid(),path:z.string(),title:z.string(),summary:z.string().nullable(),content:z.string(),
@@ -257,17 +269,29 @@ async function captureKnowledgeSearch(
   throw new DerivedScopeError('scope_evidence_missing')
 }
 
-/** Query evaluation sees only a captured, current, field-admitted native domain. */
-async function queryKnowledgeCollection<T extends QueryResultRow>(ctx:AccessContext,authority:SessionContextAuthority|undefined,
- fields:readonly KnowledgeField[],sql:string,params:unknown[],sourceRows=true){
+function requireKnowledgeViewer(ctx: AccessContext, authority?: SessionContextAuthority) {
  if(currentApplicationReadTransaction(ctx)||ctx.systemRead||!ctx.userId)throw new DerivedScopeError('scope_evidence_missing')
- ctx=structuredClone(ctx);params=structuredClone(params)
  if(authority){
   const e=authority.execution
   if(e.identity.kind!=='attended'||e.identity.principal.kind!=='workspace_member'||e.security.access.userId!==ctx.userId
    ||e.security.access.workspaceId!==ctx.workspaceId||e.assistant.id!==ctx.assistantId)throw new DerivedScopeError('scope_evidence_missing')
-  await e.security.authority.assertCurrent()
  }
+}
+
+async function pinKnowledgeViewer(client: PoolClient, ctx: AccessContext, authority: SessionContextAuthority) {
+  const {access, ceiling} = authority.execution.security
+  const requested = pinAccessCeiling({...access, ...Object.fromEntries(Object.entries(ctx).filter(([, v]) => v !== undefined))})
+  const bounded = intersectAccessCeilings(ceiling, requested)
+  await runWithAgentAccess({...access, ...bounded}, () => applyRLSGucs(client, ctx.userId))
+  return bounded
+}
+
+/** Query evaluation sees only a captured, current, field-admitted native domain. */
+async function queryKnowledgeCollection<T extends QueryResultRow>(ctx:AccessContext,authority:SessionContextAuthority|undefined,
+ fields:readonly KnowledgeField[],sql:string,params:unknown[],sourceRows=true){
+ requireKnowledgeViewer(ctx, authority)
+ ctx=structuredClone(ctx);params=structuredClone(params)
+ await authority?.execution.security.authority.assertCurrent()
  const discover=async(client?:PoolClient)=>{
   const statement=`SELECT ${knowledgeSourceColumns('ke')} FROM knowledge_entries ke ORDER BY ke.id LIMIT 4097`
   const result=await(client?queryKnowledgeRows<{id:string}>(client,statement,[],true,true):queryKnowledgeViewer<{id:string}>(ctx,statement,[],true,true))
@@ -278,9 +302,7 @@ async function queryKnowledgeCollection<T extends QueryResultRow>(ctx:AccessCont
  const run=async(client:PoolClient)=>{
   let ceiling=authority?.execution.security.ceiling
   if(authority){
-   const requested=pinAccessCeiling({...authority.execution.security.access,...Object.fromEntries(Object.entries(ctx).filter(([,v])=>v!==undefined))})
-   ceiling=intersectAccessCeilings(authority.execution.security.ceiling,requested)
-   await runWithAgentAccess({...authority.execution.security.access,...ceiling},()=>applyRLSGucs(client,ctx.userId))
+   ceiling=await pinKnowledgeViewer(client, ctx, authority)
    if(JSON.stringify(boundScopeSources((await discover(client)).rows))!==JSON.stringify(roots))throw new DerivedScopeError('scope_source_changed')
   }
   const captureParams = [ctx.workspaceId, [...fields], !!authority, appliesDenylist(ctx) ? ctx.assistantId : null]
@@ -551,6 +573,32 @@ function knowledgeBrowseChildProjection(visible: string, sourceScoped: boolean) 
  */
 function appliesDenylist(ctx: AccessContext): boolean {
   return ctx.assistantKind !== 'primary'
+}
+
+/** A SQL NULL delegates to the general reader, including external source acquisition. */
+async function searchNativeKnowledge(
+  ctx: AccessContext, authority: SessionContextAuthority, query: string, limit: number, sourceId?: string | null,
+): Promise<KnowledgeSearchResult[] | null> {
+  return readRetainedQueryFrame(authority, [], async client => {
+    await pinKnowledgeViewer(client, ctx, authority)
+    const result = await client.query<{value: unknown}>(
+      'SELECT read_native_knowledge_search($1,$2,$3,$4,$5,$6,$7,$8,$9) AS value',
+      [ctx.workspaceId, appliesDenylist(ctx) ? ctx.assistantId : null, query, limit,
+        sourceId !== undefined, sourceId ?? null, ctx.clearance ?? DEFAULT_CLEARANCE, ctx.compartments, ctx.projectIds],
+    )
+    const raw = result.rows[0]?.value
+    if (raw === null) return {value: null, sources: []}
+    const captured = nativeSearchResult.parse(raw)
+    const sources: ScopeSource[] = [...captured.sources]
+    const rows = captured.rows.map(({row, source, sources: fields}) => {
+      if (row.id !== source.resourceId) throw new DerivedScopeError('scope_evidence_missing')
+      sources.push(source, ...fields)
+      return bindScopeSources({...row, sensitivity: source.sensitivity, compartments: source.compartments,
+        projectIds: source.projectIds}, [...captured.sources, source, ...fields])
+    })
+    if (sources.some(source => source.workspaceId !== ctx.workspaceId)) throw new DerivedScopeError('scope_evidence_missing')
+    return {value: bindScopeSources(rows, sources), sources}
+  })
 }
 
 async function queryKnowledgeSearch<T extends KnowledgeSearchResult>(
@@ -910,7 +958,14 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       })
     },
 
-    searchForTool(ctx, queryStr, limit = 10, authority, sourceId) {
+    async searchForTool(ctx, queryStr, limit = 10, authority, sourceId) {
+      // Capture the caller's selection before the first asynchronous boundary.
+      requireKnowledgeViewer(ctx, authority)
+      ctx = structuredClone(ctx)
+      if (authority) {
+        const hits = await searchNativeKnowledge(ctx, authority, queryStr, limit, sourceId)
+        if (hits !== null) return hits
+      }
       return queryKnowledgeSearch<KnowledgeSearchResult>(ctx, queryStr, limit, authority, sourceId, {
         fields: KNOWLEDGE_TOOL_SEARCH_FIELDS,
         columns: () => `${knowledgeSourceColumns('ke')}, ke.id, ke.path, ke.title, ke.summary, ke.tags,

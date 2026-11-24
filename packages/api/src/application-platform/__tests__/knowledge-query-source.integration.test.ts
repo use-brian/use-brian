@@ -5,11 +5,12 @@ import {createKnowledgeTools} from '@use-brian/core/tools/base/knowledge.js'
 import type {LLMProvider} from '@use-brian/agent-runtime/providers/types.js'
 import type {AccessContext} from '@use-brian/agent-runtime/security/access-context.js'
 import {executionToolContext} from '@use-brian/agent-runtime/security/execution-context.js'
-import type {Tool} from '@use-brian/agent-runtime/tools/types.js'
+import type {Tool, ToolResult} from '@use-brian/agent-runtime/tools/types.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {createDbConnectorStore} from '../../db/connector-store.js'
 import {createDbKnowledgeStore,type KnowledgeEntry} from '../../db/knowledge-store.js'
 import {createDbMcpSettingsStore} from '../../db/mcp-settings-store.js'
+import {createDbWorkspaceGroupStore} from '../../db/workspace-group-store.js'
 import {admitModelInput} from '../../context-scope/admission.js'
 import {composeSurfaceCapabilities} from '../../mcp/surface.js'
 import {generateTitle} from '../../routes/attended-session-title.js'
@@ -21,6 +22,72 @@ const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/loca
 await assertLocalFixture()
 const store=createDbKnowledgeStore()
 type Fixture=Awaited<ReturnType<typeof retainedKnowledgeFixture>>
+type WorkspaceFixture=Awaited<ReturnType<typeof persistentContextFixture>>
+type SearchInput={query:string; sourceId?:string|null}
+type SearchDomain={kind?:string; digest?:string; candidates?:unknown[]; fields:string[]}
+type SearchTiming={toolMs:number;admissionMs:number;totalMs:number}
+const searchFixtures={entries:917, matchingPath:'fictional-load/917', hit:'amberneedle', miss:'violetneedle'}
+const searchFields=['content','id','path','sourceId','summary','tags','title']
+
+async function prepareChannelSearch(f:WorkspaceFixture,userId=f.ownerId){
+ const {execution,accumulator}=await signedKnowledgeAuthority(f,userId)
+ const context={...executionToolContext(execution,{appId:'fictional-knowledge-load'}),scopeAccumulator:accumulator}
+ const tools=new Map<string,Tool>()
+ await composeSurfaceCapabilities('channel',{userId,assistantId:f.assistantId,assistantTeamId:f.workspaceId,tools,
+  connectorStore:createDbConnectorStore(randomBytes(32)),settingsStore:createDbMcpSettingsStore(),knowledgeStore:store,
+  executionContext:execution,scopeAccumulator:accumulator})
+ const discover=tools.get('mcp_search'),invoke=tools.get('mcp_call')
+ if(!discover||!invoke)throw new Error('The channel must register the MCP discovery and invocation tools')
+ const discovery=await discover.execute({query:'search workspace knowledge base'},context)
+ expect(discovery.isError).not.toBe(true)
+ const route=String(discovery.data).match(/\[(knowledge)\]\s+(searchKnowledge):/)
+ if(!route)throw new Error('The registered channel catalog must discover searchKnowledge')
+ return {context,search:(args:SearchInput)=>invoke.execute({server:route[1],tool:route[2],args},context)}
+}
+
+async function searchDomain(f:WorkspaceFixture,result:ToolResult){
+ if(!result.scopeEvidence)throw new Error('Signed search must bind current query evidence')
+ const sources=result.scopeEvidence.sources?.filter(source=>source.resourceKind==='application_field')??[]
+ const domains=(await f.pool.query<{domain:SearchDomain}>(`SELECT d.domain
+  FROM application_field_resources r JOIN application_query_domains d ON d.workspace_id=r.workspace_id AND d.id=r.resource_id
+  WHERE r.workspace_id=$1 AND r.id=ANY($2::uuid[]) AND r.selection='query_domain'`,[f.workspaceId,sources.map(source=>source.resourceId)])).rows
+ expect(domains).toHaveLength(1)
+ return domains[0].domain
+}
+
+async function expectCompactSearch(f:WorkspaceFixture,result:ToolResult){
+ expect(result.isError,result.isError?String(result.data):undefined).not.toBe(true)
+ const domain=await searchDomain(f,result)
+ expect(domain).toMatchObject({kind:'knowledge_search_domain_v1',fields:searchFields,digest:expect.stringMatching(/^[a-f0-9]{64}$/)})
+ expect(domain).not.toHaveProperty('candidates')
+}
+
+async function searchLoad(f:WorkspaceFixture){
+ // There are 805 linked entries and 2,966 edges. The final manual row shares the repository entry's path.
+ await f.pool.query(`WITH entries AS MATERIALIZED (
+   SELECT n,gen_random_uuid() AS id FROM generate_series(1,$3::integer-1) n
+  ) INSERT INTO knowledge_entries(id,workspace_id,path,title,summary,content,tags,sensitivity,created_by,related_ids)
+  SELECT entry.id,$1,'fictional-load/'||CASE WHEN entry.n=$3-1 THEN $3 ELSE entry.n END,
+   'Fictional fixture entry '||entry.n,'Fictional fixture summary',
+   repeat('Fictional synthetic notes for an invented workspace. ',75)||CASE WHEN entry.n=$3-1 THEN 'amberneedle' ELSE '' END,
+   ARRAY['fictional'],'internal',$2,ARRAY(
+    SELECT target.id FROM generate_series(1,CASE WHEN entry.n<=551 THEN 4 WHEN entry.n<=805 THEN 3 ELSE 0 END) step
+    JOIN entries target ON target.n=1+((entry.n-1+step)%($3::integer)) ORDER BY step
+   ) FROM entries entry`,[f.workspaceId,f.ownerId,searchFixtures.entries])
+}
+
+async function expectSearchHeldBeforeModel(context:Awaited<ReturnType<typeof prepareChannelSearch>>['context'],result:ToolResult){
+ let extractions=0,calls=0
+ const provider:LLMProvider={name:'fictional-compact-search',models:['fixture'],createSession(){throw new Error('Stateless fixture required')},
+  stream:async function*(){calls++;yield{type:'message_start',model:'fixture'};
+   yield{type:'text_delta',text:'Fictional compact search title'};
+   yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:2,outputTokens:2}}}}
+ await expect(generateTitle(provider,[{role:'user',get content(){extractions++;return JSON.stringify(result.data)}}],
+  'fixture',()=>admitModelInput(context))).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
+ expect(extractions).toBe(0)
+ expect(calls).toBe(0)
+}
+
 type Reader={name:string;read:(ctx:AccessContext,row:KnowledgeEntry)=>Promise<boolean>}
 const legacyReaders:Reader[]=[
  {name:'point path',read:async(ctx,row)=>!!await store.getByPath(ctx,row.path)},
@@ -39,44 +106,22 @@ describe.sequential('[COMP:api/application-persistence] actual retained-source K
  let fixture:Fixture|undefined
  afterEach(async()=>{configureConnectorSourceRuntimeFactory(undefined);await fixture?.cleanup();fixture=undefined})
  afterAll(async()=>{await getAppPool().end();await getPool().end()})
- it('searches a 917-entry knowledge cohort through signed native authority',async()=>{
+ it('searches a 917-entry cohort with a configured repository through signed native authority',async()=>{
   const f=await persistentContextFixture('confidential')
   try{
    const role=(await getAppPool().query<{role:string;timeout:string}>(
     "SELECT current_user AS role,current_setting('statement_timeout') AS timeout")).rows[0]
    expect(role).toEqual({role:'app_user',timeout:'15s'})
-   const entryCount=917
-   const matchingPath='fictional-load/917'
-   // 805 linked entries carry three or four references apiece (2,966 edges).
-   await f.pool.query(`WITH entries AS MATERIALIZED (
-     SELECT n,gen_random_uuid() AS id FROM generate_series(1,$3::integer-1) n
-    ) INSERT INTO knowledge_entries(id,workspace_id,path,title,summary,content,tags,sensitivity,created_by,related_ids)
-    SELECT entry.id,$1,'fictional-load/'||CASE WHEN entry.n=$3-1 THEN $3 ELSE entry.n END,
-     'Fictional fixture entry '||entry.n,'Fictional fixture summary',
-     repeat('Fictional synthetic notes for an invented workspace. ',75)||CASE WHEN entry.n>=$3-1 THEN 'amberneedle' ELSE '' END,
-     ARRAY['fictional'],'internal',$2,ARRAY(
-      SELECT target.id FROM generate_series(1,CASE WHEN entry.n<=551 THEN 4 WHEN entry.n<=805 THEN 3 ELSE 0 END) step
-      JOIN entries target ON target.n=1+((entry.n-1+step)%($3::integer)) ORDER BY step
-     ) FROM entries entry`,[f.workspaceId,f.ownerId,entryCount])
+   const {entries:entryCount,matchingPath,hit,miss}=searchFixtures
+   await searchLoad(f)
    const {source}=await configuredKnowledgeEntryFixture(f,{source:{repo:'fictional/knowledge-load'},
     entry:{path:matchingPath,title:'Fictional synced Knowledge entry',content:'Fictional amberneedle body',sensitivity:'internal'}})
    const sourceAuthority=await signedKnowledgeAuthority(f)
    expect(await store.getSourceForViewer(sourceAuthority.execution.security.access,source.id,sourceAuthority)).toMatchObject({repo:source.repo})
-   const connectorStore=createDbConnectorStore(randomBytes(32)),settingsStore=createDbMcpSettingsStore()
-   for(const [query,match] of [['amberneedle',true],['violetneedle',false]] as const){
-    const {execution,accumulator}=await signedKnowledgeAuthority(f)
-    const context={...executionToolContext(execution,{appId:'fictional-knowledge-load'}),scopeAccumulator:accumulator}
-    const tools=new Map<string,Tool>()
-    await composeSurfaceCapabilities('channel',{userId:f.ownerId,assistantId:f.assistantId,assistantTeamId:f.workspaceId,tools,
-     connectorStore,settingsStore,knowledgeStore:store,executionContext:execution,scopeAccumulator:accumulator})
-    const discover=tools.get('mcp_search'),invoke=tools.get('mcp_call')
-    if(!discover||!invoke)throw new Error('The channel must register the MCP discovery and invocation tools')
-    const discovery=await discover.execute({query:'search workspace knowledge base'},context)
-    expect(discovery.isError).not.toBe(true)
-    const route=String(discovery.data).match(/\[(knowledge)\]\s+(searchKnowledge):/)
-    if(!route)throw new Error('The registered channel catalog must discover searchKnowledge')
+   for(const [query,match] of [[hit,true],[miss,false]] as const){
+    const {context,search}=await prepareChannelSearch(f)
     const start=performance.now()
-    const result=await invoke.execute({server:route[1],tool:route[2],args:{query}},context)
+    const result=await search({query})
     const elapsedMs=Math.round(performance.now()-start)
     console.info(JSON.stringify({scenario:match?'matching-search':'empty-search',entries:entryCount,elapsedMs,
      failure:result.isError===true?result.data:null}))
@@ -92,12 +137,10 @@ describe.sequential('[COMP:api/application-persistence] actual retained-source K
     }
     if(!result.scopeEvidence)throw new Error('Signed search must bind current query evidence')
     if(match)expect(result.scopeEvidence.sources).toContainEqual(expect.objectContaining({resourceKind:'knowledge_source',resourceId:source.id}))
-    const sources=result.scopeEvidence.sources?.filter(source=>source.resourceKind==='application_field')??[]
-    const domains=(await f.pool.query<{size:number;fields:string[]}>(`SELECT jsonb_array_length(d.domain->'candidates') AS size,d.domain->'fields' AS fields
-     FROM application_field_resources r JOIN application_query_domains d ON d.workspace_id=r.workspace_id AND d.id=r.resource_id
-     WHERE r.workspace_id=$1 AND r.id=ANY($2::uuid[]) AND r.selection='query_domain'`,[f.workspaceId,sources.map(source=>source.resourceId)])).rows
-    expect(domains).toEqual([{size:entryCount,fields:['content','id','path','sourceId','summary','tags','title']}])
-    accumulator.note(result.scopeEvidence)
+    const domain=await searchDomain(f,result)
+    expect(domain.candidates).toHaveLength(entryCount)
+    expect(domain.fields).toEqual(searchFields)
+    context.scopeAccumulator.note(result.scopeEvidence)
     const admissionStart=performance.now()
     try{await admitModelInput(context)}finally{
      console.info(JSON.stringify({scenario:match?'matching-admission':'empty-admission',entries:entryCount,
@@ -106,8 +149,208 @@ describe.sequential('[COMP:api/application-persistence] actual retained-source K
    }
   }finally{await f.cleanup()}
  },180_000)
- it('holds paged search when the second SQL slice reports a different query domain',async()=>{
+ it('ranks and admits signed channel hits and misses for 917 ordinary entries using a compact query proof',async()=>{
   const f=await persistentContextFixture('confidential')
+  try{
+   const {entries,matchingPath,hit,miss}=searchFixtures
+   await searchLoad(f)
+   const source=await store.createSource({workspaceId:f.workspaceId,sourceType:'local',repo:'fictional/legacy-source'})
+   await store.create({workspaceId:f.workspaceId,path:matchingPath,title:'Fictional sourced Knowledge entry',
+    content:'Fictional amberneedle body',sensitivity:'internal',createdBy:f.ownerId,sourceId:source.id})
+   const benchmark=process.env.BRIAN_KNOWLEDGE_SEARCH_BENCHMARK==='1'
+   const sampleCount=benchmark?25:1
+   const samples={hit:[] as SearchTiming[],miss:[] as SearchTiming[]}
+   for(let i=0;i<sampleCount;i++){
+    for(const [scenario,query] of [['hit',hit],['miss',miss]] as const){
+     const {context,search}=await prepareChannelSearch(f)
+     const start=performance.now()
+     const result=await search({query})
+     const toolComplete=performance.now()
+     if(result.isError||!result.scopeEvidence)throw new Error(`Signed ${scenario} failed: ${String(result.data)}`)
+     context.scopeAccumulator.note(result.scopeEvidence)
+     await admitModelInput(context)
+     const admitted=performance.now()
+     samples[scenario].push({toolMs:toolComplete-start,admissionMs:admitted-toolComplete,totalMs:admitted-start})
+     if(i===0)await expectCompactSearch(f,result)
+     if(scenario==='hit'){
+      expect(result.data).toHaveLength(2)
+      expect(result.data).toEqual(expect.arrayContaining([
+       expect.objectContaining({path:matchingPath,sourceId:null,sourceLabel:'Manual entries'}),
+       expect.objectContaining({path:matchingPath,sourceId:source.id}),
+      ]))
+     }else{
+      expect(result.data).toMatch(/^No knowledge entries found for this query\./)
+     }
+    }
+   }
+   if(benchmark){
+    const percentiles=Object.entries(samples).map(([scenario,durations])=>{
+     const ordered=durations.map(sample=>sample.totalMs).sort((a,b)=>a-b)
+     const p95=ordered[Math.ceil(ordered.length*0.95)-1]
+     console.info(JSON.stringify({scenario:`ordinary-${scenario}`,entries,samples:durations.length,
+      elapsedMs:durations.map(sample=>Object.fromEntries(Object.entries(sample).map(([unit,value])=>[unit,Math.round(value)]))),
+      p95Ms:Math.round(p95)}))
+     return {scenario,p95}
+    })
+    for(const {scenario,p95} of percentiles){
+     expect(p95,`Signed channel ${scenario} plus model admission p95`).toBeLessThanOrEqual(1_000)
+    }
+   }
+  }finally{await f.cleanup()}
+ },180_000)
+ it('invalidates a ranked hit and a miss before model input after a mass body change',async()=>{
+  const f=await persistentContextFixture('confidential')
+  try{
+   await f.pool.query(`INSERT INTO knowledge_entries(workspace_id,path,title,content,tags,sensitivity,created_by)
+    SELECT $1,'fictional-bulk/'||n,'Fictional bulk entry','amberneedle body',
+     CASE WHEN n=1 THEN ARRAY['amberneedle'] ELSE '{}'::text[] END,'internal',$2 FROM generate_series(1,96) n`,[f.workspaceId,f.ownerId])
+   const expected=(await f.pool.query<{id:string}>(`SELECT id FROM knowledge_entries
+    WHERE workspace_id=$1 AND search_vector @@ plainto_tsquery('english','amberneedle')
+    ORDER BY ts_rank_cd(search_vector,plainto_tsquery('english','amberneedle')) DESC,id LIMIT 10`,[f.workspaceId])).rows
+   const hit=await prepareChannelSearch(f),miss=await prepareChannelSearch(f)
+   const ranked=await hit.search({query:'amberneedle'}),absent=await miss.search({query:'violetneedle'})
+   await expectCompactSearch(f,ranked)
+   await expectCompactSearch(f,absent)
+   expect(ranked.data).toMatchObject(expected)
+   expect(absent.data).toMatch(/^No knowledge entries found for this query\./)
+   expect(ranked.scopeEvidence?.sources?.filter(source=>source.resourceKind==='knowledge_entry')).toHaveLength(10)
+   expect(absent.scopeEvidence?.sources?.filter(source=>source.resourceKind==='knowledge_entry')).toHaveLength(0)
+   hit.context.scopeAccumulator.note(ranked.scopeEvidence)
+   miss.context.scopeAccumulator.note(absent.scopeEvidence)
+   await expect(admitModelInput(hit.context)).resolves.toBeUndefined()
+   await expect(admitModelInput(miss.context)).resolves.toBeUndefined()
+   const independent=await prepareChannelSearch(f,f.secondId)
+   independent.context.scopeAccumulator.note(ranked.scopeEvidence)
+   await expect(admitModelInput(independent.context)).resolves.toBeUndefined()
+   const change=await f.pool.query(`UPDATE knowledge_entries SET content='violetneedle body',tags='{}'
+    WHERE workspace_id=$1`,[f.workspaceId])
+   expect(change.rowCount).toBe(96)
+   await expectSearchHeldBeforeModel(hit.context,ranked)
+   await expectSearchHeldBeforeModel(miss.context,absent)
+   const fresh=await prepareChannelSearch(f)
+   const revised=await fresh.search({query:'violetneedle'})
+   await expectCompactSearch(f,revised)
+   expect(revised.data).toHaveLength(10)
+   fresh.context.scopeAccumulator.note(revised.scopeEvidence)
+   await expect(admitModelInput(fresh.context)).resolves.toBeUndefined()
+  }finally{await f.cleanup()}
+ },45_000)
+ it('invalidates a compact miss after an existing entry becomes eligible or a new entry is added',async()=>{
+  const f=await persistentContextFixture('confidential')
+  try{
+   await f.pool.query("UPDATE assistants SET clearance='internal' WHERE workspace_id=$1 AND id=$2",[f.workspaceId,f.assistantId])
+   const hidden=await store.create({workspaceId:f.workspaceId,path:'fictional-hidden',title:'Fictional hidden entry',
+    content:'Fictional amberneedle body',sensitivity:'confidential',createdBy:f.ownerId})
+   const first=await prepareChannelSearch(f)
+   const absent=await first.search({query:'amberneedle'})
+   await expectCompactSearch(f,absent)
+   expect(absent.data).toMatch(/^No knowledge entries found for this query\./)
+   first.context.scopeAccumulator.note(absent.scopeEvidence)
+   await expect(admitModelInput(first.context)).resolves.toBeUndefined()
+   await f.pool.query("UPDATE knowledge_entries SET sensitivity='internal' WHERE id=$1",[hidden.id])
+   await expectSearchHeldBeforeModel(first.context,absent)
+
+   const current=await prepareChannelSearch(f)
+   const visible=await current.search({query:'amberneedle'})
+   await expectCompactSearch(f,visible)
+   expect(visible.data).toMatchObject([{id:hidden.id}])
+   const beforeInsert=await prepareChannelSearch(f)
+   const missing=await beforeInsert.search({query:'violetneedle'})
+   await expectCompactSearch(f,missing)
+   expect(missing.data).toMatch(/^No knowledge entries found for this query\./)
+   beforeInsert.context.scopeAccumulator.note(missing.scopeEvidence)
+   await expect(admitModelInput(beforeInsert.context)).resolves.toBeUndefined()
+   const inserted=await store.create({workspaceId:f.workspaceId,path:'fictional-new',title:'Fictional new entry',
+    content:'Fictional violetneedle body',sensitivity:'internal',createdBy:f.ownerId})
+   await expectSearchHeldBeforeModel(beforeInsert.context,missing)
+   const fresh=await prepareChannelSearch(f)
+   const found=await fresh.search({query:'violetneedle'})
+   await expectCompactSearch(f,found)
+   expect(found.data).toMatchObject([{id:inserted.id}])
+   fresh.context.scopeAccumulator.note(found.scopeEvidence)
+   await expect(admitModelInput(fresh.context)).resolves.toBeUndefined()
+  }finally{await f.cleanup()}
+ },45_000)
+ it('preserves source selection and holds compact results after a standard assistant source denial',async()=>{
+  const f=await persistentContextFixture('confidential')
+  try{
+   await f.pool.query("UPDATE assistants SET kind='standard' WHERE workspace_id=$1 AND id=$2",[f.workspaceId,f.assistantId])
+   const source=await store.createSource({workspaceId:f.workspaceId,sourceType:'local',repo:'fictional/compact-selector'})
+   const seed={workspaceId:f.workspaceId,path:'fictional-shared-path',title:'Fictional source test',content:'amberneedle',
+    sensitivity:'internal' as const,createdBy:f.ownerId}
+   const manual=await store.create(seed),synced=await store.create({...seed,sourceId:source.id})
+   const selected=await prepareChannelSearch(f)
+   const result=await selected.search({query:'amberneedle',sourceId:source.id})
+   await expectCompactSearch(f,result)
+   expect(result.data).toMatchObject([{id:synced.id,sourceId:source.id}])
+   selected.context.scopeAccumulator.note(result.scopeEvidence)
+   await expect(admitModelInput(selected.context)).resolves.toBeUndefined()
+   const manualOnly=await prepareChannelSearch(f)
+   const expectedManual=await manualOnly.search({query:'amberneedle',sourceId:null})
+   await expectCompactSearch(f,expectedManual)
+   expect(expectedManual.data).toMatchObject([{id:manual.id,sourceId:null}])
+
+   await store.setSourceDisabled({assistantId:f.assistantId,sourceId:source.id,disabled:true,userId:f.ownerId})
+   await expectSearchHeldBeforeModel(selected.context,result)
+   const current=await prepareChannelSearch(f)
+   const denied=await current.search({query:'amberneedle',sourceId:source.id})
+   await expectCompactSearch(f,denied)
+   expect(denied.data).toMatch(/^No knowledge entries found for this query\./)
+   current.context.scopeAccumulator.note(denied.scopeEvidence)
+   await expect(admitModelInput(current.context)).resolves.toBeUndefined()
+   const all=await prepareChannelSearch(f)
+   const visible=await all.search({query:'amberneedle'})
+   await expectCompactSearch(f,visible)
+   expect(visible.data).toMatchObject([{id:manual.id,sourceId:null}])
+  }finally{await f.cleanup()}
+ },45_000)
+ it('carries the admission floor of every eligible entry even when compact search misses',async()=>{
+  const f=await persistentContextFixture('confidential')
+  try{
+   const groups=createDbWorkspaceGroupStore()
+   const teams=await Promise.all(['north','south'].map(direction=>groups.createTeam(f.ownerId,f.workspaceId,
+    {name:`Fictional ${direction} team`,key:`fictional-${direction}`})))
+   const projects=(await f.pool.query<{id:string}>(`INSERT INTO workspace_projects(workspace_id,name,normalized_name,created_by)
+    VALUES ($1,'Fictional north project','fictional north project',$2),($1,'Fictional south project','fictional south project',$2)
+    RETURNING id`,[f.workspaceId,f.ownerId])).rows
+   for(const [i,team] of teams.entries()){
+    await f.pool.query(`INSERT INTO knowledge_entries(workspace_id,path,title,content,sensitivity,compartments,project_ids,created_by)
+     VALUES ($1,$2,'Fictional floor entry','Fictional reference material',$3,ARRAY[$4]::text[],ARRAY[$5]::uuid[],$6)`,
+     [f.workspaceId,`fictional-floor/${i}`,i===0?'internal':'confidential',team.compartmentKey,projects[i].id,f.ownerId])
+   }
+   const prepared=await prepareChannelSearch(f)
+   const miss=await prepared.search({query:'violetneedle'})
+   await expectCompactSearch(f,miss)
+   expect(miss.data).toMatch(/^No knowledge entries found for this query\./)
+   expect(miss.scopeEvidence?.sensitivity).toBe('confidential')
+   expect(miss.scopeEvidence?.compartments?.slice().sort()).toEqual(teams.map(team=>team.compartmentKey).sort())
+   expect(miss.scopeEvidence?.projectIds?.slice().sort()).toEqual(projects.map(project=>project.id).sort())
+   expect(miss.scopeEvidence?.sources).toHaveLength(1)
+   prepared.context.scopeAccumulator.note(miss.scopeEvidence)
+   await expect(admitModelInput(prepared.context)).resolves.toBeUndefined()
+  }finally{await f.cleanup()}
+ },45_000)
+ it('invalidates a compact miss when a nonmatching eligible entry is held',async()=>{
+  const f=await persistentContextFixture('confidential')
+  try{
+   const row=await store.create({workspaceId:f.workspaceId,path:'fictional-review',title:'Fictional review entry',
+    content:'Fictional amberneedle body',sensitivity:'internal',createdBy:f.ownerId})
+   const prepared=await prepareChannelSearch(f)
+   const miss=await prepared.search({query:'violetneedle'})
+   await expectCompactSearch(f,miss)
+   prepared.context.scopeAccumulator.note(miss.scopeEvidence)
+   await expect(admitModelInput(prepared.context)).resolves.toBeUndefined()
+   await f.pool.query('UPDATE knowledge_entries SET scope_held=true WHERE workspace_id=$1 AND id=$2',[f.workspaceId,row.id])
+   await expectSearchHeldBeforeModel(prepared.context,miss)
+   const current=await (await prepareChannelSearch(f)).search({query:'amberneedle'})
+   await expectCompactSearch(f,current)
+   expect(current.data).toMatch(/^No knowledge entries found for this query\./)
+  }finally{await f.cleanup()}
+ },45_000)
+ it('holds paged search when the second SQL slice reports a different query domain',async()=>{
+  fixture=await retainedKnowledgeFixture()
+  const c=fixture,f=c.f
+  configureConnectorSourceRuntimeFactory(c.source.factory,{instances:c.source.instances})
   const originalQueries=new Map<PoolClient,PoolClient['query']>()
   let slices=0,matchingStatements=0
   const trace=(client:PoolClient)=>{
@@ -132,7 +375,8 @@ describe.sequential('[COMP:api/application-persistence] actual retained-source K
   try{
    await f.pool.query(`INSERT INTO knowledge_entries(workspace_id,path,title,content,sensitivity,created_by)
     SELECT $1,'fictional-stale-slice/'||n,'Fictional entry','Fictional body','internal',$2 FROM generate_series(1,385) n`,[f.workspaceId,f.ownerId])
-   const authority=await signedKnowledgeAuthority(f)
+   const context=await c.context(f.ownerId,true)
+   const authority={execution:context.executionContext!,accumulator:context.scopeAccumulator}
    getAppPool().on('acquire',trace)
    await expect(store.searchForTool(authority.execution.security.access,'fictional',10,authority)).rejects.toThrow('scope_source_changed')
    expect(slices).toBe(2)
@@ -140,7 +384,6 @@ describe.sequential('[COMP:api/application-persistence] actual retained-source K
   }finally{
    getAppPool().off('acquire',trace)
    for(const [client,query] of originalQueries)client.query=query
-   await f.cleanup()
   }
  },45_000)
  for(const reader of legacyReaders)it(`holds retained content before the actual legacy ${reader.name} computation while preserving an ordinary authorized control`,async()=>{
