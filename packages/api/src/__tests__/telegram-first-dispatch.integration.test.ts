@@ -627,9 +627,11 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       if (standaloneGuest) {
         await vi.waitFor(async () => {
           expect(delivered).toContain(knowledgeGuestReply)
-          const { rows: [active] } = await pool.query<{ count: number }>(`SELECT count(*)::int AS count FROM sessions
-            WHERE assistant_id=$1 AND channel_type='telegram' AND (status='running' OR turn_lease_token IS NOT NULL)`, [assistantId])
-          expect(active.count).toBe(0)
+          const { rows: [active] } = await pool.query<{ count: number; locked: boolean }>(`SELECT count(*)::int AS count,
+            EXISTS(SELECT 1 FROM chat_turn_locks WHERE chat_key=$2) AS locked FROM sessions
+            WHERE assistant_id=$1 AND channel_type='telegram' AND (status='running' OR turn_lease_token IS NOT NULL)`,
+          [assistantId, `tg-byo:${conversationId}`])
+          expect(active).toEqual({ count: 0, locked: false })
         }, { interval: 100, timeout: 15_000 })
         expect(await linkRead.mock.results[0].value).toBeNull()
         expect(modelCalls).toHaveLength(1)
@@ -762,6 +764,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
         betweenMainMs: Math.round(modelCalls[1].elapsedMs - modelCalls[0].elapsedMs),
         sqlCallsSinceBaseline: before ? modelCalls.map(row => row.sqlCalls) : undefined,
         deliveredMs: Math.round(deliveredMs!),
+        ...(standaloneLookup ? { retainedHistoryReads: historyRead?.mock.calls.length, retainedRecordReads: recordRead?.mock.calls.length } : {}),
         backgroundMs: backgroundCalls.map(Math.round), delivered: delivered.includes(expectedReply)
       }))
       expect(modelCalls[0].elapsedMs).toBeLessThan(10_000)
