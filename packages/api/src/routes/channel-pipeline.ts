@@ -3060,6 +3060,14 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
       initialMailboxCapabilities: createConnectorCapabilityRequest && isIdentified && !isolatedAudience
         ? async () => createConnectorCapabilityRequest(await resolveConnectorUserId(), new Map())
         : undefined,
+      initialKnowledgeCapabilities: createConnectorCapabilityRequest && knowledgeStore && senderIsWorkspaceMember
+        && isIdentified && !isolatedAudience && !hasConversationReference
+        && executionContext.ownership.kind === 'workspace' && executionContext.identity.kind === 'attended'
+        && executionContext.identity.principal.kind === 'workspace_member'
+        && executionContext.identity.principal.authenticationKind === 'verified_channel'
+        && (!isGroupChat || telegramKnowledgeGroup(executionContext))
+        ? async () => createConnectorCapabilityRequest(await resolveConnectorUserId(), new Map())
+        : undefined,
       contextDiscovery: discoverContext,
     })
     replyEvidence.note(initialPrompt.stablePrompt)

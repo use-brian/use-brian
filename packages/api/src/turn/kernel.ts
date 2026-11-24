@@ -75,7 +75,7 @@ import { randomUUID } from 'node:crypto'
 import { currentTurnFrame, readTurnSqlLedger, turnSqlRecordingEnabled, withTurnFrame, type TurnSqlLedger } from '../db/turn-sql-accounting.js'
 import type { SessionMessage } from '../db/sessions.js'
 import { writeTurnPublication, type TurnPublicationRequest } from './publication.js'
-import { captureCapabilityComposition, captureInitialMailboxTools, initialCurrentTurnTools, type TurnCapabilityProfile, type TurnCapabilityRequest, type TurnCapabilityResult } from './capabilities.js'
+import { captureCapabilityComposition, captureInitialKnowledgeSearch, captureInitialMailboxTools, initialCurrentTurnTools, type TurnCapabilityProfile, type TurnCapabilityRequest, type TurnCapabilityResult } from './capabilities.js'
 import { captureTurnHistory, type CapturedTurnHistory, type TurnHistoryRequest } from './history.js'
 import { assertInitialMailboxEvidenceCurrent, closeInitialMailboxEvidence } from './mailbox-read-authority.js'
 import { resumePredecessorSlotWait, type ResumeSlotWaitOptions } from './resume-recovery.js'
@@ -428,7 +428,9 @@ class AssistantTurnOwner {
     const preparation = this.modelPreparation
     const discover = input.contextDiscovery
     const mailbox = input.initialMailboxCapabilities
+    const knowledge = input.initialKnowledgeCapabilities
     if (mailbox && !discover) throw new Error('Initial mailbox reads require an attended context-discovery frame.')
+    if (knowledge && !discover) throw new Error('Initial Knowledge reads require an attended context-discovery frame.')
     let initial = input
     if (discover) {
       if (input.messages.length !== 1 || input.messages[0]?.role !== 'user') {
@@ -523,7 +525,8 @@ class AssistantTurnOwner {
         },
       }
       const tools = [discoveryTool, ...initialCurrentTurnTools(input.candidateTools),
-        ...(mailbox ? captureInitialMailboxTools(lane, mailbox, preparation.assertCurrent) : [])]
+        ...(mailbox ? captureInitialMailboxTools(lane, mailbox, preparation.assertCurrent) : []),
+        ...(knowledge && lane !== 'public' ? [captureInitialKnowledgeSearch(lane, knowledge, preparation.assertCurrent)] : [])]
       initial = { ...input, candidateTools: new Map(tools.map(tool => [tool.name, tool])),
         trustedContributions: [...input.trustedContributions ?? [], { name: 'context_discovery',
           content: `For a self-contained request, answer using the current message and any available tools. You can use tool results in subsequent calls. Call ${CONVERSATION_CONTEXT_TOOL} when the request depends on earlier conversation, referenced material, or a tool that is not already available.` }] }

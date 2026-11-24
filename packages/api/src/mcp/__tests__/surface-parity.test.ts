@@ -48,7 +48,7 @@ import type { LocalSource, RemoteSource } from '@use-brian/core/mcp/tool-search.
 import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { z } from 'zod'
 import { createDescriptorLifecycle } from '../descriptors.js'
-import { composeResumeCapabilities, composeSurfaceCapabilities, type SurfaceCapabilities, type SurfaceCapabilityOptions } from '../surface.js'
+import { composeResumeCapabilities, composeSurfaceCapabilities, prepareKnowledgeReadDispatcher, type SurfaceCapabilities, type SurfaceCapabilityOptions } from '../surface.js'
 import type { CapabilitySurface } from '../catalog.js'
 import { OFFICIAL_CONNECTORS } from '@use-brian/shared'
 
@@ -341,6 +341,16 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks() })
 
 const FIXTURES = { workspace: workspaceFixture, personal: personalFixture, policy: policyFixture }
+
+it('[COMP:api/mcp-catalog] withholds first-step Knowledge search when the surface excludes it', async () => {
+  const lanes = workspaceFixture()
+  const opts = options(lanes, { restrictSearchToToolNames: ['browseKnowledge'] })
+
+  await expect(prepareKnowledgeReadDispatcher('channel', opts)).resolves.toBeUndefined()
+  expect(opts.knowledgeStore?.hasEntriesForAssistant).toHaveBeenCalledOnce()
+  expect(lanes.connectorInstanceStore.listByWorkspaceSystem).not.toHaveBeenCalled()
+  expect(lanes.connectorGrantStore.listForTargetSystem).not.toHaveBeenCalled()
+})
 
 describe('[COMP:api/mcp-catalog] entrypoint surface parity with the retired injector', () => {
   const baseline = loadBaseline()

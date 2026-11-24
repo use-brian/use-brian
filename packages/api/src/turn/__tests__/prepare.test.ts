@@ -36,8 +36,9 @@ vi.mock('../../application-platform/model-source-authority.js', () => ({
   admitModelSourceEvidence: async (context: { authority?: CurrentAuthorityBoundary }) => { await context.authority?.assertCurrent() },
 }))
 const mailbox = vi.hoisted(() => ({ dispatcher: vi.fn() }))
+const knowledge = vi.hoisted(() => ({ dispatcher: vi.fn() }))
 vi.mock('../../mcp/surface.js', async importOriginal => ({ ...await importOriginal<typeof import('../../mcp/surface.js')>(),
-  prepareMailboxReadDispatcher: mailbox.dispatcher }))
+  prepareMailboxReadDispatcher: mailbox.dispatcher, prepareKnowledgeReadDispatcher: knowledge.dispatcher }))
 import { openAssistantTurn, type AssistantTurn } from '../kernel.js'
 import type { InitialMailboxCapabilities } from '../capabilities.js'
 import type { SurfaceCapabilityOptions } from '../../mcp/surface.js'
@@ -70,7 +71,7 @@ function capturingProvider(script: 'text' | 'tool' | readonly string[] = 'text',
           if (name) {
             const id = call ? `fixture-call-${call}` : 'fixture-call'
             yield { type: 'tool_use_start' as const, id, name }
-            yield { type: 'tool_use_delta' as const, id, input: '{}' }
+            yield { type: 'tool_use_delta' as const, id, input: name === 'searchKnowledge' ? '{"query":"observatory handbook"}' : '{}' }
             yield { type: 'tool_use_end' as const, id }
             yield { type: 'message_end' as const, stopReason: toolStopReason, usage: { inputTokens: 1, outputTokens: 1 } }
           } else {
@@ -89,7 +90,7 @@ async function fixture(options: { assertCurrent?: () => Promise<void>; lane?: 'w
   const lane = options.lane ?? 'web'
   // Durable resume binds its canonical system execution, keyed by its approval.
   const execution = createExecutionContext({ identity: lane === 'resume' ? { kind: 'system', purpose: 'session_resume', jobId: 'fixture-approval' }
-    : { kind: 'attended', principal: { kind: 'workspace_member', userId: identity.user, authenticationKind: 'native_session' } },
+    : { kind: 'attended', principal: { kind: 'workspace_member', userId: identity.user, authenticationKind: lane === 'channel' ? 'verified_channel' : 'native_session' } },
     ownership: { kind: 'workspace', workspaceId: identity.workspace },
     access: { workspaceId: identity.workspace, userId: identity.user, assistantId: identity.assistant, assistantKind: 'standard', clearance: 'internal',
       compartments: [], mutationCompartments: [], projectIds: [], visibilityAssistantIds: [identity.assistant] },
@@ -279,6 +280,40 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
       expect(discover).not.toHaveBeenCalled()
       expect(scripted.captured).toHaveLength(1)
     }
+  })
+
+  it('dispatches the ordinary Knowledge search lazily and completes without earlier conversation', async () => {
+    const scripted = capturingProvider(['searchKnowledge'], undefined, 'end_turn')
+    const f = await fixture({ lane: 'channel', provider: scripted.provider })
+    const initial: Message = { role: 'user', content: 'Search Knowledge for the current observatory handbook.' }
+    const capabilities = initialMailbox(f)
+    const execute = vi.fn(async () => ({ data: 'Fictional observatory handbook receipt' }))
+    knowledge.dispatcher.mockResolvedValue({ execute })
+    const discover = vi.fn(async () => { throw new Error('Unexpected history load') })
+    await f.owner.prepareRun({ systemPrompt: 'Initial', messages: [initial], candidateTools: new Map(),
+      initialKnowledgeCapabilities: capabilities, contextDiscovery: discover })
+    expect(capabilities).not.toHaveBeenCalled()
+    expect(knowledge.dispatcher).not.toHaveBeenCalled()
+
+    await expect(f.owner.run({ loop: owned(f.context), sink: { kind: 'adapter' } })).resolves.toMatchObject({ finalText: 'Fictional prepared answer.' })
+    expect(toolNames(scripted.captured[0])).toEqual(['requestConversationContext', 'searchKnowledge'])
+    expect(scripted.captured[0].sends[0]).toEqual([initial])
+    expect(scripted.captured[0].sends[1]).toMatchObject([{ role: 'user', content: [{ type: 'tool_result', name: 'searchKnowledge',
+      toolUseId: 'fixture-call', content: 'Fictional observatory handbook receipt' }] }])
+    expect(execute).toHaveBeenCalledExactlyOnceWith({ server: 'knowledge', tool: 'searchKnowledge', args: { query: 'observatory handbook' } },
+      expect.objectContaining({ executionContext: f.execution }))
+    expect(discover).not.toHaveBeenCalled()
+  })
+
+  it('refuses a substituted Knowledge actor before catalog activation', async () => {
+    const scripted = capturingProvider('tool', 'searchKnowledge')
+    const f = await fixture({ lane: 'channel', provider: scripted.provider })
+    const messages: Message[] = [{ role: 'user', content: 'Search Knowledge.' }]
+    const capabilities = initialMailbox(f, { actorIdentity: { channel: 'telegram', id: 'other-account', email: null, userId: 'other-user' } })
+    await f.owner.prepareRun({ systemPrompt: 'Initial', messages, candidateTools: new Map(), initialKnowledgeCapabilities: capabilities,
+      contextDiscovery: async () => ({ systemPrompt: 'Expanded', messages, candidateTools: new Map() }) })
+    await expect(f.owner.run({ loop: owned(f.context), sink: { kind: 'adapter' } })).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(knowledge.dispatcher).not.toHaveBeenCalled()
   })
 
   it.each(['actor', 'assistant', 'profile'] as const)('refuses a substituted mailbox %s before connector lookup', async field => {

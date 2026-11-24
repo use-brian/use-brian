@@ -29,6 +29,7 @@ import { routeTurn, type CapabilityDescriptorRef, type TurnRoute, type TurnRouti
 import type { ConnectorResumeTarget, Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { missingToolCapability } from '@use-brian/agent-runtime/tools/capability-gate.js'
 import { mailboxGetMessageInput, mailboxSearchInput } from '@use-brian/core/tools/base/mailbox.js'
+import { knowledgeSearchInput } from '@use-brian/core/tools/base/knowledge.js'
 import { AuthorityChangedError, isAuthorityChangedError } from '../context-scope/authority-lease.js'
 import type { ApplyMcpInjectionParams } from '../routes/route-helpers.js'
 import type { SurfaceCapabilities, SurfaceCapabilityOptions } from '../mcp/surface.js'
@@ -56,7 +57,8 @@ export type TurnCapabilityRequest =
   | { profile: 'resume'; composition: { kind: 'resume'; params: ResumeCapabilityParams } }
 
 export type TurnCapabilityResult = SurfaceCapabilities
-export type InitialMailboxCapabilities = () => Promise<TurnCapabilityRequest | null>
+export type InitialReadCapabilities = () => Promise<TurnCapabilityRequest | null>
+export type InitialMailboxCapabilities = InitialReadCapabilities
 
 const CURRENT_TURN_TOOLS = ['webSearch', 'urlReader', 'calculate']
 
@@ -159,12 +161,8 @@ export function captureCapabilityComposition(request: TurnCapabilityRequest): {
   }
 }
 
-/** Static schemas let the main model request a read before any connector
- * lookup. The dispatcher is the ordinary catalog-backed MCP read path. */
-export function captureInitialMailboxTools(profile: 'web' | 'channel' | 'public', requestCapabilities: InitialMailboxCapabilities,
-  assertCurrent: () => Promise<void>): Tool[] {
-  let dispatcher: Promise<Tool | undefined> | undefined
-  const prepare = async (context: ToolContext) => {
+function captureInitialReadOptions(profile: 'web' | 'channel' | 'public', requestCapabilities: InitialReadCapabilities) {
+  return async (context: ToolContext) => {
     const request = await requestCapabilities()
     if (!request) return undefined
     if (request.profile !== profile) throw new AuthorityChangedError()
@@ -178,6 +176,19 @@ export function captureInitialMailboxTools(profile: 'web' | 'channel' | 'public'
       || (options.assistantTeamId ?? null) !== (context.workspaceId ?? null)
       || (scopedActorId !== undefined && scopedActorId !== context.userId)
       || (identityActorId !== undefined && identityActorId !== context.userId)) throw new AuthorityChangedError()
+    return options
+  }
+}
+
+/** Static schemas let the main model request a read before any connector
+ * lookup. The dispatcher is the ordinary catalog-backed MCP read path. */
+export function captureInitialMailboxTools(profile: 'web' | 'channel' | 'public', requestCapabilities: InitialMailboxCapabilities,
+  assertCurrent: () => Promise<void>): Tool[] {
+  let dispatcher: Promise<Tool | undefined> | undefined
+  const optionsFor = captureInitialReadOptions(profile, requestCapabilities)
+  const prepare = async (context: ToolContext) => {
+    const options = await optionsFor(context)
+    if (!options) return undefined
     return (await import('../mcp/surface.js')).prepareMailboxReadDispatcher(profile, options, assertCurrent)
   }
   const schemaTools = [
@@ -197,6 +208,38 @@ export function captureInitialMailboxTools(profile: 'web' | 'channel' | 'public'
       return call.execute({ server: 'imap', tool: name, args: input }, context)
     },
   }))
+}
+
+/** Keep the first model schema static, then apply the same source, policy and
+ * tool authority as the discovered Knowledge entry. */
+export function captureInitialKnowledgeSearch(profile: 'web' | 'channel', requestCapabilities: InitialReadCapabilities,
+  assertCurrent: () => Promise<void>): Tool {
+  const optionsFor = captureInitialReadOptions(profile, requestCapabilities)
+  async function prepare(context: ToolContext) {
+    const options = await optionsFor(context)
+    if (!options) return undefined
+    return (await import('../mcp/surface.js')).prepareKnowledgeReadDispatcher(profile, options)
+  }
+  let dispatcher: Promise<Tool | undefined> | undefined
+  return {
+    name: 'searchKnowledge', inputSchema: knowledgeSearchInput.strict(),
+    description: 'Search the workspace knowledge base by keywords from the current request. Use this directly for a self-contained Knowledge question. Request conversation context first if you need an earlier reference to determine what to search.',
+    isReadOnly: true, isConcurrencySafe: false, requiresConfirmation: false, timeoutMs: 5_000,
+    async execute(input, context) {
+      context.abortSignal.throwIfAborted()
+      await assertCurrent()
+      const execution = context.executionContext
+      const identity = execution?.identity
+      const authentication = profile === 'web' ? 'native_session' : 'verified_channel'
+      if (!execution || execution.ownership.kind !== 'workspace' || identity?.kind !== 'attended'
+        || identity.principal.kind !== 'workspace_member' || identity.principal.authenticationKind !== authentication
+        || identity.principal.userId !== context.userId) throw new AuthorityChangedError()
+      const call = await (dispatcher ??= prepare(context))
+      context.abortSignal.throwIfAborted()
+      if (!call) return { data: 'Workspace Knowledge search is unavailable for this turn.', isError: true }
+      return call.execute({ server: 'knowledge', tool: 'searchKnowledge', args: input }, context)
+    },
+  }
 }
 
 /**
