@@ -257,13 +257,21 @@ describe.skipIf(phase!=='target').sequential('[COMP:api/portable-restore] authen
     const authenticatePinnedRelease=releaseAuthentication(head,sourceRoot)
     const snapshot=async()=>JSON.stringify({rows:await harnessRows(client),ledger:(await client.query('SELECT to_jsonb(t)::text row FROM _migrations t ORDER BY name')).rows,
      sessions:(await client.query('SELECT to_jsonb(t)::text row FROM sessions t ORDER BY id')).rows,
-     catalog:(await client.query(`SELECT p.oid::text,pg_get_functiondef(p.oid) definition,p.proacl::text FROM pg_proc p WHERE p.pronamespace='public'::regnamespace AND (p.proname LIKE 'project_harness_%' OR p.proname LIKE 'harness_execution_%' OR p.proname='conversation_dag') ORDER BY p.oid`)).rows,
+     catalog:(await client.query(`SELECT p.oid::text,pg_get_functiondef(p.oid) definition,p.proacl::text FROM pg_proc p WHERE p.pronamespace='public'::regnamespace AND (p.proname LIKE 'project_harness_%' OR p.proname LIKE 'harness_execution_%' OR p.proname IN('conversation_dag','application_native_source_edges_dispatch')) ORDER BY p.oid`)).rows,
+     index:(await client.query(`SELECT pg_get_indexdef(to_regclass('public.application_field_observation_sources_by_resource')) AS definition`)).rows,
      triggers:(await client.query(`SELECT t.oid::text,pg_get_triggerdef(t.oid) definition,t.tgenabled FROM pg_trigger t WHERE t.tgrelid IN (SELECT oid FROM pg_class WHERE relnamespace='public'::regnamespace AND relname LIKE 'project_harness_%') ORDER BY t.oid`)).rows})
     const mutations=[
      ['function',`ALTER FUNCTION public.harness_execution_human(uuid,uuid) COST 101`,'portable_successor_catalog_changed'],
      ['acl',`GRANT EXECUTE ON FUNCTION public.harness_execution_human(uuid,uuid) TO app_user`,'portable_successor_catalog_changed'],
      ['trigger',`ALTER TABLE public.project_harness_runs DISABLE TRIGGER harness_run_audit`,'portable_successor_catalog_changed'],
      ['unknown-prefix',`CREATE FUNCTION public.harness_execution_unreviewed() RETURNS int LANGUAGE sql AS 'SELECT 1'`,'portable_successor_unknown_catalog_object'],
+     ...(head>='8351_scope_derivation_parent_lookup.sql'?[
+      ['derivation-lookup-metadata',`ALTER FUNCTION public.application_native_source_edges_dispatch(uuid,text,uuid,text) COST 101`,'conversion_predecessor_changed: application_native_source_edges_dispatch'],
+      ['derivation-observation-index-missing',`DROP INDEX public.application_field_observation_sources_by_resource`,'scope_derivation_lookup_index_changed'],
+      ['derivation-observation-index-key',`DROP INDEX public.application_field_observation_sources_by_resource;
+       CREATE INDEX application_field_observation_sources_by_resource ON public.application_field_observation_sources(workspace_id,version,resource_id)`,'scope_derivation_lookup_index_changed'],
+      ['derivation-lookup-release-receipt',`DELETE FROM public._migrations WHERE name='8351_scope_derivation_parent_lookup.sql'`,'portable_successor_migration_tail_missing'],
+     ]:[]),
      ...(head>='8350_conversation_graph_ordinal_edges.sql'?[
       ['ordinal-graph-metadata',`ALTER FUNCTION public.conversation_dag(uuid,jsonb,jsonb) COST 101`,'conversion_predecessor_changed: conversation_dag'],
       ['ordinal-graph-release-receipt',`DELETE FROM public._migrations WHERE name='8350_conversation_graph_ordinal_edges.sql'`,'portable_successor_migration_tail_missing'],

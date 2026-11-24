@@ -125,6 +125,9 @@ describe.sequential('[COMP:api/native-turn-frame] lossless graph representation'
  it('evaluates a topic graph beyond the old adjacency byte limit and still holds withdrawn inputs',async()=>{
   const dense=await persistentContextFixture()
   try{
+   // Record prior workspaces' statistics before inserting this workspace's dense history.
+   await dense.pool.query(`ANALYZE public.scope_derivations,public.scope_derivation_sources,
+    public.application_field_observation_sources`)
    const historySize=325
    const denseExecution=await dense.execution(dense.firstId)
    const authority=()=>({execution:denseExecution,accumulator:new ContextScopeAccumulator()})

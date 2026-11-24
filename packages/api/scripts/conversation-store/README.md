@@ -275,9 +275,9 @@ deferred column or the whole row become `suspended:restoration-placeholder`.
 Any new table, sequence, insert/update trigger or FORCE-RLS policy refuses
 import until the roster is regenerated and reviewed. The builder also refuses an
 inventory whose `ledgerCount` differs from the fresh chain and records the chain
-head (826 entries, `8350_conversation_graph_ordinal_edges.sql`). The installation
-verifier replays the ordinal-edge edits in its expected graph source and
-authenticates the revised canonical graph fingerprint. The 8276 witness is
+head (827 entries, `8351_scope_derivation_parent_lookup.sql`). The installation
+verifier reconstructs the ordinal-edge evaluator, bounded derivation lookup,
+and lineage fingerprint from reviewed source. The 8276 witness is
 installation-derived (D7): a head import ends with the owner-only refresh, and an
 8273-cohort transfer is refreshed by 8276 itself as the runner moves forward.
 `portableTableDigests` returns the canonical per-table rows and record digests
