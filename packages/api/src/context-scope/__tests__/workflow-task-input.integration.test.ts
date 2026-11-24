@@ -3,13 +3,16 @@ import { afterAll, describe, expect, it } from 'vitest'
 import { getPool, getAppPool, queryWithRLS, runWithAgentAccess } from '../../db/client.js'
 import { readWorkflowOutcomeWithLineage } from '../../crm-operations/workflow-copy-store.js'
 import { createTask, updateTask } from '../../db/tasks.js'
-import { createDbWorkflowStore, createDbWorkflowRunStore, findEventTriggeredWorkflowsSystem, getWorkflowCreatorSystem, pauseWorkflowForPrimitiveEventSystem } from '../../db/workflow-store.js'
+import { createDbWorkflowStore, createDbWorkflowRunStore, findEventTriggeredWorkflowsSystem, getWorkflowCreatorSystem, pauseWorkflowForPrimitiveEventSystem, validatePrimitiveEventMetadata } from '../../db/workflow-store.js'
 import { createWorkflowEventDispatcher } from '@use-brian/core/workflow/event-trigger.js'
 import { pinAccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { setTaskEventDispatcher } from '../../task-event-fanout.js'
 import { setKnowledgeEventDispatcher } from '../../knowledge-event-fanout.js'
 import { createDbKnowledgeStore } from '../../db/knowledge-store.js'
 import { createDbWorkspaceGroupStore } from '../../db/workspace-group-store.js'
+import { briefFixture } from '../../briefs/__tests__/fixture.js'
+import { withTableTriggersSuspended } from '../../__tests__/fixtures/bootstrap-role.js'
+import { WorkflowTriggerSchema } from '@use-brian/core/workflow/schemas.js'
 import { captureAuthoringAuthoritySystem, resolveWorkflowRunScope } from '../workflow-authority.js'
 import { readWorkflowInputEvidence } from '../workflow-input-evidence.js'
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
@@ -241,6 +244,56 @@ describe('[COMP:api/workflow-input-evidence] primitive lifecycle receipts',()=>{
       expect((await readWorkflowInputEvidence(queued[0].id,f.workspaceId)).sources).toEqual([expect.objectContaining({resourceId:task.id,userId:f.owner,sensitivity:'confidential'})])
     } finally {setTaskEventDispatcher(null)}
   })
+  it('queues committed status changes only for tasks with the selected Project home', async () => {
+    const { workspaceId, people, assistants, projectId } = await briefFixture()
+    const userId = people.lead, assistantId = assistants.brian
+    const authoringAuthority = await captureAuthoringAuthoritySystem({ userId, workspaceId, assistantId, contextProjectId: projectId })
+    const store = createDbWorkflowStore()
+    const workflow = await store.create({ userId, workspaceId, name: 'Project task status', contextProjectId: projectId, authoringAuthority,
+      trigger: WorkflowTriggerSchema.parse({ kind: 'event', event: { sources: [{ source: { type: 'task' },
+        match: { inChannels: ['status_changed'], taskProjectIds: [projectId] } }] } }),
+      definition: { startStepId: 'inspect', steps: [{ id: 'inspect', type: 'tool_call', toolName: 'getTask', arguments: {} }] },
+    }, { authoring: { kind: 'internal-human', userId, assistantId } })
+    await store.update(userId, workflow.id, { enabled: true })
+    const failures: unknown[] = []
+    const dispatcher = createWorkflowEventDispatcher({
+      findEventTriggeredWorkflows: ({ workspaceId }) => findEventTriggeredWorkflowsSystem(workspaceId),
+      startWorkflowRun: async ({ workflowId, workspaceId, input }) => {
+        await runs.createRun({ workflowId, workspaceId, input, triggerKind: 'event', triggeredBy: userId })
+      },
+      onError: error => { failures.push(error) },
+    })
+    let finish!: () => void
+    const writeAndDispatch = async <T>(write: () => Promise<T>) => {
+      const dispatched = new Promise<void>(resolve => { finish = resolve })
+      const result = await write()
+      await dispatched
+      return result
+    }
+    setTaskEventDispatcher({ dispatch: async event => { try { await dispatcher.dispatch(event) } finally { finish() } } })
+    try {
+      const selected = await writeAndDispatch(() => createTask(userId, { workspaceId, title: 'Selected task',
+        home: { kind: 'project', id: projectId }, projectIds: [projectId], compartments: [`project:${projectId}`], visibility: { userId: null, assistantId: null } }))
+      const unassigned = await writeAndDispatch(() => createTask(userId, { workspaceId, title: 'No Project home' }))
+      await writeAndDispatch(() => updateTask(userId, unassigned.id, { status: 'in_review' }))
+      const updated = await writeAndDispatch(() => updateTask(userId, selected.id, { status: 'in_review' }))
+      await writeAndDispatch(() => updateTask(userId, updated!.id, { title: 'Edited with no new status', status: 'in_review' }))
+      expect(failures).toEqual([])
+      const { rows } = await pool.query('SELECT input, primitive_event_metadata_verified FROM workflow_runs WHERE workflow_id=$1', [workflow.id])
+      expect(rows).toHaveLength(1)
+      expect(rows[0]).toMatchObject({ primitive_event_metadata_verified: true, input: {
+        trigger: { sourceType: 'task' }, event: { taskId: updated!.id, status: 'in_review', previousStatus: 'todo', actions: ['status_changed', 'updated'] },
+      } })
+      const input = rows[0].input
+      expect(input.event).not.toHaveProperty('taskProjectId')
+      const { rows: receipts } = await pool.query('SELECT metadata FROM workflow_task_event_receipts WHERE task_id=$1', [updated!.id])
+      const recheck = (actions: string[]) => validatePrimitiveEventMetadata(
+        { ...input, event: { ...input.event, actions } }, 'task', receipts[0].metadata, workspaceId,
+      )
+      expect(() => recheck(['updated'])).not.toThrow() // persisted before the additive status facet
+      expect(() => recheck(['status_changed', 'completed', 'updated'])).toThrow('primitive_event_metadata_conflict')
+    } finally { setTaskEventDispatcher(null) }
+  })
   it('rejects private task metadata before creating a public workflow queue row',async()=>{
     const f=await fixture(),w=await f.workflow(f.member)
     expect((await queryWithRLS(f.member,'SELECT id FROM tasks WHERE id=$1',[f.task.id])).rows).toHaveLength(0)
@@ -249,7 +302,18 @@ describe('[COMP:api/workflow-input-evidence] primitive lifecycle receipts',()=>{
   })
   it('executes an authorized event while retaining its original floor after source relabeling',async()=>{
     const f=await fixture(),w=await f.workflow(f.owner),run=await f.create(w)
-    await pool.query("UPDATE tasks SET sensitivity='public',user_id=NULL WHERE id=$1",[f.task.id])
+    // Simulate historical drift behind a verified receipt. The current
+    // canonical task contract correctly forbids this raw declassification.
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      await withTableTriggersSuspended(client, ['tasks'], () =>
+        client.query("UPDATE tasks SET sensitivity='public',user_id=NULL WHERE id=$1", [f.task.id]))
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally { client.release() }
     const evidence=await readWorkflowInputEvidence(run.id,f.workspaceId)
     expect(evidence).toMatchObject({sensitivity:'confidential',sources:[expect.objectContaining({resourceKind:'task',resourceId:f.task.id,userId:f.owner,sensitivity:'confidential'})]})
     const scope=await resolveWorkflowRunScope({workspaceId:f.workspaceId,userId:f.owner,assistantId:w.assistantId,run})

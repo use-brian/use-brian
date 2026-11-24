@@ -87,6 +87,8 @@ export type DispatchEvent = {
   tags?: string[]
   /** Current full task tag set, matched only by task `EventMatch.currentTags`. */
   currentTags?: string[]
+  /** Explicit post-write Project home. Internal routing metadata, not run input. */
+  taskProjectId?: string
   /** Whether a bot authored the event — gated by `EventMatch.fromBots`. */
   isBot: boolean
   /** Whether a channel event came from a shared group conversation. */
@@ -364,6 +366,11 @@ export function matchesEvent(
     const currentTags = event.currentTags ?? []
     const want = m.currentTags
     if (!currentTags.some((tag) => want.includes(tag))) return false
+  }
+  if (m.taskProjectIds?.length) {
+    if (event.source.type !== 'task' || !event.taskProjectId) return false
+    const projectId = event.taskProjectId.toLowerCase()
+    if (!m.taskProjectIds.some((id) => id.toLowerCase() === projectId)) return false
   }
   return true
 }

@@ -71,8 +71,8 @@ type EventSourceRef =
       /**
        * The workspace's task table — id-less: `match` does all the selection.
        * Lifecycle actions (`created` | `completed` | `blocked` | `reopened` |
-       * `assigned` | `tagged` | `updated`) ride `match.inChannels`; task tags
-       * ride the task-only `match.tags`.
+       * `assigned` | `tagged` | `status_changed` | `updated`) ride
+       * `match.inChannels`; task tags ride the task-only `match.tags`.
        */
       type: "task";
     }
@@ -103,6 +103,8 @@ export type EventMatch = {
   tags?: string[];
   /** Task's full live tag set at dispatch time. Task sources only. Cap 64. */
   currentTags?: string[];
+  /** Task sources only. Matches the explicit post-write Project home, not visibility scope. */
+  taskProjectIds?: string[];
   /** Allow bot-authored events. Default false (self-loop guard). */
   fromBots?: boolean;
 };

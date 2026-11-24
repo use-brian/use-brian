@@ -252,7 +252,7 @@ export function createCanonicalNativeApplicationModule():ApplicationModuleDefini
     const record=await createTask(access.userId,{...taskValues,...(due!==undefined?{due:due===null?null:new Date(due)}:{}),workspaceId:access.workspaceId,access,...creation.scope,
      createdByAssistantId:context.execution.assistant.id,writtenBy:'system'},undefined,context.transaction,{deduplicate:false})
     context.afterCommit(()=>publishTaskLifecycle({workspaceId:record.workspaceId,taskId:record.id,kind:'created',title:record.title,status:record.status,previousStatus:null,
-     tags:record.tags,previousTags:null,assigneeId:record.assigneeId,previousAssigneeId:null,due:record.due,parentId:record.parentId,changedFields:[],actorId:access.userId,writtenBy:'system'}))
+     tags:record.tags,previousTags:null,assigneeId:record.assigneeId,previousAssigneeId:null,due:record.due,parentId:record.parentId,home:record.home,changedFields:[],actorId:access.userId,writtenBy:'system'}))
     return [await creationRef(context,'task',record.id)]
    }},
  }

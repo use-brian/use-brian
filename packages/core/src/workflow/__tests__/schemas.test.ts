@@ -933,6 +933,17 @@ describe('[COMP:workflow/schemas] WorkflowTriggerSchema', () => {
     expect(WorkflowTriggerSchema.safeParse(trigger).success).toBe(false)
   })
 
+  it('preserves valid task Project filters and rejects non-UUIDs, oversized lists and non-task sources', () => {
+    const id = '97cc10ca-74bb-4aa2-bfb7-619203cb1297'
+    const input = (type: 'task' | 'knowledge', taskProjectIds: string[]) => ({
+      kind: 'event', event: { sources: [{ source: { type }, match: { inChannels: ['status_changed'], taskProjectIds } }] },
+    })
+    expect(WorkflowTriggerSchema.parse(input('task', [id]))).toEqual(input('task', [id]))
+    expect(WorkflowTriggerSchema.safeParse(input('task', ['Project name'])).success).toBe(false)
+    expect(WorkflowTriggerSchema.safeParse(input('task', Array(65).fill(id))).success).toBe(false)
+    expect(WorkflowTriggerSchema.safeParse(input('knowledge', [id])).success).toBe(false)
+  })
+
   it('[COMP:workflow/task-current-tags] accepts currentTags on task sources only', () => {
     expect(WorkflowTriggerSchema.safeParse({
       kind: 'event',

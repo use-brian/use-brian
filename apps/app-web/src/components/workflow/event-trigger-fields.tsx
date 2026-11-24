@@ -17,7 +17,12 @@
  * [COMP:app-web/workflow]
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Skeleton } from "@/components/skeleton";
+import { listContextProjects } from "@/lib/api/context-scopes";
+import { useCachedResource } from "@/lib/surface-cache";
+import { surfaceDataKey } from "@/lib/surface-prefetch";
 import { useT } from "@/lib/i18n/client";
 import { format as fmt } from "@/lib/i18n";
 import type {
@@ -217,6 +222,18 @@ export function EventTriggerFields({
                     }
                     disabled={disabled}
                   />
+                  <TaskProjectPicker
+                    workspaceId={workspaceId}
+                    value={sub.match?.taskProjectIds ?? []}
+                    onChange={(ids) => {
+                      const match = {
+                        ...sub.match,
+                        taskProjectIds: ids.length ? ids : undefined,
+                      };
+                      updateSource(idx, { ...sub, match: anyMatchSet(match) ? match : undefined });
+                    }}
+                    disabled={disabled}
+                  />
                   <ChipInput
                     field="tags"
                     label={t.workflowPage.builder.eventTaskTagsLabel}
@@ -318,6 +335,7 @@ function anyMatchSet(m: EventMatch): boolean {
     !!m.mentions?.length ||
     !!m.tags?.length ||
     !!m.currentTags?.length ||
+    !!m.taskProjectIds?.length ||
     m.fromBots === true
   );
 }
@@ -350,13 +368,14 @@ function SourceRow({
     if (next === kind) return;
     // `inChannels` is kind-specific (channel ids for connector/channel, the
     // lifecycle-action mode for page/task), so reset it on a kind switch;
-    // `tags` and `currentTags` are task-only, so drop them too.
+    // Drop the task-only tag and Project home filters too.
     const carriedMatch = sub.match
       ? {
           ...sub.match,
           inChannels: undefined,
           tags: undefined,
           currentTags: undefined,
+          taskProjectIds: undefined,
         }
       : undefined;
     if (next === "task") {
@@ -983,6 +1002,7 @@ function WatchForOption({
 const TASK_WATCH_ACTIONS = [
   "created",
   "tagged",
+  "status_changed",
   "completed",
   "blocked",
   "reopened",
@@ -1011,6 +1031,7 @@ function TaskWatchFor({
   const labels: Record<TaskWatchAction, string> = {
     created: t.workflowPage.builder.eventTaskActionCreated,
     tagged: t.workflowPage.builder.eventTaskActionTagged,
+    status_changed: t.workflowPage.builder.eventTaskActionStatusChanged,
     completed: t.workflowPage.builder.eventTaskActionCompleted,
     blocked: t.workflowPage.builder.eventTaskActionBlocked,
     reopened: t.workflowPage.builder.eventTaskActionReopened,
@@ -1039,12 +1060,11 @@ function TaskWatchFor({
             key={action}
             className="flex items-center gap-1.5 text-xs cursor-pointer"
           >
-            <input
-              type="checkbox"
+            <Checkbox
+              aria-label={labels[action]}
               checked={selected.has(action)}
-              onChange={() => toggle(action)}
+              onCheckedChange={() => toggle(action)}
               disabled={disabled}
-              className="accent-primary"
             />
             <span
               className={
@@ -1057,6 +1077,96 @@ function TaskWatchFor({
         ))}
       </div>
     </div>
+  );
+}
+
+/** Saved IDs are draft data; the registry only supplies labels and new choices. */
+function TaskProjectPicker({
+  workspaceId,
+  value,
+  onChange,
+  disabled,
+}: {
+  workspaceId: string | null;
+  value: string[];
+  onChange: (next: string[]) => void;
+  disabled?: boolean;
+}) {
+  const { workflowPage: { builder: t } } = useT();
+  const hintId = useId();
+  const registry = useCachedResource(surfaceDataKey("projects", workspaceId), () =>
+    listContextProjects(workspaceId!, true),
+  );
+  const projects = registry.data ?? [];
+  const eligible = projects.filter((project) =>
+    project.status === "active" && project.shared?.status === "active" &&
+    (project.shared.myRole === "owner" || project.shared.myRole === "participant"),
+  );
+  const selected = new Set(value.map((id) => id.toLowerCase()));
+  const remaining = eligible.filter((project) => !selected.has(project.id.toLowerCase()));
+  return (
+    <fieldset className="flex min-w-0 flex-col gap-1.5" aria-describedby={hintId}>
+      <legend className="text-xs font-medium text-muted-foreground">{t.eventTaskProjectsLabel}</legend>
+      <p id={hintId} className="text-[11px] text-muted-foreground/80">{t.eventTaskProjectsHint}</p>
+      {value.length > 0 && (
+        <ul className="flex flex-wrap gap-1">
+          {value.map((id) => {
+            const name = projects.find((project) => project.id.toLowerCase() === id.toLowerCase())?.name ?? id;
+            const label = registry.data && !registry.error && !eligible.some((project) => project.id.toLowerCase() === id.toLowerCase())
+              ? fmt(t.eventTaskProjectUnavailable, { name })
+              : name;
+            return (
+              <li key={id} className="flex max-w-full items-center rounded-lg border border-border bg-muted pl-2 text-xs">
+                <span className="min-w-0 [overflow-wrap:anywhere]">{label}</span>
+                <button
+                  type="button"
+                  aria-label={fmt(t.eventTaskProjectRemove, { name: label })}
+                  className="min-h-7 min-w-7 shrink-0 rounded-lg hover:bg-accent disabled:opacity-50 max-md:min-h-11 max-md:min-w-11 [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11"
+                  onClick={() => onChange(value.filter((projectId) => projectId !== id))}
+                  disabled={disabled}
+                >
+                  ×
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {workspaceId && registry.loading && <Skeleton className="h-11 w-full max-w-md md:h-8" />}
+      {registry.error !== undefined ? (
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          <p role="status">{t.eventTaskProjectsLoadError}</p>
+          <button
+            type="button"
+            className="min-h-7 rounded border border-border px-2 hover:bg-muted disabled:opacity-50 max-md:min-h-11 [@media(pointer:coarse)]:min-h-11"
+            onClick={() => void registry.refresh()}
+            disabled={registry.revalidating}
+          >
+            {t.eventTaskProjectsRetry}
+          </button>
+        </div>
+      ) : remaining.length > 0 && value.length < 64 ? (
+        <Select
+          items={remaining.map((project) => ({ value: project.id, label: project.name }))}
+          value={null}
+          onValueChange={(id) => {
+            if (id && remaining.some((project) => project.id === id)) onChange([...value, id]);
+          }}
+          disabled={disabled}
+        >
+          <SelectTrigger aria-label={t.eventTaskProjectsAdd} className="w-full max-w-md">
+            <SelectValue placeholder={t.eventTaskProjectsAdd} />
+          </SelectTrigger>
+          <SelectContent>
+            {remaining.map((project) => (
+              <SelectItem key={project.id} value={project.id}>{project.name}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      ) : registry.data && eligible.length === 0 ? (
+        <p className="text-xs text-muted-foreground">{t.eventTaskProjectsEmpty}</p>
+      ) : null}
+    </fieldset>
   );
 }
 
