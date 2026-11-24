@@ -37,6 +37,7 @@ import * as release8344 from './installation-authentication-8344.mjs'
 import * as release8345 from './installation-authentication-8345.mjs'
 import * as release8346 from './installation-authentication-8346.mjs'
 import { indexedSearchRelease, searchCohortRelease } from './installation-authentication-8348.mjs'
+import { telegramKnowledgeRelease } from './installation-authentication-8349.mjs'
 import * as release8339 from './installation-authentication-8339.mjs'
 import * as release8338 from './installation-authentication-8338.mjs'
 
@@ -80,6 +81,7 @@ const profiles=new Map([
  ['8346_knowledge_field_proof_batch.sql',release8346],
  [indexedSearchRelease.migration,indexedSearchRelease],
  [searchCohortRelease.migration,searchCohortRelease],
+ [telegramKnowledgeRelease.migration,telegramKnowledgeRelease],
 ])
 export const hasInstallationRelease=head=>profiles.has(head)
 function profileForRelease(head){

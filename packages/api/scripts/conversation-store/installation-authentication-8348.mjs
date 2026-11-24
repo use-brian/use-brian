@@ -8,7 +8,7 @@ import { currentInstallationAuthenticationSource, knowledgeFieldProofClassificat
 
 const sha = value => createHash('sha256').update(value).digest('hex')
 
-function searchRelease(predecessor, migration, migrationSha, functions, catalogSha) {
+export function searchRelease(predecessor, migration, migrationSha, functions, catalogSha) {
   const catalog = { scope: { functions, tables: [], types: [], triggers: [] }, sha256: catalogSha }
   async function source({ sourceRoot = fileURLToPath(new URL('../../', import.meta.url)) } = {}) {
     const [previous, numbered] = await Promise.all([

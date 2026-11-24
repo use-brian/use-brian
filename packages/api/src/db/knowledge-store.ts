@@ -47,6 +47,7 @@ import { currentAgentAccess,runWithAgentAccess } from './agent-access-context.js
 import {currentApplicationReadTransaction} from '../application-platform/execution-context.js'
 import {writeRetainedContextFrame,readRetainedContextFrame,readRetainedQueryFrame} from './session-context-revisions.js'
 import {validateCallerScopeEvidence} from '../context-scope/caller-evidence.js'
+import {noteTelegramKnowledgeUse,readTelegramKnowledgeQueryFloor,telegramKnowledgeGroup} from '../context-scope/telegram-knowledge-audience.js'
 import { readAdmissionPolicy } from '../workspace-access/admission-policy-read.js'
 import { admitKnowledgeWrite, lockKnowledgePrior, admitKnowledgeSourceConfiguration, type KnowledgeSourceBindingInput, type KnowledgeConfigureAuthority } from '../workspace-access/knowledge-create-admission.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
@@ -279,10 +280,12 @@ function requireKnowledgeViewer(ctx: AccessContext, authority?: SessionContextAu
 }
 
 async function pinKnowledgeViewer(client: PoolClient, ctx: AccessContext, authority: SessionContextAuthority) {
-  const {access, ceiling} = authority.execution.security
+  const {execution}=authority
+  const {access, ceiling} = execution.security
   const requested = pinAccessCeiling({...access, ...Object.fromEntries(Object.entries(ctx).filter(([, v]) => v !== undefined))})
   const bounded = intersectAccessCeilings(ceiling, requested)
-  await runWithAgentAccess({...access, ...bounded}, () => applyRLSGucs(client, ctx.userId))
+  const assistant = telegramKnowledgeGroup(execution) ? execution.assistant.id : undefined
+  await runWithAgentAccess({...access, ...bounded}, () => applyRLSGucs(client, ctx.userId, assistant))
   return bounded
 }
 
@@ -579,15 +582,22 @@ function appliesDenylist(ctx: AccessContext): boolean {
 async function searchNativeKnowledge(
   ctx: AccessContext, authority: SessionContextAuthority, query: string, limit: number, sourceId?: string | null,
 ): Promise<KnowledgeSearchResult[] | null> {
-  return readRetainedQueryFrame(authority, [], async client => {
+  const hits = await readRetainedQueryFrame(authority, [], async client => {
     await pinKnowledgeViewer(client, ctx, authority)
+    const floor = await readTelegramKnowledgeQueryFloor(client, authority.execution)
+    const params = [ctx.workspaceId, appliesDenylist(ctx) ? ctx.assistantId : null, query, limit,
+      sourceId !== undefined, sourceId ?? null, ctx.clearance ?? DEFAULT_CLEARANCE, ctx.compartments, ctx.projectIds]
     const result = await client.query<{value: unknown}>(
-      'SELECT read_native_knowledge_search($1,$2,$3,$4,$5,$6,$7,$8,$9) AS value',
-      [ctx.workspaceId, appliesDenylist(ctx) ? ctx.assistantId : null, query, limit,
-        sourceId !== undefined, sourceId ?? null, ctx.clearance ?? DEFAULT_CLEARANCE, ctx.compartments, ctx.projectIds],
+      floor ? 'SELECT read_native_group_knowledge_search($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) AS value'
+        : 'SELECT read_native_knowledge_search($1,$2,$3,$4,$5,$6,$7,$8,$9) AS value',
+      floor ? [...params, JSON.stringify(floor)] : params,
     )
     const raw = result.rows[0]?.value
-    if (raw === null) return {value: null, sources: []}
+    if (raw === null) {
+      // The general reader cannot reproduce a compact domain's exact room floor.
+      if (floor) throw new DerivedScopeError('scope_evidence_missing')
+      return {value: null, sources: []}
+    }
     const captured = nativeSearchResult.parse(raw)
     const sources: ScopeSource[] = [...captured.sources]
     const rows = captured.rows.map(({row, source, sources: fields}) => {
@@ -599,6 +609,8 @@ async function searchNativeKnowledge(
     if (sources.some(source => source.workspaceId !== ctx.workspaceId)) throw new DerivedScopeError('scope_evidence_missing')
     return {value: bindScopeSources(rows, sources), sources}
   })
+  if (hits !== null) noteTelegramKnowledgeUse(authority.execution)
+  return hits
 }
 
 async function queryKnowledgeSearch<T extends KnowledgeSearchResult>(

@@ -1,7 +1,7 @@
 import {withCurrentReadAuthority} from './authority-lease.js'
 import {assertOutputOperationAuthority} from '@use-brian/agent-runtime/engine/query-loop.js'
 import {executionToolContext} from '@use-brian/agent-runtime/security/execution-context.js'
-import {tryNativeInvocationEvidence} from './native-invocation-evidence.js'
+import {hasVerifiedTelegramGroupEvidence,tryNativeInvocationEvidence} from './native-invocation-evidence.js'
 import { nativeSessionQueryContextSources } from '../application-platform/session-query-context.js'
 /** Native attended recipient admission. [COMP:api/application-persistence] [COMP:api/delivery-authority] */
 import {intersectAccessCeilings, type AccessCeiling} from '@use-brian/agent-runtime/security/access-ceiling.js'
@@ -27,13 +27,15 @@ import {deliveryFailureMetadata,type DeliveryVerificationPhase} from './delivery
 import {yieldOptionalEvidence} from './optional-evidence.js'
 import {beginClosureAdmission} from './admission-closure.js'
 import {admitTurnConversationRecords,assertConversationFloor,recordEvidenceParts} from './conversation-record-admission.js'
+import {noteTelegramKnowledgeUse,readTelegramKnowledgeAudienceProof,telegramKnowledgeBindingCurrent,telegramKnowledgeGroup,type TelegramKnowledgeGroup} from './telegram-knowledge-audience.js'
 
 type Prepare=(execution:ExecutionContext,sources:readonly ScopeSource[],action:'context'|'deliver')=>Promise<PreparedExternalSourceAuthority>
 type Options={integrationStore?:ChannelIntegrationStore;prepareSource?:Prepare}
 function denied(phase?:DeliveryVerificationPhase):never{throw new DeliveryAudienceUnverifiedError(undefined,'source_unverifiable',deliveryFailureMetadata(undefined,phase))}
 /** A destination narrows data access, never the original invocation identity. */
 export async function admitAttendedAudienceEvidence(execution:ExecutionContext,rawEvidence:ScopeEvidence,rawRecipient:AccessCeiling,
- options:{prepareSource?:Prepare;directHumanSource?:boolean;pageThreadSessionId?:string;turnDestinationSessionId?:string}={}):Promise<ScopeEvidence>{
+ options:{prepareSource?:Prepare;directHumanSource?:boolean;pageThreadSessionId?:string;turnDestinationSessionId?:string;
+  telegramGroup?:{group:TelegramKnowledgeGroup;input:DeliveryAudienceInput}}={}):Promise<ScopeEvidence>{
  try{
   const evidence=new ContextScopeAccumulator(execution.security.provenance);evidence.note(structuredClone(rawEvidence))
   const recipient=structuredClone(rawRecipient),workspaceId=execution.security.access.workspaceId,actor=execution.security.access.userId
@@ -93,17 +95,26 @@ export async function admitAttendedAudienceEvidence(execution:ExecutionContext,r
    return current
   }
   let nativeFieldProof:ScopeSource[]=[]
+  let telegramKnowledgeFields:ScopeSource[]=[]
+  const telegram=anonymous&&hasVerifiedTelegramGroupEvidence(execution)&&!getApplicationExecutionBinding(execution)
+   ?options.telegramGroup:undefined
   if(anonymous){
    if(hasExternal)denied()
    const ids=[...new Set(sources.filter(source=>source.resourceKind==='application_field').map(source=>source.resourceId))]
    if(ids.length){
     // Metadata is not admission. Fields outside the original session allowlist
     // must independently complete the existing closed native reader below.
-    const rows=(await getPool().query<{id:string;closed:boolean}>(`SELECT id,origin='{"kind":"native","moduleKey":"native"}'::jsonb
-     AND type_key IN('session_message','session_message_annotation') AS closed FROM application_field_resources WHERE workspace_id=$1 AND id=ANY($2::uuid[])`,[workspaceId,ids])).rows
+    const rows=(await getPool().query<{id:string;closed:boolean;knowledge:boolean}>(`SELECT id,origin='{"kind":"native","moduleKey":"native"}'::jsonb
+     AND type_key IN('session_message','session_message_annotation') AS closed,
+     origin='{"kind":"native","moduleKey":"native"}'::jsonb AND type_key='knowledge_entry' AS knowledge
+     FROM application_field_resources WHERE workspace_id=$1 AND id=ANY($2::uuid[])`,[workspaceId,ids])).rows
     if(rows.length!==ids.length)denied()
     const unproved=new Set(rows.filter(row=>!row.closed).map(row=>row.id))
     nativeFieldProof=sources.filter(source=>source.resourceKind==='application_field'&&unproved.has(source.resourceId))
+    if(telegram){
+     const knowledge=new Set(rows.filter(row=>row.knowledge).map(row=>row.id))
+     telegramKnowledgeFields=nativeFieldProof.filter(source=>knowledge.has(source.resourceId))
+    }
    }
   }
   if(hasExternal&&!options.directHumanSource)denied()
@@ -129,9 +140,16 @@ export async function admitAttendedAudienceEvidence(execution:ExecutionContext,r
    const role=(await client.query<{bypass:boolean}>(`SELECT r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE') AS bypass
     FROM pg_roles r JOIN pg_class c ON c.oid='session_messages'::regclass WHERE r.rolname=current_user`)).rows[0]
    if(role?.bypass!==false)denied()
-   await runWithAgentAccess({...execution.security.access,...bounded,sharedAudience:anonymous||execution.security.access.sharedAudience},()=>applyRLSGucs(client,actor))
+   await runWithAgentAccess({...execution.security.access,...bounded,sharedAudience:anonymous||execution.security.access.sharedAudience},()=>
+    applyRLSGucs(client,actor,telegramKnowledgeFields.length?execution.assistant.id:undefined))
    if(machine)await client.query("SELECT set_config('app.v2_assistant_id',$1,true)",[execution.assistant.id])
    await client.query('SELECT id FROM workspaces WHERE id=$1 FOR SHARE',[workspaceId])
+   if(telegram&&telegramKnowledgeFields.length){
+    const roots=[...telegramKnowledgeFields,...sources.filter(source=>source.resourceKind==='knowledge_entry')]
+    if(!await readTelegramKnowledgeAudienceProof(client,telegram.input,telegram.group,roots))denied('anonymous_field_proof')
+    const witnessed=new Set(telegramKnowledgeFields)
+    nativeFieldProof=nativeFieldProof.filter(source=>!witnessed.has(source))
+   }
    if(nativeFieldProof.length){
     // This is the same source/recipient proof used for a standalone native
     // closure, on the original actor's non-owner transaction. Null refuses;
@@ -154,6 +172,10 @@ export async function admitAttendedAudienceEvidence(execution:ExecutionContext,r
   })}finally{releaseApplicationTransactionBinding(client);await rollbackAndRelease(client)}
   if(contextProof)await assertPreparedExternalSourceAuthorityCurrent(execution,contextProof)
   if(prepared)await assertPreparedExternalSourceAuthorityCurrent(execution,prepared)
+  if(telegram&&telegramKnowledgeFields.length){
+   if(!await telegramKnowledgeBindingCurrent(telegram.input,telegram.group,recipient))denied('anonymous_field_proof')
+   noteTelegramKnowledgeUse(execution)
+  }
   assertWiring();return result
   })
  }catch(error){
@@ -167,12 +189,20 @@ export function createAttendedDeliveryAudienceAuthorizer(execution:ExecutionCont
  const envelope=createDeliveryAudienceEnvelopeResolver({integrationStore:dependencies.integrationStore})
  return async input=>{
   const pinned=structuredClone(input),actor=execution.security.access.userId
+  const group=telegramKnowledgeGroup(execution)
+  const telegramGroup=group&&pinned.channelType==='telegram'&&pinned.recipientType==='group'&&!pinned.groupSpeaker
+   &&pinned.channelId===execution.lifecycle.channelId&&(pinned.sessionChannelId??pinned.channelId)===group.address
+   &&pinned.channelIntegrationId===group.integrationId&&execution.lifecycle.sessionId===group.sessionId
+   &&(!pinned.sessionId||pinned.sessionId===group.sessionId)&&pinned.userId===actor
+   &&pinned.assistantId===execution.assistant.id&&pinned.workspaceId===execution.security.access.workspaceId
+   ?{group,input:pinned}:undefined
 
   const capture=admitAttendedAudienceEvidence
   const resolve=async():Promise<DeliveryAudienceDecision>=>{
    const fallback=()=>createDeliveryAudienceAuthorizer({integrationStore:dependencies.integrationStore,
     validateEvidence:(evidence,recipient)=>capture(execution,evidence,recipient,{
      ...(dependencies.prepareSource?{prepareSource:dependencies.prepareSource}:{}),
+     ...(telegramGroup?{telegramGroup}:{}),
      directHumanSource:isWebTransport(pinned.channelType)||pinned.recipientType==='individual',
      pageThreadSessionId:pinned.sessionId,
      ...(pinned.channelType==='web'&&pinned.channelId===execution.lifecycle.channelId&&pinned.userId===actor

@@ -133,6 +133,11 @@ export function bindVerifiedTelegramEvidence(execution: ExecutionContext): void 
  if (execution.lifecycle.channelType === 'telegram') bindVerifiedProviderEvidence(execution)
 }
 
+export function hasVerifiedTelegramGroupEvidence(execution: ExecutionContext): boolean {
+ return execution.lifecycle.channelType === 'telegram' && execution.security.access.sharedAudience === true
+  && verifiedProviderEvidence.get(execution) === execution.security.authority
+}
+
 /** Native threaded provider rooms have an exact record and credential lease. */
 export function bindVerifiedThreadRoomEvidence(execution: ExecutionContext): void {
  if (execution.lifecycle.channelType === 'slack' || execution.lifecycle.channelType === 'feishu') bindVerifiedProviderEvidence(execution)

@@ -264,6 +264,9 @@ describe.skipIf(phase!=='target').sequential('[COMP:api/portable-restore] authen
      ['acl',`GRANT EXECUTE ON FUNCTION public.harness_execution_human(uuid,uuid) TO app_user`,'portable_successor_catalog_changed'],
      ['trigger',`ALTER TABLE public.project_harness_runs DISABLE TRIGGER harness_run_audit`,'portable_successor_catalog_changed'],
      ['unknown-prefix',`CREATE FUNCTION public.harness_execution_unreviewed() RETURNS int LANGUAGE sql AS 'SELECT 1'`,'portable_successor_unknown_catalog_object'],
+     ...(head>='8349_verified_telegram_knowledge_delivery.sql'?[
+      ['telegram-knowledge-recipient-proof',`GRANT EXECUTE ON FUNCTION public.capture_verified_telegram_knowledge_evidence(uuid,uuid,uuid,uuid,text,uuid,text,bigint,bigint,uuid,text,text,jsonb) TO PUBLIC`,'installation_additional_catalog_changed'],
+     ]:[]),
      ...(head>='8348_knowledge_search_cohort_proof.sql'?[
       ['knowledge-search-cohort-receipt',`DELETE FROM public._migrations WHERE name='8348_knowledge_search_cohort_proof.sql'`,'portable_successor_migration_tail_missing'],
      ]:[]),

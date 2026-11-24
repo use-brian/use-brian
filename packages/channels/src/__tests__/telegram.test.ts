@@ -1098,6 +1098,57 @@ describe('[COMP:channels/telegram] api 429 retry', () => {
     }
   })
 
+  it.each([
+    { method: 'sendMessage', revoked: true },
+    { method: 'sendMessage', revoked: false },
+    { method: 'sendDocument', revoked: true },
+    { method: 'sendDocument', revoked: false },
+  ])('rechecks guarded $method after retry_after with revocation $revoked', async ({ method, revoked }) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const mock = vi.fn<(_: string, init?: RequestInit) => Promise<Response>>()
+      .mockResolvedValueOnce(Response.json(make429(1), { status: 429 }))
+      .mockResolvedValueOnce(Response.json({ ok: true, result: { message_id: 42 } }))
+    vi.stubGlobal('fetch', mock)
+    const refused = new Error('Fictional topic permission revoked')
+    let current = true
+    const assertCurrent = vi.fn(async () => { if (!current) throw refused })
+    const report = 'Fictional protected report'
+    try {
+      const adapter = createTelegramAdapter({ token: 'test-token' })
+      const response = method === 'sendDocument'
+        ? { text: '', documents: [{ filename: 'report.txt', mime: 'text/plain', data: new TextEncoder().encode(report) }] }
+        : { text: report }
+      const delivery = adapter.sendMessage('-1001234567890:topic:9999', { ...response, telegramDispatch: { assertCurrent } })
+        .then(value => ({ value }), error => ({ error }))
+
+      await vi.advanceTimersByTimeAsync(999)
+      expect(mock).toHaveBeenCalledTimes(1)
+      current = !revoked
+      await vi.advanceTimersByTimeAsync(1)
+      expect(await delivery).toEqual(revoked ? { error: refused } : { value: '42' })
+      expect(assertCurrent).toHaveBeenCalledTimes(2)
+      expect(mock).toHaveBeenCalledTimes(revoked ? 1 : 2)
+
+      for (const [url, request] of mock.mock.calls) {
+        expect(url).toMatch(new RegExp(`/${method}$`))
+        if (method === 'sendDocument') {
+          expect(request?.body).toBeInstanceOf(FormData)
+          const body = request!.body as FormData
+          expect(body.get('chat_id')).toBe('-1001234567890')
+          expect(body.get('message_thread_id')).toBe('9999')
+          await expect((body.get('document') as File).text()).resolves.toBe(report)
+        } else {
+          expect(JSON.parse(String(request?.body))).toMatchObject({
+            chat_id: '-1001234567890', message_thread_id: 9999, text: report,
+          })
+        }
+      }
+    } finally {
+      vi.unstubAllGlobals()
+      vi.useRealTimers()
+    }
+  })
+
   it('throws after exhausting retries on sustained 429', async () => {
     let calls = 0
     const mock = vi.fn(async () => {
@@ -1730,6 +1781,42 @@ describe('[COMP:channels/telegram] forum-topic outbound threading', () => {
     try {
       const adapter = createTelegramAdapter({ token: 'test-token', strictTopic: true })
       await expect(adapter.sendMessage('-1001234567890:topic:9999', { text: 'Which?' })).rejects.toThrow('message thread not found')
+      expect(mock).toHaveBeenCalledTimes(1)
+    } finally { vi.unstubAllGlobals() }
+  })
+
+  it.each([true, false])('keeps a guarded Markdown reply in its exact topic when the topic disappears (live check: %s)', async liveCheck => {
+    const mock = vi.fn(async (_url: string, _init?: RequestInit) => Response.json({
+      ok: false, error_code: 400, description: 'Bad Request: message thread not found',
+    }, { status: 400 }))
+    const assertCurrent = vi.fn(async () => {})
+    const telegramDispatch = liveCheck ? { assertCurrent } : {}
+    vi.stubGlobal('fetch', mock)
+    try {
+      const adapter = createTelegramAdapter({ token: 'test-token' })
+      await expect(adapter.sendMessage('-1001234567890:topic:9999', {
+        text: '**Fictional reply**', format: 'markdown', telegramDispatch,
+      })).rejects.toThrow('message thread not found')
+      expect(assertCurrent).toHaveBeenCalledTimes(liveCheck ? 1 : 0)
+      expect(mock).toHaveBeenCalledTimes(1)
+      const body = JSON.parse(String(mock.mock.calls[0][1]?.body))
+      expect(body).toMatchObject({ chat_id: '-1001234567890', message_thread_id: 9999, parse_mode: 'HTML' })
+    } finally { vi.unstubAllGlobals() }
+  })
+
+  it('rechecks current authority before retrying a guarded Markdown reply as plain text', async () => {
+    const mock = vi.fn(async () => Response.json({
+      ok: false, error_code: 400, description: "Bad Request: can't parse entities",
+    }, { status: 400 }))
+    const refused = new Error('Fictional delivery authority changed')
+    const assertCurrent = vi.fn<() => Promise<void>>().mockResolvedValueOnce(undefined).mockRejectedValueOnce(refused)
+    vi.stubGlobal('fetch', mock)
+    try {
+      const adapter = createTelegramAdapter({ token: 'test-token' })
+      await expect(adapter.sendMessage('-1001234567890:topic:9999', {
+        text: '**Fictional reply**', format: 'markdown', telegramDispatch: { assertCurrent },
+      })).rejects.toBe(refused)
+      expect(assertCurrent).toHaveBeenCalledTimes(2)
       expect(mock).toHaveBeenCalledTimes(1)
     } finally { vi.unstubAllGlobals() }
   })

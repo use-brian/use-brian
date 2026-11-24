@@ -58,9 +58,13 @@ const mailReply = 'Your recent mail includes ' + mailSubject + '.'
 const lookupQuestion = 'Look up the posted North Star Observatory ticket price and calculate the total for three people.'
 const lookupPage = 'General admission is 12.50 credits per person.'
 const guestReply = 'I can answer without using the lookup tools.'
-const knowledgeQuestion = 'Search workspace knowledge for the current observatory handbook.'
+const knowledgeQuestion = 'Use our earlier calibration conversation to identify the handbook, then look it up in workspace knowledge.'
+const standaloneKnowledgeQuestion = 'Search the workspace knowledge base for the current observatory handbook.'
+const knowledgeGuestReply = 'I can reply without accessing workspace knowledge.'
 const knowledgeTitle = 'Fictional observatory handbook'
 const heldKnowledgeTitle = 'Fictional restricted handbook'
+const projectKnowledgeTitle = 'Fictional project-only handbook'
+const knowledgeProviderFailure = 'Fictional confidential supplier response usage limit marker'
 const knowledgeHitReply = 'The current handbook is available.'
 const knowledgeMissReply = 'No knowledge entries match that query.'
 const rows = Number(process.env.BRIAN_TELEGRAM_HISTORY_ROWS ?? 300)
@@ -177,7 +181,18 @@ async function seedChannelKnowledge(recording: Awaited<ReturnType<typeof seedCon
       repeat('Synthetic observatory reference material. ',100)||CASE n WHEN 916 THEN 'amberneedle' WHEN 917 THEN 'amberneedle violetneedle' ELSE '' END,
       'public',$2,n=917 FROM generate_series(1,917) n WHERE n>=916 OR $5 ON CONFLICT DO NOTHING`,
   [workspaceId, ownerId, knowledgeTitle, heldKnowledgeTitle, fullCohort])
+  const { rows: [cohort] } = await pool.query<{ count: number }>('SELECT count(*)::int AS count FROM knowledge_entries WHERE workspace_id=$1', [workspaceId])
+  expect(cohort.count).toBe(fullCohort ? 917 : 2)
   return { knowledgeStore: createDbKnowledgeStore(), connectorStore: createDbConnectorStore(recording.key), mcpSettingsStore: createDbMcpSettingsStore() }
+}
+
+async function scopeKnowledgeEntryToProject(recording: Awaited<ReturnType<typeof seedConversation>>) {
+  const { pool, workspaceId, ownerId } = recording
+  const { rows: [project] } = await pool.query<{ id: string }>(`INSERT INTO workspace_projects(workspace_id,name,normalized_name,created_by)
+    VALUES($1,'Fictional handbook project','fictional handbook project',$2) RETURNING id`, [workspaceId, ownerId])
+  const update = await pool.query(`UPDATE knowledge_entries SET title=$2,content='amberneedle violetneedle',project_ids=ARRAY[$3]::uuid[]
+    WHERE workspace_id=$1 AND path='fictional-handbook/915'`, [workspaceId, projectKnowledgeTitle, project.id])
+  expect(update.rowCount).toBe(1)
 }
 
 type ModelRequest = {
@@ -198,6 +213,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
   let mailbox: Awaited<ReturnType<typeof seedCoveredMailbox>> | undefined
   let knowledge: Awaited<ReturnType<typeof seedChannelKnowledge>> | undefined
   let knowledgeScaleSeeded = false
+  let knowledgeProjectSeeded = false
   const mailboxMs: number[] = []
   beforeAll(async () => {
     expect(Number.isSafeInteger(rows) && rows > 0).toBe(true)
@@ -227,11 +243,6 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       phase: 'mail-dispatch', incomingId: 4003 },
     { title: 'withholds a mail-derived reply if the connection is revoked before delivery',
       phase: 'mail-release', incomingId: 4002 },
-    { title: 'compact Knowledge preserves the legacy Telegram group reply hold', phase: 'knowledge-group-control', incomingId: 4300 },
-    { title: 'compact Knowledge group hit obeys the Telegram audience hold', phase: 'knowledge-hit', incomingId: 4301 },
-    { title: 'compact Knowledge group miss obeys the Telegram audience hold', phase: 'knowledge-miss', incomingId: 4302 },
-    { title: 'compact Knowledge obeys a live Telegram group binding move after search', phase: 'knowledge-group-revoked', incomingId: 4303 },
-    { title: 'compact Knowledge delivers a hit to the linked member in a verified Telegram DM', phase: 'knowledge-dm', incomingId: 4304 },
     ...Array.from({ length: lookupSamples }, (_, sample) => ({
       title: 'executes a public lookup and sends its answer across three tool rounds without retained history, sample ' + (sample + 1),
       phase: 'lookup' as const, incomingId: 5001 + sample,
@@ -245,18 +256,40 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
     { title: 'loses workspace membership before the public tool can run or reply', phase: 'member', incomingId: 2004 },
     { title: 'withholds the answer after the audience binding moves to another group', phase: 'audience', incomingId: 2005 },
     { title: 'denies an unlinked sender on an owner-only bot', phase: 'unlinked', incomingId: 2006 },
+    { title: 'direct Knowledge hit reaches the approved Telegram topic without history', phase: 'knowledge-initial-hit', incomingId: 4310 },
+    { title: 'direct Knowledge miss reaches the approved Telegram topic without history', phase: 'knowledge-initial-miss', incomingId: 4311 },
+    { title: 'direct Knowledge is absent for an allowlisted Telegram guest', phase: 'knowledge-initial-guest', incomingId: 4312 },
+    { title: 'compact Knowledge preserves the legacy Telegram group reply hold', phase: 'knowledge-group-control', incomingId: 4300 },
+    { title: 'compact Knowledge delivers a hit to the linked member in a verified Telegram DM', phase: 'knowledge-dm', incomingId: 4304 },
+    { title: 'compact Knowledge group hit reaches the approved Telegram topic', phase: 'knowledge-hit', incomingId: 4301 },
+    { title: 'compact Knowledge group miss reaches the approved Telegram topic', phase: 'knowledge-miss', incomingId: 4302 },
+    { title: 'compact Knowledge obeys a live Telegram group binding move after search', phase: 'knowledge-group-revoked', incomingId: 4303 },
+    { title: 'compact Knowledge refuses an unbound Telegram group before search', phase: 'knowledge-unbound', incomingId: 4305 },
+    { title: 'compact Knowledge withholds untrusted provider error text from the approved group', phase: 'knowledge-provider-error', incomingId: 4308 },
+    { title: 'compact Knowledge refuses a Telegram parent-chat retry when the approved topic disappears', phase: 'knowledge-topic-missing', incomingId: 4307 },
+    { title: 'compact Knowledge withholds a Telegram group reply if the hit is held after admission', phase: 'knowledge-source-held', incomingId: 4306 },
   ] as const)('$title', async ({ phase, incomingId }) => {
     const { pool, workspaceId, sessionId, channelId, integrationId, config, ownerId, secondId, assistantId,
       linkedAccountStore, integrationStore, stats } = recording
     const isMail = phase === 'mailbox' || phase === 'mail-revoked' || phase === 'mail-release' || phase === 'mail-dispatch'
     const isLookup = phase === 'lookup' || phase === 'lookup-guest'
+    const standaloneLookup = phase === 'knowledge-initial-hit' || phase === 'knowledge-initial-miss'
+    const standaloneGuest = phase === 'knowledge-initial-guest'
     const isKnowledge = phase === 'knowledge-hit' || phase === 'knowledge-miss' || phase === 'knowledge-dm'
-      || phase === 'knowledge-group-revoked' || phase === 'knowledge-group-control'
+      || phase === 'knowledge-group-revoked' || phase === 'knowledge-group-control' || phase === 'knowledge-unbound'
+      || phase === 'knowledge-source-held' || phase === 'knowledge-topic-missing' || phase === 'knowledge-provider-error'
+      || standaloneLookup || standaloneGuest
+    const knowledgeModelResultRound = standaloneLookup ? 1 : 3
     const knowledgeDirect = phase === 'knowledge-dm'
     const knowledgeRevoked = phase === 'knowledge-group-revoked'
     const knowledgeControl = phase === 'knowledge-group-control'
-    const knowledgeQuery = phase === 'knowledge-miss' ? 'violetneedle' : 'amberneedle'
-    const knowledgeExpected = phase === 'knowledge-miss' ? 'No knowledge entries found for this query.' : knowledgeTitle
+    const knowledgeUnbound = phase === 'knowledge-unbound'
+    const holdKnowledgeSource = phase === 'knowledge-source-held'
+    const knowledgeTopicMissing = phase === 'knowledge-topic-missing'
+    const untrustedKnowledgeError = phase === 'knowledge-provider-error'
+    const knowledgeMiss = phase === 'knowledge-miss' || phase === 'knowledge-initial-miss'
+    const knowledgeQuery = knowledgeMiss ? 'violetneedle' : 'amberneedle'
+    const knowledgeExpected = knowledgeMiss ? 'No knowledge entries found for this query.' : knowledgeTitle
     // Unique target per sample so URL cache hits cannot stand in for tool execution.
     const lookupUrl = 'https://observatory.example.invalid/admission?receipt=' + incomingId
     const lookupReply = 'Three tickets cost 37.50 credits. ' + lookupUrl
@@ -266,7 +299,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       { name: 'calculate', id: 'fixture-calculator', args: { expression: '12.50 * 3' } },
     ]
     const lookupEvidence = [lookupUrl, lookupPage, '"result":"37.5"']
-    const analytics = phase === 'lookup' ? new AnalyticsLogger(createDbAnalyticsStore()) : undefined
+    const analytics = phase === 'lookup' || isKnowledge ? new AnalyticsLogger(createDbAnalyticsStore()) : undefined
     const lookupTools = isLookup || phase === 'member'
       ? new Map([createWebSearchTool(), createUrlReaderTool(), calculateTool].map(tool => [tool.name, tool]))
       : new Map()
@@ -274,31 +307,37 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       mailbox ??= await seedCoveredMailbox(recording)
       await mailbox.refresh()
     }
-    if (isKnowledge && (!knowledge || !knowledgeControl && !knowledgeScaleSeeded)) {
+    if (isKnowledge && (!knowledge || !knowledgeScaleSeeded && !knowledgeControl)) {
       knowledge = await seedChannelKnowledge(recording, !knowledgeControl)
       knowledgeScaleSeeded ||= !knowledgeControl
     }
+    if (isKnowledge && !knowledgeControl && !knowledgeDirect && !knowledgeUnbound && !knowledgeProjectSeeded) {
+      await scopeKnowledgeEntryToProject(recording)
+      knowledgeProjectSeeded = true
+    }
     const knowledgeFieldIds: string[] = []
+    let knowledgeStoreStartedAt: number | undefined
+    let knowledgeStoreCompletedAt: number | undefined
     const knowledgeStores = isKnowledge && knowledge ? { ...knowledge, knowledgeStore: {
       ...knowledge.knowledgeStore,
       searchForTool: async (...args: Parameters<KnowledgeStore['searchForTool']>) => {
         const reader = knowledgeControl ? knowledge!.knowledgeStore.search : knowledge!.knowledgeStore.searchForTool
+        knowledgeStoreStartedAt = performance.now()
         const results = await reader(...args)
+        knowledgeStoreCompletedAt = performance.now()
         knowledgeFieldIds.push(...boundScopeSources(results).filter(source => source.resourceKind === 'application_field').map(source => source.resourceId))
-        if (knowledgeRevoked) await changeConfig({ ...config,
-          deliveryAudienceBindings: config.deliveryAudienceBindings.map(binding => ({ ...binding, channelId: String(chat - 1) })),
-        })
         return results
       },
     } } : undefined
     const unavailableReply = 'I could not access that mailbox.'
     const expectedReply = phase === 'mail-revoked' ? unavailableReply : isMail ? mailReply
-      : isKnowledge ? phase === 'knowledge-miss' ? knowledgeMissReply : knowledgeHitReply
+      : standaloneGuest ? knowledgeGuestReply : isKnowledge ? knowledgeMiss ? knowledgeMissReply : knowledgeHitReply
       : phase === 'lookup' ? lookupReply : phase === 'lookup-guest' ? guestReply : reply
     const hold = phase === 'headers' || phase === 'response' || phase === 'member' || phase === 'audience'
-    const telegramSender = phase === 'member' ? otherMember : phase === 'unlinked' || phase === 'lookup-guest' ? unlinkedSender : sender
+    const telegramSender = phase === 'member' ? otherMember : phase === 'unlinked' || phase === 'lookup-guest' || standaloneGuest ? unlinkedSender : sender
     const choice = 'Use our earlier calibration decision'
-    const authored = phase === 'choice' ? '1' : isMail ? mailQuestion : isLookup ? lookupQuestion : isKnowledge ? knowledgeQuestion : question
+    const authored = phase === 'choice' ? '1' : isMail ? mailQuestion : isLookup ? lookupQuestion
+      : standaloneLookup || standaloneGuest ? standaloneKnowledgeQuestion : isKnowledge ? knowledgeQuestion : question
     const pendingQuestion = {
       integrationId: channelId, assistantId, userId: ownerId, incoming: {
         userId: String(sender), channelId: conversationId, text: 'Select the next step', isGroupChat: true, timestamp: Date.now(), raw: {},
@@ -310,6 +349,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
     let revokedAtDispatch = false
     let memberRevoked = false
     let configChanged = false
+    let heldKnowledgeId: string | undefined
     async function changeConfig(next: typeof config & { userAccessMode?: 'allowlist', allowedUserIds?: string[] }) {
       const changed = await pool.query('UPDATE channel_integrations SET config=$2 WHERE id=$1', [integrationId, next])
       expect(changed.rowCount).toBe(1)
@@ -404,6 +444,19 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
               args: { server: 'knowledge', tool: 'searchKnowledge', args: { query: knowledgeQuery } } }, thoughtSignature: 'fixture-knowledge-query-signature' }]
           } else {
             const admitted = response('fixture-knowledge-query')?.includes(knowledgeExpected) === true
+            if (untrustedKnowledgeError && admitted) {
+              res.status(400).json({ error: { message: knowledgeProviderFailure } })
+              return
+            }
+            if (knowledgeRevoked && admitted) await changeConfig({ ...config,
+              deliveryAudienceBindings: config.deliveryAudienceBindings.map(binding => ({ ...binding, channelId: String(chat - 1) })),
+            })
+            if (holdKnowledgeSource && admitted) {
+              const held = await pool.query<{ id: string }>(`UPDATE knowledge_entries SET scope_held=true
+                WHERE workspace_id=$1 AND path='fictional-handbook/916' AND NOT scope_held RETURNING id`, [workspaceId])
+              expect(held.rowCount).toBe(1)
+              heldKnowledgeId = held.rows[0].id
+            }
             parts = [{ text: admitted ? expectedReply : 'Knowledge evidence unavailable.' }]
           }
         } else if (phase === 'lookup') {
@@ -465,6 +518,10 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       channelUserStore: createDbChannelUserStore(), apiUrl: origin, ...(isMail ? mailbox?.stores : {}), ...knowledgeStores,
     }))
     const delivered: string[] = []
+    const knowledgeReplyTargets: { chatId: string; topicId?: number }[] = []
+    const protectedReplyAttempts: { chatId: string; topicId?: number }[] = []
+    const vanishedTopicAttempts: { chatId: string; topicId?: number }[] = []
+    const knowledgeSendTargets: string[] = []
     let messageId = incomingId * 10
     let replyReceiptId: string | undefined
     const network = globalThis.fetch
@@ -486,9 +543,21 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       if (url.origin !== 'https://api.telegram.org' || !url.pathname.startsWith('/bot' + token + '/')) throw new Error('Unexpected benchmark network destination')
       if (url.pathname.endsWith('/sendMessage')) {
         const body = JSON.parse(String(init?.body))
+        const target = { chatId: String(body.chat_id), topicId: body.message_thread_id }
+        if (knowledgeTopicMissing && body.text === expectedReply) {
+          protectedReplyAttempts.push(target)
+        }
+        if (knowledgeTopicMissing && protectedReplyAttempts.length) {
+          vanishedTopicAttempts.push(target)
+          if (target.topicId === topic) return Response.json({
+            ok: false, error_code: 400, description: 'Bad Request: message thread not found',
+          }, { status: 400 })
+        }
         delivered.push(body.text)
+        if (isKnowledge) knowledgeSendTargets.push(String(body.chat_id))
         messageId++
         if (body.text === expectedReply) {
+          if (isKnowledge) knowledgeReplyTargets.push(target)
           replyReceiptId = String(messageId)
           deliveredMs = performance.now() - ingress
         }
@@ -503,6 +572,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
     try {
       if (phase === 'unlinked') await changeConfig({ ...config, userAccessMode: 'allowlist' })
       if (phase === 'lookup-guest') await changeConfig({ ...config, userAccessMode: 'allowlist', allowedUserIds: [String(unlinkedSender)] })
+      if (knowledgeUnbound) await changeConfig({ ...config, deliveryAudienceBindings: [] })
       const result = await network(origin + '/webhook/telegram/' + channelId, {
         method: 'POST', headers: {
           'content-type': 'application/json',
@@ -519,6 +589,14 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       })
       expect(result.status).toBe(200)
       await vi.waitFor(() => expect(linkRead).toHaveBeenCalledWith('telegram', String(telegramSender)))
+      if (knowledgeUnbound) {
+        await vi.waitFor(() => expect(delivered.join('\n')).toMatch(/can't show the result in this chat|group is not approved for workspace replies/i),
+          { timeout: 15_000 })
+        expect(modelCalls).toHaveLength(0)
+        expect(knowledgeFieldIds).toHaveLength(0)
+        expect(knowledgeReplyTargets).toEqual([])
+        return
+      }
       if (phase === 'unlinked') {
         const link = await linkRead.mock.results[0].value
         expect(link).toBeNull()
@@ -579,24 +657,46 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       }
       function expectKnowledgeModelResult() {
         expect(JSON.stringify(modelCalls)).not.toContain(heldKnowledgeTitle)
+        if (!knowledgeDirect) expect(JSON.stringify(modelCalls)).not.toContain(projectKnowledgeTitle)
         const admittedResult = modelCalls[3].body.contents?.at(-1)?.parts.find(part => part.functionResponse?.id === 'fixture-knowledge-query')
         expect(admittedResult?.functionResponse?.response.result).toContain(knowledgeExpected)
-        console.info('[Telegram Knowledge model admission]', { phase, toolAndAdmissionMs: Math.round(modelCalls[3].elapsedMs - modelCalls[2].elapsedMs) })
+        expect(knowledgeStoreStartedAt).toBeDefined()
+        expect(knowledgeStoreCompletedAt).toBeDefined()
+        console.info('[Telegram Knowledge model admission]', {
+          phase,
+          storeMs: Math.round(knowledgeStoreCompletedAt! - knowledgeStoreStartedAt!),
+          storeStartToModelAdmissionMs: Math.round(ingress + modelCalls[3].elapsedMs - knowledgeStoreStartedAt!),
+          toolAndAdmissionMs: Math.round(modelCalls[3].elapsedMs - modelCalls[2].elapsedMs),
+        })
       }
-      if (isKnowledge && !knowledgeDirect) {
+      if (knowledgeControl || knowledgeRevoked || holdKnowledgeSource || knowledgeTopicMissing || untrustedKnowledgeError) {
         await vi.waitFor(async () => {
           if (knowledgeRevoked) expect(configChanged).toBe(true)
+          if (holdKnowledgeSource) expect(heldKnowledgeId).toBeDefined()
+          if (knowledgeTopicMissing) expect(protectedReplyAttempts.length).toBeGreaterThan(0)
           const session = await pool.query('SELECT status,turn_lease_token FROM sessions WHERE id=$1', [sessionId])
           expect(session.rows[0]).toEqual({ status: 'failed', turn_lease_token: null })
-        }, { interval: 100, timeout: 15_000 })
+        }, { interval: 100, timeout: 180_000 })
         await expectKnowledgeQueryProof()
-        expect([3, 4]).toContain(modelCalls.length)
+        if (!knowledgeControl) expect(modelCalls).toHaveLength(4)
+        else expect([3, 4]).toContain(modelCalls.length)
         if (modelCalls.length === 4) expectKnowledgeModelResult()
         expect(delivered).not.toContain(expectedReply)
         expect(replyReceiptId).toBeUndefined()
+        expect(knowledgeReplyTargets).toEqual([])
+        if (knowledgeRevoked) expect(knowledgeSendTargets).not.toContain(String(chat - 1))
+        if (knowledgeTopicMissing) {
+          expect(protectedReplyAttempts).toEqual([{ chatId: String(chat), topicId: topic }])
+          expect(vanishedTopicAttempts.every(target => target.chatId === String(chat) && target.topicId === topic)).toBe(true)
+        }
+        if (untrustedKnowledgeError) {
+          expect(delivered.length).toBeGreaterThan(0)
+          expect(delivered.join('\n')).not.toContain(knowledgeProviderFailure)
+        }
         return
       }
       let receivingSessionId = sessionId
+      let receivingFailed = false
       await vi.waitFor(async () => {
         if (knowledgeDirect) {
           const { rows: [direct] } = await pool.query<{ id: string }>(`SELECT id FROM sessions
@@ -607,11 +707,23 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
         }
         const row = (await pool.query(`SELECT s.status, (SELECT count(*)::int FROM session_messages m WHERE m.session_id=s.id AND m.sequence_num>$2) added
            FROM sessions s WHERE s.id=$1`, [receivingSessionId, knowledgeDirect ? 0 : rows])).rows[0]
+        if (isKnowledge && row.status === 'failed') {
+          receivingFailed = true
+          return
+        }
         expect(delivered.length).toBeGreaterThan(0)
         if (row.status === 'failed') throw new Error('Telegram turn failed after ' + modelCalls.length + ' main model requests')
         expect(row.status).toBe('idle')
         expect(row.added).toBeGreaterThanOrEqual(2)
-      }, { interval: 250, timeout: isKnowledge ? 15_000 : 180_000 })
+      }, { interval: 250, timeout: 180_000 })
+      if (receivingFailed) {
+        const latest = modelCalls.at(-1)?.body.contents?.at(-1)?.parts.find(part => part.functionResponse?.id === 'fixture-knowledge-query')
+        await analytics?.flush()
+        const { rows: [latestError] } = await pool.query(`SELECT metadata FROM analytics_events
+          WHERE session_id=$1 AND event_name='chat_route_error' ORDER BY created_at DESC LIMIT 1`, [receivingSessionId])
+        throw new Error(`Telegram Knowledge turn failed after ${modelCalls.length} model requests. ${latest?.functionResponse?.response.result ?? ''}
+          ${JSON.stringify(latestError?.metadata ?? {})}`)
+      }
       expect(modelCalls, isKnowledge ? JSON.stringify({ tools: modelCalls[1]?.body.tools,
         response: modelCalls[2]?.body.contents?.at(-1)?.parts }) : undefined)
         .toHaveLength(phase === 'lookup' ? lookupSteps.length + 1 : isKnowledge ? 4 : 2)
@@ -634,6 +746,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       if (isKnowledge) {
         await expectKnowledgeQueryProof()
         expectKnowledgeModelResult()
+        expect(knowledgeReplyTargets).toEqual([knowledgeDirect ? { chatId: String(telegramSender) } : { chatId: String(chat), topicId: topic }])
         return
       }
       if (phase === 'lookup') {
@@ -701,6 +814,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       stub.mockRestore()
       await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
       if (heldInputId) await pool.query('UPDATE session_messages SET scope_held=false WHERE session_id=$1 AND id=$2', [sessionId, heldInputId])
+      if (heldKnowledgeId) await pool.query('UPDATE knowledge_entries SET scope_held=false WHERE workspace_id=$1 AND id=$2', [workspaceId, heldKnowledgeId])
       if (memberRevoked) await pool.query(
         "INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'member','confidential')",
         [workspaceId, secondId])
