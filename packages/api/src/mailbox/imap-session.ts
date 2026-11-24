@@ -15,6 +15,7 @@
  * [COMP:api/mailbox-imap-client]
  */
 
+import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { ImplementationUnavailableError } from '@use-brian/agent-runtime/tools/lazy-implementation.js'
 import type { ImapFlow as ImapFlowClient } from 'imapflow'
@@ -28,6 +29,8 @@ export type ImapClientLike = {
   list(): Promise<Array<{ path: string; specialUse?: string; flags?: Set<string> }>>
   getMailboxLock(path: string): Promise<{ release(): void }>
   search(query: unknown, opts: { uid: true }): Promise<number[] | false>
+  /** Native ESEARCH count only. Undefined means the provider has no ESEARCH. */
+  countSearch?(query: { since?: Date; before?: Date }): Promise<number | false | undefined>
   fetch(
     range: string,
     query: Record<string, unknown>,
@@ -273,7 +276,7 @@ export function imapFlowClass(): typeof ImapFlowClient {
 
 export function createImapClient(settings: MailboxAccountSettings): ImapClientLike {
   const ImapFlow = imapFlowClass()
-  const client = new ImapFlow({
+  const imap = new ImapFlow({
     host: settings.imapHost,
     port: settings.imapPort,
     secure: true,
@@ -281,7 +284,13 @@ export function createImapClient(settings: MailboxAccountSettings): ImapClientLi
     logger: false,
     greetingTimeout: MAILBOX_GREETING_TIMEOUT_MS,
     socketTimeout: MAILBOX_SOCKET_TIMEOUT_MS,
-  }) as unknown as ImapClientLike
+  })
+  const client = imap as unknown as ImapClientLike
+  client.countSearch = async (query) => {
+    if (!imap.capabilities.has('ESEARCH')) return undefined
+    const result = await imap.search(query, { uid: true, returnOptions: ['COUNT'] })
+    return result && !Array.isArray(result) && typeof result.count === 'number' ? result.count : false
+  }
   attachSessionErrorSink(client, settings.email)
   return client
 }
@@ -343,7 +352,13 @@ export function createMailboxSessionCache(opts?: {
   }
 
   return {
-    async withClient(key, settings, fn) {
+    async withClient(instanceKey, settings, fn) {
+      // A reconnect may retain the instance ID while changing host or login.
+      // A new generation must never run against an older authenticated socket.
+      const login = createHash('sha256').update(JSON.stringify([
+        settings.imapHost, settings.imapPort, settings.email, settings.appPassword,
+      ])).digest('hex')
+      const key = `${instanceKey}:${login}`
       let entry = sessions.get(key)
       if (entry && Date.now() - entry.createdAt > maxLifetimeMs && entry.inFlight === 0) {
         await closeEntry(key, entry)

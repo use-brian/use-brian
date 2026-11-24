@@ -19,10 +19,12 @@ import type { ChannelCredentials } from './channel-integrations.js'
 import {
   normalizeStoredCredentials,
   credsTypeOf,
+  editableConnectorConfigSql,
   type OAuthCredentials,
   type ConnectorCredentials,
 } from './connector-store.js'
 import type { ConnectorAuthType } from '@use-brian/shared'
+import { sealMailboxArchiveProof } from '../mailbox/search-coverage.js'
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -266,12 +268,17 @@ export type ConnectorInstanceStore = {
    * Persist one mailbox-sync cursor only if its backfill request is still the
    * one the worker started with. A user may re-arm `all` while an older worker
    * pass is in flight; that older pass must not overwrite the newer request.
+   * Sync workers also pin their starting success and archive-reset generation.
    */
   setMailboxSyncStateSystem(
     id: string,
     mailboxSync: unknown,
     expectedRequestedAt: string | null,
+    expectedSync?: { lastSyncAt: string | null; archiveResetToken: string | null },
   ): Promise<boolean>
+
+  mailboxArchiveProofSystem?(id: string, purpose: 'account' | 'coverage', value: unknown): string | null
+  mailboxArchiveClockSystem?(): Promise<string>
 
   /**
    * Re-encrypt and persist the credentials envelope with no acting user.
@@ -404,7 +411,7 @@ export function createConnectorInstanceStore(encryptionKey: Buffer | null): Conn
         `INSERT INTO connector_instance
            (scope, user_id, workspace_id, provider, label, connected_email, url,
             custom, credentials, credentials_type, config, sensitivity, connected, created_by)
-         VALUES ('user', $1, NULL, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         VALUES ('user', $1, NULL, $2, $3, $4, $5, $6, $7, $8, ${editableConnectorConfigSql('$9', '$2')}, $10, $11, $12)
          RETURNING ${PUBLIC_COLS}`,
         [
           params.userId,
@@ -435,7 +442,7 @@ export function createConnectorInstanceStore(encryptionKey: Buffer | null): Conn
            (scope, user_id, workspace_id, provider, label, connected_email, url,
             custom, credentials, credentials_type, config, sensitivity, connected,
             created_by, compartments, project_ids)
-         VALUES ('workspace', NULL, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+         VALUES ('workspace', NULL, $1, $2, $3, $4, $5, $6, $7, $8, ${editableConnectorConfigSql('$9', '$2')}, $10, $11, $12, $13, $14)
          RETURNING ${PUBLIC_COLS}`,
         [
           params.workspaceId,
@@ -472,7 +479,7 @@ export function createConnectorInstanceStore(encryptionKey: Buffer | null): Conn
       if (updates.compartments !== undefined) { sets.push(`compartments = $${idx}`); values.push(updates.compartments); idx++ }
       if (updates.projectIds !== undefined) { sets.push(`project_ids = $${idx}`); values.push(updates.projectIds); idx++ }
       if (updates.configPatch !== undefined) {
-        sets.push(`config = COALESCE(config, '{}') || $${idx}::jsonb`)
+        sets.push(`config = COALESCE(config, '{}') || (${editableConnectorConfigSql(`$${idx}`)})`)
         values.push(JSON.stringify(updates.configPatch)); idx++
       }
       if(updates.compartments!==undefined||updates.projectIds!==undefined)sets.push("context_binding_origin = 'explicit'")
@@ -550,7 +557,7 @@ export function createConnectorInstanceStore(encryptionKey: Buffer | null): Conn
       await queryWithRLS(
         actingUserId,
         `UPDATE connector_instance
-         SET config = COALESCE(config, '{}') || $2::jsonb
+         SET config = COALESCE(config, '{}') || (${editableConnectorConfigSql('$2')})
          WHERE id = $1`,
         [id, JSON.stringify(config)],
       )
@@ -700,6 +707,20 @@ export function createConnectorInstanceStore(encryptionKey: Buffer | null): Conn
     },
 
     async setConfigSystem(id, config) {
+      // Explicit backfill requests replace checkpoints. Preserve the latest
+      // archive generation even if the request read an older cursor while
+      // probing IMAP, and require a fresh search receipt after re-arming.
+      if (Object.hasOwn(config, 'mailboxSync')) {
+        await query(
+          `UPDATE connector_instance
+              SET config = COALESCE(config, '{}') || jsonb_set($2::jsonb, '{mailboxSync}',
+                ($2::jsonb->'mailboxSync' - 'archiveResetToken' - 'archiveAccount' - 'searchCoverage' - 'searchCoverageSeal' - 'searchCoverageCheckedAt')
+                || jsonb_strip_nulls(jsonb_build_object('archiveResetToken', config #> '{mailboxSync,archiveResetToken}',
+                                                        'archiveAccount', config #> '{mailboxSync,archiveAccount}')))
+            WHERE id = $1`, [id, JSON.stringify(config)],
+        )
+        return
+      }
       await query(
         `UPDATE connector_instance
          SET config = COALESCE(config, '{}') || $2::jsonb
@@ -708,14 +729,34 @@ export function createConnectorInstanceStore(encryptionKey: Buffer | null): Conn
       )
     },
 
-    async setMailboxSyncStateSystem(id, mailboxSync, expectedRequestedAt) {
+    mailboxArchiveProofSystem(id, purpose, value) {
+      return encryptionKey && sealMailboxArchiveProof(encryptionKey, id, purpose, value)
+    },
+
+    async mailboxArchiveClockSystem() {
+      const result = await query<{ now: string }>(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS now`)
+      return result.rows[0].now
+    },
+
+    async setMailboxSyncStateSystem(id, mailboxSync, expectedRequestedAt, expectedSync) {
+      if (!expectedSync) {
+        const result = await query(
+          `UPDATE connector_instance
+              SET config = COALESCE(config, '{}') || jsonb_build_object('mailboxSync', $2::jsonb)
+            WHERE id = $1 AND (config #>> '{mailboxSync,backfill,requestedAt}') IS NOT DISTINCT FROM $3::text`,
+          [id, JSON.stringify(mailboxSync), expectedRequestedAt],
+        )
+        return (result.rowCount ?? 0) > 0
+      }
       const result = await query(
         `UPDATE connector_instance
          SET config = COALESCE(config, '{}') || jsonb_build_object('mailboxSync', $2::jsonb)
          WHERE id = $1
            AND (config #>> '{mailboxSync,backfill,requestedAt}')
-               IS NOT DISTINCT FROM $3::text`,
-        [id, JSON.stringify(mailboxSync), expectedRequestedAt],
+               IS NOT DISTINCT FROM $3::text
+           AND (config #>> '{mailboxSync,lastSyncAt}') IS NOT DISTINCT FROM $4::text
+           AND (config #>> '{mailboxSync,archiveResetToken}') IS NOT DISTINCT FROM $5::text`,
+        [id, JSON.stringify(mailboxSync), expectedRequestedAt, expectedSync.lastSyncAt, expectedSync.archiveResetToken],
       )
       return (result.rowCount ?? 0) > 0
     },

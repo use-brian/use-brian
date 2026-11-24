@@ -1,4 +1,6 @@
 import { admitCurrentAuthoredInput, readAttendedSessionHistory } from './attended-session-context.js'
+import type { RouteCapabilityParams, TurnCapabilityRequest } from '../turn/capabilities.js'
+import { assertInitialMailboxEvidenceCurrent } from '../turn/mailbox-read-authority.js'
 import { readsNativePdf, type DiscoveredTurnFrame } from '../turn/prepare.js'
 import { routeAttendedTurn, type AttendedTurnRoute } from './attended-turn-routing.js'
 import {bindPrivateResponderTranscript,privateTranscriptText,resumePrivateLegacySession,PRIVATE_TRANSCRIPT_INSTRUCTION} from '../db/private-transcript.js'
@@ -4814,6 +4816,68 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         resolveAppSoul: assistant.appType === 'distribution' && (!activeCapabilities.has('feed') || !activeCapabilities.has('home_app:feed:read') || !activeCapabilities.has('home_app:feed:write')) ? undefined : options.resolveAppSoul,
       }), { followupChips: requestedFollowupChips, assistantKind: assistant.kind ?? 'standard' })
 
+      const resolveConnectorUserId = () => getConnectorUserId(user.id, assistant.workspaceId)
+      const createConnectorCapabilityRequest = (
+        connectorUserId: string,
+        tools: Map<string, Tool>,
+        overrides: Pick<RouteCapabilityParams, 'connectorActionAudit' | 'routineCalendarRead'> = {},
+      ): TurnCapabilityRequest => ({
+        profile: 'web', composition: { kind: 'route-params', params: {
+          scope: 'chat',
+          ...(programmatic ? { bindingMaximum: programmatic.consent.connectorBindings,
+            restrictSearchToToolNames: programmatic.consent.operationNames, keepToolsDirect: true } : {}),
+          connectorUserId,
+          assistant,
+          userTimezone: user.timezone,
+          tools,
+          stores: {
+            ...options,
+            // Promote a just-attached photo on demand, so an image can reach a
+            // Shopify product without the model first calling saveFileToBrain.
+            readCachedFile: options.fileStore
+              ? (id, ctx) => options.fileStore!.get(id, ctx)
+              : undefined,
+          },
+          engineHooks: options.engineHooks,
+          // In-app actor identity: email is how the signed-in user is known on
+          // the web/app surface. Channel turns (WA/TG/Slack) set their native id
+          // in channel-pipeline. Resolved server-side from the session — never
+          // model output. Opted-in connectors receive X-Sidanclaw-Actor-*.
+          actorIdentity: { channel: session.channelType ?? 'web', id: user.email, email: user.email, userId: user.id },
+          // Forwarded to the Google provider's Gmail `sendMessage` audit wrap.
+          // Shared with the host extra-tool inject above.
+          connectorActionAudit: overrides.connectorActionAudit,
+          // Workspace domain is null today — workspaces don't carry an
+          // email_domain column. The GCal audit hook falls back to
+          // treating attendees-with-domain as external (audience=public).
+          // Future migration adds the column.
+          workspaceDomain: null,
+          // Interactive chat has a live Approve/Deny loop, so the KB write
+          // tools may exist here (D2 — chat-only). The public API shares the
+          // route parameter block and must NOT set this.
+          allowKnowledgeWrites: true,
+          knowledgeCaptureText: message ?? '',
+          discoveryQuery: rawMessage ?? undefined,
+          exposeLocalReadTools: true,
+          contextScope: turnScope,
+          executionContext,
+          scopeAccumulator,
+          // On-demand introspection lane (ability audit §6-c/d): workspace
+          // PRIMARY assistants only — these read workspace-operational state
+          // (approvals / scheduled jobs / research runs / session history).
+          // They enter the mcp_search index, never the direct tool surface.
+          introspectionTools:
+            assistant.kind === 'primary' && assistant.workspaceId
+              ? options.introspectionTools
+              : undefined,
+          // T1: the late-activated Calendar read adapters are requested only when
+          // routine planning can be eligible on this turn (the necessary
+          // conditions of `routineCalendarReadDeclineReason` known now); the
+          // routine port activates exactly the planned read after planning.
+          routineCalendarRead: overrides.routineCalendarRead,
+        } },
+      })
+
       const discoverWebContext = async (signal: AbortSignal) => {
         const { backgroundLlmRuntime, backgroundProvider, backgroundModel, backgroundUsageAttribution } = await getBackground()
         let operateSiteIntent = !researchMode && !!message && detectOperateSiteIntent(message)
@@ -4864,7 +4928,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
                 episodesStore: options.episodesStore,
               })
             : undefined
-        const connectorUserId = await getConnectorUserId(user.id, assistant.workspaceId)
+        const connectorUserId = await resolveConnectorUserId()
         const preparedConnectorTools = new Map(filterToolsByCapabilities(options.tools, activeCapabilities))
         // Routine Calendar planning needs the native owner-delivery boundary; the
         // same predicate gates preparation below and the routine decline reason.
@@ -4873,62 +4937,13 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           && classifySession(session).surface === 'chat')
         // The roster is prepared by the original turn owner through the M3
         // capability surface (`web` profile, catalog-only until a call).
-        const preparedConnectors = await turnTiming.time('connector_prepare', () => ownedTurn.prepareCapabilities({
-          profile: 'web', composition: { kind: 'route-params', params: {
-          scope: 'chat',
-          ...(programmatic ? { bindingMaximum: programmatic.consent.connectorBindings,
-            restrictSearchToToolNames: programmatic.consent.operationNames, keepToolsDirect: true } : {}),
-          connectorUserId,
-          assistant,
-          userTimezone: user.timezone,
-          tools: preparedConnectorTools,
-          stores: {
-            ...options,
-            // Promote a just-attached photo on demand, so an image can reach a
-            // Shopify product without the model first calling saveFileToBrain.
-            readCachedFile: options.fileStore
-              ? (id, ctx) => options.fileStore!.get(id, ctx)
-              : undefined,
-          },
-          engineHooks: options.engineHooks,
-          // In-app actor identity: email is how the signed-in user is known on
-          // the web/app surface. Channel turns (WA/TG/Slack) set their native id
-          // in channel-pipeline. Resolved server-side from the session — never
-          // model output. Opted-in connectors receive X-Sidanclaw-Actor-*.
-          actorIdentity: { channel: session.channelType ?? 'web', id: user.email, email: user.email, userId: user.id },
-          // Forwarded to the Google provider's Gmail `sendMessage` audit wrap.
-          // Shared with the host extra-tool inject above.
-          connectorActionAudit,
-          // Workspace domain is null today — workspaces don't carry an
-          // email_domain column. The GCal audit hook falls back to
-          // treating attendees-with-domain as external (audience=public).
-          // Future migration adds the column.
-          workspaceDomain: null,
-          // Interactive chat has a live Approve/Deny loop, so the KB write
-          // tools may exist here (D2 — chat-only). The public API shares the
-          // route parameter block and must NOT set this.
-          allowKnowledgeWrites: true,
-          knowledgeCaptureText: message ?? '',
-          discoveryQuery: rawMessage ?? undefined,
-          exposeLocalReadTools: true,
-          contextScope: turnScope,
-          executionContext,
-          scopeAccumulator,
-          // On-demand introspection lane (ability audit §6-c/d): workspace
-          // PRIMARY assistants only — these read workspace-operational state
-          // (approvals / scheduled jobs / research runs / session history).
-          // They enter the mcp_search index, never the direct tool surface.
-          introspectionTools:
-            assistant.kind === 'primary' && assistant.workspaceId
-              ? options.introspectionTools
-              : undefined,
-          // T1: the late-activated Calendar read adapters are requested only when
-          // routine planning can be eligible on this turn (the necessary
-          // conditions of `routineCalendarReadDeclineReason` known now); the
-          // routine port activates exactly the planned read after planning.
-          routineCalendarRead: Boolean(options.decisionRuntime) && routineNativeOutput && Boolean(nativeTranscriptAuthority)
-            && !researchMode && !operateSiteIntent,
-        } } }))
+        const preparedConnectors = await turnTiming.time('connector_prepare', () => ownedTurn.prepareCapabilities(
+          createConnectorCapabilityRequest(connectorUserId, preparedConnectorTools, {
+            connectorActionAudit,
+            routineCalendarRead: Boolean(options.decisionRuntime) && routineNativeOutput && Boolean(nativeTranscriptAuthority)
+              && !researchMode && !operateSiteIntent,
+          }),
+        ))
 
         // One turn route accounts for the research, topic and split decisions.
         const recordRoutingUsage = (record: import('@use-brian/core/workers/turn-routing.js').TurnRoutingUsageRecord, userMessageId: string) => recordOverheadUsage({
@@ -7326,6 +7341,9 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           messages: [initialMessage],
           candidateTools: new Map(),
           trustedContributions: initialContributions,
+          initialMailboxCapabilities: !programmatic && options.connectorStore && options.mcpSettingsStore
+            ? async () => createConnectorCapabilityRequest(await resolveConnectorUserId(), new Map())
+            : undefined,
           contextDiscovery: async signal => {
             discovered = await discoverWebContext(signal)
             return discovered.run
@@ -8515,6 +8533,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             })
             let synthesised: string | null = null
             try {
+              await assertInitialMailboxEvidenceCurrent(executionContext)
               const result = await authority.execute(() => composeEmptyTurnSynthesis({
                 provider: backgroundProvider,
                 pendingAssistantTurns,
@@ -8538,10 +8557,12 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
                 })
               }
             } catch (synthErr) {
+              if (isAuthorityChangedError(synthErr) || isDeliveryAudienceUnverifiedError(synthErr)) throw synthErr
               console.warn('[chat] empty-turn synthesis raised:', synthErr)
             }
             if (synthesised) {
               await assertDeliveryAudience()
+              await assertInitialMailboxEvidenceCurrent(executionContext)
               sendEvent('text_delta', { text: synthesised })
               await ownedTurn.publish({ disposition: 'closing', write: publicationWrite(),
                 native: nativeTranscriptAuthority, execute: operation => authority.execute(operation), rows: [{
@@ -8614,6 +8635,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
               }) : null
           if (recovered) {
             await assertDeliveryAudience()
+            await assertInitialMailboxEvidenceCurrent(executionContext)
             sendEvent('text_delta', { text: recovered.text })
             // Persist as a real assistant message so the recovery is
             // part of the conversation history on next page load —

@@ -42,6 +42,7 @@ type EmailArchiveRow = EmailArchiveHit & { distance?: number | string | null }
 export type SearchEmailArchiveInput = {
   ownerUserId: string
   instanceId: string
+  archivedAfter?: string
   query: string
   topK?: number
   from?: string
@@ -78,6 +79,10 @@ export async function searchEmailArchive(
       `es.instance_id = $${instIdx}`,
       'es.retracted_at IS NULL',
     ]
+    if (input.archivedAfter) {
+      values.push(input.archivedAfter)
+      clauses.push(`m.created_at >= $${values.length}::timestamptz`)
+    }
     if (input.from?.trim()) {
       values.push(`%${input.from.trim()}%`)
       clauses.push(`m.from_addr ILIKE $${values.length}`)

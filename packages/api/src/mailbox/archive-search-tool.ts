@@ -86,6 +86,8 @@ export type ArchiveAccountRef = {
   email: string
   /** True for the primary (first-connected) mailbox — the default. */
   isPrimary: boolean
+  /** Current host/account archive boundary; shared with the literal search. */
+  archiveCutoff?: () => Promise<string | undefined>
 }
 
 export type CreateArchiveSearchToolOptions = {
@@ -145,6 +147,7 @@ export function createSearchEmailArchiveTool(opts: CreateArchiveSearchToolOption
           boundAccountEmail: target.email,
           explicitFrom: input.from,
         })
+        const archivedAfter = await target.archiveCutoff?.()
         const { hits, coverage } = await search(
           {
             ownerUserId: opts.ownerUserId,
@@ -154,6 +157,7 @@ export function createSearchEmailArchiveTool(opts: CreateArchiveSearchToolOption
             from: input.from ?? inferredFrom,
             since: input.since,
             before: input.before,
+            ...(archivedAfter ? { archivedAfter } : {}),
           },
           opts.deps.embedder ? { embedder: opts.deps.embedder } : undefined,
         )

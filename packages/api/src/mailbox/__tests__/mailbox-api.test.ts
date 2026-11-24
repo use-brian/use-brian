@@ -153,6 +153,7 @@ function makeApi(
     sendAsAliases?: string[]
     knownFolderPaths?: string[]
     searchArchivedMessages?: ReturnType<typeof vi.fn>
+    searchCoveredArchivedMessages?: ReturnType<typeof vi.fn>
   } = {},
 ) {
   const sessions = createMailboxSessionCache({ createClient: () => client })
@@ -165,10 +166,39 @@ function makeApi(
     ...(over.sendAsAliases ? { getSendAsAliases: async () => over.sendAsAliases! } : {}),
     ...(over.knownFolderPaths ? { getKnownFolderPaths: async () => over.knownFolderPaths! } : {}),
     ...(over.searchArchivedMessages ? { searchArchivedMessages: over.searchArchivedMessages } : {}),
+    ...(over.searchCoveredArchivedMessages ? { searchCoveredArchivedMessages: over.searchCoveredArchivedMessages } : {}),
   })
 }
 
 const BASE_PARAMS = { since: '2026-01-01', limit: 20 }
+
+describe('[COMP:api/mailbox-imap-client] recent synced snapshot', () => {
+  it('labels a verified empty snapshot without opening IMAP', async () => {
+    const { client, searches } = makeFakeClient({ INBOX: { uids: [1], messages: { 1: msg(1) } } })
+    const covered = vi.fn(async () => ({ hits: [], verifiedAt: '2026-01-02T00:10:00.000Z' }))
+    const api = makeApi(client, { searchCoveredArchivedMessages: covered })
+    expect(await api.searchMessages(BASE_PARAMS)).toEqual({ hits: [], note: expect.stringContaining('2026-01-02T00:10:00.000Z') })
+    expect(searches).toHaveLength(0)
+  })
+
+  it('uses live search for missing evidence, archive errors, or explicit freshness', async () => {
+    const { client, searches } = makeFakeClient({ INBOX: { uids: [1], messages: { 1: msg(1) } } })
+    const covered = vi.fn().mockResolvedValueOnce(null).mockRejectedValueOnce(new Error('archive unavailable'))
+    const api = makeApi(client, { searchCoveredArchivedMessages: covered })
+    for (const params of [BASE_PARAMS, BASE_PARAMS, { ...BASE_PARAMS, live: true }]) {
+      expect((await api.searchMessages(params)).hits).toMatchObject([{ id: 'INBOX:1' }])
+    }
+    expect(covered).toHaveBeenCalledTimes(2)
+    expect(searches).toHaveLength(3)
+  })
+
+  it('does not present a failed IMAP command as zero matching mail', async () => {
+    const { client } = makeFakeClient({ INBOX: { uids: [], messages: {} } })
+    client.search = async () => false
+    const api = makeApi(client)
+    await expect(api.searchMessages(BASE_PARAMS)).rejects.toThrow('did not complete the search')
+  })
+})
 
 describe('[COMP:api/mailbox-imap-client] searchMessages folder scope', () => {
   it('searches INBOX, Sent, and regular custom folders by default (D12 #3)', async () => {

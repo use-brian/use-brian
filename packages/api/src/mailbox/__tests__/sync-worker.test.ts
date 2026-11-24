@@ -21,6 +21,7 @@ import { createMailboxSessionCache, type ImapClientLike, type ImapFetchedMessage
 import type { ConnectorInstance, ConnectorInstanceStore } from '../../db/connector-instance-store.js'
 import type { IngestRuleRow, IngestRulesStore } from '../../db/ingest-rules-store.js'
 import type { EmailArchiveMessageInput } from '../../db/email-archive-store.js'
+import { captureMailboxSearchCoverage, mailboxSearchAccountKey, sealMailboxArchiveProof } from '../search-coverage.js'
 
 // ── Fixtures ────────────────────────────────────────────────────
 
@@ -33,6 +34,8 @@ const IMAP_CREDS = {
   smtpHost: 'smtp.qiye.aliyun.com',
   smtpPort: 465,
 }
+const MAILBOX_PROOF_KEY = Buffer.alloc(32, 7)
+const ARCHIVE_CUTOFF = '2026-08-06T05:00:00.000Z'
 
 function rfc822(uid: number, over: { from?: string; subject?: string; listUnsubscribe?: boolean } = {}): Buffer {
   const lines = [
@@ -201,6 +204,10 @@ function instanceRow(over: Partial<ConnectorInstance> = {}): ConnectorInstance {
 function makeWorker(over: Partial<MailboxSyncWorkerDeps> & { client: ImapClientLike; instance?: ConnectorInstance }) {
   const instance = over.instance ?? instanceRow()
   const { store, configs, healthCalls } = makeInstanceStore(instance)
+  if (over.captureSearchCoverage) {
+    store.mailboxArchiveProofSystem = (id, purpose, value) => sealMailboxArchiveProof(MAILBOX_PROOF_KEY, id, purpose, value)
+    store.mailboxArchiveClockSystem = async () => ARCHIVE_CUTOFF
+  }
   const insertMessage = vi.fn(async (_input: EmailArchiveMessageInput) => ({ inserted: true, messageId: 'am-1', segmentCount: 1 }))
   const deleteFolder = vi.fn(async (_instanceId: string, _folder: string) => 0)
   const findArchivedUids = vi.fn(async (_instanceId: string, _folder: string, _uids: number[]) => new Set<number>())
@@ -216,6 +223,9 @@ function makeWorker(over: Partial<MailboxSyncWorkerDeps> & { client: ImapClientL
     deleteFolder: deleteFolder as never,
     findArchivedUids: (over.findArchivedUids ?? findArchivedUids) as never,
     countArchive: (over.countArchive ?? countArchive) as never,
+    captureSearchCoverage: over.captureSearchCoverage ?? (async () => undefined),
+    listArchiveFolderPaths: over.listArchiveFolderPaths ?? (async () => []),
+    now: over.now,
     ...('brain' in over ? { brain: over.brain } : {}),
     backfillChunk: over.backfillChunk,
     backfillReconcileWindow: over.backfillReconcileWindow,
@@ -227,6 +237,89 @@ function makeWorker(over: Partial<MailboxSyncWorkerDeps> & { client: ImapClientL
 }
 
 // ── First sync + backfill preflight gate (D9) ───────────────────
+
+describe('[COMP:api/mailbox-sync-worker] recent arrival-day coverage', () => {
+  it('captures exact provider day sets without enumerating a large older archive', async () => {
+    const client = makeFakeImap({ INBOX: { uidvalidity: '7', uids: [20_003], sources: {} } })
+    client.status = async (path) => ({ path, messages: 20_003, uidNext: 20_004, uidValidity: 7n })
+    client.countSearch = vi.fn(async () => 20_000)
+    const recentSearch = vi.fn(async (query: { since?: Date }) => {
+      const since = query.since?.toISOString().slice(0, 10)
+      if (since === '2026-08-05') return [20_001]
+      if (since === '2026-08-06') return [20_002, 20_003]
+      return []
+    })
+    client.search = (query) => recentSearch(query as { since?: Date })
+    const { worker, configs, insertMessage } = makeWorker({
+      client, captureSearchCoverage: captureMailboxSearchCoverage, now: () => new Date('2026-08-06T06:00:00Z'),
+    })
+    await worker.tick()
+    expect(client.countSearch).toHaveBeenCalledWith({ before: new Date('2026-08-05T00:00:00Z') })
+    expect(recentSearch).toHaveBeenCalledTimes(3)
+    expect(insertMessage).not.toHaveBeenCalled()
+    expect(readMailboxSyncState(configs.get('inst-1')).searchCoverage).toMatchObject({
+      completeRoster: true,
+      folders: { INBOX: { uidValidity: '7', days: { '2026-08-05': [20_001], '2026-08-06': [20_002, 20_003] } } },
+    })
+  })
+
+  it('withholds coverage when the provider date partitions omit messages', async () => {
+    const client = makeFakeImap({ INBOX: { uidvalidity: '7', uids: [1, 2, 3], sources: {} } })
+    client.search = async () => []
+    const { worker, configs } = makeWorker({ client, captureSearchCoverage: captureMailboxSearchCoverage })
+    await worker.tick()
+    expect(readMailboxSyncState(configs.get('inst-1')).searchCoverage).toBeUndefined()
+  })
+
+  it('withholds coverage when the ordinary folder roster changes during capture', async () => {
+    const client = makeFakeImap({ INBOX: { uidvalidity: '7', uids: [], sources: {} } })
+    client.list = vi.fn().mockResolvedValueOnce([{ path: 'INBOX' }]).mockResolvedValueOnce([{ path: 'INBOX' }, { path: 'New' }])
+    const { worker, configs } = makeWorker({ client, captureSearchCoverage: captureMailboxSearchCoverage })
+    await worker.tick()
+    expect(readMailboxSyncState(configs.get('inst-1')).searchCoverage).toBeUndefined()
+  })
+
+  it('withholds whole-mailbox coverage after a move changes an already observed folder', async () => {
+    const client = makeFakeImap({ INBOX: { uidvalidity: '7', uids: [], sources: {} }, Archive: { uidvalidity: '7', uids: [], sources: {} } })
+    let statusReads = 0
+    client.status = async (path) => {
+      statusReads++
+      return { path, messages: path === 'INBOX' && statusReads > 6 ? 1 : 0,
+        uidNext: path === 'INBOX' && statusReads > 6 ? 2 : 1, uidValidity: 7n }
+    }
+    const { worker, configs } = makeWorker({ client, captureSearchCoverage: captureMailboxSearchCoverage })
+    await worker.tick()
+    expect(readMailboxSyncState(configs.get('inst-1')).searchCoverage).toMatchObject({
+      completeRoster: false, folders: { Archive: { uidValidity: '7' } },
+    })
+    expect(readMailboxSyncState(configs.get('inst-1')).searchCoverage?.folders.INBOX).toBeUndefined()
+  })
+
+  it('rotates the archive generation on an IMAP host change even if folder UIDs match', async () => {
+    const previousToken = '5279251a-791c-4a75-9b9f-66889bc17d82'
+    const previous = {
+      accountKey: mailboxSearchAccountKey({ ...IMAP_CREDS, imapHost: 'former.example.invalid' }),
+      archivedAfter: '2026-01-01T00:00:00.000Z', replaced: false,
+    }
+    const { worker, configs, insertMessage } = makeWorker({
+      client: makeFakeImap({ INBOX: { uidvalidity: '7', uids: [1], sources: { 1: rfc822(1) } } }),
+      captureSearchCoverage: captureMailboxSearchCoverage,
+      instance: instanceRow({ config: { mailboxSync: {
+        folders: { INBOX: { lastUid: 77, uidvalidity: '7', backfillDone: true } },
+        archiveResetToken: previousToken,
+        archiveAccount: { ...previous, seal: sealMailboxArchiveProof(MAILBOX_PROOF_KEY, 'inst-1', 'account', previous) },
+        backfill: { scope: 'all', requestedAt: '2026-01-01T00:00:00.000Z', status: 'done' },
+      } } }),
+    })
+    await worker.tick()
+    const state = readMailboxSyncState(configs.get('inst-1'))
+    expect(state.archiveResetToken).not.toBe(previousToken)
+    expect(state.archiveAccount).toMatchObject({ accountKey: mailboxSearchAccountKey(IMAP_CREDS), archivedAfter: ARCHIVE_CUTOFF, replaced: true })
+    expect(state.folders.INBOX).toMatchObject({ uidvalidity: '7', lastUid: 1 })
+    expect(state.backfill).toBeUndefined()
+    expect(insertMessage).not.toHaveBeenCalled()
+  })
+})
 
 describe('[COMP:api/mailbox-sync-worker] first sync + preflight gate', () => {
   it('the first sync only establishes cursors — NO history is fetched before a confirmed backfill (D9/D6)', async () => {
@@ -1166,7 +1259,7 @@ describe('[COMP:api/mailbox-sync-worker] UIDVALIDITY change', () => {
     await worker.tick()
 
     expect(deleteFolder).toHaveBeenCalledTimes(1)
-    expect(deleteFolder).toHaveBeenCalledWith('inst-1', 'INBOX')
+    expect(deleteFolder).toHaveBeenCalledWith('inst-1', 'INBOX', expect.objectContaining({ previous: null, next: expect.any(String) }))
     const state = readMailboxSyncState(configs.get('inst-1'))
     expect(state.folders.INBOX).toMatchObject({ uidvalidity: '8', lastUid: 2 })
     expect(state.folders.Sent).toMatchObject({ uidvalidity: '3', lastUid: 9 })

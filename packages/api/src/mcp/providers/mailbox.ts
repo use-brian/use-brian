@@ -20,7 +20,8 @@ import { createMailboxContactImportTools, getGlobalMailboxContactImportDeps } fr
 import { createSyncMailboxNowTool, getGlobalMailboxSyncDeps } from '../../mailbox/sync-tool.js'
 import type { MailboxAccountSettings } from '../../mailbox/types.js'
 import { enqueueFileIngestJob } from '../../db/file-ingest-jobs-store.js'
-import { countEmailArchiveMessages, searchLiteralEmailArchiveMessages } from '../../db/email-archive-store.js'
+import { countEmailArchiveMessages, searchCoveredEmailArchiveMessages, searchLiteralEmailArchiveMessages } from '../../db/email-archive-store.js'
+import { mailboxSearchAccountKey, readVerifiedMailboxArchiveAccount } from '../../mailbox/search-coverage.js'
 import type { AssistantConnectorStore } from '../../db/assistant-connector-store.js'
 import type { ConnectorActionAudit, ConnectorActionPreflight } from '../../connector-action-port.js'
 import { gateToolsOnActionGrants } from '../../safety/assert-action-allowed.js'
@@ -227,7 +228,7 @@ async function collectMailboxTools(params: {
     // authoritative email (the model-visible binding label; the instance label
     // can be renamed, so it is NOT the identity). A creds-missing instance is
     // skipped rather than surfaced as a dead tool.
-    const bound: Array<{ instanceId: string; email: string; api: MailboxApi }> = []
+    const bound: Array<{ instanceId: string; email: string; api: MailboxApi; archiveCutoff(): Promise<string | undefined> }> = []
     for (const row of rows) {
       const instanceId = row.id ?? instanceIdOverride ?? null
       if (!instanceId) continue
@@ -256,10 +257,27 @@ async function collectMailboxTools(params: {
           return []
         }
       }
-      const getKnownFolderPaths = async (): Promise<string[]> => {
+      const readArchiveAccount = (config: Record<string, unknown> | undefined) => {
+        const sync = config?.mailboxSync as { archiveAccount?: unknown } | undefined
+        return readVerifiedMailboxArchiveAccount(sync?.archiveAccount,
+          (value) => store.mailboxArchiveProofSystem?.(boundId, 'account', value))
+      }
+      const archiveCutoff = async (): Promise<string | undefined> => {
+        const [current, settings] = await Promise.all([store.getSystem(boundId), getSettings()])
+        const account = readArchiveAccount(current?.config)
+        if (account && account.accountKey !== mailboxSearchAccountKey(settings)) {
+          throw new Error('Mailbox archive has not synchronized with the currently connected account')
+        }
+        return account?.replaced ? account.archivedAfter : undefined
+      }
+      const getKnownFolderPaths = async (settings: MailboxAccountSettings): Promise<string[]> => {
         const paths = new Set<string>()
+        let archivedAfter: string | undefined
         try {
           const current = await store.getSystem(boundId)
+          const account = readArchiveAccount(current?.config)
+          if (account && account.accountKey !== mailboxSearchAccountKey(settings)) return []
+          archivedAfter = account?.replaced ? account.archivedAfter : undefined
           const sync = current?.config?.mailboxSync as { folders?: unknown } | undefined
           const folders = sync?.folders
           if (folders && typeof folders === 'object' && !Array.isArray(folders)) {
@@ -269,7 +287,7 @@ async function collectMailboxTools(params: {
           // Live LIST remains available even if config lookup is degraded.
         }
         try {
-          const archived = await countEmailArchiveMessages(boundId)
+          const archived = await countEmailArchiveMessages(boundId, archivedAfter)
           for (const path of Object.keys(archived.byFolder)) paths.add(path)
         } catch {
           // The archive is a recovery hint, not a dependency of live IMAP.
@@ -282,13 +300,32 @@ async function collectMailboxTools(params: {
         getSettings,
         getSendAsAliases,
         getKnownFolderPaths,
-        searchArchivedMessages: (params) => searchLiteralEmailArchiveMessages({
-          ownerUserId: userId,
-          instanceId: boundId,
-          params,
-        }),
+        searchCoveredArchivedMessages: async (params, settings) => {
+          const current = await store.getSystem(boundId)
+          const sync = current?.config?.mailboxSync as { searchCoverage?: unknown; searchCoverageSeal?: unknown } | undefined
+          const seal = sync?.searchCoverageSeal
+          if (typeof seal !== 'string' || !sync?.searchCoverage
+            || store.mailboxArchiveProofSystem?.(boundId, 'coverage', sync.searchCoverage) !== seal) return null
+          return searchCoveredEmailArchiveMessages({
+            ownerUserId: userId,
+            instanceId: boundId,
+            accountKey: mailboxSearchAccountKey(settings),
+            rawCoverage: sync?.searchCoverage,
+            seal,
+            params,
+          })
+        },
+        searchArchivedMessages: async (params) => {
+          const archivedAfter = await archiveCutoff()
+          return searchLiteralEmailArchiveMessages({
+            ownerUserId: userId,
+            instanceId: boundId,
+            params,
+            ...(archivedAfter ? { archivedAfter } : {}),
+          })
+        },
       })
-      bound.push({ instanceId: boundId, email, api: withHealth(withAudit(rawApi, email), boundId) })
+      bound.push({ instanceId: boundId, email, api: withHealth(withAudit(rawApi, email), boundId), archiveCutoff })
     }
     if (bound.length === 0) {
       unavailable?.push(notConnectedNotice('Company email (IMAP)', "searching, reading, and sending from the user's own corporate mailbox"))
@@ -309,6 +346,7 @@ async function collectMailboxTools(params: {
         instanceId: mailbox.instanceId,
         email: mailbox.email,
         isPrimary: true,
+        archiveCutoff: mailbox.archiveCutoff,
       }
       const router: MailboxAccountRouter = {
         list: () => [{ email: mailbox.email, isPrimary: true }],

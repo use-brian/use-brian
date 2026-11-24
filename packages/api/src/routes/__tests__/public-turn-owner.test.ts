@@ -335,9 +335,10 @@ describe('[COMP:api/public-turn] complete public operation ownership',()=>{
 describe('[COMP:api/public-turn] stale-takeover notice through the real public routers',()=>{
   // The port is optional on both routers: an unforwarded bus typechecks and the
   // reclaimed predecessor's followers never learn its outcome (turn-kernel.md).
-  it.each(['public-api','chat-link'] as const)('the %s router hands its injected bus to the public turn',async surface=>{
+  it.each(['public-api','chat-link'] as const)('the %s router forwards the bus and keeps staff mailbox tools out of the guest provider frame',async surface=>{
     const events:Array<{kind:string;sessionId:string;payload:unknown}>=[]
     const publishSessionEvent=(event:{kind:string;sessionId:string;payload:unknown})=>{events.push(structuredClone(event))}
+    const connectorStores = { connectorStore: {} as never, mcpSettingsStore: {} as never }
     mocks.claim.mockImplementationOnce(async()=>{held=`public-token-${++nextToken}`
       return {token:held,turnId:`public-turn-${nextToken}`,recovered:{turnId:'f'.repeat(64),reason:'stalled_reclaimed'}}})
     const app=express();app.use(express.json())
@@ -349,7 +350,7 @@ describe('[COMP:api/public-turn] stale-takeover notice through the real public r
       const keyRow={id:keyId,assistantId:assistant.id,name:'Fictional key',prefix:minted.prefix,scope:'chat',audience:'external',
         anonymousContext:'thin',toolPolicy:'assistant',status:'active',createdBy:null,createdAt:new Date(),lastUsedAt:null,
         keyHash:await hashSecret(minted.secret),workspaceMcpConsent:null}
-      app.use('/api/v1',publicApiRoutes({...deps(),publishSessionEvent,
+      app.use('/api/v1',publicApiRoutes({...deps(),...connectorStores,publishSessionEvent,
         apiKeyStore:{getByIdSystem:async()=>keyRow,touchLastUsedAt:async()=>{}} as never}))
       response=await request(app).post(`/api/v1/assistants/${assistant.id}/messages`).set('Authorization',`Bearer ${minted.plaintext}`)
         .send({externalUserId:'fictional-client',sessionId:session.channelId,message:'Fictional question'})
@@ -368,13 +369,14 @@ describe('[COMP:api/public-turn] stale-takeover notice through the real public r
       // The assistant-full lane reads the assistant's own memory surface; empty here.
       const memoryStore={getSoulContext:async()=>({content:null,evidence:{}}),getIdentity:async()=>[],getIndexRanked:async()=>({rows:[]}),
         getWorkspaceIdentity:async()=>[],getWorkspaceIndex:async()=>[]}
-      app.use('/api',publicChatRoutes({...deps(),memoryStore:memoryStore as never,publishSessionEvent,chatLinkStore:{
+      app.use('/api',publicChatRoutes({...deps(),...connectorStores,memoryStore:memoryStore as never,publishSessionEvent,chatLinkStore:{
         resolveToken:async()=>({linkId:'fictional-link',assistantId:assistant.id,assistantName:'Fictional assistant',assistantIconSeed:null,assistantBio:null}),
         consumeDailyBudget:async()=>({allowed:true})} as never}))
       response=await request(app).post('/api/public/chat/fictional-token/messages')
         .send({visitorId:'fictional-visitor',sessionId:session.channelId,message:'Fictional question'})
     }
     expect(response.status,JSON.stringify(response.body)).toBe(200)
+    expect(offeredTools[0]).toEqual(['requestConversationContext'])
     expect(events).toEqual([{kind:'turn_completed',sessionId:session.id,payload:{senderUserId:null,turnId:'f'.repeat(64),reason:'stalled_reclaimed'}}])
   })
 })

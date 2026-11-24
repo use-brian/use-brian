@@ -388,7 +388,8 @@ async function searchFolder(
         { uid: true },
       )
     }
-    if (!uids || uids.length === 0) return { hits: [], degraded }
+    if (uids === false) throw new Error('The email server did not complete the search')
+    if (uids.length === 0) return { hits: [], degraded }
 
     if (degraded === null) {
       const capped = uids.slice(-params.limit)
@@ -416,9 +417,14 @@ export type CreateMailboxApiOptions = {
    * is temporarily truncated. Paths that raw LIST explicitly marks special
    * or non-selectable are still excluded.
    */
-  getKnownFolderPaths?: () => Promise<string[]>
+  getKnownFolderPaths?: (settings: MailboxAccountSettings) => Promise<string[]>
   /** Owner-scoped literal arm over the synced archive; needs no embeddings. */
   searchArchivedMessages?: (params: MailboxSearchParams) => Promise<MailboxSearchHit[]>
+  /** Indexed recent snapshot lookup over the exact verified provider UID set. */
+  searchCoveredArchivedMessages?: (params: MailboxSearchParams, settings: MailboxAccountSettings) => Promise<{
+    hits: MailboxSearchHit[]
+    verifiedAt: string
+  } | null>
   sessions?: MailboxSessionCache
   /**
    * APPEND the sent bytes to the IMAP Sent folder after SMTP submission
@@ -541,11 +547,20 @@ export function createMailboxApi(opts: CreateMailboxApiOptions): MailboxApi {
     async searchMessages(params) {
       const settings = await opts.getSettings()
       const literalSearch = hasSelectiveTextSearch(params)
+      if (!literalSearch && !params.live && params.archiveSince !== null && params.since && opts.searchCoveredArchivedMessages) {
+        const covered = await opts.searchCoveredArchivedMessages(params, settings).catch(() => null)
+        if (covered) {
+          return {
+            hits: mergeMailboxSearchHits({ live: [], archive: covered.hits, params }),
+            note: 'Synced mailbox snapshot as of ' + covered.verifiedAt + '. Mail or folder changes after that time may not appear.',
+          }
+        }
+      }
       const archiveParams: MailboxSearchParams = {
         ...params,
         since: params.archiveSince === null ? undefined : params.archiveSince ?? params.since,
       }
-      const archivePromise = literalSearch && opts.searchArchivedMessages
+      const archivePromise = literalSearch && !params.live && opts.searchArchivedMessages
         ? Promise.resolve()
           .then(() => opts.searchArchivedMessages!(archiveParams))
           .then((hits) => ({ attempted: true, hits, error: null as unknown }))
@@ -566,7 +581,7 @@ export function createMailboxApi(opts: CreateMailboxApiOptions): MailboxApi {
           } else {
             const listed = await client.list()
             const listedPaths = new Set(listed.map((folder) => folder.path))
-            const knownFolderPaths = await opts.getKnownFolderPaths?.() ?? []
+            const knownFolderPaths = await opts.getKnownFolderPaths?.(settings) ?? []
             folders = [...new Set([
               ...syncableFolders(listed).map((folder) => folder.path),
               // Only recover paths absent from raw LIST. A known path that LIST
@@ -632,12 +647,14 @@ export function createMailboxApi(opts: CreateMailboxApiOptions): MailboxApi {
       const notes: string[] = []
       if (live.outcomes.some((outcome) => outcome.degraded === 'charset')) {
         notes.push(
-          'The mail server rejected the non-ASCII search terms, so recent subjects and senders were filtered client-side; the synced archive was also searched literally for body matches.',
+          'The mail server rejected the non-ASCII search terms, so recent subjects and senders were filtered client-side.'
+            + (archive.attempted && !archive.error ? ' The synced archive was also searched literally for body matches.' : ''),
         )
       }
       if (live.outcomes.some((outcome) => outcome.degraded === 'alimail-empty')) {
         notes.push(
-          'AliMail returned an empty selective search, so recent message envelopes were filtered client-side; the synced archive was also searched literally for body matches.',
+          'AliMail returned an empty selective search, so recent message envelopes were filtered client-side.'
+            + (archive.attempted && !archive.error ? ' The synced archive was also searched literally for body matches.' : ''),
         )
       }
       if (live.error && archive.hits.length > 0) {

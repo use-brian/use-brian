@@ -57,6 +57,9 @@ import type { EmailInboxProvider } from '../agentmail/provider.js'
 import type { ConnectorSourceRuntimeFactory } from '../application-platform/source-runtime.js'
 import type { ConnectorActionAudit } from '../connector-action-port.js'
 import type { ConnectorTurnGrant } from '../context-scope/connector-exposure.js'
+import { AuthorityChangedError } from '../context-scope/authority-lease.js'
+import { retainInitialMailboxEvidence } from '../turn/mailbox-read-authority.js'
+import { captureRetainedToolPolicy, instanceBindingFingerprint } from './activation.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { KnowledgeCaptureRuleStore } from '../knowledge/capture-rules.js'
@@ -190,12 +193,13 @@ export function surfaceProfileFor(surface: CapabilitySurface, options: Pick<Surf
 }
 
 /** Prepare the composed catalog for one entrypoint surface. */
-export function prepareSurfaceCatalog(surface: CapabilitySurface, options: SurfaceCapabilityOptions): Promise<ComposedCatalog> {
+export function prepareSurfaceCatalog(surface: CapabilitySurface, options: SurfaceCapabilityOptions, onlyNativeConnector?: string): Promise<ComposedCatalog> {
   const profile = surfaceProfileFor(surface, options)
-  const introspection = options.introspectionTools?.length
+  const introspection = !onlyNativeConnector && options.introspectionTools?.length
     ? [{ kind: 'local' as const, serverName: 'introspection', tools: options.introspectionTools }] : undefined
   return prepareComposedCatalog({
     profile,
+    onlyNativeConnector,
     assistant: { id: options.assistantId, workspaceId: options.assistantTeamId ?? null },
     connectorUserId: options.userId,
     actorUserId: options.actorIdentity?.userId,
@@ -214,7 +218,7 @@ export function prepareSurfaceCatalog(surface: CapabilitySurface, options: Surfa
     // No grants store wired (legacy call sites, tests) ⇒ no grant visibility filter, as before.
     actionGrantReader: options.actionGrantReader !== undefined ? options.actionGrantReader
       : options.assistantConnectorGrantsStore ? undefined : null,
-    ...(options.knowledgeStore ? { knowledge: {
+    ...(!onlyNativeConnector && options.knowledgeStore ? { knowledge: {
       store: options.knowledgeStore,
       repoWriter: options.knowledgeRepoWriter,
       captureRuleStore: options.knowledgeCaptureRuleStore,
@@ -251,6 +255,66 @@ export function prepareSurfaceCatalog(surface: CapabilitySurface, options: Surfa
       bootTools: options.tools,
     },
   })
+}
+
+/** Expose only the canonical dispatcher for the two initial mailbox reads.
+ * Their source is catalogued and activated after the model requests mail. */
+export async function prepareMailboxReadDispatcher(surface: 'web' | 'channel' | 'public', options: SurfaceCapabilityOptions,
+  assertCurrent: () => Promise<void>): Promise<Tool | undefined> {
+  const { catalog, composition } = await prepareSurfaceCatalog(surface, options, 'imap')
+  const mailbox = catalog.sources.find((source): source is LocalSource => source.kind === 'local' && source.serverName === 'imap')
+  const resolve = mailbox?.resolve
+  if (!mailbox || !resolve) return undefined
+  const index = buildToolIndex([{
+    ...mailbox,
+    async resolve(name) {
+      const resolved = await resolve(name)
+      if (!resolved || !('status' in resolved) || resolved.status !== 'ready') return resolved
+      const tool = resolved.tool
+      const descriptor = catalog.descriptors.find(item => item.name === name && item.serverName === 'imap')
+      if (!descriptor?.instanceId) throw new AuthorityChangedError()
+      const instanceId = descriptor.instanceId
+      const readPersonalBinding = async () => {
+        const current = await options.connectorInstanceStore?.getSystem(instanceId)
+        if (!current?.connected || current.healthStatus === 'auth_failed' || current.provider !== 'imap'
+          || current.scope !== 'user' || current.userId !== options.userId) throw new AuthorityChangedError()
+        return instanceBindingFingerprint(current)
+      }
+      return { ...resolved, tool: {
+        ...tool,
+        async execute(input, context) {
+          // An Ask decision may have paused this invocation after activation.
+          // Recheck the original destination at the actual provider read.
+          await assertCurrent()
+          context.abortSignal.throwIfAborted()
+          const execution = options.executionContext
+          if (!execution || context.executionContext !== execution) throw new AuthorityChangedError()
+          const personalBinding = descriptor.lane === 'personal' ? await readPersonalBinding() : undefined
+          const policy = captureRetainedToolPolicy(tool, context, input)
+          const result = await tool.execute(input, context)
+          context.abortSignal.throwIfAborted()
+          await assertCurrent()
+          if (!result.isError) {
+            const assertBindingCurrent = async () => {
+              if (personalBinding === undefined) await composition.assertActivationCurrent(catalog.plan)
+              else if (await readPersonalBinding() !== personalBinding) throw new AuthorityChangedError()
+              if (options.assistantConnectorStore && !await options.assistantConnectorStore.isEnabled(
+                catalog.plan.assistantId, descriptor.governanceId, 'imap')) throw new AuthorityChangedError()
+            }
+            await Promise.all([assertBindingCurrent(), policy.assertCurrent()])
+            retainInitialMailboxEvidence(execution, instanceId, assertBindingCurrent)
+            retainInitialMailboxEvidence(execution, JSON.stringify([instanceId, name, policy.alreadyConfirmed]), policy.assertCurrent)
+          }
+          return result
+        },
+      } }
+    },
+  }])
+  const call = createMcpSearchTools({ index, settingsStore: options.settingsStore, assistantId: catalog.plan.assistantId,
+    appLevelAssistantId: APP_LEVEL_ASSISTANT_ID, userId: catalog.plan.connectorUserId, hooks: options.engineHooks,
+  }).find(tool => tool.name === 'mcp_call')
+  if (!call) return undefined
+  return (await unavailableAsEmpty(() => composition.wrapTools(catalog.plan, [call], index)))[0]
 }
 
 /** Prepare and register one entrypoint surface's capabilities into `options.tools`. */

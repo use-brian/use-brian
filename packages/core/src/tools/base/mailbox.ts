@@ -145,6 +145,8 @@ export type MailboxSearchParams = {
    */
   archiveSince?: string | null
   before?: string
+  /** Require a live provider read instead of the verified recent snapshot. */
+  live?: boolean
   /** Core always supplies (default 20, capped at 50). */
   limit: number
 }
@@ -427,6 +429,24 @@ function formatSize(bytes: number): string {
   return formatMb(bytes)
 }
 
+export const mailboxSearchInput = z.object({
+  keywords: z.array(z.string()).max(8).optional()
+    .describe('Words or phrases matched against message text; any match counts (OR). Include synonyms — one call, one round trip.'),
+  from: z.string().optional().describe('Only messages whose sender matches this substring (name or address).'),
+  subject: z.string().optional().describe('Only messages whose subject contains this substring.'),
+  folder: z.string().optional().describe('Search one specific folder instead of the default all-selectable-folders scope.'),
+  since: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()
+    .describe(`Earliest date (YYYY-MM-DD). Broad/keyword-only default: ${MAILBOX_DEFAULT_WINDOW_DAYS} days ago; sender/subject default: full history.`),
+  before: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Latest date (YYYY-MM-DD), exclusive.'),
+  live: z.boolean().optional().describe('Require live mailbox freshness for this search.'),
+  maxResults: z.number().int().min(1).max(MAILBOX_MAX_LIMIT).optional()
+    .describe(`Max messages to return (default ${MAILBOX_DEFAULT_LIMIT}, max ${MAILBOX_MAX_LIMIT}).`),
+})
+
+export const mailboxGetMessageInput = z.object({
+  messageId: z.string().describe('The message id from imapSearchMessages results (`folder:uid`).'),
+})
+
 export function createMailboxTools(
   router: MailboxAccountRouter,
   opts?: CreateMailboxToolsOptions,
@@ -455,34 +475,9 @@ export function createMailboxTools(
       'Literal search combines the live mail server with the synced personal archive, so provider search quirks and missing embeddings cannot hide an exact sender, subject, or body match. Start with 2-4 `keywords` (they are OR\'d, so include synonyms), then refine by sender, subject, or date. ' +
       'Sender matches rank ahead of subject matches, then body matches; results come back grouped into conversation threads with snippets. ' +
       `Sender- or subject-constrained searches cover the full live history by default. Broad and keyword-only live search defaults to the last ${MAILBOX_DEFAULT_WINDOW_DAYS} days, while its literal archive arm covers all synced history. Pass \`since\` to bound both. ` +
+      'For a time-only request, set the explicit inclusive arrival day in since. A recent synced snapshot can answer it and reports its as-of time. Set live to true when the user needs the latest provider state right now. ' +
       accountRoutingDescription,
-    inputSchema: z.object({
-      keywords: z
-        .array(z.string())
-        .max(8)
-        .optional()
-        .describe('Words or phrases matched against message text; any match counts (OR). Include synonyms — one call, one round trip.'),
-      from: z.string().optional().describe('Only messages whose sender matches this substring (name or address).'),
-      subject: z.string().optional().describe('Only messages whose subject contains this substring.'),
-      folder: z
-        .string()
-        .optional()
-        .describe('Search one specific folder instead of the default all-selectable-folders scope.'),
-      since: z
-        .string()
-        .regex(/^\d{4}-\d{2}-\d{2}$/)
-        .optional()
-        .describe(`Earliest date (YYYY-MM-DD). Broad/keyword-only default: ${MAILBOX_DEFAULT_WINDOW_DAYS} days ago; sender/subject default: full history.`),
-      before: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Latest date (YYYY-MM-DD), exclusive.'),
-      maxResults: z
-        .number()
-        .int()
-        .min(1)
-        .max(MAILBOX_MAX_LIMIT)
-        .optional()
-        .describe(`Max messages to return (default ${MAILBOX_DEFAULT_LIMIT}, max ${MAILBOX_MAX_LIMIT}).`),
-      ...accountInputShape,
-    }),
+    inputSchema: z.object({ ...mailboxSearchInput.shape, ...accountInputShape }),
     isConcurrencySafe: true,
     isReadOnly: true,
     timeoutMs: 30_000,
@@ -511,6 +506,7 @@ export function createMailboxTools(
           since: input.since ?? (hasEnvelopeFilter ? undefined : isoDaysAgo(MAILBOX_DEFAULT_WINDOW_DAYS)),
           archiveSince: input.since ?? null,
           before: input.before,
+          ...(input.live ? { live: true } : {}),
           limit,
         })
         const bounded = hits.slice(0, limit).map((h) => ({ ...h, snippet: truncateSnippet(h.snippet) }))
@@ -537,10 +533,7 @@ export function createMailboxTools(
         ? 'To hand an attachment to the user, save it with imapSaveAttachment using its `partId`, then deliver it with sendFile.'
         : 'Attachment contents cannot be fetched here.') +
       ` ${accountRoutingDescription}`,
-    inputSchema: z.object({
-      messageId: z.string().describe('The message id from imapSearchMessages results (`folder:uid`).'),
-      ...accountInputShape,
-    }),
+    inputSchema: z.object({ ...mailboxGetMessageInput.shape, ...accountInputShape }),
     isConcurrencySafe: true,
     isReadOnly: true,
     timeoutMs: 20_000,

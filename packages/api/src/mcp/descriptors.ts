@@ -161,14 +161,17 @@ const providerRecords = new WeakMap<readonly Pick<ProviderModule, 'family' | 'de
  * One fresh record per native registry connector. A provider module's
  * `describe()` replaces the registry rows for its family's connectors.
  */
-export function staticNativeDescriptorRecords(providers: readonly Pick<ProviderModule, 'family' | 'describe'>[] = []): DescriptorRecord[] {
-  if (providers.length === 0 && registryRecords) return registryRecords
-  const memoized = providers.length > 0 ? providerRecords.get(providers) : undefined
-  if (memoized) return memoized
+export function staticNativeDescriptorRecords(providers: readonly Pick<ProviderModule, 'family' | 'describe'>[] = [], onlyConnector?: string): DescriptorRecord[] {
+  const memoized = providers.length > 0 ? providerRecords.get(providers) : registryRecords
+  if (memoized) return onlyConnector ? memoized.filter(record => record.connectorId === onlyConnector) : memoized
+  const connectorIds = onlyConnector ? [onlyConnector] : Object.keys(OFFICIAL_CONNECTOR_TOOLS)
+  const familyFilter = onlyConnector ? nativeFamilyForConnector(onlyConnector) : undefined
   const described = new Map<ProviderFamily, ToolDescriptor[]>()
-  for (const provider of providers) described.set(provider.family, provider.describe())
+  for (const provider of providers) {
+    if (!onlyConnector || provider.family === familyFilter) described.set(provider.family, provider.describe())
+  }
   const records: DescriptorRecord[] = []
-  for (const connectorId of Object.keys(OFFICIAL_CONNECTOR_TOOLS)) {
+  for (const connectorId of connectorIds) {
     const family = nativeFamilyForConnector(connectorId)
     if (!family) continue
     const tools = described.has(family)
@@ -185,6 +188,7 @@ export function staticNativeDescriptorRecords(providers: readonly Pick<ProviderM
       availability: 'fresh',
     })
   }
+  if (onlyConnector) return records
   if (providers.length === 0) registryRecords = records
   else providerRecords.set(providers, records)
   return records

@@ -44,6 +44,19 @@ import type { ProviderModule, ProviderActivationContext, ActivationAuthority, Pr
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import type { DescriptorRecord } from './descriptors.js'
 
+const retainedToolPolicy = Symbol('retainedToolPolicy')
+type ToolWithPolicy = Tool & { [retainedToolPolicy]?: (alreadyConfirmed: boolean) => Promise<void> }
+
+/** Capture the live policy of a successful inbox read under the exact approval
+ * for that effect. Retained mail cannot cross a later model/send boundary
+ * after the connection's selected operation stops being permitted. */
+export function captureRetainedToolPolicy(tool: Tool, context: ToolContext, input: unknown) {
+  const verify = (tool as ToolWithPolicy)[retainedToolPolicy]
+  if (!verify) throw new AuthorityChangedError()
+  const alreadyConfirmed = hasToolConfirmation(context, tool.name, input)
+  return { alreadyConfirmed, assertCurrent: () => verify(alreadyConfirmed) }
+}
+
 /** Admit one instance's tool set, then re-read the selected tool at each use. */
 export async function applyToolPolicies(
   candidates: Tool[],
@@ -71,6 +84,11 @@ export async function applyToolPolicies(
     }
     const readCurrent = async () => (await readToolPolicies(settingsStore, keys, [policyTools[index]!]))[0]!.effectivePolicy
     tool.resolveConfirmation = async () => await readCurrent() === 'ask'
+    const retained = tool as ToolWithPolicy
+    retained[retainedToolPolicy] = async alreadyConfirmed => {
+      const current = await readCurrent()
+      if (current === 'block' || current === 'ask' && !alreadyConfirmed) throw new AuthorityChangedError()
+    }
     const execute = tool.execute
     tool.execute = async (input, context) => {
       const current = await readCurrent()

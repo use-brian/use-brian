@@ -140,7 +140,8 @@ describe('[COMP:api/mcp-surface] mailbox operational state and current authority
       now: () => new Date('2030-01-01T00:02:00.000Z'),
     })
     expect(await worker.syncInstanceById(mailbox.id)).toMatchObject({ synced: false, reason: 'error' })
-    expect(persist).toHaveBeenCalledWith(mailbox.id, { folders: {}, lastError: 'Fictional transport interruption', lastFailedSyncAt: '2030-01-01T00:02:00.000Z' }, null)
+    expect(persist).toHaveBeenCalledWith(mailbox.id, { folders: {}, lastError: 'Fictional transport interruption', lastFailedSyncAt: '2030-01-01T00:02:00.000Z' }, null,
+      { lastSyncAt: null, archiveResetToken: null })
     expect(mailbox.healthStatus).toBe('degraded')
     expect((await tools.get('mcp_search')!.execute({ query: 'calendar' }, context)).isError).not.toBe(true)
     await store.markHealth(mailbox.id, 'ok')

@@ -202,6 +202,23 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks() })
 
 describe('[COMP:api/mcp-catalog] catalog-only preparation', () => {
+  it('activates only the admitted primary mailbox binding and never falls forward to a sibling', async () => {
+    const f = fixture()
+    f.instances.push(instance({ id: 'mailbox-primary', provider: 'imap', createdAt: at(1) }),
+      instance({ id: 'mailbox-extra', provider: 'imap', createdAt: at(2) }))
+    const activate = vi.fn<CatalogActivator>().mockResolvedValue([])
+    const catalog = await prepareCapabilityCatalog(catalogInput(f, { onlyNativeConnector: 'imap', activator: activate }))
+    expect(f.knowledgeStore.hasEntriesForAssistant).not.toHaveBeenCalled()
+    expect(catalog.sources.map(source => source.serverName)).toEqual(['imap'])
+    expect(activate).not.toHaveBeenCalled()
+    const source = catalog.sources[0]!
+    if (source.kind !== 'local') throw new Error('Expected a native mailbox source')
+    await expect(source.resolve!('imapSearchMessages')).resolves.toEqual({ status: 'unavailable', reason: 'it is no longer available to this assistant' })
+    expect(activate).toHaveBeenCalledOnce()
+    expect(activate.mock.calls[0]![0].admitted.map(row => row.instanceId)).toEqual(['mailbox-primary'])
+    expect(activate.mock.calls[0]![1]).toEqual({ toolNames: ['imapSearchMessages'] })
+  })
+
   it('prepares a fully connected workspace with metadata reads only: no network, credentials or spawns', async () => {
     const f = fixture()
     const catalog = await prepareCapabilityCatalog(catalogInput(f))

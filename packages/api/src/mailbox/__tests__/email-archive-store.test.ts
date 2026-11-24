@@ -22,6 +22,7 @@ import {
   insertEmailArchiveMessage,
   countEmailArchiveMessages,
   findArchivedEmailUids,
+  searchCoveredEmailArchiveMessages,
   searchLiteralEmailArchiveMessages,
 } from '../../db/email-archive-store.js'
 import { searchEmailArchive } from '../../db/email-archive-search.js'
@@ -330,6 +331,60 @@ describe('[COMP:api/email-archive-store] unified literal mailbox search', () => 
     const [, sql, params] = mockQueryWithRLS.mock.calls[0] as unknown as [string, string, unknown[]]
     expect(sql).toContain("ESCAPE E'\\\\'")
     expect(params).toContain('%100\\%\\_ready%')
+  })
+})
+
+describe('[COMP:api/email-archive-store] bounded provider arrival-day lookup', () => {
+  it('deduplicates before limiting and allows only current provider refs and account-generation rows', async () => {
+    const { PGlite } = await import('@electric-sql/pglite')
+    const database = new PGlite()
+    const owner = '00000000-0000-0000-0000-000000000001'
+    const instance = '00000000-0000-0000-0000-000000000002'
+    const coverage = {
+      version: 1, ownerUserId: owner, accountKey: 'fixture-account', archivedAfter: '2026-08-05T00:00:00Z',
+      completeRoster: true, listedFolders: ['INBOX', 'Archive'], folders: {
+        INBOX: { uidValidity: '1', verifiedAt: '2026-08-06T10:00:00Z', days: { '2026-08-06': [2, 3] }, futureUids: [] },
+        Archive: { uidValidity: '3', verifiedAt: '2026-08-06T10:00:00Z', days: { '2026-08-06': [8] }, futureUids: [] },
+      },
+    }
+    try {
+      await database.exec(`
+        CREATE TABLE connector_instance (id uuid PRIMARY KEY, user_id uuid, connected boolean, provider text, config jsonb);
+        CREATE TABLE email_archive_messages (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), instance_id uuid,
+          owner_user_id uuid, provider_message_id text, folder text, sent_at timestamptz, rfc_message_id text,
+          from_addr text, to_addrs text[], subject text, body_text text, in_reply_to text, references_ids text[],
+          created_at timestamptz, UNIQUE(instance_id, provider_message_id));
+        CREATE ROLE archive_reader;
+        GRANT SELECT ON connector_instance, email_archive_messages TO archive_reader;
+        ALTER TABLE connector_instance ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE email_archive_messages ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY connector_reader ON connector_instance USING (user_id = current_setting('app.current_user_id')::uuid);
+        CREATE POLICY mailbox_reader ON email_archive_messages USING (owner_user_id = current_setting('app.current_user_id')::uuid);
+      `)
+      await database.query("INSERT INTO connector_instance VALUES ($1,$2,true,'imap',$3)",
+        [instance, owner, JSON.stringify({ mailboxSync: { searchCoverage: coverage, searchCoverageSeal: 'fixture-seal' } })])
+      await database.query(`
+        INSERT INTO email_archive_messages(instance_id,owner_user_id,provider_message_id,folder,sent_at,rfc_message_id,from_addr,subject,body_text,created_at)
+        VALUES ($1,$2,'INBOX:1','INBOX','2026-08-06 11:00Z','<moved@example.invalid>','','Stale original','','2026-08-06'),
+               ($1,$2,'INBOX:2','INBOX','2026-08-06 09:00Z','<copy@example.invalid>','','Duplicate','','2026-08-06'),
+               ($1,$2,'INBOX:3','INBOX','2026-08-04 07:00Z',null,'','New arrival with an older Date header','','2026-08-06'),
+               ($1,$2,'Archive:8','Archive','2026-08-06 10:00Z','<copy@example.invalid>','','Moved copy','','2026-08-06')`, [instance, owner])
+      await database.exec('SET ROLE archive_reader')
+      mockQueryWithRLS.mockImplementation(async (caller, sql, values) => {
+        await database.query("SELECT set_config('app.current_user_id', $1, false)", [caller])
+        return await database.query(sql, values) as never
+      })
+      const input = { ownerUserId: owner, instanceId: instance, accountKey: coverage.accountKey, rawCoverage: coverage,
+        seal: 'fixture-seal', params: { since: '2026-08-06', limit: 2 }, now: new Date('2026-08-06T10:01:00Z') }
+      expect((await searchCoveredEmailArchiveMessages(input))?.hits.map((hit) => hit.id)).toEqual(['Archive:8', 'INBOX:3'])
+      expect(await searchCoveredEmailArchiveMessages({ ...input, seal: 'stale-seal' })).toBeNull()
+      await database.exec('RESET ROLE')
+      await database.exec("UPDATE email_archive_messages SET created_at = '2026-08-01' WHERE provider_message_id = 'INBOX:3'")
+      await database.exec('SET ROLE archive_reader')
+      expect(await searchCoveredEmailArchiveMessages(input)).toBeNull()
+    } finally {
+      await database.close()
+    }
   })
 })
 
