@@ -230,7 +230,8 @@ async function captureKnowledgeSearch(
   for (let offset = 0; offset <= 4096; offset += pageSize) {
     await authority?.execution.security.authority.assertCurrent()
     const result = await client.query<{ value: unknown }>(
-      'SELECT value FROM read_native_knowledge_query_projection($1,$2,$3,$4,$5,$6)',
+      `SELECT value FROM read_native_knowledge_query_projection($1,$2,$3,$4,$5,$6)
+       WITH ORDINALITY AS page(value, position) ORDER BY position`,
       [...params, offset, pageSize],
     )
     const [header, ...points] = result.rows.map(row => knowledgeCapture.parse(row.value))
