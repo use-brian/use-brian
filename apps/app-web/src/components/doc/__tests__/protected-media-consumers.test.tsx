@@ -10,10 +10,9 @@ import {applySpineEventToSurfaceCache} from '@/lib/surface-cache-invalidation';
 import {WORKSPACE_IDENTITY_REFRESH_EVENT} from '@/lib/workspace-identity-events';
 import {FeedGenerationImage} from '@/components/feed/generation-placeholder';
 import {PostMediaTray} from '@/components/feed/post-media-tray';
-import {LinkedInPublishing} from '@/components/feed/linkedin-publishing';
+import {LinkedInPostPreview} from '@/components/feed/linkedin-publishing';
 import {ChatFileAttachments} from '@/components/chrome/chat-file-attachment';
-import {importLegacyFeed} from '@use-brian/doc-model';
-import type {FeedWorkingContent} from '@/lib/offline/feed-offline';
+import {importLegacyFeed,projectFeedLinkedIn} from '@use-brian/doc-model';
 
 const {http}=vi.hoisted(()=>({http:vi.fn()}));
 vi.mock('@/lib/auth-fetch',()=>({authFetch:http}));
@@ -52,8 +51,9 @@ afterEach(()=>{act(()=>root.unmount());host.remove();resetSurfaceCache();vi.useR
 describe('[COMP:app-web/doc-file-url] durable consumer admission',()=>{
   it('shares one current byte admission across generated, tray and LinkedIn previews',async()=>{
     const media=[{fileId:FILE,mimeType:'image/png' as const,alt:'Linked fixture'}];
-    const content:FeedWorkingContent={title:'Fixture',text:'Fixture',privateBrief:'',postFormat:'post',threadSegments:[],article:{sourceUrl:'',title:'',description:''},media,schemaVersion:2,composition:importLegacyFeed({text:'Fixture',postFormat:'post',threadSegments:[],media}),linkedin:{version:1,mode:'post',authorKind:'person',destinationId:null}};
-    await render(<>{image()}<PostMediaTray workspaceId={WS} platform="linkedin" media={media} readOnly onChange={()=>{}}/><LinkedInPublishing workspaceId={WS} workspaceName="Fixture" assistantId="assistant" sessionId="session" revision={1} content={content} ready readOnly disabled={false} onCommand={async()=>true} onPreview={()=>{}} onPromotion={async()=>{}} onRefresh={()=>{}}/></>);
+    const composition=importLegacyFeed({text:'Fixture',postFormat:'post',threadSegments:[],media});
+    const projection=projectFeedLinkedIn(composition);
+    await render(<>{image()}<PostMediaTray workspaceId={WS} platform="linkedin" media={media} readOnly onChange={()=>{}}/><LinkedInPostPreview workspaceId={WS} projection={projection}/></>);
     expect(host.querySelectorAll('img')).toHaveLength(3);
     expect(new Set([...host.querySelectorAll('img')].map(img=>img.src))).toEqual(new Set(['blob:fixture-1']));
     expect(http).toHaveBeenCalledOnce();

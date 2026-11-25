@@ -7,7 +7,7 @@ import { validateFeedComposition } from './model.js'
 export function escapeLinkedInCommentary(text: string): string { return text.replace(/[|{}@\[\]()<>#\\*_~]/g, '\\$&') }
 export function projectFeedLinkedIn(composition: FeedComposition, context?: FeedLinkedInContext, legacy?: {
   postFormat?: string; article?: { sourceUrl: string; title: string; description: string };
-}): FeedLinkedInProjection {
+}, onBlockLine?: (blockId: string, line: number) => void): FeedLinkedInProjection {
   const warnings: FeedLinkedInIssue[] = []; const blockers: FeedLinkedInIssue[] = []
   const media: FeedLinkedInProjection['media'] = []
   const issue = (list: FeedLinkedInIssue[], code: FeedLinkedInIssue['code'], blockId?: string) => {
@@ -26,21 +26,40 @@ export function projectFeedLinkedIn(composition: FeedComposition, context?: Feed
     }
     return text
   }).join('')
-  const render = (node: FeedNode, depth = 0): string => {
+  // LinkedIn flattens rich text. Keep optional editor anchors alongside the
+  // projection without adding local presentation data to the delivery payload.
+  const joinBlocks = (nodes: FeedNode[], separator: string, depth: number, firstLine: number,
+    skipEmpty: boolean, prefix?: (index: number) => string): string => {
+    const parts: string[] = []
+    let line = firstLine
+    for (const [index, node] of nodes.entries()) {
+      const part = (prefix?.(index) ?? '') + render(node, depth, line)
+      if (part || !skipEmpty) {
+        parts.push(part)
+        if (onBlockLine) line += part.split('\n').length - 1 + separator.length
+      }
+    }
+    return parts.join(separator)
+  }
+  const render = (node: FeedNode, depth: number, line: number): string => {
+    if (node.type !== 'image' && node.type !== 'generationPlaceholder') onBlockLine?.(node.attrs.id, line)
     switch (node.type) {
       case 'paragraph': case 'heading': return inline(node.content ?? [], node.attrs.id)
       case 'generationPlaceholder': issue(blockers, 'unfinished_slot', node.attrs.id); return ''
       case 'image': media.push({ fileId: node.attrs.fileId, mimeType: node.attrs.mimeType, alt: node.attrs.alt ?? '', blockId: node.attrs.id, placement: node.attrs.placement }); return ''
-      case 'blockquote': return node.content.map(n => render(n, depth)).join('\n\n').split('\n').map(line => '› ' + line).join('\n')
-      case 'listItem': return node.content.map(n => render(n, depth)).filter(Boolean).join('\n')
-      case 'bulletList': case 'orderedList': return node.content.map((n, i) => {
-        const prefix = '  '.repeat(depth) + (node.type === 'orderedList' ? `${node.attrs.start + i}. ` : '• ')
-        return prefix + render(n, depth + 1)
-      }).join('\n')
+      case 'blockquote': return joinBlocks(node.content, '\n\n', depth, line, false).split('\n').map(line => '› ' + line).join('\n')
+      case 'listItem': return joinBlocks(node.content, '\n', depth, line, true)
+      case 'bulletList': case 'orderedList': return joinBlocks(node.content, '\n', depth + 1, line, false,
+        i => '  '.repeat(depth) + (node.type === 'orderedList' ? `${node.attrs.start + i}. ` : '• '))
       default: issue(blockers, 'unsupported_node'); return ''
     }
   }
-  const text = composition.segments.map(s => s.content.map(n => render(n)).filter(Boolean).join('\n\n')).join('\n\n')
+  let firstLine = 0
+  const text = composition.segments.map(segment => {
+    const body = joinBlocks(segment.content, '\n\n', 0, firstLine, true)
+    if (onBlockLine) firstLine += body.split('\n').length + 1
+    return body
+  }).join('\n\n')
   const mode = context?.mode ?? (legacy?.postFormat === 'article' ? media.some(m => m.placement === 'inline') ? 'legacy_article' : 'link_post' : 'post')
   const manual = mode === 'newsletter_edition' || mode === 'legacy_article'
   if (composition.segments.length !== 1) issue(blockers, 'invalid_thread')

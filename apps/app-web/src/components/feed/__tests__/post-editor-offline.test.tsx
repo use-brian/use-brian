@@ -309,6 +309,50 @@ describe('[COMP:app-web/feed-post-editor] automatic legacy upgrade', () => {
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
 
 describe("[COMP:app-web/feed-offline] offline editor lifecycle", () => {
+  it("switches a LinkedIn draft to its provider preview and back with edits intact", async () => {
+    const post = await createLocalFeedPost("assistant-1", "linkedin", {
+      ...blankFeedContent(),
+      schemaVersion: 2,
+      composition: { version: 1, segments: [{
+        id: crypto.randomUUID(),
+        content: [{
+          type: "paragraph", attrs: { id: crypto.randomUUID() },
+          content: [{ type: "text", text: "Company update", marks: [{ type: "bold" }] }],
+        }],
+      }] },
+    });
+    const viewProps = vi.spyOn(EditorView.prototype, "setProps");
+    try {
+      await render(post.session.id, "linkedin");
+      const buttons = [...container.querySelectorAll<HTMLButtonElement>("header button[aria-pressed]")];
+      const draft = buttons.find(button => button.textContent === en.feedPage.postEditor.editMode)!;
+      const preview = buttons.find(button => button.textContent === en.feedPage.postEditor.previewMode)!;
+      expect(draft.getAttribute("aria-pressed")).toBe("true");
+      expect(preview.getAttribute("aria-pressed")).toBe("false");
+      const editor = container.querySelector('[contenteditable="true"]')!;
+      const view = (viewProps.mock.contexts as EditorView[]).find(candidate => candidate.dom === editor)!;
+      await act(async () => view.dispatch(view.state.tr.insertText("New ", 1)));
+      const before = await readLocalFeedPost("assistant-1", post.session.id);
+      await act(async () => preview.click());
+      expect(preview.getAttribute("aria-pressed")).toBe("true");
+      expect(draft.getAttribute("aria-pressed")).toBe("false");
+      expect(editor.closest("[inert]")).toBeTruthy();
+      const output = container.querySelector(`section[aria-label="${en.feedLinkedIn.preview}"]`)!;
+      expect(output.closest("[hidden], [inert]")).toBeNull();
+      expect(output.textContent).toContain("New Company update");
+      expect(output.textContent).toContain(en.feedLinkedIn.formatting_loss);
+      expect(output.querySelector("[data-block-id]")?.getAttribute("data-block-id"))
+        .toBe(editor.querySelector("[data-block-id]")?.getAttribute("data-block-id"));
+      await act(async () => draft.click());
+      expect(editor.closest("[inert]")).toBeNull();
+      expect(container.querySelector('[contenteditable="true"]')).toBe(editor);
+      expect(editor.textContent).toBe("New Company update");
+      expect(await readLocalFeedPost("assistant-1", post.session.id)).toEqual(before);
+    } finally {
+      viewProps.mockRestore();
+    }
+  });
+
   it("returns from preview to the same passage and scroll position", async () => {
     const post = await createLocalFeedPost("assistant-1", "threads", {
       ...blankFeedContent(), text: "A draft with a selected passage.",

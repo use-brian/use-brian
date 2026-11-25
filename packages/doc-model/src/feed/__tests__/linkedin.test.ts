@@ -8,11 +8,20 @@ const context = (mode: FeedLinkedInContext['mode'] = 'post'): FeedLinkedInContex
 const image = (placement: 'inline' | 'attachment' = 'inline'): FeedNode => ({ type: 'image', attrs: { id: randomUUID(), fileId: randomUUID(), mimeType: 'image/png', alt: 'Orchard', placement } })
 describe('[COMP:feed/linkedin-projection] canonical LinkedIn conversion', () => {
   it('preserves paragraphs, headings, breaks, nested ordering and quote text', () => {
+    const fruit = feedParagraph('Fruit')
+    const apple = feedParagraph('Apple')
+    const quote = feedParagraph('Quoted')
     const doc = composition({ type: 'heading', attrs: { id: randomUUID(), level: 2 }, content: [{ type: 'text', text: 'Heading' }] },
       { type: 'paragraph', attrs: { id: randomUUID() }, content: [{ type: 'text', text: 'First' }, { type: 'hardBreak' }, { type: 'text', text: 'Second' }] },
-      { type: 'orderedList', attrs: { id: randomUUID(), start: 3 }, content: [{ type: 'listItem', attrs: { id: randomUUID() }, content: [feedParagraph('Fruit'), { type: 'bulletList', attrs: { id: randomUUID() }, content: [{ type: 'listItem', attrs: { id: randomUUID() }, content: [feedParagraph('Apple')] }] }] }] },
-      { type: 'blockquote', attrs: { id: randomUUID() }, content: [feedParagraph('Quoted')] })
-    expect(projectFeedLinkedIn(doc).text).toBe('Heading\n\nFirst\nSecond\n\n3. Fruit\n  • Apple\n\n› Quoted')
+      { type: 'orderedList', attrs: { id: randomUUID(), start: 3 }, content: [{ type: 'listItem', attrs: { id: randomUUID() }, content: [fruit, { type: 'bulletList', attrs: { id: randomUUID() }, content: [{ type: 'listItem', attrs: { id: randomUUID() }, content: [apple] }] }] }] },
+      { type: 'blockquote', attrs: { id: randomUUID() }, content: [quote] })
+    const lines = new Map<string, number>()
+    const preview = projectFeedLinkedIn(doc, undefined, undefined, (id, line) => lines.set(id, line))
+    expect(preview).toEqual(projectFeedLinkedIn(doc))
+    expect(lines.get(fruit.attrs.id)).toBe(5)
+    expect(lines.get(apple.attrs.id)).toBe(6)
+    expect(lines.get(quote.attrs.id)).toBe(8)
+    expect(preview.text).toBe('Heading\n\nFirst\nSecond\n\n3. Fruit\n  • Apple\n\n› Quoted')
   })
   it('removes styling with notice and preserves link destinations', () => {
     const doc = composition({ type: 'paragraph', attrs: { id: randomUUID() }, content: [{ type: 'text', text: 'Read', marks: [{ type: 'bold' }, { type: 'italic' }, { type: 'link', attrs: { href: 'https://example.com/story' } }] }] })

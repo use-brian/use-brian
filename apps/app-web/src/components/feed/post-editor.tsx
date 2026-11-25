@@ -1,5 +1,5 @@
 "use client";
-import { LinkedInPublishing, type LinkedInPreviewState } from './linkedin-publishing';
+import { LinkedInPostPreview, LinkedInPublishing, type LinkedInPreviewState } from './linkedin-publishing';
 import { linkedinRequest,linkedinDraftPath } from '@/lib/api/feed-linkedin';
 import { FeedSources } from './feed-sources';
 
@@ -31,7 +31,6 @@ import {
   FileDown,
   Info,
   MoreHorizontal,
-  Eye,
   Sparkles,
   Heart,
   Link2,
@@ -952,7 +951,20 @@ function PostPane({
   }
   const canonicalProjection = localPost?.content.composition ? projectFeed(localPost.content.composition) : null;
   const missingSlots = canonicalProjection?.missingSlots ?? [];
-  const linkedinProjection=platform==='linkedin'&&localPost?.content.composition?projectFeedLinkedIn(localPost.content.composition,localPost.content.linkedin,localPost.content):null;
+  const linkedinContent = platform === "linkedin" ? localPost?.content : undefined;
+  const linkedinPreviewDocument = useMemo(() => {
+    if (!linkedinContent?.composition) return null;
+    const anchors = new Map<number, string[]>();
+    const projection = projectFeedLinkedIn(linkedinContent.composition, linkedinContent.linkedin, linkedinContent,
+      (blockId, line) => {
+        const ids = anchors.get(line);
+        if (ids) ids.push(blockId);
+        else anchors.set(line, [blockId]);
+      });
+    return { projection, anchors };
+  }, [linkedinContent]);
+  const linkedinProjection = linkedinPreviewDocument?.projection;
+
   const compositionValid = linkedinProjection ? linkedinProjection.blockers.length===0 : postFormat === "thread"
     ? threadValid
     : postFormat === "article"
@@ -1109,16 +1121,19 @@ function PostPane({
                 reviewOpen={editorPanel === 'review'}
                 onReview={structured ? anchor => showPanel('review', anchor) : undefined}
                 onCommit={() => void commitVersion()} onApprove={() => void act('approve')} onPosted={() => void act('posted')} />
-              <Tooltip label={viewMode === "preview" ? te.editMode : te.previewMode}>
-                <Button variant="ghost" size="sm" type="button" className="min-h-11 min-w-11 md:min-h-9 md:min-w-9"
-                  onClick={() => {
-                    if (viewMode === "edit") editScrollTop.current = workspaceRef.current?.scrollTop ?? 0;
-                    setViewMode(viewMode === "edit" ? "preview" : "edit");
-                  }}>
-                  {viewMode === "preview" ? <Pencil aria-hidden /> : <Eye aria-hidden />}
-                  <span className="sr-only @xl/feed-editor:not-sr-only">{viewMode === "preview" ? te.editMode : te.previewMode}</span>
-                </Button>
-              </Tooltip>
+              <div className="flex shrink-0 items-center gap-0.5 rounded-lg border border-border p-0.5">
+                {(["edit", "preview"] as const).map(mode => (
+                  <Button key={mode} type="button" size="sm" variant={viewMode === mode ? "secondary" : "ghost"}
+                    aria-pressed={viewMode === mode} className="min-h-11 px-3 focus-visible:ring-2 focus-visible:ring-ring aria-pressed:font-semibold md:min-h-9"
+                    onClick={() => {
+                      if (viewMode === mode) return;
+                      if (mode === "preview") editScrollTop.current = workspaceRef.current?.scrollTop ?? 0;
+                      setViewMode(mode);
+                    }}>
+                    {mode === "edit" ? te.editMode : te.previewMode}
+                  </Button>
+                ))}
+              </div>
             </header>
 
             <div data-feed-title>
@@ -1129,6 +1144,7 @@ function PostPane({
                     value={titleDirty ? titleDraft : displayPostTitle(session.title)}
                     maxLength={200}
                     disabled={titleSaving || readOnly}
+                    readOnly={viewMode === "preview"}
                     aria-label={te.editTitle}
                     title={te.editTitle}
                     onFocus={() => {
@@ -1162,7 +1178,7 @@ function PostPane({
                     style={{ fieldSizing: "content" } as React.CSSProperties}
                     className="h-11 md:h-10 min-w-0 max-w-[calc(100%_-_1.125rem)] w-auto truncate rounded-sm border-0 bg-transparent px-0 text-xl md:text-2xl font-semibold outline-none transition-colors focus:bg-muted/40 disabled:opacity-60"
                   />
-                  <Pencil className="size-3 shrink-0 text-muted-foreground/70" aria-hidden />
+                  {viewMode === "edit" && <Pencil className="size-3 shrink-0 text-muted-foreground/70" aria-hidden />}
                 </div>
               ) : (
                 <h1 className="truncate text-[15px] font-semibold">{te.newPost}</h1>
@@ -1191,6 +1207,7 @@ function PostPane({
                       <DropdownMenuItem className="min-h-11 md:min-h-9" onClick={() => showPanel('details')}><Info aria-hidden />{tc.details}</DropdownMenuItem>
                       {platform === "linkedin" && structured ? (
                         <DropdownMenuItem className="min-h-11 md:min-h-9" onClick={() => {
+                          setViewMode("edit");
                           const publishing = workspaceRef.current?.querySelector<HTMLElement>("[data-feed-linkedin-publishing]");
                           requestAnimationFrame(() => {
                             publishing?.focus({ preventScroll: true });
@@ -1348,7 +1365,13 @@ function PostPane({
                         : te.manualDelivery}
                     </span>
                   </div>
-                  {structured && localPost?.content.composition ? <div className={hasCommentMarkers ? "max-md:pr-12" : undefined}><FeedCompositionPreview composition={localPost.content.composition} workspaceId={workspaceId} /></div> : <PlatformPostPreview
+                  {structured && localPost?.content.composition ? (
+                    <div className={hasCommentMarkers ? "max-md:pr-12" : undefined}>
+                      {linkedinPreviewDocument
+                        ? <LinkedInPostPreview workspaceId={workspaceId} {...linkedinPreviewDocument} />
+                        : <FeedCompositionPreview composition={localPost.content.composition} workspaceId={workspaceId} />}
+                    </div>
+                  ) : <PlatformPostPreview
                     platform={platform}
                     postFormat={postFormat}
                     text={selected?.text ?? ""}
@@ -1370,10 +1393,10 @@ function PostPane({
             </div>
             {structured ? <FeedDocumentAnnotations documentRef={viewMode === "edit" ? editDocumentRef : previewDocumentRef} threads={collaboration.data?.threads ?? []} onThread={openThread} /> : null}
             </div>
-            {platform==='linkedin' && structured && localPost ? <LinkedInPublishing workspaceId={workspaceId} workspaceName={workspace.name} assistantId={assistantId} sessionId={sessionId} revision={localPost.revision} content={localPost.content} ready={status==='ready'} readOnly={readOnly} disabled={Boolean(remoteBlocked)||!workspace.canDraft||busy} onCommand={runCommands} onPreview={setLinkedinPreview} onRefresh={()=>{void collaboration.refresh();void load();}} onPromotion={async url=>{
+            {platform==='linkedin' && structured && localPost ? <div hidden={viewMode !== "edit"} inert={viewMode !== "edit"}><LinkedInPublishing workspaceId={workspaceId} workspaceName={workspace.name} assistantId={assistantId} sessionId={sessionId} revision={localPost.revision} content={localPost.content} ready={status==='ready'} readOnly={readOnly} disabled={Boolean(remoteBlocked)||!workspace.canDraft||busy} onCommand={runCommands} onPreview={setLinkedinPreview} onRefresh={()=>{void collaboration.refresh();void load();}} onPromotion={async url=>{
               const result=await linkedinRequest<{sessionId:string}>(`${linkedinDraftPath(assistantId,sessionId)}/linkedin-promotion`,{expectedRevision:localPost.revision,sessionId:crypto.randomUUID()});
               router.push(feedPostPath(workspaceId,'linkedin',result.sessionId));
-            }}/> : null}
+            }}/></div> : null}
           </div>
         </div>
         <FeedEditorPanel open={editorPanel !== null} title={panelMode === 'details' ? tc.details : panelMode === 'review' ? tc.review : panelMode === 'learning' ? tl.title : tc.comments} anchor={panelAnchor} passage={panelMode === 'thread'} onClose={() => setEditorPanel(null)}>

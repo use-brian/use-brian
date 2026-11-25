@@ -10505,7 +10505,7 @@ export const ja: Dictionary = {
       privateBriefNotice: "この投稿と調整チャットだけで使う背景情報です。公開されません。",
       editorLabel: "エディター",
       viewModeAria: "エディター表示",
-      editMode: "編集",
+      editMode: "下書き",
       previewMode: "プレビュー",
       previewLabel: "ライブプレビュー",
       previewAccount: "あなたのブランド",

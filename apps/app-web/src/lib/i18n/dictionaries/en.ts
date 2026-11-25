@@ -10750,7 +10750,7 @@ export const en = {
       privateBriefNotice: "Working context for this post and its Refine chat. Not published.",
       editorLabel: "Editor",
       viewModeAria: "Editor view",
-      editMode: "Edit",
+      editMode: "Draft",
       previewMode: "Preview",
       previewLabel: "Live preview",
       previewAccount: "Your brand",
