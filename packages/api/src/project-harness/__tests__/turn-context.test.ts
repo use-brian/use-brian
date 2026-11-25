@@ -64,6 +64,7 @@ describe('Project-only automatic harness grounding', () => {
       expect(result).toMatchObject({ name: 'project_harness', content: expect.stringContaining('Preserve authorization') })
       expect(result!.content).toContain('Project Brief remains authoritative')
       expect(result!.content).toContain('prepareProjectHarnessTask')
+      expect(result!.content).toContain('explicit brianTaskId UUID')
       expect(currentAgentAccess()).toEqual(parent)
     })
     expect(f.accumulator.evidence).toMatchObject({ sensitivity: 'internal', projectIds: [projectId], compartments: [`project:${projectId}`] })

@@ -8,6 +8,7 @@ import type { HarnessImpact, HarnessImpactRequest } from './impact.js'
 import { harnessScopeKey, type HarnessOrigin } from './resolve.js'
 
 export const harnessTaskFields = {
+  brianTaskId: z.string().uuid(),
   prompt: z.string().trim().min(1).max(12_000).refine(value => !value.includes('\0')),
   // Operator's runtime profile key; never inferred from a Brian UUID/title or mapping.
   runtimeProject: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/),
@@ -39,7 +40,7 @@ const reviewInstructions = [
 
 export function prepareHarnessTask(
   loaded: LoadedHarnessContext,
-  input: { prompt: string; runtimeProject: string },
+  input: { brianTaskId: string; prompt: string; runtimeProject: string },
   plan: HarnessCodingTestPlan,
   productName?: string,
 ) {
@@ -69,6 +70,7 @@ export function prepareHarnessTask(
     status: 'prepared' as const,
     toolName: 'new_task_with_context' as const,
     arguments: {
+      brianTaskId: input.brianTaskId,
       prompt: input.prompt,
       context: {
         project: input.runtimeProject,

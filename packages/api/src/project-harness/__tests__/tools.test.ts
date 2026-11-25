@@ -5,8 +5,10 @@ import { type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { createProjectHarnessTools, type ProjectHarnessToolsOptions } from '../tools.js'
 import type { HarnessApproval, HarnessRun } from '../execution-contracts.js'
 import type { HarnessDefinition, HarnessRevision, HarnessScope, ProjectProduct } from '../contracts.js'
+import { WorkspaceAccessError } from '../../workspace-access/policy.js'
 import { currentAgentAccess, runWithAgentAccess } from '../../db/agent-access-context.js'
 
+const brianTaskId = '42000000-0000-4000-8000-000000000101'
 const userId = '20000000-0000-4000-8000-000000000001'
 const workspaceId = '20000000-0000-4000-8000-000000000002'
 const projectId = '20000000-0000-4000-8000-000000000003'
@@ -15,6 +17,8 @@ const componentId = '20000000-0000-4000-8000-000000000005'
 const revisionId = '20000000-0000-4000-8000-000000000006'
 const approvalId = '20000000-0000-4000-8000-000000000007'
 const otherId = '20000000-0000-4000-8000-000000000008'
+const taskEvidence = { sources: [{ resourceKind: 'task', resourceId: brianTaskId, version: '1', workspaceId, userId,
+  assistantId: null, sensitivity: 'internal' as const, projectIds: [projectId], compartments: [`project:${projectId}`] }] }
 const scope: HarnessScope = { kind: 'project' }
 const scenario = { key: 'accept', title: 'Accept change', preconditions: ['Signed in'], steps: ['Observe result'],
   criteria: [{ key: 'visible', observation: 'Correct result visible', evidence: 'Screenshot or observation' }] }
@@ -30,7 +34,7 @@ function fixture() {
   const store = { lineage: vi.fn().mockResolvedValue([revision]), tree: vi.fn().mockResolvedValue(tree),
     definition: vi.fn().mockResolvedValue(revision), history: vi.fn().mockResolvedValue([revision]) }
   const execution = { approvals: vi.fn().mockResolvedValue([approval]), runs: vi.fn().mockResolvedValue([]) }
-  const snapshot = vi.fn().mockResolvedValue({ tree, revisions: [revision] })
+  const snapshot = vi.fn().mockResolvedValue({ taskEvidence, tree, revisions: [revision] })
   const options: ProjectHarnessToolsOptions = { store, execution, snapshot }
   const tools = createProjectHarnessTools(options)
   const authority = { assertCurrent: vi.fn().mockResolvedValue(undefined), execute: async <T>(work: () => Promise<T>) => work() }
@@ -54,7 +58,7 @@ describe('native/MCP harness read tools', () => {
       expect(tool.isConcurrencySafe).toBe(true)
       expect(tool.requiresConfirmation).toBe(false)
       expect(tool.description.length).toBeGreaterThan(50)
-      expect(tool.inputSchema.parse(tool.name === 'prepareProjectHarnessTask' ? { prompt: 'Implement', runtimeProject: 'frontend' } : {})).toMatchObject({ scope: { kind: 'project' } })
+      expect(tool.inputSchema.parse(tool.name === 'prepareProjectHarnessTask' ? { brianTaskId, prompt: 'Implement', runtimeProject: 'frontend' } : {})).toMatchObject({ scope: { kind: 'project' } })
     }
   })
   it.each(names)('%s rejects injected identity, authority, definitions, approval claims and malformed scopes', async name => {
@@ -144,7 +148,7 @@ describe('native/MCP harness read tools', () => {
       expect(currentAgentAccess()).toEqual(original)
     })
     expect(f.store.definition).not.toHaveBeenCalled()
-    f.snapshot.mockResolvedValue({ tree, revisions: [revision] })
+    f.snapshot.mockResolvedValue({ taskEvidence, tree, revisions: [revision] })
     expect(await f.invoke(names[2], { scopes: [scope], changedSources: [{ repository: 'app', path: 'a.ts' }] })).toMatchObject({ isError: true })
     expect(await f.invoke(names[2], { changedSources: [{ repository: 'app', path: 'unmapped.ts' }] })).toMatchObject({ data: { impact: { status: 'blocked', uncovered: [{ reason: 'no_source_mapping' }] } } })
   })
@@ -175,13 +179,16 @@ describe('native/MCP harness read tools', () => {
     const f = fixture()
     const target = { kind: 'component' as const, productId, componentId }
     const child = { ...revision, id: otherId, scope: target, definition: { ...definition, rules: [{ key: 'width', kind: 'local' as const, value: 'Calendar local width', override: false }] } }
-    f.snapshot.mockResolvedValue({ tree, revisions: [revision, child] })
-    const result = await f.invoke('prepareProjectHarnessTask', { prompt: 'Fix calendar', runtimeProject: 'configured-frontend', scope: target })
+    f.snapshot.mockResolvedValue({ taskEvidence, tree, revisions: [revision, child] })
+    const result = await f.invoke('prepareProjectHarnessTask', { brianTaskId, prompt: 'Fix calendar', runtimeProject: 'configured-frontend', scope: target })
     expect(result).toMatchObject({ data: { status: 'prepared', toolName: 'new_task_with_context', arguments: {
-      prompt: 'Fix calendar', context: { project: 'configured-frontend', product: 'Frontend',
+      brianTaskId, prompt: 'Fix calendar', context: { project: 'configured-frontend', product: 'Frontend',
         constraints: [expect.stringContaining('Calendar local width'), expect.stringContaining('impact_selected_coding_test_plan')],
         verification: expect.stringContaining('Coding/test review only'), references: [expect.stringContaining(revisionId), expect.stringContaining(otherId)] },
     }, binding: { projectId, scope: target }, notice: expect.stringContaining('no task started') } })
+    expect(result.scopeEvidence).toMatchObject({ sensitivity: 'internal', sources: taskEvidence.sources })
+    expect(f.context.scopeAccumulator!.evidence).toEqual(result.scopeEvidence)
+    expect(JSON.stringify(result.data)).not.toContain('resourceKind')
     const encoded = JSON.stringify(result)
     expect(encoded).toContain('IMPLEMENTATION_SECRET')
     expect(encoded).toContain('contract tests')
@@ -189,19 +196,27 @@ describe('native/MCP harness read tools', () => {
     expect(f.store.lineage).not.toHaveBeenCalled()
     expect(f.store.tree).not.toHaveBeenCalled()
     expect(f.execution.approvals).not.toHaveBeenCalled()
-    expect(f.snapshot).toHaveBeenCalledExactlyOnceWith(userId, workspaceId, projectId)
+    expect(f.snapshot).toHaveBeenCalledExactlyOnceWith(userId, workspaceId, projectId, { brianTaskId, access: f.context.executionContext!.security.access })
+  })
+  it('withholds all arguments if Task admission fails or canonical evidence is absent', async () => {
+    const f = fixture()
+    const input = { brianTaskId, prompt: 'Implement', runtimeProject: 'frontend' }
+    f.snapshot.mockRejectedValueOnce(new WorkspaceAccessError('harness_not_found', 404))
+    expect(await f.invoke('prepareProjectHarnessTask', input)).toEqual({ isError: true, data: { error: 'harness_not_found' } })
+    f.snapshot.mockResolvedValueOnce({ tree, revisions: [revision] })
+    expect(await f.invoke('prepareProjectHarnessTask', input)).toEqual({ isError: true, data: { error: 'harness_unavailable' } })
   })
   it('preparation rejects caller-authored contracts, missing runtime selection, conflicts and unconfigured scopes', async () => {
     const f = fixture()
-    const valid = { prompt: 'Implement', runtimeProject: 'frontend' }
-    for (const input of [{ prompt: 'Implement' }, { ...valid, context: { constraints: ['replace'] } }, { ...valid, runtimeProject: '../private' },
+    const valid = { brianTaskId, prompt: 'Implement', runtimeProject: 'frontend' }
+    for (const input of [{ prompt: valid.prompt, runtimeProject: valid.runtimeProject }, { ...valid, brianTaskId: 'not-a-uuid' }, { brianTaskId, prompt: 'Implement' }, { ...valid, context: { constraints: ['replace'] } }, { ...valid, runtimeProject: '../private' },
       { ...valid, verification: 'approved' }, { ...valid, cwd: '/elsewhere' }, { ...valid, prompt: 'bad\0text' }]) {
       expect(await f.invoke('prepareProjectHarnessTask', input)).toMatchObject({ isError: true, data: { error: 'harness_invalid_input' } })
     }
     expect(f.store.lineage).not.toHaveBeenCalled()
-    f.snapshot.mockResolvedValue({ tree, revisions: [] })
+    f.snapshot.mockResolvedValue({ taskEvidence, tree, revisions: [] })
     expect(await f.invoke('prepareProjectHarnessTask', valid)).toMatchObject({ isError: true, data: { error: 'harness_context_unconfigured' } })
-    f.snapshot.mockResolvedValue({ tree, revisions: [{ ...revision, definition: { ...definition, rules: [{ ...definition.rules[0], override: true }] } }] })
+    f.snapshot.mockResolvedValue({ taskEvidence, tree, revisions: [{ ...revision, definition: { ...definition, rules: [{ ...definition.rules[0], override: true }] } }] })
     expect(await f.invoke('prepareProjectHarnessTask', valid)).toMatchObject({ isError: true, data: { error: 'harness_context_conflicted' } })
   })
   it('rejects CJK results before the executor could truncate the successful context/prompt pair', async () => {

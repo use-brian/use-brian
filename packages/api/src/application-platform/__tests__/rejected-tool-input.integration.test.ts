@@ -33,14 +33,16 @@ await assertLocalFixture()
 const usage={inputTokens:1,outputTokens:1}
 const obj=(properties:Record<string,unknown>,required:string[]=[])=>({type:'object',properties,additionalProperties:false,...(required.length?{required}:{})})
 const str={type:'string'},strings={type:'array',items:str}
-const wire=obj({prompt:str,cwd:str,context:obj({summary:str,project:str,product:str,verification:str,constraints:strings,references:strings,
- conversation:{type:'array',items:obj({role:{type:'string',enum:['system','developer','user','assistant','tool']},content:str},['role','content'])}})},['prompt','context'])
+const wire=obj({brianTaskId:str,prompt:str,cwd:str,context:obj({summary:str,project:str,product:str,verification:str,constraints:strings,references:strings,
+ conversation:{type:'array',items:obj({role:{type:'string',enum:['system','developer','user','assistant','tool']},content:str},['role','content'])}})},['brianTaskId','prompt','context'])
 async function canonicalArguments(){
  const id=(n:number)=>`52000000-0000-4000-8000-${String(n).padStart(12,'0')}`
  const workspaceId=id(1),projectId=id(2),userId=id(3),productId=id(4),componentId=id(5),now='2026-01-01T00:00:00Z'
  const node=(nid:string,name:string)=>({id:nid,name,description:null,workspaceId,projectId,revision:1,status:'active' as const,createdAt:now,updatedAt:now})
  const scope={kind:'component' as const,productId,componentId}
- const snapshot={tree:{products:[node(productId,'Synthetic Product')],components:[{...node(componentId,'Synthetic Landing'),productId}]},revisions:[
+ const taskEvidence={sources:[{resourceKind:'task',resourceId:id(8),version:'1',workspaceId,userId,assistantId:null,
+  sensitivity:'internal',compartments:[],projectIds:[projectId]}]}
+ const snapshot={taskEvidence,tree:{products:[node(productId,'Synthetic Product')],components:[{...node(componentId,'Synthetic Landing'),productId}]},revisions:[
   {id:id(10),workspaceId,projectId,scope:{kind:'project' as const},revision:1,createdAt:now,createdBy:userId,
    definition:{schemaVersion:1 as const,rules:[],codeChecks:[{key:'unit',kind:'unit' as const,instructions:'Run synthetic checks',command:'node --test'}],acceptanceScenarios:[]}}]}
  const tool=createProjectHarnessTools({store:{} as never,execution:{} as never,snapshot:vi.fn().mockResolvedValue(snapshot)}).find(t=>t.name==='prepareProjectHarnessTask')!
@@ -53,7 +55,7 @@ async function canonicalArguments(){
   authority,writeDefaults:{compartments:[],projectIds:[projectId]},
   lifecycle:{sessionId:id(7),channelType:'web',channelId:'fixture',abortSignal:new AbortController().signal}})
  const context={...executionToolContext(execution,{appId:'synthetic-preparation'}),activeProjectId:projectId,scopeAccumulator:new ContextScopeAccumulator()}
- const result=await tool.execute({prompt:'Synthetic static page; no real coding task.',runtimeProject:'synthetic',scope,scopes:[scope]},context)
+ const result=await tool.execute({brianTaskId:id(8),prompt:'Synthetic static page; no real coding task.',runtimeProject:'synthetic',scope,scopes:[scope]},context)
  expect(result.isError).not.toBe(true)
  const prepared=result.data as {status:string;arguments:Record<string,unknown>}
  expect(prepared.status).toBe('prepared')
