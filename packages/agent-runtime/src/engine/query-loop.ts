@@ -2558,6 +2558,7 @@ export function streamErrorCode(err: unknown): string | undefined {
  */
 function isTransientStreamError(err: unknown): boolean {
   if (err instanceof Error && err.name === 'AbortError') return false
+  if (err && typeof err === 'object' && 'retrySafe' in err && err.retrySafe === false) return false
   if (streamErrorCodes(err).some((code) => TRANSIENT_SOCKET_CODES.has(code))) return true
   const msg = err instanceof Error ? err.message : String(err)
   return (

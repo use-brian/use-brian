@@ -1,5 +1,6 @@
 import { wrapProvider } from '@use-brian/agent-runtime/providers/wrappers.js'
 import { createGeminiProvider } from '@use-brian/agent-runtime/providers/gemini.js'
+import { CodexRpcTimeoutError, CodexRpcClosedError } from '@use-brian/agent-runtime/providers/codex-app-server/rpc.js'
 import { describe, it, expect, vi } from 'vitest'
 import { NOOP_TURN_LEDGER } from '@use-brian/agent-runtime/engine/turn-ledger.js'
 import { z } from 'zod'
@@ -227,6 +228,20 @@ describe('[COMP:engine/query-loop] Transient stream retry', () => {
       expect(text, `expected recovery for ${errMsg}`).toBe('ok')
       expect(calls).toHaveLength(2)
     }
+  })
+
+  it.each([
+    new CodexRpcTimeoutError('turn/start', { phase: 'awaiting_response',
+      elapsedMs: { write_queue: 0, input_authority: 503, stdin_write: 1, awaiting_response: 29496 } }),
+    new CodexRpcClosedError('Codex app-server stdin write failed: EPIPE'),
+  ])('does not repeat a Codex call with an uncertain outcome: $message', async (error) => {
+    const { provider, calls } = scriptedProvider([
+      { kind: 'throwBefore', error },
+      { kind: 'chunks', chunks: textChunks('should not be retried') },
+    ])
+    const events = await runRetryLoop(provider)
+    expect(calls).toHaveLength(1)
+    expect(events).toContainEqual({ type: 'error', error })
   })
 
   it('retries when only err.code says ECONNRESET (message is just "aborted")', async () => {

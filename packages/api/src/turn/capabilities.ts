@@ -31,6 +31,8 @@ import { missingToolCapability } from '@use-brian/agent-runtime/tools/capability
 import { mailboxGetMessageInput, mailboxSearchInput } from '@use-brian/core/tools/base/mailbox.js'
 import { knowledgeSearchInput } from '@use-brian/core/tools/base/knowledge.js'
 import { AuthorityChangedError, isAuthorityChangedError } from '../context-scope/authority-lease.js'
+import { CHAT_ARCHIVE_CHANNELS_TOOL, CHAT_ARCHIVE_SEARCH_TOOL } from '../chat-archive/tool-catalog.js'
+import { retainInitialReadEvidence } from './initial-read-authority.js'
 import type { ApplyMcpInjectionParams } from '../routes/route-helpers.js'
 import type { SurfaceCapabilities, SurfaceCapabilityOptions } from '../mcp/surface.js'
 import { CONNECTOR_PREPARATION_UNAVAILABLE } from '../mcp/discovery-diagnostics.js'
@@ -59,19 +61,52 @@ export type TurnCapabilityRequest =
 export type TurnCapabilityResult = SurfaceCapabilities
 export type InitialReadCapabilities = () => Promise<TurnCapabilityRequest | null>
 export type InitialMailboxCapabilities = InitialReadCapabilities
+export type InitialChatArchiveReads = { assertRecipientCurrent: () => Promise<void>; onRead: () => void }
 
 const CURRENT_TURN_TOOLS = ['webSearch', 'urlReader', 'calculate']
+const INITIAL_CHAT_ARCHIVE_TOOLS = [CHAT_ARCHIVE_CHANNELS_TOOL.name, CHAT_ARCHIVE_SEARCH_TOOL.name]
 
-/** Select the already registered reads that need no private context or capability lookup. */
-export function initialCurrentTurnTools(candidates: ReadonlyMap<string, Tool>): Tool[] {
+function initialDirectReads(candidates: ReadonlyMap<string, Tool>, names: readonly string[]): Tool[] {
   const tools: Tool[] = []
-  for (const name of CURRENT_TURN_TOOLS) {
+  for (const name of names) {
     const tool = candidates.get(name)
     if (tool && tool.name === name && tool.isReadOnly && !tool.hiddenFromModel
       && !tool.deferredSchemaOnly && !missingToolCapability(tool)
       && !tool.requiresConfirmation && !tool.resolveConfirmation && !tool.resolveToolCall) tools.push(tool)
   }
   return tools
+}
+
+/** Select the already registered reads that need no private context or capability lookup. */
+export function initialCurrentTurnTools(candidates: ReadonlyMap<string, Tool>): Tool[] {
+  return initialDirectReads(candidates, CURRENT_TURN_TOOLS)
+}
+
+/** The channel adapter has bound this direct destination to the verified speaker. */
+export function captureInitialChatArchiveTools(candidates: ReadonlyMap<string, Tool>,
+  assertCurrent: () => Promise<void>, { assertRecipientCurrent, onRead }: InitialChatArchiveReads): Tool[] {
+  return initialDirectReads(candidates, INITIAL_CHAT_ARCHIVE_TOOLS).map(tool => ({
+    ...tool,
+    description: `${tool.description} Use directly when the current message supplies the subject or time range. Resolve references to earlier messages in this conversation before searching.`,
+    async execute(input, context) {
+      const execution = context.executionContext
+      const identity = execution?.identity
+      if (!execution || execution.lifecycle.channelType !== 'telegram' || execution.security.access.sharedAudience
+        || identity?.kind !== 'attended' || identity.principal.kind !== 'workspace_member'
+        || identity.principal.authenticationKind !== 'verified_channel'
+        || identity.principal.userId !== context.userId) throw new AuthorityChangedError()
+      await assertCurrent()
+      await assertRecipientCurrent()
+      context.abortSignal.throwIfAborted()
+      retainInitialReadEvidence(execution, 'telegram:personal-chat-archive', assertRecipientCurrent)
+      onRead()
+      const result = await tool.execute(input, context)
+      await assertCurrent()
+      await assertRecipientCurrent()
+      context.abortSignal.throwIfAborted()
+      return result
+    },
+  }))
 }
 
 const identityEnricher: SurfaceCapabilities['enrichConfirmation'] = async (_toolName, input) => input

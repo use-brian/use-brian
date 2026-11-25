@@ -1,6 +1,6 @@
 import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/attended-audience.js'
 import type { TurnCapabilityRequest } from '../turn/capabilities.js'
-import { assertInitialMailboxEvidenceCurrent } from '../turn/mailbox-read-authority.js'
+import { assertInitialReadEvidenceCurrent } from '../turn/initial-read-authority.js'
 import { withTurnInference } from '../turn/runtime.js'
 import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
 import { bindScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
@@ -1748,7 +1748,7 @@ async function executePublicTurnInScope(
     try {
       await assertDeliveryAudience()
       await assertTurnCurrent()
-      await assertInitialMailboxEvidenceCurrent(executionContext)
+      await assertInitialReadEvidenceCurrent(executionContext)
     } catch (err) {
       if (!isAuthorityChangedError(err) && !isDeliveryAudienceUnverifiedError(err)) throw err
       const error = isAuthorityChangedError(err)

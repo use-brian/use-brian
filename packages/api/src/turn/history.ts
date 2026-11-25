@@ -26,6 +26,9 @@ import {DerivedScopeError} from '@use-brian/agent-runtime/security/derived-scope
 import {conversationRecordSelectedRow} from '../db/conversation-record.js'
 import type { PublicTurnConversationBinding } from '../db/public-conversation.js'
 import type {ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
+import {readRetainedContextFrame} from '../db/session-context-revisions.js'
+import {privateHistoryText} from '../db/session-legacy-history.js'
+import {recentTextDigest,selectVerifiedChannelRecentText} from '../db/verified-channel-record.js'
 
 /** The swappable readers underneath the owner port. */
 export type TurnHistoryReaders = {
@@ -121,4 +124,37 @@ export function captureTurnHistory(sessionId: string, input: TurnHistoryRequest)
     if (request.evidence) noteAutomaticScopeEvidence(request.evidence, messages)
     return Object.freeze({ messages, source: 'stored' as const })
   }
+}
+
+/** Positive dialogue excerpts from the exact verified pre-input window. The
+ * selector witness is local to the original invocation. Each model/reply
+ * boundary independently checks the same slice and its retained source roots. */
+export async function readRecentChannelText(authority: SessionContextAuthority, beforeSequence: number, signal: AbortSignal) {
+  const {execution} = authority
+  const select = () => selectVerifiedChannelRecentText(execution, beforeSequence)
+  signal.throwIfAborted()
+  await execution.security.authority.assertCurrent()
+  const candidates = await select()
+  const witness = JSON.stringify(candidates)
+  const isCurrent = async () => JSON.stringify(await select()) === witness
+  const sources = candidates.map(candidate => candidate.source)
+  const messages = !sources.length ? [] : await readRetainedContextFrame(authority, sources, async client => {
+    const {rows} = await client.query<{id:string;role:'user'|'assistant';sequence:number;digest:string;content:unknown}>(`SELECT
+      m.id,m.role,m.sequence_num AS sequence,${recentTextDigest} AS digest,m.content
+      FROM session_messages m WHERE m.workspace_id=$1 AND m.session_id=$2 AND m.id=ANY($3::uuid[])
+        AND m.scope_held IS NOT TRUE ORDER BY m.sequence_num`,
+    [execution.security.access.workspaceId,execution.lifecycle.sessionId,sources.map(source=>source.resourceId)])
+    if (rows.length !== candidates.length) throw new DerivedScopeError('scope_source_changed')
+    return rows.flatMap((row,index) => {
+      const candidate = candidates[index]
+      if (row.id !== candidate.source.resourceId || row.sequence !== candidate.sequence || row.role !== candidate.role
+        || row.digest !== candidate.digest) throw new DerivedScopeError('scope_source_changed')
+      const text = privateHistoryText(row.content,row.role)
+      if (!text) return []
+      return [{role:row.role,text:text.length>1000?Array.from(text).slice(0,1000).join('')+'…':text}]
+    })
+  })
+  if (!await isCurrent()) throw new DerivedScopeError('scope_source_changed')
+  signal.throwIfAborted()
+  return {messages,sources,isCurrent}
 }

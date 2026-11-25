@@ -1,6 +1,6 @@
 import { admitCurrentAuthoredInput, readAttendedSessionHistory } from './attended-session-context.js'
 import type { RouteCapabilityParams, TurnCapabilityRequest } from '../turn/capabilities.js'
-import { assertInitialMailboxEvidenceCurrent } from '../turn/mailbox-read-authority.js'
+import { assertInitialReadEvidenceCurrent } from '../turn/initial-read-authority.js'
 import { readsNativePdf, type DiscoveredTurnFrame } from '../turn/prepare.js'
 import { routeAttendedTurn, type AttendedTurnRoute } from './attended-turn-routing.js'
 import {bindPrivateResponderTranscript,privateTranscriptText,resumePrivateLegacySession,PRIVATE_TRANSCRIPT_INSTRUCTION} from '../db/private-transcript.js'
@@ -8542,7 +8542,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             })
             let synthesised: string | null = null
             try {
-              await assertInitialMailboxEvidenceCurrent(executionContext)
+              await assertInitialReadEvidenceCurrent(executionContext)
               const result = await authority.execute(() => composeEmptyTurnSynthesis({
                 provider: backgroundProvider,
                 pendingAssistantTurns,
@@ -8571,7 +8571,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             }
             if (synthesised) {
               await assertDeliveryAudience()
-              await assertInitialMailboxEvidenceCurrent(executionContext)
+              await assertInitialReadEvidenceCurrent(executionContext)
               sendEvent('text_delta', { text: synthesised })
               await ownedTurn.publish({ disposition: 'closing', write: publicationWrite(),
                 native: nativeTranscriptAuthority, execute: operation => authority.execute(operation), rows: [{
@@ -8644,7 +8644,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
               }) : null
           if (recovered) {
             await assertDeliveryAudience()
-            await assertInitialMailboxEvidenceCurrent(executionContext)
+            await assertInitialReadEvidenceCurrent(executionContext)
             sendEvent('text_delta', { text: recovered.text })
             // Persist as a real assistant message so the recovery is
             // part of the conversation history on next page load —

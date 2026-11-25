@@ -58,7 +58,7 @@ import type { ConnectorSourceRuntimeFactory } from '../application-platform/sour
 import type { ConnectorActionAudit } from '../connector-action-port.js'
 import type { ConnectorTurnGrant } from '../context-scope/connector-exposure.js'
 import { AuthorityChangedError } from '../context-scope/authority-lease.js'
-import { retainInitialMailboxEvidence } from '../turn/mailbox-read-authority.js'
+import { retainInitialReadEvidence } from '../turn/initial-read-authority.js'
 import { captureRetainedToolPolicy, instanceBindingFingerprint } from './activation.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import type { ConnectorStore } from '../db/connector-store.js'
@@ -302,8 +302,8 @@ export async function prepareMailboxReadDispatcher(surface: 'web' | 'channel' | 
                 catalog.plan.assistantId, descriptor.governanceId, 'imap')) throw new AuthorityChangedError()
             }
             await Promise.all([assertBindingCurrent(), policy.assertCurrent()])
-            retainInitialMailboxEvidence(execution, instanceId, assertBindingCurrent)
-            retainInitialMailboxEvidence(execution, JSON.stringify([instanceId, name, policy.alreadyConfirmed]), policy.assertCurrent)
+            retainInitialReadEvidence(execution, instanceId, assertBindingCurrent)
+            retainInitialReadEvidence(execution, JSON.stringify([instanceId, name, policy.alreadyConfirmed]), policy.assertCurrent)
           }
           return result
         },
