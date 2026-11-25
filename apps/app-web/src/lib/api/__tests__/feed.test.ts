@@ -435,9 +435,9 @@ describe("[COMP:app-web/feed-sdk] feed SDK", () => {
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
 
-    // Missing key degrades to [].
+    // A malformed response cannot confirm a draft is absent.
     authFetch.mockResolvedValueOnce(jsonResponse({}));
-    await expect(fetchFeedDraftSessions("a-1", "twitter")).resolves.toEqual([]);
+    await expect(fetchFeedDraftSessions("a-1", "twitter")).rejects.toThrow();
 
     authFetch.mockResolvedValueOnce(jsonResponse({}, false, 500));
     await expect(fetchFeedDraftSessions("a-1", "threads")).rejects.toThrow(

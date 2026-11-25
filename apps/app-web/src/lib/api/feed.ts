@@ -18,7 +18,7 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
  * [COMP:app-web/feed-sdk]
  */
 
-import { feedCachedJson } from "@/lib/offline/feed-cache";
+import { feedCachedJson, feedOwner, isAuthoritativeFeedDenial } from "@/lib/offline/feed-cache";
 import { mergeLocalFeedSessions, readLocalFeedPost } from "@/lib/offline/feed-offline";
 import { authFetch } from "@/lib/auth-fetch";
 import type { PostMedia } from "@/lib/feed-media";
@@ -202,7 +202,8 @@ export async function fetchFeedDistributionAssistants(
   const body = await feedCachedJson<{
     assistants?: Array<{ id: string; name: string; kind?: string; appType?: string }>;
   }>(`/api/assistants?workspaceId=${encodeURIComponent(workspaceId)}`);
-  return (body.assistants ?? [])
+  if (!Array.isArray(body?.assistants)) throw new Error("Invalid Feed assistant list");
+  return body.assistants
     .filter((assistant) =>
       assistant.kind === "app" && assistant.appType === "distribution"
     )
@@ -718,19 +719,32 @@ export async function fetchFeedDraftSessions(
   /** Omit for every platform — the merged Posts queue reads the whole rail
    *  in one call. Both editions treat the query param as optional. */
   platform?: FeedPlatform,
+  requireNetwork = false,
 ): Promise<FeedDraftSessionSummary[]> {
-  let sessions: FeedDraftSessionSummary[] = [];
+  const owner = feedOwner();
+  const started = performance.timeOrigin + performance.now();
+  let fresh = false;
+  const valid = (body: { sessions?: FeedDraftSessionSummary[] }) =>
+    Array.isArray(body?.sessions) && body.sessions.every(row => typeof row?.id === "string" && row.id.length > 0);
+  let rows: FeedDraftSessionSummary[];
   try {
     const body = await feedCachedJson<{ sessions?: FeedDraftSessionSummary[] }>(
       `/api/distribution/${assistantId}/draft-sessions${platform ? `?platform=${platform}` : ""}`,
+      { requireNetwork, onNetworkValue: result => {
+        if (!valid(result)) throw new Error("Invalid Feed draft list");
+        fresh = true;
+      } },
     );
-    sessions = body.sessions ?? [];
+    if (!valid(body)) throw new Error("Invalid Feed draft list");
+    rows = body.sessions!;
   } catch (error) {
-    const local = await mergeLocalFeedSessions(assistantId, [], platform);
-    if (!local.length) throw error;
+    if (feedOwner() !== owner) throw error;
+    const denied = isAuthoritativeFeedDenial(error);
+    const local = await mergeLocalFeedSessions(assistantId, [], platform, denied ? "denied" : "unavailable", started);
+    if (requireNetwork || denied || !local.length) throw error;
     return local;
   }
-  return mergeLocalFeedSessions(assistantId, sessions, platform);
+  return mergeLocalFeedSessions(assistantId, rows, platform, fresh ? "live" : "cached", started);
 }
 
 /**

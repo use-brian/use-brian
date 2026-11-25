@@ -128,10 +128,13 @@ export async function feedPaintFirst<T>(
   );
   return cached;
 }
-export async function feedCachedJson<T>(path: string): Promise<T> {
+export async function feedCachedJson<T>(path: string, options: {
+  requireNetwork?: boolean;
+  onNetworkValue?: (value: T) => void | Promise<void>;
+} = {}): Promise<T> {
   const owner = feedOwner();
   const key = `feed:cache:${owner}:${path}`;
-  const cached = owner ? currentCopy<T>(await idbGet<unknown>(key))?.value ?? null : null;
+  const cached = owner && !options.requireNetwork ? currentCopy<T>(await idbGet<unknown>(key))?.value ?? null : null;
   if (typeof navigator !== "undefined" && navigator.onLine === false) {
     if (cached !== null && feedOwner() === owner) return cached;
     throw new FeedReadError(0);
@@ -141,13 +144,12 @@ export async function feedCachedJson<T>(path: string): Promise<T> {
     if (!response.ok) throw new FeedReadError(response.status);
     const value = await response.json() as T;
     if (feedOwner() !== owner) throw new FeedReadError(401);
+    await options.onNetworkValue?.(value);
+    if (feedOwner() !== owner) throw new FeedReadError(401);
     if (owner) await idbSet(key, confirmed(value));
     return value;
   } catch (error) {
-    const transient = !(error instanceof FeedReadError) || error.status >= 500 ||
-      (error.status === 401 && isDesktopAuth() && Boolean(
-        desktopBridge()?.getAccessToken?.() || desktopBridge()?.getRefreshToken?.(),
-      ));
+    const transient = !isAuthoritativeFeedDenial(error);
     if (!transient) await idbDelete(key);
     if (transient && cached !== null && feedOwner() === owner) return cached;
     throw error;

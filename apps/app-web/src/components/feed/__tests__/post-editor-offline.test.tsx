@@ -9,7 +9,10 @@ vi.mock("@/lib/user", () => ({ getUserInfo: () => ({ id: "viewer-a" }) }));
 vi.mock("@/lib/auth-fetch", () => ({ authFetch: vi.fn(async () => { throw new Error("offline"); }) }));
 vi.mock("@/lib/i18n/client", async () => { const { en } = await import("@/lib/i18n/dictionaries/en"); return { useT: () => en, useLocale: () => "en" }; });
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: state.push }) }));
-vi.mock("@/lib/offline/use-offline-sync", () => ({ useIsOffline: () => state.offline }));
+vi.mock("@/lib/offline/use-offline-sync", async importOriginal => ({
+  ...await importOriginal<typeof import("@/lib/offline/use-offline-sync")>(),
+  useIsOffline: () => state.offline,
+}));
 vi.mock("@/lib/recorder/dock-recorder-bridge", () => ({ useGlobalDockRecorder: () => null }));
 vi.mock("@/components/feed/tuning-chat-panel", () => ({ TuningChatPanel: (props: Record<string, unknown>) => { state.chatProps = props; return null; } }));
 vi.mock("@/components/feed/post-media-tray", () => ({ PostMediaTray: () => null }));
@@ -32,8 +35,14 @@ import { TextSelection } from '@tiptap/pm/state';
 import { feedCollaborationCacheKey } from '@/lib/surface-prefetch';
 import { PostEditor } from "../post-editor";
 import { blankFeedContent, createLocalFeedPost, readLocalFeedPost, readFeedNewPostForm } from "@/lib/offline/feed-offline";
+import { useOfflineSync } from "@/lib/offline/use-offline-sync";
 import { authFetch } from "@/lib/auth-fetch";
 import { resetSurfaceCache, markSurfaceCacheStale } from '@/lib/surface-cache';
+
+function ReconnectingDraft({ id }: { id: string }) {
+  useOfflineSync();
+  return <PostEditor platform="threads" sessionId={id} />;
+}
 
 let root: Root;
 let container: HTMLDivElement;
@@ -67,6 +76,50 @@ beforeEach(() => {
 });
 
 describe('[COMP:app-web/feed-post-editor] unavailable history', () => {
+  it('requires successful working-copy admission before opening a listed draft for the first time', async () => {
+    const { session } = await createLocalFeedPost('assistant-1', 'threads', blankFeedContent());
+    state.data.clear();
+    state.chatProps = null;
+    state.canDraft = false; // Observe admission without triggering a legacy upgrade.
+    state.offline = false;
+    Object.defineProperty(navigator, 'onLine', { value: true, configurable: true });
+    const draftText = 'Retained version from the list';
+    let status = 503;
+    vi.mocked(authFetch).mockImplementation(async url => {
+      const path = String(url);
+      if (path.includes('/post-working-copies/')) return new Response(JSON.stringify(status === 200 ? { copy: null } : {}), { status });
+      if (path.includes('/draft-sessions?')) return Response.json({ sessions: [session] });
+      if (path.endsWith('/saved-drafts')) return Response.json({ drafts: [{ status: 'pending', draftText }] });
+      return Response.json([]);
+    });
+    const assertWithheld = async () => {
+      expect(container.querySelector('textarea,[contenteditable],[data-feed-document-layout]')).toBeNull();
+      expect(container.textContent).not.toContain(draftText);
+      expect(state.chatProps).toBeNull();
+      expect(await readLocalFeedPost('assistant-1', session.id)).toBeNull();
+    };
+
+    await render(session.id);
+    await assertWithheld();
+    status = 403;
+    await remount();
+    await render(session.id);
+    expect(container.querySelector('[data-post-editor-unavailable]')).toBeTruthy();
+    await assertWithheld();
+    await remount();
+    state.offline = true;
+    Object.defineProperty(navigator, 'onLine', { value: false, configurable: true });
+    await render(session.id);
+    await assertWithheld();
+
+    state.offline = false;
+    status = 200;
+    Object.defineProperty(navigator, 'onLine', { value: true, configurable: true });
+    await act(async () => { window.dispatchEvent(new Event('online')); });
+    expect(await readLocalFeedPost('assistant-1', session.id)).toMatchObject({ content: { text: draftText } });
+    expect(container.querySelector('[data-feed-document-layout]')).toBeTruthy();
+  });
+
   it('withholds the editor and chat and offers a read-only retry and posts route', async () => {
     state.offline=false; state.chatProps=null;
     Object.defineProperty(navigator,'onLine',{value:true,configurable:true});
@@ -131,6 +184,16 @@ describe('[COMP:app-web/feed-post-editor] automatic legacy upgrade', () => {
     expect(container.textContent).not.toContain('Keep the existing copy.');
     // The working copy is untouched while hidden.
     expect((await readLocalFeedPost('assistant-1',post.session.id))?.content.text).toBe('Keep the existing copy.');
+    await remount();
+    resetSurfaceCache();
+    vi.mocked(authFetch).mockRejectedValue(new TypeError('Failed to fetch'));
+    state.offline = true;
+    Object.defineProperty(navigator, 'onLine', { value: false, configurable: true });
+    await render(post.session.id);
+    expect(container.querySelector('[data-feed-composition],textarea,[contenteditable]')).toBeNull();
+    expect(container.textContent).not.toContain('Keep the existing copy.');
+    state.offline = false;
+    Object.defineProperty(navigator, 'onLine', { value: true, configurable: true });
     vi.mocked(authFetch).mockImplementation(previous);
     const retry=[...container.querySelectorAll('button')].find(b=>b.textContent===en.feedPage.postEditor.accessLostRetry)!;
     await act(async()=>retry.click());
@@ -138,32 +201,132 @@ describe('[COMP:app-web/feed-post-editor] automatic legacy upgrade', () => {
     expect(container.querySelector('[data-post-editor-unavailable]')).toBeNull();
     expect(container.querySelector('[data-feed-composition]')?.textContent).toContain('Keep the existing copy.');
   });
-  it('hides after the 30-second lease online but keeps the one-hour window offline', async () => {
-    const post=await legacyPost();goOnline(post);await render(post.session.id);
-    const previous=vi.mocked(authFetch).getMockImplementation()!;
-    vi.mocked(authFetch).mockImplementation((url,init)=>String(url).includes('/draft-sessions?')?Promise.reject(new Error('network')):previous(url,init));
-    const now=performance.now();const clock=vi.spyOn(performance,'now');
+  it.each([
+    ['timeout', () => Promise.reject(new TypeError('Failed to fetch'))],
+    ['408', () => Promise.resolve(new Response('', { status: 408 }))],
+    ['429', () => Promise.resolve(new Response('', { status: 429 }))],
+    ['503', () => Promise.resolve(new Response('', { status: 503 }))],
+    ['malformed list', () => Promise.resolve(new Response('{"sessions":null}'))],
+  ] as const)('keeps the mounted editor after an inconclusive %s renewal', async (_label, failure) => {
+    const post = await legacyPost();
+    goOnline(post);
+    await render(post.session.id);
+    const editor = container.querySelector('[contenteditable="true"]');
+    expect(editor).toBeTruthy();
+    const currentTime = performance.now();
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(currentTime + 31_000);
     try {
-      Object.defineProperty(navigator,'onLine',{value:false,configurable:true});
-      clock.mockReturnValue(now+31_000);
-      await act(async()=>{window.dispatchEvent(new Event('focus'));});
+      vi.mocked(authFetch).mockImplementation(failure);
+      await act(async () => { window.dispatchEvent(new Event('focus')); });
+      expect(container.querySelector('[contenteditable="true"]')).toBe(editor);
       expect(container.querySelector('[data-post-editor-unavailable]')).toBeNull();
-      Object.defineProperty(navigator,'onLine',{value:true,configurable:true});
-      await act(async()=>{window.dispatchEvent(new Event('focus'));});
-      await act(async()=>{});
-      expect(container.querySelector('[data-post-editor-unavailable]')).toBeTruthy();
-      expect(container.textContent).not.toContain('Keep the existing copy.');
     } finally { clock.mockRestore(); }
   });
-  it('withholds an open editor after a collaboration read denies access', async () => {
-    const post=await legacyPost();goOnline(post);await render(post.session.id);
-    expect(container.querySelector('[data-feed-composition]')).toBeTruthy();
-    const previous=vi.mocked(authFetch).getMockImplementation()!;
-    vi.mocked(authFetch).mockImplementation((url,init)=>String(url).endsWith('/collaboration')?Promise.resolve(new Response('{}',{status:403})):previous(url,init));
-    await act(async()=>{markSurfaceCacheStale(feedCollaborationCacheKey('workspace-1','assistant-1',post.session.id));});
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain(en.feedPage.postEditor.loadFailed);
+
+  it('restores a clean working copy when the draft list expires during a network outage', async () => {
+    const post = await legacyPost();
+    goOnline(post);
+    await render(post.session.id);
+    expect((await readLocalFeedPost('assistant-1', post.session.id))?.dirty).toBe(false);
+    await remount();
+    resetSurfaceCache();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 2 * 60 * 60_000);
+    try {
+      vi.mocked(authFetch).mockResolvedValue(new Response('', { status: 503 }));
+      await render(post.session.id);
+      expect(container.querySelector('[contenteditable="true"]')?.textContent).toBe('Keep the existing copy.');
+    } finally { clock.mockRestore(); }
+  });
+
+  it('reopens a previously confirmed draft and replays its retained offline edit on reconnection', async () => {
+    const post = await legacyPost();
+    goOnline(post);
+    const views = vi.spyOn(EditorView.prototype, 'setProps');
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now');
+    try {
+      await render(post.session.id);
+      const editor = container.querySelector('[contenteditable="true"]')!;
+      const view = (views.mock.contexts as EditorView[]).find(item => item.dom === editor)!;
+      clock.mockReturnValue(now + 2 * 60 * 60_000);
+      vi.mocked(authFetch).mockRejectedValue(new TypeError('Failed to fetch'));
+      await act(async () => view.dispatch(view.state.tr.insertText('Offline edit. ', 1)));
+      const edited = await readLocalFeedPost('assistant-1', post.session.id);
+      expect(edited?.dirty).toBe(true);
+      const expected = 'Offline edit. Keep the existing copy.';
+      expect(edited?.content.text).toBe(expected);
+      await remount();
+      state.offline = true;
+      Object.defineProperty(navigator, 'onLine', { value: false, configurable: true });
+      resetSurfaceCache();
+      await act(async () => root.render(<ReconnectingDraft id={post.session.id} />));
+      expect(container.querySelector('[contenteditable="true"]')?.textContent).toBe(expected);
+      goOnline(edited!);
+      await act(async () => { window.dispatchEvent(new Event('online')); });
+      expect((await readLocalFeedPost('assistant-1', post.session.id))?.content.text).toBe(expected);
+      expect(await readLocalFeedPost('assistant-1', post.session.id)).toMatchObject({ dirty: false });
+      expect(commands().map(([, init]) => JSON.parse(String(init?.body)).mutationId)).toContain(edited!.mutationId);
+    } finally { clock.mockRestore(); views.mockRestore(); }
+  });
+  it('keeps a confirmed detail denial through an offline remount and a stale positive listing', async () => {
+    const post = await legacyPost();
+    goOnline(post);
+    await render(post.session.id);
+    const content = 'Keep the existing copy.';
+    expect(container.querySelector('[data-feed-composition]')?.textContent).toContain(content);
+    const allowed = vi.mocked(authFetch).getMockImplementation()!;
+    const denyDetail: typeof allowed = (url, init) => String(url).endsWith('/collaboration')
+      ? Promise.resolve(new Response('{}', { status: 403 }))
+      : allowed(url, init);
+    vi.mocked(authFetch).mockImplementation(denyDetail);
+    await act(async () => { markSurfaceCacheStale(feedCollaborationCacheKey('workspace-1', 'assistant-1', post.session.id)); });
     expect(container.querySelector('[data-feed-composition],textarea,[contenteditable]')).toBeNull();
-    expect(container.textContent).not.toContain('Keep the existing copy.');
+
+    await remount();
+    resetSurfaceCache();
+    state.offline = true;
+    Object.defineProperty(navigator, 'onLine', { value: false, configurable: true });
+    vi.mocked(authFetch).mockRejectedValue(new TypeError('Offline'));
+    await render(post.session.id);
+    expect(container.textContent).not.toContain(content);
+    expect(container.querySelector('[data-feed-composition],textarea,[contenteditable]')).toBeNull();
+
+    state.offline = false;
+    Object.defineProperty(navigator, 'onLine', { value: true, configurable: true });
+    vi.mocked(authFetch).mockImplementation(denyDetail);
+    await act(async () => { window.dispatchEvent(new Event('online')); });
+    expect(container.querySelector('[data-feed-composition],textarea,[contenteditable]')).toBeNull();
+    expect(container.textContent).not.toContain(content);
+    expect((await readLocalFeedPost('assistant-1', post.session.id))?.content.text).toBe(content);
+    vi.mocked(authFetch).mockImplementation(allowed);
+    const retry = [...container.querySelectorAll('button')].find(button => button.textContent === en.feedPage.postEditor.accessLostRetry)!;
+    await act(async () => retry.click());
+    expect(container.querySelector('[contenteditable="true"]')?.textContent).toBe(content);
+  });
+  it('requires a fresh working-copy read to restore a draft denied at that endpoint', async () => {
+    const post = await legacyPost();
+    goOnline(post);
+    const allowed = vi.mocked(authFetch).getMockImplementation()!;
+    vi.mocked(authFetch).mockImplementation((url, init) => String(url).includes('/post-working-copies/')
+      ? Promise.resolve(new Response('{}', { status: 403 }))
+      : allowed(url, init));
+    await render(post.session.id);
+    expect(container.querySelector('[data-post-editor-unavailable]')).toBeTruthy();
+    expect(container.querySelector('[data-feed-composition],textarea,[contenteditable]')).toBeNull();
+    await remount();
+    resetSurfaceCache();
+    state.offline = true;
+    Object.defineProperty(navigator, 'onLine', { value: false, configurable: true });
+    await render(post.session.id);
+    expect(container.querySelector('[data-feed-composition],textarea,[contenteditable]')).toBeNull();
+    state.offline = false;
+    Object.defineProperty(navigator, 'onLine', { value: true, configurable: true });
+    await act(async () => { window.dispatchEvent(new Event('online')); });
+    expect(container.querySelector('[data-feed-composition],textarea,[contenteditable]')).toBeNull();
+    vi.mocked(authFetch).mockImplementation(allowed);
+    const retry = [...container.querySelectorAll('button')].find(button => button.textContent === en.feedPage.postEditor.accessLostRetry)!;
+    await act(async () => retry.click());
+    expect(container.querySelector('[contenteditable="true"]')?.textContent, container.textContent ?? '').toBe(post.content.text);
   });
   it('opens Review directly from the workflow without starting a model request or submitting the draft', async () => {
     const post = await legacyPost(); goOnline(post); await render(post.session.id);

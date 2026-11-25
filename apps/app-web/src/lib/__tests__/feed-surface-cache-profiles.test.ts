@@ -7,7 +7,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const disk = vi.hoisted(() => ({ record: null as unknown }));
-const profiles = vi.hoisted(() => ({ next: vi.fn() }));
+const profiles = vi.hoisted(() => ({ next: vi.fn(), assistants: vi.fn() }));
 
 vi.mock("@/lib/offline/feed-cache", () => ({
   feedCachedJson: async () => ({ id: "ws-1", name: "Team", role: "owner", me: { id: "u1" } }),
@@ -27,7 +27,7 @@ vi.mock("@/lib/edition", () => ({
 }));
 vi.mock("@/lib/api/feed", () => ({
   fetchFeedTeamProfiles: () => profiles.next(),
-  fetchFeedDistributionAssistants: async () => [],
+  fetchFeedDistributionAssistants: () => profiles.assistants(),
   fetchFeedCloudLink: async () => ({ state: "native" }),
   fetchFeedDraftSessions: async () => [],
   fetchFeedIdeas: async () => [],
@@ -43,6 +43,24 @@ describe("[COMP:app-web/feed-surface-cache] profiles read failure", () => {
   beforeEach(() => {
     disk.record = null;
     profiles.next.mockReset();
+    profiles.assistants.mockReset().mockResolvedValue([]);
+  });
+
+  it("retains a known voice on timeout and accepts a confirmed empty roster", async () => {
+    const voice = { id: "a-1", name: "Voice" };
+    profiles.next.mockResolvedValue([]);
+    profiles.assistants.mockResolvedValueOnce([voice]);
+    await loadFeedWorkspaceRecord("ws-1", "k-5");
+    profiles.assistants.mockRejectedValueOnce(new Error("timeout"));
+    expect((await loadFeedWorkspaceRecord("ws-1", "k-5")).assistants).toEqual([voice]);
+    expect((await loadFeedWorkspaceRecord("ws-1", "k-5")).assistants).toEqual([]);
+  });
+
+  it("keeps an unverified first roster read out of voice onboarding", async () => {
+    profiles.next.mockResolvedValue([]);
+    profiles.assistants.mockRejectedValueOnce(new Error("timeout"));
+    await expect(loadFeedWorkspaceRecord("ws-1", "k-6")).rejects.toThrow();
+    expect(disk.record).toBeNull();
   });
 
   it("keeps the last-known profiles when the read fails", async () => {
