@@ -23,7 +23,7 @@ import { mayReadGroupContext, roomTurnShape } from '../channel-room/turn.js'
 import { appendChannelRoomMessage, claimChannelRoomTurn } from '../channel-room/messages.js'
 import { admitRoomInputScope, captureChannelRoomInput, claimRoomHydration, findOrCreateChannelRoom, resolveRoomBinding, roomInputScope, roomSpeakerLabel } from '../channel-room/room.js'
 import { waitForTurnSlot } from '../turn/lease.js'
-import { openAssistantTurn, openTurnSqlScope, TurnRefusal, type AssistantTurn, type TurnSqlScope } from '../turn/kernel.js'
+import { openAssistantTurn, openTurnSqlScope, PreActionConversationHistoryUnavailableError, TurnRefusal, type AssistantTurn, type TurnSqlScope } from '../turn/kernel.js'
 
 /** The reply when a channel message waited out another turn on its session. */
 const CHANNEL_TURN_BUSY_NOTICE = "I'm still finishing your previous message. Send this one again once I've replied."
@@ -2293,6 +2293,8 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
       }
     : undefined
 
+  // Further discovery can run tools through preflight after history is ready.
+  let discoveryHistoryPrepared = false
   // The owner invokes this only for an actual main-model discovery tool call.
   const discoverContext = () => timing.time('context_discovery', async () => {
     const { backgroundLlmRuntime, backgroundProvider, backgroundLaneModel, backgroundUsageAttribution } = await getBackground()
@@ -2381,6 +2383,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
       // per-source audience evidence. Rebuild from filtered provider history.
       fromSequence: isolatedAudience || room ? null : session.compactBoundarySequence,
       projectStored: rows => filterHistoryForAudience(rows) })).messages
+    discoveryHistoryPrepared = true
     if(params.conversationContext)await assertTelegramConversationCurrent(params.conversationContext)
     if (room && !privateRecording) {
       const currentHistory = overlayCurrentRoomMessage(dbMessages, { id: userMessageRow.id, content: userContentBlocks })
@@ -3622,6 +3625,11 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
       return
     }
 
+    if (!discoveryHistoryPrepared && telegramKnowledgeGroup(executionContext) && err instanceof PreActionConversationHistoryUnavailableError) {
+      if (!abortController.signal.aborted) await sendTurnError(err)
+      return
+    }
+
     // Try to compose a context-aware recovery message naming any tools
     // that already shipped, so the operator doesn't blindly retry the
     // original instruction and duplicate side effects (e.g. two
@@ -3636,7 +3644,8 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
       // whole point of the helper.
       await sendResponseAndStampChannelId(recovered.text)
     } else {
-      await sendTurnError(err instanceof Error ? err : new Error(String(err)))
+      const original = err instanceof PreActionConversationHistoryUnavailableError ? err.cause : err
+      await sendTurnError(original instanceof Error ? original : new Error(String(original)))
     }
   } finally {
     channelConfirmations.clear(confirmationResolver)

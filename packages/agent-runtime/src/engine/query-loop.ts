@@ -316,7 +316,7 @@ export type DiscoveredQueryContext = Pick<QueryLoopOptions,
 
 export type QueryLoopOptions = {
   /** Host-only, one-shot handoff. Neither the model nor nested tools can install a frame. */
-  takeDiscoveredContext?: () => DiscoveredQueryContext | undefined
+  takeDiscoveredContext?: (proof: { firstAndOnlyCallFailed: boolean }) => DiscoveredQueryContext | undefined
   /** Complete host output operation, including admission and physical handoff.
    * When supplied, events go to this operation instead of being yielded.
    * Never inherited by nested loops through ToolContext. */
@@ -1156,6 +1156,7 @@ async function* queryLoopCore(
     })
 
     const toolInputBuffers = new Map<string, string>()
+    let startedToolCalls = 0
 
     // Tracks whether anything user-visible has been yielded for this turn.
     // Gates the transient-error retry below: once a chunk has streamed to
@@ -1283,6 +1284,7 @@ async function* queryLoopCore(
         }
 
         if (chunk.type === 'tool_use_start') {
+          startedToolCalls++
           toolNames.set(chunk.id, chunk.name)
           toolInputBuffers.set(chunk.id, '')
           yield { type: 'tool_start', id: chunk.id, name: chunk.name }
@@ -1982,7 +1984,10 @@ async function* queryLoopCore(
     const discoveryReceipt = options.takeDiscoveredContext && allToolResults.find(block =>
       block.type === 'tool_result' && response.content.some(call => call.type === 'tool_use' &&
         call.name === CONVERSATION_CONTEXT_TOOL && call.id === block.toolUseId))
-    const discovery = discoveryReceipt ? options.takeDiscoveredContext?.() : undefined
+    const discovery = discoveryReceipt?.type === 'tool_result' ? options.takeDiscoveredContext?.({
+      firstAndOnlyCallFailed: discoveryReceipt.isError === true && !options.resumeContext
+        && turn === 0 && startedToolCalls === 1 && loopStepIndex === 1,
+    }) : undefined
     if (discoveryReceipt?.type === 'tool_result' && discoveryReceipt.isError) throw new Error('Conversation context discovery failed.')
     // A provider can likewise stop with end_turn after an independent initial
     // read. Feed its paired result back while leaving discovery available.
