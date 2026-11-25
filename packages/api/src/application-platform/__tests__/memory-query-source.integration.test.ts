@@ -337,7 +337,7 @@ describe.sequential('[COMP:api/application-persistence] actual retained Memory c
     THEN jsonb_set(value,'{read}','[["detail_reader"]]'::jsonb) ELSE value END) FROM jsonb_array_elements(p.fields)) WHERE p.workspace_id=$1`,[x.f.workspaceId])
    const limited=await originalMemoryAuthority(x),ctx=limited.execution.security.access
    const paired=await store.getPairedPromptIndexes!(ctx,10,limited)
-   expect(paired.ranked).toMatchObject({status:'rejected',reason:{code:'42501',message:'query_domain_unavailable'}})
+   expect(paired.ranked).toEqual({status:'denied'})
    const workspace=await store.getWorkspaceIndex(ctx,false,limited)
    expect(paired.workspace).toEqual({status:'fulfilled',value:workspace})
    if(paired.workspace.status!=='fulfilled')throw new Error('Missing authorized workspace result')
@@ -354,7 +354,7 @@ describe.sequential('[COMP:api/application-persistence] actual retained Memory c
     const team = await createMemory({workspaceId:roomFixture.workspaceId,assistantId:roomFixture.assistantId,userId:null,
      createdByUserId:roomFixture.ownerId,summary:'Fictional independent Room field floor',scope:'workspace',sensitivity:'internal'})
     const room = await store.getPairedPromptIndexes!(sharedAccess,10,shared)
-    expect(room.ranked).toMatchObject({status:'rejected',reason:{code:'42501',message:'query_domain_unavailable'}})
+    expect(room.ranked).toEqual({status:'denied'})
     const roomScalar = await store.getWorkspaceIndex(sharedAccess,false,shared)
     expect(room.workspace).toEqual({status:'fulfilled',value:roomScalar})
     if (room.workspace.status!=='fulfilled') throw new Error('Missing authorized Room workspace result')

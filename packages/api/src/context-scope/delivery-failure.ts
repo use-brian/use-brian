@@ -1,6 +1,6 @@
 /** Fixed internal diagnostics and coarse copy classification. [COMP:api/delivery-authority] */
 const phases = ['native_proof', 'ancestry', 'anonymous_field_proof', 'current_source', 'ancestry_recheck',
-  'retained_context', 'prompt_memory_metadata', 'prompt_memory_capture', 'pool_checkout'] as const
+  'retained_context', 'prompt_memory_metadata', 'prompt_memory_capture', 'prompt_memory_projection', 'pool_checkout'] as const
 export type DeliveryVerificationPhase = typeof phases[number]
 export type DeliveryFailureMetadata = {
   verificationPhase?: DeliveryVerificationPhase

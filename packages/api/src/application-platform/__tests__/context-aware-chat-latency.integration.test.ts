@@ -170,17 +170,19 @@ it.each(['sparse', 'dense'] as const)('finishes two context-aware turns within f
   }
 }, 120_000)
 
-it.each(['native_proof','ancestry','prompt_memory_capture'] as const)('reports a PostgreSQL proof timeout in %s during prompt preparation', async phase => {
+it.each(['native_proof','ancestry','prompt_memory_capture','prompt_memory_projection','paired_prompt_memory_projection'] as const)('reports a PostgreSQL read timeout in %s during prompt preparation', async phase => {
   const f = await persistentContextFixture('internal')
   try {
     await f.pool.query("UPDATE workspaces SET plan='pro', department_read_v2=true WHERE id=$1", [f.workspaceId])
     // The packed reader falls back when its metadata bound exceeds 100 roots.
-    const memoryCount = phase === 'prompt_memory_capture' ? 1 : 101
+    const memoryCount = phase === 'prompt_memory_capture' || phase === 'prompt_memory_projection' ? 1 : 101
     for (let index = 0; index < memoryCount; index++) await f.memory(`Fictional retained context ${index}`, f.ownerId)
     const { session, token } = await openContextChatSession(f, secret)
     const requestText = 'What is the retained context for this request?'
     const originalQuery = pg.Client.prototype.query
     let pairedClient: pg.Client | undefined
+    let packedClient: pg.Client | undefined
+    const packedPackets: unknown[] = []
     let observedSqlstate: unknown
     let timedProofs = 0
     const ancestryBatches: number[] = []
@@ -190,21 +192,45 @@ it.each(['native_proof','ancestry','prompt_memory_capture'] as const)('reports a
       const run = (queryArgs: unknown[]) => Reflect.apply(originalQuery, this, queryArgs)
       const [sql, params] = args
       if (typeof sql !== 'string') return run(args)
+      const packedCapture = sql.includes('THEN public.capture_native_prompt_memory_sections')
+      if (packedCapture && (phase === 'prompt_memory_projection' || phase === 'paired_prompt_memory_projection')) {
+        packedClient = this
+        return (run(args) as Promise<pg.QueryResult<{ value: unknown }>>).then(result => {
+          packedPackets.push(result.rows[0]?.value)
+          return result
+        })
+      }
       if (sql.includes("SELECT 'ranked' AS cohort,value,ordinality FROM read_native_memory_query_projection")) pairedClient = this
       const kinds = Array.isArray(params) ? params[1] : undefined
       const memoryBatch = sql.includes('FROM read_external_source_dependencies($1,$2,$3,$4)')
         && Array.isArray(kinds) && kinds.length > 0 && kinds.every(kind => kind === 'memory')
       if (memoryBatch) ancestryBatches.push(kinds.length)
-      const chosen = phase === 'native_proof' ? this === pairedClient && sql === 'SELECT capture_conversation_evidence($1,$2) AS value'
-        : memoryBatch && kinds.length === 100
-      const interrupt = phase === 'prompt_memory_capture' ? sql.includes('THEN public.capture_native_prompt_memory_sections') : chosen
+      const groupedSelector = sql.startsWith('SELECT ARRAY(SELECT row_to_json(selected)')
+        && sql.includes('AS ranked,') && sql.endsWith('AS workspace')
+      let interrupt: boolean
+      switch (phase) {
+        case 'native_proof':
+          interrupt = this === pairedClient && sql === 'SELECT capture_conversation_evidence($1,$2) AS value'
+          break
+        case 'ancestry':
+          interrupt = memoryBatch && kinds.length === 100
+          break
+        case 'prompt_memory_capture':
+          interrupt = packedCapture
+          break
+        case 'prompt_memory_projection':
+          interrupt = this === packedClient && groupedSelector
+          break
+        case 'paired_prompt_memory_projection':
+          interrupt = this === pairedClient && groupedSelector
+      }
       if (!interrupt || timedProofs) return run(args)
       timedProofs++
       const interrupted = (async () => {
         await run([phase === 'ancestry' ? "SET statement_timeout='25ms'" : "SET LOCAL statement_timeout='25ms'"])
         try {
           return await run([`WITH pause AS MATERIALIZED (SELECT $1::uuid AS workspace_id,pg_sleep(0.2))
-            SELECT protected.* FROM pause CROSS JOIN LATERAL (${sql.replace('$1', 'pause.workspace_id')}) protected`, params])
+            SELECT protected.* FROM pause CROSS JOIN LATERAL (${sql.replace(/\$1\b/, 'pause.workspace_id')}) protected`, params])
         } catch (error) {
           observedSqlstate = (error as { code?: unknown }).code
           throw error
@@ -228,6 +254,16 @@ it.each(['native_proof','ancestry','prompt_memory_capture'] as const)('reports a
     expect(observedSqlstate).toBe('57014')
     expect(timedProofs).toBe(1)
     if (phase === 'ancestry') expect(ancestryBatches).toEqual([100])
+    if (phase === 'prompt_memory_projection') {
+      expect(packedPackets).toEqual([expect.objectContaining({ kind: 'sections', indexes: {
+        ranked: expect.objectContaining({ state: 'admitted' }), workspace: expect.objectContaining({ state: 'admitted' }),
+      } })])
+      expect(pairedClient).toBeUndefined()
+    }
+    if (phase === 'paired_prompt_memory_projection') {
+      expect(packedPackets).toEqual([expect.objectContaining({ kind: 'unsupported', reason: 'metadata_cohort_bound' })])
+      expect(pairedClient).toBeDefined()
+    }
     expect(providerInputs).toHaveLength(1)
     expect(providerInputs[0]).toContain(requestText)
     expect(providerInputs[0]).not.toContain('Fictional retained context')
@@ -242,8 +278,9 @@ it.each(['native_proof','ancestry','prompt_memory_capture'] as const)('reports a
     expect((await f.pool.query('SELECT status FROM sessions WHERE id=$1', [session.id])).rows).toEqual([{ status: 'failed' }])
     await boot.ctx.analytics.flush()
     const { rows } = await f.pool.query(`SELECT metadata FROM analytics_events WHERE session_id=$1 AND event_name='chat_route_error'`, [session.id])
+    const verificationPhase = phase === 'paired_prompt_memory_projection' ? 'prompt_memory_projection' : phase
     expect(rows).toEqual([{ metadata: { error_type: 'ContextVerificationUnavailableError', error_message: 'context_verification_unavailable',
-      verification_failure: 'statement_timeout', verification_phase: phase, verification_sqlstate_class: '57', stage: 'post_session' } }])
+      verification_failure: 'statement_timeout', verification_phase: verificationPhase, verification_sqlstate_class: '57', stage: 'post_session' } }])
   } finally {
     await boot.ctx.analytics.flush()
     await f.cleanup()

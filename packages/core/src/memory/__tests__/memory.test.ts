@@ -142,6 +142,14 @@ describe('[COMP:memory/context-builder] Memory context builder', () => {
     expect(ctx).not.toContain('## Memory Index')
   })
 
+  it('omits storage claims when an index was denied', () => {
+    const incomplete = { memoryIndex: [], memoryIndexIncomplete: true }
+    expect(buildMemoryContext({ ...incomplete, identityMemories: [] })).toBe('')
+    expect(buildMemoryContext({ ...incomplete, identityMemories: [
+      { id: 'identity', summary: 'A fictional identity fact', detail: null },
+    ] })).toBe('## Identity\n- [id:identity] A fictional identity fact')
+  })
+
   it('renders the index flat (post-Phase-4 retire-memory-type Q1 lock)', () => {
     // Post-Phase-4: no per-type grouping; flat list by recency, tags
     // as chips on each line.

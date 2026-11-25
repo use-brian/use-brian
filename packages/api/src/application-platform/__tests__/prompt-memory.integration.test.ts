@@ -23,6 +23,7 @@ import { upsertEvolution } from '../../db/workspace-memory-evolution-store.js'
 import { getWorkspaceIdentity } from '../../db/workspace-store.js'
 import { seedSharedMemoryAncestry } from './fixtures/context-chat-memory.js'
 import { persistentContextFixture } from './fixtures/persistent-context.js'
+import { prepareRankedMaskPolicy } from './fixtures/prompt-memory-field-policy.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -30,7 +31,6 @@ const { promptMemorySignature } = await import(new URL('../../../scripts/convers
 const { authenticateConversationInstallation, currentReleaseSource } = await import(new URL('../../../scripts/conversation-store/installation-release.mjs', import.meta.url).href)
 
 const store = createDbMemoryStore()
-
 async function privateTurn(departmentV2 = false) {
   const f = await persistentContextFixture()
   if (departmentV2) await f.pool.query('UPDATE workspaces SET department_read_v2=true WHERE id=$1', [f.workspaceId])
@@ -160,44 +160,14 @@ describe.sequential('reviewed native prompt Memory owner', () => {
 
   it('replays the original reader when the ranked field mask is refused', async () => {
     const f = await privateTurn(true)
-    const suffix = randomUUID().replaceAll('-', '')
-    const catalog = 'fixture_memory_mask_catalog_' + suffix
-    const point = 'fixture_memory_mask_point_' + suffix
-    const install = 'fixture_memory_mask_install_' + suffix
+    let restriction: Awaited<ReturnType<typeof prepareRankedMaskPolicy>> | undefined
     let db: PoolClient | undefined
     let restoreTracking = false
     try {
       const memory = await f.memory('Fictional Memory with restricted ranking metadata', f.ownerId)
       // The restricted field is in the ranked mask only. Install the policy
       // inside this app transaction so other fixtures never see the override.
-      await f.pool.query(`CREATE FUNCTION public.${catalog}(w uuid,o jsonb,t text) RETURNS jsonb
-        LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $fixture$
-        SELECT jsonb_build_object('moduleKey','native','origin',o,'typeKey',t,'schemaVersion','fixture-rank-mask','policyVersion','1',
-          'fieldKeys',to_jsonb(public.application_memory_field_keys()),
-          'fields',(SELECT jsonb_agg(jsonb_build_object('key',key,
-            'read',CASE WHEN key='created_at' THEN '[["rank_reader"]]'::jsonb ELSE '[]'::jsonb END,
-            'write','[]'::jsonb,'releaseReadTo','[]'::jsonb,'releaseWriteTo','[]'::jsonb))
-            FROM unnest(public.application_memory_field_keys()) AS key),
-          'scope',jsonb_build_object('workspaceId',w,'userId',NULL,'assistantId',NULL,
-            'sensitivity','public','compartments','[]'::jsonb,'projectIds','[]'::jsonb))
-        WHERE w='${f.workspaceId}'::uuid AND t='memory'
-        $fixture$;
-        CREATE FUNCTION public.${point}(w uuid,o jsonb,t text,i text) RETURNS jsonb
-        LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $fixture$
-          SELECT (public.${catalog}(w,o,t)-'scope')||jsonb_build_object(
-            'recordVersion',m.scope_version::text,'source',public.read_scope_source(w,'memory',m.id))
-          FROM public.memories m WHERE m.workspace_id=w AND m.id=i::uuid
-        $fixture$;
-        CREATE FUNCTION public.${install}() RETURNS void
-        LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $fixture$
-          INSERT INTO public.application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader,catalog_reader)
-          VALUES('native','1',ARRAY['rank_reader'],'public.${point}(uuid,jsonb,text,text)'::regprocedure,
-            'public.${catalog}(uuid,jsonb,text)'::regprocedure);
-          INSERT INTO public.application_native_resource_owners(workspace_id,origin,resource_type,module_key)
-          VALUES('${f.workspaceId}'::uuid,'{"kind":"native","moduleKey":"native"}','memory','native')
-        $fixture$;
-        REVOKE ALL ON FUNCTION public.${catalog}(uuid,jsonb,text),public.${point}(uuid,jsonb,text,text),public.${install}() FROM PUBLIC;
-        GRANT EXECUTE ON FUNCTION public.${install}() TO app_user`)
+      restriction = await prepareRankedMaskPolicy(f)
       restoreTracking = await withBootstrap(async admin => {
         if ((await admin.query("SELECT has_parameter_privilege('app_user','track_functions','SET') AS allowed")).rows[0].allowed) return false
         await admin.query('GRANT SET ON PARAMETER track_functions TO app_user')
@@ -205,7 +175,7 @@ describe.sequential('reviewed native prompt Memory owner', () => {
       })
       db = await getAppPool().connect()
       await db.query('BEGIN ISOLATION LEVEL REPEATABLE READ')
-      await db.query(`SELECT public.${install}()`)
+      await restriction.install(db)
       await db.query("SET LOCAL track_functions='all'")
       const packed = await f.captureCurrent(db, 'packed')
       const { rows } = await db.query(`SELECT calls::int AS calls FROM pg_stat_xact_user_functions
@@ -221,8 +191,7 @@ describe.sequential('reviewed native prompt Memory owner', () => {
       try {
         if (db) await rollbackAndRelease(db)
         if (restoreTracking) await withBootstrap(admin => admin.query('REVOKE SET ON PARAMETER track_functions FROM app_user'))
-        await f.pool.query(`DROP FUNCTION IF EXISTS public.${install}(),
-          public.${point}(uuid,jsonb,text,text),public.${catalog}(uuid,jsonb,text)`)
+        await restriction?.dispose()
       } finally { await f.cleanup() }
     }
   }, 60_000)
@@ -419,4 +388,5 @@ describe.sequential('reviewed native prompt Memory owner', () => {
       await f.cleanup()
     }
   }, 120_000)
+
 })

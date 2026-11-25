@@ -8,7 +8,7 @@ import {readApplicationFieldAncestors} from '../application-platform/field-evide
 import {z} from 'zod'
 import {readRetainedContextFrame,readRetainedQueryFrame} from './session-context-revisions.js'
 import {assertPreparedConversationCohortEvidence,scopeEvidenceFailureOf,validateCallerScopeEvidence} from '../context-scope/caller-evidence.js'
-import { contextVerificationUnavailable } from '../context-scope/delivery-failure.js'
+import { contextVerificationUnavailable, type DeliveryVerificationPhase } from '../context-scope/delivery-failure.js'
 import {decodeConversationPreparationCohort,readConversationPreparation,type PreparationCohortEvidence} from '../application-platform/conversation-evidence.js'
 import {captureSessionAuthority} from '../context-scope/authority-lease.js'
 import {sessionAuthorityFactsParameters} from '../context-scope/session-authority-facts.js'
@@ -20,6 +20,7 @@ import { beginBrainAdmission, admitBrainCreate } from '../workspace-access/brain
 import { captureMemoryVersions, type CaptureOpts } from './brain-row-versions.js'
 import type { EntityLinksStore } from '@use-brian/core/entities/types.js'
 import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
+import type { PromptMemoryIndexOutcome } from '@use-brian/core/memory/types.js'
 import { intersectAccessCeilings, pinAccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
 import { DerivedScopeError, deriveResourceScope, deriveWriteScope, type ResourceScope, type DerivedWriteEvidence, type ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
@@ -731,6 +732,10 @@ const memoryQuerySource=z.object({workspaceId:z.string().uuid(),userId:z.string(
 const memoryQueryCapture=z.object({row:z.record(z.unknown()).nullable(),sources:z.array(memoryQuerySource).min(1),source:memoryQuerySource.optional()}).strict()
 type MemoryProjection = { rows: object[]; sources: ScopeSource[] }
 
+function memoryReadFailureAt(phase: DeliveryVerificationPhase) {
+  return (error: unknown): never => { throw contextVerificationUnavailable(error, phase) ?? error }
+}
+
 /** One current metadata cohort and retained scope frame for this exact viewer. */
 async function readNativeMemoryFrame<T>(ctx: AccessContext, authority: SessionContextAuthority,
   capture: (client: pg.PoolClient, ceiling: ReturnType<typeof intersectAccessCeilings>) => Promise<{value:T;sources:ScopeSource[]}>,
@@ -742,21 +747,21 @@ async function readNativeMemoryFrame<T>(ctx: AccessContext, authority: SessionCo
  const privateOAuthReader = credential && await credential()
  if(!(e.identity.kind==='delegated'||e.identity.kind==='attended'&&e.identity.principal.kind==='workspace_member'||hasWorkspaceMcpRetainedAuthority(e)||privateOAuthReader)||e.ownership.kind!=='workspace'||e.security.access.userId!==ctx.userId
    ||e.security.access.workspaceId!==ctx.workspaceId||e.assistant.id!==ctx.assistantId)throw new DerivedScopeError('scope_evidence_missing')
- await e.security.authority.assertCurrent()
+ await e.security.authority.assertCurrent().catch(memoryReadFailureAt('retained_context'))
  const discover=async(client?:pg.PoolClient)=>{
   const statement='SELECT source FROM read_native_memory_query_metadata($1)'
   const rows=(await(client?client.query<{source:unknown}>(statement,[ctx.workspaceId]):queryMemoryViewer<{source:unknown}>(ctx,statement,[ctx.workspaceId]))).rows
   if(rows.length>4096)throw new DerivedScopeError('scope_evidence_missing')
   return rows.map(row=>memoryQuerySource.parse(row.source))
  }
- const roots=await discover().catch(error=>{throw contextVerificationUnavailable(error,'prompt_memory_metadata')??error})
+ const roots=await discover().catch(memoryReadFailureAt('prompt_memory_metadata'))
  return readRetainedQueryFrame(authority,roots,async client=>{
    const requested=pinAccessCeiling({...authority.execution.security.access,...Object.fromEntries(Object.entries(ctx).filter(([,v])=>v!==undefined))})
    const ceiling=intersectAccessCeilings(authority.execution.security.ceiling,requested)
    await runWithAgentAccess({...authority.execution.security.access,...ceiling},()=>applyRLSGucs(client,ctx.userId))
    if(JSON.stringify(await discover(client))!==JSON.stringify(roots))throw new DerivedScopeError('scope_source_changed')
    return capture(client,ceiling)
- }).catch(error=>{throw contextVerificationUnavailable(error,'retained_context')??error})
+ }).catch(memoryReadFailureAt('retained_context'))
 }
 
 function parseMemoryProjection(raw: unknown[], workspaceId: string): MemoryProjection {
@@ -785,27 +790,67 @@ function bindMemoryProjection<T extends object>(rows: T[], projection: MemoryPro
 }
 
 async function projectMemoryCollection<T extends pg.QueryResultRow>(client: pg.PoolClient, sql: string,
-  params: unknown[], projection: MemoryProjection,
+  params: unknown[], projection: MemoryProjection, promptIndex = false,
 ): Promise<pg.QueryResult<T>> {
-  const result = await client.query<T>(projectedMemoryStatement(sql,params.length+1),[...params,JSON.stringify(projection.rows)])
+  const selection = client.query<T>(projectedMemoryStatement(sql,params.length+1),[...params,JSON.stringify(projection.rows)])
+  const result = await (promptIndex ? selection.catch(memoryReadFailureAt('prompt_memory_projection')) : selection)
   bindMemoryProjection(result.rows,projection)
   return result
+}
+
+class PromptMemoryProjectionDenied extends Error {}
+
+function isMemoryProjectionDenial(error: unknown): boolean {
+  const failure = error as { code?: string; message?: string } | null
+  return failure?.code === '42501' &&
+    (failure.message === 'query_domain_unavailable' || failure.message === 'access_unavailable')
+}
+
+const nativeMemoryFieldCatalog = z.object({
+  moduleKey: z.literal('native'),
+  schemaVersion: z.string().min(1),
+  policyVersion: z.string().min(1),
+  readFields: z.array(z.string().min(1)).max(128),
+  writeFields: z.array(z.string().min(1)).max(128),
+}).strict()
+
+/** Only a current, positively authenticated catalog can prove a missing field. */
+async function readMemoryCatalogMask(client: pg.PoolClient, workspaceId: string): Promise<ReadonlySet<string> | null> {
+  const { rows } = await client.query<{ mask: unknown }>(
+    `SELECT public.read_native_application_field_catalog($1,'{"kind":"native","moduleKey":"native"}','memory') AS mask`,
+    [workspaceId],
+  )
+  const parsed = nativeMemoryFieldCatalog.safeParse(rows[0]?.mask)
+  if (!parsed.success) return null
+  const allowed = new Set(parsed.data.readFields)
+  return allowed.size === parsed.data.readFields.length ? allowed : null
 }
 
 /** A complete metadata cohort precedes current source admission and any payload computation. */
 async function queryMemoryCollection<T extends pg.QueryResultRow>(ctx: AccessContext,sql: string,params: unknown[],
   authority?: SessionContextAuthority,fields: readonly string[] = MEMORY_QUERY_FIELDS,
+  promptIndex = false,
 ): Promise<pg.QueryResult<T>> {
   if (!authority) return queryMemoryViewer<T>(ctx,sql,params)
   const values = structuredClone(params)
   const workspaceId = ctx.workspaceId
   return readNativeMemoryFrame(ctx,authority,async (client,ceiling) => {
-    const raw = (await client.query<{value:unknown}>('SELECT value FROM read_native_memory_query_projection($1,$2,$3)',
-      [workspaceId,[...fields],true])).rows.map(row => row.value)
+    if (promptIndex) await client.query('SAVEPOINT prompt_memory_index')
+    const result = await client.query<{value:unknown}>('SELECT value FROM read_native_memory_query_projection($1,$2,$3)',
+      [workspaceId,[...fields],true]).catch(async error => {
+      if (promptIndex && isMemoryProjectionDenial(error)) {
+        await client.query('ROLLBACK TO SAVEPOINT prompt_memory_index')
+        const allowed = await readMemoryCatalogMask(client,workspaceId)
+        if (allowed && fields.some(field => !allowed.has(field))) throw new PromptMemoryProjectionDenied()
+      }
+      throw error
+    })
+    if (promptIndex) await client.query('RELEASE SAVEPOINT prompt_memory_index')
+    const raw = result.rows.map(row => row.value)
     const projection = parseMemoryProjection(raw,workspaceId)
     await authority.execution.security.authority.assertCurrent()
     await validateCallerScopeEvidence({sources:projection.sources},ceiling,client)
-    const value = await projectMemoryCollection<T>(client,sql,values,projection)
+    const value = await projectMemoryCollection<T>(client,sql,values,projection,promptIndex)
     return { value,sources:projection.sources }
   })
 }
@@ -1376,10 +1421,12 @@ function rankedMemoryIndex(rankedRows: Array<RankedMemoryIndexRow & { total: str
   return bindScopeSources({ rows: bindScopeSources(rows,sources), totalCount },sources)
 }
 
-export async function getMemoryIndexRanked(ctx: AccessContext,limit: number,authority?: SessionContextAuthority): Promise<RankedMemoryIndex> {
+export async function getMemoryIndexRanked(ctx: AccessContext,limit: number,authority?: SessionContextAuthority,
+  promptIndex = false,
+): Promise<RankedMemoryIndex> {
   const ap = buildMemoryAccessPredicate(ctx)
   const result = await queryMemoryCollection<RankedMemoryIndexRow & { total: string }>(
-    ctx,rankedMemoryIndexSql(ap),[...ap.params,limit],authority,MEMORY_RANKED_FIELDS,
+    ctx,rankedMemoryIndexSql(ap),[...ap.params,limit],authority,MEMORY_RANKED_FIELDS,promptIndex,
   )
   return rankedMemoryIndex(result.rows)
 }
@@ -2391,10 +2438,11 @@ export async function getWorkspaceMemoryIndex(ctx: AccessContext,
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _validOnly: boolean = false, // Historical flag. Live rows are always selected.
   authority?: SessionContextAuthority,
+  promptIndex = false,
 ): Promise<WorkspaceMemoryIndexRow[]> {
   const ap = buildMemoryAccessPredicate(ctx)
   const result = await queryMemoryCollection<WorkspaceMemoryIndexRow>(
-    ctx,workspaceMemoryIndexSql(ap),ap.params,authority,MEMORY_INDEX_FIELDS,
+    ctx,workspaceMemoryIndexSql(ap),ap.params,authority,MEMORY_INDEX_FIELDS,promptIndex,
   )
   return result.rows
 }
@@ -2410,7 +2458,7 @@ async function projectPromptIndexes(client: pg.PoolClient,ap: ReturnType<typeof 
     workspace:WorkspaceMemoryIndexRow[];
   }>(`SELECT ARRAY(SELECT row_to_json(selected) FROM (${rankedSql}) selected) AS ranked,
     ARRAY(SELECT row_to_json(selected) FROM (${workspaceSql}) selected) AS workspace`,
-  [...ap.params,limit,JSON.stringify(ranked.rows),JSON.stringify(workspace.rows)])
+  [...ap.params,limit,JSON.stringify(ranked.rows),JSON.stringify(workspace.rows)]).catch(memoryReadFailureAt('prompt_memory_projection'))
   const row=result.rows[0]
   if(!row)throw new DerivedScopeError('scope_evidence_missing')
   const rankedRows=bindMemoryProjection(row.ranked.map(memory=>({...memory,createdAt:new Date(memory.createdAt)})),ranked)
@@ -2419,8 +2467,8 @@ async function projectPromptIndexes(client: pg.PoolClient,ap: ReturnType<typeof 
 
 /** Compatible prompt reads share metadata while each observes its exact fields. */
 export async function getPairedPromptMemoryIndexes(ctx: AccessContext,limit: number,authority: SessionContextAuthority): Promise<{
-  ranked: PromiseSettledResult<RankedMemoryIndex>;
-  workspace: PromiseSettledResult<WorkspaceMemoryIndexRow[]>;
+  ranked: PromptMemoryIndexOutcome<RankedMemoryIndex>;
+  workspace: PromptMemoryIndexOutcome<WorkspaceMemoryIndexRow[]>;
 }> {
   const { execution } = authority
   const room = ctx.sharedAudience === true
@@ -2428,11 +2476,15 @@ export async function getPairedPromptMemoryIndexes(ctx: AccessContext,limit: num
     execution.identity.principal.kind !== 'workspace_member') throw new DerivedScopeError('scope_evidence_missing')
   const ap = buildMemoryAccessPredicate(ctx)
   const workspaceId = ctx.workspaceId
+  const denied = { status: 'denied' as const }
+  const section = <T>(outcome: PromiseSettledResult<T>): PromptMemoryIndexOutcome<T> =>
+    outcome.status === 'rejected' && outcome.reason instanceof PromptMemoryProjectionDenied ? denied : outcome
   const scalar = async () => {
     const [ranked,workspace] = await Promise.allSettled([
-      getMemoryIndexRanked(ctx,limit,authority),getWorkspaceMemoryIndex(ctx,undefined,authority),
+      getMemoryIndexRanked(ctx,limit,authority,true),getWorkspaceMemoryIndex(ctx,undefined,authority,true),
     ])
-    return { ranked,workspace }
+    await execution.security.authority.assertCurrent().catch(memoryReadFailureAt('retained_context'))
+    return { ranked:section(ranked),workspace:section(workspace) }
   }
   if (room && !conversationReadersActive()) return scalar()
   try {
@@ -2453,23 +2505,21 @@ export async function getPairedPromptMemoryIndexes(ctx: AccessContext,limit: num
         rankedAllowed = roomPromptIndexAllowed(rankedProjection,ceiling,cohorts[0])
         workspaceAllowed = roomPromptIndexAllowed(workspaceProjection,ceiling,cohorts[1])
       } else await validateCallerScopeEvidence({sources:[...rankedProjection.sources,...workspaceProjection.sources]},ceiling,client)
-      const refused = {status:'rejected' as const,reason:new DerivedScopeError('scope_evidence_missing')}
       if(rankedAllowed&&workspaceAllowed){
         const values=await projectPromptIndexes(client,ap,limit,rankedProjection,workspaceProjection)
         return {value:{ranked:{status:'fulfilled' as const,value:values.ranked},workspace:{status:'fulfilled' as const,value:values.workspace}},
           sources:[...rankedProjection.sources,...workspaceProjection.sources]}
       }
       const ranked = rankedAllowed ? {status:'fulfilled' as const,value:rankedMemoryIndex((await projectMemoryCollection<RankedMemoryIndexRow&{total:string}>(
-        client,rankedMemoryIndexSql(ap),[...ap.params,limit],rankedProjection)).rows)} : refused
+        client,rankedMemoryIndexSql(ap),[...ap.params,limit],rankedProjection,true)).rows)} : denied
       const workspace = workspaceAllowed ? {status:'fulfilled' as const,value:(await projectMemoryCollection<WorkspaceMemoryIndexRow>(
-        client,workspaceMemoryIndexSql(ap),ap.params,workspaceProjection)).rows} : refused
+        client,workspaceMemoryIndexSql(ap),ap.params,workspaceProjection,true)).rows} : denied
       const sources = [...(rankedAllowed?rankedProjection.sources:[]),...(workspaceAllowed?workspaceProjection.sources:[])]
       return {value:{ranked,workspace},sources}
     })
     if (paired) return paired
   } catch (error) {
-    const failure = error as { code?: string; message?: string }
-    if (failure.code !== '42501' || !['query_domain_unavailable','access_unavailable'].includes(failure.message ?? '')) throw error
+    if (!isMemoryProjectionDenial(error)) throw error
   }
   // An independent family or narrower field request keeps its original
   // scalar owner and establishes its current result afresh.
@@ -2556,8 +2606,9 @@ export async function getNativePromptMemoryContext(ctx:AccessContext,limit:numbe
   // Retry this entire owner once under a new snapshot and the same live lease.
   const read = async () => {
     execution.lifecycle.abortSignal.throwIfAborted()
-    const client=await getAppPool().connect()
+    const client=await getAppPool().connect().catch(memoryReadFailureAt('pool_checkout'))
     try {
+      let verificationPhase: DeliveryVerificationPhase = 'prompt_memory_capture'
       const result=await runWithAgentAccess({...access,...ceiling},async()=>{
         await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ')
         await applyRLSGucs(client,userId,execution.assistant.id)
@@ -2566,32 +2617,37 @@ export async function getNativePromptMemoryContext(ctx:AccessContext,limit:numbe
             || input.assistantId!==execution.assistant.id || input.sessionId!==execution.lifecycle.sessionId) return null
           const sql = promptMemorySectionsV2Active() ? capturePromptMemorySectionsV2Sql : capturePromptMemorySectionsSql
           const result = await client.query<{value: unknown}>(sql,
-            [...sessionAuthorityFactsParameters(input),input.turn.token]).catch(error => {
-            throw contextVerificationUnavailable(error, 'prompt_memory_capture') ?? error
-          })
+            [...sessionAuthorityFactsParameters(input),input.turn.token])
           const raw = result.rows[0]?.value
           const value=promptMemorySections.parse(raw)
           return {authority:value.authority,value}
         })
         if (!acquired || acquired.value.kind==='unsupported') return null
-        const validate=(section:z.infer<typeof promptMemoryIndexSection>):MemoryProjection|null=>{
-          if(section.state==='denied')return null
+        verificationPhase = 'prompt_memory_projection'
+        const sections=acquired.value.indexes
+        const allowed = sections.ranked.state === 'denied' || sections.workspace.state === 'denied'
+          ? await readMemoryCatalogMask(client,workspaceId) : null
+        const validate=(section:z.infer<typeof promptMemoryIndexSection>, fields:readonly string[]):MemoryProjection|null=>{
+          if (section.state === 'denied') {
+            if (allowed && fields.some(field => !allowed.has(field))) return null
+            throw new DerivedScopeError('scope_evidence_missing')
+          }
           const projection=parseMemoryProjection(section.projection,workspaceId)
           const proof=decodeConversationPreparationCohort(workspaceId,projection.sources,section.proof)
           assertPromptIndexProjection(projection,ceiling,proof)
           return projection
         }
-        const ranked=validate(acquired.value.indexes.ranked), workspace=validate(acquired.value.indexes.workspace)
-        const refused={status:'rejected' as const,reason:new DerivedScopeError('scope_evidence_missing')}
+        const ranked=validate(sections.ranked,MEMORY_RANKED_FIELDS), workspace=validate(sections.workspace,MEMORY_INDEX_FIELDS)
+        const denied={status:'denied' as const}
         const grouped=ranked&&workspace?await projectPromptIndexes(client,ap,limit,ranked,workspace):null
         const indexes:Awaited<ReturnType<typeof getPairedPromptMemoryIndexes>> = grouped ? {
           ranked:{status:'fulfilled',value:grouped.ranked},
           workspace:{status:'fulfilled',value:grouped.workspace},
         } : {
           ranked:ranked ? {status:'fulfilled',value:rankedMemoryIndex((await projectMemoryCollection<RankedMemoryIndexRow&{total:string}>(
-            client,rankedMemoryIndexSql(ap),[...ap.params,limit],ranked)).rows)} : refused,
+            client,rankedMemoryIndexSql(ap),[...ap.params,limit],ranked)).rows)} : denied,
           workspace:workspace ? {status:'fulfilled',value:(await projectMemoryCollection<WorkspaceMemoryIndexRow>(
-            client,workspaceMemoryIndexSql(ap),ap.params,workspace)).rows} : refused,
+            client,workspaceMemoryIndexSql(ap),ap.params,workspace)).rows} : denied,
         }
         const teamSettings=rlsGucSettings(userId)
         const teamAssistant=teamSettings.find(([name])=>name==='app.v2_assistant_id')?.[1]??''
@@ -2600,7 +2656,7 @@ export async function getNativePromptMemoryContext(ctx:AccessContext,limit:numbe
         const team=await readWorkspacePromptSection(client,viewer,'voice',
           promptSelfSettingsMatch(teamSettings,selfSettings) ? self : undefined)
         return {indexes,...team}
-      })
+      }).catch(error => { throw contextVerificationUnavailable(error, verificationPhase) ?? error })
       execution.lifecycle.abortSignal.throwIfAborted()
       await commitTransaction(client)
       return result
