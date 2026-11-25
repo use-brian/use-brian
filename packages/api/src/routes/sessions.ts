@@ -26,7 +26,7 @@ import {
   ASSISTANT_CLEARANCE_BELOW_CONVERSATION,
   clearanceBelowRoomDefaultCopy,
 } from './_room-binding.js'
-import { query } from '../db/client.js'
+import { query, queryWithRLS } from '../db/client.js'
 import { getTurnTrace } from '../ledger/turn-trace.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { resolveUser } from './route-helpers.js'
@@ -280,6 +280,14 @@ export function reconnectBackstopFrames(status?:string,turnId:string|null=null,t
  return[{event:'turn_completed',data:{turnId,...reason?{reason}:{}}},{event:'done',data:{turnId}}]
 }
 
+// Discover just the viewer's indexed preference markers under app RLS. The
+// rail candidate reads still use owner-only metadata and gate each conversation.
+async function listSessionArchiveIds(viewerId: string): Promise<string[]> {
+  const result = await queryWithRLS<{ sessionId: string }>(viewerId,
+    'SELECT session_id AS "sessionId" FROM session_archives WHERE user_id=$1', [viewerId])
+  return result.rows.map(row => row.sessionId)
+}
+
 export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
   const subscribeSessionEvents = opts.subscribeSessionEvents ?? noopSubscribeSessionEvents
   const publishSessionEvent = opts.publishSessionEvent ?? noopPublishSessionEvent
@@ -407,6 +415,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
           : [assistant.id, user.id, appOrigin]
       const cursorIndex = listParams.length + 1
       listParams.push(cursor.data.before ?? null, cursor.data.beforeId ?? null)
+      const archiveIndex = listParams.length + 1
       type PersonalRailRow = {
         recoveredFromSessionId: string | null
         id: string; title: string | null; channelId: string;
@@ -422,6 +431,9 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         ? await getWorkspaceMembershipWithReadScopeSystem(user.id, listWorkspaceId)
         : null
       if (listWorkspaceId && !membership) { res.json([]); return }
+      const archiveIds = await listSessionArchiveIds(user.id)
+      if (archived && archiveIds.length === 0) { res.json([]); return }
+      listParams.push(archiveIds)
       const now = new Date()
       const readable: PersonalRailRow[] = []
       const pageSize = allChannels && !archived ? 200 : 50
@@ -453,9 +465,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
            -- threads are stored on the web transport, so the audience and
            -- anchor predicate, not the channel type, is what excludes them.
            AND ${sessionKindSql.personalHistory('s')}
-           AND ${archived ? '' : 'NOT '}EXISTS (
-             SELECT 1 FROM session_archives sa WHERE sa.session_id=s.id AND sa.user_id=$2
-           )
+           AND s.id ${archived ? '= ANY' : '<> ALL'}($${archiveIndex}::uuid[])
            ${surfaceFilter}
            AND ($${cursorIndex}::timestamptz IS NULL OR (s.last_active_at,s.id)<($${cursorIndex}::timestamptz,$${cursorIndex + 1}::uuid))
          ORDER BY s.last_active_at DESC,s.id DESC
@@ -587,6 +597,8 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         || (!!before !== !!beforeId) || (before && (!Number.isFinite(Date.parse(before)) || !uuid.test(beforeId!)))) {
         res.status(400).json({ error: 'Invalid session scope or cursor' }); return
       }
+      const archiveIds = await listSessionArchiveIds(user.id)
+      if (archived && archiveIds.length === 0) { res.json([]); return }
       type RailRow = {
         id: string; title: string | null; channelId: string
         lastActiveAt: Date; status: string;turnId?:string|null;turnEndReason?:string|null
@@ -621,14 +633,12 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
            JOIN assistants a ON a.id = s.assistant_id
           WHERE a.workspace_id = $1
             AND ${sessionKindSql.railRoom('s')}
-            AND ${archived ? '' : 'NOT '}EXISTS (
-              SELECT 1 FROM session_archives sa WHERE sa.session_id=s.id AND sa.user_id=$5
-            )
+            AND s.id ${archived ? '= ANY' : '<> ALL'}($5::uuid[])
             AND ($2::text IS NULL OR ($2='general' AND s.context_project_id IS NULL) OR s.context_project_id::text=$2)
             AND ($3::timestamptz IS NULL OR (s.last_active_at,s.id)<($3::timestamptz,$4::uuid))
           ORDER BY s.last_active_at DESC,s.id DESC
           LIMIT 100`,
-        [workspaceId, projectFilter ?? null, cursorDate, cursorId, user.id],
+        [workspaceId, projectFilter ?? null, cursorDate, cursorId, archiveIds],
       )
 
       // The list never outruns the read gate (L4): the same decision the
@@ -1103,10 +1113,10 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         res.status(404).json({ error: 'Session not found' }); return
       }
       if (body.data.archived) {
-        await query(`INSERT INTO session_archives(user_id,session_id) VALUES($1,$2)
+        await queryWithRLS(userId, `INSERT INTO session_archives(user_id,session_id) VALUES($1,$2)
           ON CONFLICT (user_id,session_id) DO NOTHING`, [userId, session.id])
       } else {
-        await query('DELETE FROM session_archives WHERE user_id=$1 AND session_id=$2', [userId, session.id])
+        await queryWithRLS(userId, 'DELETE FROM session_archives WHERE user_id=$1 AND session_id=$2', [userId, session.id])
       }
       res.json({ archived: body.data.archived })
     } catch (err) {
