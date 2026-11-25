@@ -1,6 +1,7 @@
 /** Native read tools, also projected through the canonical MCP catalog/executor. */
 import { z } from 'zod'
 import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
+import { ContextScopeAccumulator, type ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
 import { estimateStringTokens } from '@use-brian/agent-runtime/compaction/index.js'
 import { runWithAgentAccess } from '../db/agent-access-context.js'
 import { createProjectHarnessStore, readHarnessProjectSnapshot } from '../db/project-harness-store.js'
@@ -67,21 +68,25 @@ export function createProjectHarnessTools(options: ProjectHarnessToolsOptions = 
   const store = options.store ?? createProjectHarnessStore()
   const execution = options.execution ?? createHarnessExecutionStore()
   const snapshot = options.snapshot ?? readHarnessProjectSnapshot
-  async function read<T>(input: TargetInput, context: ToolContext, work: (a: ReturnType<typeof actor>) => Promise<T>) {
+  async function read<T>(input: TargetInput, context: ToolContext, work: (a: ReturnType<typeof actor>, note: (evidence: ScopeEvidence) => void) => Promise<T>) {
     try {
       const a = actor(context, input)
       const guarded = () => withHarnessReadAuthority(a.authority, async () => {
         assertHarnessReadCeiling(a.userId, a.workspaceId, a.projectId)
-        const scopeEvidence = harnessScopeEvidence(a.projectId)
-        context.scopeAccumulator?.note(scopeEvidence)
-        const data = await work(a)
+        const evidence = new ContextScopeAccumulator()
+        const note = (item: ScopeEvidence) => {
+          evidence.note(item)
+          context.scopeAccumulator?.note(item)
+        }
+        note(harnessScopeEvidence(a.projectId))
+        const data = await work(a, note)
         // Check the exact native success serialization, including repeated prompt
         // JSON and CJK. Stay below the executor's universal 25k-token cap.
         const encoded = JSON.stringify(data)
         if (encoded.length > 60_000 || estimateStringTokens(encoded) > 24_000) {
           throw new WorkspaceAccessError('harness_context_too_large', 503)
         }
-        return { data, scopeEvidence }
+        return { data, scopeEvidence: evidence.evidence }
       })
       return await (context.executionContext ? runWithAgentAccess(context.executionContext.security.access, guarded) : guarded())
     } catch (error) { return failure(error) }
@@ -101,15 +106,18 @@ export function createProjectHarnessTools(options: ProjectHarnessToolsOptions = 
     },
   }), buildTool({
     name: 'prepareProjectHarnessTask',
-    description: 'Prepare exact new_task_with_context arguments for the existing sidanCode MCP connector from one fresh authorized Project snapshot. Supply the coding prompt, explicit runtimeProject key (NOT a Brian UUID), explicit coding scope, and changedSources OR scopes for impact selection (defaults to coding scope). Includes scoped constraints, impacted ancestor/reverse-dependent checks and scenarios with reasons/revisions, actual Product name, and nonempty verification for Sidan follow-up review. Blocked/uncovered/conflicted plans produce no runnable arguments. Review is not human approval or source-blind acceptance. Does not launch, authorize egress, copy hidden history or write results. Refresh before sending/resuming.',
+    description: 'Prepare exact new_task_with_context arguments for the existing sidanCode MCP connector from one fresh authorized Project snapshot. Supply the explicit brianTaskId UUID of a current readable Task in this Brian Project, coding prompt, explicit runtimeProject key (NOT a Brian UUID), explicit coding scope, and changedSources OR scopes for impact selection (defaults to coding scope). Includes scoped constraints, impacted ancestor/reverse-dependent checks and scenarios with reasons/revisions, actual Product name, and nonempty verification for Sidan follow-up review. Blocked/uncovered/conflicted plans produce no runnable arguments. Review is not human approval or source-blind acceptance. Does not launch, authorize egress, copy hidden history or write results. Refresh before sending/resuming.',
     inputSchema: prepareProjectHarnessTaskSchema, isReadOnly: true, isConcurrencySafe: true,
     async execute(raw, context) {
       try {
         const input = prepareProjectHarnessTaskSchema.parse(raw)
-        return await read(input, context, async a => {
+        return await read(input, context, async (a, note) => {
           // One actor-bound repeatable-read snapshot supplies BOTH implementation
           // lineage and impacted tests; never mix heads from separate store reads.
-          const current = await snapshot(a.userId, a.workspaceId, a.projectId)
+          const current = await snapshot(a.userId, a.workspaceId, a.projectId,
+            { brianTaskId: input.brianTaskId, access: context.executionContext!.security.access })
+          if (!current.taskEvidence?.sources?.length) throw new WorkspaceAccessError('harness_unavailable', 503)
+          note(current.taskEvidence)
           const selection = input.changedSources ? { changedSources: input.changedSources } : { scopes: input.scopes ?? [a.scope] }
           const impact = selectHarnessImpact({ workspaceId: a.workspaceId, projectId: a.projectId }, current, selection)
           const lineageKeys = new Set(scopeLineage(a.scope).map(harnessScopeKey))

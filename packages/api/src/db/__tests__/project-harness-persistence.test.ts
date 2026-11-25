@@ -1,9 +1,16 @@
+import { bindScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
+import type { TaskRecord } from '@use-brian/core/tasks/types.js'
+import { readLegacyCanonicalTask } from '../task-reader.js'
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { PGlite } from '@electric-sql/pglite'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { harnessDefinitionSchema, harnessTextUnits } from '../../project-harness/contracts.js'
 import { readHarnessProjectSnapshot } from '../project-harness-store.js'
+
+// Task admission is delegated to the canonical reader; this fixture isolates
+// the harness's Project match, transaction/actor forwarding and evidence handling.
+vi.mock('../task-reader.js', () => ({ readLegacyCanonicalTask: vi.fn() }))
 
 // Exercise the real snapshot helper against this file's PGlite restricted role.
 // Only the pool transport is adapted; SQL predicates and RLS are unchanged.
@@ -83,6 +90,37 @@ beforeAll(async () => {
 afterAll(async () => { await db?.close() })
 
 describe('[COMP:api/project-harness] restricted-role migration persistence', () => {
+  it('binds only the exact current actor-readable Task in the selected Project', async () => {
+    const brianTaskId = randomUUID()
+    const access = { userId: participant, workspaceId: w, assistantId: assistant, assistantKind: 'standard' as const }
+    const source = { resourceKind: 'task', resourceId: brianTaskId, version: '1', workspaceId: w, userId: participant,
+      assistantId: null, sensitivity: 'internal' as const, projectIds: [p], compartments: [] }
+    const sources = [source, { ...source, resourceKind: 'application_field', resourceId: randomUUID() }]
+    const task: TaskRecord = { id: brianTaskId, workspaceId: w, title: 'Task body is not handoff data', status: 'todo',
+      due: null, assigneeId: null, tags: [], attributes: {}, externalRef: {}, parentId: null, createdAt: new Date(), updatedAt: new Date() }
+    const reader = vi.mocked(readLegacyCanonicalTask)
+    const readTask = () => readHarnessProjectSnapshot(participant, w, p, { brianTaskId, access })
+    for (const match of [{ projectIds: [p] }, { home: { kind: 'project' as const, id: p } }]) {
+      reader.mockResolvedValueOnce(bindScopeSources({ ...task, ...match }, sources))
+      const result = await readTask()
+      expect(result.taskEvidence?.sources).toEqual(sources)
+      expect(JSON.stringify(result)).not.toContain(task.title)
+      expect(reader).toHaveBeenLastCalledWith(access, brianTaskId, snapshotClient)
+    }
+    for (const denied of [null, task, { ...task, projectIds: [second] }, { ...task, home: { kind: 'department' as const, id: p } },
+      { ...task, workspaceId: randomUUID(), projectIds: [p] }, { ...task, id: randomUUID(), projectIds: [p] }]) {
+      reader.mockResolvedValueOnce(denied)
+      await expect(readTask()).rejects.toMatchObject({ code: 'harness_not_found' })
+    }
+    reader.mockResolvedValueOnce({ ...task, projectIds: [p] })
+    await expect(readTask()).rejects.toMatchObject({ code: 'harness_unavailable' }) // unbound DTO
+    reader.mockClear()
+    await expect(readHarnessProjectSnapshot(outsider, w, p, { brianTaskId, access: { ...access, userId: outsider } }))
+      .rejects.toMatchObject({ code: 'harness_not_found' })
+    await expect(readHarnessProjectSnapshot(participant, w, p, { brianTaskId, access: { ...access, userId: owner } }))
+      .rejects.toMatchObject({ code: 'harness_not_found' })
+    expect(reader).not.toHaveBeenCalled()
+  })
   it('reads participants and workspace-owner oversight, but only shared owners govern', async () => {
     const product = await create()
     expect(await read(participant, product.id)).toEqual([])

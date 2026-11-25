@@ -8,16 +8,19 @@ import { currentAgentAccess, runWithAgentAccess } from '../../db/agent-access-co
 import { createProjectHarnessTools } from '../tools.js'
 import type { HarnessRevision } from '../contracts.js'
 
+const brianTaskId = '42000000-0000-4000-8000-000000000101'
 const userId = '32000000-0000-4000-8000-000000000001'
 const workspaceId = '32000000-0000-4000-8000-000000000002'
 const projectId = '32000000-0000-4000-8000-000000000003'
 const otherId = '32000000-0000-4000-8000-000000000004'
 const assistantId = '32000000-0000-4000-8000-000000000005'
+const taskEvidence = { sources: [{ resourceKind: 'task', resourceId: brianTaskId, version: '1', workspaceId, userId,
+  assistantId: null, sensitivity: 'internal' as const, projectIds: [projectId], compartments: [`project:${projectId}`] }] }
 const revision: HarnessRevision = { id: otherId, workspaceId, projectId, scope: { kind: 'project' }, revision: 1,
   definition: { schemaVersion: 1, rules: [{ key: 'safety', kind: 'invariant', value: 'Current authorized rule', override: false }], codeChecks: [], acceptanceScenarios: [] },
   createdBy: userId, createdAt: '2026-01-01T00:00:00Z' }
 const names = ['getProjectHarnessContext', 'prepareProjectHarnessTask', 'listProjectHarnessScopes', 'selectProjectHarnessTests', 'getProjectHarnessAcceptance']
-const taskInput = { prompt: 'Implement the requested change', runtimeProject: 'operator-runtime-key' }
+const taskInput = { brianTaskId, prompt: 'Implement the requested change', runtimeProject: 'operator-runtime-key' }
 
 function fixture(kind: 'brain_key' | 'assistant_key' | 'oauth_token' | 'home_app' = 'assistant_key') {
   let active = true
@@ -32,7 +35,7 @@ function fixture(kind: 'brain_key' | 'assistant_key' | 'oauth_token' | 'home_app
   const store = { lineage: vi.fn().mockResolvedValue([revision]), tree: vi.fn().mockResolvedValue({ products: [], components: [] }),
     definition: vi.fn().mockResolvedValue(revision), history: vi.fn().mockResolvedValue([revision]) }
   const execution = { approvals: vi.fn().mockResolvedValue([]), runs: vi.fn().mockResolvedValue([]) }
-  const snapshot = vi.fn().mockResolvedValue({ tree: { products: [], components: [] }, revisions: [revision] })
+  const snapshot = vi.fn().mockResolvedValue({ taskEvidence, tree: { products: [], components: [] }, revisions: [revision] })
   const tools = createProjectHarnessTools({ store, execution, snapshot })
   const admission = { context, tools: new Map(tools.map(tool => [tool.name, tool])), operationNames: new Set(names), readOnly: true }
   const resolve = vi.fn(async () => admission)
@@ -102,10 +105,10 @@ describe('real workspace MCP catalog with native harness operations', () => {
     const current = { ...revision, id: assistantId, revision: 2, definition: { ...revision.definition,
       rules: [{ key: 'safety', kind: 'invariant' as const, value: 'REFRESHED RULE', override: false }] } }
     f.store.lineage.mockResolvedValue([current])
-    f.snapshot.mockResolvedValue({ tree: { products: [], components: [] }, revisions: [current] })
+    f.snapshot.mockResolvedValue({ taskEvidence, tree: { products: [], components: [] }, revisions: [current] })
     const result = await prepare.handler(taskInput)
     expect(result).toMatchObject({ isError: false, structuredContent: { status: 'succeeded', data: { status: 'prepared', toolName: 'new_task_with_context',
-      arguments: { prompt: taskInput.prompt, context: { project: taskInput.runtimeProject,
+      arguments: { brianTaskId, prompt: taskInput.prompt, context: { project: taskInput.runtimeProject,
         constraints: [expect.stringContaining('REFRESHED RULE'), expect.stringContaining('impact_selected_coding_test_plan')],
         verification: expect.stringContaining('Coding/test review only'), references: [expect.stringContaining(assistantId)] } }, binding: { revisions: [{ revisionId: assistantId, revision: 2 }] },
       notice: expect.stringContaining('no task started'),
@@ -115,7 +118,7 @@ describe('real workspace MCP catalog with native harness operations', () => {
     expect(f.store.lineage).toHaveBeenCalledTimes(2)
     expect(f.execution.approvals).not.toHaveBeenCalled()
     expect(f.execution.runs).not.toHaveBeenCalled()
-    expect(f.snapshot).toHaveBeenCalledExactlyOnceWith(userId, workspaceId, projectId)
+    expect(f.snapshot).toHaveBeenCalledExactlyOnceWith(userId, workspaceId, projectId, { brianTaskId, access: f.context.executionContext!.security.access })
   })
 
   it.each([

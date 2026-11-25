@@ -9,8 +9,11 @@ import { createProjectHarnessTools } from '../tools.js'
 import { currentAgentAccess, runWithAgentAccess } from '../../db/agent-access-context.js'
 
 const id = (n: number) => `41000000-0000-4000-8000-${String(n).padStart(12, '0')}`
+const brianTaskId = '42000000-0000-4000-8000-000000000101'
 const userId = id(1), workspaceId = id(2), projectId = id(3), frontendId = id(4), backendId = id(5)
 const calendarId = id(6), logoId = id(7), apiId = id(8)
+const taskEvidence = { sources: [{ resourceKind: 'task', resourceId: brianTaskId, version: '1', workspaceId, userId,
+  assistantId: null, sensitivity: 'internal' as const, projectIds: [projectId], compartments: [`project:${projectId}`] }] }
 const project: HarnessScope = { kind: 'project' }
 const frontend: HarnessScope = { kind: 'product', productId: frontendId }
 const backend: HarnessScope = { kind: 'product', productId: backendId }
@@ -42,7 +45,7 @@ function fixture() {
     row(16, api, { codeChecks: [{ key: 'contract', kind: 'contract', instructions: 'Test availability response schema', command: 'pnpm test availability-contract' }],
       sourceMappings: [{ repository: 'server', pathPrefix: 'src/availability' }] }),
   ]
-  const snapshot: HarnessProjectSnapshot = { tree: { products: [node(frontendId, 'Frontend'), node(backendId, 'Backend')],
+  const snapshot: HarnessProjectSnapshot & { taskEvidence: typeof taskEvidence } = { taskEvidence, tree: { products: [node(frontendId, 'Frontend'), node(backendId, 'Backend')],
     components: [{ ...node(calendarId, 'Calendar Picker'), productId: frontendId }, { ...node(logoId, 'Logo'), productId: frontendId }, { ...node(apiId, 'Availability API'), productId: backendId }] }, revisions }
   const readSnapshot = vi.fn().mockResolvedValue(snapshot)
   const store = { lineage: vi.fn().mockRejectedValue(new Error('Do not mix separate lineage heads')), tree: vi.fn(), definition: vi.fn(), history: vi.fn() }
@@ -56,7 +59,7 @@ function fixture() {
   const context: ToolContext = { ...executionToolContext(ec, { appId: 'fixture' }), activeProjectId: projectId,
     scopeAccumulator: new ContextScopeAccumulator() }
   const tool = createProjectHarnessTools({ store, execution, snapshot: readSnapshot }).find(t => t.name === 'prepareProjectHarnessTask')!
-  const input = { prompt: 'Update availability', runtimeProject: 'operator-checkout', scope: api }
+  const input = { brianTaskId, prompt: 'Update availability', runtimeProject: 'operator-checkout', scope: api }
   const invoke = (patch: Record<string, unknown> = {}) => tool.execute({ ...input, ...patch }, context)
   async function prepared(patch: Record<string, unknown> = {}) {
     const result = await invoke(patch)
@@ -89,7 +92,7 @@ describe('impact-selected sidanCode coding/review handoff', () => {
     expect(data.arguments.context.project).toBe('operator-checkout')
     expect(data.arguments.context.references).toHaveLength(5)
     expect(data.binding.revisions.map(r => r.revisionId).sort()).toEqual([11, 12, 13, 14, 16].map(id))
-    expect(f.readSnapshot).toHaveBeenCalledExactlyOnceWith(userId, workspaceId, projectId)
+    expect(f.readSnapshot).toHaveBeenCalledExactlyOnceWith(userId, workspaceId, projectId, { brianTaskId, access: f.context.executionContext!.security.access })
     expect(f.store.lineage).not.toHaveBeenCalled()
     expect(f.store.tree).not.toHaveBeenCalled()
     expect(f.execution.approvals).not.toHaveBeenCalled()
