@@ -44,6 +44,7 @@ let nativeConversationReads = false
 let nativeConversationSettings = false
 let nativePageVisitorReads = false
 let nativePromptMemorySections = false
+let nativePromptMemorySectionsV2 = false
 let nativeAnchorWriteAdmission = false
 let nativeRetainedConversationOutputs = false
 let nativePublicConversationHistory = false
@@ -52,7 +53,7 @@ let nativeVerifiedChannelPublication = false
 /** Edition-shared boot binds the installed SQL capability before mounting
  * routes. An activated native read never falls back after a refusal or error. */
 export async function initializeConversationVisibility(): Promise<void> {
-  const result = await getAppPool().query<{ reads: boolean; settings: boolean; pageVisitors: boolean; promptMemory: boolean;
+  const result = await getAppPool().query<{ reads: boolean; settings: boolean; pageVisitors: boolean; promptMemory: boolean; promptMemoryV2: boolean;
     anchorWriteAdmission: boolean; anchorWriteExposed: boolean; retainedOutputs: boolean; retainedOutputOwnerExposed: boolean;
     publicHistory: boolean; publicHistoryOwnerExposed: boolean; publicMemberPublication: boolean; verifiedChannelPublication: boolean }>(`SELECT
     coalesce(has_function_privilege(current_user,to_regprocedure('public.read_conversation_member_tiers(uuid[],boolean)'),'EXECUTE'),false)
@@ -62,6 +63,7 @@ export async function initializeConversationVisibility(): Promise<void> {
     to_regprocedure('public.read_native_page_conversation_rows(uuid,text)') IS NOT NULL
     AND NOT coalesce(has_function_privilege(current_user,to_regprocedure('public.read_native_page_conversation_rows(uuid,text)'),'EXECUTE'),false) AS "pageVisitors",
     coalesce(has_function_privilege(current_user,to_regprocedure('public.capture_native_prompt_memory_sections(uuid,uuid,uuid,uuid,uuid,integer,uuid,boolean,boolean,uuid)'),'EXECUTE'),false) AS "promptMemory",
+    coalesce(has_function_privilege(current_user,to_regprocedure('public.capture_native_prompt_memory_sections_v2(uuid,uuid,uuid,uuid,uuid,integer,uuid,boolean,boolean,uuid)'),'EXECUTE'),false) AS "promptMemoryV2",
     to_regprocedure('public.lock_conversation_member_read(uuid,uuid,uuid)') IS NOT NULL AS "anchorWriteAdmission",
     coalesce(has_function_privilege(current_user,to_regprocedure('public.lock_conversation_member_read(uuid,uuid,uuid)'),'EXECUTE'),false)
       AS "anchorWriteExposed",
@@ -94,6 +96,7 @@ export async function initializeConversationVisibility(): Promise<void> {
   nativeConversationSettings = settingsReady
   nativePageVisitorReads = nativeConversationReads && result.rows[0]?.pageVisitors === true
   nativePromptMemorySections = nativeConversationReads && result.rows[0]?.promptMemory === true
+  nativePromptMemorySectionsV2 = nativePromptMemorySections && result.rows[0]?.promptMemoryV2 === true
   nativeAnchorWriteAdmission = nativeConversationReads && result.rows[0]?.anchorWriteAdmission === true
   nativeRetainedConversationOutputs = nativeConversationReads && result.rows[0]?.retainedOutputs === true
   nativePublicConversationHistory = nativeConversationReads && result.rows[0]?.publicHistory === true
@@ -103,6 +106,7 @@ export const conversationReadersActive = () => nativeConversationReads
 export const conversationSettingsActive = () => nativeConversationSettings
 export const pageVisitorConversationsActive = () => nativePageVisitorReads
 export const promptMemorySectionsActive = () => nativePromptMemorySections
+export const promptMemorySectionsV2Active = () => nativePromptMemorySectionsV2
 export const conversationAnchorWriteAdmissionActive = () => nativeAnchorWriteAdmission
 export const conversationRetainedOutputActive = () => nativeRetainedConversationOutputs
 export const publicConversationHistoryActive = () => nativePublicConversationHistory

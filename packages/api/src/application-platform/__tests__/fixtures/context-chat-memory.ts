@@ -21,6 +21,47 @@ export async function openContextChatSession({ ownerId, assistantId, workspaceId
   return { session, deviceId: device.id, token: createTokens(actor, secret, device).accessToken }
 }
 
+export async function seedSharedMemoryAncestry(f: Fixture) {
+  const facts = ['Fictional primary label is violet.', 'Fictional secondary label is orange.']
+  const roots = await Promise.all(facts.map(fact => f.memory(fact, f.ownerId)))
+  const ancestor = await f.memory('Fictional retired source Memory', f.ownerId)
+  const { rows: files } = await f.pool.query<{ id: string; version: string }>(`
+    INSERT INTO workspace_files(workspace_id,path,name,storage_uri,created_by_user_id,source,sensitivity)
+    SELECT $1,'/fictional/shared-source-'||n,'Fictional shared source','fixture://shared-source-'||n,$2,'user','internal'
+    FROM generate_series(1,8) n RETURNING id,scope_version::text AS version`, [f.workspaceId, f.ownerId])
+  const client = await f.pool.connect()
+  try {
+    await client.query('BEGIN')
+    // Model a previously captured Memory graph. Only the two current Memory
+    // roots are selected, but their protected source closure overlaps.
+    await withTableTriggersSuspended(client, ['memories', 'scope_derivations', 'scope_derivation_sources'], async () => {
+      await client.query('UPDATE memories SET valid_to=now() WHERE id=$1', [ancestor.id])
+      await client.query(`WITH parents AS (
+        INSERT INTO scope_derivations(workspace_id,resource_kind,resource_id,resource_version,producer,user_id,assistant_id,
+          sensitivity,compartments,project_ids,source_policy_revision)
+        SELECT workspace_id,'memory',id,scope_version::text,'fixture:shared-memory-ancestry',user_id,assistant_id,
+          sensitivity,compartments,project_ids,1 FROM memories WHERE id=ANY($1::uuid[])
+        RETURNING workspace_id,id,resource_id
+      ) INSERT INTO scope_derivation_sources(workspace_id,derivation_id,source_kind,source_id,source_version)
+        SELECT p.workspace_id,p.id,'memory',m.id,m.scope_version::text
+        FROM parents p CROSS JOIN memories m WHERE p.resource_id<>$2 AND m.id=$2
+        UNION ALL
+        SELECT p.workspace_id,p.id,'workspace_file',file.id,file.version
+        FROM parents p CROSS JOIN unnest($3::uuid[],$4::text[]) AS file(id,version) WHERE p.resource_id=$2`,
+      [[...roots.map(root=>root.id),ancestor.id],ancestor.id,files.map(file=>file.id),files.map(file=>file.version)])
+    })
+    const { rows } = await client.query<{ current: boolean }>('SELECT public.native_turn_contract_witness_refresh() AS current')
+    expect(rows[0].current).toBe(true)
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
+  return { roots, facts, ancestor, sourceFile: files[0] }
+}
+
 export async function seedContextChatMemory(f: Fixture, dense: boolean, secret: string, colorFact: string) {
   const { workspaceId, assistantId, ownerId } = f
   const sourceSession = await openContextChatSession(f, secret)

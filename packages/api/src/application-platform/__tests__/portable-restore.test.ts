@@ -87,6 +87,19 @@ describe('[COMP:api/portable-restore] reviewed harness extension',()=>{
   const releases=await import(new URL('installation-release.mjs',directory).href)
   expect(releases.hasInstallationRelease('8337_project_chat_creation_admission.sql')).toBe(true)
  })
+ it('binds the packed Memory release without replacing the preceding release profile', { timeout: 15_000 }, async()=>{
+  const {currentReleaseSource}=await import(new URL('installation-release.mjs',directory).href)
+  const previous='8351_scope_derivation_parent_lookup.sql',head='8352_packed_memory_observation.sql'
+  const [oldSource,newSource]=await Promise.all([currentReleaseSource(previous),currentReleaseSource(head)])
+  expect(oldSource.portableSuccessor.migrations.at(-1)).toBe(previous)
+  expect(newSource.portableSuccessor.migrations).toEqual([...oldSource.portableSuccessor.migrations,head])
+  expect(newSource.sourceDigest).not.toBe(oldSource.sourceDigest)
+  expect(newSource.additionalCatalogs.slice(0,-1)).toEqual(oldSource.additionalCatalogs)
+  expect(newSource.additionalCatalogs.at(-1).scope.functions).toEqual([
+   'capture_native_prompt_memory_sections_once','capture_native_prompt_memory_sections_v2',
+   'observe_native_prompt_memory_field_once','read_native_memory_query_projection_once',
+  ])
+ })
 })
 
 describe('[COMP:api/portable-restore] finite portable restore roster',()=>{

@@ -6,6 +6,7 @@ import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evid
 import { memoryLearningSchema } from '@use-brian/core/memory/learning.js'
 import { Pool, type PoolClient } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { withBootstrap } from '../../__tests__/fixtures/bootstrap-role.js'
 import { bindSessionTurnAuthority } from '../../context-scope/authority-lease.js'
 import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
 import { authSessionStore } from '../../db/auth-session-store.js'
@@ -20,6 +21,7 @@ import { findAssistantById } from '../../db/users.js'
 import { upsertBrainEvolution } from '../../db/workspace-brain-evolution-store.js'
 import { upsertEvolution } from '../../db/workspace-memory-evolution-store.js'
 import { getWorkspaceIdentity } from '../../db/workspace-store.js'
+import { seedSharedMemoryAncestry } from './fixtures/context-chat-memory.js'
 import { persistentContextFixture } from './fixtures/persistent-context.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
@@ -49,21 +51,24 @@ async function privateTurn(departmentV2 = false) {
   const token = await claimTurnLease(session.id, f.assistantId)
   if (!token) throw new Error('Missing test turn lease')
   const disposeBinding = bindSessionTurnAuthority(execution.security.authority, { sessionId: session.id, assistantId: f.assistantId, token })
-  const statement = `SELECT public.capture_native_prompt_memory_sections($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) AS value`
   const params = [f.workspaceId, f.ownerId, f.assistantId, session.id, auth.id, auth.authVersion, f.ownerId, true, true, token]
-  function captureIn(db: PoolClient, snapshot: 'repeatable read' | 'read committed') {
+  function captureCurrent(db: PoolClient, reader: 'original' | 'packed' = 'original') {
+    const operation = reader === 'packed' ? 'capture_native_prompt_memory_sections_v2' : 'capture_native_prompt_memory_sections'
     return runWithAgentAccess(execution.security.access, async () => {
-      await db.query(snapshot === 'repeatable read' ? 'BEGIN ISOLATION LEVEL REPEATABLE READ' : 'BEGIN')
       await applyRLSGucs(db, f.ownerId, f.assistantId)
-      return (await db.query(statement, params)).rows[0].value
+      return (await db.query(`SELECT public.${operation}($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) AS value`, params)).rows[0].value
     })
+  }
+  async function captureIn(db: PoolClient, snapshot: 'repeatable read' | 'read committed') {
+    await db.query(snapshot === 'repeatable read' ? 'BEGIN ISOLATION LEVEL REPEATABLE READ' : 'BEGIN')
+    return captureCurrent(db)
   }
   async function capture(snapshot: 'repeatable read' | 'read committed') {
     const db = await getAppPool().connect()
     try { return await captureIn(db, snapshot) } finally { await rollbackAndRelease(db) }
   }
   const authority = { execution, accumulator: new ContextScopeAccumulator() }
-  return { ...f, auth, authority, capture, captureIn, read: () => store.getPromptMemoryContext!(execution.security.access, 10, authority),
+  return { ...f, auth, authority, capture, captureIn, captureCurrent, read: () => store.getPromptMemoryContext!(execution.security.access, 10, authority),
     async cleanup() {
       disposeBinding()
       try { await releaseTurnLease(session.id, 'failed', token) } finally { await f.cleanup() }
@@ -98,6 +103,129 @@ describe.sequential('reviewed native prompt Memory owner', () => {
       expect(result.team.tagged.map(row => row.id)).toEqual([team.id])
     } finally { await f.cleanup() }
   }, 120_000)
+
+  it('matches both canonical Memory masks and rechecks a same-transaction source hold', async () => {
+    const f = await privateTurn(true)
+    const holdSource = 'prompt_memory_hold_fixture_' + randomUUID().replaceAll('-', '')
+    let db: PoolClient | undefined
+    try {
+      const { facts, sourceFile } = await seedSharedMemoryAncestry(f)
+      await f.pool.query(`CREATE FUNCTION public.${holdSource}() RETURNS boolean
+        LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $fixture$
+          WITH held AS (
+            UPDATE public.workspace_files SET scope_held=true
+            WHERE workspace_id='${f.workspaceId}'::uuid AND id='${sourceFile.id}'::uuid RETURNING id
+          )
+          SELECT count(*)=1 FROM held
+        $fixture$;
+        REVOKE ALL ON FUNCTION public.${holdSource}() FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION public.${holdSource}() TO app_user`)
+      const client = db = await getAppPool().connect()
+      await db.query('BEGIN ISOLATION LEVEL REPEATABLE READ')
+      const original = await f.captureCurrent(db, 'original')
+      const packed = await f.captureCurrent(db, 'packed')
+      expect(packed.indexes).toEqual(original.indexes)
+      expect(packed.indexes).toMatchObject({ ranked: { state: 'admitted' }, workspace: { state: 'admitted' } })
+      for (const fact of facts) {
+        expect(JSON.stringify(packed.indexes.ranked.projection)).toContain(fact)
+        expect(JSON.stringify(packed.indexes.workspace.projection)).toContain(fact)
+      }
+      for (const row of packed.indexes.ranked.projection.slice(1)) expect(row.row).toHaveProperty('created_at')
+      for (const row of packed.indexes.workspace.projection.slice(1)) expect(row.row).not.toHaveProperty('created_at')
+
+      // Apply the hold after materializing both masks. PostgreSQL exposes
+      // the transaction's own writes even within the original snapshot.
+      expect((await db.query(`SELECT public.${holdSource}() AS held`)).rows).toEqual([{ held: true }])
+      async function blocked(reader: 'original' | 'packed') {
+        await client.query('SAVEPOINT held_memory')
+        try { return { value: await f.captureCurrent(client, reader) } }
+        catch (error) {
+          const sql = error as { code?: string; message: string }
+          return { error: { code: sql.code, message: sql.message } }
+        } finally {
+          await client.query('ROLLBACK TO SAVEPOINT held_memory')
+          await client.query('RELEASE SAVEPOINT held_memory')
+        }
+      }
+      const held = await blocked('packed')
+      expect(held).toEqual(await blocked('original'))
+      for (const fact of facts) expect(JSON.stringify(held)).not.toContain(fact)
+    } finally {
+      try {
+        if (db) await rollbackAndRelease(db)
+        await f.pool.query(`DROP FUNCTION IF EXISTS public.${holdSource}()`)
+      } finally { await f.cleanup() }
+    }
+  }, 60_000)
+
+  it('replays the original reader when the ranked field mask is refused', async () => {
+    const f = await privateTurn(true)
+    const suffix = randomUUID().replaceAll('-', '')
+    const catalog = 'fixture_memory_mask_catalog_' + suffix
+    const point = 'fixture_memory_mask_point_' + suffix
+    const install = 'fixture_memory_mask_install_' + suffix
+    let db: PoolClient | undefined
+    let restoreTracking = false
+    try {
+      const memory = await f.memory('Fictional Memory with restricted ranking metadata', f.ownerId)
+      // The restricted field is in the ranked mask only. Install the policy
+      // inside this app transaction so other fixtures never see the override.
+      await f.pool.query(`CREATE FUNCTION public.${catalog}(w uuid,o jsonb,t text) RETURNS jsonb
+        LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $fixture$
+        SELECT jsonb_build_object('moduleKey','native','origin',o,'typeKey',t,'schemaVersion','fixture-rank-mask','policyVersion','1',
+          'fieldKeys',to_jsonb(public.application_memory_field_keys()),
+          'fields',(SELECT jsonb_agg(jsonb_build_object('key',key,
+            'read',CASE WHEN key='created_at' THEN '[["rank_reader"]]'::jsonb ELSE '[]'::jsonb END,
+            'write','[]'::jsonb,'releaseReadTo','[]'::jsonb,'releaseWriteTo','[]'::jsonb))
+            FROM unnest(public.application_memory_field_keys()) AS key),
+          'scope',jsonb_build_object('workspaceId',w,'userId',NULL,'assistantId',NULL,
+            'sensitivity','public','compartments','[]'::jsonb,'projectIds','[]'::jsonb))
+        WHERE w='${f.workspaceId}'::uuid AND t='memory'
+        $fixture$;
+        CREATE FUNCTION public.${point}(w uuid,o jsonb,t text,i text) RETURNS jsonb
+        LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $fixture$
+          SELECT (public.${catalog}(w,o,t)-'scope')||jsonb_build_object(
+            'recordVersion',m.scope_version::text,'source',public.read_scope_source(w,'memory',m.id))
+          FROM public.memories m WHERE m.workspace_id=w AND m.id=i::uuid
+        $fixture$;
+        CREATE FUNCTION public.${install}() RETURNS void
+        LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $fixture$
+          INSERT INTO public.application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader,catalog_reader)
+          VALUES('native','1',ARRAY['rank_reader'],'public.${point}(uuid,jsonb,text,text)'::regprocedure,
+            'public.${catalog}(uuid,jsonb,text)'::regprocedure);
+          INSERT INTO public.application_native_resource_owners(workspace_id,origin,resource_type,module_key)
+          VALUES('${f.workspaceId}'::uuid,'{"kind":"native","moduleKey":"native"}','memory','native')
+        $fixture$;
+        REVOKE ALL ON FUNCTION public.${catalog}(uuid,jsonb,text),public.${point}(uuid,jsonb,text,text),public.${install}() FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION public.${install}() TO app_user`)
+      restoreTracking = await withBootstrap(async admin => {
+        if ((await admin.query("SELECT has_parameter_privilege('app_user','track_functions','SET') AS allowed")).rows[0].allowed) return false
+        await admin.query('GRANT SET ON PARAMETER track_functions TO app_user')
+        return true
+      })
+      db = await getAppPool().connect()
+      await db.query('BEGIN ISOLATION LEVEL REPEATABLE READ')
+      await db.query(`SELECT public.${install}()`)
+      await db.query("SET LOCAL track_functions='all'")
+      const packed = await f.captureCurrent(db, 'packed')
+      const { rows } = await db.query(`SELECT calls::int AS calls FROM pg_stat_xact_user_functions
+        WHERE schemaname='public' AND funcname='capture_native_prompt_memory_sections'`)
+      expect(rows).toEqual([{ calls: 1 }])
+      expect(packed.indexes).toEqual((await f.captureCurrent(db, 'original')).indexes)
+      expect(packed.indexes.ranked).toEqual({ state: 'denied' })
+      expect(packed.indexes.workspace).toMatchObject({ state: 'admitted', projection: [
+        { row: null }, { row: { id: memory.id, summary: memory.summary } },
+      ] })
+      expect(packed.indexes.workspace.projection[1].row).not.toHaveProperty('created_at')
+    } finally {
+      try {
+        if (db) await rollbackAndRelease(db)
+        if (restoreTracking) await withBootstrap(admin => admin.query('REVOKE SET ON PARAMETER track_functions FROM app_user'))
+        await f.pool.query(`DROP FUNCTION IF EXISTS public.${install}(),
+          public.${point}(uuid,jsonb,text,text),public.${catalog}(uuid,jsonb,text)`)
+      } finally { await f.cleanup() }
+    }
+  }, 60_000)
 
   it('applies only authorized and currently applicable exceptions to prompt identity and voice', async () => {
     const f = await privateTurn(true)

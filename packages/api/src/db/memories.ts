@@ -31,7 +31,7 @@ import { currentAgentAccess,runWithAgentAccess } from './agent-access-context.js
 import { buildMemoryAccessPredicate } from './memory-access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { applyRLSGucs, commitTransaction, getAppPool, getPool, query, queryGated, rlsGucSettings, rollbackAndRelease } from './client.js'
-import { conversationReadersActive, promptMemorySectionsActive, retainedConversationOutputFilter } from './conversation-visibility.js'
+import { conversationReadersActive, promptMemorySectionsActive, promptMemorySectionsV2Active, retainedConversationOutputFilter } from './conversation-visibility.js'
 import { emitMentionedEdges } from './edge-hooks.js'
 import { excludeExternalPrincipalsSql } from './external-principal.js'
 import { backgroundWorkspaceFilter } from '../background-inference-policy.js'
@@ -2508,21 +2508,28 @@ const promptMemorySections = z.discriminatedUnion('kind',[
 ])
 // The migration builder checks the matching installed caller body on disk.
 const promptMemoryBodySha = 'ecf6950e5d6cd57f244815fde0a6c29a5d9a9ef5aa5f7c00268cb145a7d54022'
-const capturePromptMemorySectionsSql = `
+const promptMemoryV2BodySha = 'd831769974085ae8b11d6ebca9ad1b35844e7eedb1e10790f6304d55cf6e6ed1'
+const capturePromptMemorySql = (version: 1 | 2) => {
+  const name = version === 2 ? 'capture_native_prompt_memory_sections_v2' : 'capture_native_prompt_memory_sections'
+  const bodySha = version === 2 ? promptMemoryV2BodySha : promptMemoryBodySha
+  return `
   SELECT CASE WHEN EXISTS(
     SELECT 1 FROM pg_catalog.pg_proc p
     JOIN pg_catalog.pg_class c ON c.oid='public.sessions'::regclass
     JOIN pg_catalog.pg_roles r ON r.rolname='app_user'
-    WHERE p.oid=to_regprocedure('public.capture_native_prompt_memory_sections(uuid,uuid,uuid,uuid,uuid,integer,uuid,boolean,boolean,uuid)')
+    WHERE p.oid=to_regprocedure('public.${name}(uuid,uuid,uuid,uuid,uuid,integer,uuid,boolean,boolean,uuid)')
       AND p.proowner=c.relowner AND p.pronamespace='public'::regnamespace
       AND p.proacl=ARRAY[makeaclitem(c.relowner,c.relowner,'EXECUTE',false),makeaclitem(r.oid,c.relowner,'EXECUTE',false)]
       AND p.prolang=(SELECT oid FROM pg_catalog.pg_language WHERE lanname='plpgsql')
       AND p.prorettype='jsonb'::regtype AND p.prokind='f' AND p.provolatile='v'
       AND p.prosecdef AND NOT p.proretset AND NOT p.proisstrict AND NOT p.proleakproof AND p.proparallel='u'
       AND p.proconfig=ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.pronargdefaults=0
-      AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')='${promptMemoryBodySha}'
-  ) THEN public.capture_native_prompt_memory_sections($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) END AS value
+      AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')='${bodySha}'
+  ) THEN public.${name}($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) END AS value
 `
+}
+const capturePromptMemorySectionsSql = capturePromptMemorySql(1)
+const capturePromptMemorySectionsV2Sql = capturePromptMemorySql(2)
 
 /** Authority, complete Memory cohorts and the original prompt selectors share one connection. */
 export async function getNativePromptMemoryContext(ctx:AccessContext,limit:number,authority:SessionContextAuthority):Promise<{
@@ -2557,8 +2564,12 @@ export async function getNativePromptMemoryContext(ctx:AccessContext,limit:numbe
         const acquired=await captureSessionAuthority(execution.security.authority,async input=>{
           if(!input.turn || !input.credential || input.workspaceId!==workspaceId || input.userId!==userId
             || input.assistantId!==execution.assistant.id || input.sessionId!==execution.lifecycle.sessionId) return null
-          const raw=(await client.query<{value:unknown}>(capturePromptMemorySectionsSql,
-            [...sessionAuthorityFactsParameters(input),input.turn.token])).rows[0]?.value
+          const sql = promptMemorySectionsV2Active() ? capturePromptMemorySectionsV2Sql : capturePromptMemorySectionsSql
+          const result = await client.query<{value: unknown}>(sql,
+            [...sessionAuthorityFactsParameters(input),input.turn.token]).catch(error => {
+            throw contextVerificationUnavailable(error, 'prompt_memory_capture') ?? error
+          })
+          const raw = result.rows[0]?.value
           const value=promptMemorySections.parse(raw)
           return {authority:value.authority,value}
         })

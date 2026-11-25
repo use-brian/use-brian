@@ -6,12 +6,13 @@ import request from 'supertest'
 import { afterAll, beforeAll, expect, it, vi } from 'vitest'
 import type { LLMProvider } from '@use-brian/agent-runtime/providers/types.js'
 import type { BootResult } from '../../boot.js'
+import { withBootstrap } from '../../__tests__/fixtures/bootstrap-role.js'
 import { authSessionStore } from '../../db/auth-session-store.js'
 import { createDbCapabilityStore } from '../../db/capability-store.js'
 import { createDbFileStore } from '../../db/file-store.js'
 import { createDbWorkspaceFilesStore } from '../../db/workspace-files-store.js'
 import { persistentContextFixture } from './fixtures/persistent-context.js'
-import { openContextChatSession, seedContextChatMemory } from './fixtures/context-chat-memory.js'
+import { openContextChatSession, seedContextChatMemory, seedSharedMemoryAncestry } from './fixtures/context-chat-memory.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -169,12 +170,13 @@ it.each(['sparse', 'dense'] as const)('finishes two context-aware turns within f
   }
 }, 120_000)
 
-it.each(['native_proof','ancestry'] as const)('reports a PostgreSQL proof timeout in %s during paired prompt preparation', async phase => {
+it.each(['native_proof','ancestry','prompt_memory_capture'] as const)('reports a PostgreSQL proof timeout in %s during prompt preparation', async phase => {
   const f = await persistentContextFixture('internal')
   try {
     await f.pool.query("UPDATE workspaces SET plan='pro', department_read_v2=true WHERE id=$1", [f.workspaceId])
     // The packed reader falls back when its metadata bound exceeds 100 roots.
-    for (let index = 0; index < 101; index++) await f.memory(`Fictional retained context ${index}`, f.ownerId)
+    const memoryCount = phase === 'prompt_memory_capture' ? 1 : 101
+    for (let index = 0; index < memoryCount; index++) await f.memory(`Fictional retained context ${index}`, f.ownerId)
     const { session, token } = await openContextChatSession(f, secret)
     const requestText = 'What is the retained context for this request?'
     const originalQuery = pg.Client.prototype.query
@@ -184,8 +186,7 @@ it.each(['native_proof','ancestry'] as const)('reports a PostgreSQL proof timeou
     const ancestryBatches: number[] = []
     providerInputs = []
     const spy = vi.spyOn(pg.Client.prototype, 'query').mockImplementation(function (this: pg.Client, ...args: unknown[]) {
-      // Only the actual paired SQL and its following application-role proof
-      // participate. All other checkout, storage, and delivery operations run normally.
+      // Interrupt one actual Memory acquisition. Storage and delivery run normally.
       const run = (queryArgs: unknown[]) => Reflect.apply(originalQuery, this, queryArgs)
       const [sql, params] = args
       if (typeof sql !== 'string') return run(args)
@@ -196,10 +197,11 @@ it.each(['native_proof','ancestry'] as const)('reports a PostgreSQL proof timeou
       if (memoryBatch) ancestryBatches.push(kinds.length)
       const chosen = phase === 'native_proof' ? this === pairedClient && sql === 'SELECT capture_conversation_evidence($1,$2) AS value'
         : memoryBatch && kinds.length === 100
-      if (!chosen || timedProofs) return run(args)
+      const interrupt = phase === 'prompt_memory_capture' ? sql.includes('THEN public.capture_native_prompt_memory_sections') : chosen
+      if (!interrupt || timedProofs) return run(args)
       timedProofs++
       const interrupted = (async () => {
-        await run([phase === 'native_proof' ? "SET LOCAL statement_timeout='25ms'" : "SET statement_timeout='25ms'"])
+        await run([phase === 'ancestry' ? "SET statement_timeout='25ms'" : "SET LOCAL statement_timeout='25ms'"])
         try {
           return await run([`WITH pause AS MATERIALIZED (SELECT $1::uuid AS workspace_id,pg_sleep(0.2))
             SELECT protected.* FROM pause CROSS JOIN LATERAL (${sql.replace('$1', 'pause.workspace_id')}) protected`, params])
@@ -301,6 +303,97 @@ it('delivers a private chat reply with both a CRM self profile and an offered sk
     expect(messages.map((row: { role: string }) => row.role)).toEqual(['user'])
   } finally {
     beforeOutput = undefined
+    await boot.ctx.analytics.flush()
+    await f.cleanup()
+  }
+}, 60_000)
+
+it('shares packed Memory proof work and checks source access again before publishing', async () => {
+  const f = await persistentContextFixture('internal')
+  let restoreTracking = false
+  try {
+    restoreTracking = await withBootstrap(async db => {
+      const { rows } = await db.query<{ allowed: boolean }>(
+        "SELECT has_parameter_privilege('app_user','track_functions','SET') AS allowed",
+      )
+      if (rows[0].allowed) return false
+      await db.query('GRANT SET ON PARAMETER track_functions TO app_user')
+      return true
+    })
+    const { workspaceId, assistantId } = f
+    await f.pool.query("UPDATE workspaces SET plan='pro', department_read_v2=true WHERE id=$1", [workspaceId])
+    const { facts, sourceFile } = await seedSharedMemoryAncestry(f)
+    const { session, token } = await openContextChatSession(f, secret)
+    const post = (sessionId: string, authorization: string) => request(boot.app).post('/api/chat')
+      .set('Authorization', 'Bearer ' + authorization).send({ workspaceId, assistantId, sessionId,
+        appOrigin: 'chat', model: 'standard', message: 'What are the two fictional labels?' }).expect(200)
+    const read = (sessionId: string, authorization: string) => request(boot.app).get('/api/sessions/' + sessionId + '/messages')
+      .set('Authorization', 'Bearer ' + authorization).expect(200)
+
+    const originalQuery = pg.Client.prototype.query
+    const captures: Array<{ packet: unknown; calls: Map<string, number> }> = []
+    const spy = vi.spyOn(pg.Client.prototype, 'query').mockImplementation(function (this: pg.Client, ...args: unknown[]) {
+      const run = (queryArgs: unknown[]) => Reflect.apply(originalQuery, this, queryArgs)
+      const [sql] = args
+      if (typeof sql !== 'string' || !sql.includes('THEN public.capture_native_prompt_memory_sections_v2(')) return run(args)
+      return (async () => {
+        await run(["SET LOCAL track_functions='all'"])
+        const counts = async () => (await run([`SELECT funcname,calls::int AS calls
+          FROM pg_stat_xact_user_functions WHERE schemaname='public'`])).rows as Array<{ funcname: string; calls: number }>
+        const before = new Map((await counts()).map(row => [row.funcname, row.calls]))
+        const result = await run(args)
+        const calls = new Map((await counts()).map(row => [row.funcname, row.calls - (before.get(row.funcname) ?? 0)]))
+        captures.push({ packet: result.rows[0].value, calls })
+        return result
+      })()
+    } as typeof originalQuery)
+    answer = 'The two fictional labels are violet and orange.'
+    providerInputs = []
+    let response
+    try { response = await post(session.id, token) } finally { spy.mockRestore() }
+    expect(captures).toHaveLength(1)
+    expect(captures[0].packet).toMatchObject({ kind: 'sections', indexes: {
+      ranked: { state: 'admitted' }, workspace: { state: 'admitted' },
+    } })
+    expect(captures[0].calls.get('observe_native_prompt_memory_field_once')).toBe(6)
+    expect(captures[0].calls.get('application_current_field_snapshot') ?? 0).toBe(0)
+    expect(captures[0].calls.get('application_compute_field_envelope')).toBe(6)
+    const { rows: masks } = await f.pool.query<{ rankedOnly: boolean }>(`
+      SELECT 'created_at'=ANY(fields) AS "rankedOnly"
+      FROM application_field_resources WHERE workspace_id=$1 AND type_key='memory' AND selection='query'
+      GROUP BY fields ORDER BY "rankedOnly"`, [workspaceId])
+    expect(masks).toEqual([{ rankedOnly: false }, { rankedOnly: true }])
+    for (const fact of facts) expect(providerInputs.at(-1)).toContain(fact)
+    expect(response.text).toContain('event: done')
+    expect(response.text).toContain('event: assistant_message_saved')
+    expect((await read(session.id, token)).body.at(-1)).toMatchObject({
+      role: 'assistant', content: [{ type: 'text', text: answer }],
+    })
+
+    const pending = await openContextChatSession(f, secret)
+    answer = 'Fictional reply whose upstream source is now held.'
+    providerInputs = []
+    beforeOutput = async () => {
+      await f.pool.query('UPDATE workspace_files SET scope_held=true WHERE workspace_id=$1 AND id=$2', [workspaceId, sourceFile.id])
+    }
+    const invalidated = await post(pending.session.id, pending.token)
+    beforeOutput = undefined
+    for (const fact of facts) expect(providerInputs.at(-1)).toContain(fact)
+    expect(invalidated.text).toContain('event: error')
+    expect(invalidated.text).not.toContain('event: done')
+    expect((await read(pending.session.id, pending.token)).body.map((row: { role: string }) => row.role)).toEqual(['user'])
+
+    const fresh = await openContextChatSession(f, secret)
+    providerInputs = []
+    answer = 'There is no current source for the fictional labels.'
+    const refreshed = await post(fresh.session.id, fresh.token)
+    expect(refreshed.text).toContain('event: done')
+    expect(refreshed.text).toContain('event: text_delta\ndata: ' + JSON.stringify({ text: answer }))
+    expect(providerInputs).toHaveLength(2)
+    for (const fact of facts) expect(providerInputs[1]).not.toContain(fact)
+  } finally {
+    beforeOutput = undefined
+    if (restoreTracking) await withBootstrap(db => db.query('REVOKE SET ON PARAMETER track_functions FROM app_user'))
     await boot.ctx.analytics.flush()
     await f.cleanup()
   }
