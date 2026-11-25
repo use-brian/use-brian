@@ -790,6 +790,7 @@ export function createTaskTools(
         'Replace the task body — the objective and context, where or how to start, and what result means done. Markdown. Pass null to clear it. Merged into the task, so sibling attribute keys (priority, icon, sprint fields) survive; this is a full replacement of the body text itself, so include what you want kept.',
       ),
       status: statusEnum.optional(),
+      coding_state: z.enum(['running', 'waiting', 'blocked', 'claimed_done']).optional().describe('Status-only update from an external coding session. Sets open work to in_progress or blocked, or marks it done on claimed_done. Does not reopen closed work or move a task out of review except to done. Do not combine with other edits.'),
       assignee_id: idShape.nullable().optional().describe('workspace_members id of the PERSON who executes — call `listWorkspaceMembers` to resolve a name. Pass null to unassign. Setting a person clears an assistant executor.'),
       executor_assistant_id: idShape.nullable().optional().describe(`${executorDescription} Pass null to clear.`),
       follow_up_member_id: idShape.nullable().optional().describe(`${followUpDescription} Pass null to clear.`),
@@ -805,6 +806,25 @@ export function createTaskTools(
       closeLinks: explicitClosesField,
     }),
     async execute(input, context) {
+      if (input.coding_state !== undefined) {
+        if (Object.keys(input).some(key => key !== 'id' && key !== 'coding_state')) {
+          return { data: 'Pass coding_state alone with the task id.', isError: true }
+        }
+        // Use the same governed writer as ordinary board edits. The check runs
+        // on the locked live head, not on an earlier superseded task version.
+        const status = input.coding_state === 'claimed_done' ? 'done'
+          : input.coding_state === 'running' ? 'in_progress' : 'blocked'
+        let skipped = false
+        const result = await applyUpdate(context, input.id, { status }, ['update_status'], current => {
+          const eligible = ['todo', 'in_progress', 'blocked'].includes(current.status) ||
+            (status === 'done' && current.status === 'in_review')
+          skipped = current.status === status || !eligible
+          if (skipped) return 'noop'
+        })
+        if ('isError' in result) return result
+        if (!skipped) opts?.onEvent?.({ type: 'task_updated', taskId: result.record.id, fields: ['status'] }, eventCtx(context))
+        return { data: { id: result.record.id, status: result.record.status, changed: !skipped }, scopeEvidence: scopeEvidenceFromRows([result.record]) }
+      }
       const fields: Parameters<TaskStore['update']>[2] = {}
       if (input.title !== undefined) fields.title = input.title
       if (input.status !== undefined) fields.status = input.status
