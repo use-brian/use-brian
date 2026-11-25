@@ -14,7 +14,8 @@
  */
 import { z } from 'zod'
 import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
-import { queryWithRLS } from '../db/client.js'
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import { admittedExternalTaskId } from './external-task-admission.js'
 import {
   appendExternalReportSystem,
   bindExternalLaneSystem,
@@ -33,7 +34,7 @@ export class ExternalProgressError extends Error {
 }
 
 /** The reporter: who authenticated, never who the payload names. */
-export type Reporter = { userId: string; actor: ExecutionActor }
+export type Reporter = { userId: string; actor: ExecutionActor; access?: AccessContext | null }
 
 export const bindSchema = z.object({
   externalExecutionId: z.string().trim().min(1).max(200),
@@ -55,14 +56,9 @@ export const reportSchema = z.object({
 
 /** Resolve the live head of a task the reporter can read (RLS as its user). */
 async function admittedTask(reporter: Reporter, workspaceId: string, taskId: string): Promise<{ id: string }> {
-  const r = await queryWithRLS<{ id: string }>(reporter.userId,
-    `WITH RECURSIVE chain AS (
-       SELECT id, superseded_by, valid_to FROM tasks WHERE id = $1
-       UNION ALL SELECT t.id, t.superseded_by, t.valid_to FROM tasks t JOIN chain c ON t.id = c.superseded_by)
-     SELECT t.id FROM tasks t WHERE t.id = (SELECT id FROM chain WHERE valid_to IS NULL LIMIT 1)
-        AND t.workspace_id = $2 AND t.retracted_at IS NULL AND NOT t.scope_held`, [taskId, workspaceId])
-  if (!r.rows[0]) throw new ExternalProgressError('task_not_found')
-  return r.rows[0]
+  const id = await admittedExternalTaskId(reporter.userId, workspaceId, taskId, reporter.access)
+  if (!id) throw new ExternalProgressError('task_not_found')
+  return { id }
 }
 
 export type ExternalLaneView = {
@@ -117,9 +113,10 @@ export async function reportExternalProgress(reporter: Reporter, workspaceId: st
 /** The reporting identity of a tool call: the authenticated credential on brain
  *  MCP, else the assistant acting for its user. Never anything in the input. */
 export function reporterFromTool(context: ToolContext): Reporter {
+  const access = context.executionContext?.security.access ?? null
   return context.programmaticPrincipal
-    ? { userId: context.userId, actor: { kind: 'credential', id: context.programmaticPrincipal.credentialId, origin: 'mcp', humanOrigin: false } }
-    : { userId: context.userId, actor: { kind: 'assistant', id: context.assistantId, origin: 'chat', humanOrigin: false } }
+    ? { access, userId: context.userId, actor: { kind: 'credential', id: context.programmaticPrincipal.credentialId, origin: 'mcp', humanOrigin: false } }
+    : { access, userId: context.userId, actor: { kind: 'assistant', id: context.assistantId, origin: 'chat', humanOrigin: false } }
 }
 
 const progressFailure = (error: unknown): { data: string; isError: true } => {

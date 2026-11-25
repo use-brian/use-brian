@@ -10,7 +10,7 @@ import { afterAll, describe, expect, it } from 'vitest'
 import type { ToolContext } from '@use-brian/agent-runtime/tools/types.js'
 import { getAppPool, getPool } from '../../db/client.js'
 import { getPoolSystem } from '../../db/task-execution-store.js'
-import { updateTask } from '../../db/tasks.js'
+import { createTask, updateTask } from '../../db/tasks.js'
 import { externalFreshness, inspectExecution } from '../execution-control.js'
 import { bindExternalExecution, createExternalProgressTools, reportExternalProgress, type Reporter } from '../external-progress.js'
 import { assistantTaskWithExecution, briefFixture, type BriefFixture } from '../../goals/__tests__/fixtures/execution-journeys.js'
@@ -81,8 +81,12 @@ describe('[COMP:api/task-external-progress] external progress capture (real PG +
     const next = await updateTask(f.people.lead, task.id, { title: 'Fictional vendor summary, revised' })
     const r = await reportExternalProgress(reporter, f.workspaceId, task.id, 'coding-session-1', report(3))
     expect(r.lane.taskId).toBe(next!.id)
-    await pool.query('UPDATE tasks SET user_id=$1 WHERE id=$2', [f.people.lead, next!.id])
-    await expect(reportExternalProgress(reporter, f.workspaceId, next!.id, 'coding-session-1', report(4)))
+    const privateTask = await createTask(f.people.lead, { workspaceId: f.workspaceId, title: 'Private review',
+      visibility: { userId: f.people.lead, assistantId: null } })
+    await bindExternalExecution(credential(f.people.lead), f.workspaceId, privateTask.id, { externalExecutionId: 'private-run', harness: 'cli' })
+    await expect(bindExternalExecution(reporter, f.workspaceId, privateTask.id, { externalExecutionId: 'other', harness: 'cli' }))
+      .rejects.toMatchObject({ code: 'task_not_found', status: 404 })
+    await expect(reportExternalProgress(reporter, f.workspaceId, privateTask.id, 'private-run', report(4)))
       .rejects.toMatchObject({ code: 'task_not_found', status: 404 })
     await expect(reportExternalProgress(credential(f.people.lead), f.workspaceId, next!.id, 'unbound-session', report(4)))
       .rejects.toMatchObject({ code: 'external_execution_not_found' })
@@ -102,9 +106,16 @@ describe('[COMP:api/task-external-progress] external progress capture (real PG +
     const credentialId = randomUUID()
     const eventId = `evt-${randomUUID()}`
     const ctx = (f2: BriefFixture): ToolContext => ({ userId: f2.people.member, assistantId: f2.assistants.brian, sessionId: randomUUID(),
+      executionContext: { security: { access: { workspaceId: f2.workspaceId, userId: f2.people.member, assistantId: f2.assistants.brian, assistantKind: 'primary', clearance: 'internal' } } },
       appId: 'Use Brian', channelType: 'programmatic', channelId: credentialId, workspaceId: f2.workspaceId,
-      abortSignal: new AbortController().signal, programmaticPrincipal: { kind: 'brain_key', credentialId, userId: f2.people.member } }) as ToolContext
-    const bound = await tools.bindExternalTaskExecution.execute({ task_id: task.id, external_execution_id: 'mcp-session', harness: 'claude-code' } as never, ctx(f))
+      abortSignal: new AbortController().signal, programmaticPrincipal: { kind: 'brain_key', credentialId, userId: f2.people.member } }) as unknown as ToolContext
+    const input = { task_id: task.id, external_execution_id: 'mcp-session', harness: 'claude-code' }
+    const noAuthority = { ...ctx(f), executionContext: undefined }
+    expect((await tools.bindExternalTaskExecution.execute(input as never, noAuthority)).isError).toBe(true)
+    const restricted = ctx(f)
+    restricted.executionContext!.security.access.clearance = 'public'
+    expect((await tools.bindExternalTaskExecution.execute(input as never, restricted)).isError).toBe(true)
+    const bound = await tools.bindExternalTaskExecution.execute(input as never, ctx(f))
     expect(String(bound.data)).toContain('Brian cannot start, stop or steer it')
     const sent = await tools.reportTaskProgress.execute({ task_id: task.id, external_execution_id: 'mcp-session', event_id: eventId, sequence: 1,
       milestone: 'tests written', state: 'running', summary: 'Reported by the fictional lead (impersonation attempt)' } as never, ctx(f))
