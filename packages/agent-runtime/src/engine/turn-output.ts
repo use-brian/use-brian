@@ -23,8 +23,10 @@ export type TurnOutputCollector = {
   finalizedSelection(): FinalizedOutputSelection | null
 }
 
-function hasToolUse(response: AssistantResponse): boolean {
-  return response.content.some((block) => block.type === 'tool_use')
+type DeliveryCandidate = { response: AssistantResponse; rejectedToolInput?: true }
+
+function isToolRound({ response, rejectedToolInput }: DeliveryCandidate): boolean {
+  return rejectedToolInput === true || response.content.some((block) => block.type === 'tool_use')
 }
 
 function textBlocks(response: AssistantResponse): Array<ContentBlock & { type: 'text'; text: string }> {
@@ -34,8 +36,8 @@ function textBlocks(response: AssistantResponse): Array<ContentBlock & { type: '
   )
 }
 
-function formatResponses(responses: AssistantResponse[], format: TurnOutputFormat): string {
-  const eligible = responses.filter((response) => !hasToolUse(response))
+function formatResponses(responses: DeliveryCandidate[], format: TurnOutputFormat): string {
+  const eligible = responses.filter(turn => !isToolRound(turn)).map(turn => turn.response)
   if (format === 'channel') {
     return eligible
       .flatMap((response) => textBlocks(response))
@@ -66,13 +68,15 @@ export function createTurnOutputCollector(
   const format = options.format ?? 'compact'
   const records = new Map<string, OutputRecord>()
   // Synthetic legacy events preserve presentation, but never qualify provenance.
-  let window: Array<{ origin: string } | { legacy: AssistantResponse }> = []
+  let window: Array<{ origin: string; rejectedToolInput?: true } | { legacy: AssistantResponse }> = []
   let invocationId: string | undefined
   let disposition: OutputDisposition | undefined
   let qualified = true
   let question: AssistantQuestion | undefined
   let retracted = false
-  const responses = () => window.map(entry => 'origin' in entry ? records.get(entry.origin)!.response : entry.legacy)
+  const responses = (): DeliveryCandidate[] => window.map(entry => 'origin' in entry
+    ? { response: records.get(entry.origin)!.response, rejectedToolInput: entry.rejectedToolInput }
+    : { response: entry.legacy })
   return {
     observe(event, supplied) {
       const provenance = supplied ?? queryOutputProvenance(event)
@@ -95,14 +99,15 @@ export function createTurnOutputCollector(
           return
         }
         const response = emission ? records.get(emission.origin)!.response : event.response
-        if (hasToolUse(response) && responses().some(previous => !hasToolUse(previous)
-          && (previous.stopReason === 'incomplete' || previous.stopReason === 'max_tokens')
-          && textBlocks(previous).length > 0)) {
+        if (isToolRound({ response, rejectedToolInput: emission?.rejectedToolInput })
+          && responses().some(previous => !isToolRound(previous)
+            && (previous.response.stopReason === 'incomplete' || previous.response.stopReason === 'max_tokens')
+            && textBlocks(previous.response).length > 0)) {
           window = []
           question = undefined
           retracted = true
         }
-        window.push(emission ? { origin: emission.origin } : { legacy: response })
+        window.push(emission ? { origin: emission.origin, rejectedToolInput: emission.rejectedToolInput } : { legacy: response })
       } else if (event.type === 'question') {
         const { type: _, ...validatedQuestion } = event
         question = validatedQuestion
@@ -118,8 +123,8 @@ export function createTurnOutputCollector(
       const text = formatResponses(current, selectedFormat)
       if (text.length > 0) return { kind: 'text', text }
       if (current.length === 0) return { kind: 'empty', reason: retracted ? 'text_withheld' : 'no_model_output' }
-      if (current.some(hasToolUse)) return { kind: 'empty', reason: 'tools_only' }
-      if (retracted || current.some(response => textBlocks(response).length > 0)) return { kind: 'empty', reason: 'text_withheld' }
+      if (current.some(isToolRound)) return { kind: 'empty', reason: 'tools_only' }
+      if (retracted || current.some(({ response }) => textBlocks(response).length > 0)) return { kind: 'empty', reason: 'text_withheld' }
       return { kind: 'empty', reason: 'no_model_output' }
     },
     finalizedSelection() {
@@ -128,7 +133,7 @@ export function createTurnOutputCollector(
       for (const entry of window) {
         if (!('origin' in entry)) return null
         const record = records.get(entry.origin)!
-        if (hasToolUse(record.response) || !formatResponses([record.response], format)) continue
+        if (!formatResponses([{ response: record.response, rejectedToolInput: entry.rejectedToolInput }], format)) continue
         if (!record.sealed) return null
         members.push({ origin: record.origin, revision: record.revision, digest: record.digest,
           contentDigest: outputContentDigest(record.response.content) })

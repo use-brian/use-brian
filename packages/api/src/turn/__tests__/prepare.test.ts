@@ -7,7 +7,8 @@ import { z } from 'zod'
 import { NOOP_TURN_LEDGER } from '@use-brian/agent-runtime/engine/turn-ledger.js'
 import { createConfirmationResolver } from '@use-brian/agent-runtime/mcp/types.js'
 import { createGeminiProvider } from '@use-brian/agent-runtime/providers/gemini.js'
-import type { LLMProvider, Message } from '@use-brian/agent-runtime/providers/types.js'
+import type { ContentBlock, LLMProvider, Message, StreamChunk } from '@use-brian/agent-runtime/providers/types.js'
+import { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import {
   createExecutionContext,
@@ -37,8 +38,11 @@ vi.mock('../../application-platform/model-source-authority.js', () => ({
 }))
 const mailbox = vi.hoisted(() => ({ dispatcher: vi.fn() }))
 const knowledge = vi.hoisted(() => ({ dispatcher: vi.fn() }))
+const selectRecentText = vi.hoisted(() => vi.fn())
 vi.mock('../../mcp/surface.js', async importOriginal => ({ ...await importOriginal<typeof import('../../mcp/surface.js')>(),
   prepareMailboxReadDispatcher: mailbox.dispatcher, prepareKnowledgeReadDispatcher: knowledge.dispatcher }))
+vi.mock('../../db/verified-channel-record.js', async importOriginal => ({ ...await importOriginal<typeof import('../../db/verified-channel-record.js')>(),
+  selectVerifiedChannelRecentText: selectRecentText }))
 import { openAssistantTurn, type AssistantTurn } from '../kernel.js'
 import type { InitialMailboxCapabilities } from '../capabilities.js'
 import type { SurfaceCapabilityOptions } from '../../mcp/surface.js'
@@ -57,7 +61,7 @@ beforeEach(() => vi.clearAllMocks())
 type Captured = { config: Record<string, unknown>; sends: Message[][] }
 /** Real provider boundary: records exactly what a session is constructed and sent with. */
 function capturingProvider(script: 'text' | 'tool' | readonly string[] = 'text', toolName = 'readThing',
-  toolStopReason: 'tool_use' | 'end_turn' = 'tool_use') {
+  toolStopReason: 'tool_use' | 'end_turn' = 'tool_use', toolInputs: readonly string[] = []) {
   const captured: Captured[] = []
   let calls = 0
   const provider: LLMProvider = { name: 'fixture-run-provider', models: [], stream() { throw new Error('Unexpected stateless dispatch') },
@@ -71,7 +75,7 @@ function capturingProvider(script: 'text' | 'tool' | readonly string[] = 'text',
           if (name) {
             const id = call ? `fixture-call-${call}` : 'fixture-call'
             yield { type: 'tool_use_start' as const, id, name }
-            yield { type: 'tool_use_delta' as const, id, input: name === 'searchKnowledge' ? '{"query":"observatory handbook"}' : '{}' }
+            yield { type: 'tool_use_delta' as const, id, input: toolInputs[call] ?? (name === 'searchKnowledge' ? '{"query":"observatory handbook"}' : '{}') }
             yield { type: 'tool_use_end' as const, id }
             yield { type: 'message_end' as const, stopReason: toolStopReason, usage: { inputTokens: 1, outputTokens: 1 } }
           } else {
@@ -84,7 +88,7 @@ function capturingProvider(script: 'text' | 'tool' | readonly string[] = 'text',
   return { provider, captured }
 }
 
-async function fixture(options: { assertCurrent?: () => Promise<void>; lane?: 'web' | 'channel' | 'resume'; provider?: LLMProvider; custom?: boolean; resolver?: WorkspaceCustomLlmResolver } = {}) {
+async function fixture(options: { assertCurrent?: () => Promise<void>; lane?: 'web' | 'channel' | 'resume'; provider?: LLMProvider; custom?: boolean; resolver?: WorkspaceCustomLlmResolver; scopeAccumulator?: ContextScopeAccumulator } = {}) {
   const abort = new AbortController(), assertCurrent = vi.fn(options.assertCurrent ?? (async () => {}))
   const authority: CurrentAuthorityBoundary = { assertCurrent, async execute(operation) { return operation() } }
   const lane = options.lane ?? 'web'
@@ -110,7 +114,8 @@ async function fixture(options: { assertCurrent?: () => Promise<void>; lane?: 'w
     owner.bindModelPreparation({ kind: 'execution', toolProfile: 'resume', execution, assertCurrent: authority.assertCurrent.bind(authority) }, services)
     main = await owner.prepareMainModel({ kind: 'resume', fallbackModel: 'fixture-model', selectedTier: 'pro' })
   } else {
-    owner.bindModelPreparation({ kind: 'execution', toolProfile: lane, execution, assertCurrent: () => authority.assertCurrent() }, services)
+    owner.bindModelPreparation({ kind: 'execution', toolProfile: lane, execution, scopeAccumulator: options.scopeAccumulator,
+      assertCurrent: () => authority.assertCurrent() }, services)
     main = await owner.prepareMainModel(lane === 'web'
       ? { kind: 'web', requestedModel: options.custom ? 'custom:fixture' : 'pro', plan: 'max_5x', budgetStatus: 'ok', researchMode: false, metered: null, hasImage: false }
       : { kind: 'channel', plan: 'max_5x', budgetStatus: 'ok' })
@@ -248,6 +253,102 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
     expect(boundScopeSources(sent(continuation)[0])).toEqual([source('earlier')])
     expect(view.grounding.runtimeContext).toContain('Private permitted context')
     expect(f.owner.usage?.totalUsage).toMatchObject({ inputTokens: 2, outputTokens: 2 })
+  })
+
+  it.each(['tool_use', 'end_turn'] as const)('lets the web model correct rejected discovery arguments after %s', async stopReason => {
+    const tool = 'requestConversationContext'
+    const scripted = capturingProvider([tool, tool], undefined, stopReason, ['{"request":"Use earlier notes."}', '{}'])
+    const f = await fixture({ provider: scripted.provider })
+    const initial: Message = { role: 'user', content: 'Continue the earlier discussion.' }
+    const earlier = bindScopeSources<Message>({ role: 'user', content: 'Fictional retained notes.' }, [source('earlier')])
+    const sendsAtDiscovery: number[] = []
+    const discover = vi.fn(async () => {
+      sendsAtDiscovery.push(scripted.captured[0].sends.length)
+      return { systemPrompt: 'Expanded', messages: [earlier, initial], candidateTools: new Map([['readThing', readTool()]]) }
+    })
+    await f.owner.prepareRun({ systemPrompt: 'Initial', messages: [initial], candidateTools: new Map(), contextDiscovery: discover })
+
+    const result = await f.owner.run({ loop: owned(f.context), sink: { kind: 'adapter' } })
+
+    expect(result.finalText).toBe('Fictional prepared answer.')
+    expect(discover).toHaveBeenCalledOnce()
+    expect(sendsAtDiscovery).toEqual([2])
+    expect(scripted.captured).toHaveLength(2)
+    const [limited, expanded] = scripted.captured
+    expect(limited.config.systemPrompt).toBe('Initial')
+    expect(toolNames(limited)).toEqual([tool])
+    expect(limited.sends).toHaveLength(2)
+    expect(limited.sends[0]).toEqual([initial])
+    expect(limited.sends[1]).toMatchObject([{ role: 'user', content: [{
+      type: 'tool_result', name: tool, toolUseId: 'fixture-call', isError: true, content: expect.any(String),
+    }] }])
+    expect(JSON.stringify(limited.sends)).not.toContain(earlier.content)
+    expect(toolNames(expanded)).toEqual(['readThing'])
+    expect(sent(expanded)).toMatchObject([earlier, initial,
+      { role: 'assistant', content: [{ type: 'tool_use', name: tool, id: 'fixture-call' }] },
+      { role: 'user', content: [{ type: 'tool_result', name: tool, toolUseId: 'fixture-call', isError: true }] },
+      { role: 'assistant', content: [{ type: 'tool_use', name: tool, id: 'fixture-call-1', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', name: tool, toolUseId: 'fixture-call-1',
+        content: 'The permitted conversation context and available tools are ready.' }] },
+    ])
+  })
+
+  it('terminates discovery when a valid web call fails in the discovery frame', async () => {
+    const scripted = capturingProvider('tool', 'requestConversationContext')
+    const f = await fixture({ provider: scripted.provider })
+    const failure = new Error('Fictional discovery failed while reading history.')
+    const discover = vi.fn(async () => { throw failure })
+    await f.owner.prepareRun({ systemPrompt: 'Initial', messages: [{ role: 'user', content: 'Continue the earlier discussion.' }],
+      candidateTools: new Map(), contextDiscovery: discover })
+
+    await expect(f.owner.run({ loop: owned(f.context), sink: { kind: 'adapter' } })).rejects.toBe(failure)
+    expect(discover).toHaveBeenCalledOnce()
+    expect(scripted.captured).toHaveLength(1)
+    expect(scripted.captured[0].sends).toHaveLength(1)
+  })
+
+  it('terminates discovery when a rejected call precedes a recent text read failure in the same batch', async () => {
+    const tool = 'requestConversationContext'
+    const send = vi.fn(async function* (): AsyncGenerator<StreamChunk> {
+      yield { type: 'message_start', model: 'fixture-model' }
+      if (send.mock.calls.length > 1) {
+        yield { type: 'text_delta', text: 'Unexpected continuation after a failed read.' }
+        yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 } }
+        return
+      }
+      for (const [id, input] of [['rejected-call', '{"mode":"fictional-mode"}'], ['recent-text-call', '{"mode":"recent_text"}']]) {
+        yield { type: 'tool_use_start', id, name: tool }
+        yield { type: 'tool_use_delta', id, input }
+        yield { type: 'tool_use_end', id }
+      }
+      yield { type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 1, outputTokens: 1 } }
+    })
+    const provider: LLMProvider = { name: 'fixture-run-provider', models: [],
+      stream() { throw new Error('Unexpected stateless dispatch') }, createSession: () => ({ send }) }
+    const scopeAccumulator = new ContextScopeAccumulator()
+    const f = await fixture({ lane: 'channel', provider, scopeAccumulator })
+    const readFailure = 'Fictional recent text read failed.'
+    selectRecentText.mockRejectedValueOnce(new Error(readFailure))
+    const bindSelection = vi.fn(), discover = vi.fn()
+    await f.owner.prepareRun({ systemPrompt: 'Initial', messages: [{ role: 'user', content: 'Continue our discussion.' }],
+      candidateTools: new Map(), contextDiscovery: discover,
+      recentChannelText: { authority: { execution: f.execution, accumulator: scopeAccumulator }, beforeSequence: 3, bindSelection } })
+
+    const receipts: Extract<ContentBlock, { type: 'tool_result' }>[] = []
+    const run = f.owner.run({ loop: owned({ ...f.context, scopeAccumulator }), sink: { kind: 'adapter', onEvent(event) {
+      if (event.type === 'tool_result') receipts.push(...event.results.filter(block => block.type === 'tool_result'))
+    } } })
+    const result = await run.then(value => ({ value }), error => ({ error }))
+
+    expect(receipts).toMatchObject([
+      { type: 'tool_result', name: tool, toolUseId: 'rejected-call', isError: true, content: expect.stringContaining('Validation failed') },
+      { type: 'tool_result', name: tool, toolUseId: 'recent-text-call', isError: true, content: expect.stringContaining(readFailure) },
+    ])
+    expect(selectRecentText).toHaveBeenCalledExactlyOnceWith(f.execution, 3)
+    expect(bindSelection).not.toHaveBeenCalled()
+    expect(discover).not.toHaveBeenCalled()
+    expect(result).toEqual({ error: new Error('Conversation context discovery failed.') })
+    expect(send).toHaveBeenCalledOnce()
   })
 
   it.each([false, true])('reads mail in the initial frame and retains the pair when context is requested later (%s)', async useHistory => {

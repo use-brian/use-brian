@@ -60,7 +60,7 @@ type TrackedTool = {
   resultImages?: ContentBlock[]
   /** Internal-only meta from the tool's ToolResult.meta. Surfaced via getCompletedResults. */
   meta?: ToolResultMeta
-  error?: string
+  preExecutionFeedback?: true
 }
 
 /** Completed results from one drain, paired with per-toolUseId meta. */
@@ -283,6 +283,7 @@ export function renderToolResultData(data: unknown, isError: boolean): string {
 
 export function createToolExecutor(options: ToolExecutorOptions) {
   const tracked: TrackedTool[] = []
+  const preExecutionReceipts = new WeakSet<ContentBlock>()
   const deniedTools = options.deniedTools ?? new Set<string>()
   let siblingAbort = new AbortController()
   let hasErrored = false
@@ -369,6 +370,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
     const action: LoopAction = options.loopDetector.check(t.name, t.input, {
       repeatTolerant: toolDef.allowsRepeatCalls === true,
     })
+    if (action === 'block' || action === 'hard_stop') t.preExecutionFeedback = true
     if (action === 'block') {
       t.result = {
         type: 'tool_result',
@@ -424,6 +426,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
     // execution. A diagnostic representation must never become runnable input.
     const textProblem=toolInputTextProblem(t.input)
     if(textProblem){
+      t.preExecutionFeedback = true
       t.result={type:'tool_result',toolUseId:t.id,name:t.wireName??t.name,isError:true,
         content:`ERROR: ${textProblem}. This call was NOT executed. Submit valid arguments; if preparation is required, forward its exact fresh arguments. Do not strip fields and dispatch this rejected request.`}
       t.status='completed';wake();return
@@ -777,7 +780,12 @@ export function createToolExecutor(options: ToolExecutorOptions) {
     const abandonSignal = AbortSignal.any([options.context.abortSignal, siblingAbort.signal])
 
     try {
-      const validated = toolDef.inputSchema.parse(t.input)
+      const parsed = toolDef.inputSchema.safeParse(t.input)
+      if (!parsed.success) {
+        t.preExecutionFeedback = true
+        throw parsed.error
+      }
+      const validated = parsed.data
 
       // WU-4.3 — write-time clearance gate (Q8 lock).
       // If the validated input declares a `sensitivity` tier, reject when it
@@ -1042,14 +1050,14 @@ export function createToolExecutor(options: ToolExecutorOptions) {
     }
     // Same cap as the success path — a thrown error is tool-produced,
     // unbounded content too. The pathological case is a `ZodError` (from
-    // the `inputSchema.parse` above or a tool's own internal validation):
+    // the input validation above or a tool's own internal validation):
     // `ZodError.message` is `JSON.stringify(issues)` and `invalid_union`
     // recursively expands every branch, so `formatToolError` collapses it
     // to a compact, actionable list before the token cap is even reached.
     const content = capToolResultTokens(`Error: ${formatToolError(err)}`)
     t.result = { type: 'tool_result', toolUseId: t.id, name: t.name, content, isError: true }
     t.status = 'completed'
-    // A thrown error (incl. the `inputSchema.parse` ZodError behind
+    // A thrown error (incl. the schema validation error behind
     // "Validation failed: …") is a real failure — feed the streak breaker.
     options.loopDetector.recordOutcome(t.name, true)
 
@@ -1135,7 +1143,9 @@ export function createToolExecutor(options: ToolExecutorOptions) {
           || t.status === 'executing'
         ) break // preserve order
         if (t.result) {
-          blocks.push(t.wireName && t.result.type === 'tool_result' ? { ...t.result, name: t.wireName } : t.result)
+          const receipt = t.wireName && t.result.type === 'tool_result' ? { ...t.result, name: t.wireName } : t.result
+          if (t.preExecutionFeedback) preExecutionReceipts.add(receipt)
+          blocks.push(receipt)
           // Emit tool-produced images right after their tool_result so they land
           // in the same tool-results user turn the model reads next.
           if (t.resultImages?.length) blocks.push(...t.resultImages)
@@ -1194,6 +1204,11 @@ export function createToolExecutor(options: ToolExecutorOptions) {
           if (!stillQueued) break
         }
       }
+    },
+
+    /** Only argument rejection and loop limits produce this host-owned feedback. */
+    isPreExecutionFeedback(receipt: ContentBlock): boolean {
+      return preExecutionReceipts.has(receipt)
     },
 
     /**

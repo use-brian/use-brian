@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { NOOP_TURN_LEDGER } from '../turn-ledger.js'
 import { z } from 'zod'
 import type {
@@ -10,7 +10,9 @@ import type {
   Message,
 } from '../../providers/types.js'
 import { buildTool } from '../../tools/types.js'
-import { queryLoop, type QueryEvent } from '../query-loop.js'
+import { createTurnOutputCollector } from '../turn-output.js'
+import { CONVERSATION_CONTEXT_TOOL, MAX_TURNS_FALLBACK_REPLY, TOOL_BUDGET_FALLBACK_REPLY, TOOL_FAILURE_FALLBACK_REPLY,
+  queryLoop, type QueryEvent } from '../query-loop.js'
 
 // ── Scripted provider ──────────────────────────────────────────
 // Same shape as query-loop.force-text-explain.test.ts: each send() consumes
@@ -188,6 +190,138 @@ const invocationResourceTurn: StreamChunk[] = [
   { type: 'tool_use_end', id: 'resource-2' },
   { type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 5, outputTokens: 3 } },
 ]
+
+describe('[COMP:engine/query-loop] Discovery correction limits', () => {
+  const toolName = CONVERSATION_CONTEXT_TOOL
+  const invalid = '{"request":"Use earlier notes."}'
+  const usage = { inputTokens: 1, outputTokens: 1 }
+  const round = (...calls: [id: string, input: string][]): StreamChunk[] => [
+    { type: 'message_start', model: 'mock-model' },
+    ...calls.flatMap(([id, input]): StreamChunk[] => [
+      { type: 'tool_use_start', id, name: toolName },
+      { type: 'tool_use_delta', id, input },
+      { type: 'tool_use_end', id },
+    ]),
+    { type: 'message_end', stopReason: 'tool_use', usage },
+  ]
+
+  function discoveryRun(scripts: StreamChunk[][], maxToolCalls: number,
+    execute = vi.fn(async () => ({ data: 'Discovery ran.' })), maxTurns?: number) {
+    const events: QueryEvent[] = []
+    const provider = scriptedProvider(scripts)
+    const finalizer = vi.spyOn(provider, 'stream')
+    const tool = buildTool({ name: toolName, description: 'Read fixture context',
+      inputSchema: z.object({}).strict(), isReadOnly: true, execute })
+    const outcome = (async () => {
+      for await (const event of queryLoop({
+        provider, model: 'mock-model', systemPrompt: 'Fictional fixture',
+        messages: [{ role: 'user', content: 'Read the earlier discussion.' }],
+        tools: new Map([[toolName, tool]]), context: baseContext, ledger: NOOP_TURN_LEDGER,
+        takeDiscoveredContext: () => undefined, maxToolCalls, maxTurns,
+      })) events.push(event)
+    })()
+    return { events, execute, finalizer, outcome }
+  }
+
+  it('delivers a bounded stop when a correction hits the tool budget', async () => {
+    const inventedCompletion = 'I read the earlier discussion and finished.'
+    const run = discoveryRun([round(['invalid', invalid]), round(['at-limit', '{}']),
+      textChunks(JSON.stringify({ message: inventedCompletion }))], 2)
+    await run.outcome
+
+    expect(run.execute).not.toHaveBeenCalled()
+    expect(run.finalizer).not.toHaveBeenCalled()
+    expect(JSON.stringify(run.events)).not.toContain(inventedCompletion)
+    expect(run.events.at(-1)).toMatchObject({ type: 'turn_complete', terminalStop: { code: 'tool_budget_exhausted' },
+      response: { content: [{ type: 'text', text: TOOL_BUDGET_FALLBACK_REPLY }] } })
+  })
+
+  it('keeps duplicate arguments in the normal loop until the call budget stops it', async () => {
+    const calls = Array.from({ length: 6 }, (_, index) => round([`invalid-${index}`, invalid]))
+    const run = discoveryRun([...calls, textChunks(JSON.stringify({ message: 'I stopped before reading the earlier discussion.' }))], 6)
+    await run.outcome
+
+    expect(run.execute).not.toHaveBeenCalled()
+    expect(run.events.filter(event => event.type === 'assistant_turn')).toHaveLength(7)
+    expect(run.events.at(-1)).toMatchObject({ type: 'turn_complete', terminalStop: { code: 'tool_budget_exhausted' } })
+  })
+
+  it('uses the static failure notice when varied invalid calls trip the failure fuse', async () => {
+    const attempts = Array.from({ length: 5 }, (_, index) => round([`invalid-${index}`, `{"request":${index}}`]))
+    const run = discoveryRun([...attempts, textChunks('{"message":"The history was loaded."}')], 10)
+    await run.outcome
+
+    expect(run.execute).not.toHaveBeenCalled()
+    expect(run.finalizer).not.toHaveBeenCalled()
+    expect(run.events.at(-1)).toMatchObject({ type: 'turn_complete', terminalStop: { code: 'tool_failure_limit', tool: toolName },
+      response: { content: [{ type: 'text', text: TOOL_FAILURE_FALLBACK_REPLY }] } })
+  })
+
+  it('uses the static turn-limit notice after a malformed call without executing its preview', async () => {
+    const malformed = round(['invalid', '{unclosed'])
+    malformed.splice(1, 0, { type: 'text_delta', text: 'I will look for the earlier discussion.' })
+    const run = discoveryRun([malformed, textChunks('{"message":"The history was loaded."}')], 10, undefined, 1)
+    await run.outcome
+
+    expect(run.execute).not.toHaveBeenCalled()
+    expect(run.finalizer).not.toHaveBeenCalled()
+    const intermediate = run.events.find(event => event.type === 'assistant_turn')
+    expect(intermediate).toMatchObject({ response: { content: [
+      { type: 'text', text: 'I will look for the earlier discussion.' },
+      { type: 'text', text: expect.stringContaining('Rejected tool call') },
+    ] }, toolResults: [{ type: 'text', text: expect.stringContaining('Rejected tool-call result') }] })
+    expect(run.events.at(-1)).toMatchObject({ type: 'turn_complete', terminalStop: { code: 'max_turns' },
+      response: { content: [{ type: 'text', text: MAX_TURNS_FALLBACK_REPLY }] } })
+    for (const format of ['compact', 'channel'] as const) {
+      const collector = createTurnOutputCollector({ format })
+      for (const event of run.events) {
+        collector.observe(event)
+        if (event === intermediate) expect(collector.select()).toEqual({ kind: 'empty', reason: 'tools_only' })
+      }
+      expect(collector.select()).toEqual({ kind: 'text', text: MAX_TURNS_FALLBACK_REPLY })
+      expect(collector.finalizedSelection()?.members).toHaveLength(1)
+    }
+  })
+
+  it('preserves a genuine final reply with text that resembles a diagnostic', async () => {
+    const directReply = 'Rejected tool call — NOT EXECUTED. That is the phrase you asked me to quote.'
+    const run = discoveryRun([round(['invalid', '{unclosed']), textChunks(directReply)], 10)
+    await run.outcome
+
+    const collector = createTurnOutputCollector({ format: 'channel' })
+    for (const event of run.events) collector.observe(event)
+    expect(collector.select()).toEqual({ kind: 'text', text: directReply })
+    expect(collector.finalizedSelection()?.members).toHaveLength(1)
+  })
+
+  it('keeps evidence-based finalization after real discovery work with an empty result', async () => {
+    const execute = vi.fn(async () => ({ data: '' }))
+    const run = discoveryRun([round(['admitted', '{}']), round(['invalid', invalid]), round(['at-limit', '{}']),
+      textChunks('{"message":"I stopped before finishing the request."}')], 3, execute)
+    await run.outcome
+
+    expect(execute).toHaveBeenCalledOnce()
+    expect(run.finalizer).toHaveBeenCalledOnce()
+    expect(JSON.parse(String(run.finalizer.mock.calls[0][0].messages[0].content))).toMatchObject({
+      toolEvidence: [], stopReason: { code: 'tool_budget_exhausted' },
+    })
+    expect(run.events.at(-1)).toMatchObject({ type: 'turn_complete', terminalStop: { code: 'tool_budget_exhausted' } })
+  })
+
+  it.each(['execution', 'authority'] as const)('keeps a real %s failure terminal alongside a rejected call', async kind => {
+    const failure = kind === 'authority'
+      ? Object.assign(new Error('Fictional access revoked'), { reason: 'authority_changed' })
+      : new Error('Fictional discovery execution failed')
+    const execute = vi.fn(async () => { throw failure })
+    // Reused wire IDs may reach the generic loop from a provider. Provenance
+    // belongs to the specific result, even when its reported ID collides.
+    const run = discoveryRun([round(['same-id', invalid], ['same-id', '{}'])], 8, execute)
+
+    await expect(run.outcome).rejects.toEqual(kind === 'authority' ? failure : new Error('Conversation context discovery failed.'))
+    expect(execute).toHaveBeenCalledOnce()
+    expect(run.finalizer).not.toHaveBeenCalled()
+  })
+})
 
 describe('[COMP:engine/query-loop] Invocation finalizers', () => {
   it('runs a keyed finalizer once after a normal terminal turn', async () => {

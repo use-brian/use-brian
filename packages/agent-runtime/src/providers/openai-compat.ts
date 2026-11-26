@@ -401,6 +401,7 @@ async function* streamCompat(
   // open call once the stream finishes (chat-completions has no per-call
   // terminator event).
   const openCalls = new Map<number, { id: string; started: boolean }>()
+  const callIndexById = new Map<string, number>()
   let finishReason: string | null | undefined
   let sawToolCalls = false
   let usage: TokenUsage = { inputTokens: 0, outputTokens: 0 }
@@ -465,8 +466,18 @@ async function* streamCompat(
       sawToolCalls = true
       sawContent = true
       let call = openCalls.get(tc.index)
+      // Some endpoints supply the ID after the first fragment. Keep our
+      // original pairing stable and reject an ID claimed by two stream slots.
+      const id = tc.id ?? call?.id ?? `call_${tc.index}`
+      if (!call || tc.id !== undefined) {
+        const previousIndex = callIndexById.get(id)
+        if (previousIndex !== undefined && previousIndex !== tc.index) {
+          throw new Error(`[openai-compat:${cfg.label}] duplicate tool call ID`)
+        }
+        callIndexById.set(id, tc.index)
+      }
       if (!call) {
-        call = { id: tc.id ?? `call_${tc.index}`, started: false }
+        call = { id, started: false }
         openCalls.set(tc.index, call)
       }
       if (!call.started && tc.function?.name) {

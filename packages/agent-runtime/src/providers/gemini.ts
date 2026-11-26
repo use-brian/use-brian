@@ -338,11 +338,12 @@ export function geminiSamplingConfig(modelId: string, temperature?: number): { t
 }
 
 function toToolDeclarations(tools: readonly ToolDefinition[]): GeminiFunctionDeclaration[] {
-  return tools.map((t) => ({
-    name: t.name,
-    description: t.description,
-    parameters: t.parameters,
-  }))
+  return tools.map(({ name, description, parameters }) => {
+    // Gemini declares a function with no arguments by leaving parameters unset.
+    const noArguments = parameters.type === 'object' && parameters.additionalProperties === false
+      && parameters.properties && Object.keys(parameters.properties).length === 0 && Object.keys(parameters).length === 3
+    return { name, description, ...(!noArguments ? { parameters } : {}) }
+  })
 }
 
 /**

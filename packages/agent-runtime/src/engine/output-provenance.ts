@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { AssistantResponse } from '../providers/types.js'
 import type { QueryEvent } from './query-loop.js'
+import { isRejectedToolInputText } from './rejected-tool-input.js'
 
 /** Private dispatcher metadata. Never provider content or a public wire field. */
 export type OutputDisposition = 'reply' | 'question' | 'suspended' | 'partial' | 'error'
@@ -15,7 +16,7 @@ export type OutputRevision = Readonly<{
 export type QueryOutputProvenance = Readonly<{
   version: 1
   invocationId: string
-  emission?: { origin: string; replay: boolean }
+  emission?: { origin: string; replay: boolean; rejectedToolInput?: true }
   updates: readonly OutputRevision[]
   disposition?: OutputDisposition
   qualified: boolean
@@ -110,7 +111,10 @@ export function createQueryOutputOwner(maxTurns: number) {
         const record = aliases.get(event.response)
         if (!record) qualified = false
         else {
-          emission = { origin: record.origin, replay: record.observed }
+          // The actual engine diagnostic is distinguishable by its host-owned
+          // identity only until this emission is detached for storage/delivery.
+          emission = { origin: record.origin, replay: record.observed,
+            ...(event.response.content.some(isRejectedToolInputText) ? { rejectedToolInput: true } : {}) }
           const update = revision(record, false)
           updates.push(update)
           record.observed = true
