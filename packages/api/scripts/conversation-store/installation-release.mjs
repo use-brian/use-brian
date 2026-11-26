@@ -40,6 +40,7 @@ import { indexedSearchRelease, searchCohortRelease } from './installation-authen
 import { telegramKnowledgeRelease } from './installation-authentication-8349.mjs'
 import * as release8350 from './installation-authentication-8350.mjs'
 import * as release8351 from './installation-authentication-8351.mjs'
+import * as release8352 from './installation-authentication-8352.mjs'
 import * as release8339 from './installation-authentication-8339.mjs'
 import * as release8338 from './installation-authentication-8338.mjs'
 
@@ -86,6 +87,7 @@ const profiles=new Map([
  [telegramKnowledgeRelease.migration,telegramKnowledgeRelease],
  ['8350_conversation_graph_ordinal_edges.sql',release8350],
  [release8351.migration,release8351],
+ [release8352.migration,release8352],
 ])
 export const hasInstallationRelease=head=>profiles.has(head)
 function profileForRelease(head){

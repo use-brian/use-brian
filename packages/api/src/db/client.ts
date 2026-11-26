@@ -148,14 +148,10 @@ function attachPoolErrorHandler(pool: pg.Pool, label: string): void {
 }
 
 /**
- * The **system pool** — connects as the table OWNER (`DATABASE_URL`). With
- * `FORCE ROW LEVEL SECURITY` dropped (migration 269), the owner **bypasses RLS
- * entirely**, so this pool is the system-access path: bare `query()`, the
- * scheduler/workers, and the system manual-transaction stores. There is no
- * `app.system_bypass` GUC anymore — "system access" means "this pool / this
- * role", not a mutable connection setting (which was the pool-contamination bug
- * class; see docs/architecture/platform/database-schema.md → "RLS bypass +
- * connection state").
+ * The system pool connects as the table owner (`DATABASE_URL`) for trusted
+ * operations. PostgreSQL applies row policies to the owner on tables with
+ * FORCE ROW LEVEL SECURITY. Viewer-owned data such as session archive markers
+ * uses `queryWithRLS` on the app pool.
  *
  * Kept named `getPool()` so every existing `getPool().connect()` system
  * checkout keeps working unchanged.
@@ -169,13 +165,8 @@ export function getPool(): pg.Pool {
     // connection (see instrumentPoolClient). Single-connection mode serves
     // both roles from this pool, so its statements are labelled `single`.
     attachClientInstrumentation(systemPool, SINGLE_CONNECTION ? 'single' : 'system')
-    // No app.current_user_id sentinel seed here — this is the table OWNER
-    // connection, and no table sets FORCE ROW LEVEL SECURITY, so the owner
-    // bypasses RLS: the `current_setting('app.current_user_id')::uuid` casts in
-    // the policies are never evaluated, so the `''` revert that the seed guards
-    // against on the app_user pool cannot throw 22P02 here. (Seeding it via a
-    // fire-and-forget connect handler also raced the first query on the single
-    // connection, tripping pg's "already executing a query" deprecation.)
+    // System checkouts have no default viewer. The app pool owns the
+    // current_user_id sentinel for its transaction-local viewer bindings.
   }
   return systemPool
 }
@@ -564,7 +555,7 @@ export function rlsGucSettings(userId: string, verifiedAssistantId?: string): Re
 }
 
 /**
- * Execute a query on the **system pool** (owner role, bypasses RLS). For system
+ * Execute a query on the **system pool** as the database owner. For system
  * operations only: user creation, auth-provider lookups before a session exists,
  * scheduler/worker reads + writes, analytics, and the system manual-transaction
  * stores. Anything acting on behalf of a specific user must use `queryWithRLS`.

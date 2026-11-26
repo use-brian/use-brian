@@ -71,7 +71,10 @@ query loop, and localized Settings surface:
 - A bounded, Zod-validated JSONL RPC peer owns initialization, correlation,
   notifications, server requests, cancellation, and shutdown. A request timeout
   reports its method, its last phase and the time spent queuing, checking input
-  permission, writing to stdin and waiting for a response.
+  permission, writing to stdin and waiting for a response. Independent input
+  checks can overlap. A check is repeated if it has to wait for stdin after
+  completing. The deadline and invocation binding are checked again at the
+  synchronized write boundary.
 - A managed process seam starts the pinned package over stdio with an isolated
   `CODEX_HOME`, a private working directory under `CODEX_HOME/runtime/`, and an allowlisted
   environment that excludes OpenAI/Codex API keys and access tokens.

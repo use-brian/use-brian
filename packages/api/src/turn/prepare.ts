@@ -15,7 +15,8 @@ import { attachUserVisibleContext, formatUserVisibleContext } from './user-visib
 import { captureHarnessRunPreparation } from '../project-harness/turn-context.js'
 import type { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
 import { captureBriefRunPreparation } from '../briefs/context.js'
-import type { InitialMailboxCapabilities, InitialReadCapabilities } from './capabilities.js'
+import type { InitialChatArchiveReads, InitialMailboxCapabilities, InitialReadCapabilities } from './capabilities.js'
+import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
 
 export type PreparedModelSelection = {
   provider: LLMProvider
@@ -32,8 +33,15 @@ export type NamedRunContribution = {
 export type TurnRunPreparationInput = TurnRunFrame & {
   /** With discovery, only the current-turn reads eligible on this surface enter the initial roster. */
   contextDiscovery?: (signal: AbortSignal) => Promise<DiscoveredTurnFrame>
+  recentChannelText?: {
+    authority: SessionContextAuthority
+    beforeSequence: number
+    bindSelection(isCurrent: () => Promise<boolean>): void
+    onReadTiming?(milliseconds: number): void
+  }
   initialMailboxCapabilities?: InitialMailboxCapabilities
   initialKnowledgeCapabilities?: InitialReadCapabilities
+  initialChatArchiveReads?: InitialChatArchiveReads
 }
 
 /** Only orchestration and capability data may change after the initial round.

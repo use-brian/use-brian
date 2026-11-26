@@ -39,7 +39,7 @@ describe('[COMP:api/channel-live-authority] exact destination authority wiring',
     expect(outputAdmission).toContain('...(nativeTranscriptAuthority ? { admitOutput: async (_context, eventKind) => {')
     expect(outputAdmission).toMatch(/await authority\.assertCurrent\(\)\s+return\s+}\s+await assertDeliveryAudience\(\)/)
     const postLoop = adapterSink?.[2] ?? ''
-    expect(postLoop).toMatch(/await flushBufferedTurns\([^\n]+\)\s+if \(!sessionStateStore \|\| !isIdentified \|\| isolatedAudience\) return\s+try \{/)
+    expect(postLoop).toMatch(/await flushBufferedTurns\([^\n]+\)\s+if \(queryLoopFailed \|\| !sessionStateStore \|\| !isIdentified \|\| isolatedAudience\) return\s+try \{/)
     expect(source.match(/runTurnSessionStateDiff\(/g)).toHaveLength(1)
     expect(source).toContain('maximumAccessCurrent: currentAudienceMaximum')
     expect(source).toContain('persistSessionSummary: !room && !isolatedAudience')

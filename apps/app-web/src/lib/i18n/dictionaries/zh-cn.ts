@@ -10585,7 +10585,7 @@ export const zhCN: Dictionary = {
       privateBriefNotice: "仅供这条帖子及其打磨对话使用，不会公开。",
       editorLabel: "编辑器",
       viewModeAria: "编辑器视图",
-      editMode: "编辑",
+      editMode: "草稿",
       previewMode: "预览",
       previewLabel: "实时预览",
       previewAccount: "你的品牌",

@@ -7,7 +7,7 @@ vi.mock('@/lib/user',()=>({getUserInfo:()=>({id:'viewer'})}));
 vi.mock('@/lib/auth-fetch',()=>({authFetch:(...args:unknown[])=>state.http(...args)}));
 vi.mock('@/lib/offline/idb', async importOriginal => ({
   ...await importOriginal<typeof import('@/lib/offline/idb')>(),idbGet:async(k:string)=>state.disk.get(k)??null,idbSet:async(k:string,v:unknown)=>{state.disk.set(k,v)},idbDelete:async(k:string)=>{state.disk.delete(k)}}));
-vi.mock('@/lib/offline/feed-offline',()=>({FEED_LOCAL_CHANGED:'fixture-local',adoptFeedServerCopy:vi.fn(),readLocalFeedPost:async()=>null,mergeLocalFeedSessions:(...args:unknown[])=>state.merge(...args)}));
+vi.mock('@/lib/offline/feed-offline',()=>({FEED_LOCAL_CHANGED:'fixture-local',setFeedDetailAccess:vi.fn(),adoptFeedServerCopy:vi.fn(),readLocalFeedPost:async()=>null,mergeLocalFeedSessions:(...args:unknown[])=>state.merge(...args)}));
 import {useFeedCollaboration,useFeedLearning} from '../feed-collaboration';
 import {loadSurfaceCache,resetSurfaceCache,markSurfaceCacheStale,readSurfaceCache,useCachedResource} from '../surface-cache';
 import {loadFeedWorkspaceRecord,loadFeedPlatformSessions} from '../feed-surface-cache';

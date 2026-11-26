@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 
-vi.mock('../../db/client.js', () => ({ query: vi.fn() }))
+vi.mock('../../db/client.js', () => ({ query: vi.fn(), queryWithRLS: vi.fn() }))
 vi.mock('../../db/sessions.js', () => ({ readSessionById: vi.fn(), countSessionHumans: vi.fn(async () => new Map()) }))
 vi.mock('../../session-read-authority.js', () => ({ gateSessionRead: vi.fn() }))
 vi.mock('../route-helpers.js', () => ({ resolveUser: vi.fn() }))
@@ -16,7 +16,7 @@ vi.mock('../session-title-authority.js', () => ({
 }))
 
 import { sessionRoutes } from '../sessions.js'
-import { query } from '../../db/client.js'
+import { query, queryWithRLS } from '../../db/client.js'
 import { readSessionById } from '../../db/sessions.js'
 import { gateSessionRead } from '../../session-read-authority.js'
 import { resolveUser } from '../route-helpers.js'
@@ -36,6 +36,7 @@ function app(userId: string | null = viewer) {
 beforeEach(() => {
   vi.resetAllMocks()
   vi.mocked(query).mockResolvedValue({ rows: [], rowCount: 0 } as never)
+  vi.mocked(queryWithRLS).mockResolvedValue({ rows: [{ sessionId: id }] } as never)
   vi.mocked(readSessionById).mockResolvedValue({ id } as never)
   vi.mocked(gateSessionRead).mockResolvedValue(null)
   vi.mocked(resolveUser).mockResolvedValue({ id: viewer } as never)
@@ -48,8 +49,9 @@ describe('[COMP:api/sessions-list] per-viewer archives', () => {
     for (let i = 0; i < 2; i++) {
       await request(app()).patch(`/api/sessions/${id}/archive`).send({ archived: true }).expect(200, { archived: true })
     }
-    expect(query).toHaveBeenCalledTimes(2)
-    for (const [sql, params] of vi.mocked(query).mock.calls) {
+    expect(queryWithRLS).toHaveBeenCalledTimes(2)
+    for (const [actor, sql, params] of vi.mocked(queryWithRLS).mock.calls) {
+      expect(actor).toBe(viewer)
       expect(sql).toContain('ON CONFLICT (user_id,session_id) DO NOTHING')
       expect(params).toEqual([viewer, id])
       expect(sql).not.toContain('UPDATE sessions')
@@ -57,14 +59,14 @@ describe('[COMP:api/sessions-list] per-viewer archives', () => {
   })
   it('restores only this viewer marker', async () => {
     await request(app()).patch(`/api/sessions/${id}/archive`).send({ archived: false }).expect(200)
-    expect(query).toHaveBeenCalledWith('DELETE FROM session_archives WHERE user_id=$1 AND session_id=$2', [viewer, id])
+    expect(queryWithRLS).toHaveBeenCalledWith(viewer, 'DELETE FROM session_archives WHERE user_id=$1 AND session_id=$2', [viewer, id])
   })
   it('requires authentication and rejects body coercion or a forged viewer', async () => {
     await request(app(null)).patch(`/api/sessions/${id}/archive`).send({ archived: true }).expect(401)
     for (const body of [{ archived: 'false' }, {}, { archived: true, userId: 'other' }]) {
       await request(app()).patch(`/api/sessions/${id}/archive`).send(body).expect(400)
     }
-    expect(query).not.toHaveBeenCalled()
+    expect(queryWithRLS).not.toHaveBeenCalled()
   })
   it('conceals unreadable, removed and invalid sessions', async () => {
     vi.mocked(gateSessionRead).mockResolvedValueOnce({ status: 403, error: 'Denied' })
@@ -72,29 +74,41 @@ describe('[COMP:api/sessions-list] per-viewer archives', () => {
     vi.mocked(readSessionById).mockResolvedValueOnce(null)
     await request(app()).patch(`/api/sessions/${id}/archive`).send({ archived: false }).expect(404)
     await request(app()).patch('/api/sessions/invalid/archive').send({ archived: true }).expect(404)
-    expect(query).not.toHaveBeenCalled()
+    expect(queryWithRLS).not.toHaveBeenCalled()
   })
   it.each(['', '&archived=true'])('filters personal archive state before the limit: %s', async suffix => {
     await request(app()).get(`/api/sessions?workspaceId=${workspace}&scope=workspace&channels=all${suffix}`).expect(200)
     const [sql, params] = vi.mocked(query).mock.calls[0]
-    expect(sql).toContain(`${suffix ? '' : 'NOT '}EXISTS (\n             SELECT 1 FROM session_archives`)
-    expect(sql).toContain('sa.user_id=$2')
-    expect(sql.indexOf('session_archives')).toBeLessThan(sql.indexOf('LIMIT'))
-    expect(params?.[1]).toBe(viewer)
+    const markerFilter = `s.id ${suffix ? '= ANY' : '<> ALL'}($5::uuid[])`
+    expect(sql).toContain(markerFilter)
+    expect(sql.indexOf(markerFilter)).toBeLessThan(sql.indexOf('LIMIT'))
+    expect(params).toEqual([workspace, viewer, null, null, [id]])
+    expect(queryWithRLS).toHaveBeenCalledWith(viewer,
+      'SELECT session_id AS "sessionId" FROM session_archives WHERE user_id=$1', [viewer])
   })
   it('paginates personal archives with a stable timestamp and id cursor', async () => {
     const date = '2026-10-01T01:00:00.000Z'
     await request(app()).get(`/api/sessions?workspaceId=${workspace}&scope=workspace&channels=all&archived=true&before=${date}&beforeId=${id}`).expect(200)
     const [sql, params] = vi.mocked(query).mock.calls[0]
     expect(sql).toContain('(s.last_active_at,s.id)<($3::timestamptz,$4::uuid)')
-    expect(params).toEqual([workspace, viewer, date, id])
+    expect(params).toEqual([workspace, viewer, date, id, [id]])
     expect(sql).toContain('LIMIT 50')
   })
   it('uses the current viewer for the shared archive filter', async () => {
     await request(app()).get(`/api/sessions/workspace?workspaceId=${workspace}&archived=true`).expect(200)
     const [sql, params] = vi.mocked(query).mock.calls[0]
-    expect(sql).toContain('sa.user_id=$5')
-    expect(params?.[4]).toBe(viewer)
+    expect(sql).toContain('s.id = ANY($5::uuid[])')
+    expect(params?.[4]).toEqual([id])
+    expect(queryWithRLS).toHaveBeenCalledWith(viewer,
+      'SELECT session_id AS "sessionId" FROM session_archives WHERE user_id=$1', [viewer])
+  })
+  it('returns an empty archive without scanning candidate sessions', async () => {
+    vi.mocked(queryWithRLS).mockResolvedValue({ rows: [] } as never)
+    for (const path of ['/api/sessions', '/api/sessions/workspace']) {
+      await request(app()).get(`${path}?workspaceId=${workspace}&archived=true`).expect(200, [])
+    }
+    expect(query).not.toHaveBeenCalled()
+    expect(queryWithRLS).toHaveBeenCalledTimes(2)
   })
   it('scans past unreadable personal archives without disclosing them or hiding older readable rows', async () => {
     const row = (id: string, userId: string) => ({
@@ -107,12 +121,14 @@ describe('[COMP:api/sessions-list] per-viewer archives', () => {
       .mockResolvedValueOnce({ rows: [row(id, viewer)] } as never)
     const res = await request(app()).get(`/api/sessions?workspaceId=${workspace}&scope=workspace&channels=all&archived=true`).expect(200)
     expect(res.body.map((r: { id: string }) => r.id)).toEqual([id])
-    expect(vi.mocked(query).mock.calls[1][1]).toEqual([workspace, viewer, '2026-10-01T00:00:00.000Z', 'hidden-49'])
+    expect(vi.mocked(query).mock.calls[1][1]).toEqual([workspace, viewer, '2026-10-01T00:00:00.000Z', 'hidden-49', [id]])
+    expect(queryWithRLS).toHaveBeenCalledTimes(1)
   })
   it('rejects malformed filters and partial cursors', async () => {
     await request(app()).get(`/api/sessions?workspaceId=${workspace}&archived=all`).expect(400)
     await request(app()).get(`/api/sessions?workspaceId=${workspace}&beforeId=${id}`).expect(400)
     await request(app()).get(`/api/sessions/workspace?workspaceId=${workspace}&archived=all`).expect(400)
     expect(query).not.toHaveBeenCalled()
+    expect(queryWithRLS).not.toHaveBeenCalled()
   })
 })

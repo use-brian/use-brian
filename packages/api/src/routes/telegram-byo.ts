@@ -59,7 +59,7 @@ import {
   resolveTelegramRoutingForSurface,
   getChannelForWebhook,
 } from '../db/channels-store.js'
-import { type LinkedAccountStore } from '../db/linked-accounts.js'
+import { type LinkedAccount, type LinkedAccountStore } from '../db/linked-accounts.js'
 import { completeLinkClaim } from './link-claim.js'
 import type { LinkCodeStore } from '../db/link-codes.js'
 import { withChatLock } from '../db/chat-lock.js'
@@ -96,6 +96,7 @@ import { cacheInboundImage } from './channel-file-cache.js'
 import { mediaByteLimit, type ChatArchiveLiveMedia } from '../chat-archive/live-media.js'
 import { archiveUnroutedInbound, resolveChatArchiveInstanceId } from '../chat-archive/live-writer.js'
 import { archiveProviderMessageId } from '../chat-archive/normalize.js'
+import { CHAT_ARCHIVE_CHANNELS_TOOL, CHAT_ARCHIVE_SEARCH_TOOL } from '../chat-archive/tool-catalog.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import { buildFileContentBlocks } from './route-helpers.js'
 import { handleConnectCommand } from './_connect-command.js'
@@ -1268,6 +1269,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       // cause Step 2 to re-run and (in a private chat) incorrectly redirect
       // the owner to the shared @use_brian_bot.
       let foundLinked = false
+      let linkedIdentity: Pick<LinkedAccount, 'id' | 'assistantId'> | undefined
       let foundLinkedOwner = false
       const telegramUserId = incoming.userId
 
@@ -1308,6 +1310,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
               channelUserId = found.id
               isIdentified = true
               foundLinked = true
+              linkedIdentity = { id: linked.id, assistantId: linked.assistantId }
               foundLinkedOwner = found.id === ownerId
             }
           }
@@ -1479,6 +1482,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           ownerId: routedOwnerId,
           isIdentified,
           senderLinkedIdentity: foundLinked,
+          linkedIdentity,
           externalGuest,
           externalGuestConnectorTools:
             externalGuest
@@ -1669,6 +1673,7 @@ type ProcessMessageParams = {
   isIdentified: boolean
   /** Sender came in through their own linked Telegram account (`foundLinked`). */
   senderLinkedIdentity: boolean
+  linkedIdentity?: Pick<LinkedAccount, 'id' | 'assistantId'>
   /** Explicitly allowlisted, unlinked private sender: conversation-only lane. */
   externalGuest: boolean
   /** Explicit per-integration opt-in for connector tools on that guest lane. */
@@ -2354,6 +2359,25 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   // supply it only through the source-labelled provider context, once per turn.
   const replyRaw = (providerVisibleContext || recording) && rawReply.reply_to_message?.is_automatic_forward
     ? { ...rawReply, reply_to_message: undefined } : incoming.raw
+  const linkedAccountStore = params.linkedAccountStore
+  const linkedIdentity = params.linkedIdentity
+  const speakerAddress = incoming.userId
+  // Keep the exact intake link available to the first-dispatch archive tools.
+  const initialChatArchiveRecipientCurrent = linkedAccountStore && linkedIdentity && isIdentified && !incoming.isGroupChat
+    && speakerAddress === incoming.channelId && (params.tools.has(CHAT_ARCHIVE_CHANNELS_TOOL.name) || params.tools.has(CHAT_ARCHIVE_SEARCH_TOOL.name))
+    ? async () => {
+      const readOriginalLink = async () => {
+        const current = await linkedAccountStore.findByProvider('telegram', speakerAddress)
+        return current?.id === linkedIdentity.id && current.userId === channelUserId
+          && current.assistantId === linkedIdentity.assistantId ? current : null
+      }
+      const current = await readOriginalLink()
+      return telegramLinkBindsHere(current, assistant.id, ownerId, assistant.workspaceId, async (userId, workspaceId) => {
+        const role = await getWorkspaceRoleSystem(userId, workspaceId)
+        // The fallback workspace membership check awaited after the link read.
+        return role && await readOriginalLink() ? role : null
+      })
+    } : undefined
   await processChannelMessage({
     admittedAnswerContext: admission,
     interactionScope: params.interactionScope,
@@ -2376,6 +2400,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     channelIntegrationId: params.integrationId,
     channelIntegrationStore: params.integrationStore,
     telegramProviderIdentity: params.providerIdentity,
+    initialChatArchiveRecipientCurrent,
     actorChannelId: byoUsername ? `@${byoUsername}` : null,
     messageText: combinedText,
     userContentBlocks,

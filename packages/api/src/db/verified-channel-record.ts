@@ -109,6 +109,42 @@ export async function readVerifiedChannelRecordIds(address: ChannelRecordAddress
   return result.rows[0] ? new Set(result.rows[0].ids) : null
 }
 
+const recentTextCandidateSchema = z.object({
+  sequence: z.number().int().positive(),
+  role: z.enum(['user','assistant']),
+  digest: z.string().regex(/^[0-9a-f]{64}$/),
+  source: z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nullable(),assistantId:z.string().uuid().nullable(),
+    resourceKind:z.literal('session_message'),resourceId:z.string().uuid(),version:z.string().min(1),
+    sensitivity:z.enum(['public','internal','confidential']),compartments:z.array(z.string()),projectIds:z.array(z.string().uuid())}).strict(),
+}).strict()
+
+export const recentTextDigest = "encode(sha256(convert_to(m.content::text,'UTF8')),'hex')"
+const recentTextSlots = 8
+
+/** A fixed, server-owned selection of bounded metadata under the verified
+ * workspace record floor. The room branch of addressedEnvelope applies the
+ * workspace audience. The non-owner retained reader admits each selected
+ * message and its ancestry before fetching model-visible bytes. */
+export async function selectVerifiedChannelRecentText(execution: ExecutionContext, beforeSequence: number) {
+  const binding = verifiedSelections.get(execution)
+  if (!binding || !binding.address.room || binding.address.session.channelType !== 'telegram'
+    || !Number.isSafeInteger(beforeSequence) || beforeSequence < 1 || beforeSequence > 2147483647) {
+    throw new DerivedScopeError('scope_source_changed')
+  }
+  const rows = await query<{ candidates: unknown }>(`SELECT COALESCE((SELECT jsonb_agg(jsonb_build_object(
+    'sequence',m.sequence_num,'role',m.role,'digest',${recentTextDigest},'source',jsonb_build_object(
+      'workspaceId',m.workspace_id,'userId',m.user_id,'assistantId',m.assistant_id,'resourceKind','session_message',
+      'resourceId',m.id,'version',m.scope_version::text,'sensitivity',m.sensitivity,
+      'compartments',m.compartments,'projectIds',m.project_ids)) ORDER BY m.sequence_num)
+    FROM public.conversation_record_rows(bound.envelope,$10,$11,false,$6,false) m
+    WHERE m.channel_message_id IS NOT NULL AND m.user_id IS NULL AND octet_length(m.content::text)<=16384
+      AND NOT jsonb_path_exists(m.content,'$[*] ? (@.type == "tool_use" || @.type == "tool_result" || @.type == "host_observation")')
+  ),'[]'::jsonb) AS candidates FROM (${addressedEnvelope}) bound`,
+  [...addressValues(binding.address,binding.version),Math.max(0,beforeSequence-1-recentTextSlots),beforeSequence-1])
+  if (!rows.rows[0]) throw new DerivedScopeError('scope_source_changed')
+  return z.array(recentTextCandidateSchema).max(recentTextSlots).parse(rows.rows[0].candidates)
+}
+
 export function channelEvidenceFitsEnvelope(envelope: ChannelRecordEnvelope, evidence: ScopeEvidence) {
   const floor = resolveWriteScope({evidence})
   return maxSensitivity(envelope.cap,floor.sensitivity)===envelope.cap

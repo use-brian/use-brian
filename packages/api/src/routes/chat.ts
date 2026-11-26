@@ -1,6 +1,6 @@
 import { admitCurrentAuthoredInput, readAttendedSessionHistory } from './attended-session-context.js'
 import type { RouteCapabilityParams, TurnCapabilityRequest } from '../turn/capabilities.js'
-import { assertInitialMailboxEvidenceCurrent } from '../turn/mailbox-read-authority.js'
+import { assertInitialReadEvidenceCurrent } from '../turn/initial-read-authority.js'
 import { readsNativePdf, type DiscoveredTurnFrame } from '../turn/prepare.js'
 import { routeAttendedTurn, type AttendedTurnRoute } from './attended-turn-routing.js'
 import {bindPrivateResponderTranscript,privateTranscriptText,resumePrivateLegacySession,PRIVATE_TRANSCRIPT_INSTRUCTION} from '../db/private-transcript.js'
@@ -173,7 +173,7 @@ import type { FileStore } from '@use-brian/core/files/types.js'
 import type { TranscribeResult } from '@use-brian/core/media/transcribe.js'
 import type { EpisodicStore } from '@use-brian/core/memory/episodic-types.js'
 import type { TopicClassification } from '@use-brian/core/memory/topic-classifier.js'
-import type { MemoryStore } from '@use-brian/core/memory/types.js'
+import type { MemoryStore, PromptMemoryIndexOutcome } from '@use-brian/core/memory/types.js'
 import type { RetrievalStore } from '@use-brian/core/retrieval/types.js'
 import type { UsageStore } from '@use-brian/agent-runtime/billing/cost-tracker.js'
 import type { CacheStore } from '@use-brian/agent-runtime/compaction/cache-tool.js'
@@ -5327,11 +5327,11 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             && turnScope.activeProjectId===null)
             ? (promptIndexes ??= turnTiming.time('prompt_paired_memory', () => options.memoryStore.getPairedPromptIndexes!(viewerCtx, PER_TURN_INDEX_CAP, candidate)))
             : undefined
-        const indexValue = <T>(result: PromiseSettledResult<T>) => {
+        const indexValue = <T>(result: PromptMemoryIndexOutcome<T>): T | null => {
           if (result.status === 'rejected') throw result.reason
-          return result.value
+          return result.status === 'fulfilled' ? result.value : null
         }
-        const [soulContext, identityMemories, rankedIndex, preferredChannel, selfEntityId] = await Promise.all([
+        const [soulContext, identityMemories, rankedMemory, preferredChannel, selfEntityId] = await Promise.all([
           optionalContext(async () => {
             const auxiliary = await auxiliaryPrompt
             if (auxiliary) return auxiliary.soul
@@ -5351,7 +5351,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             if (packed) return indexValue(packed.indexes.ranked)
             const paired = readPromptIndexes(candidate)
             return paired ? indexValue((await paired).ranked) : options.memoryStore.getIndexRanked(viewerCtx,PER_TURN_INDEX_CAP,candidate)
-          }, { rows: [], totalCount: 0 }, value => [value, value.rows, ...value.rows], value => value.rows.length > 0 || value.totalCount > 0),
+          }, { rows: [], totalCount: 0 }, value => value ? [value, value.rows, ...value.rows] : [],
+          value => !!value && (value.rows.length > 0 || value.totalCount > 0)),
           (async () => {
             const auxiliary = await auxiliaryPrompt
             return auxiliary ? auxiliary.preferred : getPreferredChannel(assistant.id, user.id)
@@ -5362,6 +5363,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             return packed?.selfEntityId===undefined?getSelfEntityId(viewerCtx):packed.selfEntityId
           })(),
         ])
+        const rankedIndex = rankedMemory ?? { rows: [], totalCount: 0 }
         noteAutomaticScopeEvidence(scopeAccumulator,[identityMemories,...identityMemories])
         const soul = soulContext.content
         scopeAccumulator.note(soulContext.evidence)
@@ -5405,7 +5407,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         // routing decision for saveMemory and the ## Team Context block. Identity
         // memories and voice rules share a read and retain separate admission.
         let workspaceIdentityMemories: Awaited<ReturnType<typeof options.memoryStore.getWorkspaceIdentity>> = []
-        let teamMemoryIndex: Awaited<ReturnType<typeof options.memoryStore.getWorkspaceIndex>> = []
+        let workspaceMemory: Awaited<ReturnType<typeof options.memoryStore.getWorkspaceIndex>> | null = []
         let teamVoiceRules: Awaited<ReturnType<typeof options.memoryStore.getWorkspaceMemoriesByCategory>> = []
         let workspaceIdentity: { name: string; purpose: string } | null = null
         if (assistant.workspaceId) {
@@ -5413,7 +5415,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           const readPromptMemories = () => options.memoryStore.getWorkspacePromptMemories
             ? (promptMemories ??= turnTiming.time('prompt_workspace_identity_voice', () => options.memoryStore.getWorkspacePromptMemories!(viewerCtx, 'voice')))
             : undefined
-          ;[workspaceIdentityMemories, teamMemoryIndex, teamVoiceRules, workspaceIdentity] = await Promise.all([
+          ;[workspaceIdentityMemories, workspaceMemory, teamVoiceRules, workspaceIdentity] = await Promise.all([
             optionalContext(async candidate => {
               const packed = await readNativePromptMemory(candidate)
               if (packed) return packed.team.identity
@@ -5440,6 +5442,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             })(),
           ])
         }
+        const teamMemoryIndex = workspaceMemory ?? []
         const teamPurpose = workspaceIdentity?.purpose ?? null
 
         // Shared Feed authoring uses the existing loaders intersected with its
@@ -5461,7 +5464,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           identityMemories: identityMemories.map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
           memoryIndex: feedTurnContext ? [] : rankedIndex.rows.map((m) => ({ ...m, appId: null })),
           memoryIndexDeferred: deferAmbientIndexes,
-          totalNonIdentityCount: rankedIndex.totalCount,
+          memoryIndexIncomplete: rankedMemory === null || workspaceMemory === null,
+          totalNonIdentityCount: rankedMemory?.totalCount,
           workspaceIdentityMemories: feedTurnContext ? [] : workspaceIdentityMemories.map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
           teamMemoryIndex: feedTurnContext ? [] : teamMemoryIndex.map((m) => ({ ...m, appId: null })),
           teamVoiceRules: (feedTurnContext ? [] : teamVoiceRules).map((m) => ({
@@ -8542,7 +8546,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             })
             let synthesised: string | null = null
             try {
-              await assertInitialMailboxEvidenceCurrent(executionContext)
+              await assertInitialReadEvidenceCurrent(executionContext)
               const result = await authority.execute(() => composeEmptyTurnSynthesis({
                 provider: backgroundProvider,
                 pendingAssistantTurns,
@@ -8571,7 +8575,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             }
             if (synthesised) {
               await assertDeliveryAudience()
-              await assertInitialMailboxEvidenceCurrent(executionContext)
+              await assertInitialReadEvidenceCurrent(executionContext)
               sendEvent('text_delta', { text: synthesised })
               await ownedTurn.publish({ disposition: 'closing', write: publicationWrite(),
                 native: nativeTranscriptAuthority, execute: operation => authority.execute(operation), rows: [{
@@ -8644,7 +8648,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
               }) : null
           if (recovered) {
             await assertDeliveryAudience()
-            await assertInitialMailboxEvidenceCurrent(executionContext)
+            await assertInitialReadEvidenceCurrent(executionContext)
             sendEvent('text_delta', { text: recovered.text })
             // Persist as a real assistant message so the recovery is
             // part of the conversation history on next page load —

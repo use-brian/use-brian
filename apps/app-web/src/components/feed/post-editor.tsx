@@ -1,5 +1,5 @@
 "use client";
-import { LinkedInPublishing, type LinkedInPreviewState } from './linkedin-publishing';
+import { LinkedInPostPreview, LinkedInPublishing, type LinkedInPreviewState } from './linkedin-publishing';
 import { linkedinRequest,linkedinDraftPath } from '@/lib/api/feed-linkedin';
 import { FeedSources } from './feed-sources';
 
@@ -31,7 +31,6 @@ import {
   FileDown,
   Info,
   MoreHorizontal,
-  Eye,
   Sparkles,
   Heart,
   Link2,
@@ -107,11 +106,10 @@ import {
 import { useGlobalDockRecorder } from "@/lib/recorder/dock-recorder-bridge";
 
 import { useIsOffline } from "@/lib/offline/use-offline-sync";
-import { FEED_API_URL, feedCachedJson, isAuthoritativeFeedDenial } from "@/lib/offline/feed-cache";
-import { OFFLINE_AUTHORITY_MS, SURFACE_CONTENT_LEASE_MS, useSurfaceContentRenewal } from "@/lib/offline/surface-content-cache";
-import { authFetch } from "@/lib/auth-fetch";
+import { feedCachedJson, isAuthoritativeFeedDenial } from "@/lib/offline/feed-cache";
+import { useSurfaceContentRenewal } from "@/lib/offline/surface-content-cache";
 import {
-  FEED_LOCAL_CHANGED, blankFeedContent, createLocalFeedPost, loadFeedWorkingCopy,
+  FEED_LOCAL_CHANGED, feedPostDenied, blankFeedContent, createLocalFeedPost, loadFeedWorkingCopy,
   patchFeedWorkingCopy, readLocalFeedPost, forkLocalFeedPost, ensureFeedComposition, retryFeedWorkingCopy,
   readFeedNewPostForm, writeFeedNewPostForm,
   type FeedWorkingContent, type LocalFeedPost,
@@ -232,7 +230,7 @@ export function PostEditor({
   }
   return (
     <PostPane
-      key={sessionId}
+      key={JSON.stringify([team.me.id, team.workspaceId, assistantId, sessionId])}
       assistantId={assistantId}
       assistantName={assistant?.name ?? ""}
       assistantIconSeed={
@@ -470,6 +468,7 @@ function PostPane({
   });
   const compositionLoadedRef = useRef(false);
   const offline = useIsOffline();
+  const [accessLost, setAccessLost] = useState(false);
   const [localPost, setLocalPost] = useState<LocalFeedPost | null>(null);
   const [localSaveError, setLocalSaveError] = useState(false);
   const [retryingSync, setRetryingSync] = useState(false);
@@ -529,15 +528,20 @@ function PostPane({
   const load = useCallback(async () => {
     setError(null);
     const [sessions, saved, rows] = await Promise.all([
-      fetchFeedDraftSessions(assistantId, platform).catch(
-        () => [] as FeedDraftSessionSummary[],
-      ),
+      fetchFeedDraftSessions(assistantId, platform).catch(error => {
+        if (isAuthoritativeFeedDenial(error)) setAccessLost(true);
+        return [] as FeedDraftSessionSummary[];
+      }),
       fetchFeedSavedDrafts(assistantId, sessionId),
       readLocalFeedPost(assistantId, sessionId).then(post => post?.newSession ? [] :
         feedCachedJson<Array<{ role: string; content: unknown }>>(`/api/sessions/${sessionId}/messages`).catch(() => [])),
     ]);
     const found = sessions.find((s) => s.id === sessionId) ?? null;
-    if (!found) setError(te.loadFailed);
+    if (!found) {
+      setError(te.loadFailed);
+      const stored = await readLocalFeedPost(assistantId, sessionId);
+      if (feedPostDenied(stored)) setLocalPost(stored);
+    }
     setSession(found);
     const savedDrafts = saved ?? [];
     setDrafts(savedDrafts);
@@ -574,6 +578,7 @@ function PostPane({
             article: savedComposition?.article ?? blankFeedContent().article, media: savedComposition?.media ?? [],
           });
           setLocalPost(copy);
+          compositionLoadedRef.current = true;
           // Saved review/posted versions retain their exact reviewed content.
           const resolved = postQueueStatus(found);
           if (resolved !== "ready" && resolved !== "posted") {
@@ -585,9 +590,13 @@ function PostPane({
             setThreadSegments(content.threadSegments); setArticle(content.article); setMedia(content.media);
             setSession({ ...found, title: `[${platform}] ${content.title || "New draft"}` });
           }
-        } catch { setLocalSaveError(true); }
+        } catch (error) {
+          if (isAuthoritativeFeedDenial(error)) {
+            setAccessLost(true);
+            setLocalPost(await readLocalFeedPost(assistantId, sessionId));
+          } else setError(te.loadFailed);
+        }
       }
-      if (found) compositionLoadedRef.current = true;
     }
     setLoading(false);
   }, [assistantId, platform, sessionId, te.loadFailed]);
@@ -663,8 +672,8 @@ function PostPane({
   }, [assistantId, sessionId, collaboration.refresh, te.syncConflict, te.syncBlocked, te.sourceAccessBlocked]);
   const upgradeAttempt = useRef<string | null>(null);
   useEffect(() => {
-    if (offline) { upgradeAttempt.current = null; return; }
-    if (loading || readOnly || structured || !localPost || localPost.error || localSaveError || localSaving > 0) return;
+    if (offline || accessLost || feedPostDenied(localPost)) { upgradeAttempt.current = null; return; }
+    if (loading || !compositionLoadedRef.current || readOnly || structured || !localPost || localPost.error || localSaveError || localSaving > 0) return;
     const attempt = `${localPost.revision}:${localPost.mutationId}`;
     if (upgradeAttempt.current === attempt) return;
     upgradeAttempt.current = attempt;
@@ -672,7 +681,7 @@ function PostPane({
     void ensureFeedComposition(assistantId, sessionId, { mutationId: localPost.mutationId, text: selected?.text ?? localPost.content.text })
       .catch(() => setLocalSaveError(true))
       .finally(() => setLocalSaving(n => n - 1));
-  }, [assistantId, sessionId, loading, readOnly, structured, offline, localPost, localSaveError, localSaving, selected?.text]);
+  }, [assistantId, sessionId, loading, readOnly, structured, offline, accessLost, localPost, localSaveError, localSaving, selected?.text]);
   function showPanel(kind: Exclude<typeof editorPanel, null>, anchor?: HTMLElement | null) {
     setPanelAnchor(anchor ?? actionsButtonRef.current);
     lastPanel.current = kind;
@@ -952,7 +961,20 @@ function PostPane({
   }
   const canonicalProjection = localPost?.content.composition ? projectFeed(localPost.content.composition) : null;
   const missingSlots = canonicalProjection?.missingSlots ?? [];
-  const linkedinProjection=platform==='linkedin'&&localPost?.content.composition?projectFeedLinkedIn(localPost.content.composition,localPost.content.linkedin,localPost.content):null;
+  const linkedinContent = platform === "linkedin" ? localPost?.content : undefined;
+  const linkedinPreviewDocument = useMemo(() => {
+    if (!linkedinContent?.composition) return null;
+    const anchors = new Map<number, string[]>();
+    const projection = projectFeedLinkedIn(linkedinContent.composition, linkedinContent.linkedin, linkedinContent,
+      (blockId, line) => {
+        const ids = anchors.get(line);
+        if (ids) ids.push(blockId);
+        else anchors.set(line, [blockId]);
+      });
+    return { projection, anchors };
+  }, [linkedinContent]);
+  const linkedinProjection = linkedinPreviewDocument?.projection;
+
   const compositionValid = linkedinProjection ? linkedinProjection.blockers.length===0 : postFormat === "thread"
     ? threadValid
     : postFormat === "article"
@@ -988,56 +1010,52 @@ function PostPane({
     [te],
   );
 
-  // Department authority for the open editor (perceived-performance.md,
-  // "Content lease for protected lists"): a draft is shown only while its
-  // session still lists for this viewer. An authoritative denial hides it at
-  // once; failed renewals hide it after the lease (one hour offline, the disk
-  // tier's window). Edits stay in state and in the local working copy.
-  const [accessLost, setAccessLost] = useState(false);
-  const confirmedAtRef = useRef(performance.now());
-  const renewable = session !== null && !localPost?.newSession;
-  const accessDeadlinePassed = useCallback(() => performance.now() - confirmedAtRef.current
-    >= (typeof navigator !== "undefined" && navigator.onLine === false ? OFFLINE_AUTHORITY_MS : SURFACE_CONTENT_LEASE_MS), []);
-  const renewAccess = useCallback(async () => {
+  // Unreachable Feed is inconclusive. The mounted working copy remains admitted
+  // until a live audience read excludes it or the authenticated identity changes.
+  const renewable = Boolean(session || localPost || accessLost) && !localPost?.newSession;
+  const renewAccess = useCallback(async (retryDetail = false) => {
+    if (!navigator.onLine) return false;
     try {
-      const response = await authFetch(
-        `${FEED_API_URL}/api/distribution/${assistantId}/draft-sessions?platform=${platform}`,
-        { signal: AbortSignal.timeout(8_000) },
-      );
-      if (response.ok) {
-        const body = await response.json() as { sessions?: Array<{ id: string }> };
-        if (body.sessions?.some((item) => item.id === sessionId)) {
-          confirmedAtRef.current = performance.now();
-          setAccessLost(false);
-          return true;
+      const sessions = await fetchFeedDraftSessions(assistantId, platform, true);
+      let found = sessions.find(item => item.id === sessionId);
+      if (!found && retryDetail) {
+        const stored = await readLocalFeedPost(assistantId, sessionId);
+        // The verified list has readmitted the post. Each detail endpoint
+        // that separately denied it must also grant a new live read.
+        if (stored && !stored.accessDenied && (stored.copyDenied || stored.detailDenied)) {
+          if (stored.copyDenied) await loadFeedWorkingCopy(assistantId, stored.session, stored.content);
+          if (stored.detailDenied) await collaboration.refresh();
+          const renewed = await readLocalFeedPost(assistantId, sessionId);
+          if (renewed && !feedPostDenied(renewed)) found = renewed.session;
         }
-        setAccessLost(true);
-        return false;
       }
-      if (response.status >= 400 && response.status < 500) {
-        setAccessLost(true);
-        return false;
-      }
-    } catch { /* transient: the deadline decides */ }
-    if (accessDeadlinePassed()) setAccessLost(true);
-    return false;
-  }, [accessDeadlinePassed, assistantId, platform, sessionId]);
-  useEffect(() => { if (session) confirmedAtRef.current = performance.now(); }, [session]);
+      setAccessLost(!found);
+      if (!found) return false;
+      setSession(found);
+      setError(current => current === te.loadFailed ? null : current);
+      if (!compositionLoadedRef.current) await load();
+      return true;
+    } catch (error) {
+      if (isAuthoritativeFeedDenial(error)) setAccessLost(true);
+      return false;
+    }
+  }, [assistantId, platform, sessionId, te.loadFailed, load, collaboration.refresh]);
   useSurfaceContentRenewal(renewAccess, renewable);
   useEffect(() => {
     if (!renewable) return;
-    const timer = setInterval(() => { if (accessDeadlinePassed()) setAccessLost(true); }, 5_000);
-    return () => clearInterval(timer);
-  }, [accessDeadlinePassed, renewable]);
+    const reconnect = () => { void renewAccess(true); };
+    window.addEventListener("online", reconnect);
+    return () => window.removeEventListener("online", reconnect);
+  }, [renewable, renewAccess]);
 
-  if (accessLost) {
+  if (accessLost || feedPostDenied(localPost) || isAuthoritativeFeedDenial(collaboration.error)) {
     return (
       <div role="alert" data-post-editor-unavailable className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
         <p className="text-sm font-medium">{te.accessLostTitle}</p>
         <p className="max-w-md text-sm text-muted-foreground">{te.accessLostBody}</p>
         <div className="flex flex-wrap items-center justify-center gap-2">
           <Button type="button" variant="outline" className="max-sm:min-h-11"
-            onClick={() => void renewAccess().then((ok) => { if (ok) void load(); })}>
+            onClick={() => void renewAccess(true)}>
             {te.accessLostRetry}
           </Button>
           <Button type="button" variant="ghost" className="max-sm:min-h-11"
@@ -1071,7 +1089,7 @@ function PostPane({
     );
   }
 
-  if ((!session && !localPost?.newSession) || isAuthoritativeFeedDenial(collaboration.error)) {
+  if (!localPost || (!session && !localPost.newSession)) {
     return (
       <div className="flex flex-col items-start gap-4 p-4 sm:p-6">
         <p role="alert" className="text-sm text-muted-foreground">{te.loadFailed}</p>
@@ -1109,16 +1127,19 @@ function PostPane({
                 reviewOpen={editorPanel === 'review'}
                 onReview={structured ? anchor => showPanel('review', anchor) : undefined}
                 onCommit={() => void commitVersion()} onApprove={() => void act('approve')} onPosted={() => void act('posted')} />
-              <Tooltip label={viewMode === "preview" ? te.editMode : te.previewMode}>
-                <Button variant="ghost" size="sm" type="button" className="min-h-11 min-w-11 md:min-h-9 md:min-w-9"
-                  onClick={() => {
-                    if (viewMode === "edit") editScrollTop.current = workspaceRef.current?.scrollTop ?? 0;
-                    setViewMode(viewMode === "edit" ? "preview" : "edit");
-                  }}>
-                  {viewMode === "preview" ? <Pencil aria-hidden /> : <Eye aria-hidden />}
-                  <span className="sr-only @xl/feed-editor:not-sr-only">{viewMode === "preview" ? te.editMode : te.previewMode}</span>
-                </Button>
-              </Tooltip>
+              <div className="flex shrink-0 items-center gap-0.5 rounded-lg border border-border p-0.5">
+                {(["edit", "preview"] as const).map(mode => (
+                  <Button key={mode} type="button" size="sm" variant={viewMode === mode ? "secondary" : "ghost"}
+                    aria-pressed={viewMode === mode} className="min-h-11 px-3 focus-visible:ring-2 focus-visible:ring-ring aria-pressed:font-semibold md:min-h-9"
+                    onClick={() => {
+                      if (viewMode === mode) return;
+                      if (mode === "preview") editScrollTop.current = workspaceRef.current?.scrollTop ?? 0;
+                      setViewMode(mode);
+                    }}>
+                    {mode === "edit" ? te.editMode : te.previewMode}
+                  </Button>
+                ))}
+              </div>
             </header>
 
             <div data-feed-title>
@@ -1129,6 +1150,7 @@ function PostPane({
                     value={titleDirty ? titleDraft : displayPostTitle(session.title)}
                     maxLength={200}
                     disabled={titleSaving || readOnly}
+                    readOnly={viewMode === "preview"}
                     aria-label={te.editTitle}
                     title={te.editTitle}
                     onFocus={() => {
@@ -1162,7 +1184,7 @@ function PostPane({
                     style={{ fieldSizing: "content" } as React.CSSProperties}
                     className="h-11 md:h-10 min-w-0 max-w-[calc(100%_-_1.125rem)] w-auto truncate rounded-sm border-0 bg-transparent px-0 text-xl md:text-2xl font-semibold outline-none transition-colors focus:bg-muted/40 disabled:opacity-60"
                   />
-                  <Pencil className="size-3 shrink-0 text-muted-foreground/70" aria-hidden />
+                  {viewMode === "edit" && <Pencil className="size-3 shrink-0 text-muted-foreground/70" aria-hidden />}
                 </div>
               ) : (
                 <h1 className="truncate text-[15px] font-semibold">{te.newPost}</h1>
@@ -1191,6 +1213,7 @@ function PostPane({
                       <DropdownMenuItem className="min-h-11 md:min-h-9" onClick={() => showPanel('details')}><Info aria-hidden />{tc.details}</DropdownMenuItem>
                       {platform === "linkedin" && structured ? (
                         <DropdownMenuItem className="min-h-11 md:min-h-9" onClick={() => {
+                          setViewMode("edit");
                           const publishing = workspaceRef.current?.querySelector<HTMLElement>("[data-feed-linkedin-publishing]");
                           requestAnimationFrame(() => {
                             publishing?.focus({ preventScroll: true });
@@ -1348,7 +1371,13 @@ function PostPane({
                         : te.manualDelivery}
                     </span>
                   </div>
-                  {structured && localPost?.content.composition ? <div className={hasCommentMarkers ? "max-md:pr-12" : undefined}><FeedCompositionPreview composition={localPost.content.composition} workspaceId={workspaceId} /></div> : <PlatformPostPreview
+                  {structured && localPost?.content.composition ? (
+                    <div className={hasCommentMarkers ? "max-md:pr-12" : undefined}>
+                      {linkedinPreviewDocument
+                        ? <LinkedInPostPreview workspaceId={workspaceId} {...linkedinPreviewDocument} />
+                        : <FeedCompositionPreview composition={localPost.content.composition} workspaceId={workspaceId} />}
+                    </div>
+                  ) : <PlatformPostPreview
                     platform={platform}
                     postFormat={postFormat}
                     text={selected?.text ?? ""}
@@ -1370,10 +1399,10 @@ function PostPane({
             </div>
             {structured ? <FeedDocumentAnnotations documentRef={viewMode === "edit" ? editDocumentRef : previewDocumentRef} threads={collaboration.data?.threads ?? []} onThread={openThread} /> : null}
             </div>
-            {platform==='linkedin' && structured && localPost ? <LinkedInPublishing workspaceId={workspaceId} workspaceName={workspace.name} assistantId={assistantId} sessionId={sessionId} revision={localPost.revision} content={localPost.content} ready={status==='ready'} readOnly={readOnly} disabled={Boolean(remoteBlocked)||!workspace.canDraft||busy} onCommand={runCommands} onPreview={setLinkedinPreview} onRefresh={()=>{void collaboration.refresh();void load();}} onPromotion={async url=>{
+            {platform==='linkedin' && structured && localPost ? <div hidden={viewMode !== "edit"} inert={viewMode !== "edit"}><LinkedInPublishing workspaceId={workspaceId} workspaceName={workspace.name} assistantId={assistantId} sessionId={sessionId} revision={localPost.revision} content={localPost.content} ready={status==='ready'} readOnly={readOnly} disabled={Boolean(remoteBlocked)||!workspace.canDraft||busy} onCommand={runCommands} onPreview={setLinkedinPreview} onRefresh={()=>{void collaboration.refresh();void load();}} onPromotion={async url=>{
               const result=await linkedinRequest<{sessionId:string}>(`${linkedinDraftPath(assistantId,sessionId)}/linkedin-promotion`,{expectedRevision:localPost.revision,sessionId:crypto.randomUUID()});
               router.push(feedPostPath(workspaceId,'linkedin',result.sessionId));
-            }}/> : null}
+            }}/></div> : null}
           </div>
         </div>
         <FeedEditorPanel open={editorPanel !== null} title={panelMode === 'details' ? tc.details : panelMode === 'review' ? tc.review : panelMode === 'learning' ? tl.title : tc.comments} anchor={panelAnchor} passage={panelMode === 'thread'} onClose={() => setEditorPanel(null)}>

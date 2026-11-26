@@ -11,7 +11,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 
-vi.mock('../../db/client.js', () => ({ query: vi.fn() }))
+vi.mock('../../db/client.js', () => ({ query: vi.fn(), queryWithRLS: vi.fn() }))
 vi.mock('../../db/users.js', () => ({
   findOrCreateUser: vi.fn(),
   getDefaultAssistant: vi.fn(),
@@ -36,7 +36,7 @@ vi.mock('../route-helpers.js', () => ({ resolveUser: vi.fn() }))
 import { sessionRoutes, type SessionRouteOptions } from '../sessions.js'
 import { DOC_DOCK_RESUME_ROW } from '../_room-binding.js'
 import { policyFor } from '../../session-kind.js'
-import { query } from '../../db/client.js'
+import { query, queryWithRLS } from '../../db/client.js'
 import {
   getDefaultAssistant,
   getUserAssistant,
@@ -71,6 +71,7 @@ beforeEach(() => {
   vi.resetAllMocks()
   mockResolveUser.mockResolvedValue({ id: USER_ID } as never)
   mockQuery.mockResolvedValue({ rows: [], rowCount: 0 } as never)
+  vi.mocked(queryWithRLS).mockResolvedValue({ rows: [] } as never)
   vi.mocked(getWorkspaceMembershipWithReadScopeSystem).mockResolvedValue({ clearance: 'internal', compartments: [], projectIds: null } as never)
 })
 
@@ -183,7 +184,7 @@ describe('[COMP:api/sessions-list] doc-dock workspace-scope resume', () => {
     // so legacy null-origin and inbox rows stay visible there.
     expect(sql).toContain('app_origin IS NULL')
     expect(sql).toContain("anchor_kind IN ('none', 'inbox', 'channel')")
-    expect(params).toHaveLength(5)
+    expect(params).toHaveLength(6)
   })
 
   it('ignores scope=workspace without a workspaceId (falls back to the assistant list)', async () => {
@@ -211,7 +212,7 @@ describe('[COMP:api/sessions-list] doc-dock workspace-scope resume', () => {
     expect(sql).toContain('s.channel_type as "channelType"')
     expect(sql).not.toContain('s.channel_type = $3')
     expect(sql).not.toContain("s.channel_type IN ('web'")
-    expect(params).toEqual([WS_ID, USER_ID, null, null])
+    expect(params).toEqual([WS_ID, USER_ID, null, null, []])
   })
 
   it('channels=all is ignored without scope=workspace', async () => {
@@ -224,7 +225,7 @@ describe('[COMP:api/sessions-list] doc-dock workspace-scope resume', () => {
     const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]]
     expect(sql).toContain("s.channel_type = 'web'")
     expect(sql).toContain("anchor_kind IN ('none', 'inbox', 'channel')")
-    expect(params).toHaveLength(5)
+    expect(params).toHaveLength(6)
   })
 })
 
@@ -263,8 +264,8 @@ describe('[COMP:api/sessions-list] Project paging', () => {
       .mockResolvedValueOnce({rows:[row('visible','internal')]} as never)
     const res=await request(makeApp()).get(`/api/sessions/workspace?workspaceId=${WS_ID}&contextProjectId=${project}`).expect(200)
     expect(res.body.map((r:{id:string})=>r.id)).toEqual(['visible'])
-    expect(mockQuery.mock.calls[0][1]).toEqual([WS_ID,project,null,null,USER_ID])
-    expect(mockQuery.mock.calls[1][1]).toEqual([WS_ID,project,'2026-01-01T00:00:00.000Z','hidden-99',USER_ID])
+    expect(mockQuery.mock.calls[0][1]).toEqual([WS_ID,project,null,null,[]])
+    expect(mockQuery.mock.calls[1][1]).toEqual([WS_ID,project,'2026-01-01T00:00:00.000Z','hidden-99',[]])
   })
 })
 

@@ -19,6 +19,12 @@ import type { Sensitivity } from '@use-brian/agent-runtime/security/sensitivity.
 import type { ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
 import type { DerivedWriteEvidence } from '@use-brian/agent-runtime/security/derived-scope.js'
 
+/** An automatic Memory index carries values only after its own scope proof. */
+export type PromptMemoryIndexOutcome<T> =
+  | { status: 'fulfilled'; value: T }
+  | { status: 'denied' }
+  | { status: 'rejected'; reason: unknown }
+
 export type MemoryRecord = {
   learning?: MemoryLearning | null
   id: string
@@ -403,8 +409,8 @@ export type MemoryStore = {
 
   /** Compatible prompt indexes retain independent fields and evidence. */
   getPairedPromptIndexes?(ctx: AccessContext, limit: number, authority: SessionContextAuthority): Promise<{
-    ranked: PromiseSettledResult<Awaited<ReturnType<MemoryStore['getIndexRanked']>>>
-    workspace: PromiseSettledResult<Awaited<ReturnType<MemoryStore['getWorkspaceIndex']>>>
+    ranked: PromptMemoryIndexOutcome<Awaited<ReturnType<MemoryStore['getIndexRanked']>>>
+    workspace: PromptMemoryIndexOutcome<Awaited<ReturnType<MemoryStore['getWorkspaceIndex']>>>
   }>
 
   /** Native automatic Memory sections from one admitted turn acquisition.

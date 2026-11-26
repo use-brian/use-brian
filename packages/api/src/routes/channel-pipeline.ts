@@ -13,7 +13,7 @@ import { bindScopeSources } from '@use-brian/agent-runtime/security/source-evide
 import { resourceScopeKey } from '@use-brian/agent-runtime/security/derived-scope.js'
 import type { TurnCapabilityRequest } from '../turn/capabilities.js'
 import type { SurfaceCapabilityOptions } from '../mcp/surface.js'
-import { assertInitialMailboxEvidenceCurrent } from '../turn/mailbox-read-authority.js'
+import { assertInitialReadEvidenceCurrent } from '../turn/initial-read-authority.js'
 import { runTurnSessionStateDiff } from '../turn/session-state.js'
 import { withTurnInference } from '../turn/runtime.js'
 import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
@@ -78,6 +78,7 @@ import {
 } from '@use-brian/agent-runtime/engine/grounding-gate.js'
 import { createConfirmationResolver } from '@use-brian/agent-runtime/mcp/types.js'
 import { collectStream } from '@use-brian/agent-runtime/providers/accumulator.js'
+import { summarizeProviderError } from '@use-brian/agent-runtime/providers/provider-error-summary.js'
 import { pinAccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
 import { CompartmentAccumulator } from '@use-brian/agent-runtime/security/compartments.js'
 import {
@@ -526,6 +527,7 @@ export type ChannelPipelineParams = AdmittedChannelMessage & {
    * See scoped-context.md → "Channel credential receipts".
    */
   credentialCurrent?: () => Promise<boolean>
+  initialChatArchiveRecipientCurrent?: () => Promise<boolean>
   checkCreditBudget?: CreditBudgetGate
 
   // ── Channel context ──
@@ -1322,8 +1324,12 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
   // A provider-visible original post need not raise its own group's delivery
   // ceiling. Its exact row must nevertheless remain readable across effects.
   let currentGroupInput: (() => Promise<boolean>) | undefined
-  const recordCurrent = async () => currentGroupInput ? currentGroupInput()
-    : !recordAddress || !recordEnvelope || !!await readVerifiedChannelEnvelope(recordAddress,recordEnvelope.version)
+  let recentTextSelectionCurrent: (() => Promise<boolean>) | undefined
+  const recordCurrent = async () => {
+    const current = currentGroupInput ? await currentGroupInput()
+      : !recordAddress || !recordEnvelope || !!await readVerifiedChannelEnvelope(recordAddress,recordEnvelope.version)
+    return current && (!recentTextSelectionCurrent || await recentTextSelectionCurrent())
+  }
   const channelWrite = !params.recording && recordAddress && recordEnvelope && verifiedChannelPublicationActive()
     ? {address:recordAddress,version:recordEnvelope.version} : undefined
   const memberMode = assistant.workspaceId === null
@@ -1546,13 +1552,25 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
       throw new DeliveryAudienceUnverifiedError(undefined,'source_reclassified')
     }
   })
+  let initialChatArchiveUsed = false
+  const archiveRecipientCurrent = params.initialChatArchiveRecipientCurrent
+  const assertArchiveRecipientCurrent = async () => {
+    if (!archiveRecipientCurrent || !await archiveRecipientCurrent()
+      || executionContext.security.authority !== authority || executionContext.identity !== originalIdentity
+      || executionContext.ownership !== originalOwnership) throw new AuthorityChangedError(false)
+  }
   const checkTelegramDispatch = async () => {
     await assertDeliveryAudience()
+    if (initialChatArchiveUsed) {
+      await authority.assertCurrent()
+      await assertArchiveRecipientCurrent()
+    }
     abortController.signal.throwIfAborted()
   }
   const telegramDispatch = (): TelegramDispatchScope | undefined => {
+    if (initialChatArchiveUsed) return { assertCurrent: checkTelegramDispatch }
     if (!telegramKnowledgeGroup(executionContext)) return
-    return telegramKnowledgeUsed(executionContext) ? { assertCurrent: checkTelegramDispatch } : {}
+    return telegramKnowledgeUsed(executionContext) || recentTextSelectionCurrent ? { assertCurrent: checkTelegramDispatch } : {}
   }
   const emitStatus = (message: string) => {
     const check = telegramDispatch()
@@ -2108,7 +2126,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
       const savedTurns = [...assembled.assistantRows].flatMap(([index, turn]) => rows[index] ? [{ row: rows[index]!, content: turn.content }] : [])
       if (savedTurns.length) {
         await assertDeliveryAudience()
-        await assertInitialMailboxEvidenceCurrent(executionContext)
+        await assertInitialReadEvidenceCurrent(executionContext)
       }
       for (const saved of savedTurns) {
         lastFlushedAssistantRowId = saved.row.id
@@ -2136,7 +2154,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
   let terminalQuestion: ChannelQuestion | undefined
   let endpointFallbackAnnounced = false
   const sendResponseAndStampChannelId = async (text: string, documents?: OutgoingDocument[]): Promise<void> => {
-    await assertInitialMailboxEvidenceCurrent(executionContext)
+    await assertInitialReadEvidenceCurrent(executionContext)
     const telegram = telegramDispatch()
     if (!telegram?.assertCurrent) await assertDeliveryAudience()
     // A channel has no `notice` lane, so an announced fallback has to travel
@@ -2349,12 +2367,13 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
         sessionId: session.id, userMessageId: userMessageRow.id, model: record.model,
         usage: record.usage, source: record.source, triggerKey: record.triggerKey, ...backgroundUsageAttribution,
       }),
-      attribution: backgroundUsageAttribution, signal: abortController.signal,
+      attribution: backgroundUsageAttribution, signal: abortController.signal, measure: timing.time,
     })
     const adaptiveResearchActive = routing.route.research.active
     // The routed native topic publishes its annotation now, as the sequential
     // classifier did; a legacy turn keeps the routed classification.
-    const nativeClassification = routing.topic ? await routing.topic.publish() : undefined
+    const topic = routing.topic
+    const nativeClassification = topic ? await timing.time('context_topic_publish', () => topic.publish()) : undefined
 
     if(params.conversationContext)await assertTelegramConversationCurrent(params.conversationContext)
     const replyResolved = nativeClassification ? nativeClassification.reply : legacyReply ?? null
@@ -2378,11 +2397,11 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     if(params.conversationContext)await assertTelegramConversationCurrent(params.conversationContext)
     // The original turn owner selects and performs the main-turn history read;
     // the channel declares only its stored-history audience projection.
-    let dbMessages = privateRecording ? [] : (await turnOwner.prepareHistory({ native: nativeTranscriptAuthority ?? null, classified: nativeClassification,
+    let dbMessages = privateRecording ? [] : (await timing.time('context_history', () => turnOwner.prepareHistory({ native: nativeTranscriptAuthority ?? null, classified: nativeClassification,
       // A public audience cannot trust the durable summary because it has no
       // per-source audience evidence. Rebuild from filtered provider history.
       fromSequence: isolatedAudience || room ? null : session.compactBoundarySequence,
-      projectStored: rows => filterHistoryForAudience(rows) })).messages
+      projectStored: rows => filterHistoryForAudience(rows) }))).messages
     discoveryHistoryPrepared = true
     if(params.conversationContext)await assertTelegramConversationCurrent(params.conversationContext)
     if (room && !privateRecording) {
@@ -2424,7 +2443,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     await assertDeliveryAudience()
     const compactionResult = privateRecording
       ? { messages: [{ role: 'user' as const, content: structuredClone(userContentBlocks) }] }
-      : await runProactiveCompaction({
+      : await timing.time('context_compaction', () => runProactiveCompaction({
       modelContext: { execution: executionContext, accumulator: scopeAccumulator },
       sessionMessages: dbMessages,
       timezone: userTimezone,
@@ -2460,7 +2479,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
       compartments: dataTurnScope.writeCompartments,
       projectIds: dataTurnScope.writeProjectIds,
       authority,
-    })
+    }))
     // Coalesced assembly: a room's un-addressed posts are consecutive user rows,
     // folded into the addressed turn under the provider's alternation contract.
     const messages: Message[] = roomShape.coalesce
@@ -2913,7 +2932,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     if (routing.route.split) {
       try {
         const preflightTools = turnOwner.prepareTools(allTools)
-        const preflight = await runPreflight({
+        const preflight = await timing.time('context_preflight', () => runPreflight({
           provider: backgroundProvider, model: backgroundLaneModel, message: messageText, tools: preflightTools,
           classify: async () => ({ tasks: await routing.consumeSplit(), usage: null, model: null }),
           // Discovery, a read (and an optional detail read), then synthesis.
@@ -2968,7 +2987,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
               channelType, workerId, pendingUsage,
             })
           },
-        })
+        }))
         if (preflight.type === 'researched') {
           preflightContext = preflight.context
         }
@@ -3028,6 +3047,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
 
   // ── Query loop ──
   if (abortController.signal.aborted) return
+  let queryLoopFailed = false
   const dispatchToolProgress: DispatchChannelToolProgress = async (write) => {
     const telegram = telegramDispatch()
     if (!telegram?.assertCurrent) await assertDeliveryAudience()
@@ -3060,6 +3080,10 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
       candidateTools: senderIsWorkspaceMember && !isolatedAudience && !hasConversationReference ? tools : new Map(),
       trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
       userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
+      initialChatArchiveReads: channelType === 'telegram' && !isGroupChat && isIdentified
+        && params.senderLinkedIdentity === true && incoming?.userId === channelId && session.userId === userId
+        && turnPolicy.deliveryCeiling.recipientType === 'individual' && archiveRecipientCurrent
+        ? { assertRecipientCurrent: assertArchiveRecipientCurrent, onRead: () => { initialChatArchiveUsed = true } } : undefined,
       initialMailboxCapabilities: createConnectorCapabilityRequest && isIdentified && !isolatedAudience
         ? async () => createConnectorCapabilityRequest(await resolveConnectorUserId(), new Map())
         : undefined,
@@ -3072,6 +3096,13 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
         ? async () => createConnectorCapabilityRequest(await resolveConnectorUserId(), new Map())
         : undefined,
       contextDiscovery: discoverContext,
+      recentChannelText: nativeTranscriptAuthority && params.recording?.policy.destination === 'workspace'
+        && hasWorkspaceConversationAudience(recordEnvelope?.visibility) && telegramKnowledgeGroup(executionContext) && !hasConversationReference
+        && userContentBlocks.every(block=>block.type==='text'&&!/<attached_file\b/i.test(block.text))
+        ? { authority: nativeTranscriptAuthority, beforeSequence: userMessageRow.sequenceNum,
+            bindSelection: (isCurrent) => { recentTextSelectionCurrent = isCurrent },
+            onReadTiming: ms => timing.add('context_recent_text', ms) }
+        : undefined,
     })
     replyEvidence.note(initialPrompt.stablePrompt)
     replyEvidence.note(messageText)
@@ -3144,7 +3175,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
         await assertDeliveryAudience()
       } } : {}), afterLoop: async () => {
         await flushBufferedTurns('[Tool did not return a result. Treat as failed and do not retry.]')
-        if (!sessionStateStore || !isIdentified || isolatedAudience) return
+        if (queryLoopFailed || !sessionStateStore || !isIdentified || isolatedAudience) return
         try {
           const { backgroundProvider, backgroundLaneModel, backgroundUsageAttribution } = await getBackground()
           const result = await runTurnSessionStateDiff({
@@ -3510,15 +3541,49 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
           }
           break
         }
-        case 'error':
-          console.error(`[${channelType}] query loop error:`, event.error)
-          await sendTurnError(event.error)
+        case 'error': {
+          queryLoopFailed = true
+          const failure = summarizeProviderError(event.error)
+          const rpcTimeout = failure.codexRpcTimeout
+          console.error(`[${channelType}] query loop error:`, { sessionId: session.id, ...failure })
+          analytics?.logEvent({
+            userId, assistantId: assistant.id, sessionId: session.id,
+            eventName: 'chat_route_error', channelType,
+            metadata: {
+              error_type: sanitizeAnalytics(rpcTimeout ? 'CodexRpcTimeoutError' : 'ProviderError'),
+              stage: sanitizeAnalytics('query_loop'),
+              error_source: sanitizeAnalytics('yielded'),
+              provider_error_category: sanitizeAnalytics(failure.category),
+              ...(failure.httpStatus === null ? {} : { provider_http_status: failure.httpStatus }),
+              ...(rpcTimeout ? {
+                codex_rpc_method: sanitizeAnalytics(rpcTimeout.method),
+                codex_rpc_phase: sanitizeAnalytics(rpcTimeout.phase),
+                codex_rpc_write_queue_ms: rpcTimeout.elapsedMs.write_queue,
+                codex_rpc_input_authority_ms: rpcTimeout.elapsedMs.input_authority,
+                codex_rpc_stdin_write_ms: rpcTimeout.elapsedMs.stdin_write,
+                codex_rpc_awaiting_response_ms: rpcTimeout.elapsedMs.awaiting_response,
+              } : {}),
+              ...timing.snapshot(),
+            },
+          })
+          try {
+            await sendTurnError(event.error)
+          } catch (error) {
+            console.error(`[${channelType}] failure notice delivery failed:`, {
+              sessionId: session.id, ...summarizeProviderError(error),
+            })
+          }
           break
+        }
       }
     } },
     })
 
     await flushBufferedTurns('[Tool did not return a result. Treat as failed and do not retry.]')
+    if (queryLoopFailed) {
+      await settleResearch('', true)
+      return
+    }
     await settleResearch(turnLoopResult.finalText ?? '', abortController.signal.aborted)
 
 
@@ -3575,6 +3640,15 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
   } catch (err) {
     turnFailed = true
     if (abortController.signal.aborted || turnOwner.abortKind) {
+      await settleResearch('', true)
+      return
+    }
+    if (queryLoopFailed) {
+      // The terminal outcome was already reported. A failed flush cannot
+      // reopen recovery or send another notice for the same turn.
+      console.error(`[${channelType}] failed turn cleanup error:`, {
+        sessionId: session.id, ...summarizeProviderError(err),
+      })
       await settleResearch('', true)
       return
     }

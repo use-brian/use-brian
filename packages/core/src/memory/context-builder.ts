@@ -117,6 +117,8 @@ export function buildMemoryContext(params: {
   memoryIndex: MemoryEntry[]
   /** Broad indexes were deferred; authorized Memory tools can still be used. */
   memoryIndexDeferred?: boolean
+  /** A denied section cannot establish that the Memory indexes are empty. */
+  memoryIndexIncomplete?: boolean
   /** KB entry summaries — memories duplicating these are filtered from the index. */
   knowledgeSummaries?: Array<{ summary: string | null }>
   /** Team-scoped identity memories (visible to all team members). */
@@ -343,14 +345,14 @@ export function buildMemoryContext(params: {
     sections.push(
       `## Memory Index\nUse getMemory to fetch details for any entry below. Treat these as background context — let them guide your responses; cite them when directly asked, otherwise shape invisibly.\n\n${lines.join('\n')}${footer}`,
     )
-  } else if (params.identityMemories.length > 0) {
+  } else if (params.identityMemories.length > 0 && !params.memoryIndexIncomplete) {
     sections.push(
       '## Memory Index\n(Identity only — no other memories are stored. Do not keyword-search for anything beyond the identity entries above; if the user references something you do not see, ask them to remind you rather than guessing.)',
     )
   }
 
   if (sections.length === 0) {
-    return '## Memory\nNo memories yet. Save important facts about the user as you learn them.'
+    return params.memoryIndexIncomplete ? '' : '## Memory\nNo memories yet. Save important facts about the user as you learn them.'
   }
 
   return sections.join('\n\n')

@@ -547,6 +547,27 @@ describe('[COMP:tasks/tools] listTasks', () => {
 })
 
 describe('[COMP:tasks/tools] updateTask', () => {
+  it('maps coding milestones to the board and can mark work done without reopening it', async () => {
+    const store = makeFakeStore()
+    const { saveTask, updateTask } = createTaskTools(store)
+    await saveTask.execute({ title: 'Implement the selected change' }, ctx)
+    const row = store.rows[0]
+    for (const [state, status] of [['running', 'in_progress'], ['waiting', 'blocked'], ['running', 'in_progress'], ['claimed_done', 'done']] as const) {
+      const result = await updateTask.execute({ id: row.id, coding_state: state }, ctx)
+      expect(result).toMatchObject({ data: { id: row.id, status, changed: true } })
+      expect(row.status).toBe(status)
+      expect(await updateTask.execute({ id: row.id, coding_state: state }, ctx)).toMatchObject({ data: { changed: false } })
+    }
+    for (const status of ['in_review', 'done', 'archived'] as const) {
+      row.status = status
+      expect(await updateTask.execute({ id: row.id, coding_state: 'running' }, ctx)).toMatchObject({ data: { status, changed: false } })
+    }
+    expect(await updateTask.execute({ id: row.id, coding_state: 'claimed_done' }, ctx)).toMatchObject({ data: { status: 'archived', changed: false } })
+    row.status = 'in_review'
+    expect(await updateTask.execute({ id: row.id, coding_state: 'claimed_done' }, ctx)).toMatchObject({ data: { status: 'done', changed: true } })
+    expect((await updateTask.execute({ id: row.id, coding_state: 'running', title: 'Other change' }, ctx)).isError).toBe(true)
+  })
+
   it('patches only the fields passed', async () => {
     const store = makeFakeStore()
     const { saveTask, updateTask } = createTaskTools(store)

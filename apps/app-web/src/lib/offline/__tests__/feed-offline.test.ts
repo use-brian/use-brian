@@ -124,6 +124,32 @@ describe("[COMP:app-web/feed-offline] durable authoring and replay", () => {
     await patchFeedWorkingCopy(assistant, post.session.id, { text: "Local unfinished revision" });
     expect((await loadFeedWorkingCopy(assistant, post.session, content())).content.text).toBe("Local unfinished revision");
   });
+  it("keeps a later list denial in force when an earlier grant arrives late", async () => {
+    const post = await createLocalFeedPost(assistant, "threads", content());
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.mocked(authFetch).mockImplementationOnce(syncReply);
+    await flushFeedWorkingCopies();
+    await patchFeedWorkingCopy(assistant, post.session.id, { text: "Still on this device" });
+    let grant!: (response: Response) => void;
+    const pending = new Promise<Response>(resolve => { grant = resolve; });
+    vi.mocked(authFetch).mockImplementationOnce(() => pending);
+    const older = fetchFeedDraftSessions(assistant, "threads", true);
+    await vi.waitFor(() => expect(authFetch).toHaveBeenCalledTimes(2));
+    vi.mocked(authFetch).mockResolvedValueOnce(reply({ sessions: [] }));
+    expect(await fetchFeedDraftSessions(assistant, "threads", true)).toEqual([]);
+    grant(reply({ sessions: [post.session] }));
+    // A superseded read can reject or settle without any admitted rows.
+    expect(await older.catch(() => [])).toEqual([]);
+    vi.mocked(authFetch).mockClear();
+    await flushFeedWorkingCopies();
+    expect(authFetch).not.toHaveBeenCalled();
+    expect((await readLocalFeedPost(assistant, post.session.id))?.content.text).toBe("Still on this device");
+    vi.mocked(authFetch).mockResolvedValueOnce(reply({ sessions: [post.session] }));
+    expect((await fetchFeedDraftSessions(assistant, "threads", true)).map(row => row.id)).toEqual([post.session.id]);
+    vi.mocked(authFetch).mockImplementation(syncReply);
+    await flushFeedWorkingCopies();
+    expect(await readLocalFeedPost(assistant, post.session.id)).toMatchObject({ dirty: false, content: { text: "Still on this device" } });
+  });
   it("caches reads for airplane navigation but evicts an authoritative access denial", async () => {
     vi.stubGlobal("navigator", { onLine: true });
     vi.mocked(authFetch).mockResolvedValueOnce(reply({ name: "Demo workspace" }));
@@ -140,7 +166,7 @@ describe("[COMP:app-web/feed-offline] durable authoring and replay", () => {
 
 // Command replay is exercised through the same persisted record and driver as
 // legacy authoring; transport replies are the only replacement boundary here.
-import { queueFeedCommands } from '../feed-offline';
+import { queueFeedCommands, setFeedDetailAccess } from '../feed-offline';
 import { applyFeedEdits, proposeFeedReplacement, projectFeed, walkFeed } from '@use-brian/doc-model';
 async function structuredPost() {
   const post = await createLocalFeedPost(assistant, 'threads', content());
@@ -157,6 +183,37 @@ function commandReply(_url: unknown, init?: RequestInit) {
   return Promise.resolve(reply({ receipt: { mutationId: request.mutationId, revision: request.expectedRevision + request.commands.filter((c: {kind: string}) => ['upgrade', 'edit', 'context'].includes(c.kind)).length, sequence: 0, threadIds: [], suggestionIds: [] } }));
 }
 describe('[COMP:app-web/feed-offline] automatic composition preparation', () => {
+  it.each([400, 403, 404, 409])('resumes only access-rejected mutations after both live read grants (%s)', async status => {
+    const post = await structuredPost();
+    const id = post.session.id;
+    await queueFeedCommands(assistant, id, [{ kind: 'context', title: 'Retained offline title' }]);
+    vi.mocked(authFetch).mockReset().mockResolvedValueOnce(reply({ error: 'rejected_edit' }, status));
+    await flushFeedWorkingCopies();
+    const firstRequest = vi.mocked(authFetch).mock.calls[0]![1]!.body;
+    const started = () => performance.timeOrigin + performance.now();
+    await setFeedDetailAccess(state.owner, assistant, id, true, started());
+    vi.mocked(authFetch).mockResolvedValueOnce(reply({ sessions: [] }));
+    expect(await fetchFeedDraftSessions(assistant, 'threads', true)).toEqual([]);
+    vi.stubGlobal('navigator', { onLine: false });
+    expect((await readLocalFeedPost(assistant, id))?.content.title).toBe('Retained offline title');
+    vi.stubGlobal('navigator', { onLine: true });
+    vi.mocked(authFetch).mockResolvedValueOnce(reply({ sessions: [post.session] }));
+    expect(await fetchFeedDraftSessions(assistant, 'threads', true)).toEqual([]);
+    vi.mocked(authFetch).mockClear().mockImplementation(commandReply);
+    await flushFeedWorkingCopies();
+    expect(authFetch).not.toHaveBeenCalled();
+    await setFeedDetailAccess(state.owner, assistant, id, false, started());
+    await flushFeedWorkingCopies();
+    await flushFeedWorkingCopies();
+    if (status === 403 || status === 404) {
+      expect(authFetch).toHaveBeenCalledOnce();
+      expect(vi.mocked(authFetch).mock.calls[0]![1]!.body).toBe(firstRequest);
+      expect(await readLocalFeedPost(assistant, id)).toMatchObject({ dirty: false, content: { title: 'Retained offline title' } });
+    } else {
+      expect(authFetch).not.toHaveBeenCalled();
+      expect(await readLocalFeedPost(assistant, id)).toMatchObject({ dirty: true, error: status === 409 ? 'conflict' : 'blocked' });
+    }
+  });
   it.each([400, 403, 404, 409])('explicitly retries a rejected command (%s) without changing its payload or losing later local edits', async status => {
     const post = await structuredPost();
     await queueFeedCommands(assistant, post.session.id, [{ kind: 'context', title: 'First title' }]);

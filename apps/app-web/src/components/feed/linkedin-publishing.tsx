@@ -3,7 +3,7 @@
 import {useDocMediaSrc} from '@/lib/use-doc-media';
 import {useEffect,useMemo,useState} from 'react';
 import {projectFeedLinkedIn,feedCompositionHtml} from '@use-brian/doc-model';
-import type {FeedCommand,FeedLinkedInContext} from '@use-brian/shared';
+import type {FeedCommand,FeedLinkedInContext,FeedLinkedInProjection} from '@use-brian/shared';
 import type {FeedWorkingContent} from '@/lib/offline/feed-offline';
 import {useT,useLocale} from '@/lib/i18n/client';
 import {Button} from '@/components/ui/button';
@@ -45,12 +45,58 @@ export function LinkedInPublishing(props:{workspaceId:string;workspaceName:strin
   {target&&(target.connectionStatus??target.status)!=='active'?<p role="status">{t.reconnect}</p>:null}
   {target&&!manual&&!target.capabilities?.[context.mode as 'post'|'link_post']?<p role="status">{t.help.inactive}</p>:null}
   {manual?<><div className="grid gap-3 md:grid-cols-2">{field('name',t.newsletterName)}{field('url',t.newsletterUrl)}{field('editionTitle',t.editionTitle)}{field('coverCaption',t.coverCaption)}{field('launchCommentary',t.launchCommentary)}</div><label className="grid gap-1 text-sm">{t.chooseCover}<SearchableSelect aria-label={t.chooseCover} value={newsletter.coverFileId??''} disabled={editDisabled} items={[{value:'',label:t.noCover},...assets.map(a=>({value:a.id,label:a.name}))]} onValueChange={value=>void change({newsletter:{...newsletter,coverFileId:value||null}})}/></label><p className="text-sm text-muted-foreground">{t.manualHelp}</p></>:context.mode==='link_post'?<label className="grid gap-1 text-sm">{t.thumbnail}<SearchableSelect aria-label={t.thumbnail} value={context.thumbnailFileId??''} disabled={editDisabled} items={[{value:'',label:t.noThumbnail},...assets.map(a=>({value:a.id,label:a.name}))]} onValueChange={value=>void change({thumbnailFileId:value||null})}/></label>:null}
-  <details open><summary>{t.preview}</summary><p className="text-xs text-muted-foreground">{t.previewHelp}</p><div className="whitespace-pre-wrap break-words py-3 text-sm">{projection?.text}</div>{projection?.media.map((m,i)=><figure key={m.blockId} className="my-2"><LinkedInImage workspaceId={props.workspaceId} fileId={m.fileId} alt={m.alt}/><figcaption className="text-sm">{i+1}. {m.alt}</figcaption></figure>)}{projection?.article?<article className="rounded-md border p-3">{projection.article.thumbnailFileId?<LinkedInImage workspaceId={props.workspaceId} fileId={projection.article.thumbnailFileId} alt={projection.article.title}/>:null}<p className="font-medium">{projection.article.title}</p><p>{projection.article.description}</p><p className="break-all text-xs">{projection.article.sourceUrl}</p></article>:null}{projection?.warnings.map((w,i)=><p role="status" key={i}>{w.code==='formatting_loss'?t.formatting_loss:t.inline_attachments}</p>)}{projection?.blockers.length?<div role="alert"><p>{t.blocked}</p>{projection.blockers.map((issue,i)=><p key={i}>{issue.code in t.help?t.help[issue.code as keyof typeof t.help]:t.blocked}</p>)}</div>:null}</details>
+
   {manual?<div className="flex flex-wrap gap-2"><Button disabled={busy||props.disabled||!!projection?.blockers.length} onClick={()=>void action(async()=>{const blob=await exportFeedSessionArticle(props.assistantId,props.sessionId,props.revision,false);const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='linkedin-edition.zip';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);})}>{t.prepare}</Button><Button variant="outline" disabled={busy||props.disabled||!!projection?.blockers.length} onClick={()=>void copy(false)}>{t.copyText}</Button><Button variant="outline" disabled={busy||props.disabled||!!projection?.blockers.length} onClick={()=>void copy(true)}>{t.copyRich}</Button><a className="inline-flex min-h-8 max-sm:min-h-11 items-center rounded-md border px-3 text-sm" href="https://www.linkedin.com/article/new/" target="_blank" rel="noopener noreferrer">{t.editor}</a><Button variant="outline" disabled={busy||props.disabled||!props.ready||!!projection?.blockers.length||receipt?.revision===props.revision} onClick={()=>void complete()}>{t.markPublished}</Button></div>:null}
   {receipt?<div className="space-y-2"><a href={receipt.url} target="_blank" rel="noopener noreferrer" className="text-sm underline">{t.receipt}</a><Button variant="outline" disabled={busy||props.disabled} onClick={()=>void action(()=>props.onPromotion(receipt.url))}>{t.promotion}</Button></div>:null}
   {deliveries.filter(d=>d.revision===props.revision&&['creating','unknown_outcome'].includes(d.state)).map(d=><div key={d.id} role="status" className="space-y-2 border-t border-border pt-3"><p>{t.unknownOutcome}</p><p className="text-sm">{targets.find(target=>target.destinationId===d.destinationId)?.displayName??context.authorDisplay} · {new Date(d.createdAt).toLocaleString()}</p><Button variant="outline" disabled={busy||props.disabled} onClick={()=>void action(async()=>{let url='';if(!await confirmDialog({title:t.markPublished,description:t.unknownOutcome,confirmLabel:t.markPublished,content:<input type="url" aria-label={t.newsletterUrl} onChange={e=>{url=e.target.value;}} className="min-h-8 max-sm:min-h-11 w-full rounded-md border px-3"/>}))return;await linkedinRequest(`${path}/linkedin-reconcile`,{deliveryId:d.id,expectedRevision:props.revision,url});setDeliveries(rows=>rows.filter(row=>row.id!==d.id));})}>{t.markPublished}</Button></div>)}
   {error?<p role="alert">{error}</p>:null}
  </section>;
+}
+
+export function LinkedInPostPreview({ workspaceId, projection, anchors }: {
+  workspaceId: string;
+  projection: FeedLinkedInProjection;
+  anchors?: ReadonlyMap<number, readonly string[]>;
+}) {
+  const t = useT().feedLinkedIn;
+  return (
+    <section aria-label={t.preview} className="space-y-3">
+      <p className="text-xs text-muted-foreground">{t.previewHelp}</p>
+      <div className="whitespace-pre-wrap break-words text-sm">
+        {projection.text.split("\n").map((line, index) => (
+          <span key={index}>
+            {index > 0 ? "\n" : null}
+            {anchors?.get(index)?.map(id => <span key={id} data-block-id={id} />)}
+            {line}
+          </span>
+        ))}
+      </div>
+      {projection.media.map((item, index) => (
+        <figure key={item.blockId} data-block-id={item.blockId}>
+          <LinkedInImage workspaceId={workspaceId} fileId={item.fileId} alt={item.alt} />
+          <figcaption className="text-sm">{index + 1}. {item.alt}</figcaption>
+        </figure>
+      ))}
+      {projection.article && (
+        <article className="rounded-md border p-3">
+          {projection.article.thumbnailFileId && <LinkedInImage workspaceId={workspaceId}
+            fileId={projection.article.thumbnailFileId} alt={projection.article.title} />}
+          <p className="font-medium">{projection.article.title}</p>
+          <p>{projection.article.description}</p>
+          <p className="break-all text-xs">{projection.article.sourceUrl}</p>
+        </article>
+      )}
+      {projection.warnings.map((issue, index) => <p role="status" key={index}>
+        {issue.code === 'formatting_loss' ? t.formatting_loss : t.inline_attachments}
+      </p>)}
+      {projection.blockers.length > 0 && <div role="alert">
+        <p>{t.blocked}</p>
+        {projection.blockers.map((issue, index) => <p key={index}>
+          {issue.code in t.help ? t.help[issue.code as keyof typeof t.help] : t.blocked}
+        </p>)}
+      </div>}
+    </section>
+  );
 }
 
 function LinkedInImage({workspaceId,fileId,alt}:{workspaceId:string;fileId:string;alt:string}) {

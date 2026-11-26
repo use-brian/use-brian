@@ -1,6 +1,8 @@
 /** Content-free diagnostics only; never use these heuristics to decide retries. */
-export type ProviderErrorCategory = 'invalid_argument' | 'signature_error' | 'tool_pairing_error' | 'rate_limit' | 'auth' | 'upstream_failure' | 'network' | 'aborted' | 'idle_timeout' | 'incomplete_stream' | 'unknown'
-export type ProviderErrorSummary = { category: ProviderErrorCategory; httpStatus: number | null }
+import { readCodexRpcTimeoutDiagnostics, type CodexRpcTimeoutDiagnostics } from './codex-app-server/rpc.js'
+
+export type ProviderErrorCategory = 'invalid_argument' | 'signature_error' | 'tool_pairing_error' | 'rate_limit' | 'auth' | 'upstream_failure' | 'network' | 'aborted' | 'idle_timeout' | 'incomplete_stream' | 'codex_rpc_timeout' | 'unknown'
+export type ProviderErrorSummary = { category: ProviderErrorCategory; httpStatus: number | null; codexRpcTimeout?: CodexRpcTimeoutDiagnostics }
 const MAX_MESSAGE = 16_384
 // Avoid getters, toString/toJSON, and unbounded cause traversal on arbitrary thrown values.
 function field(value: unknown, key: string): unknown {
@@ -12,6 +14,8 @@ function status(value: unknown): number | null {
 }
 
 export function summarizeProviderError(error: unknown): ProviderErrorSummary {
+  const codexRpcTimeout = readCodexRpcTimeoutDiagnostics(error)
+  if (codexRpcTimeout) return { category: 'codex_rpc_timeout', httpStatus: null, codexRpcTimeout }
   let httpStatus = status(field(error, 'status')) ?? status(field(error, 'statusCode'))
   const raw = field(error, 'message')
   const message = typeof raw === 'string' ? raw.slice(0, MAX_MESSAGE) : ''

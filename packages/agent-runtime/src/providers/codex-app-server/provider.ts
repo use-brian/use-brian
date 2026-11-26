@@ -474,16 +474,37 @@ class CodexProviderSession implements ProviderSession {
       await assertInputAuthority(check)
       this.#options.signal?.throwIfAborted()
     } catch (error) {
-      if (isInputAuthorityError(error)) {
-        this.#closedReason = asError(error)
-        this.#detached = []
-        this.#detachedEnd = undefined
-        this.#activeQueue?.fail(this.#closedReason)
-        this.#failParked('Brian session is no longer available.')
-        void this.dispose()
-      }
+      if (isInputAuthorityError(error)) this.#refuseInputAuthority(asError(error))
       throw error
     }
+  }
+
+  #refuseInputAuthority(error: Error): void {
+    this.#closedReason ??= error
+    this.#detached = []
+    this.#detachedEnd = undefined
+    this.#activeQueue?.fail(this.#closedReason)
+    this.#failParked('Brian session is no longer available.')
+    void this.dispose()
+  }
+
+  async #proveRpcWrite(originalCheck?: () => Promise<void>): Promise<() => void> {
+    const current = this.#inputCheck
+    if (originalCheck && originalCheck !== current) await this.#assertInputAuthority(originalCheck)
+    await this.#assertInputAuthority(current)
+    return () => {
+      if (this.#closedReason) throw this.#closedReason
+      this.#options.signal?.throwIfAborted()
+      if (this.#disposed || this.#inputCheck !== current) {
+        const error = Object.assign(new Error('The model context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
+        this.#refuseInputAuthority(error)
+        throw error
+      }
+    }
+  }
+
+  #rpcWriteOptions() {
+    return { signal: this.#options.signal, authorityOwner: this, assertInputAuthority: () => this.#proveRpcWrite() }
   }
 
   async #startFreshTurn(messages: Message[], opts: SendOptions): Promise<void> {
@@ -546,7 +567,7 @@ class CodexProviderSession implements ProviderSession {
             ...(this.#options.outputSchema ? { outputSchema: this.#options.outputSchema } : {}),
           },
           TurnStartResponseSchema,
-          { signal: this.#options.signal, assertInputAuthority: () => this.#assertInputAuthority() },
+          this.#rpcWriteOptions(),
         )
       } catch (error) {
         // Structured-output schemas are advisory at the provider boundary.
@@ -557,7 +578,7 @@ class CodexProviderSession implements ProviderSession {
           'turn/start',
           params,
           TurnStartResponseSchema,
-          { signal: this.#options.signal, assertInputAuthority: () => this.#assertInputAuthority() },
+          this.#rpcWriteOptions(),
         )
       }
     } catch (error) {
@@ -606,7 +627,7 @@ class CodexProviderSession implements ProviderSession {
         selectedCapabilityRoots: [],
       },
       ThreadStartResponseSchema,
-      { signal: this.#options.signal, assertInputAuthority: () => this.#assertInputAuthority() },
+      this.#rpcWriteOptions(),
     )
     if (response.model !== wireModel) {
       throw new CodexProviderProtocolError('Codex silently substituted the requested model')
@@ -632,7 +653,7 @@ class CodexProviderSession implements ProviderSession {
         'thread/inject_items',
         { threadId: this.#threadId, items: batch },
         ThreadInjectItemsResponseSchema,
-        { signal: this.#options.signal, assertInputAuthority: () => this.#assertInputAuthority() },
+        this.#rpcWriteOptions(),
       )
     }
   }
@@ -712,10 +733,7 @@ class CodexProviderSession implements ProviderSession {
 
     const result = await response
     if (!originalCheck && !this.#inputCheck) return result
-    return this.#transport.rpc.guardResponse(result, async () => {
-      await this.#assertInputAuthority(originalCheck)
-      if (this.#inputCheck !== originalCheck) await this.#assertInputAuthority()
-    })
+    return this.#transport.rpc.guardResponse(result, () => this.#proveRpcWrite(originalCheck), this)
   }
 
   async whenTurnReady(): Promise<void> {

@@ -1,4 +1,8 @@
 /** Actor-bound persistence for shared-Project engineering contracts. */
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import { boundScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
+import type { ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
+import { readLegacyCanonicalTask } from './task-reader.js'
 import type { PoolClient } from 'pg'
 import { z } from 'zod'
 import { applyRLSGucs, getAppPool, rollbackAndRelease } from './client.js'
@@ -77,16 +81,36 @@ function ancestry(input: HarnessScope): [string | null, string | null] {
  * Separate helper preserves compatibility with existing ProjectHarnessStore mocks.
  * References remain metadata; this does not fetch repository/source contents.
  */
-export async function readHarnessProjectSnapshot(userId: string, workspaceId: string, projectId: string): Promise<HarnessProjectSnapshot> {
+export async function readHarnessProjectSnapshot(userId: string, workspaceId: string, projectId: string,
+  handoff?: { brianTaskId: string; access: AccessContext }): Promise<HarnessProjectSnapshot & { taskEvidence?: ScopeEvidence }> {
   return asActor(userId, workspaceId, projectId, false, async client => {
     const tree = (await client.query<{ result: { products: NodeRow[]; components: NodeRow[] } }>(
       "SELECT public.project_harness_read($1,$2,NULL,NULL,'tree') AS result", [workspaceId, projectId])).rows[0].result
+    let taskEvidence: ScopeEvidence | undefined
+    if (handoff) {
+      const { access, brianTaskId } = handoff
+      if (access.systemRead || access.userId !== userId || access.workspaceId !== workspaceId) {
+        throw new WorkspaceAccessError('harness_not_found', 404)
+      }
+      // Use canonical Task/source admission, not mere workspace membership. Do
+      // not substitute a successor, infer an ID, or include Task content in the plan.
+      const task = await readLegacyCanonicalTask(access, parse(uuid, brianTaskId), client)
+      if (!task || task.id !== brianTaskId.toLowerCase() || task.workspaceId !== workspaceId ||
+        !(task.projectIds?.includes(projectId) || (task.home?.kind === 'project' && task.home.id === projectId))) {
+        throw new WorkspaceAccessError('harness_not_found', 404)
+      }
+      const sources = boundScopeSources(task)
+      if (!sources.some(s => s.resourceKind === 'task' && s.resourceId === task.id && s.workspaceId === workspaceId)) {
+        throw new WorkspaceAccessError('harness_unavailable', 503)
+      }
+      taskEvidence = { sources: [...sources] }
+    }
     const heads = await client.query<{ result: RevisionRow }>(
       `SELECT to_jsonb(head) AS result FROM (
         SELECT DISTINCT ON (scope_id) * FROM public.project_harness_revisions
         WHERE workspace_id=$1 AND project_id=$2 ORDER BY scope_id,revision DESC
       ) head ORDER BY scope_id`, [workspaceId, projectId])
-    return { tree: { products: tree.products.map(node), components: tree.components.map(component) }, revisions: heads.rows.map(row => revision(row.result)) }
+    return { ...(taskEvidence ? { taskEvidence } : {}), tree: { products: tree.products.map(node), components: tree.components.map(component) }, revisions: heads.rows.map(row => revision(row.result)) }
   })
 }
 

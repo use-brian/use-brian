@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { summarizeProviderError } from '../provider-error-summary.js'
+import { CodexRpcTimeoutError } from '../codex-app-server/rpc.js'
 import { debugDocumentFlow } from '../../engine/document-flow-debug.js'
 const secret = 'Bearer PRIVATE-key https://private.example/file.pdf base64SECRET'
 const gemini = (status: number, message = secret, code?: string) => new Error(`Gemini API error ${status}: ${JSON.stringify({ error: { message, status: code }, payload: secret })}`)
@@ -30,6 +31,18 @@ it('recognizes network causes, abort and actual idle errors, not generic timeout
   expect(summarizeProviderError(new Error('timeout setting invalid')).category).toBe('unknown')
   const cycle = { cause: undefined as unknown }; cycle.cause = cycle
   expect(summarizeProviderError(cycle).category).toBe('unknown')
+})
+it('reports trusted Codex timeout observations without accepting provider text or unknown method names', () => {
+  const progress = { phase: 'input_authority', elapsedMs: { write_queue: 20000, input_authority: 10000,
+    stdin_write: 0, awaiting_response: 0 } } as const
+  const error = new CodexRpcTimeoutError('thread/start', progress)
+  error.name = secret
+  expect(summarizeProviderError(error)).toEqual({ category: 'codex_rpc_timeout', httpStatus: null,
+    codexRpcTimeout: { method: 'thread/start', ...progress } })
+  expect(summarizeProviderError(new Error(error.message))).toEqual({ category: 'unknown', httpStatus: null })
+  const summary = summarizeProviderError(new CodexRpcTimeoutError(secret, progress))
+  expect(summary.codexRpcTimeout?.method).toBe('other')
+  expect(JSON.stringify(summary)).not.toContain(secret)
 })
 it('debug is opt-in and emits only enums/status, never the error or body', () => {
   const spy = vi.spyOn(console, 'info').mockImplementation(() => {})

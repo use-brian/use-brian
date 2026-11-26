@@ -1,11 +1,13 @@
 import { PassThrough, Writable } from 'node:stream'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
+import { createCodexAppServerProvider } from '../provider.js'
 import {
   CodexProtocolError,
   CodexRpcClosedError,
   CodexRpcPeer,
   CodexRpcRemoteError,
+  readCodexRpcTimeoutDiagnostics,
 } from '../rpc.js'
 
 type Harness = {
@@ -86,6 +88,135 @@ describe('[COMP:providers/codex-rpc] Codex app-server JSONL RPC', () => {
       expect(check).toHaveBeenCalledOnce()
       expect(harness.peer.closed).toBe(false)
     } finally { harness.peer.close() }
+  })
+
+  it('lets an independent authorization and ordered control frames pass a slow proof', async () => {
+    const harness = createHarness()
+    let release!: () => void
+    const check = vi.fn<() => Promise<void>>().mockResolvedValue(undefined)
+      .mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve }))
+    try {
+      const slow = harness.peer.request('thread/start', { input: 'Slow fixture' }, z.object({}), { assertInputAuthority: check })
+      expect(check).toHaveBeenCalledOnce()
+      const fast = harness.peer.request('thread/start', { input: 'Ready fixture' }, z.object({}), { assertInputAuthority: async () => {} })
+      await waitForOutbound(harness)
+      expect(harness.outbound).toEqual([{ id: 2, method: 'thread/start', params: { input: 'Ready fixture' } }])
+      harness.inbound.write('{"id":2,"result":{}}\n')
+      await fast
+      await harness.peer.notify('fixture/ready', {})
+      const interrupt = harness.peer.request('turn/interrupt', {}, z.object({}))
+      await waitForOutbound(harness, 3)
+      expect(harness.outbound.slice(1)).toEqual([
+        { method: 'fixture/ready', params: {} }, { id: 3, method: 'turn/interrupt', params: {} },
+      ])
+      harness.inbound.write('{"id":3,"result":{}}\n')
+      await interrupt
+      release()
+      await waitForOutbound(harness, 4)
+      expect(harness.outbound[3]).toEqual({ id: 1, method: 'thread/start', params: { input: 'Slow fixture' } })
+      harness.inbound.write('{"id":1,"result":{}}\n')
+      await slow
+    } finally { harness.peer.close() }
+  })
+
+  it('rechecks a proof overtaken by a competing stdin write and withholds a now-revoked payload', async () => {
+    const harness = queuedHarness()
+    let releaseFirst!: () => void
+    let releaseSecond!: () => void
+    let revoked = false
+    const firstCheck = () => new Promise<void>(resolve => { releaseFirst = resolve })
+    const secondCheck = vi.fn(async () => {
+      if (revoked) throw new Error('Permission withdrawn')
+      await new Promise<void>(resolve => { releaseSecond = resolve })
+    })
+    try {
+      const first = harness.peer.request('thread/start', { input: 'First fixture' }, z.object({}), { assertInputAuthority: firstCheck })
+      const second = expect(harness.peer.request('thread/start', { input: 'Never submitted' }, z.object({}), { assertInputAuthority: secondCheck }))
+        .rejects.toMatchObject({ reason: 'authority_changed' })
+      expect(secondCheck).toHaveBeenCalledOnce()
+      releaseFirst()
+      await vi.waitFor(() => expect(harness.outbound).toHaveLength(1))
+      releaseSecond()
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(secondCheck).toHaveBeenCalledOnce()
+      revoked = true
+      harness.release()
+      harness.inbound.write('{"id":1,"result":{}}\n')
+      await first
+      await second
+      expect(secondCheck).toHaveBeenCalledTimes(2)
+      expect(harness.outbound).toHaveLength(1)
+      expect(harness.peer.closed).toBe(false)
+    } finally { harness.peer.close() }
+  })
+
+  it('rechecks after a control frame has already finished writing while authorization awaited', async () => {
+    const harness = createHarness()
+    let finish!: () => void
+    let revoked = false
+    const check = vi.fn(async () => { if (revoked) throw new Error('Permission withdrawn') })
+      .mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve }))
+    try {
+      const protectedFrame = expect(harness.peer.request('thread/start', { input: 'Never submitted' }, z.object({}), {
+        assertInputAuthority: check,
+      })).rejects.toMatchObject({ reason: 'authority_changed' })
+      await harness.peer.notify('fixture/passed', {})
+      revoked = true
+      finish()
+      await protectedFrame
+      expect(check).toHaveBeenCalledTimes(2)
+      expect(harness.outbound).toEqual([{ method: 'fixture/passed', params: {} }])
+      expect(harness.peer.closed).toBe(false)
+    } finally { harness.peer.close() }
+  })
+
+  it('runs one proof per owner and discards a cancelled sibling before starting its proof', async () => {
+    const harness = createHarness()
+    const authorityOwner = {}, controller = new AbortController()
+    let release!: () => void
+    const firstCheck = () => new Promise<void>(resolve => { release = resolve })
+    const siblingCheck = vi.fn(async () => {})
+    try {
+      const first = harness.peer.request('thread/start', {}, z.object({}), { authorityOwner, assertInputAuthority: firstCheck })
+      const cancelled = expect(harness.peer.request('turn/start', {}, z.object({}), {
+        authorityOwner, assertInputAuthority: siblingCheck, signal: controller.signal,
+      })).rejects.toMatchObject({ name: 'AbortError' })
+      controller.abort()
+      await cancelled
+      release()
+      await waitForOutbound(harness)
+      harness.inbound.write('{"id":1,"result":{}}\n')
+      await first
+      expect(siblingCheck).not.toHaveBeenCalled()
+      expect(harness.outbound).toHaveLength(1)
+    } finally { harness.peer.close() }
+  })
+
+  it('keeps a timed-out proof in the peer limit until its work settles', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    const harness = createHarness({ maxPendingRequests: 1, requestTimeoutMs: 10 })
+    let settle!: () => void
+    const check = vi.fn(async () => {})
+    try {
+      const stalled = expect(harness.peer.request('thread/start', {}, z.object({}), {
+        assertInputAuthority: () => new Promise<void>(resolve => { settle = resolve }),
+      })).rejects.toThrow('phase=input_authority')
+      await vi.advanceTimersByTimeAsync(10)
+      await stalled
+      expect(harness.peer.pendingRequestCount).toBe(0)
+      await expect(harness.peer.request('thread/start', {}, z.object({}), { assertInputAuthority: check }))
+        .rejects.toThrow('authority check limit exceeded')
+      expect(check).not.toHaveBeenCalled()
+      expect(harness.outbound).toEqual([])
+      settle()
+      await new Promise<void>(resolve => setImmediate(resolve))
+      const healthy = harness.peer.request('thread/start', {}, z.object({}), { assertInputAuthority: check })
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(check).toHaveBeenCalledOnce()
+      expect(harness.outbound).toEqual([{ id: 3, method: 'thread/start', params: {} }])
+      harness.inbound.write('{"id":3,"result":{}}\n')
+      await healthy
+    } finally { harness.peer.close(); vi.useRealTimers() }
   })
 
   it('checks opaque tool responses at the queued write and returns a fixed safe error', async () => {
@@ -313,10 +444,10 @@ describe('[COMP:providers/codex-rpc] Codex app-server JSONL RPC', () => {
       const check = vi.fn(async () => {})
       const options = { timeoutMs: 25, assertInputAuthority: check }
       const written = harness.peer.request('thread/start', { input: 'First private input' }, z.object({}), options)
-      const queued = harness.peer.request('thread/start', { input: 'Second private input' }, z.object({}), options)
-      const results = Promise.allSettled([written, queued])
       await new Promise<void>(resolve => setImmediate(resolve))
       expect(harness.outbound).toHaveLength(1)
+      const queued = harness.peer.request('thread/start', { input: 'Second private input' }, z.object({}), options)
+      const results = Promise.allSettled([written, queued])
       expect(check).toHaveBeenCalledTimes(1)
       await vi.advanceTimersByTimeAsync(25)
       expect(await results).toMatchObject([
@@ -333,6 +464,64 @@ describe('[COMP:providers/codex-rpc] Codex app-server JSONL RPC', () => {
       harness.peer.close()
       vi.useRealTimers()
     }
+  })
+
+  it('withholds a proved frame whose deadline expired before timers could run', async () => {
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(0)
+    const harness = createHarness({ requestTimeoutMs: 10_000 })
+    let prove!: () => void
+    try {
+      const failed = expect(harness.peer.request('thread/start', {}, z.object({}), {
+        assertInputAuthority: () => new Promise<void>(resolve => { prove = resolve }),
+      })).rejects.toMatchObject({ retrySafe: false, message: expect.stringContaining('phase=input_authority') })
+      clock.mockReturnValue(10_000)
+      prove()
+      await failed
+      expect(harness.outbound).toEqual([])
+      expect(harness.peer.pendingRequestCount).toBe(0)
+      expect(harness.peer.closed).toBe(false)
+    } finally { harness.peer.close(); clock.mockRestore() }
+  })
+
+  it('checks the submission fence after proof completion and never serializes it', async () => {
+    const harness = createHarness()
+    let finish!: () => void
+    let current = true
+    try {
+      const request = expect(harness.peer.request('thread/start', { input: 'Withheld' }, z.object({}), {
+        assertInputAuthority: async () => {
+          await new Promise<void>(resolve => { finish = resolve })
+          queueMicrotask(() => { current = false })
+          return () => { if (!current) throw Object.assign(new Error('Permission withdrawn'), { reason: 'authority_changed' }) }
+        },
+      })).rejects.toMatchObject({ reason: 'authority_changed' })
+      finish()
+      await request
+      expect(harness.outbound).toEqual([])
+      expect(harness.peer.closed).toBe(false)
+    } finally { harness.peer.close() }
+  })
+
+  it('withholds the provider thread frame if its session closes during authorization', async () => {
+    const harness = createHarness()
+    const provider = createCodexAppServerProvider({ transport: { rpc: harness.peer, cwd: '/fictional' }, models: ['gpt-6.2-sol'] })
+    let release!: () => void
+    const check = vi.fn<() => Promise<void>>().mockResolvedValueOnce(undefined)
+      .mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve }))
+    const session = provider.createSession!({ model: 'gpt-6.2-sol', systemPrompt: 'Fictional private setup.' })
+    try {
+      const drain = async () => {
+        for await (const _ of session.send([{ role: 'user', content: 'Fictional input.' }], { assertInputAuthority: check })) { /* drain */ }
+      }
+      const rejected = expect(drain()).rejects.toMatchObject({ reason: 'authority_changed', retrySafe: false })
+      await vi.waitFor(() => expect(check).toHaveBeenCalledTimes(2))
+      if (!('dispose' in session) || typeof session.dispose !== 'function') throw new Error('Fixture has no session disposal')
+      await session.dispose()
+      release()
+      await rejected
+      expect(harness.outbound).toEqual([])
+      expect(harness.peer.closed).toBe(false)
+    } finally { harness.peer.close() }
   })
 
   it('distinguishes an unfinished authority check from a flushed request without a response', async () => {
@@ -372,6 +561,7 @@ describe('[COMP:providers/codex-rpc] Codex app-server JSONL RPC', () => {
       const request = harness.peer.request('thread/start', { input: 'Private input' }, z.object({}), {
         assertInputAuthority: () => new Promise(resolve => setTimeout(resolve, 20)),
       })
+      const diagnostics = request.catch(error => readCodexRpcTimeoutDiagnostics(error))
       const failure = expect(request).rejects.toMatchObject({
         name: 'CodexProtocolError',
         message: 'Codex app-server RPC request timed out: thread/start ' +
@@ -382,6 +572,8 @@ describe('[COMP:providers/codex-rpc] Codex app-server JSONL RPC', () => {
       expect(harness.outbound).toHaveLength(1)
       await vi.advanceTimersByTimeAsync(5)
       await failure
+      expect(await diagnostics).toEqual({ method: 'thread/start', phase: 'awaiting_response',
+        elapsedMs: { write_queue: 0, input_authority: 20, stdin_write: 0, awaiting_response: 5 } })
     } finally {
       harness.peer.close()
       vi.useRealTimers()

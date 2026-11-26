@@ -1,6 +1,6 @@
 import type { Readable, Writable } from 'node:stream'
 import { z } from 'zod'
-import { assertInputAuthority, isInputAuthorityError } from '../input-authority.js'
+import { assertInputAuthority } from '../input-authority.js'
 import {
   InboundRpcMessageSchema,
   type InboundRpcMessage,
@@ -16,6 +16,15 @@ type NotificationHandler = (params: unknown) => void | Promise<void>
 type RequestHandler = (params: unknown, signal: AbortSignal) => unknown | Promise<unknown>
 type CloseHandler = (reason: Error) => void
 type RequestPhase = 'write_queue' | 'input_authority' | 'stdin_write' | 'awaiting_response'
+type RequestProgressSnapshot = Readonly<{ phase: RequestPhase; elapsedMs: Readonly<Record<RequestPhase, number>> }>
+const diagnosticMethods = ['thread/start', 'thread/inject_items', 'thread/unsubscribe', 'turn/start', 'turn/interrupt'] as const
+export type CodexRpcTimeoutDiagnostics = RequestProgressSnapshot & Readonly<{ method: typeof diagnosticMethods[number] | 'other' }>
+
+const timeoutDiagnostics = new WeakMap<object, CodexRpcTimeoutDiagnostics>()
+
+export function readCodexRpcTimeoutDiagnostics(error: unknown): CodexRpcTimeoutDiagnostics | undefined {
+  return error !== null && typeof error === 'object' ? timeoutDiagnostics.get(error) : undefined
+}
 
 class RequestProgress {
   #phase: RequestPhase = 'write_queue'
@@ -29,11 +38,10 @@ class RequestProgress {
     this.#started = now
   }
 
-  describeTimeout(): string {
+  snapshot(): RequestProgressSnapshot {
     const elapsed = { ...this.#elapsed }
     elapsed[this.#phase] += Math.floor(performance.now()) - this.#started
-    const durations = Object.entries(elapsed).map(([phase, ms]) => `${phase}_ms=${ms}`)
-    return [`phase=${this.#phase}`, ...durations].join(', ')
+    return { phase: this.#phase, elapsedMs: elapsed }
   }
 }
 
@@ -42,7 +50,42 @@ type PendingRequest<T = unknown> = {
   resolve: (value: T) => void
   reject: (reason: Error) => void
   timeout: ReturnType<typeof setTimeout>
+  deadline: number
+  timeoutError: () => Error
+  cancelAdmission: () => void
   removeAbortListener?: () => void
+}
+
+type InputProof = () => Promise<void | (() => void)>
+type WriteOptions = {
+  check?: InputProof
+  authorityOwner?: object
+  signal?: AbortSignal
+  assertCurrent?: () => void
+  progress?: RequestProgress
+}
+
+/** Wake everyone when the current writer or authority owner is free. */
+class WriteBarrier {
+  #waiters = new Set<() => void>()
+
+  wait(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(abortError())
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        this.#waiters.delete(release)
+        signal?.removeEventListener('abort', abort)
+      }
+      const release = () => { cleanup(); resolve() }
+      const abort = () => { cleanup(); reject(abortError()) }
+      this.#waiters.add(release)
+      signal?.addEventListener('abort', abort, { once: true })
+    })
+  }
+
+  release(): void {
+    for (const waiter of this.#waiters) waiter()
+  }
 }
 
 export type CodexRpcPeerOptions = {
@@ -60,18 +103,33 @@ export type CodexRpcPeerOptions = {
 export type CodexRpcRequestOptions = {
   timeoutMs?: number
   signal?: AbortSignal
-  /** Host-only admission at the actual JSONL write, never serialized. */
-  assertInputAuthority?: () => Promise<void>
+  /** Host-only proof, optionally returning a synchronous submission fence. */
+  assertInputAuthority?: InputProof
+  /** Protected writes for one owner share one in-flight proof. */
+  authorityOwner?: object
 }
 
 export class CodexProtocolError extends Error {
+  readonly retrySafe = false
+
   constructor(message: string) {
     super(message)
     this.name = 'CodexProtocolError'
   }
 }
 
+export class CodexRpcTimeoutError extends CodexProtocolError {
+  constructor(method: string, { phase, elapsedMs }: RequestProgressSnapshot) {
+    const durations = Object.entries(elapsedMs).map(([name, ms]) => `${name}_ms=${ms}`)
+    super(`Codex app-server RPC request timed out: ${method} (${[`phase=${phase}`, ...durations].join(', ')})`)
+    timeoutDiagnostics.set(this, Object.freeze({ method: diagnosticMethods.find(name => name === method) ?? 'other',
+      phase, elapsedMs: Object.freeze({ ...elapsedMs }) }))
+  }
+}
+
 export class CodexRpcClosedError extends Error {
+  readonly retrySafe = false
+
   constructor(message = 'Codex app-server RPC peer is closed') {
     super(message)
     this.name = 'CodexRpcClosedError'
@@ -107,9 +165,11 @@ export class CodexRpcPeer {
   #requestHandlers = new Map<string, RequestHandler>()
   #activeServerRequests = new Set<AbortController>()
   #closeHandlers = new Set<CloseHandler>()
-  #writeChain: Promise<void> = Promise.resolve()
+  #writer: WriteBarrier | undefined
+  #lastSubmission: WriteBarrier | undefined
+  readonly #authorizing = new Map<object, WriteBarrier>()
   #closedReason: Error | undefined
-  readonly #guardedResponses = new WeakMap<object, { value: unknown; check: () => Promise<void> }>()
+  readonly #guardedResponses = new WeakMap<object, { value: unknown; check: InputProof; authorityOwner?: object }>()
 
   constructor(options: CodexRpcPeerOptions) {
     this.#input = options.input
@@ -147,9 +207,9 @@ export class CodexRpcPeer {
   }
 
   /** Opaque host value: only this peer can unwrap it at a response write. */
-  guardResponse(value: unknown, check: () => Promise<void>): object {
+  guardResponse(value: unknown, check: InputProof, authorityOwner?: object): object {
     const token = Object.freeze({})
-    this.#guardedResponses.set(token, { value, check })
+    this.#guardedResponses.set(token, { value, check, authorityOwner })
     return token
   }
 
@@ -209,23 +269,17 @@ export class CodexRpcPeer {
     const id = this.#nextRequestId++
     const timeoutMs = positiveInteger(options.timeoutMs, this.#requestTimeoutMs, 'timeoutMs')
     const progress = new RequestProgress()
+    const deadline = performance.now() + timeoutMs
+    const timeoutError = () => new CodexRpcTimeoutError(method, progress.snapshot())
+    const admission = new AbortController()
 
-    let pending!: PendingRequest<T>
     const result = new Promise<T>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.#pending.delete(id)
-        pending.removeAbortListener?.()
-        reject(new CodexProtocolError(`Codex app-server RPC request timed out: ${method} (${progress.describeTimeout()})`))
-      }, timeoutMs)
-
-      pending = { schema: resultSchema, resolve, reject, timeout }
+      const timeout = setTimeout(() => this.#rejectPending(id, timeoutError()), timeoutMs)
+      const pending: PendingRequest<T> = { schema: resultSchema, resolve, reject, timeout, deadline, timeoutError,
+        cancelAdmission: () => admission.abort() }
 
       if (options.signal) {
-        const onAbort = () => {
-          this.#pending.delete(id)
-          clearTimeout(timeout)
-          reject(abortError())
-        }
+        const onAbort = () => this.#rejectPending(id, abortError())
         options.signal.addEventListener('abort', onAbort, { once: true })
         pending.removeAbortListener = () => options.signal?.removeEventListener('abort', onAbort)
       }
@@ -233,16 +287,16 @@ export class CodexRpcPeer {
       this.#pending.set(id, pending as PendingRequest)
     })
 
-    try {
-      void this.#write({ method, id, params }, {
-        check: options.assertInputAuthority,
-        isCurrent: () => this.#pending.has(id) && !options.signal?.aborted,
-        progress,
-      })
-        .catch(error => this.#rejectPending(id, asError(error)))
-    } catch (error) {
-      this.#rejectPending(id, asError(error))
-    }
+    void this.#write({ method, id, params }, {
+      check: options.assertInputAuthority,
+      authorityOwner: options.authorityOwner,
+      signal: admission.signal,
+      assertCurrent: () => {
+        if (admission.signal.aborted || options.signal?.aborted) throw abortError()
+        if (performance.now() >= deadline) throw timeoutError()
+      },
+      progress,
+    }).catch(error => this.#rejectPending(id, asError(error)))
 
     return result
   }
@@ -259,6 +313,8 @@ export class CodexRpcPeer {
     for (const [id] of this.#pending) this.#rejectPending(id, reason)
     for (const controller of this.#activeServerRequests) controller.abort()
     this.#activeServerRequests.clear()
+    this.#writer?.release()
+    for (const barrier of this.#authorizing.values()) barrier.release()
     this.#frameParts = []
     this.#frameBytes = 0
 
@@ -356,19 +412,17 @@ export class CodexRpcPeer {
       this.#handleNotification(message.method, message.params)
       return
     }
-    if ('error' in message) {
-      const pending = this.#takePending(message.id)
-      if (!pending) {
-        this.close(new CodexProtocolError('Codex app-server replied with an unknown request id'))
-        return
-      }
-      pending.reject(new CodexRpcRemoteError(message.error))
-      return
-    }
-
     const pending = this.#takePending(message.id)
     if (!pending) {
       this.close(new CodexProtocolError('Codex app-server replied with an unknown request id'))
+      return
+    }
+    if (performance.now() >= pending.deadline) {
+      pending.reject(pending.timeoutError())
+      return
+    }
+    if ('error' in message) {
+      pending.reject(new CodexRpcRemoteError(message.error))
       return
     }
     const result = pending.schema.safeParse(message.result)
@@ -409,7 +463,9 @@ export class CodexRpcPeer {
     try {
       const result = await handler(params, controller.signal)
       const guarded = result && typeof result === 'object' ? this.#guardedResponses.get(result) : undefined
-      if (!this.closed) await this.#write({ id, result: (guarded ? guarded.value : result) ?? null }, { check: guarded?.check })
+      if (!this.closed) await this.#write({ id, result: (guarded ? guarded.value : result) ?? null }, {
+        check: guarded?.check, authorityOwner: guarded?.authorityOwner, signal: controller.signal,
+      })
     } catch (error) {
       if (!this.closed) await this.#writeError(id, -32603, safeErrorMessage(error))
     } finally {
@@ -428,6 +484,7 @@ export class CodexRpcPeer {
     this.#pending.delete(id)
     clearTimeout(pending.timeout)
     pending.removeAbortListener?.()
+    pending.cancelAdmission()
     return pending
   }
 
@@ -446,11 +503,7 @@ export class CodexRpcPeer {
     }
   }
 
-  #write(message: unknown, { check, isCurrent, progress }: {
-    check?: () => Promise<void>
-    isCurrent?: () => boolean
-    progress?: RequestProgress
-  } = {}): Promise<void> {
+  async #write(message: unknown, { check, authorityOwner = check, signal, assertCurrent, progress }: WriteOptions = {}): Promise<void> {
     this.#assertOpen()
     let frame: string
     try {
@@ -467,42 +520,68 @@ export class CodexRpcPeer {
       this.close(reason)
       throw reason
     }
-    const attempt = this.#writeChain
-      .then(async () => {
+    for (;;) {
+      this.#assertOpen()
+      assertCurrent?.()
+      if (this.#writer) {
+        progress?.enter('write_queue')
+        await this.#writer.wait(signal)
+        continue
+      }
+      if (!check || !authorityOwner) return this.#submitFrame(frame, progress)
+
+      progress?.enter('input_authority')
+      const previous = this.#authorizing.get(authorityOwner)
+      if (previous) {
+        await previous.wait(signal)
+        continue
+      }
+      // A timed-out caller can leave an unsettled proof. Keep those proofs in
+      // the cap until they actually settle, so repeated requests cannot pile up.
+      if (this.#authorizing.size >= this.#maxPendingRequests) {
+        throw new CodexProtocolError(`Codex app-server RPC authority check limit exceeded (${this.#maxPendingRequests})`)
+      }
+      const barrier = new WriteBarrier()
+      this.#authorizing.set(authorityOwner, barrier)
+      const lastSubmission = this.#lastSubmission
+      try {
+        let fence: (() => void) | undefined
+        await assertInputAuthority(async () => { fence = (await check()) ?? undefined })
         this.#assertOpen()
-        if (isCurrent && !isCurrent()) throw abortError()
-        if (check) progress?.enter('input_authority')
-        await assertInputAuthority(check)
-        this.#assertOpen()
-        if (isCurrent && !isCurrent()) throw abortError()
-        await new Promise<void>((resolve, reject) => {
-          if (this.closed) {
-            reject(this.#closedReason)
-            return
+        assertCurrent?.()
+        if (this.#lastSubmission !== lastSubmission) continue
+        // No await between the binding fence and handing the frame to stdin.
+        fence?.()
+        return this.#submitFrame(frame, progress)
+      } finally {
+        this.#authorizing.delete(authorityOwner)
+        barrier.release()
+      }
+    }
+  }
+
+  async #submitFrame(frame: string, progress?: RequestProgress): Promise<void> {
+    const writer = new WriteBarrier()
+    this.#writer = writer
+    this.#lastSubmission = writer
+    try {
+      progress?.enter('stdin_write')
+      await new Promise<void>((resolve, reject) => {
+        this.#output.write(frame, (error?: Error | null) => {
+          if (error) reject(error)
+          else {
+            progress?.enter('awaiting_response')
+            resolve()
           }
-          progress?.enter('stdin_write')
-          this.#output.write(frame, (error?: Error | null) => {
-            if (error) reject(error)
-            else {
-              progress?.enter('awaiting_response')
-              resolve()
-            }
-          })
         })
       })
-    // A scoped refusal withholds one frame. Transport errors still close the
-    // peer, but one invocation's revoked grant cannot revoke other sessions.
-    this.#writeChain = attempt.catch((error) => {
-      if (isInputAuthorityError(error) || (error instanceof Error && error.name === 'AbortError')) return
-      const reason = new CodexRpcClosedError(
-        `Codex app-server stdin write failed: ${asError(error).message}`,
-      )
-      this.close(reason)
-    })
-    return attempt.catch(error => {
-      if (isInputAuthorityError(error) || (error instanceof Error && error.name === 'AbortError')) throw error
+    } catch (error) {
+      this.close(new CodexRpcClosedError(`Codex app-server stdin write failed: ${asError(error).message}`))
       throw this.#closedReason ?? error
-    })
+    } finally {
+      this.#writer = undefined
+      writer.release()
+    }
   }
 }
 

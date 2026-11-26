@@ -140,7 +140,7 @@ async function fetchFeedWorkspaceRecord(
   const capabilities = deploymentCapabilities();
   let team: Awaited<ReturnType<typeof loadWorkspaceIdentity>>;
   let profiles: FeedProfile[] | null;
-  let assistants: Array<{ id: string; name: string }>;
+  let assistants: FeedWorkspaceRecord["assistants"] | null;
   let brand: BrandRecord | null;
   let cloudLink: FeedCloudLink;
   try {
@@ -151,11 +151,8 @@ async function fetchFeedWorkspaceRecord(
       // null here keeps the last-known profiles below, so a slow API never
       // erases a real connection (docs/architecture/feed/twitter.md ->
       // "Return landing").
-      fetchFeedTeamProfiles(workspaceId).catch(() => null),
-      // Same degrade: the Create surfaces just see no brand voice yet.
-      fetchFeedDistributionAssistants(workspaceId).catch(
-        () => [] as Array<{ id: string; name: string }>,
-      ),
+      fetchFeedTeamProfiles(workspaceId).catch(error => isAuthoritativeFeedDenial(error) ? [] : null),
+      fetchFeedDistributionAssistants(workspaceId).catch(error => isAuthoritativeFeedDenial(error) ? [] : null),
       // A brand read failing must never take down a composer, so this is the
       // same degrade as profiles: null, and every consumer renders its
       // pre-brand shape.
@@ -177,43 +174,32 @@ async function fetchFeedWorkspaceRecord(
     }
     throw error;
   }
+  const previous = profiles === null || assistants === null
+    ? readSurfaceCache<FeedWorkspaceRecord>(key).data ??
+      await readFeedCachedJson<FeedWorkspaceRecord>(feedWorkspaceRecordPath(workspaceId))
+    : null;
+  if (assistants === null && !previous && !profiles?.length) throw new Error("Feed voices could not be loaded");
   const record: FeedWorkspaceRecord = {
     workspaceId,
     name: team.name,
     role: team.role,
     canDraft: team.canDraft,
     me: { id: team.myUserId },
-    profiles: profiles ?? (await lastKnownFeedProfiles(workspaceId, key)),
-    assistants,
+    profiles: profiles ?? previous?.profiles ?? [],
+    assistants: assistants ?? previous?.assistants ?? [],
     brand,
     cloudLink,
   };
   // The signed-in viewer changed while this was in flight (the multi-account
   // switcher): the record belongs to the previous account.
   if (feedOwner() !== owner) throw new Error("Local identity changed");
-  await writeFeedCachedJson(feedWorkspaceRecordPath(workspaceId), record);
+  await writeFeedCachedJson(feedWorkspaceRecordPath(workspaceId), record, assistants === null || profiles === null);
   return record;
 }
 
 /**
- * The profiles this viewer last saw for the workspace: the in-memory record,
- * else the disk record, else none. Used only when a profiles read fails.
- */
-async function lastKnownFeedProfiles(
-  workspaceId: string,
-  key: string,
-): Promise<FeedProfile[]> {
-  const memory = readSurfaceCache<FeedWorkspaceRecord>(key).data;
-  if (memory) return memory.profiles;
-  const disk = await readFeedCachedJson<FeedWorkspaceRecord>(
-    feedWorkspaceRecordPath(workspaceId),
-  ).catch(() => null);
-  return disk?.profiles ?? [];
-}
-
-/**
  * Drop a just-disconnected profile from both cache tiers. A failed read keeps
- * the last-known profiles (`lastKnownFeedProfiles`), so without this a
+ * the last-known profiles, so without this a
  * disconnect followed by a slow refresh would paint the account again.
  */
 export async function forgetFeedProfile(params: {

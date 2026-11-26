@@ -54,7 +54,7 @@ import {
 } from '@use-brian/agent-runtime/engine/turn-output.js'
 import type { ContentBlock, Message } from '@use-brian/agent-runtime/providers/types.js'
 import { inheritScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
-import type { ToolContext, Tool } from '@use-brian/agent-runtime/tools/types.js'
+import type { ToolContext, Tool, ToolResult } from '@use-brian/agent-runtime/tools/types.js'
 import {createTerminalPublicationOwner} from './terminal-publication.js'
 import { committedTurnCompletion, type BufferedWebPublication } from '../db/conversation-publication-recovery.js'
 import { ConversationHistoryUnavailableError } from '../db/conversation-store.js'
@@ -68,7 +68,7 @@ import { ownsTurnDeliveryAdmission, type TurnDeliveryAdmission } from '../contex
 import { openTurnAdmissionClosure, type AdmissionClosureStats, type TurnAdmissionClosure } from '../context-scope/admission-closure.js'
 import { registerTurnAbort, releaseTurn, startLeaseHeartbeat, takeTurnLease, unregisterTurnAbort,TurnLeaseLostError,TurnStoppedError,turnAbortKind } from './lease.js'
 import { captureTurnUsageBilling, type TurnBilling, type TurnUsageBilling, type TurnUsageSettlement, type PriorTurnSpend } from './billing.js'
-import { bindSessionTurnAuthority,isAuthorityChangedError } from '../context-scope/authority-lease.js'
+import { AuthorityChangedError, bindSessionTurnAuthority,isAuthorityChangedError } from '../context-scope/authority-lease.js'
 import { bindVerifiedResumeEvidence } from '../context-scope/native-invocation-evidence.js'
 import { findSessionTurnLeaseState, type TurnEndReason, type RecoveredTurn } from '../db/sessions.js'
 import { registerTurnInbox, type TurnInboxHandle } from '../turn-inbox.js'
@@ -76,9 +76,9 @@ import { randomUUID } from 'node:crypto'
 import { currentTurnFrame, readTurnSqlLedger, turnSqlRecordingEnabled, withTurnFrame, type TurnSqlLedger } from '../db/turn-sql-accounting.js'
 import type { SessionMessage } from '../db/sessions.js'
 import { writeTurnPublication, type TurnPublicationRequest } from './publication.js'
-import { captureCapabilityComposition, captureInitialKnowledgeSearch, captureInitialMailboxTools, initialCurrentTurnTools, type TurnCapabilityProfile, type TurnCapabilityRequest, type TurnCapabilityResult } from './capabilities.js'
-import { captureTurnHistory, type CapturedTurnHistory, type TurnHistoryRequest } from './history.js'
-import { assertInitialMailboxEvidenceCurrent, closeInitialMailboxEvidence } from './mailbox-read-authority.js'
+import { captureCapabilityComposition, captureInitialChatArchiveTools, captureInitialKnowledgeSearch, captureInitialMailboxTools, initialCurrentTurnTools, type TurnCapabilityProfile, type TurnCapabilityRequest, type TurnCapabilityResult } from './capabilities.js'
+import { captureTurnHistory, readRecentChannelText, type CapturedTurnHistory, type TurnHistoryRequest } from './history.js'
+import { assertInitialReadEvidenceCurrent, closeInitialReadEvidence } from './initial-read-authority.js'
 import { resumePredecessorSlotWait, type ResumeSlotWaitOptions } from './resume-recovery.js'
 import { composeRecoveryMessage, type ComposeRecoveryMessageResult, type RecoveryPendingTurn } from './recovery-message.js'
 import { captureTurnModelPreparation, type TurnModelInvocation, type TurnModelServices, type TurnMainModelRequest, type PreparedTurnModel,
@@ -436,10 +436,15 @@ class AssistantTurnOwner {
     this.runPreparationStarted = true
     const preparation = this.modelPreparation
     const discover = input.contextDiscovery
+    const recentText = input.recentChannelText && {
+      ...input.recentChannelText, authority: {...input.recentChannelText.authority},
+    }
     const mailbox = input.initialMailboxCapabilities
     const knowledge = input.initialKnowledgeCapabilities
+    const chatArchive = input.initialChatArchiveReads
     if (mailbox && !discover) throw new Error('Initial mailbox reads require an attended context-discovery frame.')
     if (knowledge && !discover) throw new Error('Initial Knowledge reads require an attended context-discovery frame.')
+    if (recentText && (!discover || preparation.lane !== 'channel')) throw new Error('Recent channel text requires attended channel context discovery.')
     let initial = input
     if (discover) {
       if (input.messages.length !== 1 || input.messages[0]?.role !== 'user') {
@@ -452,7 +457,14 @@ class AssistantTurnOwner {
       let ready: DiscoveredQueryContext | undefined
       let continuationModel: PreparedTurnModel | undefined
       let loading: Promise<void> | undefined
+      let recent: Promise<ToolResult> | undefined
       let failure: { error: unknown } | undefined
+      if (recentText) {
+        preparation.assertHistoryAuthority(recentText.authority)
+        if (recentText.authority.accumulator !== this.retainedPreparationAccumulator) {
+          throw new Error('Recent channel text must retain the original turn accumulator.')
+        }
+      }
       this.takeDiscoveredContext = ({ firstAndOnlyCallFailed }) => {
         if (lane === 'channel' && firstAndOnlyCallFailed && failure?.error instanceof ConversationHistoryUnavailableError) {
           throw new PreActionConversationHistoryUnavailableError(failure.error)
@@ -473,12 +485,35 @@ class AssistantTurnOwner {
       }
       const discoveryTool: Tool = {
         name: CONVERSATION_CONTEXT_TOOL,
-        description: 'Load permitted conversation history, referenced material, and additional tools. Use when the current request depends on earlier work or needs a tool that is not already available.',
-        inputSchema: z.object({}).strict(), isReadOnly: true, isConcurrencySafe: false, requiresConfirmation: false,
+        description: recentText
+          ? 'Read excerpts from the most recent retained conversation messages by default. Use mode full for older history, referenced material, or additional tools.'
+          : 'Load permitted conversation history, referenced material, and additional tools. Use when the current request depends on earlier work or needs a tool that is not already available.',
+        inputSchema: recentText ? z.object({mode:z.enum(['recent_text','full']).optional()}).strict() : z.object({}).strict(),
+        isReadOnly: true, isConcurrencySafe: false, requiresConfirmation: false,
         timeoutMs: NO_TOOL_TIMEOUT,
-        execute: async (_input, toolContext) => {
+        execute: async (input, toolContext) => {
           const signal = toolContext.abortSignal
           signal.throwIfAborted()
+          if (recentText && input.mode !== 'full') {
+            preparation.assertLoopContext(toolContext)
+            if (toolContext.scopeAccumulator !== recentText.authority.accumulator) throw new AuthorityChangedError(false)
+            recent ??= this.frame('preparation', async () => {
+              const startedAt = performance.now()
+              const selection = await readRecentChannelText(recentText.authority,recentText.beforeSequence,signal)
+                .finally(() => recentText.onReadTiming?.(performance.now() - startedAt))
+              preparation.assertLoopContext(toolContext)
+              if (toolContext.scopeAccumulator !== recentText.authority.accumulator) throw new AuthorityChangedError(false)
+              signal.throwIfAborted()
+              recentText.bindSelection(selection.isCurrent)
+              return {
+                data: {messages: selection.messages, scope: 'Recent retained text excerpts. Use full mode if you need older or more complete context.'},
+                scopeEvidence: {sources: selection.sources},
+              }
+            })
+            const result = await recent
+            signal.throwIfAborted()
+            return structuredClone(result)
+          }
           loading ??= this.frame('preparation', async () => {
             this.discovering = true
             try {
@@ -537,11 +572,12 @@ class AssistantTurnOwner {
         },
       }
       const tools = [discoveryTool, ...initialCurrentTurnTools(input.candidateTools),
+        ...(chatArchive && lane === 'channel' ? captureInitialChatArchiveTools(input.candidateTools, preparation.assertCurrent, chatArchive) : []),
         ...(mailbox ? captureInitialMailboxTools(lane, mailbox, preparation.assertCurrent) : []),
         ...(knowledge && lane !== 'public' ? [captureInitialKnowledgeSearch(lane, knowledge, preparation.assertCurrent)] : [])]
       initial = { ...input, candidateTools: new Map(tools.map(tool => [tool.name, tool])),
         trustedContributions: [...input.trustedContributions ?? [], { name: 'context_discovery',
-          content: `For a self-contained request, answer using the current message and any available tools. You can use tool results in subsequent calls. Call ${CONVERSATION_CONTEXT_TOOL} when the request depends on earlier conversation, referenced material, or a tool that is not already available.` }] }
+          content: `For a self-contained request, answer using the current message and any available tools. You can use tool results in subsequent calls. Call ${CONVERSATION_CONTEXT_TOOL} when the request depends on earlier conversation, referenced material, or a tool that is not already available.${recentText ? ' Use the default recent text for a recent follow-up. Select mode full for older history, referenced material, or a missing capability.' : ''}` }] }
     }
     const assemble = preparation.captureRun(initial, model, this.retainedPreparationAccumulator, Boolean(discover))
     const prepared = this.frame('preparation', () => Promise.resolve().then(assemble).then((run): PreparedTurnRunView => {
@@ -683,7 +719,7 @@ class AssistantTurnOwner {
     const assertDestination = async () => {
       signal.throwIfAborted()
       await authorizeDestination()
-      await assertInitialMailboxEvidenceCurrent(context.executionContext)
+      await assertInitialReadEvidenceCurrent(context.executionContext)
       signal.throwIfAborted()
     }
     this.recoveryMessage = this.frame('follow_up', () => composeRecoveryMessage({
@@ -744,7 +780,7 @@ class AssistantTurnOwner {
     // never published for it. A streaming sink finalizes under the stopped token.
     if (signal.aborted && this.sinkKind && this.sinkKind !== 'sse') signal.throwIfAborted()
     const write = async () => {
-      await assertInitialMailboxEvidenceCurrent(this.recoveryContext?.executionContext)
+      await assertInitialReadEvidenceCurrent(this.recoveryContext?.executionContext)
       return writeTurnPublication({ sessionId: this.params.sessionId, token: this.token, stopped: signal.aborted,
         operationId: this.publicationOperationId,
         bindTerminal: (root, authority, values, ordinals) => this.terminal.bind(root, authority.execution, values, ordinals) }, request)
@@ -817,7 +853,7 @@ class AssistantTurnOwner {
         this.input = undefined
         await this.settleUsage()
       } finally {
-        closeInitialMailboxEvidence(this.recoveryContext?.executionContext)
+        closeInitialReadEvidence(this.recoveryContext?.executionContext)
         this.disposeAdmissionClosure()
         this.disposeSessionTurnAuthority?.();this.disposeSessionTurnAuthority=undefined
         this.stopHeartbeat()
@@ -925,7 +961,7 @@ async function runAssistantTurnLoop(collector: TurnOutputCollector, params: Assi
       // The owner evaluates the complete source/recipient requirements for
       // this physical output. Input and publication remain separate effects.
       await assertSinkOutputAuthority(current, eventKind)
-      await assertInitialMailboxEvidenceCurrent(current.executionContext)
+      await assertInitialReadEvidenceCurrent(current.executionContext)
       admitted?.()
     }
     const context = { ...params.loop.context,
@@ -941,7 +977,7 @@ async function runAssistantTurnLoop(collector: TurnOutputCollector, params: Assi
           if (admitted) {
             recordOutputTiming(current, at)
             assertPermissionContextBinding(current)
-            await assertInitialMailboxEvidenceCurrent(current.executionContext)
+            await assertInitialReadEvidenceCurrent(current.executionContext)
             return
           }
         }
@@ -953,7 +989,7 @@ async function runAssistantTurnLoop(collector: TurnOutputCollector, params: Assi
           throw Object.assign(new Error('The model context authority changed.'), { reason: 'authority_changed' as const,retrySafe: false })
         }
         await admitModelSourceEvidence(current, 'context')
-        await assertInitialMailboxEvidenceCurrent(current.executionContext)
+        await assertInitialReadEvidenceCurrent(current.executionContext)
       }),admitModelOutput: admitOutput }
     const deliver = (current: ToolContext, event?: QueryEvent, provenance?: QueryOutputProvenance): Promise<void> => frame('output_admission', async () => {
       if (params.abortController.signal.aborted) return

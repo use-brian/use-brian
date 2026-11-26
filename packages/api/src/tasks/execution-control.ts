@@ -17,6 +17,8 @@
  *
  * [COMP:api/task-execution-control]
  */
+import type { AccessContext } from '@use-brian/agent-runtime/security/access-context.js'
+import { admittedExternalTaskId } from './external-task-admission.js'
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import { buildTool, type Tool, type ToolContext } from '@use-brian/agent-runtime/tools/types.js'
@@ -109,9 +111,13 @@ export type ExecutionView = ExecutionViewerProjection & {
 }
 
 /** Inspect an execution the actor can read (by execution id or by task). */
-export async function inspectExecution(actor: Pick<ControlActor, 'userId'>, workspaceId: string, target: { executionId: string } | { taskId: string }): Promise<ExecutionView> {
+export async function inspectExecution(actor: Pick<ControlActor, 'userId'> & { access?: AccessContext | null }, workspaceId: string, target: { executionId: string } | { taskId: string }): Promise<ExecutionView> {
   const view = await readExecutionForViewer(actor.userId, target)
   if (!view || view.state.workspaceId !== workspaceId) throw new ExecutionControlError('execution_not_found')
+  if ((view.externalLanes.length || view.state.lane === 'external') && view.state.taskId &&
+      await admittedExternalTaskId(actor.userId, workspaceId, view.state.taskId, actor.access) !== view.state.taskId) {
+    throw new ExecutionControlError('execution_not_found')
+  }
   const now = new Date()
   return {
     ...view,
@@ -213,7 +219,7 @@ export function createTaskExecutionTools(effects: ControlEffects = {}): { getTas
       if (!context.workspaceId) return { data: 'Task execution needs a workspace-scoped conversation. Nothing was read.', isError: true }
       if (Boolean(input.task_id) === Boolean(input.execution_id)) return { data: 'Pass exactly one of task_id or execution_id. Nothing was read.', isError: true }
       try {
-        const view = await inspectExecution(controlActorFromTool(context), context.workspaceId,
+        const view = await inspectExecution({ ...controlActorFromTool(context), access: context.executionContext?.security.access ?? null }, context.workspaceId,
           input.execution_id ? { executionId: input.execution_id } : { taskId: input.task_id! })
         return { data: summarize(view) }
       } catch (error) { return failure(error) }

@@ -4,8 +4,8 @@ import { useEffect, useRef } from 'react';
 import type { FeedAnchor, FeedEdit, FeedEditorialRunSummary, FeedReviewFinding, FeedLearnedDecisions } from '@use-brian/shared';
 import { useCachedResource, SurfaceCacheEvictionError, invalidateSurfaceCache } from '@/lib/surface-cache';
 import { feedCollaborationCacheKey, feedLearningCacheKey, feedSessionsCacheFamily } from '@/lib/surface-prefetch';
-import { feedCachedJson, feedPaintFirst, readFeedCachedJson, isAuthoritativeFeedDenial } from '@/lib/offline/feed-cache';
-import { FEED_LOCAL_CHANGED, adoptFeedServerCopy, readLocalFeedPost, type FeedWorkingContent } from '@/lib/offline/feed-offline';
+import { feedOwner, feedCachedJson, feedPaintFirst, readFeedCachedJson, isAuthoritativeFeedDenial } from '@/lib/offline/feed-cache';
+import { FEED_LOCAL_CHANGED, setFeedDetailAccess, adoptFeedServerCopy, readLocalFeedPost, type FeedWorkingContent } from '@/lib/offline/feed-offline';
 export type FeedCommentThread = { id: string; transcriptSessionId: string; anchor: FeedAnchor; resolved: boolean; authorUserId: string; authorName?: string | null; authorKind: 'user' | 'assistant'; createdAt: string };
 export type FeedDraftSuggestion = { sourceRunId?: string | null; id: string; sourceProposal?: { index: number; text: string; label?: string; imageBrief?: string } | null; edits: FeedEdit[]; rationale: string; status: string; threadId: string | null; parentId: string | null; sourceRevision: number; authorUserId: string; authorName?: string | null; authorKind: 'user' | 'assistant'; acceptanceReceipt?: { revision: number } | null };
 export type FeedCollaborationSnapshot = { runs?: FeedEditorialRunSummary[]; reviewFindings?: { threadId: string; runId: string; finding: FeedReviewFinding & { sources?: { id: string; title: string; date?: string; link?: string; hash?: string }[] } }[]; copy: { revision: number; mutationId: string; sequence: number; content: FeedWorkingContent } | null; threads: FeedCommentThread[]; suggestions: FeedDraftSuggestion[] };
@@ -14,7 +14,22 @@ export function useFeedCollaboration(workspaceId: string, assistantId: string, s
   const key = feedCollaborationCacheKey(workspaceId, assistantId, sessionId); const path = feedCollaborationPath(assistantId, sessionId) + '/collaboration';
   const resource = useCachedResource<FeedCollaborationSnapshot>(enabled ? key : null, () => feedPaintFirst(key,
     () => readFeedCachedJson<FeedCollaborationSnapshot>(path),
-    async () => { try { return await feedCachedJson<FeedCollaborationSnapshot>(path); } catch (error) { if (isAuthoritativeFeedDenial(error)) throw new SurfaceCacheEvictionError(error); throw error; } },
+    async () => {
+      const owner = feedOwner();
+      const started = performance.timeOrigin + performance.now();
+      try {
+        return await feedCachedJson<FeedCollaborationSnapshot>(path, { onNetworkValue: async snapshot => {
+          if (!Array.isArray(snapshot?.threads) || !Array.isArray(snapshot.suggestions)) throw new Error("Invalid Feed collaboration snapshot");
+          await setFeedDetailAccess(owner, assistantId, sessionId, false, started);
+        } });
+      } catch (error) {
+        if (isAuthoritativeFeedDenial(error)) {
+          await setFeedDetailAccess(owner, assistantId, sessionId, true, started);
+          throw new SurfaceCacheEvictionError(error);
+        }
+        throw error;
+      }
+    },
   ));
   const previousDenial = useRef({ key, denied: false });
   useEffect(() => {

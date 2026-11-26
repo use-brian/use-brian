@@ -8,7 +8,7 @@ import type { FeedArticleFields, FeedPostFormat } from "@/lib/feed-post-versions
 import type { PostMedia } from "@/lib/feed-media";
 import { notifyFeedPostsChanged } from "@/lib/feed-posts-events";
 import { idbGet, idbUpdate } from "./idb";
-import { FEED_API_URL, feedCachedJson, feedOwner } from "./feed-cache";
+import { FEED_API_URL, feedCachedJson, feedOwner, isAuthoritativeFeedDenial } from "./feed-cache";
 
 export const FEED_LOCAL_CHANGED = "feed:local-changed";
 export type FeedWorkingContent = {
@@ -25,8 +25,13 @@ export type LocalFeedPost = FeedWorkingCopy & {
   inFlight?: FeedWorkingCopy & { baseTitle?: string; create?: { platform: FeedPlatform } };
   collaborationQueue?: Array<{ mutationId: string; commands: FeedCommand[] }>;
   commandFlight?: FeedCommandRequest;
-  dirty: boolean; newSession: boolean; error?: "conflict" | "blocked"; errorCode?: string;
+  /** Receipt time of the last denial at each independent read boundary. */
+  accessDenied?: number; detailDenied?: number; copyDenied?: number;
+  dirty: boolean; newSession: boolean; error?: "conflict" | "blocked"; errorCode?: string; writeDenial?: boolean;
 };
+export function feedPostDenied(post: LocalFeedPost | null | undefined): boolean {
+  return Boolean(post?.accessDenied || post?.detailDenied || post?.copyDenied);
+}
 type Records = Record<string, LocalFeedPost>;
 const key = (owner: string) => `feed:working:${owner}`;
 const recordKey = (assistantId: string, sessionId: string) => `${assistantId}:${sessionId}`;
@@ -79,17 +84,35 @@ export async function createLocalFeedPost(assistantId: string, platform: FeedPla
 export async function loadFeedWorkingCopy(assistantId: string, session: FeedDraftSessionSummary, fallback: FeedWorkingContent): Promise<LocalFeedPost> {
   const owner = ownerRequired();
   const local = await readLocalFeedPost(assistantId, session.id);
-  if (local?.dirty) return local;
+  if (local?.dirty && !local.copyDenied) return local;
+  const started = performance.timeOrigin + performance.now();
   const remote = await feedCachedJson<{ copy: FeedWorkingCopy | null }>(
-    `/api/distribution/${assistantId}/post-working-copies/${session.id}`,
-  ).catch(() => null);
+    `/api/distribution/${assistantId}/post-working-copies/${session.id}`, {
+      requireNetwork: !local || Boolean(local.copyDenied),
+      onNetworkValue: async body => {
+        if (!body || body.copy !== null && (!body.copy?.content || !Number.isInteger(body.copy.revision))) {
+          throw new Error("Invalid Feed working copy");
+        }
+        await setFeedDetailAccess(owner, assistantId, session.id, false, started, "copyDenied");
+      },
+    },
+  ).catch(async error => {
+    if (isAuthoritativeFeedDenial(error)) {
+      await setFeedDetailAccess(owner, assistantId, session.id, true, started, "copyDenied");
+      throw error;
+    }
+    // A permitted list row does not establish access to its working copy.
+    // Only a confirmed empty copy seeds a legacy composition on first open.
+    if (!local || feedPostDenied(local)) throw error;
+    return { copy: local };
+  });
   if (feedOwner() !== owner) throw new Error("Local identity changed");
   const id = recordKey(assistantId, session.id);
   const records = await idbUpdate<Records>(key(owner), old => {
     if (feedOwner() !== owner) throw new Error("Local identity changed");
-    if (old?.[id]?.dirty) return old;
+    if (old && (old[id]?.dirty || feedPostDenied(old[id]))) return old;
     const baseline = { revision: 0, mutationId: crypto.randomUUID(), content: fallback };
-    const copy = remote ? remote.copy ?? baseline : local ?? baseline;
+    const copy = remote.copy ?? baseline;
     return { ...old, [id]: { ...copy, assistantId, session, dirty: false, newSession: false } };
   });
   return records[id];
@@ -102,7 +125,7 @@ export async function patchFeedWorkingCopy(assistantId: string, sessionId: strin
   const records = await idbUpdate<Records>(key(owner), old => {
     if (feedOwner() !== owner) throw new Error("Local identity changed");
     const current = old?.[id];
-    if (!current) throw new Error("Working copy not loaded");
+    if (!current || feedPostDenied(current)) throw new Error("Working copy unavailable");
     if (current.content.schemaVersion === 2) {
       const commands = feedPatchCommands(current.content, patch);
       return commands.length ? { ...old, [id]: applyQueuedFeedCommands(current, commands) } : old!;
@@ -122,7 +145,7 @@ export async function ensureFeedComposition(assistantId: string, sessionId: stri
   await idbUpdate<Records>(key(owner), old => {
     if (feedOwner() !== owner) throw new Error('Local identity changed');
     const current = old?.[id];
-    if (!current || current.content.schemaVersion === 2 || current.error || current.revision || current.inFlight) return old ?? {};
+    if (!current || feedPostDenied(current) || current.content.schemaVersion === 2 || current.error || current.revision || current.inFlight) return old ?? {};
     // A restored session may not have a server working-copy row. Seed its
     // visible proposal only if no newer local edit has taken ownership.
     const content = !current.content.textEdited && current.mutationId === displayed.mutationId
@@ -139,19 +162,75 @@ export async function ensureFeedComposition(assistantId: string, sessionId: stri
     const current = old?.[id];
     // Check inside the transaction, not against the render that started us.
     // This also makes two local opens converge on the same IDs and queue entry.
-    if (!navigator.onLine || !current || current.content.schemaVersion === 2 || current.error || current.dirty || current.newSession || !current.revision || current.inFlight || current.commandFlight) return old ?? {};
+    if (!navigator.onLine || !current || feedPostDenied(current) || current.content.schemaVersion === 2 || current.error || current.dirty || current.newSession || !current.revision || current.inFlight || current.commandFlight) return old ?? {};
     upgraded = true;
     return { ...old, [id]: applyQueuedFeedCommands(current, [{ kind: 'upgrade', seed: crypto.randomUUID() }]) };
   });
   if (upgraded) { changed(); await flushFeedWorkingCopies(); }
 }
 
-export async function mergeLocalFeedSessions(assistantId: string, sessions: FeedDraftSessionSummary[], platform?: FeedPlatform) {
+/** Keep the working bytes and outbox when a live read revokes access. A cached
+ * success cannot clear a denial; each authority must confirm its own read. */
+function withFeedReadDecision(post: LocalFeedPost, field: "accessDenied" | "detailDenied" | "copyDenied", denied: boolean) {
+  const next = { ...post, [field]: denied ? performance.timeOrigin + performance.now() : undefined };
+  // A read grant lets a previously denied write retry once. The write route
+  // still checks current editing permission, revision and mutation identity.
+  if (post[field] && !feedPostDenied(next) && next.writeDenial) {
+    delete next.writeDenial;
+    delete next.error;
+    delete next.errorCode;
+  }
+  return next;
+}
+
+export async function setFeedDetailAccess(owner: string, assistantId: string, sessionId: string,
+  denied: boolean, started: number, field: "detailDenied" | "copyDenied" = "detailDenied") {
+  const current = await readLocalFeedPost(assistantId, sessionId);
+  if (!current || feedOwner() !== owner || !denied && !current[field]) return;
+  const id = recordKey(assistantId, sessionId);
+  let visibilityChanged = false;
+  await idbUpdate<Records>(key(owner), old => {
+    const post = old?.[id];
+    if (!post || feedOwner() !== owner || !denied && (post[field] ?? 0) >= started) return old ?? {};
+    visibilityChanged = Boolean(post[field]) !== denied;
+    return { ...old, [id]: withFeedReadDecision(post, field, denied) };
+  });
+  if (visibilityChanged) { changed(); notifyFeedPostsChanged(); }
+}
+
+export async function mergeLocalFeedSessions(assistantId: string, sessions: FeedDraftSessionSummary[], platform?: FeedPlatform,
+  source: "cached" | "live" | "unavailable" | "denied" = "cached", started = 0) {
+  const owner = feedOwner();
   const merged = new Map(sessions.map(s => [s.id, s]));
-  for (const post of await readLocalFeedPosts()) {
-    if (post.assistantId !== assistantId || (platform && post.session.platform !== platform)) continue;
+  const inScope = (post: LocalFeedPost) => post.assistantId === assistantId && (!platform || post.session.platform === platform);
+  let local = (await readLocalFeedPosts()).filter(inScope);
+  if (feedOwner() !== owner) return [];
+  const live = source === "live" || source === "denied";
+  if (live && local.some(post => !post.newSession && (post.accessDenied || !merged.has(post.session.id)))) {
+    let visibilityChanged = false;
+    const records = await idbUpdate<Records>(key(owner), old => {
+      if (!old || feedOwner() !== owner) return old ?? {};
+      const next = { ...old };
+      for (const [id, post] of Object.entries(old)) {
+        if (!inScope(post) || post.newSession) continue;
+        const denied = !merged.has(post.session.id);
+        if (!denied && (!post.accessDenied || post.accessDenied >= started)) continue;
+        if (Boolean(post.accessDenied) !== denied) visibilityChanged = true;
+        next[id] = withFeedReadDecision(post, "accessDenied", denied);
+      }
+      return next;
+    });
+    if (feedOwner() !== owner) return [];
+    local = Object.values(records).filter(inScope);
+    if (visibilityChanged) { changed(); notifyFeedPostsChanged(); }
+  }
+  for (const post of local) {
     const remote = merged.get(post.session.id);
-    if (!remote && !post.dirty) continue;
+    if (feedPostDenied(post) || live && !post.newSession && !remote) {
+      merged.delete(post.session.id);
+      continue;
+    }
+    if (!remote && !post.dirty && source !== "unavailable") continue;
     merged.set(post.session.id, { ...(remote ?? post.session),
       ...(post.dirty ? { title: `[${post.session.platform}] ${post.content.title || "New draft"}` } : {}),
       draftText: post.content.text || remote?.draftText || null,
@@ -170,7 +249,7 @@ async function replay() {
   const owner = feedOwner();
   if (!owner || !navigator.onLine) return;
   for (const post of await readLocalFeedPosts()) {
-    if (!post.dirty || post.error) continue;
+    if (!post.dirty || post.error || feedPostDenied(post)) continue;
     if (!navigator.onLine || feedOwner() !== owner) return;
     try {
       if (!post.newSession && post.collaborationQueue?.length) { await replayFeedCommands(post, owner); continue; }
@@ -180,7 +259,7 @@ async function replay() {
       const records = await idbUpdate<Records>(key(owner), old => {
         if (feedOwner() !== owner) throw new Error("Local identity changed");
         const current = old?.[id];
-        if (!current?.dirty) return old ?? {};
+        if (!current?.dirty || feedPostDenied(current)) return old ?? {};
         return { ...old, [id]: { ...current, inFlight: current.inFlight ?? {
           revision: current.revision, mutationId: current.mutationId, content: current.newSession && current.content.schemaVersion === 2 ? { ...current.content, schemaVersion: undefined, composition: undefined, goalId: undefined, reviewMonth: undefined } : current.content,
           baseTitle: current.session.title,
@@ -188,7 +267,7 @@ async function replay() {
         } } };
       });
       const flight = records[id]?.inFlight;
-      if (!flight || feedOwner() !== owner) continue;
+      if (!flight || feedPostDenied(records[id]) || feedOwner() !== owner) continue;
       const response = await authFetch(`${FEED_API_URL}/api/distribution/${post.assistantId}/post-working-copies/${post.session.id}`, {
         method: "PUT", headers: { "Content-Type": "application/json" }, signal: AbortSignal.timeout(10_000),
         body: JSON.stringify(flight),
@@ -203,7 +282,7 @@ async function replay() {
             const error = response.status === 409 ? "conflict" : "blocked";
             if (!current || current.inFlight?.mutationId !== flight.mutationId || current.error === error) return old ?? {};
             updated = true;
-            return { ...old, [id]: { ...current, error } };
+            return { ...old, [id]: { ...current, error, writeDenial: response.status === 403 || response.status === 404 } };
           });
           if (updated) changed();
         }
@@ -216,7 +295,7 @@ async function replay() {
         const current = old?.[id];
         if (!current || current.inFlight?.mutationId !== flight.mutationId) return old ?? {};
         return { ...old, [id]: { ...current, revision: copy.revision, newSession: false, inFlight: undefined,
-          dirty: current.mutationId !== flight.mutationId || Boolean(current.collaborationQueue?.length), error: undefined, errorCode: undefined } };
+          dirty: current.mutationId !== flight.mutationId || Boolean(current.collaborationQueue?.length), error: undefined, errorCode: undefined, writeDenial: undefined } };
       });
       changed(); notifyFeedPostsChanged();
     } catch { /* Durable work remains pending. Other posts may still sync. */ }
@@ -232,7 +311,7 @@ export async function retryFeedWorkingCopy(assistantId: string, sessionId: strin
     if (feedOwner() !== owner) throw new Error('Local identity changed');
     const current = old?.[id];
     if (!current?.dirty || !current.error) return old ?? {};
-    return { ...old, [id]: { ...current, error: undefined, errorCode: undefined } };
+    return { ...old, [id]: { ...current, error: undefined, errorCode: undefined, writeDenial: undefined } };
   });
   changed();
   await flushFeedWorkingCopies();
@@ -272,7 +351,7 @@ export async function queueFeedCommands(assistantId: string, sessionId: string, 
   const owner = ownerRequired(); const id = recordKey(assistantId, sessionId);
   const records = await idbUpdate<Records>(key(owner), old => {
     if (feedOwner() !== owner) throw new Error('Local identity changed');
-    const current = old?.[id]; if (!current) throw new Error('Working copy not loaded');
+    const current = old?.[id]; if (!current || feedPostDenied(current)) throw new Error('Working copy unavailable');
     return { ...old, [id]: applyQueuedFeedCommands(current, commands, optimisticEdits) };
   });
   changed(); return records[id];
@@ -283,10 +362,10 @@ async function replayFeedCommands(post: LocalFeedPost, owner: string) {
     const records = await idbUpdate<Records>(key(owner), old => {
       if (feedOwner() !== owner) throw new Error('Local identity changed');
       const current = old?.[id]; const next = current?.collaborationQueue?.[0];
-      if (!current || !next || current.error) return old ?? {};
+      if (!current || !next || current.error || feedPostDenied(current)) return old ?? {};
       return { ...old, [id]: { ...current, commandFlight: current.commandFlight ?? { ...next, expectedRevision: current.revision } } };
     });
-    const flight = records[id]?.commandFlight; if (!flight || records[id]?.error) return;
+    const flight = records[id]?.commandFlight; if (!flight || records[id]?.error || feedPostDenied(records[id])) return;
     const response = await authFetch(`${FEED_API_URL}/api/distribution/${post.assistantId}/draft-sessions/${post.session.id}/commands`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(10_000), body: JSON.stringify(flight),
     });
@@ -297,7 +376,7 @@ async function replayFeedCommands(post: LocalFeedPost, owner: string) {
         await idbUpdate<Records>(key(owner), old => {
           if (feedOwner() !== owner) throw new Error('Local identity changed');
           const current = old?.[id]; if (!current || current.commandFlight?.mutationId !== flight.mutationId) return old ?? {};
-          return { ...old, [id]: { ...current, error: response.status === 409 ? 'conflict' : 'blocked', errorCode: detail?.code ?? detail?.error } };
+          return { ...old, [id]: { ...current, error: response.status === 409 ? 'conflict' : 'blocked', errorCode: detail?.code ?? detail?.error, writeDenial: response.status === 403 || response.status === 404 } };
         }); changed();
       }
       return;
@@ -308,7 +387,7 @@ async function replayFeedCommands(post: LocalFeedPost, owner: string) {
       if (feedOwner() !== owner) throw new Error('Local identity changed');
       const current = old?.[id]; if (!current || current.commandFlight?.mutationId !== flight.mutationId) return old ?? {};
       const remaining = (current.collaborationQueue ?? []).slice(1);
-      return { ...old, [id]: { ...current, content: { ...current.content, ...sourceAuthority, ...(sourceSensitivity ? { sourceSensitivity } : {}) }, revision: receipt.revision, commandFlight: undefined, collaborationQueue: remaining, dirty: remaining.length > 0, error: undefined, errorCode: undefined } };
+      return { ...old, [id]: { ...current, content: { ...current.content, ...sourceAuthority, ...(sourceSensitivity ? { sourceSensitivity } : {}) }, revision: receipt.revision, commandFlight: undefined, collaborationQueue: remaining, dirty: remaining.length > 0, error: undefined, errorCode: undefined, writeDenial: undefined } };
     });
     changed(); notifyFeedPostsChanged();
   }
@@ -320,7 +399,7 @@ export async function adoptFeedServerCopy(assistantId: string, sessionId: string
   await idbUpdate<Records>(key(owner), old => {
     if (feedOwner() !== owner) return old ?? {};
     const current = old?.[id];
-    if (!current || current.dirty || copy.revision < current.revision || (copy.mutationId === current.mutationId && JSON.stringify(copy.content) === JSON.stringify(current.content))) return old ?? {};
+    if (!current || feedPostDenied(current) || current.dirty || copy.revision < current.revision || (copy.mutationId === current.mutationId && JSON.stringify(copy.content) === JSON.stringify(current.content))) return old ?? {};
     updated = true; return { ...old, [id]: { ...current, ...copy, dirty: false } };
   });
   if (updated) changed();
