@@ -6,7 +6,7 @@ import type {
   WorkflowStore,
 } from '@use-brian/core/workflow/types.js'
 import { intersectAccessCeilings } from '@use-brian/agent-runtime/security/access-ceiling.js'
-import { getPool, query } from '../db/client.js'
+import { getPool, query, runWithAgentAccess, withRLSTransaction } from '../db/client.js'
 import type { PoolClient } from 'pg'
 import { createDbWorkflowStore, createDbWorkflowRunStore } from '../db/workflow-store.js'
 import { findAssistantById, getWorkspacePrimaryAssistant } from '../db/users.js'
@@ -201,9 +201,16 @@ export function createWorkflowPublicationAuthorizer(deps: Dependencies = {}): Au
         userId: input.userId, assistant, workspaceId: input.workspaceId,
       })
       const ceiling = intersectAccessCeilings(live, { ...envelope.ceiling, userId: input.userId })
-      // Preserve and revalidate ALL evidence, including current source state;
-      // another person's private rows, held sources, and revoked access still fail.
-      await (deps.validateEvidence ?? validateAudienceScopeEvidence)(input.scopeEvidence, ceiling)
+      const evidence = input.scopeEvidence
+      const validateEvidence = deps.validateEvidence ?? validateAudienceScopeEvidence
+      if (evidence.sources?.length) {
+        // Replay source queries under the actor's live grants. The validator
+        // checks the resulting evidence against the destination ceiling.
+        await runWithAgentAccess(live, () => withRLSTransaction(live.userId,
+          client => validateEvidence(evidence, ceiling, client), assistant.id))
+      } else {
+        await validateEvidence(evidence, ceiling)
+      }
       // Evidence validation may await source reads. Do not use consent, role,
       // run state or a workflow revision captured before those awaits.
       const latestWorkflow = await workflows.findByIdSystem(workflow.id)
