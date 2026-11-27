@@ -751,7 +751,8 @@ export function registerComputerUse(scope: ComputerUseScope) {
       })
     },
   })
-  allTools.set('browserExplore', buFallback.browserExplore)
+  // Do not advertise a fallback that can never run on a local-only deployment.
+  if (sandboxProvider) allTools.set('browserExplore', buFallback.browserExplore)
 
   // ── Agent capability toolset ──
   const agentControlPlaneReader = createControlPlaneReader({

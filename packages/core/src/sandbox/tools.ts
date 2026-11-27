@@ -688,7 +688,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     name: 'browserNavigate',
     requiresCapability: 'computer',
     description:
-      'Open a URL in the controlled browser and get back the page\'s interactive elements as refs (@e1 button "Send") in the same call — no separate browserSnapshot needed after navigating. Public sites need NO browser profile; a profile (a saved login identity) is used automatically when one is enabled — pass "profile" to pick one by name when several match.',
+      'Open a URL in the controlled browser and get back the page\'s interactive elements as refs (@e1 button "Send") in the same call — no separate browserSnapshot needed after navigating. Cloud browsing can open public sites without a profile. My Browser requires a paired profile even on public sites. An eligible profile may be selected automatically; pass "profile" to choose an authorized profile by name when needed.',
     inputSchema: z.object({
       url: z.string().min(1).describe('Absolute http(s) URL to open'),
       profile: z

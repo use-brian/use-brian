@@ -191,22 +191,30 @@ describe('[COMP:api/route-helpers] Route helpers', () => {
       expect(buildBrowserEscalationPrompt(new Map())).toBe('')
     })
 
-    it('steers escalation + the no-profile posture when browserNavigate is present', () => {
-      const tools = new Map([['browserNavigate', {}]])
-      const result = buildBrowserEscalationPrompt(tools)
-      expect(result).toContain('browserNavigate')
-      expect(result).toContain('Never refuse to browse because the workspace has no browser profile')
+    it('prefers interactive navigation, distinguishes paired profiles, and recovers safely', () => {
+      const result = buildBrowserEscalationPrompt(new Map([['browserNavigate', {}]]))
+      expect(result).toContain('open that site directly in the browser')
       expect(result).toContain('open the authoritative site')
-      // browserExplore is absent from this map, so it must not be named.
-      expect(result).not.toContain('browserExplore')
+      expect(result).toContain('My Browser requires a paired profile')
+      expect(result).toContain('Never switch identities or backends to get around a denial')
+      expect(result).toContain('take a fresh snapshot and continue from its current state')
+      expect(result).toContain('never blindly repeat a booking, purchase, or submission')
+      for (const unavailable of ['browserExplore', 'browserFillForm', 'listBrowserProfiles']) {
+        expect(result).not.toContain(unavailable)
+      }
     })
 
-    it('names browserExplore only when it is actually injected', () => {
+    it('names optional helpers only when injected', () => {
       const tools = new Map([
         ['browserNavigate', {}],
         ['browserExplore', {}],
+        ['browserFillForm', {}],
+        ['listBrowserProfiles', {}],
       ])
-      expect(buildBrowserEscalationPrompt(tools)).toContain('browserExplore')
+      const result = buildBrowserEscalationPrompt(tools)
+      expect(result).toContain('browserExplore')
+      expect(result).toContain('Batch independent field edits with browserFillForm')
+      expect(result).toContain('check listBrowserProfiles once for eligible profiles')
     })
   })
 
