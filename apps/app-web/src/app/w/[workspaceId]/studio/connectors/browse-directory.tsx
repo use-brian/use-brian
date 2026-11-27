@@ -27,6 +27,7 @@ import { ConnectorIcon } from "@/components/connectors/connector-icon";
 import { OFFICIAL_OAUTH_SCOPES } from "@use-brian/shared/builtin-connectors";
 import { buildConnectorState } from "@/lib/connector-oauth-state";
 import { armConnectorOauthState } from "@/lib/oauth-state-cookie";
+import { resolveConnectorAddAnotherFlow } from "@/lib/connector-add-another";
 import {
   Select,
   SelectContent,
@@ -205,14 +206,15 @@ export function BrowseDirectory({ open, onClose, onConnectorAdded, onConnectorCo
     }
   }
 
-  // "Add another" for a connected entry. OAuth providers go through the
-  // page's OAuth flow with the `:add` intent (a directory-add here would
-  // mint an orphan disconnected instance whose later plain OAuth connect
-  // overwrites the primary's credentials); PAT / remote-MCP entries keep
-  // the create-disconnected-instance path (the rail's PAT form targets the
-  // new instance by id).
+  // Provider setup (including CLI and PAT forms) belongs to the page.
+  // Directory install is idempotent, so it cannot add another CLI instance.
+  // Only remote directory entries should fall back to that endpoint.
   function handleAddAnother(entry: DirectoryEntry) {
-    if (entry.oauth_required && onConnectorConnect) {
+    const flow = resolveConnectorAddAnotherFlow({
+      id: entry.id,
+      oauthRequired: entry.oauth_required,
+    });
+    if (flow !== "directory" && onConnectorConnect) {
       onConnectorConnect(entry, { addAnother: true });
       return;
     }
