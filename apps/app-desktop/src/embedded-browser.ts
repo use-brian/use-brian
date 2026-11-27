@@ -458,7 +458,7 @@ export class EmbeddedBrowser {
     this.check(generation);
     switch (op) {
       case "navigate": return executor.navigate(browserUrl(args.url));
-      case "snapshot": return executor.snapshot(args.mode === "full" ? "full" : "interactive");
+      case "snapshot": return executor.snapshot(args.mode === "full" ? "full" : "interactive", args.afterClick === true);
       case "click": await executor.click(text(args.ref)); return {};
       case "type": await executor.type(text(args.ref), text(args.text)); return {};
       case "fillForm": return executor.fillForm(args);

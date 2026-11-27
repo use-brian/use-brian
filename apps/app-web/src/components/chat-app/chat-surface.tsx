@@ -272,11 +272,11 @@ import { openInPane, refreshPaneRef, type OpenOptions, type PaneRef } from "@/li
 import { useChatPanePins } from "@/lib/use-chat-pane-pins";
 import {
   desktopBrowserPane,
-  isBrowserToolName,
   reportTurnChat,
   subscribeBrowserPane,
 } from "@/lib/desktop-browser-pane";
 import { getComputerTask } from "@/lib/api/computer";
+import { createChatBrowserPreview } from "@/lib/chat-browser-preview";
 import { resolveRequestedFreshAssistant } from "@/components/chat-app/assistant-deeplink";
 import {
   isAssistantPickerLive,
@@ -1652,39 +1652,18 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       }),
     [workspaceId],
   );
-  /** Chats whose cloud browser this mount already opened as a tab. */
-  const computerTabsRef = useRef<Set<string>>(new Set());
-  /**
-   * Web: a browser tool step starts in this chat's turn. If the browse runs in
-   * a cloud browser (or there is no desktop pane to host a local one), open
-   * its Take-Over frame as a `browser` tab of this chat's pane.
-   */
-  const openComputerTab = useCallback(
-    (sessionId: string) => {
-      if (computerTabsRef.current.has(sessionId)) return;
-      computerTabsRef.current.add(sessionId);
-      void getComputerTask(sessionId)
-        .then((task) => {
-          if (!task || (task.backend === "local" && desktopBrowserPane())) {
-            computerTabsRef.current.delete(sessionId);
-            return;
-          }
-          updateChatPane(
-            workspaceId,
-            sessionId,
-            (state) =>
-              openInPane(state, {
-                kind: "browser",
-                browserId: `computer:${sessionId}`,
-                url: null,
-                title: task.injectedSite,
-              }),
-          );
-        })
-        .catch(() => computerTabsRef.current.delete(sessionId));
-    },
-    [workspaceId],
-  );
+  const browserPreview = useMemo(() => createChatBrowserPreview({
+    lookup: getComputerTask,
+    hasNativePane: () => !!desktopBrowserPane(),
+    open: (sessionId, task) => updateChatPane(workspaceId, sessionId, (state) =>
+      openInPane(state, {
+        kind: "browser",
+        browserId: `computer:${sessionId}`,
+        url: null,
+        title: task.injectedSite,
+      }),
+    ),
+  }), [workspaceId]);
 
   /** Re-probe `GET /pending` for the open chat through its conversation:
    *  a suspended question or a restored tool confirmation is presented there
@@ -2178,7 +2157,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           if (!id || !name) break;
           // Brian started browsing: show the browser in this chat's pane.
           const owner = sending?.owningSessionId ?? sessionId;
-          if (!replay && isBrowserToolName(name) && owner) openComputerTab(owner);
+          if (!replay && owner) browserPreview.started(owner, id, name);
           // Re-emits keep the existing row.
           if (eventToolIdsRef.current.has(id)) break;
           eventToolIdsRef.current.add(id);
@@ -2191,11 +2170,18 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           setStreamingEvents(eventLogRef.current.events);
           break;
         }
+        case "tool_result": {
+          const owner = sending?.owningSessionId ?? sessionId;
+          if (!replay && owner) void browserPreview.settled(owner, text(payload.id));
+          break;
+        }
         case "tool_dropped": {
           // The engine stripped this call from the persisted turn: retract
           // the phantom step so the live UI matches what was saved.
           const id = text(payload.id);
           if (!id) break;
+          const owner = sending?.owningSessionId ?? sessionId;
+          if (!replay && owner) browserPreview.dropped(owner, id);
           eventToolIdsRef.current.delete(id);
           eventedToolIdsRef.current.delete(id);
           eventLogRef.current = removeToolSteps(eventLogRef.current, id);

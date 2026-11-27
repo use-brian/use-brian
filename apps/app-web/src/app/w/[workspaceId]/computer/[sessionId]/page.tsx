@@ -197,16 +197,20 @@ export default function ComputerTakeoverPage(props: {
   // which is the flicker on a damage-driven stream. The gate also owns the
   // object-url lifetime, so a url is freed only once it is off screen.
   const gateRef = useRef<ReturnType<typeof createFrameGate> | null>(null);
-  if (!gateRef.current) {
-    gateRef.current = createFrameGate({
+  useEffect(() => {
+    const gate = createFrameGate({
       decode: decodeFrame,
       commit: setFrameSrc,
       release: (src) => {
         if (src.startsWith("blob:")) URL.revokeObjectURL(src);
       },
     });
-  }
-  useEffect(() => () => gateRef.current?.dispose(), []);
+    gateRef.current = gate;
+    return () => {
+      gateRef.current = null;
+      gate.dispose();
+    };
+  }, []);
 
   // Arrival = the Take-Over begins: resolve the task and resume the paused
   // sandbox (§4.8 pauses it during the wait, not during the takeover).

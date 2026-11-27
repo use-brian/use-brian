@@ -650,9 +650,12 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     state: SessionBrowseState,
     backend: BrowserBackendKind,
     observation: ObservationMode = 'auto',
+    afterClick = false,
   ): Promise<{ snapshot: BrowserSnapshot; rendered: string; advice: string } | null> {
     try {
-      const snapshot = await providerFor(backend).snapshot(callCtx(context, state), { mode: 'full' })
+      const snapshot = await providerFor(backend).snapshot(callCtx(context, state), {
+        mode: 'full', ...(afterClick && backend === 'local' ? { afterClick: true } : {}),
+      })
       const advice = pageAdvice(context, state, snapshot)
       const observed = state.observations.observe(snapshot, {
         scope: JSON.stringify([backend, state.profileId]), mode: 'full', observation,
@@ -688,7 +691,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     name: 'browserNavigate',
     requiresCapability: 'computer',
     description:
-      'Open a URL in the controlled browser and get back the page\'s interactive elements as refs (@e1 button "Send") in the same call — no separate browserSnapshot needed after navigating. Public sites need NO browser profile; a profile (a saved login identity) is used automatically when one is enabled — pass "profile" to pick one by name when several match.',
+      'Open a URL in the controlled browser and get back the page\'s interactive elements as refs (@e1 button "Send") in the same call — no separate browserSnapshot needed after navigating. Cloud browsing can open public sites without a profile. My Browser requires a paired profile even on public sites. An eligible profile may be selected automatically; pass "profile" to choose an authorized profile by name when needed.',
     inputSchema: z.object({
       url: z.string().min(1).describe('Absolute http(s) URL to open'),
       profile: z
@@ -917,7 +920,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     name: 'browserListTabs',
     requiresCapability: 'computer',
     description:
-      'List the tabs this task may control in the active My Browser profile. Task-owned mode returns only the approved tab and task-opened tabs; full-profile mode returns every eligible normal web tab.',
+      'List the tabs this task may control in the active My Browser profile. Use this first when resuming a prior browser task and looking for its existing results tab. Task-owned mode returns only the approved tab and task-opened tabs; full-profile mode returns every eligible normal web tab.',
     inputSchema: z.object({}),
     isReadOnly: true,
     isConcurrencySafe: false,
@@ -959,7 +962,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     name: 'browserSwitchTab',
     requiresCapability: 'computer',
     description:
-      'Switch the active My Browser task to a tab handle returned by browserListTabs and return a fresh page snapshot.',
+      'Switch the active My Browser task to a tab handle returned by browserListTabs and return a fresh page snapshot. Verify the tab and use its new refs rather than refs from an earlier turn.',
     inputSchema: z.object({ tabId: z.string().min(1).describe('Opaque tab handle from browserListTabs') }),
     isReadOnly: false,
     isConcurrencySafe: false,
@@ -1217,7 +1220,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
         await providerFor(backend).click(callCtx(context, gate.state), gate.state.observations.resolve(input.ref))
         if (label) record(gate.state, { action: isSubmit ? 'submit' : 'click', detail: label, description: isSubmit ? label : null })
         emit({ type: 'browser_action', op: 'click', backend, host: null, ok: true }, context)
-        const snap = await inlineSnapshot(context, gate.state, backend, input.observation)
+        const snap = await inlineSnapshot(context, gate.state, backend, input.observation, true)
         const advice = snap ? snap.advice : ''
         return {
           data:

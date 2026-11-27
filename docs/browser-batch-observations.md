@@ -68,11 +68,17 @@ usable through full snapshots rather than guessed identity matching.
 
 ## Bounded settling
 
+Chromium may include an observed `linkUrl` on an enabled link in a snapshot. It is a same-origin HTTP(S) navigation hint; credentials, queries, fragments, and cross-origin targets are omitted. Use it to open read-only detail pages in a separate tab without losing filters on the original page. It does not replace action refs or override approval for actions that change state.
+
 Chromium waits for DOM quiet before snapshots and final batch verification: 100 ms without observed
 mutations, bounded by 750 ms, including a host-side deadline for throttled page
 timers or evaluation failures. This is best-effort settling, not network idle,
 a guarantee that the application has finished, or a transaction boundary.
 Continuously updating pages therefore cannot block observations indefinitely.
+
+For the inline observation after a local Chromium click, visible busy/progress regions and short live/status loading announcements keep that wait open until they change or the same 750 ms deadline expires. This handles delayed search results without another model/tool round trip. The click itself is never retried; a timeout still returns the current page, not a success claim. Ordinary snapshots and cloud observations retain their prior behavior.
+
+When continuing a My Browser task, list the authorized tabs, match the results page by URL/title, and switch back to it for a fresh observation. Do not recreate the search or reuse element refs from earlier turns. The [room acceptance check](browser-room-acceptance.md) covers the one-turn comparison, resuming without replay, and ambiguous requests.
 
 ## Watching browser actions
 
