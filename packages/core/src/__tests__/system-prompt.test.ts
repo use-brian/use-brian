@@ -15,11 +15,11 @@ describe('[COMP:context-engine/layer-1-system-prompt] system-prompt constants', 
   })
 
   it('clarifies materially underspecified commitments without blocking safe work or duplicating approval', () => {
-    expect(LAYER_1_SYSTEM_PROMPT).toContain('For low-risk lookups and reversible work, make a reasonable interpretation')
-    expect(LAYER_1_SYSTEM_PROMPT).toContain("don't guess missing details that materially change the action")
-    expect(LAYER_1_SYSTEM_PROMPT).toContain('a workable time window, approximate headcount, and venue if unknown')
-    expect(LAYER_1_SYSTEM_PROMPT).toContain('A draft or a search is not permission to submit')
-    expect(LAYER_1_SYSTEM_PROMPT).toContain('Clarify missing material inputs before calling the tool')
+    expect(LAYER_1_SYSTEM_PROMPT).toContain('For reversible work, assume reasonably')
+    expect(LAYER_1_SYSTEM_PROMPT).toContain('Before external commitments, ask for missing material details')
+    expect(LAYER_1_SYSTEM_PROMPT).toContain('time window, rough headcount, venue')
+    expect(LAYER_1_SYSTEM_PROMPT).toContain('A draft or search is not permission to submit')
+    expect(LAYER_1_SYSTEM_PROMPT).toContain('Clarify missing inputs before calling the tool')
   })
 
   it('distinguishes a live recheck from discussion of earlier observations', () => {
