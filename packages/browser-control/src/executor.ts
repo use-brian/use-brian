@@ -632,7 +632,7 @@ export class TabExecutor {
     return { url: tab.url ?? url }
   }
 
-  async snapshot(mode: 'interactive' | 'full' = 'interactive'): Promise<{ url: string; title: string; documentId?: string; nodes: BuiltSnapshot['nodes'] }> {
+  async snapshot(mode: 'interactive' | 'full' = 'interactive', afterClick = false): Promise<{ url: string; title: string; documentId?: string; nodes: BuiltSnapshot['nodes'] }> {
     const tabId = this.mustTab()
     const attachmentId = this.attachmentId
     const documentRoot = async () => {
@@ -653,7 +653,7 @@ export class TabExecutor {
       }).catch(error => {
         if (isDetachedError(error)) detachedDuringSettle = error
         throw error
-      }))
+      }), afterClick && attempt === 0)
       // Optional settling must not mask the authoritative loss of control.
       if (detachedDuringSettle) throw detachedDuringSettle
       const before = await documentRoot()

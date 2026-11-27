@@ -53,7 +53,7 @@ export const BrowserSnapshotSchema = z.object({
 })
 export type BrowserSnapshot = z.infer<typeof BrowserSnapshotSchema>
 export type BrowserSnapshotMode = 'interactive' | 'full'
-export type BrowserSnapshotOptions = { mode?: BrowserSnapshotMode }
+export type BrowserSnapshotOptions = { mode?: BrowserSnapshotMode; afterClick?: boolean }
 
 export const BrowserNavigateResultSchema = z.object({ url: z.string() })
 export type BrowserNavigateResult = z.infer<typeof BrowserNavigateResultSchema>

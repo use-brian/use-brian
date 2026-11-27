@@ -216,8 +216,19 @@ describe('[COMP:api/route-helpers] Route helpers', () => {
       expect(result).toContain('open observed linkUrl values for read-only detail pages with browserOpenTab')
       expect(result).toContain('Never infer URLs or bypass approval')
       expect(result).toContain('browserExplore')
-      expect(result).toContain('Batch independent field edits with browserFillForm')
+      expect(result).toContain('Use browserFillForm to batch independent edits')
       expect(result).toContain('check listBrowserProfiles once for eligible profiles')
+      expect(result).not.toContain('list its controllable tabs before navigating')
+    })
+
+    it('resumes an existing results tab only when it can list and switch tabs', () => {
+      const tools = new Set(['browserNavigate', 'browserListTabs'])
+      expect(buildBrowserEscalationPrompt(tools)).not.toContain('list its controllable tabs before navigating')
+      tools.add('browserSwitchTab')
+      const prompt = buildBrowserEscalationPrompt(tools)
+      expect(prompt).toContain('list its controllable tabs before navigating')
+      expect(prompt).toContain('Do not reload it or redo filters')
+      expect(prompt).toContain('Never reuse old element refs')
     })
   })
 

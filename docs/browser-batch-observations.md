@@ -76,6 +76,10 @@ timers or evaluation failures. This is best-effort settling, not network idle,
 a guarantee that the application has finished, or a transaction boundary.
 Continuously updating pages therefore cannot block observations indefinitely.
 
+For the inline observation after a local Chromium click, visible `aria-busy` regions and short live/status announcements ending in an ellipsis keep that wait open until they change or the same 750 ms deadline expires. This handles delayed search results without another model/tool round trip. The click itself is never retried; a timeout still returns the current page, not a success claim. Ordinary snapshots and cloud observations retain their prior behavior.
+
+When continuing a My Browser task, list the authorized tabs, match the results page by URL/title, and switch back to it for a fresh observation. Do not recreate the search or reuse element refs from earlier turns. The [room acceptance check](browser-room-acceptance.md) covers the one-turn comparison, resuming without replay, and ambiguous requests.
+
 ## Watching browser actions
 
 Chromium scrolls actionable fields into view before typing or batch edits and

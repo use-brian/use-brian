@@ -577,8 +577,9 @@ describe('[COMP:app-desktop/embedded-browser] operations and revocation with the
   // controller argument/result translation while retaining real attach and relay paths.
   it.each([
     ['navigate', { url: 'https://EXAMPLE.com' }, ['https://example.com/'], { url: 'https://example.com/' }, { url: 'https://example.com/' }],
-    ['snapshot', { mode: 'full' }, ['full'], { snapshot: 'tree' }, { snapshot: 'tree' }],
-    ['snapshot', {}, ['interactive'], { snapshot: 'tree' }, { snapshot: 'tree' }],
+    ['snapshot', { mode: 'full' }, ['full', false], { snapshot: 'tree' }, { snapshot: 'tree' }],
+    ['snapshot', {}, ['interactive', false], { snapshot: 'tree' }, { snapshot: 'tree' }],
+    ['snapshot', { mode: 'full', afterClick: true }, ['full', true], { snapshot: 'tree' }, { snapshot: 'tree' }],
     ['click', { ref: 'r1' }, ['r1'], undefined, {}],
     ['type', { ref: 'r1', text: 'hello' }, ['r1', 'hello'], undefined, {}],
     ['fillForm', { fields: [{ ref: 'r1', value: 'hello' }] }, [{ fields: [{ ref: 'r1', value: 'hello' }] }], { filled: 1 }, { filled: 1 }],
