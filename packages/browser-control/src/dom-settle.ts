@@ -15,11 +15,20 @@ export function waitForDomQuiet(quietMs: number, maxMs: number, afterClick = fal
     // proof of completion; the deadline still wins if it never goes away.
     const finishIfReady = () => {
       if (afterClick) {
-        for (const node of Array.from(document.querySelectorAll('[aria-busy="true"], [role="status"], [aria-live="polite"], [aria-live="assertive"]'))) {
+        for (const node of Array.from(document.querySelectorAll('[aria-busy="true"], [role="status"], [role="progressbar"], progress, [aria-live="polite"], [aria-live="assertive"]'))) {
           if (!node.getClientRects().length || getComputedStyle(node).visibility !== 'visible') continue
           if (node.getAttribute('aria-busy') === 'true') return
+          if (node.tagName === 'PROGRESS') {
+            const progress = node as HTMLProgressElement
+            if (!progress.hasAttribute('value') || progress.value < progress.max) return
+          }
+          if (node.getAttribute('role') === 'progressbar') {
+            const value = node.getAttribute('aria-valuenow')
+            const max = node.getAttribute('aria-valuemax') ?? '100'
+            if (value === null || Number(value) < Number(max)) return
+          }
           const text = node.textContent?.trim() ?? ''
-          if (text.length <= 100 && /(?:\.{3}|…)$/u.test(text)) return
+          if (text.length <= 100 && (/(?:\.{3}|…)$/u.test(text) || /^(?:loading|searching|checking availability|please wait)(?:\b|[.…])/iu.test(text))) return
         }
       }
       finish()
