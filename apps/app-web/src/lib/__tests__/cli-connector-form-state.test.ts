@@ -20,7 +20,27 @@ function section(start: string, end: string): string {
   return page.slice(startIndex, endIndex);
 }
 
-describe("[COMP:web/settings-connectors] CLI connector form state", () => {
+describe("[COMP:app-web/studio-connectors] CLI connector form state", () => {
+  it("reveals a fresh CLI create draft from either add-another entry point", () => {
+    const cliConnect = section('if (id === "cli") {', "// Company mailbox");
+    expect(cliConnect).toContain("revealConnectForm(rid)");
+    expect(cliConnect).toContain('setNewCliLabel(opts?.addAnother ? ""');
+    expect(cliConnect).toContain('setNewCliBinaryPath("")');
+    expect(cliConnect).toContain('setNewCliArgs("")');
+    expect(cliConnect).toContain('setNewCliCwd("")');
+    expect(cliConnect).toContain("setNewCliError(null)");
+
+    const addAnother = section('if (flow === "cli-form") {', 'if (flow === "pat-form") {');
+    expect(addAnother).toContain("handleConnect(c, { addAnother: true })");
+
+    const directoryHandoff = section("onConnectorConnect={(entry, opts) => {", "onConfigureApp=");
+    expect(directoryHandoff).toContain("revealConnectForm(rowId(connector))");
+    expect(directoryHandoff).toContain("opts?.addAnother && isPatConnector(connector.id)");
+    expect(directoryHandoff).toContain("handleAddAnother(connector)");
+    expect(directoryHandoff).toContain("handleConnect(connector, {");
+    expect(directoryHandoff).toContain("...opts,");
+  });
+
   it("keeps the create draft independent from the selected connector settings", () => {
     const createForm = section(
       "{showCliForm === rid && (",
