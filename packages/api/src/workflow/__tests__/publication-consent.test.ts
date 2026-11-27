@@ -5,14 +5,24 @@ import type { ScopeEvidence } from '@use-brian/agent-runtime/security/context-sc
 // Source ancestry is covered by the real DB/HTTP source fixture. These tests exercise native audience rules.
 vi.mock('../../application-platform/external-source-ancestry.js', () => ({ readExternalSourceAncestors: async () => [] }))
 vi.mock('../../application-platform/field-evidence.js', () => ({ readApplicationFieldAncestors: async () => [] }))
-vi.mock('../../db/client.js', () => ({ query: async () => { throw new Error('Unexpected direct database query in publication-consent fixture') }, getPool: () => ({
-  query: async (sql: string, params: unknown[]) => {
-    if (!sql.includes('read_resource_page_dependencies') || !(params[1] as string[]).every(kind => kind === 'memory')) {
-      throw new Error('Unexpected publication fixture source lookup')
+vi.mock('../../db/client.js', async original => {
+  const client = { query: async (sql: string, params: unknown[]) => {
+    if (sql.includes('capture_conversation_evidence') || sql.includes('capture_page_closure_evidence')) {
+      return { rows: [{ value: null }] }
     }
-    return { rows: (params[1] as string[]).map(() => ({ dependencies: [] })) }
-  },
-}) }))
+    if (sql.includes('conversation_mixed_evidence_route')) return { rows: [{ route: null }] }
+    if (sql.includes('read_admitted_session_context_dependencies')) return { rows: [] }
+    if (sql.includes('read_admitted_page_dependencies') && (params[1] as string[]).every(kind => kind === 'memory')) {
+      return { rows: (params[1] as string[]).map(() => ({ dependencies: [] })) }
+    }
+    throw new Error('Unexpected publication fixture source lookup')
+  } }
+  return {
+    query: async () => { throw new Error('Unexpected direct database query in publication-consent fixture') },
+    runWithAgentAccess: (await original<typeof import('../../db/client.js')>()).runWithAgentAccess,
+    withRLSTransaction: async <T>(_userId: string, operation: (scopedClient: typeof client) => Promise<T>) => operation(client),
+  }
+})
 vi.mock('../../db/derived-scope-store.js', async original => ({
   ...await original<typeof import('../../db/derived-scope-store.js')>(),
   readCurrentScopeSources: vi.fn(async () => []),

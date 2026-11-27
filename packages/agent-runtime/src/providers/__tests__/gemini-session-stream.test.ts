@@ -118,6 +118,26 @@ describe('[COMP:providers/gemini-session-stream] Gemini session streaming', () =
     expect(JSON.stringify(second.contents)).toContain('sig-abc')
   })
 
+  it('uses the Gemini no-argument declaration only for a closed empty schema', async () => {
+    fetchMock.mockResolvedValueOnce(sseResponse([
+      { candidates: [{ content: { role: 'model', parts: [{ text: 'Done.' }] }, finishReason: 'STOP' }] },
+    ]))
+    const open: ToolDefinition['parameters'] = { type: 'object', properties: {} }
+    const withMode: ToolDefinition['parameters'] = { type: 'object', properties: { mode: { type: 'string' } } }
+    const session = createGeminiProvider('test-key').createSession({ model: tiers.pro, systemPrompt: 'sys', tools: [
+      { name: 'closed', description: 'Closed empty', parameters: { ...open, additionalProperties: false } },
+      { name: 'open', description: 'Open empty', parameters: open },
+      { name: 'withMode', description: 'Accepts a mode', parameters: withMode },
+    ] })
+    await collect(session.send([{ role: 'user', content: 'Hello.' }]))
+    const request = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
+    expect(request.tools[0].functionDeclarations).toEqual([
+      { name: 'closed', description: 'Closed empty' },
+      { name: 'open', description: 'Open empty', parameters: open },
+      { name: 'withMode', description: 'Accepts a mode', parameters: withMode },
+    ])
+  })
+
   it.each([tiers.standard, tiers.pro, tiers.max, tiers.research])('records %s while sending its wire model', async model => {
     fetchMock.mockResolvedValueOnce(sseResponse(TURN_CHUNKS))
     const session = createGeminiProvider('test-key').createSession({ model, systemPrompt: 'sys' })

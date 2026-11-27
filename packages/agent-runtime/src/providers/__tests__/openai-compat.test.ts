@@ -1,4 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { z } from 'zod'
+import { CONVERSATION_CONTEXT_TOOL, MODEL_HIDDEN_PARAM_MARKER, queryLoop } from '../../engine/query-loop.js'
+import { NOOP_TURN_LEDGER } from '../../engine/turn-ledger.js'
+import { buildTool } from '../../tools/types.js'
 import {
   createOpenAICompatProvider,
   extractCCStreamError,
@@ -6,7 +10,6 @@ import {
   mapCCStopReason,
   DASHSCOPE_INTL_BASE_URL,
 } from '../openai-compat.js'
-import type { StreamChunk } from '../types.js'
 
 /** Build a Response whose body streams the given SSE `data:` payloads. */
 function sseResponse(payloads: Array<Record<string, unknown> | string>): Response {
@@ -16,8 +19,8 @@ function sseResponse(payloads: Array<Record<string, unknown> | string>): Respons
   return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
 }
 
-async function collect(stream: AsyncIterable<StreamChunk>): Promise<StreamChunk[]> {
-  const out: StreamChunk[] = []
+async function collect<T>(stream: AsyncIterable<T>): Promise<T[]> {
+  const out: T[] = []
   for await (const c of stream) out.push(c)
   return out
 }
@@ -70,7 +73,7 @@ describe('[COMP:providers/openai-compat] streaming protocol mapping', () => {
   it('accumulates tool-call fragments per index and forces stopReason tool_use', async () => {
     fetchMock.mockResolvedValueOnce(sseResponse([
       { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_1', function: { name: 'searchBrain', arguments: '' } }] } }] },
-      { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{"query":' } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_1', function: { arguments: '{"query":' } }] } }] },
       { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '"x"}' } }] } }] },
       { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
       '[DONE]',
@@ -85,6 +88,24 @@ describe('[COMP:providers/openai-compat] streaming protocol mapping', () => {
     expect(args).toBe('{"query":"x"}')
     expect(chunks).toContainEqual({ type: 'tool_use_end', id: 'call_1' })
     expect((chunks.at(-1) as { stopReason: string }).stopReason).toBe('tool_use')
+  })
+
+  it.each([false, true])('rejects duplicate IDs across calls before execution (late ID: %s)', async lateId => {
+    fetchMock.mockResolvedValueOnce(sseResponse([
+      { choices: [{ delta: { tool_calls: [0, 1].map(index => ({
+        index, id: index === 0 || !lateId ? 'same-call' : undefined, function: { name: 'searchBrain', arguments: '' },
+      })) }, finish_reason: 'tool_calls' }] },
+      { choices: [{ delta: { tool_calls: [{ index: 1, id: 'same-call', function: { arguments: '{}' } }] } }] },
+      '[DONE]',
+    ]))
+    const events: string[] = []
+    const read = async () => {
+      for await (const chunk of provider.stream({
+        model: 'fixture', systemPrompt: '', messages: [{ role: 'user', content: 'Read both.' }],
+      })) events.push(chunk.type)
+    }
+    await expect(read()).rejects.toThrow('duplicate tool call ID')
+    expect(events).not.toContain('tool_use_end')
   })
 
   it('surfaces reasoning_content as thinking_delta (display-only lane)', async () => {
@@ -194,6 +215,86 @@ describe('[COMP:providers/openai-compat] request construction', () => {
       { type: 'function', function: { name: 'searchBrain', description: 'search', parameters: { type: 'object', properties: {} } } },
     ])
     expect(body.stream_options).toEqual({ include_usage: true })
+  })
+
+  it.each([false, true])('sends an explicitly closed empty tool schema (stateless=%s)', async stateless => {
+    fetchMock.mockResolvedValueOnce(sseResponse([
+      { choices: [{ delta: { content: 'Done.' }, finish_reason: 'stop' }] }, '[DONE]',
+    ]))
+    const custom = createOpenAICompatProvider({
+      baseURL: 'http://model.example/v1', label: 'fixture', wireModel: 'fixture-model', includeStreamUsage: false,
+    })
+    const schemas = {
+      [CONVERSATION_CONTEXT_TOOL]: z.object({}).strict(),
+      open: z.object({}).passthrough(),
+      strip: z.object({}),
+      catchall: z.object({}).strict().catchall(z.string()),
+      hiddenField: z.object({ hidden: z.string().describe(MODEL_HIDDEN_PARAM_MARKER) }).strict(),
+      explicitMode: z.object({ mode: z.enum(['recent_text', 'full']).optional() }).strict(),
+    }
+    const tools = new Map(Object.entries(schemas).map(([name, inputSchema]) => [name, buildTool({
+      name, inputSchema, description: `Fixture ${name}`, execute: async () => ({ data: 'Done.' }),
+    })]))
+    const events = await collect(queryLoop({
+      provider: custom, model: 'fixture-model', systemPrompt: 'Fictional fixture', stateless,
+      messages: [{ role: 'user', content: 'Hello.' }], tools, ledger: NOOP_TURN_LEDGER,
+      context: {
+        userId: 'fixture-user', assistantId: 'fixture-assistant', sessionId: 'fixture-session',
+        appId: 'fixture', channelType: 'web', channelId: 'fixture', abortSignal: new AbortController().signal,
+      },
+    }))
+    expect(events.at(-1)?.type).toBe('turn_complete')
+    const empty = { type: 'object', properties: {} }
+    expect(lastRequestBody().tools).toEqual(Object.entries({
+      [CONVERSATION_CONTEXT_TOOL]: { ...empty, additionalProperties: false },
+      open: empty,
+      strip: empty,
+      catchall: empty,
+      hiddenField: empty,
+      explicitMode: { ...empty, properties: { mode: { type: 'string', enum: ['recent_text', 'full'] } } },
+    }).map(([name, parameters]) => ({ type: 'function', function: { name, description: `Fixture ${name}`, parameters } })))
+  })
+
+  it('settles malformed discovery arguments live and replays the diagnostic pair on context expansion', async () => {
+    const name = CONVERSATION_CONTEXT_TOOL
+    const request = (id: string, args: string) => sseResponse([{ choices: [{ finish_reason: 'tool_calls',
+      delta: { tool_calls: [{ index: 0, id, type: 'function', function: { name, arguments: args } }] },
+    }] }, '[DONE]'])
+    fetchMock.mockResolvedValueOnce(request('malformed', '{"mode":'))
+      .mockResolvedValueOnce(request('corrected', '{}'))
+      .mockResolvedValueOnce(sseResponse([{ choices: [{ delta: { content: 'Finished.' }, finish_reason: 'stop' }] }, '[DONE]']))
+    const execute = vi.fn(async () => ({ data: 'Context ready.' }))
+    const tool = buildTool({ name, inputSchema: z.object({}).strict(), description: 'Read permitted context', execute })
+    const user = { role: 'user' as const, content: 'Continue the earlier discussion.' }
+    const events = await collect(queryLoop({
+      provider, model: 'fixture', messages: [user], systemPrompt: 'Initial', tools: new Map([[name, tool]]),
+      ledger: NOOP_TURN_LEDGER, context: { userId: 'fixture-user', assistantId: 'fixture-assistant', sessionId: 'fixture-session',
+        appId: 'fixture', channelType: 'web', channelId: 'fixture', abortSignal: new AbortController().signal },
+      takeDiscoveredContext: () => execute.mock.calls.length ? {
+        provider, model: 'fixture', messages: [user], systemPrompt: 'Expanded', tools: new Map(),
+      } : undefined,
+    }))
+
+    expect(execute).toHaveBeenCalledOnce()
+    expect(events.at(-1)).toMatchObject({ type: 'turn_complete', response: { content: [{ type: 'text', text: 'Finished.' }] } })
+    const wire = fetchMock.mock.calls.map(([, init]) => JSON.parse(init.body as string).messages)
+    expect(wire).toHaveLength(3)
+    expect(wire[1].slice(2)).toMatchObject([
+      { role: 'assistant', tool_calls: [{ id: 'malformed' }] },
+      { role: 'tool', tool_call_id: 'malformed', content: expect.stringContaining('NOT executed') },
+    ])
+    const firstTurn = events.find(event => event.type === 'assistant_turn')
+    const rejectedCall = firstTurn?.response.content[0], rejectedResult = firstTurn?.toolResults[0]
+    if (rejectedCall?.type !== 'text' || rejectedResult?.type !== 'text') throw new Error('Missing stored diagnostic pair')
+    expect(rejectedCall.text).toContain('Rejected tool call')
+    expect(rejectedResult.text).toContain('Rejected tool-call result')
+    expect(wire[2]).toEqual([
+      { role: 'system', content: 'Expanded' }, user,
+      { role: 'assistant', content: rejectedCall.text },
+      { role: 'user', content: rejectedResult.text },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'corrected', type: 'function', function: { name, arguments: '{}' } }] },
+      { role: 'tool', tool_call_id: 'corrected', content: 'Context ready.' },
+    ])
   })
 
   it('maps thinkingLevel to enable_thinking and omits it by default', async () => {

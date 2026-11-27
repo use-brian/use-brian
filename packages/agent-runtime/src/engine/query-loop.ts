@@ -968,6 +968,7 @@ async function* queryLoopCore(
   // The model may request context after a retry or inbox steer. Keep every
   // already-completed round for the one transition to the expanded session.
   const initialExchange: Message[] = []
+  const initialResultDiagnostics = new Map<ContentBlock, ContentBlock>()
   const initialMessageCount = options.messages.length
   // Full history for stateless mode — rebuilt each turn with assistant + tool results
   let statelessHistory: Message[] = options.stateless ? inheritScopeSources([...options.messages], options.messages) : []
@@ -977,6 +978,26 @@ async function* queryLoopCore(
   // abnormal terminal finalizer receives; the saturated provider session,
   // system prompt, tool catalog, errors, and tool-use narration stay behind.
   const terminalEvidence: TerminalEvidenceItem[] = []
+  let submittedToolCalls = 0
+  let refusedDiscoveryCalls = 0
+
+  async function* finishAtLimit(stopReason: TerminalStopReason): AsyncGenerator<QueryEvent, AssistantResponse> {
+    // A limit after nothing but proven discovery refusals has no progress for
+    // a model to summarize. Missing evidence alone cannot establish that.
+    if (options.takeDiscoveredContext && !options.routineCalendarRead && !options.resumeContext
+      && refusedDiscoveryCalls > 0 && refusedDiscoveryCalls === submittedToolCalls
+      && refusedDiscoveryCalls === loopDetector.totalToolCalls && terminalEvidence.length === 0) {
+      context.abortSignal.throwIfAborted()
+      await assertModelInputAuthority(context)
+      context.abortSignal.throwIfAborted()
+      const text = terminalFallbackReply(stopReason)
+      yield { type: 'text_delta', text }
+      return fallbackTerminalResponse(text)
+    }
+    return yield* finalizeTerminalResponse({ provider, model, context,
+      messages: terminalConversationMessages, evidence: terminalEvidence,
+      stopReason, recordUsage, inputTokenLimit: options.inputTokenLimit, signal: context.abortSignal })
+  }
 
   // Completeness gate state (execution-plan tier). `planNudges` caps the
   // "keep working" continuations per attempt; `planHandoffDone` guards the
@@ -1321,6 +1342,7 @@ async function* queryLoopCore(
             console.warn('[tool-input] rejected input',{boundary:'engine.tool_input',tool:tools.has(name)?name:'unregistered',
               reason:parseProblem?'invalid_json_object':isRejectedToolInputPreview(input)?'non_executable_diagnostic':'unsupported_json_text'})
           }
+          submittedToolCalls++
           toolExecutor.addTool(chunk.id, name, input)
           // Consumers (brain notifications, documents, worker cards) need the
           // canonical operation, while the accumulator keeps the wire call.
@@ -1544,7 +1566,7 @@ async function* queryLoopCore(
       // entire turn still reads as a leak.
       let strippedPrimer = false
       response.content = response.content.map((b) => {
-        if (b.type === 'text' && 'text' in b) {
+        if (b.type === 'text' && 'text' in b && !isRejectedToolInputText(b)) {
           const stripped = stripInstructionLeakPrefix(b.text)
           if (stripped !== b.text) strippedPrimer = true
           return { ...b, text: stripped }
@@ -1558,14 +1580,14 @@ async function* queryLoopCore(
         (block) => block.type !== 'text' || !('text' in block) || hasVisibleText(block.text),
       )
       const textBlocks = response.content.filter(
-        (b): b is { type: 'text'; text: string } => b.type === 'text' && 'text' in b,
+        (b): b is { type: 'text'; text: string } => b.type === 'text' && 'text' in b && !isRejectedToolInputText(b),
       )
       const combinedText = textBlocks.map((b) => b.text).join('').trim()
       if (combinedText.length > 0 && looksLikeInstructionLeak(combinedText)) {
         console.warn(
           `[query-loop] turn ${turn} text suppressed (instruction leak): "${combinedText.slice(0, 200)}"`,
         )
-        response.content = response.content.filter((b) => b.type !== 'text')
+        response.content = response.content.filter((b) => b.type !== 'text' || isRejectedToolInputText(b))
       }
     }
 
@@ -1719,6 +1741,12 @@ async function* queryLoopCore(
       }
     }
 
+    if (options.takeDiscoveredContext) {
+      for (const receipt of allToolResults) {
+        if (receipt.type === 'tool_result' && receipt.name === CONVERSATION_CONTEXT_TOOL
+          && receipt.isError && toolExecutor.isPreExecutionFeedback(receipt)) refusedDiscoveryCalls++
+      }
+    }
     appendTerminalEvidence(response.content.map(effectiveToolBlock), allToolResults.map(rejectedResult).map(effectiveToolBlock), terminalEvidence)
 
     // ── Phase 3b: Per-turn assistant record ────────────────────
@@ -1737,7 +1765,13 @@ async function* queryLoopCore(
       ? allToolResults
       : allToolResults.filter(
           (block) => !(block.type === 'tool_result' && transientToolUseIds.has(block.toolUseId)),
-        )).map(rejectedResult)
+        )).map(block => {
+          const stored = rejectedResult(block)
+          if (options.takeDiscoveredContext && !options.stateless && stored !== block) {
+            initialResultDiagnostics.set(block, stored)
+          }
+          return stored
+        })
     const persistedResponse = persistedContent === response.content
       ? response
       : { ...response, content: persistedContent }
@@ -1981,14 +2015,18 @@ async function* queryLoopCore(
 
     // A stream wrapper can finish with end_turn after executing discovery.
     // The admitted frame still needs a provider round to answer the user.
-    const discoveryReceipt = options.takeDiscoveredContext && allToolResults.find(block =>
+    const discoveryReceipts = options.takeDiscoveredContext && allToolResults.filter((block): block is Extract<ContentBlock, { type: 'tool_result' }> =>
       block.type === 'tool_result' && response.content.some(call => call.type === 'tool_use' &&
         call.name === CONVERSATION_CONTEXT_TOOL && call.id === block.toolUseId))
-    const discovery = discoveryReceipt?.type === 'tool_result' ? options.takeDiscoveredContext?.({
-      firstAndOnlyCallFailed: discoveryReceipt.isError === true && !options.resumeContext
+    const discovery = discoveryReceipts?.length ? options.takeDiscoveredContext?.({
+      firstAndOnlyCallFailed: discoveryReceipts[0].isError === true && !options.resumeContext
         && turn === 0 && startedToolCalls === 1 && loopStepIndex === 1,
     }) : undefined
-    if (discoveryReceipt?.type === 'tool_result' && discoveryReceipt.isError) throw new Error('Conversation context discovery failed.')
+    // Invalid and loop-blocked calls never entered discovery. Let the loop
+    // deliver correction feedback or finalize an exhausted budget normally.
+    if (discoveryReceipts?.some(receipt => receipt.isError && !toolExecutor.isPreExecutionFeedback(receipt))) {
+      throw new Error('Conversation context discovery failed.')
+    }
     // A provider can likewise stop with end_turn after an independent initial
     // read. Feed its paired result back while leaving discovery available.
     const initialToolReceipt = options.takeDiscoveredContext && response.stopReason === 'end_turn'
@@ -2382,7 +2420,16 @@ async function* queryLoopCore(
       const surface = await prepareQueryTools(options, provider, model, tools)
       ;({ catalog, registrationMode, toolDefinitions, toolRegistration } = surface)
       nextRequestReplacesSession = true
-      nextMessages = inheritScopeSources([...frame.messages, ...initialExchange, ...nextMessages], frame.messages)
+      initialExchange.push(...nextMessages)
+      // A live stateful session needs a native result for its parked call.
+      // A replacement session replays the stored diagnostic on both sides.
+      const replay = initialResultDiagnostics.size ? initialExchange.map(message => {
+        if (!Array.isArray(message.content) || !message.content.some(block => initialResultDiagnostics.has(block))) return message
+        const content = message.content.map(block => initialResultDiagnostics.get(block) ?? block)
+        return inheritScopeSources({ ...message, content }, message)
+      }) : initialExchange
+      nextMessages = inheritScopeSources([...frame.messages, ...replay], frame.messages)
+      initialResultDiagnostics.clear()
       initialExchange.length = 0
       statelessHistory = options.stateless ? inheritScopeSources([...nextMessages], nextMessages) : []
       terminalConversationMessages.splice(0, initialMessageCount, ...frame.messages)
@@ -2426,17 +2473,7 @@ async function* queryLoopCore(
         ? { code: 'tool_failure_limit', tool: failureStopTool }
         : { code: 'tool_budget_exhausted' }
       if (!hasDeliverableText(response) && allToolResults.length > 0) {
-        const fallbackResponse = yield* finalizeTerminalResponse({
-          provider,
-          model,
-          context,
-          messages: terminalConversationMessages,
-          evidence: terminalEvidence,
-          stopReason: capStop,
-          recordUsage,
-          inputTokenLimit: options.inputTokenLimit,
-          signal: context.abortSignal,
-        })
+        const fallbackResponse = yield* finishAtLimit(capStop)
         options.outputOwner.register(fallbackResponse)
         yield { type: 'assistant_turn', response: fallbackResponse, toolResults: [] }
         yield { type: 'turn_complete', response: fallbackResponse, totalUsage, terminalStop: capStop }
@@ -2453,17 +2490,7 @@ async function* queryLoopCore(
   // gate for the same reason as the tool-cap exit above.
   {
     if (!hasDeliverableText(lastResponse) && loopDetector.totalToolCalls > 0) {
-      const fallbackResponse = yield* finalizeTerminalResponse({
-        provider,
-        model,
-        context,
-        messages: terminalConversationMessages,
-        evidence: terminalEvidence,
-        stopReason: { code: 'max_turns' },
-        recordUsage,
-        inputTokenLimit: options.inputTokenLimit,
-        signal: context.abortSignal,
-      })
+      const fallbackResponse = yield* finishAtLimit({ code: 'max_turns' })
       options.outputOwner.register(fallbackResponse)
       yield { type: 'assistant_turn', response: fallbackResponse, toolResults: [] }
       yield {
@@ -3043,20 +3070,20 @@ export const MODEL_HIDDEN_PARAM_MARKER = '\x00model-hidden\x00'
  * omitted entirely (from both `properties` and `required`) so the model never
  * sees them; the field stays live in the zod schema for runtime parsing.
  */
-export function jsonSchemaFromZod(schema: { _def: unknown }): {
-  type: 'object'
-  properties: Record<string, ToolParameter>
-  required?: string[]
-} {
+export function jsonSchemaFromZod(schema: { _def: unknown }): ToolDefinition['parameters'] {
+  return renderZodToolParameters(schema, true)
+}
+
+function renderZodToolParameters(schema: { _def: unknown }, topLevel: boolean): ToolDefinition['parameters'] {
   const wireSchema = getMcpInputJsonSchema(schema)
-  if (wireSchema) return wireSchema as { type: 'object'; properties: Record<string, ToolParameter>; required?: string[] }
+  if (wireSchema) return wireSchema as ToolDefinition['parameters']
   type TP = ToolParameter
   const def = schema._def as Record<string, unknown>
 
   // Refined direct tools (including webSearch) retain their object parameters.
   // Runtime parsing still enforces the refinement; this only exposes its shape.
   if (def.typeName === 'ZodEffects') {
-    return jsonSchemaFromZod(def.schema as { _def: unknown })
+    return renderZodToolParameters(def.schema as { _def: unknown }, false)
   }
 
   if (def.typeName === 'ZodObject') {
@@ -3081,7 +3108,16 @@ export function jsonSchemaFromZod(schema: { _def: unknown }): {
       }
     }
 
-    return { type: 'object', properties, ...(required.length > 0 ? { required } : {}) }
+    const catchall = def.catchall as { _def?: { typeName: string } } | undefined
+    // The declared shape stays separate from the visible properties so a tool
+    // with hidden fields is never treated as a no-argument tool.
+    const closedEmpty = topLevel && def.unknownKeys === 'strict'
+      && catchall?._def?.typeName === 'ZodNever' && Object.keys(shape).length === 0
+    return {
+      type: 'object', properties,
+      ...(required.length > 0 ? { required } : {}),
+      ...(closedEmpty ? { additionalProperties: false } : {}),
+    }
   }
 
   return { type: 'object', properties: {} as Record<string, TP> }
@@ -3144,7 +3180,7 @@ function zodFieldToJsonSchema(field: { _def: Record<string, unknown> }): Record<
     case 'ZodLiteral':
       return { type: 'string', enum: [String(def.value)] }
     case 'ZodObject':
-      return jsonSchemaFromZod(field)
+      return renderZodToolParameters(field, false)
     case 'ZodDiscriminatedUnion': {
       // Gemini doesn't support oneOf/anyOf — flatten all variants into one object.
       // The discriminator key gets an enum of all valid values, and a description

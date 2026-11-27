@@ -100,6 +100,7 @@ export type ToolDefinition = {
     type: 'object'
     properties: Record<string, ToolParameter>
     required?: string[]
+    additionalProperties?: false
   }
 }
 
