@@ -14,6 +14,14 @@ describe('[COMP:context-engine/layer-1-system-prompt] system-prompt constants', 
     expect(LAYER_1_SYSTEM_PROMPT).toContain('Two search attempts with no useful results = stop searching')
   })
 
+  it('clarifies materially underspecified commitments without blocking safe work or duplicating approval', () => {
+    expect(LAYER_1_SYSTEM_PROMPT).toContain('For low-risk lookups and reversible work, make a reasonable interpretation')
+    expect(LAYER_1_SYSTEM_PROMPT).toContain("don't guess missing details that materially change the action")
+    expect(LAYER_1_SYSTEM_PROMPT).toContain('a workable time window, approximate headcount, and venue if unknown')
+    expect(LAYER_1_SYSTEM_PROMPT).toContain('A draft or a search is not permission to submit')
+    expect(LAYER_1_SYSTEM_PROMPT).toContain('Clarify missing material inputs before calling the tool')
+  })
+
   it('distinguishes a live recheck from discussion of earlier observations', () => {
     expect(LAYER_1_SYSTEM_PROMPT).toContain('fresh read through an appropriate available tool during the current request')
     expect(LAYER_1_SYSTEM_PROMPT).toContain('Earlier conversation results do not prove that external state is unchanged')
