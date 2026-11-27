@@ -46,6 +46,17 @@ describe("[COMP:app-web/chat-side-pane] browser preview discovery", () => {
     expect(open).not.toHaveBeenCalled();
   });
 
+  it("discovers a browser started by a wrapped call without depending on its arguments", async () => {
+    const { preview, lookup, open } = fixture();
+    preview.started("session-a", "other", "mcp_call");
+    await preview.settled("session-a", "other");
+    expect(open).not.toHaveBeenCalled();
+    lookup.mockResolvedValueOnce(null).mockResolvedValueOnce(running);
+    preview.started("session-a", "browser", "mcp_call");
+    await preview.settled("session-a", "browser");
+    expect(open).toHaveBeenCalledExactlyOnceWith("session-a", running);
+  });
+
   it("leaves local previews to the native desktop pane and does not open an ended task", async () => {
     const { preview, lookup, open } = fixture(true);
     lookup.mockResolvedValueOnce(running).mockResolvedValueOnce({ ...running, backend: "cloud", status: "completed" });

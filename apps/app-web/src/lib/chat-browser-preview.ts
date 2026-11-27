@@ -34,7 +34,10 @@ export function createChatBrowserPreview({
   }
   return {
     started(sessionId: string, id: string, name: string) {
-      if (opened.has(sessionId) || !isBrowserToolName(name)) return;
+      // Codex and other discovery-first turns can invoke the native browser
+      // through mcp_call. Arguments can be redacted from activity events;
+      // the authenticated session lookup, not that wrapper, proves liveness.
+      if (opened.has(sessionId) || (!isBrowserToolName(name) && name !== "mcp_call")) return;
       const sessionCalls = calls.get(sessionId) ?? new Map();
       if (!sessionCalls.has(id)) sessionCalls.set(id, probe(sessionId));
       calls.set(sessionId, sessionCalls);
