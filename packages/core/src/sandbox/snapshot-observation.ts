@@ -5,7 +5,7 @@ type Row = { id: string; identity: string; node: BrowserSnapshotNode }
 // DOM node identity is scoped to a document. Names, values, positions and
 // scan-local provider refs cannot establish that an element survived a scan.
 const identity = (n: BrowserSnapshotNode) => JSON.stringify([n.nodeId, !!n.ref])
-export const renderSnapshotNode = (n: BrowserSnapshotNode) => `${n.ref ? `${n.ref} ` : ''}${n.role} ${JSON.stringify(n.name)}${n.value !== undefined ? ` value=${JSON.stringify(n.value)}` : ''}${n.disabled ? ' (disabled)' : ''}${n.checked !== undefined ? ` checked=${n.checked}` : ''}${n.required ? ' (required)' : ''}${n.invalid ? ` invalid=${JSON.stringify(n.invalid)}` : ''}`
+export const renderSnapshotNode = (n: BrowserSnapshotNode) => `${n.ref ? `${n.ref} ` : ''}${n.role} ${JSON.stringify(n.name)}${n.value !== undefined ? ` value=${JSON.stringify(n.value)}` : ''}${n.linkUrl ? ` linkUrl=${JSON.stringify(n.linkUrl)}` : ''}${n.disabled ? ' (disabled)' : ''}${n.checked !== undefined ? ` checked=${n.checked}` : ''}${n.required ? ' (required)' : ''}${n.invalid ? ` invalid=${JSON.stringify(n.invalid)}` : ''}`
 const line = renderSnapshotNode
 
 /** Session-owned state. Future compound actions should resolve every public ref through

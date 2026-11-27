@@ -199,7 +199,7 @@ describe('[COMP:api/route-helpers] Route helpers', () => {
       expect(result).toContain('Never switch identities or backends to get around a denial')
       expect(result).toContain('take a fresh snapshot and continue from its current state')
       expect(result).toContain('never blindly repeat a booking, purchase, or submission')
-      for (const unavailable of ['browserExplore', 'browserFillForm', 'listBrowserProfiles']) {
+      for (const unavailable of ['browserExplore', 'browserFillForm', 'listBrowserProfiles', 'browserOpenTab']) {
         expect(result).not.toContain(unavailable)
       }
     })
@@ -210,8 +210,11 @@ describe('[COMP:api/route-helpers] Route helpers', () => {
         ['browserExplore', {}],
         ['browserFillForm', {}],
         ['listBrowserProfiles', {}],
+        ['browserOpenTab', {}],
       ])
       const result = buildBrowserEscalationPrompt(tools)
+      expect(result).toContain('open observed linkUrl values for read-only detail pages with browserOpenTab')
+      expect(result).toContain('Never infer URLs or bypass approval')
       expect(result).toContain('browserExplore')
       expect(result).toContain('Batch independent field edits with browserFillForm')
       expect(result).toContain('check listBrowserProfiles once for eligible profiles')
