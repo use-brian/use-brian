@@ -68,7 +68,7 @@ usable through full snapshots rather than guessed identity matching.
 
 ## Bounded settling
 
-Chromium may include an observed `linkUrl` on an enabled link in a verified document. It is a same-origin HTTP(S) navigation hint; credentials, queries, fragments, and cross-origin targets are omitted. Use it to open read-only detail pages in a separate tab without losing filters on the original page. It does not replace action refs or override approval for actions that change state.
+Chromium may include an observed `linkUrl` on an enabled link in a snapshot. It is a same-origin HTTP(S) navigation hint; credentials, queries, fragments, and cross-origin targets are omitted. Use it to open read-only detail pages in a separate tab without losing filters on the original page. It does not replace action refs or override approval for actions that change state.
 
 Chromium waits for DOM quiet before snapshots and final batch verification: 100 ms without observed
 mutations, bounded by 750 ms, including a host-side deadline for throttled page

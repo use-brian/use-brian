@@ -130,13 +130,21 @@ function formState(node: CdpAXNode): Pick<SnapshotNode, 'checked' | 'required' |
   }
 }
 
+function parseWebUrl(raw: string | undefined): URL | undefined {
+  if (!raw) return undefined
+  try {
+    const url = new URL(raw)
+    if (url.protocol === 'http:' || url.protocol === 'https:') return url
+  } catch { /* No hint for a malformed URL. */ }
+  return undefined
+}
+
 /** Only surface simple link targets, never credentials, query parameters or fragments. */
 function sameOriginLink(node: CdpAXNode, pageOrigin: string): string | undefined {
   const raw = asString(node.properties?.find(p => p.name === 'url')?.value?.value)
-  if (!raw || raw.length > 1024 || raw.includes('?') || raw.includes('#') || !URL.canParse(raw)) return undefined
-  const url = new URL(raw)
-  if ((url.protocol === 'http:' || url.protocol === 'https:') && url.origin === pageOrigin
-    && !url.username && !url.password && url.href.length <= 1024) return url.href
+  if (!raw || raw.length > 1024 || raw.includes('?') || raw.includes('#')) return undefined
+  const url = parseWebUrl(raw)
+  if (url?.origin === pageOrigin && !url.username && !url.password && url.href.length <= 1024) return url.href
   return undefined
 }
 
@@ -146,7 +154,7 @@ function sameOriginLink(node: CdpAXNode, pageOrigin: string): string | undefined
  * boxes that report generic roles). Skips ignored/nameless-noise nodes.
  */
 export function buildSnapshot(axNodes: CdpAXNode[], mode: 'interactive' | 'full' = 'interactive', pageUrl?: string): BuiltSnapshot {
-  const pageOrigin = pageUrl && URL.canParse(pageUrl) ? new URL(pageUrl).origin : undefined
+  const pageOrigin = parseWebUrl(pageUrl)?.origin
   const nodes: SnapshotNode[] = []
   const refToBackendNodeId = new Map<string, number>()
   const refToName = new Map<string, string>()

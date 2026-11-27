@@ -666,7 +666,7 @@ export class TabExecutor {
         continue // Discard the old AX tree; never label it with the new document id.
       }
       const documentId = before !== undefined && before === after ? `${tabId}:${attachmentId}:${before}` : undefined
-      this.lastSnapshot = buildSnapshot(res.nodes ?? [], mode, documentId ? tab.url : undefined)
+      this.lastSnapshot = buildSnapshot(res.nodes ?? [], mode, tab.url)
       return { url: tab.url ?? '', title: tab.title ?? '', ...(documentId ? { documentId } : {}), nodes: this.lastSnapshot.nodes }
     }
     this.lastSnapshot = null
