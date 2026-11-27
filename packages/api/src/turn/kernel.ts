@@ -575,9 +575,12 @@ class AssistantTurnOwner {
         ...(chatArchive && lane === 'channel' ? captureInitialChatArchiveTools(input.candidateTools, preparation.assertCurrent, chatArchive) : []),
         ...(mailbox ? captureInitialMailboxTools(lane, mailbox, preparation.assertCurrent) : []),
         ...(knowledge && lane !== 'public' ? [captureInitialKnowledgeSearch(lane, knowledge, preparation.assertCurrent)] : [])]
+      const browserDiscoveryHint = input.candidateTools.has('browserNavigate')
+        ? ` For a page that needs live interaction (forms, filters, checking availability through a search form), call ${CONVERSATION_CONTEXT_TOOL}${recentText ? ' in full mode' : ''} first to check for permitted browser tools. A static URL read cannot do those actions, even if the user gave the link.`
+        : ''
       initial = { ...input, candidateTools: new Map(tools.map(tool => [tool.name, tool])),
         trustedContributions: [...input.trustedContributions ?? [], { name: 'context_discovery',
-          content: `For a self-contained request, answer using the current message and any available tools. You can use tool results in subsequent calls. Call ${CONVERSATION_CONTEXT_TOOL} when the request depends on earlier conversation, referenced material, or a tool that is not already available.${recentText ? ' Use the default recent text for a recent follow-up. Select mode full for older history, referenced material, or a missing capability.' : ''}` }] }
+          content: `For a self-contained request, answer using the current message and any available tools. You can use tool results in subsequent calls. Call ${CONVERSATION_CONTEXT_TOOL} when the request depends on earlier conversation, referenced material, or a tool that is not already available.${recentText ? ' Use the default recent text for a recent follow-up. Select mode full for older history, referenced material, or a missing capability.' : ''}${browserDiscoveryHint}` }] }
     }
     const assemble = preparation.captureRun(initial, model, this.retainedPreparationAccumulator, Boolean(discover))
     const prepared = this.frame('preparation', () => Promise.resolve().then(assemble).then((run): PreparedTurnRunView => {

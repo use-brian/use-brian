@@ -6772,8 +6772,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
 
         // Browser-escalation guidance — dynamic injection gated on the acting
         // browser tools being in the map (tool-awareness carve-out): search
-        // that can't produce the exact figure escalates to the browser, and
-        // zero profiles never blocks a public-site browse.
+        // that can't produce the exact figure escalates to the browser, with
+        // backend-specific guidance on profiles and recovering browser steps.
         systemAddenda += buildBrowserEscalationPrompt(allTools)
         systemAddenda += buildEmailDraftAnchorPrompt(allTools)
 
