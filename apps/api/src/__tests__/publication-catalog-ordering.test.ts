@@ -2,6 +2,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { PGlite } from '@electric-sql/pglite'
 import { toMigrationExecutionSql } from '../../../../packages/api/src/migrations/execution-sql.js'
 
@@ -14,6 +15,8 @@ const contract = (signature: string) => manifest.contracts.find((item: any) => i
 const guard = contract('native_turn_helpers_current()')
 const publication = contract('native_turn_publication_contract()')
 const templates = [guard.bodyParts[1].slot.template, guard.bodyParts[3].slot.template, publication.bodyParts[1].slot.template]
+const pinContracts = manifest.contracts.filter((item: any) => item.bodyParts.some((part: any) =>
+  typeof part === 'string' && part.includes(') pin(function_oid,fingerprint) JOIN pg_catalog.pg_proc p ON p.oid=pin.function_oid')))
 const literal = (text: string) => `'${text.replaceAll("'", "''")}'`
 const renderers = (sql: string, prefix = '') => sql.slice(sql.indexOf(`CREATE FUNCTION pg_temp.${prefix}publication_json(`),
   sql.indexOf('END $source_order$;') + 'END $source_order$;'.length)
@@ -24,6 +27,7 @@ async function fixture() {
   await db.exec(`CREATE ROLE migration_owner NOSUPERUSER NOBYPASSRLS;
     GRANT CREATE,USAGE ON SCHEMA public TO migration_owner;
     SET ROLE migration_owner;
+    BEGIN;
     CREATE TEMP TABLE local_slots(slot jsonb PRIMARY KEY,value text NOT NULL);
     CREATE FUNCTION pg_temp.publication_slot(slot jsonb) RETURNS text LANGUAGE sql AS
       'SELECT value FROM pg_temp.local_slots WHERE local_slots.slot=$1';`)
@@ -38,6 +42,9 @@ async function fixture() {
           let value = String(200000 - slots.size * 137)
           if (slot.kind === 'relationDefaultAcl') value = JSON.stringify(['owner=arwdDxtm/owner', 'app_user=arwd/owner'])
           if (slot.kind === 'ownerAcl') value = `owner=${slot.identity}/owner`
+          if (slot.kind === 'fingerprint') value = createHash('sha256').update(slot.identity).digest('hex')
+          if (slot.kind === 'function' && slot.identity === 'native_turn_helpers_current()') value = '59844'
+          if (slot.kind === 'function' && slot.identity === 'application_empty_query_helpers_current()') value = '59254'
           if (slot.kind === 'constraintTriggerName') value = `RI_ConstraintTrigger_${value}`
           // The production report: source relation predates derivations; the
           // reference trigger predates both recreated foreign keys.
@@ -54,6 +61,9 @@ async function fixture() {
     return input
   }
   const resolved = templates.map(resolve)
+  for (const item of pinContracts) for (const part of item.bodyParts) {
+    if (typeof part !== 'string') resolve({ $slot: part.slot })
+  }
   for (const [slot, value] of slots) await db.query('INSERT INTO local_slots VALUES($1::jsonb,$2)', [slot, value])
   return { db, resolved }
 }
@@ -134,6 +144,83 @@ for (const [file, prefix] of [
   } finally { await db.close() }
 })
 
+test('[COMP:api/migration-execution-sql] authenticates only literal pin permutations without changing source output order', async () => {
+  const file = name, prefix = ''
+  const source = await readFile(new URL(`../../../../packages/api/migrations/${file}`, import.meta.url), 'utf8')
+  const { db } = await fixture()
+  try {
+    await db.exec(renderers(toMigrationExecutionSql(source, file)))
+    await db.exec('CREATE SEQUENCE pin_order_execution_probe')
+    assert.equal(pinContracts.length, 6)
+    for (const item of pinContracts) {
+      const body = (await db.query<{ body: string }>(`SELECT pg_temp.${prefix}publication_source_body($1,$2::jsonb,false) body`,
+        [item.signature, JSON.stringify(item.bodyParts)])).rows[0].body
+      const group = body.match(/FROM \(VALUES (.*?)\) pin\(function_oid,fingerprint\)/s)![1]
+      const rows = group.match(/\([0-9]+::oid,'[a-f0-9]{64}'::text\)/g)!
+      const reported = [...rows].reverse()
+      if (item.signature === 'application_native_worklist_helpers_current()') {
+        assert.equal(rows.length, 85)
+        const native = reported.splice(reported.findIndex(row => row.startsWith('(59844::oid,')), 1)[0]
+        reported.splice(reported.findIndex(row => row.startsWith('(59254::oid,')), 0, native)
+      }
+      const actual = body.replace(group, reported.join(','))
+      assert.notEqual(actual, body)
+      const matches = async (candidate: string, signature = item.signature) => (await db.query<{ matches: boolean }>(
+        `SELECT pg_temp.${prefix}publication_pin_body_matches($1,$2,$3) matches`, [signature, candidate, body])).rows[0].matches
+      assert.equal(await matches(actual), true, item.signature)
+      const render = async () => (await db.query<{ body: string }>('SELECT pg_temp.publication_source_body($1,$2::jsonb,false) body',
+        [item.signature, JSON.stringify(item.bodyParts)])).rows[0].body
+      assert.equal(await render(), body, 'successor output retains the reviewed source order used by later migration compilers')
+      const dependency = item.bodyParts.find((part: any) => part.slot?.kind === 'fingerprint').slot
+      const key = JSON.stringify(dependency)
+      const previous = (await db.query<{ value: string }>('SELECT value FROM local_slots WHERE slot=$1::jsonb', [key])).rows[0].value
+      await db.query('UPDATE local_slots SET value=$2 WHERE slot=$1::jsonb', [key, 'f'.repeat(64)])
+      const fresh = await render()
+      assert.equal(fresh, body.replace(previous, 'f'.repeat(64)), 'new fingerprints come from source slots, never installed pins')
+      await db.query('UPDATE local_slots SET value=$2 WHERE slot=$1::jsonb', [key, previous])
+      assert.equal(await matches(actual, 'unreviewed_guard()'), false)
+      const withRows = (changed: string[]) => body.replace(group, changed.join(','))
+      for (const candidate of [
+        withRows(rows.slice(1)),
+        withRows([...rows, rows[0]]),
+        withRows([rows[0], rows[0], ...rows.slice(2)]),
+        withRows([rows[0].replace(/^\([0-9]+/, '(999999'), ...rows.slice(1)]),
+        withRows([rows[0].replace(/^\(/, '(0'), ...rows.slice(1)]),
+        withRows([rows[0].replace(/[a-f0-9]{64}/, 'f'.repeat(64)), ...rows.slice(1)]),
+        withRows([rows[0].replace(/^\([0-9]+/, "(nextval('pin_order_execution_probe')"), ...rows.slice(1)]),
+        actual + '\n-- unreviewed code',
+        actual.replace('bool_and(', 'bool_or('),
+        actual.replace('pin.fingerprint', "'bypassed'"),
+      ]) assert.equal(await matches(candidate), false, item.signature)
+    }
+    assert.deepEqual((await db.query('SELECT is_called FROM pin_order_execution_probe')).rows, [{ is_called: false }])
+  } finally { await db.close() }
+})
+
+test('[COMP:api/migration-execution-sql] refuses unknown consumers before upstream body rewrites', async () => {
+  const { db } = await fixture()
+  try {
+    await db.exec(renderers(executable))
+    const item = contract('application_native_worklist_helpers_current()')
+    const body = (await db.query<{ body: string }>('SELECT pg_temp.publication_body($1::jsonb) body',
+      [JSON.stringify(item.bodyParts)])).rows[0].body
+    await db.exec(`CREATE FUNCTION public.application_native_worklist_helpers_current() RETURNS boolean LANGUAGE plpgsql AS ${literal(body)}`)
+    const classify = `SELECT pg_temp.publication_pin_assert_consumers(p) FROM pg_proc p
+      WHERE p.oid='public.application_native_worklist_helpers_current()'::regprocedure`
+    await db.query(classify)
+    const hash = (await db.query<{ value: string }>(`SELECT encode(sha256(convert_to(to_jsonb(p)::text,'UTF8')),'hex') value
+      FROM pg_proc p WHERE oid='public.application_native_worklist_helpers_current()'::regprocedure`)).rows[0].value
+    await db.exec(`CREATE SEQUENCE pin_consumer_probe;
+      CREATE FUNCTION public.pin_unknown_consumer() RETURNS text LANGUAGE plpgsql AS
+      ${literal(`BEGIN PERFORM nextval('pin_consumer_probe');RETURN '${hash}';END`)}`)
+    await db.exec('SAVEPOINT consumer_refusal')
+    await assert.rejects(db.query(classify), /publication_unreviewed_upstream_pin_consumer: pin_unknown_consumer/)
+    await db.exec('ROLLBACK TO SAVEPOINT consumer_refusal')
+    assert.deepEqual((await db.query('SELECT is_called FROM pin_consumer_probe')).rows, [{ is_called: false }])
+    assert.equal((await db.query<{ body: string }>("SELECT prosrc body FROM pg_proc WHERE oid='public.application_native_worklist_helpers_current()'::regprocedure")).rows[0].body, body)
+  } finally { await db.close() }
+})
+
 test('[COMP:api/migration-execution-sql] leaves non-profile arrays and unexpected catalog values unchanged', async () => {
   const { db, resolved } = await fixture()
   try {
@@ -156,7 +243,7 @@ test('[COMP:api/migration-execution-sql] leaves non-profile arrays and unexpecte
         'SELECT pg_temp.publication_ordered_catalog($1::jsonb)=$2::jsonb matches',
         [JSON.stringify(templates[1]), JSON.stringify(installed)])).rows[0].matches, false)
     }
-    assert.ok(executable.includes("ELSIF p.prosrc IS DISTINCT FROM pg_temp.publication_source_body(signature,expected->'bodyParts',false) THEN"))
+    assert.ok(executable.includes("ELSIF pg_temp.publication_pin_body_matches(signature,p.prosrc,pg_temp.publication_source_body(signature,expected->'bodyParts',false)) IS NOT TRUE THEN"))
     assert.ok(executable.includes("RAISE EXCEPTION 'publication_upstream_memory_body_changed: %',signature"))
     assert.throws(() => toMigrationExecutionSql(raw + '\n', name), /historical migration content changed/)
     assert.equal(toMigrationExecutionSql(raw, 'future.sql'), raw)

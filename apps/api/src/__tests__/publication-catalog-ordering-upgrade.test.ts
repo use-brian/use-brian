@@ -10,6 +10,7 @@ import { openOrdinaryOwnerPglite } from './ordinary-owner-pglite.js'
 import { migratePglite } from '../migrate-pglite.js'
 import { toPgliteMigrationSql } from '../../../../packages/api/src/migrations/pglite-sql.js'
 import { memoryLineagePublicationExecutionSql } from '../../../../packages/api/src/migrations/memory-lineage-publication-execution.js'
+import { publicationCatalogOrderingExecutionSql } from '../../../../packages/api/src/migrations/publication-catalog-ordering-execution.js'
 import { withoutOuterTransaction } from '../../../../packages/api/src/migrations/transaction-sql.js'
 
 const directory = fileURLToPath(new URL('../../../../packages/api/migrations/', import.meta.url))
@@ -30,6 +31,24 @@ test('[COMP:api/migration-execution-sql] upgrades historical Memory with reorder
     }
     assert.equal((await db.query<{ name: string }>(`SELECT tgname name FROM pg_trigger
       WHERE tgrelid='public.scope_derivation_sources'::regclass ORDER BY oid LIMIT 1`)).rows[0].name, 'scope_derivation_sources_reference')
+    await migratePglite(db, directory, { through: '8159_native_field_reference_checks.sql' })
+    const worklists = '8160_native_file_proof_worklists.sql'
+    const declarations = await readFile(`${directory}/${worklists}`, 'utf8')
+    const definitions = ['knowledge_versions', 'persistent_context'].map(kind =>
+      declarations.match(new RegExp(String.raw`CREATE FUNCTION public\.native_worklist_current_${kind}\([\s\S]*?END \$function\$;`))?.[0])
+    assert.ok(definitions[0] && definitions[1])
+    // Reorder two independent PL/pgSQL declarations in this disposable fixture,
+    // like a restore can, before any comparator enrolls their OIDs. Bodies,
+    // metadata, source migration files and all installed guards stay intact.
+    const reordered = declarations.replace(definitions[0], '__FIXTURE_FIRST_DECLARATION__')
+      .replace(definitions[1], definitions[0]).replace('__FIXTURE_FIRST_DECLARATION__', definitions[1])
+    await db.transaction(async tx => {
+      await tx.exec(withoutOuterTransaction(reordered, worklists))
+      await tx.query('INSERT INTO public._migrations(name) VALUES($1)', [worklists])
+    })
+    assert.deepEqual((await db.query(`SELECT
+      'native_worklist_current_persistent_context(uuid,text,uuid,jsonb)'::regprocedure::oid
+      <'native_worklist_current_knowledge_versions(uuid,text,uuid,jsonb)'::regprocedure::oid reordered`)).rows, [{ reordered: true }])
     await migratePglite(db, directory, { through: '8267_retained_native_graph.sql' })
     const canonicalImage = await db.dumpDataDir('none')
     const upstreamSql = await readFile(new URL(`../../../../packages/api/scripts/conversation-store/historical/${upstream}`, import.meta.url), 'utf8')
@@ -39,8 +58,8 @@ test('[COMP:api/migration-execution-sql] upgrades historical Memory with reorder
     })
     await migratePglite(db, directory, { through: '8271_refresh_recovery_capture.sql' })
     const source = await readFile(`${directory}/${publication}`, 'utf8')
-    const old = withoutOuterTransaction(memoryLineagePublicationExecutionSql(source), publication)
-    await assert.rejects(db.transaction(tx => tx.exec(old)), /publication_upstream_memory_body_changed: native_turn_helpers_current/)
+    const old = withoutOuterTransaction(memoryLineagePublicationExecutionSql(publicationCatalogOrderingExecutionSql(source)), publication)
+    await assert.rejects(db.transaction(tx => tx.exec(old)), /publication_upstream_memory_body_changed: application_native_worklist_helpers_current/)
     const guard = (await db.query<{ body: string; definition: string }>(`SELECT prosrc body,pg_get_functiondef(oid) definition
       FROM pg_proc WHERE oid='native_turn_helpers_current()'::regprocedure`)).rows[0]
     const state = async () => ({
@@ -64,8 +83,14 @@ test('[COMP:api/migration-execution-sql] upgrades historical Memory with reorder
     await migratePglite(db, directory, { through: publication })
     assert.deepEqual((await db.query('SELECT name FROM _migrations WHERE name=$1', [publication])).rows, [{ name: publication }])
     assert.deepEqual((await db.query(`SELECT native_turn_helpers_current() native,
-      native_turn_publication_contract() publication,native_retained_helpers_current() retained`)).rows,
-      [{ native: true, publication: true, retained: true }])
+      native_turn_publication_contract() publication,native_retained_helpers_current() retained,
+      application_native_worklist_helpers_current() worklist`)).rows,
+      [{ native: true, publication: true, retained: true, worklist: true }])
+    const registry = JSON.parse(source.match(/ FOR expected IN SELECT value FROM jsonb_array_elements\('((?:''|[^'])*)'::jsonb/)![1].replaceAll("''", "'"))
+    const worklist = registry.find((item: { signature: string }) => item.signature === 'application_native_worklist_helpers_current()')
+    assert.deepEqual((await db.query(`SELECT p.prosrc=pg_temp.publication_body($1::jsonb) authored_order
+      FROM pg_proc p WHERE oid='application_native_worklist_helpers_current()'::regprocedure`, [JSON.stringify(worklist.bodyParts)])).rows,
+      [{ authored_order: true }])
     assert.deepEqual((await db.query('SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')).rows,
       [{ rolsuper: false, rolbypassrls: false }])
     assert.equal((await db.query<{ body: string }>(`SELECT prosrc body FROM pg_proc WHERE oid='native_turn_helpers_current()'::regprocedure`)).rows[0].body.includes('-- unreviewed body'), false)
