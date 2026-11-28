@@ -8,6 +8,7 @@ import {
 } from './memory-lineage-publication-execution.js'
 import { pageThreadSourceExecutionSql } from './page-thread-execution.js'
 import { publicationCatalogOrderingExecutionSql } from './publication-catalog-ordering-execution.js'
+import { publicationPinOrderingExecutionSql } from './publication-pin-ordering-execution.js'
 
 /** Execution-only adaptation of reviewed historical SQL; contract checks stay intact.
  * [COMP:api/migration-execution-sql]
@@ -174,7 +175,7 @@ export function toMigrationExecutionSql(sql: string, file: string): string {
   if (file === memoryPublicationMigration) {
     // Both the upstream Memory bridge and the original installer must render
     // the same source-owned snapshots using this installation's OID ordering.
-    return memoryLineagePublicationExecutionSql(publicationCatalogOrderingExecutionSql(sql))
+    return publicationPinOrderingExecutionSql(memoryLineagePublicationExecutionSql(publicationCatalogOrderingExecutionSql(sql)))
   }
   if (file === requirementConversion) return publicationCatalogOrderingExecutionSql(sql, 'c8273_')
   if (file === executableContracts) return publicationCatalogOrderingExecutionSql(sql, 'a8273_')
