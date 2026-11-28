@@ -8,7 +8,7 @@ import { vector } from '@electric-sql/pglite-pgvector'
 export async function preparedIdentity(): Promise<string> {
   const root = new URL('../../../../', import.meta.url)
   const migrations = (await readdir(new URL('packages/api/migrations/', root))).filter(name => name.endsWith('.sql')).sort()
-  const adapters = ['concurrent-index', 'execution-sql', 'migration-sql-tokens', 'pglite-sql', 'renames', 'transaction-sql']
+  const adapters = ['concurrent-index', 'execution-sql', 'migration-sql-tokens', 'pglite-sql', 'publication-catalog-ordering-execution', 'renames', 'transaction-sql']
   const hash = createHash('sha256').update(`${process.version}/${process.platform}/${process.arch}\0`)
   for (const path of ['pnpm-lock.yaml', 'apps/api/package.json', 'packages/api/package.json',
     'apps/api/src/__tests__/run-embedded-tests.mjs', 'apps/api/src/migrate-pglite.ts',
