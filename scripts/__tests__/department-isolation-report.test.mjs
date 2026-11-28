@@ -165,15 +165,20 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
   it('keeps heavy embedded replays apart and automatically includes new files', () => {
     const files = readdirSync(new URL('../../apps/api/src/__tests__/', import.meta.url))
     files.push('future-fixture.test.ts', 'helper.ts')
-    const partitions = [1, 2, 3].map(shard => embeddedTestFiles(files, shard))
-    assert.ok(partitions.slice(0, 2).every(files => files.length === 1))
+    const partitions = [1, 2, 3, 4].map(shard => embeddedTestFiles(files, shard))
+    assert.ok([partitions[0], partitions[1], partitions[3]].every(files => files.length === 1))
+    assert.deepEqual(partitions[3], ['publication-catalog-ordering-upgrade.test.ts'])
+    assert.ok(!partitions[2].includes('publication-catalog-ordering-upgrade.test.ts'))
+    assert.ok(partitions[2].includes('publication-catalog-ordering.test.ts'))
     assert.ok(partitions[2].includes('future-fixture.test.ts'))
     const acceptanceFiles = [1, 2, 3, 4, 5, 6].flatMap(index => suitesForShard(parseShard(`${index}/6`)))
       .filter(suite => suite.packageDir === 'apps/api')
       .flatMap(suite => suite.testFiles.map(file => file.replace(/^src\/__tests__\//, '')))
     assert.deepEqual([...partitions.flat(), ...acceptanceFiles].sort(), files.filter(file => file.endsWith('.test.ts')).sort())
     assert.throws(() => embeddedTestFiles(files, 0), /Expected/)
+    assert.throws(() => embeddedTestFiles(files, 5), /Expected/)
     assert.throws(() => embeddedTestFiles([], 1), /Missing/)
+    assert.throws(() => embeddedTestFiles(files.filter(file => file !== 'publication-catalog-ordering-upgrade.test.ts'), 4), /Missing isolated embedded/)
   })
   it('partitions every registered suite once and isolates embedded migration replay', () => {
     for (let total = 4; total <= DEPARTMENT_ISOLATION_SUITES.length; total++) {

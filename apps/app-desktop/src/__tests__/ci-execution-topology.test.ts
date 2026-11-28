@@ -79,6 +79,7 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
       { group: 'owner-successor', timeoutMinutes: 15 },
       { group: 'owner-prerequisites', timeoutMinutes: 10 },
       { group: 'session', timeoutMinutes: 15 },
+      { group: 'publication-upgrade', timeoutMinutes: 15 },
       { group: 'remaining', timeoutMinutes: 10 },
     ]);
     expect(embedded['timeout-minutes']).toBe('${{ matrix.timeoutMinutes }}');
