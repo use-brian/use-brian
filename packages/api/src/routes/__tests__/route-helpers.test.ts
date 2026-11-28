@@ -191,22 +191,44 @@ describe('[COMP:api/route-helpers] Route helpers', () => {
       expect(buildBrowserEscalationPrompt(new Map())).toBe('')
     })
 
-    it('steers escalation + the no-profile posture when browserNavigate is present', () => {
-      const tools = new Map([['browserNavigate', {}]])
-      const result = buildBrowserEscalationPrompt(tools)
-      expect(result).toContain('browserNavigate')
-      expect(result).toContain('Never refuse to browse because the workspace has no browser profile')
+    it('prefers interactive navigation, distinguishes paired profiles, and recovers safely', () => {
+      const result = buildBrowserEscalationPrompt(new Map([['browserNavigate', {}]]))
+      expect(result).toContain('open that site directly in the browser')
       expect(result).toContain('open the authoritative site')
-      // browserExplore is absent from this map, so it must not be named.
-      expect(result).not.toContain('browserExplore')
+      expect(result).toContain('My Browser requires a paired profile')
+      expect(result).toContain('Never switch identities or backends to get around a denial')
+      expect(result).toContain('take a fresh snapshot and continue from its current state')
+      expect(result).toContain('never blindly repeat a booking, purchase, or submission')
+      for (const unavailable of ['browserExplore', 'browserFillForm', 'listBrowserProfiles', 'browserOpenTab']) {
+        expect(result).not.toContain(unavailable)
+      }
     })
 
-    it('names browserExplore only when it is actually injected', () => {
+    it('names optional helpers only when injected', () => {
       const tools = new Map([
         ['browserNavigate', {}],
         ['browserExplore', {}],
+        ['browserFillForm', {}],
+        ['listBrowserProfiles', {}],
+        ['browserOpenTab', {}],
       ])
-      expect(buildBrowserEscalationPrompt(tools)).toContain('browserExplore')
+      const result = buildBrowserEscalationPrompt(tools)
+      expect(result).toContain('open observed linkUrl values for read-only detail pages with browserOpenTab')
+      expect(result).toContain('Never infer URLs or bypass approval')
+      expect(result).toContain('browserExplore')
+      expect(result).toContain('Use browserFillForm to batch independent edits')
+      expect(result).toContain('check listBrowserProfiles once for eligible profiles')
+      expect(result).not.toContain('list its controllable tabs before navigating')
+    })
+
+    it('resumes an existing results tab only when it can list and switch tabs', () => {
+      const tools = new Set(['browserNavigate', 'browserListTabs'])
+      expect(buildBrowserEscalationPrompt(tools)).not.toContain('list its controllable tabs before navigating')
+      tools.add('browserSwitchTab')
+      const prompt = buildBrowserEscalationPrompt(tools)
+      expect(prompt).toContain('list its controllable tabs before navigating')
+      expect(prompt).toContain('Do not reload it or redo filters')
+      expect(prompt).toContain('Never reuse old element refs')
     })
   })
 

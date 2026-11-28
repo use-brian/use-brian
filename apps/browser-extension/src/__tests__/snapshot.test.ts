@@ -23,6 +23,24 @@ describe('[COMP:ext/agent] Ref-based accessibility snapshot builder (P1.5)', () 
     expect(refToName.get('@e1')).toBe('Send')
   })
 
+  it('reports same-origin detail link URLs without disclosing other link targets', () => {
+    const link = (url: string, role = 'link', disabled = false) => ax({
+      nodeId: '1', role: { value: role }, name: { value: 'Details' }, backendDOMNodeId: 10,
+      properties: [{ name: 'url', value: { value: url } }, { name: 'disabled', value: { value: disabled } }],
+    })
+    const observe = (node: CdpAXNode, page = 'https://rooms.example/results') => buildSnapshot([node], 'full', page).nodes[0]
+    expect(observe(link('https://rooms.example/rooms/cedar'))?.linkUrl).toBe('https://rooms.example/rooms/cedar')
+    for (const target of [
+      'https://other.example/rooms/cedar', 'https://rooms.example:444/rooms/cedar',
+      'https://rooms.example/rooms/cedar?code=secret', 'https://rooms.example/rooms/cedar#secret',
+      'https://name:secret@rooms.example/rooms/cedar', 'javascript:void(0)', '/rooms/cedar',
+      `https://rooms.example/${'x'.repeat(1024)}`,
+    ]) expect(observe(link(target))).not.toHaveProperty('linkUrl')
+    expect(observe(link('https://rooms.example/rooms/cedar', 'button'))).not.toHaveProperty('linkUrl')
+    expect(observe(link('https://rooms.example/rooms/cedar', 'link', true))).not.toHaveProperty('linkUrl')
+    expect(observe(link('https://rooms.example/rooms/cedar'), '')).not.toHaveProperty('linkUrl')
+  })
+
   it('skips ignored nodes, nodes without a backend DOM node, and non-interactive noise', () => {
     const { nodes } = buildSnapshot([
       ax({ nodeId: '1', role: { value: 'button' }, name: { value: 'Hidden' }, backendDOMNodeId: 20, ignored: true }),

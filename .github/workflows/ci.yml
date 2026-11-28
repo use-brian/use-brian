@@ -233,6 +233,7 @@ jobs:
           scripts/__tests__/preflight-push.test.mjs
           scripts/__tests__/docker-build-closure.test.mjs
           scripts/__tests__/trigger-hosted-web-release.test.mjs
+          scripts/__tests__/browser-room-acceptance.test.mjs
 
       # Discovery is report-only until complete journeys qualify ten candidates.
       # The required build-test gate depends on complete selected-scope coverage.

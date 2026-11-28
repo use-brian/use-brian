@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { SnapshotObservationState } from '../snapshot-observation.js'
-import type { BrowserSnapshot, BrowserSnapshotNode } from '../types.js'
+import { renderSnapshotNode, SnapshotObservationState } from '../snapshot-observation.js'
+import { BrowserSnapshotSchema, type BrowserSnapshot, type BrowserSnapshotNode } from '../types.js'
 
 const nodes: BrowserSnapshotNode[] = [
   { nodeId: 'email', ref: '@e1', role: 'textbox', name: 'Email', value: 'old' },
@@ -19,6 +19,19 @@ describe('semantic snapshot observations', () => {
     expect(next.rendered).toContain('No changes.')
     expect(state.resolve('@e1')).toBe('@e9')
     expect(next.refLabels.get('@e2')).toBe('Send')
+  })
+
+  it('renders observed link URLs in full and changed observations without replacing the ref', () => {
+    const state = new SnapshotObservationState()
+    const observe = (linkUrl: string) => BrowserSnapshotSchema.parse(page([
+      { nodeId: 'detail', ref: '@e2', role: 'link', name: 'Room details', linkUrl },
+    ]))
+    const render = (snapshot: BrowserSnapshot) => snapshot.nodes.map(renderSnapshotNode).join('\n')
+    expect(state.observe(observe('https://example.com/rooms/cedar'), { ...options, render }).rendered)
+      .toContain('@e1 link "Room details" linkUrl="https://example.com/rooms/cedar"')
+    expect(state.observe(observe('https://example.com/rooms/birch'), { ...options, render, observation: 'diff' }).rendered)
+      .toContain('~ [0] @e1 link "Room details" linkUrl="https://example.com/rooms/birch"')
+    expect(state.resolve('@e1')).toBe('@e2')
   })
 
   it('includes value/disabled changes, informational removals/additions and metadata', () => {

@@ -35,6 +35,8 @@ export const BrowserSnapshotNodeSchema = z.object({
   role: z.string(),
   name: z.string(),
   value: z.string().optional(),
+  /** Simple same-origin HTTP(S) link, when the provider supplies it. */
+  linkUrl: z.string().min(1).max(1024).optional(),
   disabled: z.boolean().optional(),
   checked: z.union([z.boolean(), z.literal('mixed')]).optional(),
   required: z.boolean().optional(),
@@ -51,7 +53,7 @@ export const BrowserSnapshotSchema = z.object({
 })
 export type BrowserSnapshot = z.infer<typeof BrowserSnapshotSchema>
 export type BrowserSnapshotMode = 'interactive' | 'full'
-export type BrowserSnapshotOptions = { mode?: BrowserSnapshotMode }
+export type BrowserSnapshotOptions = { mode?: BrowserSnapshotMode; afterClick?: boolean }
 
 export const BrowserNavigateResultSchema = z.object({ url: z.string() })
 export type BrowserNavigateResult = z.infer<typeof BrowserNavigateResultSchema>

@@ -570,12 +570,10 @@ describe('[COMP:tools/google-calendar] Google Calendar tools', () => {
     expect(updateTool.description).toMatch(/RSVP/i)
   })
 
-  it('system prompt tells model to never ask for text confirmation on tool actions', () => {
-    // Guard against double confirmation: the model asking "Is that okay?" /
-    // "Just to confirm..." in text AND the tool showing an Approve/Deny UI card.
-    expect(LAYER_1_SYSTEM_PROMPT).toMatch(/NEVER ask/)
-    expect(LAYER_1_SYSTEM_PROMPT).toMatch(/Approve\/Deny button/)
-    expect(LAYER_1_SYSTEM_PROMPT).toMatch(/Just to confirm/i)
+  it('reserves confirmation for the UI without treating it as input clarification', () => {
+    expect(LAYER_1_SYSTEM_PROMPT).toMatch(/Fully specified actions with an Approve\/Deny button/)
+    expect(LAYER_1_SYSTEM_PROMPT).toMatch(/NEVER ask for duplicate confirmation in chat/)
+    expect(LAYER_1_SYSTEM_PROMPT).toMatch(/Clarify missing inputs before calling the tool/)
   })
 
   it('write tools have requiresConfirmation set so the UI handles confirmation', () => {

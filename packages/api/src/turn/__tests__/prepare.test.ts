@@ -210,6 +210,22 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
     ]))
   })
 
+  it('steers interactive pages to discovery without exposing browser actions on the initial frame', async () => {
+    const f = await fixture()
+    const discover = vi.fn(async () => { throw new Error('Unexpected history load') })
+    await f.owner.prepareRun({ systemPrompt: 'Initial', messages: [{ role: 'user', content: 'Check the room search form at the supplied URL.' }],
+      candidateTools: new Map([
+        ['urlReader', readTool('urlReader')],
+        ['browserNavigate', { ...writeTool(), name: 'browserNavigate', requiresCapability: 'computer' }],
+      ]), contextDiscovery: discover })
+    await f.owner.run({ loop: owned(f.context), sink: { kind: 'adapter' } })
+    const [session] = f.captured
+    expect(toolNames(session)).toEqual(['requestConversationContext', 'urlReader'])
+    expect(session.config.runtimeSystemContext).toContain('call requestConversationContext first to check for permitted browser tools')
+    expect(session.config.runtimeSystemContext).toContain('A static URL read cannot do those actions')
+    expect(discover).not.toHaveBeenCalled()
+  })
+
   it('exposes only visible current-turn reads without additional grants or approval', async () => {
     const f = await fixture()
     const discover = vi.fn(async () => { throw new Error('Unexpected history load') })
