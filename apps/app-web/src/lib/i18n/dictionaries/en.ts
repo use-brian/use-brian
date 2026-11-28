@@ -2204,6 +2204,7 @@ export const en = {
     // human-readable activity description instead of "Running <tool>".
     toolNarration: {
       generic: "Running {name}",
+      readChatHistory: "Checking chat history",
       // Shown between tool calls during streaming when no tool is
       // currently running — keeps the panel from reading as "all done"
       // while the model is thinking or generating text.

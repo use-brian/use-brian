@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { AccessCeiling } from '@use-brian/agent-runtime/security/access-ceiling.js'
-import { createdRowEvidence, scopeEvidenceFromRows, type ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
+import { ContextScopeAccumulator, createdRowEvidence, scopeEvidenceFromRows, type ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
 import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import { bindScopeSource } from '@use-brian/agent-runtime/security/source-evidence.js'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
 import type { Session } from '../../db/sessions.js'
 import {
+  admitCurrentDeliveryEvidence,
   bindingCeiling,
   createDeliveryAudienceAuthorizer,
   createDeliveryAudienceEnvelopeResolver,
@@ -60,6 +61,73 @@ function ceiling(overrides: Partial<AccessCeiling> = {}): AccessCeiling {
     ...overrides,
   }
 }
+
+describe('[COMP:api/delivery-authority] evidence enrollment during an audience check', () => {
+  const history = { ...source(PROJECT, null, null), resourceKind: 'session_message' as const }
+
+  it('uses one proof when the accumulated evidence is stable', async () => {
+    const accumulator = new ContextScopeAccumulator({ sources: [history] })
+    const prove = vi.fn(async (evidence: ScopeEvidence) => evidence)
+    const accept = vi.fn()
+    await admitCurrentDeliveryEvidence(() => accumulator.evidence, prove, accept, () => true)
+    expect(prove).toHaveBeenCalledExactlyOnceWith(accumulator.evidence)
+    expect(accept).toHaveBeenCalledExactlyOnceWith(accumulator.evidence)
+  })
+
+  it('admits new history with a fresh proof before applying the audience decision', async () => {
+    const accumulator = new ContextScopeAccumulator()
+    const prove = vi.fn(async (evidence: ScopeEvidence) => evidence)
+    prove.mockImplementationOnce(async evidence => {
+      await Promise.resolve()
+      accumulator.noteSource(history)
+      return evidence
+    })
+    const accept = vi.fn()
+    await admitCurrentDeliveryEvidence(() => accumulator.evidence, prove, accept, () => true)
+    expect(prove.mock.calls).toEqual([[expect.not.objectContaining({ sources: expect.any(Array) })], [accumulator.evidence]])
+    expect(accept).toHaveBeenCalledExactlyOnceWith(accumulator.evidence)
+  })
+
+  it('refuses newly enrolled history that the current recipient cannot read', async () => {
+    const accumulator = new ContextScopeAccumulator()
+    const prove = vi.fn(async (evidence: ScopeEvidence) => validateAudienceScopeEvidence(evidence, ceiling()))
+    prove.mockImplementationOnce(async evidence => {
+      accumulator.noteSource({ ...history, userId: OTHER_USER })
+      return evidence
+    })
+    const accept = vi.fn()
+    await expect(admitCurrentDeliveryEvidence(() => accumulator.evidence, prove, accept, () => true))
+      .rejects.toMatchObject({ diagnostic: 'user_visibility' })
+    expect(prove).toHaveBeenCalledTimes(2)
+    expect(accept).not.toHaveBeenCalled()
+  })
+
+  it('preserves a live refusal even when a history page finishes during its proof', async () => {
+    const accumulator = new ContextScopeAccumulator()
+    const refused = new DeliveryAudienceUnverifiedError(undefined, 'source_held')
+    const prove = vi.fn(async () => {
+      accumulator.noteSource(history)
+      throw refused
+    })
+    const accept = vi.fn()
+    await expect(admitCurrentDeliveryEvidence(() => accumulator.evidence, prove, accept, () => true)).rejects.toBe(refused)
+    expect(prove).toHaveBeenCalledOnce()
+    expect(accept).not.toHaveBeenCalled()
+  })
+
+  it('withholds the effect when evidence changes during the refreshed proof', async () => {
+    const accumulator = new ContextScopeAccumulator()
+    const prove = vi.fn(async (evidence: ScopeEvidence) => {
+      accumulator.note({ sensitivity: evidence.sensitivity === 'public' ? 'internal' : 'confidential' })
+      return evidence
+    })
+    const accept = vi.fn()
+    await expect(admitCurrentDeliveryEvidence(() => accumulator.evidence, prove, accept, () => true))
+      .rejects.toMatchObject({ diagnostic: 'source_unverifiable' })
+    expect(prove).toHaveBeenCalledTimes(2)
+    expect(accept).not.toHaveBeenCalled()
+  })
+})
 
 function session(overrides: Partial<Session> = {}): Session {
   return {

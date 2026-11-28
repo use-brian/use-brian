@@ -13,9 +13,11 @@ import { AuthorityChangedError } from '../context-scope/authority-lease.js'
 import { runWithAgentAccess, currentAgentAccess } from '../db/agent-access-context.js'
 import { attachUserVisibleContext, formatUserVisibleContext } from './user-visible-context.js'
 import { captureHarnessRunPreparation } from '../project-harness/turn-context.js'
-import type { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
+import type { ContextScopeAccumulator, ScopeEvidence } from '@use-brian/agent-runtime/security/context-scope.js'
 import { captureBriefRunPreparation } from '../briefs/context.js'
 import type { InitialChatArchiveReads, InitialMailboxCapabilities, InitialReadCapabilities } from './capabilities.js'
+import type { TelegramHistorySource } from './history.js'
+import type { TelegramTextWindow } from '../db/verified-channel-record.js'
 import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
 
 export type PreparedModelSelection = {
@@ -30,13 +32,19 @@ export type NamedRunContribution = {
   content: string
 }
 
+export type BoundTelegramHistorySelection = {
+  isCurrent(): Promise<boolean>
+  hasNewSources(previous: ScopeEvidence, current: ScopeEvidence): boolean
+}
+
 export type TurnRunPreparationInput = TurnRunFrame & {
   /** With discovery, only the current-turn reads eligible on this surface enter the initial roster. */
   contextDiscovery?: (signal: AbortSignal) => Promise<DiscoveredTurnFrame>
-  recentChannelText?: {
-    authority: SessionContextAuthority
-    beforeSequence: number
-    bindSelection(isCurrent: () => Promise<boolean>): void
+  telegramHistory?: {
+    source: TelegramHistorySource
+    window: TelegramTextWindow
+    assertRecipient?(): Promise<void>
+    bindSelection(selection: BoundTelegramHistorySelection): void
     onReadTiming?(milliseconds: number): void
   }
   initialMailboxCapabilities?: InitialMailboxCapabilities

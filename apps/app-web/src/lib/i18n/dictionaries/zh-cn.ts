@@ -2151,6 +2151,7 @@ export const zhCN: Dictionary = {
     },
     toolNarration: {
       generic: "正在运行 {name}",
+      readChatHistory: "正在查看聊天记录",
       working: "处理中…",
       renderView: "正在起草查看",
       renderPage: "正在起草页面",

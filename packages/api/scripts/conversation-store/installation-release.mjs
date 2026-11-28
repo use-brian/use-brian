@@ -42,6 +42,7 @@ import * as release8350 from './installation-authentication-8350.mjs'
 import * as release8351 from './installation-authentication-8351.mjs'
 import * as release8352 from './installation-authentication-8352.mjs'
 import * as release8353 from './installation-authentication-8353.mjs'
+import * as release8354 from './installation-authentication-8354.mjs'
 import * as release8339 from './installation-authentication-8339.mjs'
 import * as release8338 from './installation-authentication-8338.mjs'
 
@@ -90,6 +91,7 @@ const profiles=new Map([
  [release8351.migration,release8351],
  [release8352.migration,release8352],
  [release8353.migration,release8353],
+ [release8354.migration,release8354],
 ])
 export const hasInstallationRelease=head=>profiles.has(head)
 function profileForRelease(head){

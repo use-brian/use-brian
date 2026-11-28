@@ -125,9 +125,9 @@ describe.sequential('private Chat with independent Memory index masks', () => {
           return { async *send(messages) {
             foreground.push(JSON.stringify({ options, messages }))
             yield { type: 'message_start', model: 'fixture' }
-            if (options.tools?.some(tool => tool.name === 'requestConversationContext')) {
+            if (options.tools?.some(tool => tool.name === 'readChatHistory')) {
               const id = 'fixture-memory-mask-context'
-              yield { type: 'tool_use_start', id, name: 'requestConversationContext' }
+              yield { type: 'tool_use_start', id, name: 'readChatHistory' }
               yield { type: 'tool_use_delta', id, input: '{}' }
               yield { type: 'tool_use_end', id }
               yield { type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 1, outputTokens: 1 } }

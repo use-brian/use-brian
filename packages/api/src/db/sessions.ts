@@ -1,6 +1,7 @@
 import {z} from 'zod'
 import { publishNativeSessionMessage } from './conversation-store.js'
 import { publicConversationBindingValues, type PublicTurnConversationBinding } from './public-conversation.js'
+import { exactTelegramQuoteSql, type TelegramTextWindow } from './verified-channel-record.js'
 import { hostObservationReplay } from '@use-brian/shared'
 import { readSessionContextRevisions, writeSessionContextRevision, type SessionContextRevision } from './session-context-revisions.js'
 import { classifySession, sessionKindSql } from '../session-kind.js'
@@ -214,6 +215,9 @@ export type SessionMessage = {
    */
   attachments: SessionMessageAttachment[]
 }
+
+const exactTelegramHistoryQuotes = new WeakSet<SessionMessage>()
+export const isExactTelegramHistoryQuote = (message: SessionMessage): boolean => exactTelegramHistoryQuotes.has(message)
 
 type ScopedSessionMessageRow = SessionMessage & {
   scopeWorkspaceId: string | null
@@ -1164,6 +1168,8 @@ export async function getSessionMessages(
     limit?: number
     afterSequence?: number
     fromSequence?: number | null
+    /** Fixed prior dialogue window and optional exact Telegram reply address. */
+    telegramTextWindow?: TelegramTextWindow & { firstSequence: number }
     /**
      * Withhold rows whose scope is held for review. This read runs on the
      * owner pool, which bypasses the RLS policy that withholds them
@@ -1180,6 +1186,8 @@ export async function getSessionMessages(
 ): Promise<SessionMessage[]> {
   const conditions = ['session_id = $1', 'session_recording_read_allowed(session_id)']
   const values: unknown[] = [sessionId]
+  let cte = ''
+  let quoteColumn = ''
   let paramIdx = 2
   if (opts?.excludeHeld) conditions.push('scope_held IS NOT TRUE')
   if (admittedClient) {
@@ -1213,14 +1221,33 @@ export async function getSessionMessages(
     values.push(opts.fromSequence)
     paramIdx++
   }
+  if (opts?.telegramTextWindow) {
+    const {beforeSequence, firstSequence, quoteId, includeUnaddressedDialogue} = opts.telegramTextWindow
+    const through = `$${paramIdx}`
+    const first = `$${paramIdx+1}`
+    const quote = `$${paramIdx+2}`
+    const includeUnaddressed = `$${paramIdx+3}`
+    cte = `WITH telegram_quote AS MATERIALIZED (${exactTelegramQuoteSql('$1',quote,through)}),
+      telegram_dialogue AS MATERIALIZED (
+        SELECT id FROM public.session_messages WHERE session_id=$1 AND sequence_num BETWEEN ${first} AND ${through}
+        UNION ALL SELECT id FROM telegram_quote WHERE sequence_num<${first}
+      )`
+    quoteColumn = ', id=(SELECT id FROM telegram_quote) AS "exactTelegramQuote"'
+    conditions.push(`id IN (SELECT id FROM telegram_dialogue)
+      AND role IN ('user','assistant') AND (channel_message_id IS NOT NULL OR ${includeUnaddressed}::boolean)
+      AND octet_length(content::text)<=16384
+      AND NOT scope_review_state_held('session_message',id)
+      AND NOT jsonb_path_exists(content,'$[*] ? (@.type == "tool_use" || @.type == "tool_result" || @.type == "host_observation")')`)
+    values.push(beforeSequence-1, firstSequence, quoteId ?? null, includeUnaddressedDialogue === true)
+    paramIdx += 4
+  }
 
   const limitClause = opts?.limit ? `LIMIT $${paramIdx}` : ''
   if (opts?.limit) values.push(opts.limit)
   let relation = 'session_messages'
-  let cte = ''
   if (opts?.publicConversation) {
     const binding = opts.publicConversation
-    if (admittedClient || binding.sessionId !== sessionId) throw new DerivedScopeError('scope_source_changed')
+    if (admittedClient || cte || binding.sessionId !== sessionId) throw new DerivedScopeError('scope_source_changed')
     const credentials = publicConversationBindingValues(binding, binding.version)
     const markers = credentials.map((_, index) => `$${values.length + index + 1}`)
     values.push(...credentials)
@@ -1233,7 +1260,7 @@ export async function getSessionMessages(
   }
 
   const execute = admittedClient ? <T extends pg.QueryResultRow>(sql: string, params: unknown[]) => admittedClient.query<T>(sql, params) : query
-  const result = await execute<ScopedSessionMessageRow>(
+  const result = await execute<ScopedSessionMessageRow & {exactTelegramQuote?: boolean}>(
     `${cte} SELECT id, session_id as "sessionId", role, content,
             sequence_num as "sequenceNum", created_at as "createdAt",
             reply_to_text as "replyToText",
@@ -1251,13 +1278,17 @@ export async function getSessionMessages(
             compartments as "scopeCompartments",
             project_ids as "scopeProjectIds",
             scope_version::text as "scopeVersion",
-            scope_held as "scopeHeld"
+            scope_held as "scopeHeld"${quoteColumn}
      FROM ${relation} WHERE ${conditions.join(' AND ')}
      ORDER BY sequence_num ASC ${limitClause}`,
     values,
   )
 
-  return result.rows.map(bindStoredMessageScope)
+  return result.rows.map(({exactTelegramQuote,...row}) => {
+    const message = bindStoredMessageScope(row)
+    if (exactTelegramQuote) exactTelegramHistoryQuotes.add(message)
+    return message
+  })
 }
 
 /** Recent canonical transcript window for background procedural review. */

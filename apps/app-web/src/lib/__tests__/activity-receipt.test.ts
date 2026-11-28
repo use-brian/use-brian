@@ -28,6 +28,18 @@ const shopifyUse = (id: string, query: string) => ({
 });
 
 describe("[COMP:app-web/activity-receipt] restoreAssistantActivity", () => {
+  it.each(["readChatHistory", "requestConversationContext"])(
+    "summarizes %s as a history read while retaining its stored name",
+    (name) => {
+      const { toolsUsed } = restoreAssistantActivity(
+        [{ type: "tool_use", id: "history-read-1", name, input: {} }],
+        collectToolResults([]), narration, "history-row",
+      );
+      expect(toolsUsed).toMatchObject([{ name, description: "Checking chat history" }]);
+      expect(summarizeActivity(toolsUsed, activity)).toBe("Read 1 source");
+    },
+  );
+
   it("restores actual host read input and result without a fabricated provider call", () => {
     const observation = { type: "host_observation", version: 1, id: "host-read-1", name: "googleCalendarListEvents",
       input: { calendarId: "fictional-calendar" }, content: "Fictional meeting at noon", isError: false };

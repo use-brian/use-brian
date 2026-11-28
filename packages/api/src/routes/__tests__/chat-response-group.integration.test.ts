@@ -59,11 +59,11 @@ async function conversation(variant: Variant, permissionModel: Model, helperClea
       const input = JSON.stringify(messages)
       state.sent.push(input)
       yield { type: 'message_start', model: 'fixture' }
-      if (options.tools?.some(tool => tool.name === 'requestConversationContext')) {
+      if (options.tools?.some(tool => tool.name === 'readChatHistory')) {
         state.first.push(input)
         if (options.runtimeSystemContext?.includes('Another assistant has already responded')) {
           const id = 'fictional-group-history'
-          yield { type: 'tool_use_start', id, name: 'requestConversationContext' }
+          yield { type: 'tool_use_start', id, name: 'readChatHistory' }
           yield { type: 'tool_use_delta', id, input: '{}' }
           yield { type: 'tool_use_end', id }
           yield { type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 2, outputTokens: 2 } }

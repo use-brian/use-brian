@@ -54,6 +54,7 @@ import {
 } from '@use-brian/agent-runtime/engine/turn-output.js'
 import type { ContentBlock, Message } from '@use-brian/agent-runtime/providers/types.js'
 import { inheritScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
+import type { ScopeSource } from '@use-brian/agent-runtime/security/derived-scope.js'
 import type { ToolContext, Tool, ToolResult } from '@use-brian/agent-runtime/tools/types.js'
 import {createTerminalPublicationOwner} from './terminal-publication.js'
 import { committedTurnCompletion, type BufferedWebPublication } from '../db/conversation-publication-recovery.js'
@@ -78,6 +79,7 @@ import type { SessionMessage } from '../db/sessions.js'
 import { writeTurnPublication, type TurnPublicationRequest } from './publication.js'
 import { captureCapabilityComposition, captureInitialChatArchiveTools, captureInitialKnowledgeSearch, captureInitialMailboxTools, initialCurrentTurnTools, type TurnCapabilityProfile, type TurnCapabilityRequest, type TurnCapabilityResult } from './capabilities.js'
 import { captureTurnHistory, readRecentChannelText, recentChannelTextSelectionsCurrent, type CapturedTurnHistory, type RecentChannelTextWitness, type TurnHistoryRequest } from './history.js'
+import type { TelegramTextWindow } from '../db/verified-channel-record.js'
 import { assertInitialReadEvidenceCurrent, closeInitialReadEvidence } from './initial-read-authority.js'
 import { resumePredecessorSlotWait, type ResumeSlotWaitOptions } from './resume-recovery.js'
 import { composeRecoveryMessage, type ComposeRecoveryMessageResult, type RecoveryPendingTurn } from './recovery-message.js'
@@ -436,15 +438,19 @@ class AssistantTurnOwner {
     this.runPreparationStarted = true
     const preparation = this.modelPreparation
     const discover = input.contextDiscovery
-    const recentText = input.recentChannelText && {
-      ...input.recentChannelText, authority: {...input.recentChannelText.authority},
+    const telegramHistory = input.telegramHistory && {
+      ...input.telegramHistory,
+      window: {...input.telegramHistory.window},
+      source: input.telegramHistory.source.kind === 'native'
+        ? {...input.telegramHistory.source, authority: {...input.telegramHistory.source.authority}}
+        : {...input.telegramHistory.source},
     }
     const mailbox = input.initialMailboxCapabilities
     const knowledge = input.initialKnowledgeCapabilities
     const chatArchive = input.initialChatArchiveReads
     if (mailbox && !discover) throw new Error('Initial mailbox reads require an attended context-discovery frame.')
     if (knowledge && !discover) throw new Error('Initial Knowledge reads require an attended context-discovery frame.')
-    if (recentText && (!discover || preparation.lane !== 'channel')) throw new Error('Recent channel text requires attended channel context discovery.')
+    if (telegramHistory && (!discover || preparation.lane !== 'channel')) throw new Error('Recent channel text requires attended channel context discovery.')
     let initial = input
     if (discover) {
       if (input.messages.length !== 1 || input.messages[0]?.role !== 'user') {
@@ -459,17 +465,35 @@ class AssistantTurnOwner {
       let loading: Promise<void> | undefined
       // A cursor only addresses a page issued by this turn. In-flight reads
       // share one promise and the existing turn/tool budget bounds the chain.
-      const recentPages = recentText && new Map<string | undefined, { beforeSequence: number; result?: Promise<ToolResult> }>([
-        [undefined, { beforeSequence: recentText.beforeSequence }],
+      const recentPages = telegramHistory && new Map<string | undefined, { window: TelegramTextWindow; result?: Promise<ToolResult> }>([
+        [undefined, { window: telegramHistory.window }],
       ])
       const recentSelections: RecentChannelTextWitness[] = []
+      const selectedSourceKeys = new Set<string>()
+      const sourceKey = (source: ScopeSource) => JSON.stringify([source.workspaceId, source.resourceKind, source.resourceId, source.version])
       let continuedRecentText = false
       let failure: { error: unknown } | undefined
-      if (recentText) {
-        preparation.assertHistoryAuthority(recentText.authority)
-        if (recentText.authority.accumulator !== this.retainedPreparationAccumulator) {
+      if (telegramHistory?.source.kind === 'native') {
+        preparation.assertHistoryAuthority(telegramHistory.source.authority)
+        if (telegramHistory.source.authority.accumulator !== this.retainedPreparationAccumulator) {
           throw new Error('Recent channel text must retain the original turn accumulator.')
         }
+      }
+      if (telegramHistory?.source.kind === 'stored' && telegramHistory.source.sessionId !== this.params.sessionId) {
+        throw new Error('Recent channel text must retain the original turn session.')
+      }
+      const paged = telegramHistory && telegramHistory.source.kind !== 'unavailable'
+      const pageInstructions = paged ? ' Pass nextCursor as cursor for earlier text.' : ''
+      const mode = z.enum(['recent_text', 'full']).optional()
+      let discoveryInput: Tool['inputSchema'] = telegramHistory ? z.object({ mode }).strict() : z.object({}).strict()
+      if (recentPages && paged) {
+        discoveryInput = z.object({
+          mode,
+          cursor: z.string().uuid().optional().describe('The nextCursor returned by a recent-text call in this turn.'),
+        }).strict().refine(({ mode, cursor }) => cursor === undefined || (mode !== 'full' && recentPages.has(cursor)), {
+          path: ['cursor'],
+          message: 'Use a nextCursor returned in this turn with recent text. Omit cursor for the newest window or full mode.',
+        })
       }
       this.takeDiscoveredContext = ({ firstAndOnlyCallFailed }) => {
         if (lane === 'channel' && firstAndOnlyCallFailed && failure?.error instanceof ConversationHistoryUnavailableError) {
@@ -491,56 +515,76 @@ class AssistantTurnOwner {
       }
       const discoveryTool: Tool = {
         name: CONVERSATION_CONTEXT_TOOL,
-        description: recentText
-          ? 'Read excerpts from the most recent retained conversation messages. Pass the returned nextCursor as cursor to read the preceding window, even if the current window is empty. Use mode full for complete context, referenced material, or additional tools.'
+        description: telegramHistory
+          ? `Read recent retained conversation text and the available quoted message.${pageInstructions} Use mode full for attachments, referenced material, or additional tools.`
           : 'Load permitted conversation history, referenced material, and additional tools. Use when the current request depends on earlier work or needs a tool that is not already available.',
-        inputSchema: recentPages ? z.object({
-          mode: z.enum(['recent_text', 'full']).optional(),
-          cursor: z.string().uuid().optional().describe('The nextCursor returned by a recent-text call in this turn.'),
-        }).strict().refine(({ mode, cursor }) => cursor === undefined || (mode !== 'full' && recentPages.has(cursor)), {
-          path: ['cursor'], message: 'Use a nextCursor returned in this turn with recent text. Omit cursor for the newest window or full mode.',
-        }) : z.object({}).strict(),
+        inputSchema: discoveryInput,
         isReadOnly: true, isConcurrencySafe: false, requiresConfirmation: false,
         timeoutMs: NO_TOOL_TIMEOUT,
         execute: async (input, toolContext) => {
           const signal = toolContext.abortSignal
           signal.throwIfAborted()
-          if (recentText && recentPages && input.mode !== 'full') {
+          if (telegramHistory && recentPages && input.mode !== 'full') {
             const page = recentPages.get(input.cursor)
             if (!page) throw new Error('The conversation context cursor is unavailable.')
-            preparation.assertLoopContext(toolContext)
-            if (toolContext.scopeAccumulator !== recentText.authority.accumulator) throw new AuthorityChangedError(false)
+            const assertBound = () => {
+              preparation.assertLoopContext(toolContext)
+              if (toolContext.scopeAccumulator !== this.retainedPreparationAccumulator) throw new AuthorityChangedError(false)
+            }
+            assertBound()
             const continued = input.cursor !== undefined
             continuedRecentText ||= continued
             page.result ??= this.frame('preparation', async () => {
               const startedAt = performance.now()
-              const selection = await readRecentChannelText(recentText.authority,page.beforeSequence,signal,continued)
-                .finally(() => recentText.onReadTiming?.(performance.now() - startedAt))
-              preparation.assertLoopContext(toolContext)
-              if (toolContext.scopeAccumulator !== recentText.authority.accumulator) throw new AuthorityChangedError(false)
+              await telegramHistory.assertRecipient?.()
+              const selection = await readRecentChannelText(telegramHistory.source, page.window, signal, continued)
+                .finally(() => telegramHistory.onReadTiming?.(performance.now() - startedAt))
+              assertBound()
               signal.throwIfAborted()
+              const quote = selection.quote ? { quote: selection.quote } : undefined
+              if (!selection.available) {
+                return { data: { messages: [], ...quote, scope: 'Retained conversation history is unavailable in this chat.' } }
+              }
+              for (const source of selection.sources) selectedSourceKeys.add(sourceKey(source))
               recentSelections.push(selection.witness)
-              if (recentSelections.length === 1) recentText.bindSelection(async () => {
-                // A progress write can check while a later page is acquired.
-                // Recheck the expanded set together if a page arrives mid-read.
-                for (;;) {
-                  const witnesses = [...recentSelections]
-                  const checkContinuation = continuedRecentText
-                  if (!await recentChannelTextSelectionsCurrent(recentText.authority, witnesses, checkContinuation)) return false
-                  if (witnesses.length === recentSelections.length && checkContinuation === continuedRecentText) return true
-                }
+              if (recentSelections.length === 1) telegramHistory.bindSelection({
+                async isCurrent() {
+                  // A progress write can check while a later page is acquired.
+                  // Recheck the expanded set together if a page arrives mid-read.
+                  for (;;) {
+                    const witnesses = [...recentSelections]
+                    const checkContinuation = continuedRecentText
+                    await telegramHistory.assertRecipient?.()
+                    if (!await recentChannelTextSelectionsCurrent(telegramHistory.source, witnesses, checkContinuation)) return false
+                    if (witnesses.length === recentSelections.length && checkContinuation === continuedRecentText) return true
+                  }
+                },
+                hasNewSources(previous, current) {
+                  const earlierKeys = new Set(previous.sources?.map(sourceKey))
+                  return current.sources?.some(source => {
+                    const key = sourceKey(source)
+                    return selectedSourceKeys.has(key) && !earlierKeys.has(key)
+                  }) === true
+                },
               })
-              const nextCursor = selection.nextBeforeSequence === undefined ? undefined : randomUUID()
-              if (nextCursor && selection.nextBeforeSequence !== undefined) {
-                recentPages.set(nextCursor, { beforeSequence: selection.nextBeforeSequence })
+              let nextCursor: string | undefined
+              if (selection.nextBeforeSequence !== undefined) {
+                nextCursor = randomUUID()
+                recentPages.set(nextCursor, { window: {
+                  beforeSequence: selection.nextBeforeSequence,
+                  includeUnaddressedDialogue: page.window.includeUnaddressedDialogue,
+                } })
               }
               return {
-                data: { messages: selection.messages,
+                data: {
+                  messages: selection.messages,
+                  ...quote,
                   scope: nextCursor
-                    ? 'Recent retained text excerpts. Pass nextCursor as cursor for the preceding window. Use full mode for more complete context.'
-                    : 'Recent retained text excerpts. Use full mode if you need older or more complete context.',
-                  ...(nextCursor ? { nextCursor } : {}) },
-                scopeEvidence: {sources: selection.sources},
+                    ? 'Recent retained text excerpts. Pass nextCursor as cursor for the preceding window.'
+                    : 'Recent retained text excerpts. No earlier retained window remains. Use full mode for referenced material or additional tools.',
+                  ...(nextCursor ? { nextCursor } : {}),
+                },
+                scopeEvidence: { sources: selection.sources },
               }
             })
             const result = await page.result
@@ -609,11 +653,11 @@ class AssistantTurnOwner {
         ...(mailbox ? captureInitialMailboxTools(lane, mailbox, preparation.assertCurrent) : []),
         ...(knowledge && lane !== 'public' ? [captureInitialKnowledgeSearch(lane, knowledge, preparation.assertCurrent)] : [])]
       const browserDiscoveryHint = input.candidateTools.has('browserNavigate')
-        ? ` For a page that needs live interaction (forms, filters, checking availability through a search form), call ${CONVERSATION_CONTEXT_TOOL}${recentText ? ' in full mode' : ''} first to check for permitted browser tools. A static URL read cannot do those actions, even if the user gave the link.`
+        ? ` For a page that needs live interaction (forms, filters, checking availability through a search form), call ${CONVERSATION_CONTEXT_TOOL}${telegramHistory ? ' in full mode' : ''} first to check for permitted browser tools. A static URL read cannot do those actions, even if the user gave the link.`
         : ''
       initial = { ...input, candidateTools: new Map(tools.map(tool => [tool.name, tool])),
         trustedContributions: [...input.trustedContributions ?? [], { name: 'context_discovery',
-          content: `For a self-contained request, answer using the current message and any available tools. You can use tool results in subsequent calls. Call ${CONVERSATION_CONTEXT_TOOL} when the request depends on earlier conversation, referenced material, or a tool that is not already available.${recentText ? ' Use the default recent text for a recent follow-up and pass nextCursor for earlier text. Select mode full for complete context, referenced material, or a missing capability.' : ''}${browserDiscoveryHint}` }] }
+          content: `For a self-contained request, answer using the current message and any available tools. You can use tool results in subsequent calls. Call ${CONVERSATION_CONTEXT_TOOL} when the request depends on earlier conversation, referenced material, or a tool that is not already available.${telegramHistory ? ` Use the default for recent conversation text and replies.${pageInstructions} Select mode full for attachments, referenced material, or a missing capability.` : ''}${browserDiscoveryHint}` }] }
     }
     const assemble = preparation.captureRun(initial, model, this.retainedPreparationAccumulator, Boolean(discover))
     const prepared = this.frame('preparation', () => Promise.resolve().then(assemble).then((run): PreparedTurnRunView => {

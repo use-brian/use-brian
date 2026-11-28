@@ -14,6 +14,9 @@
  * it; `getToolDisplayName` is the accessor.
  */
 export const TOOL_DISPLAY_NAMES: Record<string, string> = {
+  readChatHistory: 'Check chat history',
+  requestConversationContext: 'Check chat history',
+
   // Google Maps
   googleMapsSearchPlaces: 'Search Google Maps',
   googleMapsLookupWeather: 'Check Google Maps weather',
@@ -314,6 +317,8 @@ export function getToolDisplayName(toolName: string): string {
  * for use in tool timeline UIs (Telegram edit-in-place, Slack status).
  */
 const TOOL_STATUS_NAMES: Record<string, string> = {
+  readChatHistory: 'Checking chat history',
+  requestConversationContext: 'Checking chat history',
   saveMemory: 'Saving to memory',
   updateViewedSkill: 'Updating workspace skill',
   getMemory: 'Recalling memories',

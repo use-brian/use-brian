@@ -132,12 +132,12 @@ function provider(fixed: Fixed, calls: Record<Lane | 'other' | 'main', number>, 
       return { async *send(messages) {
         calls.main++
         observePrompt?.(options.systemPrompt + '\n' + (options.runtimeSystemContext ?? ''))
-        if (options.tools?.some(tool => tool.name === 'requestConversationContext')) {
-          expect(options.tools.map(tool => tool.name)).toEqual(['requestConversationContext'])
+        if (options.tools?.some(tool => tool.name === 'readChatHistory')) {
+          expect(options.tools.map(tool => tool.name)).toEqual(['readChatHistory'])
           expect(messages).toHaveLength(1)
           expect(JSON.stringify(messages)).not.toContain('Earlier fictional question about tools.')
           if (fixed.reply || fixed.message !== 'thanks') {
-            yield* toolCall('requestConversationContext', 'fixture-context', {})
+            yield* toolCall('readChatHistory', 'fixture-context', fixed.surface === 'channel' ? {mode:'full'} : {})
             return
           }
         }
@@ -238,8 +238,8 @@ describe.sequential('[COMP:api/turn-kernel] turn routing through the real routes
         calls.main++
         const prompt = [options.systemPrompt, options.runtimeSystemContext].join('\n')
         if (answering) frames.push({ messages: JSON.stringify(messages), prompt })
-        if (options.tools?.some(tool => tool.name === 'requestConversationContext')) {
-          yield* toolCall('requestConversationContext', answering ? 'answer-context' : 'question-context', {})
+        if (options.tools?.some(tool => tool.name === 'readChatHistory')) {
+          yield* toolCall('readChatHistory', answering ? 'answer-context' : 'question-context', {mode:'full'})
         } else if (!answering) {
           yield* toolCall('askQuestion', 'fixture-badge-question', { question, options: ['Blue', 'Green'] })
         } else {
@@ -296,8 +296,8 @@ describe.sequential('[COMP:api/turn-kernel] turn routing through the real routes
         main.push({ system: `${options.systemPrompt}\n${options.runtimeSystemContext ?? ''}`, messages: JSON.stringify(messages),
           tools: (options.tools ?? []).map(tool => tool.name) })
         return (async function* () {
-          if (options.tools?.some(tool => tool.name === 'requestConversationContext')) {
-            yield* toolCall('requestConversationContext', 'fictional-context-call', {})
+          if (options.tools?.some(tool => tool.name === 'readChatHistory')) {
+            yield* toolCall('readChatHistory', 'fictional-context-call', {})
             return
           }
           yield { type: 'message_start', model: 'fixture' }
@@ -333,7 +333,7 @@ describe.sequential('[COMP:api/turn-kernel] turn routing through the real routes
       expect(greeting).not.toContain('event: error')
       expect(greeting).toContain('Fictional greeting reply.')
       expect(main[0]?.system).toContain(charter)
-      expect(main[0]?.tools).toEqual(['requestConversationContext'])
+      expect(main[0]?.tools).toEqual(['readChatHistory'])
       expect(main[0]?.messages).not.toContain('Fictional retained conversation input.')
       expect(main[1]?.system).toContain('Use getMemory to read a known memory ID')
       expect(main[1]?.tools).toContain('getMemory')

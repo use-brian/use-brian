@@ -71,10 +71,10 @@ const provider: LLMProvider = {
       yield { type: 'message_start', model: 'fixture' }
       if (turn?.active && (turn.inputs.length > 0 || input.includes(turn.question))) {
         turn.inputs.push(input)
-        const discover = options.tools?.some(tool => tool.name === 'requestConversationContext')
+        const discover = options.tools?.some(tool => tool.name === 'readChatHistory')
         if (discover || turn.inputs.length === 2) {
           const id = (discover ? 'fixture_context_lookup_' : 'fixture_attachment_lookup_') + turn.slot
-          yield { type: 'tool_use_start', id, name: discover ? 'requestConversationContext' : 'readFileContent' }
+          yield { type: 'tool_use_start', id, name: discover ? 'readChatHistory' : 'readFileContent' }
           yield { type: 'tool_use_delta', id, input: JSON.stringify(discover ? {} : { fileId: turn.attachmentId }) }
           yield { type: 'tool_use_end', id }
           yield { type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 1, outputTokens: 1 } }

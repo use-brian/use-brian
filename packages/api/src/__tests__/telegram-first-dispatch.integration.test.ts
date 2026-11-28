@@ -1,4 +1,4 @@
-/** [COMP:api/channel-recording] A signed Telegram webhook with 300 retained
+/** [COMP:api/channel-recording] Signed Telegram webhook coverage with retained
  * messages. The model, Telegram transport and public lookup responses are fictional. */
 import { createHmac, randomBytes, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
@@ -26,11 +26,12 @@ import { createConnectorGrantStore } from '../db/connector-grant-store.js'
 import { createDbConnectorStore } from '../db/connector-store.js'
 import { createDbMcpSettingsStore } from '../db/mcp-settings-store.js'
 import * as conversationAdmission from '../context-scope/conversation-record-admission.js'
+import * as deliveryAuthority from '../context-scope/delivery-authority.js'
 import * as conversationStore from '../db/conversation-store.js'
 import { mailboxSearchAccountKey } from '../mailbox/search-coverage.js'
 import { createDbCapabilityStore } from '../db/capability-store.js'
 import { createDbChannelIntegrationStore, encryptCredentials } from '../db/channel-integrations.js'
-import { createDbChannelUserStore } from '../db/channel-user-store.js'
+import { createDbChannelUserStore, resolveChannelUser } from '../db/channel-user-store.js'
 import { getAppPool, getPool, queryWithRLS } from '../db/client.js'
 import { initializeConversationVisibility } from '../db/conversation-visibility.js'
 import { createDbKnowledgeStore, type KnowledgeStore } from '../db/knowledge-store.js'
@@ -75,7 +76,8 @@ const historyUnavailableNotice = 'I couldn’t load this conversation’s histor
 const guardedFailureNotice = 'I could not finish this reply. If you asked me to take an action, check whether it went through before asking again.'
 const knowledgeHitReply = 'The current handbook is available.'
 const knowledgeMissReply = 'No knowledge entries match that query.'
-const rows = Number(process.env.BRIAN_TELEGRAM_HISTORY_ROWS ?? 300)
+const denseFullHistory = process.env.BRIAN_TELEGRAM_DENSE_FULL_HISTORY === '1'
+const rows = Number(process.env.BRIAN_TELEGRAM_HISTORY_ROWS ?? (denseFullHistory ? 359 : 300))
 const mailboxSamples = Number(process.env.BRIAN_TELEGRAM_MAILBOX_SAMPLES ?? 1)
 const lookupSamples = Number(process.env.BRIAN_TELEGRAM_LOOKUP_SAMPLES ?? 1)
 const paginationQuestion = 'Could you answer my original calibration request now?'
@@ -83,6 +85,14 @@ const originalCalibrationRequest = 'Can you confirm the wavelength and sample co
 const originalCalibrationAnswer = 'Use 532 nm and run three water samples.'
 const paginationReply = 'For calibration, use 532 nm and run three water samples.'
 const lateRecording = 'A later message proposes a different wavelength and sample count.'
+const quoteSequence = Math.max(1, rows - 24)
+const retainedQuote = 'Use the orange filter to calibrate the sensor.'
+const providerQuotePreview = 'Use the green filter to calibrate the sensor.'
+const quoteAnswer = 'The quoted calibration instruction says to use the orange filter.'
+const quoteUnavailableReply = 'I could not read the quoted calibration instruction.'
+const attachmentFileId = 'fictional-calibration-chart'
+const attachmentPath = 'documents/calibration.png'
+const attachmentImage = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jLQ0AAAAASUVORK5CYII='
 const paginationNewer = [
   'Please answer my earlier calibration request.', 'Sorry, I could not recover that request.',
   'Could you try to answer it again?', 'I still could not retrieve that conversation.',
@@ -95,13 +105,21 @@ const paginationOlder = [
   originalCalibrationRequest, originalCalibrationAnswer,
 ]
 
-function contextCall(id: string, args: { mode?: 'recent_text'; cursor?: string } = {}) {
-  return { functionCall: { name: 'requestConversationContext', id, args }, thoughtSignature: 'fixture-context-signature' }
+function retainedText(sequence: number) {
+  if (sequence === quoteSequence && sequence !== rows - 1) return retainedQuote
+  return sequence === rows - 1 ? 'For final calibration we agreed to use ' + historicalAnswer + '.'
+    : `Fictional observatory log entry ${sequence}. The crew followed the scheduled calibration procedure, inspected the sampling tray, recorded the temperature and exposure interval, and compared this reading with the observations from the previous shift.`
+}
+
+function contextCall(id: string, args: { mode?: 'recent_text' | 'full'; cursor?: string } = {}) {
+  return { functionCall: { name: 'readChatHistory', id, args }, thoughtSignature: 'fixture-context-signature' }
 }
 
 function parseRecentPage(result: string | undefined) {
   expect(result).toBeDefined()
-  return JSON.parse(result!) as { messages: Array<{ role: 'user' | 'assistant'; text: string }>; nextCursor?: string }
+  type Excerpt = { role: 'user' | 'assistant'; text: string }
+  return JSON.parse(result!) as { messages: Excerpt[]; nextCursor?: string;
+    quote?: ({ status: 'available' } & Excerpt) | { status: 'unavailable' } }
 }
 
 function expectRecentPage(result: ReturnType<typeof parseRecentPage>, texts: string[]) {
@@ -148,10 +166,10 @@ async function seedRetainedHistory(fixture: Awaited<ReturnType<typeof persistent
   messageOffset = 0) {
   const { pool, workspaceId, ownerId } = fixture
   let sessionId = ''
+  let firstAnnotation: Awaited<ReturnType<typeof writeSessionMessageAnnotation>> = null
   for (let n = 1; n <= rows; n++) {
     const providerMessageId = String(messageOffset + n + 1000)
-    const text = n === rows - 1 ? 'For final calibration we agreed to use ' + historicalAnswer + '.'
-      : `Fictional observatory log entry ${n}. The crew followed the scheduled calibration procedure, inspected the sampling tray, recorded the temperature and exposure interval, and compared this reading with the observations from the previous shift.`
+    const text = retainedText(n)
     if (n % 2 === 0) {
       await recordDeliveredTelegramMessage({ channelId: incoming.conversationId, providerMessageId, text, botId })
       continue
@@ -161,23 +179,62 @@ async function seedRetainedHistory(fixture: Awaited<ReturnType<typeof persistent
     sessionId = recorded.session.id
     // A genuine actor-authorized topic annotation for every fourth human message.
     // Its synthetic classifier used that one authored field as its evidence.
-    if (n % 8 === 7) {
+    const annotate = denseFullHistory ? n % 10 === 7 || n === rows : n % 8 === 7
+    if (annotate) {
       const { rows: [message] } = await pool.query('SELECT id FROM session_messages WHERE session_id=$1 AND channel_message_id=$2', [sessionId, providerMessageId])
       const source = await readSessionMessageScopeSource(workspaceId, message.id)
       if (!source) throw new Error('Missing authored evidence')
-      const execution = await fixture.execution(ownerId, recorded.session, {
+      const freshExecution = () => fixture.execution(ownerId, recorded.session, {
         kind: 'attended', principal: { kind: 'workspace_member', userId: ownerId, authenticationKind: 'verified_channel' },
       })
-      const authority = { execution, accumulator: new ContextScopeAccumulator({ sources: [source] }) }
-      const classification = bindScopeSources({ topic_label: 'Calibration', state: 'continue' as const, confidence: 1 }, [source])
-      await writeSessionMessageAnnotation({ sessionId, messageId: message.id, classification, replyToText: null, authority })
+      let sources = denseFullHistory && firstAnnotation ? boundScopeSources(firstAnnotation) : [source]
+      if (denseFullHistory && n === rows) {
+        const captures = []
+        for (const throughSequence of [255, 256]) {
+          captures.push(await conversationStore.readAdmittedSessionQuery({ sessionId, throughSequence, topicThroughSequence: 0,
+            authority: { execution: await freshExecution(), accumulator: new ContextScopeAccumulator() } }))
+        }
+        sources = [...new Map(captures.flatMap(boundScopeSources).map(item => [item.resourceId, item])).values()]
+        expect(sources.every(item => item.resourceKind === 'application_field')).toBe(true)
+        const { rows: fields } = await pool.query(`SELECT type_key, selection, cardinality(fields) AS fields,
+          selected_version IS NOT NULL AS versioned, count(*)::int AS count
+          FROM application_field_resources WHERE workspace_id=$1 AND id=ANY($2::uuid[])
+          GROUP BY type_key,selection,cardinality(fields),selected_version IS NOT NULL ORDER BY type_key,selection`,
+        [workspaceId, sources.map(item => item.resourceId)])
+        expect(fields).toEqual([
+          { type_key: 'session_message', selection: 'query', fields: 9, versioned: false, count: 256 },
+          { type_key: 'session_message', selection: 'query_domain', fields: 9, versioned: false, count: 2 },
+          { type_key: 'session_message_annotation', selection: 'query_domain', fields: 5, versioned: false, count: 1 },
+        ])
+      }
+      const authority = { execution: await freshExecution(), accumulator: new ContextScopeAccumulator({ sources }) }
+      const classification = bindScopeSources({ topic_label: 'Calibration', state: 'continue' as const, confidence: 1 }, sources)
+      const annotation = await writeSessionMessageAnnotation({ sessionId, messageId: message.id, classification, replyToText: null, authority })
+      if (!annotation) throw new Error('Missing fixture annotation')
+      firstAnnotation ??= annotation
     }
   }
   const stats = (await pool.query(`SELECT count(*)::int messages, sum(octet_length(content::text))::int bytes,
     (SELECT count(*)::int FROM session_context_scope_revisions WHERE session_id=$1 AND parent_kind='message_annotation') revisions
     FROM session_messages WHERE session_id=$1`, [sessionId])).rows[0]
   expect(stats.messages).toBe(rows)
-  expect(stats.revisions).toBe(Math.floor((rows + 1) / 8))
+  expect(stats.revisions).toBe(denseFullHistory ? 37 : Math.floor((rows + 1) / 8))
+  if (denseFullHistory) {
+    // The current annotation owner materializes inherited revision and message
+    // evidence in addition to the fixture's direct source references.
+    const { rows: edges } = await pool.query(`SELECT d.resource_kind, src.source_kind, count(*)::int AS edges
+      FROM scope_derivations d JOIN scope_derivation_sources src ON src.derivation_id=d.id
+      WHERE d.workspace_id=$1 AND (
+        d.resource_kind='session_message' AND d.resource_id IN (SELECT id FROM session_messages WHERE session_id=$2)
+        OR d.resource_kind='session_context_revision' AND d.resource_id IN (SELECT id FROM session_context_scope_revisions WHERE session_id=$2)
+      ) GROUP BY d.resource_kind,src.source_kind ORDER BY d.resource_kind,src.source_kind`,[workspaceId,sessionId])
+    expect(edges).toEqual([
+      { resource_kind: 'session_context_revision', source_kind: 'application_field', edges: 259 },
+      { resource_kind: 'session_context_revision', source_kind: 'session_context_revision', edges: 107 },
+      { resource_kind: 'session_context_revision', source_kind: 'session_message', edges: 37 },
+    ])
+    console.info('[Telegram dense annotation edges]', JSON.stringify(edges))
+  }
   return { sessionId, stats }
 }
 
@@ -258,7 +315,8 @@ type ModelRequest = {
   contents?: Array<{
     role: string, parts: Array<{
       text?: string
-      functionCall?: { name: string, id: string }
+      inlineData?: { mimeType: string; data: string }
+      functionCall?: { name: string, id: string, args?: Record<string, unknown> }
       functionResponse?: { name: string, id: string, response: { result: string } }
     }>
   }>
@@ -275,6 +333,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
   const mailboxMs: number[] = []
   beforeAll(async () => {
     expect(Number.isSafeInteger(rows) && rows > 0).toBe(true)
+    if (denseFullHistory) expect(rows).toBe(359)
     expect(Number.isSafeInteger(mailboxSamples) && mailboxSamples >= 1 && mailboxSamples <= 100).toBe(true)
     expect(Number.isSafeInteger(lookupSamples) && lookupSamples >= 1 && lookupSamples <= 100).toBe(true)
     await assertLocalFixture()
@@ -308,6 +367,13 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
     { title: 'keeps the public lookup tools unavailable to an explicitly allowed conversation-only guest',
       phase: 'lookup-guest', incomingId: 5200 },
     { title: 'receives the main request within ten seconds and delivers the retained answer', phase: 'ordinary', incomingId: 2000 },
+    { title: 'delivers the retained answer on explicit full history from a signed Telegram reply', phase: 'full-reply', incomingId: 5433 },
+    { title: 'reads an older retained quote on a default signed Telegram history call', phase: 'recent-quote', incomingId: 5434 },
+    { title: 'reports a held quote unavailable on a default signed Telegram history call', phase: 'recent-quote-held', incomingId: 5435 },
+    { title: 'withholds a reply when its older quote is held after model dispatch', phase: 'recent-quote-revoked', incomingId: 5436 },
+    { title: 'uses bounded history for a reply to the Telegram forum creation marker', phase: 'recent-forum-anchor', incomingId: 5437 },
+    { title: 'uses bounded history with an addressed Telegram attachment', phase: 'recent-attachment', incomingId: 5438 },
+    { title: 'preserves a Telegram attachment when explicitly loading full history', phase: 'full-attachment', incomingId: 5439 },
     ...Array.from({length:3},(_,sample)=>({title:`delivers bounded recent Telegram text, sample ${sample+1}`,
       phase:'recent-text' as const,incomingId:5400+sample})),
     { title: 'escalates from recent text to full discovery in the same turn', phase: 'recent-then-full', incomingId: 5403 },
@@ -351,10 +417,16 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
   ] as const)('$title', async ({ phase, incomingId }) => {
     const { pool, workspaceId, sessionId, channelId, integrationId, config, ownerId, secondId, assistantId,
       linkedAccountStore, integrationStore, stats } = recording
+    const isFullReply = phase === 'full-reply'
+    const isFullHistory = isFullReply || phase === 'full-attachment'
+    const hasAttachment = phase === 'recent-attachment' || phase === 'full-attachment'
+    const isRecentQuote = phase === 'recent-quote' || phase === 'recent-quote-held' || phase === 'recent-quote-revoked'
+    const isForumAnchor = phase === 'recent-forum-anchor'
+    const boundedReference = isRecentQuote || isForumAnchor
     const recentThenFull = phase === 'recent-then-full'
     const isPagination = phase.startsWith('recent-page')
     const isRecordingLock = phase.startsWith('recording-lock')
-    const isRecent = isPagination || isRecordingLock || phase === 'recent-text' || recentThenFull || phase === 'recent-selection'
+    const isRecent = boundedReference || phase === 'recent-attachment' || isPagination || isRecordingLock || phase === 'recent-text' || recentThenFull || phase === 'recent-selection'
       || phase === 'recent-delivery' || phase === 'recent-delivery-retry'
     const retryDelivery = phase === 'recent-delivery-retry' || phase === 'recent-page-delivery'
     const revokeBeforeProvider = phase === 'recent-page-provider' || phase === 'recent-page-provider-witness'
@@ -370,6 +442,14 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
     const holdRecent = async (id: string) => {
       const held = await pool.query('UPDATE session_messages SET scope_held=true WHERE session_id=$1 AND id=$2 AND NOT scope_held', [sessionId, id])
       expect(held.rowCount).toBe(1)
+    }
+    let quotedRowId: string | undefined
+    let quotedRowHeld = false
+    if (isRecentQuote) {
+      const { rows: [quoted] } = await pool.query<{ id: string; sequence_num: number }>(`SELECT id,sequence_num
+        FROM session_messages WHERE session_id=$1 AND channel_message_id=$2`, [sessionId, String(quoteSequence + 1000)])
+      expect(quoted.sequence_num).toBeLessThan(rows - 8)
+      quotedRowId = quoted.id
     }
     if (isRecent) {
       const recentRows = isPagination ? [...paginationOlder, ...paginationNewer] : recentThenFull
@@ -421,7 +501,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       { name: 'calculate', id: 'fixture-calculator', args: { expression: '12.50 * 3' } },
     ]
     const lookupEvidence = [lookupUrl, lookupPage, '"result":"37.5"']
-    const analytics = phase === 'lookup' || isKnowledge || isRecent ? new AnalyticsLogger(createDbAnalyticsStore()) : undefined
+    const analytics = phase === 'lookup' || isKnowledge || isRecent || isFullHistory ? new AnalyticsLogger(createDbAnalyticsStore()) : undefined
     const lookupTools = isLookup || phase === 'member'
       ? new Map([createWebSearchTool(), createUrlReaderTool(), calculateTool].map(tool => [tool.name, tool]))
       : historyFailure ? new Map([[calculateTool.name, calculateTool]]) : new Map()
@@ -456,6 +536,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
     const expectedReply = phase === 'mail-revoked' ? unavailableReply : isMail ? mailReply
       : standaloneGuest ? knowledgeGuestReply : isKnowledge ? knowledgeMiss ? knowledgeMissReply : knowledgeHitReply
       : phase === 'lookup' ? lookupReply : phase === 'lookup-guest' ? guestReply
+      : phase === 'recent-quote-held' ? quoteUnavailableReply : isRecentQuote ? quoteAnswer
       : phase === 'recent-page-foreign' ? cursorRefused : isPagination ? paginationReply : isRecent ? recentReply : reply
     const hold = phase === 'headers' || phase === 'response' || phase === 'member' || phase === 'audience'
     const telegramSender = phase === 'member' || unlinkBeforeNextPage ? otherMember
@@ -463,7 +544,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
     const choice = 'Use our earlier calibration decision'
     const authored = phase === 'choice' ? '1' : isMail ? mailQuestion : isLookup ? lookupQuestion
       : standaloneLookup || standaloneGuest ? standaloneKnowledgeQuestion : isKnowledge ? knowledgeQuestion
-      : isPagination ? paginationQuestion : isRecent ? 'What was our latest observing decision?' : question
+      : isRecentQuote || isFullReply ? 'Can you confirm that decision?' : isPagination ? paginationQuestion : isRecent ? 'What was our latest observing decision?' : question
     const pendingQuestion = {
       integrationId: channelId, assistantId, userId: ownerId, incoming: {
         userId: String(sender), channelId: conversationId, text: 'Select the next step', isGroupChat: true, timestamp: Date.now(), raw: {},
@@ -479,6 +560,9 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
     let observedChannelWait: Promise<void> | undefined
     const recentDeliveryAttempts: Array<{chatId:string;topicId?:number;parseMode?:string}> = []
     const paginationReplyTargets: Array<{ chatId: string; topicId?: number }> = []
+    let historyReplyTarget: { chatId: string; topicId?: number } | undefined
+    let historyToolRequestedAt: number | undefined
+    let historyContinuationMs: number | undefined
     const pageRequestedAt = new Map<string, number>()
     const pageContinuationMs = new Map<string, number>()
     let memberRevoked = false
@@ -554,10 +638,10 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       let parts: unknown[]
       if (isMain) {
         const response = (id: string) => body.contents?.at(-1)?.parts.find(part => part.functionResponse?.id === id)?.functionResponse?.response.result
-        const fullContextArgs = JSON.stringify(body.tools ?? []).includes('recent_text') ? {mode:'full'} : {}
         const current = await sqlCounts()
         const sqlCalls = current && before ? { top: current.top - before.top, nested: current.nested - before.nested } : undefined
         modelCalls.push({ body, elapsedMs, sqlCalls })
+        if ((isFullHistory || boundedReference) && modelCalls.length === 2) historyContinuationMs = receivedAt - historyToolRequestedAt!
         console.info('[Telegram main model HTTP ingress]', { round: modelCalls.length, elapsedMs: Math.round(elapsedMs) })
         if (isRecordingLock && modelCalls.length === 1) await holdRecordingChannel()
         if (hold) {
@@ -597,7 +681,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
           }
         } else if (isPagination) {
           for (const { functionResponse } of body.contents?.at(-1)?.parts ?? []) {
-            if (!functionResponse || functionResponse.name !== 'requestConversationContext') continue
+            if (!functionResponse || functionResponse.name !== 'readChatHistory') continue
             contextResults.set(functionResponse.id, functionResponse.response.result)
             pageContinuationMs.set(functionResponse.id, receivedAt - pageRequestedAt.get(functionResponse.id)!)
           }
@@ -637,12 +721,26 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
             const id = (part as ReturnType<typeof contextCall>).functionCall?.id
             if (id) pageRequestedAt.set(id, performance.now())
           }
+        } else if (boundedReference) {
+          if (modelCalls.length === 1) {
+            parts = [contextCall('bounded-reference')]
+            historyToolRequestedAt = performance.now()
+          } else {
+            const page = parseRecentPage(response('bounded-reference'))
+            const admitted = isForumAnchor ? !page.quote && page.messages.some(item => item.text === recentMarker)
+              : page.quote?.status === 'available' && page.quote.text === retainedQuote
+            if (phase === 'recent-quote-revoked' && admitted) {
+              await holdRecent(quotedRowId!)
+              quotedRowHeld = true
+            }
+            parts = [{ text: admitted ? expectedReply : quoteUnavailableReply }]
+          }
         } else if (isRecent) {
           if (modelCalls.length === 1) {
-            parts = [{functionCall:{name:'requestConversationContext',id:'fixture-recent-text',
+            parts = [{functionCall:{name:'readChatHistory',id:'fixture-recent-text',
               args:incomingId===5402?{mode:'recent_text'}:{}},thoughtSignature:'fixture-recent-text-signature'}]
           } else if (recentThenFull && modelCalls.length === 2 && response('fixture-recent-text')?.includes(recentMarker)) {
-            parts = [{functionCall:{name:'requestConversationContext',id:'fixture-full-after-recent',args:{mode:'full'}},
+            parts = [{functionCall:{name:'readChatHistory',id:'fixture-full-after-recent',args:{mode:'full'}},
               thoughtSignature:'fixture-full-after-recent-signature'}]
           } else {
             const admitted = recentThenFull
@@ -663,7 +761,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
             : [{ text: response('fixture-knowledge-query')?.includes(knowledgeExpected) ? expectedReply : 'Knowledge evidence unavailable.' }]
         } else if (isKnowledge) {
           if (modelCalls.length === 1) {
-            parts = [{ functionCall: { name: 'requestConversationContext', id: 'fixture-knowledge-context', args: fullContextArgs },
+            parts = [{ functionCall: { name: 'readChatHistory', id: 'fixture-knowledge-context', args: { mode: 'full' } },
               thoughtSignature: 'fixture-knowledge-context-signature' }]
           } else if (modelCalls.length === 2) {
             parts = [{ functionCall: { name: 'mcp_search', id: 'fixture-knowledge-discover', args: { query: 'search workspace knowledge base' } },
@@ -700,15 +798,18 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
             parts = [{ functionCall: lookupSteps[step], thoughtSignature: 'fixture-lookup-signature' }]
           } else parts = [{ text: lookupReply }]
         } else if (historyFailure) {
-          const discovery = { functionCall: { name: 'requestConversationContext', args: fullContextArgs, id: 'fixture-context' }, thoughtSignature: 'fixture-context-signature' }
+          const discovery = contextCall('fixture-context', { mode: 'full' })
           const unrelated = { functionCall: { name: 'calculate', args: { expression: 'not a calculation' }, id: 'fixture-other-call' }, thoughtSignature: 'fixture-other-signature' }
           if (phase === 'history-sibling-tool') parts = [unrelated, discovery]
           else if (phase === 'history-after-tool' && modelCalls.length === 1) parts = [unrelated]
           else parts = [discovery]
         } else if (phase === 'lookup-guest') {
           parts = [{ text: guestReply }]
-        } else if (modelCalls.length === 1 && JSON.stringify(body.tools ?? []).includes('requestConversationContext')) {
-          parts = [{ functionCall: { name: 'requestConversationContext', args: fullContextArgs, id: 'fixture-context' }, thoughtSignature: 'fixture-context-signature' }]
+        } else if (isFullHistory && modelCalls.length === 1) {
+          parts = [contextCall('fixture-context', { mode: 'full' })]
+          historyToolRequestedAt = performance.now()
+        } else if (modelCalls.length === 1 && JSON.stringify(body.tools ?? []).includes('readChatHistory')) {
+          parts = [contextCall('fixture-context', { mode: 'full' })]
         } else {
           parts = [{ text: JSON.stringify(body.contents).includes(historicalAnswer) ? reply : 'I could not find the calibration decision.' }]
         }
@@ -772,6 +873,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
     const vanishedTopicAttempts: { chatId: string; topicId?: number }[] = []
     const guardedSendTargets: { chatId: string; topicId?: number }[] = []
     let failureNoticeAttempts = 0
+    let attachmentDownloads = 0
     let messageId = incomingId * 10
     let replyReceiptId: string | undefined
     const network = globalThis.fetch
@@ -800,7 +902,15 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
           Admission is open to the public every Saturday, with the last visitor group entering one hour before closing.</p>
           </article></body></html>`, { headers: { 'Content-Type': 'text/html' } })
       }
+      if (hasAttachment && url.origin === 'https://api.telegram.org' && url.pathname === `/file/bot${token}/${attachmentPath}`) {
+        attachmentDownloads++
+        return new Response(Buffer.from(attachmentImage, 'base64'), { headers: { 'content-type': 'image/png' } })
+      }
       if (url.origin !== 'https://api.telegram.org' || !url.pathname.startsWith('/bot' + token + '/')) throw new Error('Unexpected benchmark network destination')
+      if (hasAttachment && url.pathname.endsWith('/getFile')) {
+        expect(JSON.parse(String(init?.body))).toEqual({ file_id: attachmentFileId })
+        return Response.json({ ok: true, result: { file_id: attachmentFileId, file_unique_id: attachmentFileId, file_path: attachmentPath } })
+      }
       if (url.pathname.endsWith('/sendMessage')) {
         const body = JSON.parse(String(init?.body))
         const target = { chatId: String(body.chat_id), topicId: body.message_thread_id }
@@ -833,6 +943,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
         if (body.text === expectedReply) {
           if (isKnowledge) knowledgeReplyTargets.push(target)
           if (isPagination) paginationReplyTargets.push(target)
+          if (isFullHistory || boundedReference || hasAttachment) historyReplyTarget = target
           replyReceiptId = String(messageId)
           deliveredMs = performance.now() - ingress
         }
@@ -861,6 +972,10 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
     const linkRead = vi.spyOn(linkedAccountStore, 'findByProvider')
     configureTelegramTextDeliveryObserver(recordDeliveredTelegramMessage)
     try {
+      if (phase === 'recent-quote-held') {
+        await holdRecent(quotedRowId!)
+        quotedRowHeld = true
+      }
       if (phase === 'unlinked') await changeConfig({ ...config, userAccessMode: 'allowlist' })
       if (phase === 'lookup-guest' || standaloneGuest) await changeConfig({ ...config, userAccessMode: 'allowlist', allowedUserIds: [String(unlinkedSender)] })
       if (knowledgeUnbound) await changeConfig({ ...config, deliveryAudienceBindings: [] })
@@ -874,7 +989,18 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
             ...(knowledgeDm ? { chat: { id: telegramSender, type: 'private', first_name: 'Observer' } } : {
               message_thread_id: topic, is_topic_message: true, chat: { id: chat, type: 'supergroup', is_forum: true, title: 'Fictional observatory' },
             }),
-            from: { id: telegramSender, first_name: 'Observer', is_bot: false }, date: Math.floor(Date.now() / 1000), text
+            ...(isFullReply || boundedReference ? { reply_to_message: {
+              message_id: isForumAnchor ? topic : (isFullReply ? rows - 1 : quoteSequence) + 1000,
+              message_thread_id: topic, is_topic_message: true,
+              chat: { id: chat, type: 'supergroup', is_forum: true, title: 'Fictional observatory' },
+              from: (isFullReply ? rows - 1 : quoteSequence) % 2 === 0 ? { id: Number(botId), first_name: 'Observatory bot', is_bot: true }
+                : { id: sender, first_name: 'Observer', is_bot: false },
+              date: Math.floor(Date.now() / 1000) - 60,
+              ...(isForumAnchor ? { forum_topic_created: { name: 'Fictional calibration' } }
+                : { text: isFullReply ? retainedText(rows - 1) : providerQuotePreview }),
+            } } : {}),
+            from: { id: telegramSender, first_name: 'Observer', is_bot: false }, date: Math.floor(Date.now() / 1000),
+            ...(hasAttachment ? { caption: text, document: { file_id: attachmentFileId, mime_type: 'image/png', file_name: 'calibration.png' } } : { text }),
           }
         })
       })
@@ -894,6 +1020,51 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       const result = await postTelegram(incomingId, authored)
       expect(result.status).toBe(200)
       await vi.waitFor(() => expect(linkRead).toHaveBeenCalledWith('telegram', String(telegramSender)))
+      if (isFullHistory) {
+        const terminal = await vi.waitFor(async () => {
+          expect(modelCalls.length).toBeGreaterThan(0)
+          const { rows: [session] } = await pool.query<{ status: string; turn_lease_token: string | null }>(
+            'SELECT status,turn_lease_token FROM sessions WHERE id=$1', [sessionId])
+          expect(session.turn_lease_token).toBeNull()
+          expect(session.status).not.toBe('running')
+          return session
+        }, { timeout: 120_000, interval: 100 })
+        await analytics!.flush()
+        const { rows: [event] } = await pool.query<{ event_name: string; metadata: Record<string, number | string> }>(`SELECT event_name,metadata
+          FROM analytics_events WHERE session_id=$1 AND event_name IN ('turn_completed','chat_route_error')
+          AND created_at >= (SELECT created_at FROM session_messages WHERE session_id=$1 AND channel_message_id=$2)
+          ORDER BY created_at DESC LIMIT 1`, [sessionId, String(incomingId)])
+        expect(event).toBeDefined()
+        const metrics = event.metadata
+        console.info('[Telegram signed full history]', JSON.stringify({ stats, status: terminal.status, modelRequests: modelCalls.length,
+          contextDiscoveryMs: metrics.context_discovery_ms, classificationCaptureMs: metrics.classification_capture_ms,
+          topicPublishMs: metrics.context_topic_publish_ms, historyReadMs: metrics.context_history_ms, compactionMs: metrics.context_compaction_ms,
+          continuationMs: historyContinuationMs, errorType: metrics.error_type, receipt: replyReceiptId !== undefined }))
+        expect(metrics.context_discovery_count).toBe(1)
+        expect(metrics.classification_capture_count).toBe(1)
+        expect(metrics.context_recent_text_count ?? 0).toBe(0)
+        if (isFullReply) expect(JSON.stringify(modelCalls[0].body.systemInstruction)).toContain('This message has a conversation reference')
+        expect(JSON.stringify(modelCalls[0].body.tools)).toContain('recent_text')
+        expect(terminal.status).toBe('idle')
+        expect(event.event_name).toBe('turn_completed')
+        expect(modelCalls[1].body.contents?.flatMap(message => message.parts)).toContainEqual(
+          expect.objectContaining({ functionCall: expect.objectContaining({ id: 'fixture-context', args: { mode: 'full' } }) }))
+        expect(historyReplyTarget).toEqual({ chatId: String(chat), topicId: topic })
+      }
+      if (phase === 'recent-quote-revoked') {
+        await vi.waitFor(async () => {
+          expect(quotedRowHeld).toBe(true)
+          const { rows: [active] } = await pool.query('SELECT status,turn_lease_token FROM sessions WHERE id=$1', [sessionId])
+          expect(active).toEqual({ status: 'failed', turn_lease_token: null })
+        }, { interval: 100, timeout: 15_000 })
+        expect(modelCalls).toHaveLength(2)
+        expect(JSON.stringify(modelCalls[1].body)).toContain(retainedQuote)
+        expect(JSON.stringify(modelCalls)).not.toContain(providerQuotePreview)
+        expect(delivered.join('\n')).not.toContain(retainedQuote)
+        expect(delivered).not.toContain(quoteAnswer)
+        expect(replyReceiptId).toBeUndefined()
+        return
+      }
       if (historyFailure) {
         const notice = historyBeforeAction ? historyUnavailableNotice : guardedFailureNotice
         // The topic failure follows full discovery. Wait for this turn to release
@@ -1017,10 +1188,10 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
             expect(await linkedAccountStore.findByProvider('telegram', String(telegramSender))).toBeNull()
             expect((await pool.query('SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [workspaceId, secondId])).rowCount).toBe(1)
             expect((await pool.query('SELECT config FROM channel_integrations WHERE id=$1', [integrationId])).rows[0].config).toMatchObject(config)
-            const firstBoundary = pageSelect!.mock.calls[0]?.[1]
+            const firstBoundary = pageSelect!.mock.calls[0]?.[1].beforeSequence
             expect(firstBoundary).toEqual(expect.any(Number))
-            for (const [index, [, beforeSequence]] of pageSelect!.mock.calls.entries()) {
-              if (beforeSequence === firstBoundary) continue
+            for (const [index, [, window]] of pageSelect!.mock.calls.entries()) {
+              if (window.beforeSequence === firstBoundary) continue
               const selection = pageSelect!.mock.results[index]
               if (selection.type !== 'return') throw new Error('The continuation selector did not resolve normally.')
               await expect(selection.value).rejects.toMatchObject({ code: 'scope_source_changed' })
@@ -1030,7 +1201,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
             const read = pageRead!.mock.results[1]
             if (read.type !== 'return') throw new Error('Page two did not finish reading.')
             const secondPage = await read.value
-            expect(secondPage.messages.map(({ text }) => text)).toEqual(paginationOlder)
+            expect(secondPage.messages?.map(({ text }) => text)).toEqual(paginationOlder)
           }
           if (!unlinkBeforeNextPage) expect(pageRead).toHaveBeenCalledTimes(2)
           expect(delivered.join('\n')).not.toContain(originalCalibrationAnswer)
@@ -1171,16 +1342,16 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
         }
         const row = (await pool.query(`SELECT s.status, (SELECT count(*)::int FROM session_messages m WHERE m.session_id=s.id AND m.sequence_num>$2) added
            FROM sessions s WHERE s.id=$1`, [receivingSessionId, knowledgeDm ? 0 : rows])).rows[0]
-        if (isKnowledge && row.status === 'failed') {
+        if (row.status === 'failed') {
           receivingFailed = true
           return
         }
         expect(delivered.length).toBeGreaterThan(0)
-        if (row.status === 'failed') throw new Error('Telegram turn failed after ' + modelCalls.length + ' main model requests')
         expect(row.status).toBe('idle')
         expect(row.added).toBeGreaterThanOrEqual(2)
       }, { interval: 250, timeout: 180_000 })
       if (receivingFailed) {
+        if (!isKnowledge) throw new Error(`Telegram ${phase} turn failed after ${modelCalls.length} main model requests.`)
         const latest = modelCalls.at(-1)?.body.contents?.at(-1)?.parts.find(part => part.functionResponse?.id === 'fixture-knowledge-query')
         await analytics?.flush()
         const { rows: [latestError] } = await pool.query(`SELECT metadata FROM analytics_events
@@ -1209,6 +1380,45 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       expect(replyReceiptId).toBeDefined()
       const stored = await pool.query("SELECT content FROM session_messages WHERE session_id=$1 AND channel_message_id=$2 AND role='assistant'", [receivingSessionId, replyReceiptId])
       expect(stored.rows).toEqual([{ content: [{ type: 'text', text: expectedReply }] }])
+      if (hasAttachment) {
+        expect(attachmentDownloads).toBe(1)
+        for (const call of modelCalls) {
+          expect(call.body.contents?.flatMap(message => message.parts)).toContainEqual({
+            inlineData: { mimeType: 'image/png', data: attachmentImage },
+          })
+        }
+        expect(historyReplyTarget).toEqual({ chatId: String(chat), topicId: topic })
+      }
+      if (boundedReference) {
+        const reply = modelCalls[1].body.contents?.at(-1)?.parts
+          .find(part => part.functionResponse?.id === 'bounded-reference')?.functionResponse
+        const page = parseRecentPage(reply?.response.result)
+        expect(reply?.name).toBe('readChatHistory')
+        expect(page.messages).toHaveLength(7)
+        expect(page.messages.map(message => message.text)).toContain(recentMarker)
+        expect(page.messages.map(message => message.text)).not.toContain(retainedQuote)
+        expect(page.quote).toEqual(isForumAnchor ? undefined : phase === 'recent-quote-held'
+          ? { status: 'unavailable' }
+          : { status: 'available', role: quoteSequence % 2 === 0 ? 'assistant' : 'user', text: retainedQuote })
+        expect(JSON.stringify(modelCalls[0].body)).not.toContain(retainedQuote)
+        expect(JSON.stringify(modelCalls)).not.toContain(providerQuotePreview)
+        expect(historyReplyTarget).toEqual({ chatId: String(chat), topicId: topic })
+        expect(historyRead).not.toHaveBeenCalled()
+        expect(recordRead).not.toHaveBeenCalled()
+        expect(backgroundCalls).toEqual([])
+        await analytics!.flush()
+        const { rows: [completion] } = await pool.query<{ metadata: Record<string, number> }>(`SELECT metadata FROM analytics_events
+          WHERE session_id=$1 AND event_name='turn_completed'
+          AND created_at >= (SELECT created_at FROM session_messages WHERE session_id=$1 AND channel_message_id=$2)`, [sessionId, String(incomingId)])
+        expect(completion.metadata.context_recent_text_count).toBe(1)
+        expect(completion.metadata.context_discovery_count ?? 0).toBe(0)
+        console.info('[Telegram signed bounded history]', {
+          phase, contextRecentTextMs: completion.metadata.context_recent_text_ms, continuationMs: historyContinuationMs,
+          receiptMs: Math.round(deliveredMs!),
+        })
+        if (denseFullHistory) expect(historyContinuationMs).toBeLessThan(1000)
+        return
+      }
       if (isPagination) {
         expect(historyRead).not.toHaveBeenCalled()
         expect(recordRead).not.toHaveBeenCalled()
@@ -1252,14 +1462,14 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
         })
         return
       }
-      if (phase === 'recent-text' || recentThenFull || phase === 'recording-lock-release') {
+      if (phase === 'recent-text' || phase === 'recent-attachment' || recentThenFull || phase === 'recording-lock-release') {
         if (phase === 'recording-lock-release') {
           expect(observedChannelWait).toBeDefined()
           await observedChannelWait
           expect(pageRead).toHaveBeenCalledTimes(1)
         }
         const result = modelCalls[1].body.contents?.at(-1)?.parts.find(part=>part.functionResponse?.id==='fixture-recent-text')?.functionResponse
-        expect(result).toMatchObject({name:'requestConversationContext',response:{result:expect.stringContaining(recentMarker)}})
+        expect(result).toMatchObject({name:'readChatHistory',response:{result:expect.stringContaining(recentMarker)}})
         expect(JSON.stringify(modelCalls[0].body.tools)).toContain('recent_text')
         expect(JSON.stringify(modelCalls[1].body.tools)).toContain('full')
         expect(JSON.stringify(modelCalls[0].body)).not.toContain(recentMarker)
@@ -1331,12 +1541,12 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       }
       if (phase === 'choice') {
         expect(channelQuestions.has(pendingQuestion)).toBe(false)
-        expect(JSON.stringify(modelCalls[0].body.systemInstruction)).toContain('Request conversation context to resolve it')
+        expect(JSON.stringify(modelCalls[0].body.systemInstruction)).toContain('Call readChatHistory')
         const input = await pool.query('SELECT content FROM session_messages WHERE session_id=$1 AND channel_message_id=$2', [sessionId, String(incomingId)])
         expect(input.rows[0].content).toEqual([{ type: 'text', text: '1' }])
       }
       expect(JSON.stringify(modelCalls[0].body)).not.toContain(historicalAnswer)
-      expect(JSON.stringify(modelCalls[0].body.tools)).toContain('requestConversationContext')
+      expect(JSON.stringify(modelCalls[0].body.tools)).toContain('readChatHistory')
       const continuation = modelCalls[1].body.contents ?? []
       if (isMail) {
         expect(readsAtFirstRequest).toBe(0)
@@ -1350,7 +1560,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       if (phase === 'mail-revoked') expect(JSON.stringify(continuation)).not.toContain(mailSubject)
       else expect(JSON.stringify(continuation)).toContain(isMail ? mailSubject : historicalAnswer)
       const call = isMail ? { name: 'imapSearchMessages', id: 'fixture-search' }
-        : { name: 'requestConversationContext', id: 'fixture-context' }
+        : { name: 'readChatHistory', id: 'fixture-context' }
       const callIndex = continuation.findIndex(message => message.role === 'model' && message.parts.some(part => part.functionCall?.id === call.id))
       expect(callIndex).toBeGreaterThanOrEqual(0)
       expect(continuation[callIndex].parts).toContainEqual(expect.objectContaining({ functionCall: expect.objectContaining(call) }))
@@ -1379,6 +1589,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       stub.mockRestore()
       await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
       if (heldInputId) await pool.query('UPDATE session_messages SET scope_held=false WHERE session_id=$1 AND id=$2', [sessionId, heldInputId])
+      if (quotedRowHeld) await pool.query('UPDATE session_messages SET scope_held=false WHERE session_id=$1 AND id=$2', [sessionId, quotedRowId])
       if (isRecent) await pool.query('UPDATE session_messages SET scope_held=false WHERE session_id=$1 AND id=ANY($2::uuid[]) AND scope_held',[sessionId,recentIds])
       if (heldKnowledgeId) await pool.query('UPDATE knowledge_entries SET scope_held=false WHERE workspace_id=$1 AND id=$2', [workspaceId, heldKnowledgeId])
       if (paginationLinkRemoved) await linkedAccountStore.upsert({ userId: secondId, assistantId, provider: 'telegram', providerId: String(telegramSender) })
@@ -1478,7 +1689,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       expect(sample).toBeDefined()
       const messageId = ++telegramMessageId
       if (sent.text === benchmarkReply) sample!.receipt = String(messageId)
-      else if (!/^[⏳✓] Request Conversation Context\b/u.test(sent.text)) {
+      else if (!/^[⏳✓] Checking chat history\b/u.test(sent.text)) {
         sample!.failureNotice = sent.text === historyUnavailableNotice ? 'history unavailable'
           : sent.text === guardedFailureNotice ? 'turn failed' : 'unexpected Telegram reply'
       }
@@ -1756,7 +1967,7 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       }, { timeout: 15_000 })
       expect(modelCalls).toHaveLength(phase === 'direct' || phase === 'retry' ? 3 : phase === 'unlink' || phase === 'reroute' ? 2 : 1)
       const firstTools = JSON.stringify(modelCalls[0].body.tools)
-      expect(firstTools).toContain('requestConversationContext')
+      expect(firstTools).toContain('readChatHistory')
       for (const step of steps) {
         if (privateRead) expect(firstTools).toContain(step.name)
         else expect(firstTools).not.toContain(step.name)
@@ -1810,4 +2021,242 @@ describe.runIf(process.env.BRIAN_TELEGRAM_DISPATCH_BENCHMARK === '1')('[COMP:api
       await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
     }
   }, 30_000)
+
+  it.each([{ actor: 'linked member in a direct chat', speaker: otherMember, incomingId: 5460 },
+    { actor: 'allowlisted guest in a direct chat', speaker: 9100000312, incomingId: 5461 },
+    { actor: 'personal recorder in a group', speaker: sender, incomingId: 5462 }] as const)(
+    'limits signed history to the Telegram audience for the $actor', async ({ actor, speaker, incomingId }) => {
+      const { pool, workspaceId, assistantId, ownerId, secondId, config, channelId, integrationId, integrationStore, linkedAccountStore } = recording
+      const channelUserStore = createDbChannelUserStore()
+      const guest = actor === 'allowlisted guest in a direct chat'
+        ? await resolveChannelUser(channelUserStore, 'telegram', String(speaker), assistantId,
+            async () => ({ email: null, displayName: 'Fictional guest' }))
+        : null
+      if (guest) expect(guest.isIdentified).toBe(false)
+      const privateRecording = actor === 'personal recorder in a group'
+      const nativeDirect = !guest && !privateRecording
+      const readerId = privateRecording ? ownerId : guest?.user.id ?? secondId
+      const personalTopic = topic + 30
+      const personalConversationId = `${chat}:topic:${personalTopic}`
+      const note = (index: number) => `Fictional ${actor} calibration record ${index}.`
+      const reply = privateRecording ? 'The personal recording is unavailable in this group.' : 'I recovered the earlier direct-chat calibration record.'
+      const seedPersonalRecording = async () => {
+        const input = { integrationId, conversationId: personalConversationId, assistantId, senderUserId: readerId }
+        const original = await admitTelegramRecording({ ...input, providerMessageId: String(incomingId * 100), text: note(0) })
+        expect(original).toBeDefined()
+        await changeChannelRecording({ integrationId, actorId: readerId, id: original!.policy.id, revision: original!.policy.revision,
+          enabled: true, destination: 'personal', projectId: null })
+        for (let index = 1; index <= 16; index++) {
+          const recording = await admitTelegramRecording({ ...input, providerMessageId: String(incomingId * 100 + index), text: note(index) })
+          expect(recording?.policy.destination).toBe('personal')
+          if (index === 16) return recording!.session
+        }
+        throw new Error('The private recording was not seeded.')
+      }
+      const session = privateRecording ? await seedPersonalRecording()
+        : await findOrCreateSession({ assistantId, userId: readerId, channelType: 'telegram', channelId: String(speaker) })
+      const firstPageIds = new Set<string>()
+      if (!privateRecording) {
+        // Verified Telegram guest input is stored under its public provider envelope.
+        for (let index = 1; index <= 16; index++) {
+          const message = await addSessionMessage({ sessionId: session.id, role: 'user', senderUserId: readerId,
+            ...(index % 3 === 0 ? {} : { channelMessageId: String(incomingId * 100 + index) }),
+            content: [{ type: 'text', text: note(index) }],
+            scope: { workspaceId, userId: guest ? null : readerId, assistantId: null, sensitivity: guest ? 'public' : 'confidential',
+              compartments: [], projectIds: [] } })
+          if (index >= 9) firstPageIds.add(message.id)
+        }
+      }
+      const modelCalls: ModelRequest[] = []
+      const analytics = new AnalyticsLogger(createDbAnalyticsStore())
+      const app = express()
+      app.use(express.json())
+      app.post('/model/:model', (req, res) => {
+        const body = req.body as ModelRequest
+        const round = modelCalls.push(body)
+        const result = (id: string) => body.contents?.at(-1)?.parts.find(part => part.functionResponse?.id === id)?.functionResponse?.response.result
+        const parts = round === 1 ? [contextCall('dm-page-one')]
+          : privateRecording ? [{ text: parseRecentPage(result('dm-page-one')).messages.length === 0
+            ? reply : 'The personal recording contains messages.' }]
+          : round === 2 ? [contextCall('dm-page-two', { cursor: parseRecentPage(result('dm-page-one')).nextCursor })]
+          : [{ text: parseRecentPage(result('dm-page-two')).messages.some(item => item.text === note(5))
+            ? reply : 'The earlier direct-chat calibration record is unavailable.' }]
+        res.type('text/event-stream').send(`data: ${JSON.stringify({
+          candidates: [{ content: { role: 'model', parts }, finishReason: 'STOP' }],
+          usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 5 },
+        })}\n\n`)
+      })
+      const server = app.listen(0, '127.0.0.1')
+      await once(server, 'listening')
+      const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+      const provider = createRoutingProvider({ gemini: wrapProvider(createGeminiProvider({ kind: 'ai-studio',
+        endpoint: model => `${origin}/model/${model}`, headers: async () => ({ 'Content-Type': 'application/json' }),
+      })) })
+      app.use('/webhook/telegram', telegramByoRoutes({
+        provider, configuredProviders: new Set(['gemini']),
+        decisionRuntime: createDecisionRuntime({ llmProvider: provider, defaultLlmModel: standardGemini.alias }),
+        systemPrompt: 'Answer the speaker using admitted evidence.', tools: new Map(), memoryStore: createDbMemoryStore(),
+        capabilityStore: createDbCapabilityStore(), integrationStore, linkedAccountStore, channelUserStore, analytics, apiUrl: origin,
+      }))
+      const network = globalThis.fetch
+      let nextReceipt = incomingId * 10
+      let telegramReceipt: string | undefined
+      let firstPageEnrolled = false
+      let freshProof = false
+      let unprovedProgressWrites = 0
+      const telegramTargets: Array<{ chatId: string; topicId: number | undefined }> = []
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+        const url = new URL(input instanceof Request ? input.url : String(input))
+        if (url.origin === origin) return network(input, init)
+        if (url.origin !== 'https://api.telegram.org' || !url.pathname.startsWith(`/bot${token}/`)) throw new Error('Unexpected direct history network destination')
+        const writesStatus = url.pathname.endsWith('/sendMessage') || url.pathname.endsWith('/editMessageText')
+        if (firstPageEnrolled && modelCalls.length === 1 && writesStatus && !freshProof) unprovedProgressWrites++
+        if (!url.pathname.endsWith('/sendMessage')) return Response.json({ ok: true, result: true })
+        const body = JSON.parse(String(init?.body))
+        const messageId = ++nextReceipt
+        if (body.text === reply) {
+          telegramTargets.push({ chatId: String(body.chat_id), topicId: body.message_thread_id })
+          telegramReceipt = String(messageId)
+        }
+        return Response.json({ ok: true, result: { message_id: messageId, text: body.text } })
+      })
+      const fullHistory = vi.spyOn(conversationStore, 'readAdmittedSessionQuery')
+      const includesFirstPage = (sources: readonly { resourceId: string }[] | undefined) =>
+        sources?.some(source => firstPageIds.has(source.resourceId)) === true
+      let readingFirstPage = false
+      let heldOlderProof = false
+      let olderProofAllowed: boolean | undefined
+      let firstPageRootCount: number | undefined
+      const ordinaryHistory = turnHistory.readRecentChannelText
+      const historyRead = guest ? vi.spyOn(turnHistory, 'readRecentChannelText').mockImplementation(async (...args) => {
+        if (modelCalls.length === 1) {
+          readingFirstPage = true
+          await vi.waitFor(() => expect(heldOlderProof).toBe(true), { timeout: 2000, interval: 5 })
+        }
+        const result = await ordinaryHistory(...args)
+        if (modelCalls.length === 1 && result.available) firstPageRootCount = result.sources.length
+        return result
+      }) : undefined
+      const originalNote = ContextScopeAccumulator.prototype.note
+      const observeEnrollment = guest ? vi.spyOn(ContextScopeAccumulator.prototype, 'note').mockImplementation(function (this: ContextScopeAccumulator, evidence) {
+        originalNote.call(this, evidence)
+        if (readingFirstPage && includesFirstPage(evidence?.sources)) firstPageEnrolled = true
+      }) : undefined
+      const holdProgressProof = (authorize: deliveryAuthority.AuthorizeDeliveryAudience): deliveryAuthority.AuthorizeDeliveryAudience => {
+        return async input => {
+          const olderPageProof = input.userId === readerId && modelCalls.length === 1 && readingFirstPage
+            && !firstPageEnrolled && !heldOlderProof && !includesFirstPage(input.scopeEvidence?.sources)
+          if (olderPageProof) heldOlderProof = true
+          const decision = await authorize(input)
+          if (olderPageProof) olderProofAllowed = decision.allowed
+          // Hold an authentic progress proof while the eager tool adds the bounded page.
+          if (olderPageProof) await vi.waitFor(() => expect(firstPageEnrolled).toBe(true), { timeout: 2000, interval: 5 })
+          if (firstPageEnrolled && modelCalls.length === 1 && decision.allowed
+            && [...firstPageIds].every(id => input.scopeEvidence?.sources?.some(source => source.resourceId === id))) {
+            freshProof = true
+          }
+          return decision
+        }
+      }
+      const ordinaryAuthorizer = deliveryAuthority.createDeliveryAudienceAuthorizer
+      const audienceProof = guest ? vi.spyOn(deliveryAuthority, 'createDeliveryAudienceAuthorizer')
+        .mockImplementation(deps => holdProgressProof(ordinaryAuthorizer(deps))) : undefined
+      configureTelegramTextDeliveryObserver(recordDeliveredTelegramMessage)
+      try {
+        if (guest) await pool.query('UPDATE channel_integrations SET config=$2 WHERE id=$1', [integrationId, {
+          ...config, userAccessMode: 'allowlist', allowedUserIds: [String(speaker)],
+        }])
+        if (privateRecording) await pool.query('UPDATE channel_integrations SET config=$2 WHERE id=$1', [integrationId, {
+          ...config, requireMentionOverrides: [...config.requireMentionOverrides, { chatId: String(chat), topicId: personalTopic }],
+        }])
+        const response = await network(`${origin}/webhook/telegram/${channelId}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'x-telegram-bot-api-secret-token': 'fictional-hook' },
+          body: JSON.stringify({ update_id: incomingId, message: {
+            message_id: incomingId, date: Math.floor(Date.now() / 1000), text: 'What calibration decision did we make earlier?',
+            from: { id: speaker, first_name: 'Observer', is_bot: false },
+            ...(privateRecording ? { message_thread_id: personalTopic, is_topic_message: true,
+              chat: { id: chat, type: 'supergroup', is_forum: true, title: 'Fictional observatory' } }
+              : { chat: { id: speaker, type: 'private', first_name: 'Observer' } }),
+            ...(nativeDirect ? { reply_to_message: { message_id: incomingId * 100 + 1,
+              from: { id: speaker, first_name: 'Observer', is_bot: false },
+              date: Math.floor(Date.now() / 1000) - 60, chat: { id: speaker, type: 'private' }, text: providerQuotePreview,
+            } } : {}),
+          } }),
+        })
+        expect(response.status).toBe(200)
+        const terminal = await vi.waitFor(async () => {
+          const { rows: [active] } = await pool.query(`SELECT status,turn_lease_token,
+            EXISTS(SELECT 1 FROM session_messages WHERE session_id=$1 AND channel_message_id=$2) AS seen
+            FROM sessions WHERE id=$1`, [session.id, String(incomingId)])
+          expect(active).toMatchObject({ turn_lease_token: null, seen: true })
+          expect(active.status).not.toBe('running')
+          return active
+        }, { timeout: 15_000, interval: 100 })
+        if (terminal.status !== 'idle') {
+          await analytics.flush()
+          const { rows: failures } = await pool.query(`SELECT metadata->>'error_type' AS "errorType",metadata->>'stage' AS stage,
+            metadata->>'denial_diagnostic' AS diagnostic,metadata->>'verification_phase' AS phase,
+            metadata->>'verification_sqlstate_class' AS "sqlstateClass" FROM analytics_events
+            WHERE session_id=$1 AND event_name='chat_route_error' ORDER BY created_at`, [session.id])
+          throw new Error(`Signed Telegram history failed after ${modelCalls.length} model requests. ${JSON.stringify({ failures,
+            readingFirstPage, olderProofAllowed, firstPageRootCount,
+            heldOlderProof, firstPageEnrolled, freshProof, authorizerFactories: audienceProof?.mock.calls.length })}`)
+        }
+        expect(modelCalls).toHaveLength(privateRecording ? 2 : 3)
+        const extractPage = (index: number, id: string) => {
+          const result = modelCalls[index].contents?.at(-1)?.parts.find(part => part.functionResponse?.id === id)?.functionResponse
+          expect(result?.name).toBe('readChatHistory')
+          return parseRecentPage(result?.response.result)
+        }
+        const first = extractPage(1, 'dm-page-one')
+        if (privateRecording) {
+          expect(first).toEqual({ messages: [], scope: expect.stringContaining('unavailable') })
+          expect(JSON.stringify(modelCalls)).not.toContain(note(16))
+        } else {
+          const expectedPage = (from: number) => Array.from({ length: 8 }, (_, offset) => ({ role: 'user', text: note(from + offset) }))
+          expect(first.messages).toEqual(expectedPage(9))
+          expect(first.quote).toEqual(nativeDirect ? { status: 'available', role: 'user', text: note(1) } : undefined)
+          expect(first.nextCursor).toEqual(expect.any(String))
+          expect(extractPage(2, 'dm-page-two').messages).toEqual(expectedPage(1))
+          if (guest) {
+            expect(heldOlderProof).toBe(true)
+            expect(freshProof).toBe(true)
+            expect(unprovedProgressWrites).toBe(0)
+          }
+        }
+        expect(JSON.stringify(modelCalls[0])).not.toContain(note(16))
+        expect(JSON.stringify(modelCalls)).not.toContain(privateMarker)
+        expect(JSON.stringify(modelCalls)).not.toContain(historicalAnswer)
+        expect(JSON.stringify(modelCalls)).not.toContain(providerQuotePreview)
+        expect(fullHistory).not.toHaveBeenCalled()
+        expect(telegramTargets).toEqual([privateRecording ? { chatId: String(chat), topicId: personalTopic }
+          : { chatId: String(speaker), topicId: undefined }])
+        expect(telegramReceipt).toEqual(expect.any(String))
+        const recordedReply = [{ content: [{ type: 'text', text: reply }] }]
+        const receiptArgs = [session.id, telegramReceipt]
+        const receiptQuery = `SELECT content FROM session_messages WHERE session_id=$1 AND channel_message_id=$2 AND role='assistant'`
+        expect((await pool.query(receiptQuery, receiptArgs)).rows).toEqual(recordedReply)
+        if (guest) {
+          const { rows: [ownership] } = await pool.query(`SELECT s.user_id,
+            EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=$2 AND user_id=s.user_id) AS member
+            FROM sessions s WHERE s.id=$1`, [session.id, workspaceId])
+          expect(ownership).toEqual({ user_id: readerId, member: false })
+          expect(await linkedAccountStore.findByProvider('telegram', String(speaker))).toBeNull()
+        } else {
+          const readerQuery = `${receiptQuery} AND session_recording_read_allowed(session_id)`
+          expect((await queryWithRLS(readerId, readerQuery, receiptArgs)).rows).toEqual(recordedReply)
+          expect((await queryWithRLS(privateRecording ? secondId : ownerId, readerQuery, receiptArgs)).rows).toEqual([])
+        }
+      } finally {
+        if (guest || privateRecording) await pool.query('UPDATE channel_integrations SET config=$2 WHERE id=$1', [integrationId, config])
+        await analytics.shutdown()
+        configureTelegramTextDeliveryObserver()
+        fullHistory.mockRestore()
+        if (historyRead) historyRead.mockRestore()
+        if (observeEnrollment) observeEnrollment.mockRestore()
+        if (audienceProof) audienceProof.mockRestore()
+        fetchSpy.mockRestore()
+        await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+      }
+    }, 30_000)
 })

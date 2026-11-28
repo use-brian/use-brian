@@ -107,7 +107,10 @@ run('[COMP:api/telegram-conversation-context] normal topic continuity', () => {
     configureTelegramTextDeliveryObserver(recordDeliveredTelegramConversation)
     const usage={inputTokens:5,outputTokens:5}
     let checkedSibling=false
-    const provider:LLMProvider={name:'fictional-topic-context',models:['fixture'],async *stream(){
+    const provider:LLMProvider={name:'fictional-topic-context',models:['fixture'],
+      async *stream(){throw new Error('A bounded text read must not start enrichment')},
+      createSession(options){return {send(turn){return (async function*(){
+        requests.push(JSON.stringify({options,turn}))
       if(!checkedSibling){
         const bounds=(await s.f.pool.query(`SELECT t.turn_lease_token token,e.version::text version,m.channel_message_id incoming
           FROM sessions t JOIN conversation_envelopes e ON e.session_id=t.id
@@ -130,12 +133,15 @@ run('[COMP:api/telegram-conversation-context] normal topic continuity', () => {
         await expect(sql(room!.providerContextGeneration!+1,foreign)).rejects.toThrow('provider_context_unavailable')
         checkedSibling=true
       }
-      yield {type:'message_start',model:'fixture'}
-      yield {type:'text_delta',text:'{"topic_label":"Running schedule","state":"continue","confidence":0.9}'}
-      yield {type:'message_end',stopReason:'end_turn',usage}
-    },createSession(options){return {send(turn){return (async function*(){
-      requests.push(JSON.stringify({options,turn}))
       yield {type:'message_start' as const,model:'fixture'}
+      if(requests.length===2){
+        expect(options.tools?.find(tool=>tool.name==='readChatHistory')).toBeDefined()
+        yield {type:'tool_use_start' as const,id:'fictional-topic-history',name:'readChatHistory'}
+        yield {type:'tool_use_delta' as const,id:'fictional-topic-history',input:'{}'}
+        yield {type:'tool_use_end' as const,id:'fictional-topic-history'}
+        yield {type:'message_end' as const,stopReason:'tool_use' as const,usage}
+        return
+      }
       yield {type:'text_delta' as const,text:reply}
       yield {type:'message_end' as const,stopReason:'end_turn' as const,usage}
     })()}}}}
@@ -148,12 +154,16 @@ run('[COMP:api/telegram-conversation-context] normal topic continuity', () => {
       await processChannelMessage({...linked,ownerId:s.f.ownerId,assistant,conversationContext:context,
         incomingMessage:{userId:linked.actorChannelId,channelId:s.conversationId,messageId:providerMessageId,text,isGroupChat:true,timestamp:Date.now(),raw:{} },
         channelType:'telegram',channelId:s.conversationId,channelIntegrationId:s.integrationId,
+        telegramProviderIdentity:context.providerContextIdentity!,
         channelIntegrationStore:createDbChannelIntegrationStore(s.key),isGroupChat:true,incomingChannelMessageId:providerMessageId,
         messageText:text,userContentBlocks:[{type:'text',text},...(image?[{type:'image' as const,mimeType:'image/png',data:'RklDVElPTkFMX0lNQUdF'}]:[])],
         modelAlias:'standard',adaptiveResearchEnabled:false,abortController:new AbortController(),provider,systemPrompt:'Private fixture instructions',
         tools:new Map(),memoryStore:createDbMemoryStore(),capabilityStore:createDbCapabilityStore(),hooks:{
           async onConfirmationRequired(){throw Error('Unexpected confirmation')},async sendError(error){errors.push(error)},
-          async sendResponse(text){await assertTelegramConversationCurrent(context);return {channelMessageId:await adapter.sendMessage(s.conversationId,{text,format:'markdown'})}},
+          async sendResponse(text,_documents,_question,_actions,telegramDispatch){
+            await assertTelegramConversationCurrent(context)
+            return {channelMessageId:await adapter.sendMessage(s.conversationId,{text,format:'markdown',telegramDispatch})}
+          },
         }})
     }
     await turn('I run four times a week. How many rest days are there?')
@@ -175,16 +185,17 @@ run('[COMP:api/telegram-conversation-context] normal topic continuity', () => {
     reply='Yes, that schedule makes sense.'
     await turn('Does this make sense?',s.f.secondId,true)
     expect(errors).toEqual([])
-    expect(requests).toHaveLength(2)
-    expect(requests[1]).toContain('I run four times a week')
-    expect(requests[1]).toContain('Four sessions leave about one rest day')
+    expect(requests).toHaveLength(3)
+    expect(requests[1]).not.toContain('I run four times a week')
     expect(requests[1]).toContain('Does this make sense?')
     expect(requests[1]).toContain('RklDVElPTkFMX0lNQUdF')
-    expect(requests[1]).not.toContain('Private fixture fact')
-    expect(requests[1]).not.toContain('Private fixture instructions')
+    expect(requests[2]).toContain('I run four times a week')
+    expect(requests[2]).toContain('Four sessions leave about one rest day')
+    expect(requests[2]).not.toContain('Private fixture fact')
+    expect(requests[2]).not.toContain('Private fixture instructions')
     expect(deliveries).toHaveLength(2)
     expect(checkedSibling).toBe(true)
-    expect(requests[1]).not.toContain('Do not include this sibling topic')
+    expect(requests[2]).not.toContain('Do not include this sibling topic')
     expect(capture).not.toHaveBeenCalled()
     expect((await s.f.pool.query(`SELECT id FROM sessions s WHERE s.id=$1 AND ${sessionKindSql.surfacesBeyondAnchor('s')}`,[room!.id])).rows).toHaveLength(0)
     const messages=await getSessionMessages(room!.id,{excludeHeld:true})

@@ -113,6 +113,16 @@ describe('[COMP:api/portable-restore] reviewed harness extension',()=>{
   expect(newSource.sql).toContain(orderedLock)
   expect(oldSource.sql).not.toContain('lock_deadline:=clock_timestamp()+lock_wait_ms')
  })
+ it('authenticates the ordered generic collector under a separate release', { timeout: 15_000 }, async()=>{
+  const {currentReleaseSource}=await import(new URL('installation-release.mjs',directory).href)
+  const previous='8353_recording_channel_lock_wait.sql',head='8354_conversation_evidence_collect.sql'
+  const [oldSource,newSource]=await Promise.all([currentReleaseSource(previous),currentReleaseSource(head)])
+  expect(newSource.portableSuccessor.migrations).toEqual([...oldSource.portableSuccessor.migrations,head])
+  expect(newSource.sourceDigest).not.toBe(oldSource.sourceDigest)
+  expect(newSource.additionalCatalogs).toEqual(oldSource.additionalCatalogs)
+  expect(newSource.sql).toContain('immutable:=array_append(immutable,source)')
+  expect(oldSource.sql).not.toContain('immutable:=array_append(immutable,source)')
+ })
 })
 
 describe('[COMP:api/portable-restore] finite portable restore roster',()=>{

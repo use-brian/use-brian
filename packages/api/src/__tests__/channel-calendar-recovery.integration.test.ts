@@ -307,16 +307,16 @@ describe.sequential(`[COMP:api/channel-recording] recovered Telegram Calendar co
      expect(JSON.stringify(request.contents)).toContain(messageText)
      expect(wire).not.toContain(historyMarker)
      expect(wire).not.toContain(indexedTranscriptMarker)
-     expect(JSON.stringify(request.tools)).toContain('requestConversationContext')
+     expect(JSON.stringify(request.tools)).toContain('readChatHistory')
      expect(JSON.stringify(request.tools)).not.toContain('mcp_call')
      if(change==='trivial-topic')return modelResponse([{text:priorReply}])
-     return modelResponse([{functionCall:{id:'calendar-context',name:'requestConversationContext',args:{}},thoughtSignature:'fictional-context-signature'}])
+     return modelResponse([{functionCall:{id:'calendar-context',name:'readChatHistory',args:{mode:'full'}},thoughtSignature:'fictional-context-signature'}])
     }
     expect(wire).toContain(historyMarker)
     expect(wire).toContain(indexedTranscriptMarker)
     const discoveryParts=request.contents?.flatMap(message=>message.parts??[])??[]
-    expect(discoveryParts).toContainEqual(expect.objectContaining({functionCall:expect.objectContaining({name:'requestConversationContext',id:'calendar-context'})}))
-    expect(discoveryParts).toContainEqual(expect.objectContaining({functionResponse:expect.objectContaining({name:'requestConversationContext',id:'calendar-context'})}))
+    expect(discoveryParts).toContainEqual(expect.objectContaining({functionCall:expect.objectContaining({name:'readChatHistory',id:'calendar-context'})}))
+    expect(discoveryParts).toContainEqual(expect.objectContaining({functionResponse:expect.objectContaining({name:'readChatHistory',id:'calendar-context'})}))
     if(priorTopic)return modelResponse([{text:priorReply}])
     if(mainRequests.length===2){
      expect(JSON.stringify(request.tools)).toContain('mcp_call')

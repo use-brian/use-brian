@@ -2152,6 +2152,7 @@ export const ja: Dictionary = {
     },
     toolNarration: {
       generic: "{name} を実行中",
+      readChatHistory: "チャット履歴を確認中",
       working: "処理中…",
       renderView: "ビューを下書き中",
       renderPage: "ページを作成中",
