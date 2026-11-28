@@ -139,6 +139,30 @@ export function isDeliveryAudienceUnverifiedError(
     && (error as { reason?: unknown }).reason === 'delivery_audience_unverified'
 }
 
+/** Consume a positive proof only while it still covers the complete scope. */
+export async function admitCurrentDeliveryEvidence(
+  capture: () => ScopeEvidence,
+  prove: (evidence: ScopeEvidence) => Promise<ScopeEvidence>,
+  accept: (proved: ScopeEvidence) => void,
+  canRefresh?: (previous: ScopeEvidence, current: ScopeEvidence) => boolean,
+): Promise<void> {
+  const snapshot = capture()
+  const fingerprint = JSON.stringify(snapshot)
+  const proved = await prove(snapshot)
+  const current = capture()
+  const currentFingerprint = JSON.stringify(current)
+  if (currentFingerprint === fingerprint) {
+    accept(proved)
+    return
+  }
+  if (!canRefresh?.(snapshot, current)) throw new DeliveryAudienceUnverifiedError(undefined, 'source_unverifiable')
+  const refreshed = await prove(current)
+  if (JSON.stringify(capture()) !== currentFingerprint) {
+    throw new DeliveryAudienceUnverifiedError(undefined, 'source_unverifiable')
+  }
+  accept(refreshed)
+}
+
 type Dependencies = {
   integrationStore?: ChannelIntegrationStore
   now?: () => number

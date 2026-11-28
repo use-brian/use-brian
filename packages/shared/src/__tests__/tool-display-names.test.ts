@@ -59,6 +59,11 @@ describe('[COMP:shared/tool-display-names] channel tool-status labels', () => {
     expect(humanizeToolName('readCurrentSlackThread')).toBe('Reading the Slack thread')
   })
 
+  it.each(['readChatHistory', 'requestConversationContext'])('labels chat history progress for %s', (name) => {
+    expect(humanizeToolName(name)).toBe('Checking chat history')
+    expect(getToolDisplayName(name)).toBe('Check chat history')
+  })
+
   describe('approval projections', () => {
     it('projects frozen arguments into labeled fields without mutating them', () => {
       const input = {

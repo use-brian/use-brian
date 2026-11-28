@@ -90,8 +90,8 @@ const provider:LLMProvider={name:'fixture-public',models:['fixture'],stream(){th
     yield {type:'message_start' as const,model:'fixture'}
     await providerGate
     if(toolRequested&&first){first=false
-      const discovery = options.tools?.some(tool => tool.name === 'requestConversationContext')
-      yield {type:'tool_use_start' as const,id:'public-call',name:discovery ? 'requestConversationContext' : 'fixtureEcho'}
+      const discovery = options.tools?.some(tool => tool.name === 'readChatHistory')
+      yield {type:'tool_use_start' as const,id:'public-call',name:discovery ? 'readChatHistory' : 'fixtureEcho'}
       yield {type:'tool_use_delta' as const,id:'public-call',input:discovery ? '{}' : '{"value":"fictional"}'}
       yield {type:'tool_use_end' as const,id:'public-call'}
       yield {type:'message_end' as const,stopReason:'tool_use' as const,usage:{inputTokens:2,outputTokens:3}}
@@ -175,7 +175,7 @@ describe('[COMP:api/public-turn] complete public operation ownership',()=>{
     toolRequested=true
     const run=start();await run.promise
     expect(run.res.body).toMatchObject({reply:'Fictional public answer'})
-    expect(offeredTools.shift()).toEqual(['requestConversationContext'])
+    expect(offeredTools.shift()).toEqual(['readChatHistory'])
     expect(offeredTools.length).toBeGreaterThan(0)
     for(const names of offeredTools){expect(names).toContain('fixtureEcho');expect(names).not.toContain('fixtureConfirmedWrite')}
   })
@@ -184,7 +184,7 @@ describe('[COMP:api/public-turn] complete public operation ownership',()=>{
     const run=start(internal ? {contextScope:'internal-member',internalActor:{email:null,defaultUserId:session.userId}} : {})
     await run.promise
     expect(run.res.body).toMatchObject({reply:'Fictional public answer'})
-    expect(offeredTools).toEqual([internal ? ['requestConversationContext','webSearch','urlReader','calculate'] : ['requestConversationContext']])
+    expect(offeredTools).toEqual([internal ? ['readChatHistory','webSearch','urlReader','calculate'] : ['readChatHistory']])
     expect(mocks.capabilities).not.toHaveBeenCalled()
     expect(mocks.history).not.toHaveBeenCalled()
   })
@@ -389,7 +389,7 @@ describe('[COMP:api/public-turn] stale-takeover notice through the real public r
         .send({visitorId:'fictional-visitor',sessionId:session.channelId,message:'Fictional question'})
     }
     expect(response.status,JSON.stringify(response.body)).toBe(200)
-    expect(offeredTools[0]).toEqual(['requestConversationContext'])
+    expect(offeredTools[0]).toEqual(['readChatHistory'])
     expect(events).toEqual([{kind:'turn_completed',sessionId:session.id,payload:{senderUserId:null,turnId:'f'.repeat(64),reason:'stalled_reclaimed'}}])
   })
 })

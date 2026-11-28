@@ -24,10 +24,12 @@ const {createLocalFixture,runCommand}=await import(join(ossRoot,'scripts/crm/loc
 const sha=value=>createHash('sha256').update(value).digest('hex')
 const suite='src/application-platform/__tests__/portable-restore.integration.test.ts'
 const historicalMemorySource='scripts/conversation-store/historical/8268_native_memory_query_write_lineage.sql'
+const recordingScopeSource='scripts/conversation-store/recording.sql'
 
 function pinnedReleaseAssets(migrations){
  return ['src/migrations/renames.ts',
-  ...Object.hasOwn(migrations,'8326_native_memory_query_write_contract.sql')?[historicalMemorySource]:[]]
+  ...Object.hasOwn(migrations,'8326_native_memory_query_write_contract.sql')?[historicalMemorySource]:[],
+  ...Object.hasOwn(migrations,'8353_recording_channel_lock_wait.sql')?[recordingScopeSource]:[]]
 }
 
 async function migrationSnapshot(){

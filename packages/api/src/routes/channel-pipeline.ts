@@ -12,6 +12,8 @@ import { bindTelegramKnowledgeGroup, telegramKnowledgeGroup, telegramKnowledgeUs
 import { bindScopeSources } from '@use-brian/agent-runtime/security/source-evidence.js'
 import { resourceScopeKey } from '@use-brian/agent-runtime/security/derived-scope.js'
 import type { TurnCapabilityRequest } from '../turn/capabilities.js'
+import type { TelegramHistorySource } from '../turn/history.js'
+import type { BoundTelegramHistorySelection, TurnRunPreparationInput } from '../turn/prepare.js'
 import type { SurfaceCapabilityOptions } from '../mcp/surface.js'
 import { assertInitialReadEvidenceCurrent } from '../turn/initial-read-authority.js'
 import { runTurnSessionStateDiff } from '../turn/session-state.js'
@@ -71,7 +73,7 @@ import { buildWorkspaceFilesContext, selectWorkspaceFilesContextRows } from '@us
 import { buildUploadPolicyBlock } from '@use-brian/core/workspace-files/upload-policy-block.js'
 import { calculateCost } from '@use-brian/agent-runtime/billing/cost-tracker.js'
 import { modelToCompactionTier } from '@use-brian/agent-runtime/compaction/compact.js'
-import type { QueryEvent } from '@use-brian/agent-runtime/engine/query-loop.js'
+import { CONVERSATION_CONTEXT_TOOL, type QueryEvent } from '@use-brian/agent-runtime/engine/query-loop.js'
 import {
   matchesDisputedFigure,
   buildDisputeContextNote,
@@ -189,11 +191,12 @@ import { resolveExecutionContextSystem } from '../context-scope/execution-contex
 import { AuthorityChangedError, isAuthorityChangedError } from '../context-scope/authority-lease.js'
 import {
   createDeliveryAudienceAuthorizer,
+  admitCurrentDeliveryEvidence,
   createDeliveryAudienceEnvelopeResolver,
   DeliveryAudienceUnverifiedError,
   isDeliveryAudienceUnverifiedError,
 } from '../context-scope/delivery-authority.js'
-import { validateAudienceScopeEvidence } from '../context-scope/caller-evidence.js'
+import { scopeEvidenceFailureOf, validateAudienceScopeEvidence } from '../context-scope/caller-evidence.js'
 import { deliveryFailureAnalytics } from '../context-scope/delivery-failure.js'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import { conversationAnchorWriteAdmissionActive, verifiedChannelPublicationActive } from '../db/conversation-visibility.js'
@@ -528,6 +531,7 @@ export type ChannelPipelineParams = AdmittedChannelMessage & {
    */
   credentialCurrent?: () => Promise<boolean>
   initialChatArchiveRecipientCurrent?: () => Promise<boolean>
+  telegramHistoryRecipientCurrent?: () => Promise<boolean>
   checkCreditBudget?: CreditBudgetGate
 
   // ── Channel context ──
@@ -910,22 +914,28 @@ export async function filterChannelHistoryForAudience<T extends {
   ceiling?: AccessCeiling
   readerCeiling?: AccessCeiling
   validate?: (evidence: ScopeEvidence, ceiling: AccessCeiling) => Promise<unknown>
+  propagateVerificationFailures?: boolean
 }): Promise<T[]> {
   if (!params.group || !params.ceiling) return [...params.rows]
   const validate = params.validate ?? validateAudienceScopeEvidence
+  const verifiedFor = async (row: T, ceiling: AccessCeiling): Promise<boolean> => {
+    try {
+      await validate(scopeEvidenceFromRows([row]), ceiling)
+      return true
+    } catch (error) {
+      const diagnostic = scopeEvidenceFailureOf(error)
+      if (params.propagateVerificationFailures && (!diagnostic || diagnostic === 'verification_error' || diagnostic === 'source_unverifiable')) throw error
+      return false
+    }
+  }
   const decisions = await Promise.all(params.rows.map(async (row) => {
     if (params.readerCeiling) {
       if (!boundScopeSources(row).length) return false
-      try { await validate(scopeEvidenceFromRows([row]), params.readerCeiling) } catch { return false }
+      if (!await verifiedFor(row, params.readerCeiling)) return false
     }
     if (row.channelMessageId !== null) return true
     if (!boundScopeSources(row).length) return false
-    try {
-      await validate(scopeEvidenceFromRows([row]), params.ceiling!)
-      return true
-    } catch {
-      return false
-    }
+    return verifiedFor(row, params.ceiling!)
   }))
   return params.rows.filter((_, index) => decisions[index])
 }
@@ -1324,11 +1334,11 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
   // A provider-visible original post need not raise its own group's delivery
   // ceiling. Its exact row must nevertheless remain readable across effects.
   let currentGroupInput: (() => Promise<boolean>) | undefined
-  let recentTextSelectionCurrent: (() => Promise<boolean>) | undefined
+  let recentTextSelection: BoundTelegramHistorySelection | undefined
   const recordCurrent = async () => {
     const current = currentGroupInput ? await currentGroupInput()
       : !recordAddress || !recordEnvelope || !!await readVerifiedChannelEnvelope(recordAddress,recordEnvelope.version)
-    return current && (!recentTextSelectionCurrent || await recentTextSelectionCurrent())
+    return current && (!recentTextSelection || await recentTextSelection.isCurrent())
   }
   const channelWrite = !params.recording && recordAddress && recordEnvelope && verifiedChannelPublicationActive()
     ? {address:recordAddress,version:recordEnvelope.version} : undefined
@@ -1527,30 +1537,35 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
   const authority = executionContext.security.authority
   const originalIdentity = executionContext.identity
   const originalOwnership = executionContext.ownership
+  const allowsTelegramHistory = channelType === 'telegram' && !privateRecording
   const assertDeliveryAudience = (): Promise<void> => timing.time('audience_check', async () => {
-    if (params.conversationContext) await assertTelegramConversationCurrent(params.conversationContext)
-    // The native authorizer owns the same original lease at entry and return.
-    if (!nativeTranscriptAuthority) await authority.assertCurrent()
-    if ((recordEnvelope || currentGroupInput) && !await recordCurrent()) throw new AuthorityChangedError(false)
-    if (recordEnvelope && !channelEvidenceFitsEnvelope(recordEnvelope,scopeAccumulator.evidence)) {
-      throw new DeliveryAudienceUnverifiedError(undefined,'source_unverifiable')
+    const assertLiveDestination = async () => {
+      if (params.conversationContext) await assertTelegramConversationCurrent(params.conversationContext)
+      // The native authorizer owns the same original lease at entry and return.
+      if (!nativeTranscriptAuthority) await authority.assertCurrent()
+      if ((recordEnvelope || currentGroupInput || recentTextSelection) && !await recordCurrent()) throw new AuthorityChangedError(false)
     }
-    const evidenceBefore=JSON.stringify(scopeAccumulator.evidence)
-    const decision = await authorizeDeliveryAudience({
-      ...audienceInput,
-      scopeEvidence: scopeAccumulator.evidence,
-    })
-    if(JSON.stringify(scopeAccumulator.evidence)!==evidenceBefore)throw new DeliveryAudienceUnverifiedError(undefined,'source_unverifiable')
-    if (!decision.allowed) throw new DeliveryAudienceUnverifiedError(decision.detail, decision.diagnostic, decision)
-    // Current labels of a source that changed since it was read join the floor.
-    scopeAccumulator.note({
-      sensitivity: decision.evidence.sensitivity,
-      compartments: decision.evidence.compartments,
-      projectIds: decision.evidence.projectIds,
-    })
-    if (recordEnvelope && !channelEvidenceFitsEnvelope(recordEnvelope,scopeAccumulator.evidence)) {
-      throw new DeliveryAudienceUnverifiedError(undefined,'source_reclassified')
-    }
+    if (!allowsTelegramHistory) await assertLiveDestination()
+    await admitCurrentDeliveryEvidence(() => scopeAccumulator.evidence, async evidence => {
+      if (allowsTelegramHistory) await assertLiveDestination()
+      if (recordEnvelope && !channelEvidenceFitsEnvelope(recordEnvelope, evidence)) {
+        throw new DeliveryAudienceUnverifiedError(undefined, 'source_unverifiable')
+      }
+      const decision = await authorizeDeliveryAudience({ ...audienceInput, scopeEvidence: evidence })
+      if (!decision.allowed) throw new DeliveryAudienceUnverifiedError(decision.detail, decision.diagnostic, decision)
+      return decision.evidence
+    }, checked => {
+      // Current labels of a source that changed since it was read join the floor.
+      scopeAccumulator.note({ sensitivity: checked.sensitivity, compartments: checked.compartments, projectIds: checked.projectIds })
+      if (recordEnvelope && !channelEvidenceFitsEnvelope(recordEnvelope, scopeAccumulator.evidence)) {
+        throw new DeliveryAudienceUnverifiedError(undefined, 'source_reclassified')
+      }
+    }, allowsTelegramHistory ? (previous, current) => {
+      // An eagerly executed page can enroll new roots while its input event
+      // checks audience. Only a bound selection can trigger a fresh proof here.
+      abortController.signal.throwIfAborted()
+      return recentTextSelection?.hasNewSources(previous, current) === true
+    } : undefined)
   })
   let initialChatArchiveUsed = false
   const archiveRecipientCurrent = params.initialChatArchiveRecipientCurrent
@@ -1568,9 +1583,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
     abortController.signal.throwIfAborted()
   }
   const telegramDispatch = (): TelegramDispatchScope | undefined => {
-    if (initialChatArchiveUsed) return { assertCurrent: checkTelegramDispatch }
+    if (initialChatArchiveUsed || recentTextSelection) return { assertCurrent: checkTelegramDispatch }
     if (!telegramKnowledgeGroup(executionContext)) return
-    return telegramKnowledgeUsed(executionContext) || recentTextSelectionCurrent ? { assertCurrent: checkTelegramDispatch } : {}
+    return telegramKnowledgeUsed(executionContext) ? { assertCurrent: checkTelegramDispatch } : {}
   }
   const emitStatus = (message: string) => {
     const check = telegramDispatch()
@@ -1628,10 +1643,11 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
   }
   const filterHistoryForAudience = async <T extends {
     id: string; channelMessageId: string | null
-  }>(rows: readonly T[]): Promise<T[]> => filterChannelHistoryForAudience({
+  }>(rows: readonly T[], propagateVerificationFailures?: boolean): Promise<T[]> => filterChannelHistoryForAudience({
     rows:await filterNativeRecord(rows),
     group: turnPolicy.deliveryCeiling.recipientType === 'group',
     ceiling: audienceEnvelope?.allowed ? audienceEnvelope.ceiling : undefined,
+    propagateVerificationFailures,
     ...(room && audienceEnvelope?.allowed ? { readerCeiling: { ...pinAccessCeiling(dataTurnScope.access), userId: '',
       ...(dataTurnScope.access.departmentRead ? { departmentRead: { ...dataTurnScope.access.departmentRead, userId: '' } } : {}) } } : {}),
   })
@@ -3065,15 +3081,52 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
   try {
     const initialPrompt = buildSplitSystemPrompt({ ...channelPrompt, memoryContext: '' })
     const initialContext = [initialPrompt.privateRuntimeContext, ...channelPolicy]
-    const hasConversationReference = questionAnswer !== undefined || replyToMessageId != null
+    const historyRecipientCurrent = params.telegramHistoryRecipientCurrent
+    const topicMarker = (replyRaw as { reply_to_message?: { forum_topic_created?: unknown } } | null | undefined)
+      ?.reply_to_message?.forum_topic_created
+    const telegramQuoteId = channelType === 'telegram' && replyToMessageId != null && !topicMarker ? String(replyToMessageId) : undefined
+    const hasConversationReference = questionAnswer !== undefined || (channelType === 'telegram' ? telegramQuoteId !== undefined : replyToMessageId != null)
       || params.realtimeThreadTarget || params.providerVisibleContext
     if (hasConversationReference) {
-      initialContext.push('This message has a conversation reference. Request conversation context to resolve it before answering.')
+      initialContext.push(channelType === 'telegram'
+        ? `This message has a conversation reference. Call ${CONVERSATION_CONTEXT_TOOL} to read the retained reply before answering. Use mode full if you need referenced material or another capability.`
+        : 'This message has a conversation reference. Request conversation context to resolve it before answering.')
     }
     const currentMessage = bindScopeSources<Message>({ role: 'user', content: userContentBlocks },
       storedUserSource && enrollAuthoredSource ? [storedUserSource] : [])
     const runtimeSystemContext = formatPrivateRuntimeContext(initialContext.filter(Boolean).join('\n\n'))
     const userVisibleContext = initialPrompt.userVisibleContext
+    let telegramHistory: TurnRunPreparationInput['telegramHistory']
+    if (channelType === 'telegram') {
+      let source: TelegramHistorySource
+      if (privateRecording) {
+        source = { kind: 'unavailable' }
+      } else if (nativeTranscriptAuthority) {
+        source = { kind: 'native', authority: nativeTranscriptAuthority, verifyGroupContinuation: !!telegramKnowledgeGroup(executionContext) }
+      } else {
+        source = {
+          kind: 'stored', sessionId: session.id,
+          assertCurrent: () => authority.assertCurrent(),
+          project: rows => filterHistoryForAudience(rows, true),
+          sources: rows => rows.filter(row => countsAsGroupAudienceEvidence(row, isGroupChat)).flatMap(boundScopeSources),
+        }
+      }
+      const isSameRecipientDirect = !isGroupChat && !room && session.userId === userId
+        && turnPolicy.deliveryCeiling.recipientType === 'individual'
+      telegramHistory = {
+        source,
+        window: {
+          beforeSequence: userMessageRow.sequenceNum,
+          quoteId: telegramQuoteId,
+          includeUnaddressedDialogue: isSameRecipientDirect,
+        },
+        assertRecipient: historyRecipientCurrent ? async () => {
+          if (!await historyRecipientCurrent()) throw new AuthorityChangedError(false)
+        } : undefined,
+        bindSelection: selection => { recentTextSelection = selection },
+        onReadTiming: ms => timing.add('context_recent_text', ms),
+      }
+    }
     await turnOwner.prepareRun({
       systemPrompt: initialPrompt.stablePrompt,
       messages: [currentMessage],
@@ -3096,13 +3149,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams, channelS
         ? async () => createConnectorCapabilityRequest(await resolveConnectorUserId(), new Map())
         : undefined,
       contextDiscovery: discoverContext,
-      recentChannelText: nativeTranscriptAuthority && params.recording?.policy.destination === 'workspace'
-        && hasWorkspaceConversationAudience(recordEnvelope?.visibility) && telegramKnowledgeGroup(executionContext) && !hasConversationReference
-        && userContentBlocks.every(block=>block.type==='text'&&!/<attached_file\b/i.test(block.text))
-        ? { authority: nativeTranscriptAuthority, beforeSequence: userMessageRow.sequenceNum,
-            bindSelection: (isCurrent) => { recentTextSelectionCurrent = isCurrent },
-            onReadTiming: ms => timing.add('context_recent_text', ms) }
-        : undefined,
+      telegramHistory,
     })
     replyEvidence.note(initialPrompt.stablePrompt)
     replyEvidence.note(messageText)

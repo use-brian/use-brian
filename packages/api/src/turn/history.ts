@@ -14,7 +14,7 @@
  */
 import type { SessionContextAuthority } from '@use-brian/core/memory/session-state-types.js'
 import type { ContextScopeAccumulator } from '@use-brian/agent-runtime/security/context-scope.js'
-import { getSessionMessages, type SessionMessage } from '../db/sessions.js'
+import { getSessionMessages, isExactTelegramHistoryQuote, type SessionMessage } from '../db/sessions.js'
 import type { ConversationFrame } from '../db/conversation-store.js'
 import { readAttendedSessionHistory, type PreparedAttendedSessionHistory } from '../routes/attended-session-context.js'
 import { noteAutomaticScopeEvidence } from '../context-scope/resolve-turn-scope.js'
@@ -27,16 +27,23 @@ import {DerivedScopeError} from '@use-brian/agent-runtime/security/derived-scope
 import {conversationRecordSelectedRow} from '../db/conversation-record.js'
 import type { PublicTurnConversationBinding } from '../db/public-conversation.js'
 import type {ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
+import {boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {readRetainedContextFrame} from '../db/session-context-revisions.js'
 import {privateHistoryText} from '../db/session-legacy-history.js'
-import {previousRecentTextBoundary,recentTextDigest,selectVerifiedChannelRecentText,selectVerifiedChannelRecentTextWindows} from '../db/verified-channel-record.js'
+import {previousRecentTextBoundary,recentTextDigest,selectVerifiedChannelRecentText,selectVerifiedChannelRecentTextWindows,type TelegramTextWindow} from '../db/verified-channel-record.js'
+import {assertScopeEvidenceFitsCeiling,scopeEvidenceFailureOf} from '../context-scope/caller-evidence.js'
+import {isAudienceScopeRestriction} from '../context-scope/delivery-failure.js'
 
 /** The swappable readers underneath the owner port. */
 export type TurnHistoryReaders = {
   /** Canonical native admitted transcript read. */
   native(authority: SessionContextAuthority, sessionId: string, fromSequence?: number | null, throughSequence?: number): Promise<PreparedAttendedSessionHistory>
   /** Stored transcript read for non-native lanes; held rows are always excluded. */
-  stored(sessionId: string, options: { fromSequence?: number | null; publicConversation?: PublicTurnConversationBinding }): Promise<SessionMessage[]>
+  stored(sessionId: string, options: {
+    fromSequence?: number | null
+    publicConversation?: PublicTurnConversationBinding
+    telegramTextWindow?: TelegramTextWindow & { firstSequence: number }
+  }): Promise<SessionMessage[]>
 }
 
 const defaultReaders: TurnHistoryReaders = {
@@ -127,48 +134,146 @@ export function captureTurnHistory(sessionId: string, input: TurnHistoryRequest)
   }
 }
 
-export type RecentChannelTextWitness = Readonly<{ beforeSequence: number; fingerprint: string }>
+type StoredTelegramHistorySource = {
+  kind: 'stored'
+  sessionId: string
+  assertCurrent(): Promise<void>
+  project(rows: SessionMessage[]): Promise<SessionMessage[]>
+  sources(rows: SessionMessage[]): ScopeSource[]
+}
+
+export type TelegramHistorySource =
+  | { kind: 'native'; authority: SessionContextAuthority; verifyGroupContinuation: boolean }
+  | StoredTelegramHistorySource
+  | { kind: 'unavailable' }
+
+export type RecentChannelTextWitness = Readonly<{ window: TelegramTextWindow; fingerprint: string }>
+type TranscriptText = { role: 'user' | 'assistant'; text: string }
+type TranscriptQuote = ({ status: 'available' } & TranscriptText) | { status: 'unavailable' }
+
+const unavailableQuote = { status: 'unavailable' } as const
+
+function clipRecent(text: string): string {
+  if (text.length <= 1000) return text
+  const characters = Array.from(text)
+  return characters.length > 1000 ? characters.slice(0, 1000).join('') + '…' : text
+}
+
+async function readStoredTelegramText(source: StoredTelegramHistorySource, window: TelegramTextWindow) {
+  const firstSequence = previousRecentTextBoundary(window.beforeSequence) ?? 1
+  const rows = await readers.stored(source.sessionId, {
+    telegramTextWindow: { ...window, firstSequence },
+  })
+  const visibleRows = await source.project(rows)
+  const dialogue = visibleRows.flatMap<TranscriptText & { row: SessionMessage }>(row => {
+    if (row.sessionId !== source.sessionId || row.sequenceNum >= window.beforeSequence
+      || (!row.channelMessageId && !window.includeUnaddressedDialogue)
+      || (row.sequenceNum < firstSequence && !isExactTelegramHistoryQuote(row))
+      || (row.role !== 'user' && row.role !== 'assistant')) return []
+    const text = privateHistoryText(row.content, row.role)
+    return text ? [{ row, role: row.role, text }] : []
+  })
+  const matchedQuote = dialogue.find(({ row }) => isExactTelegramHistoryQuote(row))
+  const quote = buildTranscriptQuote(window, matchedQuote)
+  const messages = dialogue.filter(({ row }) => row.sequenceNum >= firstSequence)
+    .map(({ role, text }) => ({ role, text: clipRecent(text) }))
+  const roots = dialogue.map(({ row }) => row)
+  const fingerprint = JSON.stringify(dialogue.map(({ row, role, text }) =>
+    [row.id, row.channelMessageId, row.sequenceNum, role, text, row === matchedQuote?.row, boundScopeSources(row)]))
+  return { messages, quote, sources: source.sources(roots), fingerprint }
+}
+
+function buildTranscriptQuote(window: TelegramTextWindow, entry?: TranscriptText): TranscriptQuote | undefined {
+  if (!window.quoteId) return undefined
+  return entry ? { status: 'available', role: entry.role, text: entry.text } : unavailableQuote
+}
+
+type NativeTelegramTextSelection = Awaited<ReturnType<typeof selectVerifiedChannelRecentText>>
+function projectNativeTelegramText(authority: SessionContextAuthority, selection: NativeTelegramTextSelection): NativeTelegramTextSelection {
+  const fitsOriginalCeiling = (candidate: NativeTelegramTextSelection['messages'][number]) => {
+    try {
+      assertScopeEvidenceFitsCeiling({ sources: [candidate.source] }, authority.execution.security.ceiling, 'caller')
+      return true
+    } catch (error) {
+      if (isAudienceScopeRestriction(scopeEvidenceFailureOf(error))) return false
+      throw error
+    }
+  }
+  return {
+    messages: selection.messages.filter(fitsOriginalCeiling),
+    quote: selection.quote && fitsOriginalCeiling(selection.quote) ? selection.quote : null,
+  }
+}
 
 /** Recheck only the selection. The surrounding lease and retained-source
  * owners perform the independent live and ancestry checks. */
-export async function recentChannelTextSelectionsCurrent(authority: SessionContextAuthority, witnesses: readonly RecentChannelTextWitness[], continued: boolean) {
-  const continuation = continued ? telegramKnowledgeGroup(authority.execution) : undefined
-  if (continued && !continuation) return false
-  const pages = await selectVerifiedChannelRecentTextWindows(authority.execution, witnesses.map(witness => witness.beforeSequence), continuation)
-  return pages !== null && witnesses.every((witness, index) => JSON.stringify(pages[index]) === witness.fingerprint)
+export async function recentChannelTextSelectionsCurrent(source: TelegramHistorySource, witnesses: readonly RecentChannelTextWitness[], continued: boolean) {
+  if (source.kind === 'unavailable') return false
+  if (source.kind === 'stored') {
+    const current = await Promise.all(witnesses.map(async witness => {
+      const selection = await readStoredTelegramText(source, witness.window)
+      return selection.fingerprint === witness.fingerprint
+    }))
+    return current.every(Boolean)
+  }
+  const verifyGroup = continued && source.verifyGroupContinuation
+  const continuation = verifyGroup ? telegramKnowledgeGroup(source.authority.execution) : undefined
+  if (verifyGroup && !continuation) return false
+  const pages = await selectVerifiedChannelRecentTextWindows(source.authority.execution, witnesses.map(witness => witness.window), continuation)
+  return pages !== null && witnesses.every((witness, index) =>
+    JSON.stringify(projectNativeTelegramText(source.authority, pages[index]!)) === witness.fingerprint)
 }
 
 /** Positive dialogue excerpts from the exact verified pre-input window. The
  * selector witness is local to the original invocation. Each model/reply
  * boundary independently checks the same slice and its retained source roots. */
-export async function readRecentChannelText(authority: SessionContextAuthority, beforeSequence: number, signal: AbortSignal, continued: boolean) {
-  const {execution} = authority
-  const continuation = continued ? telegramKnowledgeGroup(execution) : undefined
-  if (continued && !continuation) throw new DerivedScopeError('scope_source_changed')
-  const select = () => continuation ? selectVerifiedChannelRecentText(execution, beforeSequence, continuation)
-    : selectVerifiedChannelRecentText(execution, beforeSequence)
+export async function readRecentChannelText(source: TelegramHistorySource, window: TelegramTextWindow, signal: AbortSignal, continued: boolean) {
   signal.throwIfAborted()
+  if (source.kind === 'unavailable') return { available: false as const, quote: buildTranscriptQuote(window) }
+  const nextBeforeSequence = previousRecentTextBoundary(window.beforeSequence)
+  if (source.kind === 'stored') {
+    await source.assertCurrent()
+    const { messages, quote, sources, fingerprint } = await readStoredTelegramText(source, window)
+    await source.assertCurrent()
+    signal.throwIfAborted()
+    return { available: true as const, messages, quote, sources, witness: { window, fingerprint }, nextBeforeSequence }
+  }
+  const { authority } = source
+  const { execution } = authority
+  const verifyGroup = continued && source.verifyGroupContinuation
+  const continuation = verifyGroup ? telegramKnowledgeGroup(execution) : undefined
+  if (verifyGroup && !continuation) throw new DerivedScopeError('scope_source_changed')
+  const select = async () => projectNativeTelegramText(authority, await selectVerifiedChannelRecentText(execution, window, continuation))
   await execution.security.authority.assertCurrent()
-  const candidates = await select()
-  const witness: RecentChannelTextWitness = { beforeSequence, fingerprint: JSON.stringify(candidates) }
-  const sources = candidates.map(candidate => candidate.source)
-  const messages = !sources.length ? [] : await readRetainedContextFrame(authority, sources, async client => {
-    const {rows} = await client.query<{id:string;role:'user'|'assistant';sequence:number;digest:string;content:unknown}>(`SELECT
+  const selection = await select()
+  const candidatesById = new Map(selection.messages.map(candidate => [candidate.source.resourceId, candidate]))
+  if (selection.quote) candidatesById.set(selection.quote.source.resourceId, selection.quote)
+  const witness: RecentChannelTextWitness = { window, fingerprint: JSON.stringify(selection) }
+  const sources = [...candidatesById.values()].map(candidate => candidate.source)
+  const entries = !sources.length ? new Map<string, TranscriptText>() : await readRetainedContextFrame(authority, sources, async client => {
+    const { rows } = await client.query<{ id: string; role: TranscriptText['role']; sequence: number; digest: string; content: unknown }>(`SELECT
       m.id,m.role,m.sequence_num AS sequence,${recentTextDigest} AS digest,m.content
       FROM session_messages m WHERE m.workspace_id=$1 AND m.session_id=$2 AND m.id=ANY($3::uuid[])
         AND m.scope_held IS NOT TRUE ORDER BY m.sequence_num`,
-    [execution.security.access.workspaceId,execution.lifecycle.sessionId,sources.map(source=>source.resourceId)])
-    if (rows.length !== candidates.length) throw new DerivedScopeError('scope_source_changed')
-    return rows.flatMap((row,index) => {
-      const candidate = candidates[index]
-      if (row.id !== candidate.source.resourceId || row.sequence !== candidate.sequence || row.role !== candidate.role
-        || row.digest !== candidate.digest) throw new DerivedScopeError('scope_source_changed')
-      const text = privateHistoryText(row.content,row.role)
-      if (!text) return []
-      return [{role:row.role,text:text.length>1000?Array.from(text).slice(0,1000).join('')+'…':text}]
-    })
+    [execution.security.access.workspaceId, execution.lifecycle.sessionId, sources.map(source => source.resourceId)])
+    if (rows.length !== candidatesById.size) throw new DerivedScopeError('scope_source_changed')
+    const textById = new Map<string, TranscriptText>()
+    for (const row of rows) {
+      const candidate = candidatesById.get(row.id)
+      if (!candidate || row.sequence !== candidate.sequence || row.role !== candidate.role || row.digest !== candidate.digest) {
+        throw new DerivedScopeError('scope_source_changed')
+      }
+      const text = privateHistoryText(row.content, row.role)
+      if (text) textById.set(row.id, { role: row.role, text })
+    }
+    return textById
   })
   if (JSON.stringify(await select()) !== witness.fingerprint) throw new DerivedScopeError('scope_source_changed')
   signal.throwIfAborted()
-  return {messages,sources,witness,nextBeforeSequence:previousRecentTextBoundary(beforeSequence)}
+  const messages = selection.messages.flatMap(candidate => {
+    const entry = entries.get(candidate.source.resourceId)
+    return entry ? [{ role: entry.role, text: clipRecent(entry.text) }] : []
+  })
+  const quoted = selection.quote ? entries.get(selection.quote.source.resourceId) : undefined
+  return { available: true as const, messages, quote: buildTranscriptQuote(window, quoted), sources, witness, nextBeforeSequence }
 }

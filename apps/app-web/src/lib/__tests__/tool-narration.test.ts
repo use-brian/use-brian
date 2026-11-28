@@ -18,6 +18,13 @@ import {
 const dict = en.chat.toolNarration;
 
 describe("[COMP:app-web/tool-narration] describeToolFromInput", () => {
+  it.each(["readChatHistory", "requestConversationContext"])(
+    "uses the chat history narration for %s",
+    (name) => {
+      expect(describeToolFromInput(name, {}, dict).description).toBe("Checking chat history");
+    },
+  );
+
   it("builds input-aware lines for searches", () => {
     expect(describeToolFromInput("webSearch", { query: "middle mile" }, dict).description).toBe(
       'Searching "middle mile"',

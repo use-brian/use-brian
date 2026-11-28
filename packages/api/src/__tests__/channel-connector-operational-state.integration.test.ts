@@ -134,9 +134,9 @@ describe.sequential('[COMP:api/channel-recording] connector operational progress
     if(mainRequests.length===1){
      expect(contents).toContain(messageText)
      expect(contents).not.toContain(retainedMarker)
-     expect(JSON.stringify(request.tools)).toContain('requestConversationContext')
+     expect(JSON.stringify(request.tools)).toContain('readChatHistory')
      expect(JSON.stringify(request.tools)).not.toContain('searchChatHistory')
-     return modelResponse([{functionCall:{id:'operational-context',name:'requestConversationContext',args:{}},thoughtSignature:'fictional-context'}])
+     return modelResponse([{functionCall:{id:'operational-context',name:'readChatHistory',args:{mode:'full'}},thoughtSignature:'fictional-context'}])
     }
     expect(contents).toContain(retainedMarker)
     expect(contents).toContain('operational-context')

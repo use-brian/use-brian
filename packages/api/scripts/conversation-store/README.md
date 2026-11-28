@@ -275,7 +275,7 @@ deferred column or the whole row become `suspended:restoration-placeholder`.
 Any new table, sequence, insert/update trigger or FORCE-RLS policy refuses
 import until the roster is regenerated and reviewed. The builder also refuses an
 inventory whose `ledgerCount` differs from the fresh chain and records the chain
-head (829 entries, `8353_recording_channel_lock_wait.sql`). The installation
+head (830 entries, `8354_conversation_evidence_collect.sql`). The installation
 verifier reconstructs the ordinal-edge evaluator, bounded derivation lookup,
 and lineage fingerprint from reviewed source. It also checks the installed
 packed Memory observation routines and their execution grants against the

@@ -183,7 +183,7 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
     expect(result.finalText).toBe('Fictional prepared answer.')
     expect(f.captured).toHaveLength(1)
     expect(sent(f.captured[0])).toEqual(messages)
-    expect(toolNames(f.captured[0])).toEqual(['requestConversationContext'])
+    expect(toolNames(f.captured[0])).toEqual(['readChatHistory'])
     expect(discover).not.toHaveBeenCalled()
     expect(brief).not.toHaveBeenCalled()
   })
@@ -202,7 +202,7 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
     expect(discover).not.toHaveBeenCalled()
     expect(scripted.captured).toHaveLength(1)
     const [session] = scripted.captured
-    expect(toolNames(session)).toEqual(['requestConversationContext', 'webSearch', 'urlReader', 'calculate'])
+    expect(toolNames(session)).toEqual(['readChatHistory', 'webSearch', 'urlReader', 'calculate'])
     expect(session.sends[0]).toEqual([message])
     expect(session.sends.slice(1)).toMatchObject(['webSearch', 'urlReader', 'calculate'].map((name, index) => [
       { role: 'user', content: [{ type: 'tool_result', name,
@@ -220,8 +220,8 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
       ]), contextDiscovery: discover })
     await f.owner.run({ loop: owned(f.context), sink: { kind: 'adapter' } })
     const [session] = f.captured
-    expect(toolNames(session)).toEqual(['requestConversationContext', 'urlReader'])
-    expect(session.config.runtimeSystemContext).toContain('call requestConversationContext first to check for permitted browser tools')
+    expect(toolNames(session)).toEqual(['readChatHistory', 'urlReader'])
+    expect(session.config.runtimeSystemContext).toContain('call readChatHistory first to check for permitted browser tools')
     expect(session.config.runtimeSystemContext).toContain('A static URL read cannot do those actions')
     expect(discover).not.toHaveBeenCalled()
   })
@@ -236,12 +236,12 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
         ['calculate', { ...readTool('calculate'), resolveConfirmation: async () => true }],
       ]), contextDiscovery: discover })
     await f.owner.run({ loop: owned(f.context), sink: { kind: 'adapter' } })
-    expect(toolNames(f.captured[0])).toEqual(['requestConversationContext'])
+    expect(toolNames(f.captured[0])).toEqual(['readChatHistory'])
     expect(discover).not.toHaveBeenCalled()
   })
 
   it.each(['tool_use', 'end_turn'] as const)('continues a completed discovery call with its receipt, model settings and scoped history after %s', async stopReason => {
-    const scripted = capturingProvider('tool', 'requestConversationContext', stopReason)
+    const scripted = capturingProvider('tool', 'readChatHistory', stopReason)
     const f = await fixture({ provider: scripted.provider, custom: true })
     const initial: Message = { role: 'user', content: 'Continue that work.' }
     const previous = bindScopeSources<Message>({ role: 'user', content: 'Earlier fixture work' }, [source('earlier')])
@@ -264,15 +264,15 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
     expect(toolNames(continuation)).toEqual(['readThing'])
     expect(continuation.config).toMatchObject({ model: scripted.captured[0].config.model, maxTokens: 2_048, inputTokenLimit: 16_000, runtimeSystemContext: expect.stringContaining('Private permitted context') })
     expect(sent(continuation)).toMatchObject([previous, initial,
-      { role: 'assistant', content: [{ type: 'tool_use', name: 'requestConversationContext', id: 'fixture-call' }] },
-      { role: 'user', content: [{ type: 'tool_result', toolUseId: 'fixture-call', name: 'requestConversationContext' }] }])
+      { role: 'assistant', content: [{ type: 'tool_use', name: 'readChatHistory', id: 'fixture-call' }] },
+      { role: 'user', content: [{ type: 'tool_result', toolUseId: 'fixture-call', name: 'readChatHistory' }] }])
     expect(boundScopeSources(sent(continuation)[0])).toEqual([source('earlier')])
     expect(view.grounding.runtimeContext).toContain('Private permitted context')
     expect(f.owner.usage?.totalUsage).toMatchObject({ inputTokens: 2, outputTokens: 2 })
   })
 
   it.each(['tool_use', 'end_turn'] as const)('lets the web model correct rejected discovery arguments after %s', async stopReason => {
-    const tool = 'requestConversationContext'
+    const tool = 'readChatHistory'
     const scripted = capturingProvider([tool, tool], undefined, stopReason, ['{"request":"Use earlier notes."}', '{}'])
     const f = await fixture({ provider: scripted.provider })
     const initial: Message = { role: 'user', content: 'Continue the earlier discussion.' }
@@ -310,7 +310,7 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
   })
 
   it('terminates discovery when a valid web call fails in the discovery frame', async () => {
-    const scripted = capturingProvider('tool', 'requestConversationContext')
+    const scripted = capturingProvider('tool', 'readChatHistory')
     const f = await fixture({ provider: scripted.provider })
     const failure = new Error('Fictional discovery failed while reading history.')
     const discover = vi.fn(async () => { throw failure })
@@ -324,7 +324,7 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
   })
 
   it('terminates discovery when a rejected call precedes a recent text read failure in the same batch', async () => {
-    const tool = 'requestConversationContext'
+    const tool = 'readChatHistory'
     const send = vi.fn(async function* (): AsyncGenerator<StreamChunk> {
       yield { type: 'message_start', model: 'fixture-model' }
       if (send.mock.calls.length > 1) {
@@ -348,7 +348,8 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
     const bindSelection = vi.fn(), discover = vi.fn()
     await f.owner.prepareRun({ systemPrompt: 'Initial', messages: [{ role: 'user', content: 'Continue our discussion.' }],
       candidateTools: new Map(), contextDiscovery: discover,
-      recentChannelText: { authority: { execution: f.execution, accumulator: scopeAccumulator }, beforeSequence: 3, bindSelection } })
+      telegramHistory: { source:{kind:'native',authority:{execution:f.execution,accumulator:scopeAccumulator},verifyGroupContinuation:false},
+        window:{beforeSequence:3},bindSelection } })
 
     const receipts: Extract<ContentBlock, { type: 'tool_result' }>[] = []
     const run = f.owner.run({ loop: owned({ ...f.context, scopeAccumulator }), sink: { kind: 'adapter', onEvent(event) {
@@ -360,7 +361,7 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
       { type: 'tool_result', name: tool, toolUseId: 'rejected-call', isError: true, content: expect.stringContaining('Validation failed') },
       { type: 'tool_result', name: tool, toolUseId: 'recent-text-call', isError: true, content: expect.stringContaining(readFailure) },
     ])
-    expect(selectRecentText).toHaveBeenCalledExactlyOnceWith(f.execution, 3)
+    expect(selectRecentText).toHaveBeenCalledExactlyOnceWith(f.execution, {beforeSequence:3}, undefined)
     expect(bindSelection).not.toHaveBeenCalled()
     expect(discover).not.toHaveBeenCalled()
     expect(result).toEqual({ error: new Error('Conversation context discovery failed.') })
@@ -368,7 +369,7 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
   })
 
   it.each([false, true])('reads mail in the initial frame and retains the pair when context is requested later (%s)', async useHistory => {
-    const scripted = capturingProvider(useHistory ? ['imapSearchMessages', 'requestConversationContext'] : ['imapSearchMessages'], undefined, 'end_turn')
+    const scripted = capturingProvider(useHistory ? ['imapSearchMessages', 'readChatHistory'] : ['imapSearchMessages'], undefined, 'end_turn')
     const f = await fixture({ lane: 'channel', provider: scripted.provider })
     const initial: Message = { role: 'user', content: 'Find the newest email.' }
     const earlier: Message = { role: 'user', content: 'Earlier fictional conversation.' }
@@ -381,7 +382,7 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
     expect(capabilities).not.toHaveBeenCalled()
     expect(mailbox.dispatcher).not.toHaveBeenCalled()
     await expect(f.owner.run({ loop: owned(f.context), sink: { kind: 'adapter' } })).resolves.toMatchObject({ finalText: 'Fictional prepared answer.' })
-    expect(toolNames(scripted.captured[0])).toEqual(['requestConversationContext', 'imapSearchMessages', 'imapGetMessage'])
+    expect(toolNames(scripted.captured[0])).toEqual(['readChatHistory', 'imapSearchMessages', 'imapGetMessage'])
     expect(scripted.captured[0].sends[0]).toEqual([initial])
     expect(scripted.captured[0].sends[1]).toMatchObject([{ role: 'user', content: [{ type: 'tool_result', name: 'imapSearchMessages', toolUseId: 'fixture-call', content: 'Fictional mailbox receipt' }] }])
     expect(capabilities).toHaveBeenCalledOnce()
@@ -391,8 +392,8 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
       expect(sent(scripted.captured[1])).toMatchObject([earlier, initial,
         { role: 'assistant', content: [{ type: 'tool_use', name: 'imapSearchMessages', id: 'fixture-call' }] },
         { role: 'user', content: [{ type: 'tool_result', name: 'imapSearchMessages', toolUseId: 'fixture-call', content: 'Fictional mailbox receipt' }] },
-        { role: 'assistant', content: [{ type: 'tool_use', name: 'requestConversationContext', id: 'fixture-call-1' }] },
-        { role: 'user', content: [{ type: 'tool_result', name: 'requestConversationContext', toolUseId: 'fixture-call-1' }] }])
+        { role: 'assistant', content: [{ type: 'tool_use', name: 'readChatHistory', id: 'fixture-call-1' }] },
+        { role: 'user', content: [{ type: 'tool_result', name: 'readChatHistory', toolUseId: 'fixture-call-1' }] }])
     } else {
       expect(discover).not.toHaveBeenCalled()
       expect(scripted.captured).toHaveLength(1)
@@ -413,7 +414,7 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
     expect(knowledge.dispatcher).not.toHaveBeenCalled()
 
     await expect(f.owner.run({ loop: owned(f.context), sink: { kind: 'adapter' } })).resolves.toMatchObject({ finalText: 'Fictional prepared answer.' })
-    expect(toolNames(scripted.captured[0])).toEqual(['requestConversationContext', 'searchKnowledge'])
+    expect(toolNames(scripted.captured[0])).toEqual(['readChatHistory', 'searchKnowledge'])
     expect(scripted.captured[0].sends[0]).toEqual([initial])
     expect(scripted.captured[0].sends[1]).toMatchObject([{ role: 'user', content: [{ type: 'tool_result', name: 'searchKnowledge',
       toolUseId: 'fixture-call', content: 'Fictional observatory handbook receipt' }] }])
@@ -449,7 +450,7 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
   })
 
   it('sends admitted discovery evidence to Gemini after an unsigned call on another provider', async () => {
-    const first = capturingProvider('tool', 'requestConversationContext')
+    const first = capturingProvider('tool', 'readChatHistory')
     const getTierRouteSystem: WorkspaceCustomLlmEndpointStore['getTierRouteSystem'] = async ({ workspaceId, tier }) =>
       tier === 'pro' ? { workspaceId, tier, modelAlias: 'gpt-6.1-terra', profileId: null, updatedAt: new Date() } : null
     const resolver = createWorkspaceCustomLlmResolver({ getTierRouteSystem } as WorkspaceCustomLlmEndpointStore, { managedProvider: first.provider })
@@ -480,7 +481,7 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
   })
 
   it('keeps worker readers available for delegation while the coordinator sees only its narrowed tools', async () => {
-    const scripted = capturingProvider(['requestConversationContext', 'delegateRead'])
+    const scripted = capturingProvider(['readChatHistory', 'delegateRead'])
     const f = await fixture({ provider: scripted.provider })
     const workerReader = readTool('workerRead')
     const seen = vi.fn()
@@ -500,7 +501,7 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
   })
 
   it('preserves the previous error receipt if the model requests context on a later round', async () => {
-    const scripted = capturingProvider(['missingFixtureTool', 'requestConversationContext'])
+    const scripted = capturingProvider(['missingFixtureTool', 'readChatHistory'])
     const f = await fixture({ provider: scripted.provider })
     const messages: Message[] = [{ role: 'user', content: 'Continue earlier work.' }]
     await f.owner.prepareRun({ systemPrompt: 'Initial', messages, candidateTools: new Map(), contextDiscovery: async () => ({
@@ -517,7 +518,7 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
   })
 
   it('defers non-native PDF bytes until discovery and keeps the attachment source at both provider boundaries', async () => {
-    const scripted = capturingProvider('tool', 'requestConversationContext')
+    const scripted = capturingProvider('tool', 'readChatHistory')
     const f = await fixture({ provider: scripted.provider, custom: true })
     const file = bindScopeSources({ type: 'image' as const, mimeType: 'application/pdf', data: 'ZmFrZSBwZGY=' }, [source('file')])
     const messages: Message[] = [{ role: 'user', content: [{ type: 'text', text: 'Read this PDF.' }, file] }]
@@ -543,7 +544,7 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
     try {
       const proModel = 'gpt-6.2-sol'
       const routes = { standard: proModel, pro: proModel, max: proModel, research: researchModel }
-      const scripted = capturingProvider(['requestConversationContext', 'inspectWithWorker'])
+      const scripted = capturingProvider(['readChatHistory', 'inspectWithWorker'])
       scripted.provider.stream = async function* (request) {
         scripted.captured.push({ config: { model: request.model, allowProviderFallback: request.allowProviderFallback }, sends: [request.messages] })
         yield { type: 'message_start', model: request.model }
@@ -593,7 +594,7 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
   it.each(['gpt-6.2-sol', 'gpt-6-luna'])('checkpoints the active Research tier and exact model %s when an approval parks', async researchModel => {
     vi.stubEnv('USEBRIAN_EDITION', 'outpost')
     try {
-      const scripted = capturingProvider(['requestConversationContext', 'writeThing'])
+      const scripted = capturingProvider(['readChatHistory', 'writeThing'])
       const getTierRouteSystem: WorkspaceCustomLlmEndpointStore['getTierRouteSystem'] = async ({ workspaceId, tier }) =>
         ({ workspaceId, tier, modelAlias: tier === 'research' ? researchModel : 'gpt-6.2-sol', profileId: null, updatedAt: new Date() })
       const resolver = createWorkspaceCustomLlmResolver({ getTierRouteSystem } as WorkspaceCustomLlmEndpointStore, { managedProvider: scripted.provider })
@@ -618,7 +619,7 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
   })
 
   it.each(['inherited', 'independent'] as const)('handles the %s worker lane on promotion to an automatic Research route', async lane => {
-    const scripted = capturingProvider(['requestConversationContext', 'inspectWorkerLane'])
+    const scripted = capturingProvider(['readChatHistory', 'inspectWorkerLane'])
     const getTierRouteSystem: WorkspaceCustomLlmEndpointStore['getTierRouteSystem'] = async ({ workspaceId, tier }) => tier === 'pro'
       ? { workspaceId, tier, modelAlias: 'gpt-6.1-terra', profileId: null, updatedAt: new Date() } : null
     const resolver = createWorkspaceCustomLlmResolver({ getTierRouteSystem } as WorkspaceCustomLlmEndpointStore, { managedProvider: scripted.provider })
@@ -640,7 +641,7 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
   })
 
   it('withholds discovered material when authority is withdrawn before the next physical dispatch', async () => {
-    const scripted = capturingProvider('tool', 'requestConversationContext')
+    const scripted = capturingProvider('tool', 'readChatHistory')
     let revoked = false
     const f = await fixture({ provider: scripted.provider, assertCurrent: async () => {
       if (revoked) throw Object.assign(new Error('Revoked'), { reason: 'authority_changed', retrySafe: false })
@@ -657,7 +658,7 @@ describe('[COMP:api/assistant-run-preparation] owner prepareRun', () => {
   })
 
   it('honors Stop during requested discovery before any enriched provider dispatch', async () => {
-    const scripted = capturingProvider('tool', 'requestConversationContext')
+    const scripted = capturingProvider('tool', 'readChatHistory')
     const f = await fixture({ provider: scripted.provider })
     const entered = deferred(), gate = deferred()
     await f.owner.prepareRun({ systemPrompt: 'Initial', messages: [{ role: 'user', content: 'Continue.' }], candidateTools: new Map(),

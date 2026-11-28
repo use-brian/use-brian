@@ -236,6 +236,32 @@ describe.sequential('[COMP:api/native-turn-frame] lossless graph representation'
    expect(await captureTopics()).toEqual([])
   }finally{await dense.cleanup()}
  },240_000)
+ it('keeps the recorded annotation facts and their order through repeated generic proofs',async()=>{
+  const authority={execution,accumulator:new ContextScopeAccumulator()}
+  const authored=await readSessionMessageScopeSource(f.workspaceId,messageId)
+  expect(authored).not.toBeNull()
+  const annotation=await writeSessionContextRevision({
+   sessionId:f.session.id,parentId:messageId,kind:'message_annotation',authority,
+   content:{topicLabel:'Fictional ordered proof topic',topicConfidence:0.9,replyToText:null},
+   derivation:{producer:'fixture:ordered-generic-proof',sources:[authored!]},
+  })
+  expect(annotation).not.toBeNull()
+  await frame(async client=>{
+   const packet=await captureConversationQuery(client,f.workspaceId,{sessionId:f.session.id,throughSequence:5,topicThroughSequence:5})
+   const observed=packet.annotations.find(entry=>entry.row?.id===messageId)
+   expect(observed?.row?.topicLabel).toBe('Fictional ordered proof topic')
+   const selected=observed!.sources.map(s=>({kind:s.resourceKind,id:s.resourceId,version:s.version}))
+   const proof=await equalProof(client,selected)
+   expect(proof.immutable).toEqual(expect.arrayContaining([
+    expect.objectContaining({resourceKind:'application_field',resourceId:selected[0].id,version:selected[0].version}),
+    expect.objectContaining({resourceKind:'session_context_revision',resourceId:annotation!.id,version:'1'}),
+   ]))
+   expect(proof.current).toContainEqual(expect.objectContaining({resourceKind:'session_message',resourceId:messageId}))
+   expect(await equalProof(client,selected)).toEqual(proof)
+   await operation(client,'hold',{id:messageId})
+   await equalProof(client,selected,[],false)
+  })
+ },90_000)
  it('keeps canonical graph internals and their contract registry private',async()=>{
   expect((await f.pool.query(`SELECT has_table_privilege('app_user','native_turn_contract_helpers','SELECT') read,
    has_table_privilege('app_user','native_turn_contract_helpers','UPDATE') write`)).rows[0]).toEqual({read:false,write:false})

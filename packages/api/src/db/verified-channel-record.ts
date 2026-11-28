@@ -118,10 +118,25 @@ const recentTextCandidateSchema = z.object({
     resourceKind:z.literal('session_message'),resourceId:z.string().uuid(),version:z.string().min(1),
     sensitivity:z.enum(['public','internal','confidential']),compartments:z.array(z.string()),projectIds:z.array(z.string().uuid())}).strict(),
 }).strict()
+const recentTextSelectionSchema = z.object({
+  messages: z.array(recentTextCandidateSchema).max(8),
+  quote: recentTextCandidateSchema.nullable(),
+}).strict()
 
 export const recentTextDigest = "encode(sha256(convert_to(m.content::text,'UTF8')),'hex')"
 const recentTextSlots = 8
-const recentTextPageSchema = z.array(recentTextCandidateSchema).max(recentTextSlots)
+export type TelegramTextWindow = Readonly<{ beforeSequence: number; quoteId?: string; includeUnaddressedDialogue?: boolean }>
+
+/** Resolve one original provider address in the exact session or return no
+ * quote. The index lookup stops after two matches so ambiguity stays bounded. */
+export function exactTelegramQuoteSql(session:string, quote:string, through:string):string {
+  return `SELECT q.id,q.sequence_num FROM (
+    SELECT candidate.id,candidate.sequence_num,count(*) OVER() AS matches FROM (
+      SELECT id,sequence_num FROM public.session_messages WHERE session_id=${session}
+        AND channel_message_id=${quote} AND sequence_num<=${through} LIMIT 2
+    ) candidate
+  ) q WHERE q.matches=1`
+}
 
 /** The next older window ends where the current window starts. */
 export function previousRecentTextBoundary(beforeSequence: number): number | undefined {
@@ -133,51 +148,84 @@ export function previousRecentTextBoundary(beforeSequence: number): number | und
  * workspace record floor. The room branch of addressedEnvelope applies the
  * workspace audience. The non-owner retained reader admits each selected
  * message and its ancestry before fetching model-visible bytes. */
-export async function selectVerifiedChannelRecentText(execution: ExecutionContext, beforeSequence: number, continuation?: TelegramKnowledgeGroup) {
-  const pages = await selectVerifiedChannelRecentTextWindows(execution, [beforeSequence], continuation)
+export async function selectVerifiedChannelRecentText(execution: ExecutionContext, window: TelegramTextWindow, continuation?: TelegramKnowledgeGroup) {
+  const pages = await selectVerifiedChannelRecentTextWindows(execution, [window], continuation)
   if (!pages) throw new DerivedScopeError('scope_source_changed')
   return pages[0]!
 }
 
 /** Capture all selected pages under one binding and one database snapshot. */
-export async function selectVerifiedChannelRecentTextWindows(execution: ExecutionContext, beforeSequences: readonly number[],
+export async function selectVerifiedChannelRecentTextWindows(execution: ExecutionContext, windows: readonly TelegramTextWindow[],
   continuation?: TelegramKnowledgeGroup) {
   const binding = verifiedSelections.get(execution)
-  if (!binding || !binding.address.room || binding.address.session.channelType !== 'telegram'
-    || !beforeSequences.length || beforeSequences.some(sequence => !Number.isSafeInteger(sequence) || sequence < 1 || sequence > 2147483647)) {
+  if (execution.lifecycle.channelType !== 'telegram' || !windows.length || windows.some(({beforeSequence}) =>
+    !Number.isSafeInteger(beforeSequence) || beforeSequence < 1 || beforeSequence > 2147483647)) {
     throw new DerivedScopeError('scope_source_changed')
   }
-  if (continuation && (continuation.sessionId !== binding.address.session.id || continuation.address !== binding.address.session.channelId
+  if (continuation && (!binding?.address.room || continuation.sessionId !== binding.address.session.id || continuation.address !== binding.address.session.channelId
     || continuation.integrationId !== binding.address.integrationId || continuation.envelopeVersion !== binding.version)) return null
+  const afterSequences = windows.map(({beforeSequence}) => (previousRecentTextBoundary(beforeSequence) ?? 1) - 1)
+  const throughSequences = windows.map(({beforeSequence}) => beforeSequence - 1)
+  const quoteIds = windows.map(window => window.quoteId ?? null)
+  const includeUnaddressed = windows.map(window => window.includeUnaddressedDialogue === true)
+  const selectionPayload = `jsonb_build_object('sequence',m.sequence_num,'role',m.role,'digest',${recentTextDigest},
+    'source',jsonb_build_object('workspaceId',m.workspace_id,'userId',m.user_id,'assistantId',m.assistant_id,
+      'resourceKind','session_message','resourceId',m.id,'version',m.scope_version::text,'sensitivity',m.sensitivity,
+      'compartments',m.compartments,'projectIds',m.project_ids))`
+  const textRows = `(m.channel_message_id IS NOT NULL OR page.include_unaddressed) AND octet_length(m.content::text)<=16384
+    AND NOT jsonb_path_exists(m.content,'$[*] ? (@.type == "tool_use" || @.type == "tool_result" || @.type == "host_observation")')`
+  if (!binding) {
+    // Before a verified envelope is available, the ordinary native reader
+    // still owns the exact message sources. This query captures only roots.
+    const {rows} = await query<{ selection: unknown }>(`SELECT jsonb_build_object('messages',coalesce(
+      jsonb_agg(payload ORDER BY seq) FILTER (WHERE in_window),'[]'::jsonb),'quote',
+      CASE WHEN count(*) FILTER (WHERE is_quote)=1 THEN (jsonb_agg(payload) FILTER (WHERE is_quote))->0 END) AS selection
+      FROM unnest($3::integer[],$4::integer[],$5::text[],$6::boolean[])
+        WITH ORDINALITY AS page(after_sequence,through_sequence,quote_id,include_unaddressed,ord)
+      LEFT JOIN LATERAL (${exactTelegramQuoteSql('$2','page.quote_id','page.through_sequence')}) quote ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT ${selectionPayload} AS payload,m.sequence_num AS seq,m.sequence_num>page.after_sequence AS in_window,
+          m.id=quote.id AS is_quote
+        FROM (
+          SELECT recent.* FROM public.session_messages recent WHERE recent.session_id=$2
+            AND recent.sequence_num>page.after_sequence AND recent.sequence_num<=page.through_sequence
+          UNION ALL
+          SELECT exact.* FROM public.session_messages exact WHERE exact.id=quote.id AND exact.sequence_num<=page.after_sequence
+        ) m WHERE m.workspace_id=$1 AND m.session_id=$2
+          AND public.session_recording_read_allowed(m.session_id) AND m.scope_held IS NOT TRUE
+          AND public.scope_review_state_held('session_message',m.id) IS NOT TRUE
+          AND m.scope_version IS NOT NULL AND m.role IN ('user','assistant') AND ${textRows}
+      ) selected ON TRUE GROUP BY page.ord ORDER BY page.ord`,
+    [execution.security.access.workspaceId,execution.lifecycle.sessionId,afterSequences,throughSequences,quoteIds,includeUnaddressed])
+    return rows.map(row => recentTextSelectionSchema.parse(row.selection))
+  }
   // Keep the metadata-only credential check with the exact page selection.
   // The live lease still owns audience, membership and source admission.
-  const continuationBinding = continuation ? `AND s.status='running' AND s.turn_lease_token=$12
+  const continuationBinding = continuation ? `AND s.status='running' AND s.turn_lease_token=$14
     AND s.cancel_requested_at IS NULL AND coalesce(s.turn_assistant_id,s.assistant_id)=$5
-    AND EXISTS (SELECT 1 FROM public.linked_identities l WHERE l.provider='telegram' AND l.provider_id=$13 AND l.user_id=$6)
+    AND EXISTS (SELECT 1 FROM public.linked_identities l WHERE l.provider='telegram' AND l.provider_id=$15 AND l.user_id=$6)
     AND EXISTS (SELECT 1 FROM public.channel_integrations ci JOIN public.channels c ON c.id=ci.channel_id
-      WHERE ci.id=$14 AND ci.bot_user_id=$15 AND ci.identity_generation=$16
+      WHERE ci.id=$16 AND ci.bot_user_id=$17 AND ci.identity_generation=$18
         AND ci.channel_type='telegram' AND c.channel_type='telegram' AND c.workspace_id=$2
         AND ci.status='active' AND c.status='active')` : ''
   const continuationValues = continuation
     ? [continuation.lease, continuation.speakerId, continuation.integrationId, continuation.botId, continuation.generation] : []
-  const afterSequences = beforeSequences.map(sequence => (previousRecentTextBoundary(sequence) ?? 1) - 1)
-  const throughSequences = beforeSequences.map(sequence => sequence - 1)
-  const { rows } = await query<{ candidates: unknown }>(`WITH bound AS MATERIALIZED (${addressedEnvelope} ${continuationBinding})
-    SELECT COALESCE((SELECT jsonb_agg(jsonb_build_object(
-    'sequence',m.sequence_num,'role',m.role,'digest',${recentTextDigest},'source',jsonb_build_object(
-      'workspaceId',m.workspace_id,'userId',m.user_id,'assistantId',m.assistant_id,'resourceKind','session_message',
-      'resourceId',m.id,'version',m.scope_version::text,'sensitivity',m.sensitivity,
-      'compartments',m.compartments,'projectIds',m.project_ids)) ORDER BY m.sequence_num)
-    FROM public.conversation_record_rows(bound.envelope,page.after_sequence,page.through_sequence,false,$6,false) m
-    WHERE m.channel_message_id IS NOT NULL AND m.user_id IS NULL AND octet_length(m.content::text)<=16384
-      AND NOT jsonb_path_exists(m.content,'$[*] ? (@.type == "tool_use" || @.type == "tool_result" || @.type == "host_observation")')
-  ),'[]'::jsonb) AS candidates FROM bound
-    CROSS JOIN unnest($10::integer[],$11::integer[]) WITH ORDINALITY AS page(after_sequence,through_sequence,ord)
+  const recordedTextRows = `${textRows} AND m.workspace_id=$2 AND (NOT $8::boolean OR m.user_id IS NULL)`
+  const { rows } = await query<{ selection: unknown }>(`WITH bound AS MATERIALIZED (${addressedEnvelope} ${continuationBinding})
+    SELECT jsonb_build_object('messages',coalesce((SELECT jsonb_agg(${selectionPayload} ORDER BY m.sequence_num)
+      FROM public.conversation_record_rows(bound.envelope,page.after_sequence,page.through_sequence,false,$6,false) m
+      WHERE ${recordedTextRows}), '[]'::jsonb), 'quote',
+      (SELECT ${selectionPayload}
+        FROM (${exactTelegramQuoteSql('$1','page.quote_id','page.through_sequence')}) candidate
+        CROSS JOIN LATERAL public.conversation_record_rows(bound.envelope,candidate.sequence_num-1,candidate.sequence_num,false,$6,false) m
+        WHERE m.id=candidate.id AND ${recordedTextRows})) AS selection
+    FROM bound CROSS JOIN unnest($10::integer[],$11::integer[],$12::text[],$13::boolean[])
+      WITH ORDINALITY AS page(after_sequence,through_sequence,quote_id,include_unaddressed,ord)
     ORDER BY page.ord`,
-  [...addressValues(binding.address,binding.version),afterSequences,throughSequences,...continuationValues])
+  [...addressValues(binding.address,binding.version),afterSequences,throughSequences,quoteIds,includeUnaddressed,...continuationValues])
   if (rows.length === 0) return null
   if (rows.length !== afterSequences.length) throw new DerivedScopeError('scope_source_changed')
-  return rows.map(row => recentTextPageSchema.parse(row.candidates))
+  return rows.map(row => recentTextSelectionSchema.parse(row.selection))
 }
 
 export function channelEvidenceFitsEnvelope(envelope: ChannelRecordEnvelope, evidence: ScopeEvidence) {

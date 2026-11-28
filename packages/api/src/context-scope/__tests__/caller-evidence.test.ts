@@ -145,14 +145,19 @@ describe('[COMP:api/caller-scope-evidence] model-context history withholds held 
     vi.resetModules()
     vi.doMock('../../db/sessions.js', async original => ({ ...await original<typeof import('../../db/sessions.js')>(), getSessionMessages }))
     try {
-      const { captureTurnHistory } = await import('../../turn/history.js')
+      const { captureTurnHistory, readRecentChannelText } = await import('../../turn/history.js')
       await captureTurnHistory('session-fixture', { native: null })()
       await captureTurnHistory('session-fixture', { native: null, fromSequence: 7 })()
       await captureTurnHistory('session-fixture', { native: null, fromSequence: null, projectStored: async rows => rows })()
+      await readRecentChannelText({
+        kind: 'stored', sessionId: 'session-fixture', assertCurrent: async () => {},
+        project: async rows => rows, sources: () => [],
+      }, { beforeSequence: 12, quoteId: '947' }, new AbortController().signal, false)
       expect(getSessionMessages.mock.calls).toEqual([
         ['session-fixture', { excludeHeld: true }],
         ['session-fixture', { fromSequence: 7, excludeHeld: true }],
         ['session-fixture', { fromSequence: null, excludeHeld: true }],
+        ['session-fixture', { telegramTextWindow: { beforeSequence: 12, firstSequence: 4, quoteId: '947' }, excludeHeld: true }],
       ])
     } finally {
       vi.doUnmock('../../db/sessions.js')

@@ -2362,9 +2362,9 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   const linkedAccountStore = params.linkedAccountStore
   const linkedIdentity = params.linkedIdentity
   const speakerAddress = incoming.userId
-  // Keep the exact intake link available to the first-dispatch archive tools.
-  const initialChatArchiveRecipientCurrent = linkedAccountStore && linkedIdentity && isIdentified && !incoming.isGroupChat
-    && speakerAddress === incoming.channelId && (params.tools.has(CHAT_ARCHIVE_CHANNELS_TOOL.name) || params.tools.has(CHAT_ARCHIVE_SEARCH_TOOL.name))
+  // The first-dispatch archive and same-recipient transcript keep the exact intake link.
+  const directRecipientCurrent = linkedAccountStore && linkedIdentity && isIdentified && !incoming.isGroupChat
+    && speakerAddress === incoming.channelId
     ? async () => {
       const readOriginalLink = async () => {
         const current = await linkedAccountStore.findByProvider('telegram', speakerAddress)
@@ -2378,6 +2378,8 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
         return role && await readOriginalLink() ? role : null
       })
     } : undefined
+  const initialChatArchiveRecipientCurrent = params.tools.has(CHAT_ARCHIVE_CHANNELS_TOOL.name) || params.tools.has(CHAT_ARCHIVE_SEARCH_TOOL.name)
+    ? directRecipientCurrent : undefined
   await processChannelMessage({
     admittedAnswerContext: admission,
     interactionScope: params.interactionScope,
@@ -2401,6 +2403,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     channelIntegrationStore: params.integrationStore,
     telegramProviderIdentity: params.providerIdentity,
     initialChatArchiveRecipientCurrent,
+    telegramHistoryRecipientCurrent: directRecipientCurrent,
     actorChannelId: byoUsername ? `@${byoUsername}` : null,
     messageText: combinedText,
     userContentBlocks,

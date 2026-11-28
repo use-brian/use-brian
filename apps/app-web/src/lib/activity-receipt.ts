@@ -175,7 +175,7 @@ type Bucket =
   | { kind: "server"; server: string; count: number }
   | { kind: "other"; count: number };
 
-const READ_NAMES = new Set(["urlReader", "fileRead", "readFileContent", "retrieveCachedResults"]);
+const READ_NAMES = new Set(["urlReader", "fileRead", "readFileContent", "retrieveCachedResults", "requestConversationContext"]);
 
 function bucketKeyOf(tool: Pick<ToolUsed, "name" | "input">): string {
   const name = tool.name;

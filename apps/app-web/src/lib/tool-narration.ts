@@ -105,7 +105,8 @@ export function staticToolLabel(
   dict: NarrationDict,
   name: string,
 ): string | undefined {
-  const value = (dict as Record<string, unknown>)[name];
+  const labelKey = name === "requestConversationContext" ? "readChatHistory" : name;
+  const value = (dict as Record<string, unknown>)[labelKey];
   if (typeof value !== "string" || value.includes("{")) return undefined;
   return value;
 }

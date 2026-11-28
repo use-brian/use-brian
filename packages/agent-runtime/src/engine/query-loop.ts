@@ -304,7 +304,7 @@ export type QueryEvent =
 
 // ── Query loop options ─────────────────────────────────────────
 
-export const CONVERSATION_CONTEXT_TOOL = 'requestConversationContext'
+export const CONVERSATION_CONTEXT_TOOL = 'readChatHistory'
 
 /** Prepared by the original host after a real in-loop discovery tool call. */
 export type DiscoveredQueryContext = Pick<QueryLoopOptions,

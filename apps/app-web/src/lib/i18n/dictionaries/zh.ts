@@ -2146,6 +2146,7 @@ export const zh: Dictionary = {
     },
     toolNarration: {
       generic: "正在執行 {name}",
+      readChatHistory: "正在查看聊天記錄",
       working: "處理中…",
       renderView: "正在起草檢視",
       renderPage: "正在起草頁面",

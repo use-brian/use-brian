@@ -51,13 +51,13 @@ beforeAll(async () => {
     createSession(options) {
       return { async *send(messages) {
         providerInputs.push(JSON.stringify({ options, messages }))
-        const discover = options.tools?.some(tool => tool.name === 'requestConversationContext')
+        const discover = options.tools?.some(tool => tool.name === 'readChatHistory')
         if (discover || requestedFileId) {
           const fileId = requestedFileId
           if (!discover) requestedFileId = undefined
           const id = discover ? 'fixture_context_lookup' : 'fixture_file_lookup'
           yield { type: 'message_start', model: 'fixture' }
-          yield { type: 'tool_use_start', id, name: discover ? 'requestConversationContext' : 'readFileContent' }
+          yield { type: 'tool_use_start', id, name: discover ? 'readChatHistory' : 'readFileContent' }
           yield { type: 'tool_use_delta', id, input: JSON.stringify(discover ? {} : { fileId }) }
           yield { type: 'tool_use_end', id }
           yield { type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 1, outputTokens: 1 } }

@@ -185,9 +185,9 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
      expect(wire).not.toContain('PRIVATE_')
      expect(wire).not.toContain('fictionalCalendarRead')
      expect(nativeQueries).toHaveLength(nativeQueryStart)
-     expect(JSON.stringify(request.tools)).toContain('requestConversationContext')
+     expect(JSON.stringify(request.tools)).toContain('readChatHistory')
      return new Response('data: '+JSON.stringify({candidates:[{content:{parts:[{
-      functionCall:{id:'recording-context',name:'requestConversationContext',args:{}},thoughtSignature:'fictional-context',
+      functionCall:{id:'recording-context',name:'readChatHistory',args:{mode:'full'}},thoughtSignature:'fictional-context',
      }]},finishReason:'STOP'}],usageMetadata:{promptTokenCount:3,candidatesTokenCount:2}})+'\n\n',{headers:{'content-type':'text/event-stream'}})
     }
     expect(mainRequests).toHaveLength(mainRequestStart+2)

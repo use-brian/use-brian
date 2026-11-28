@@ -165,11 +165,14 @@ describe('[COMP:tooling/push-preflight] actual local publication boundary', () =
 
   test('plans the complete maintained full/current workflow with no guessed test command list', async () => {
     const source = await readFile(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8')
-    for (const [historical, count] of [[true, 35], [false, 26]]) {
+    for (const [historical, count] of [[true, 36], [false, 26]]) {
       const context = workflowContext({ historical })
       const jobs = compileWorkflow(source, context).filter(job => job.definition.if === undefined || expression(job.definition.if, context))
       assert.equal(jobs.flatMap(job => job.variants).length, count)
       assert.ok(jobs.some(job => job.id === 'build-test'))
+      const embedded = jobs.find(job => job.id === 'embedded-database-tests')?.variants ?? []
+      assert.deepEqual(embedded.filter(variant => variant.group === 'publication-upgrade'),
+        historical ? [{ group: 'publication-upgrade', timeoutMinutes: 15 }] : [])
       const profile = historical ? 'full' : 'current'
       const matrices = acceptanceMatrices(profile)
       assert.deepEqual(jobs.find(job => job.id === 'department-isolation-shards').variants, matrices.remaining.include)
