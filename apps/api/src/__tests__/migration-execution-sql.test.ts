@@ -126,7 +126,7 @@ test('[COMP:api/migration-execution-sql] authenticates every adapted immutable s
     adaptedFiles.push(Number(name.split('_')[0]))
   }
   assert.deepEqual(adaptedFiles.sort((a,b)=>a-b), [8188,8196,8197,8198,8199,8200,8201,8204,8205,8229,
-    8234,8235,8236,8242,8243,8245,8246,8247,8248,8249,8250,8251,8269,8272,8290,8296,8322,8326,82690,82775,82980])
+    8234,8235,8236,8242,8243,8245,8246,8247,8248,8249,8250,8251,8269,8272,8273,8274,8290,8296,8322,8326,82690,82775,82980])
   assert.equal(toMigrationExecutionSql('SELECT 1;', 'future.sql'), 'SELECT 1;')
   assert.equal(toMigrationExecutionSql(source, 'future.sql'), source)
 })

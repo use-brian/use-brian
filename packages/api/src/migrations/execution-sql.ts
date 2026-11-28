@@ -7,12 +7,15 @@ import {
   memoryWriteSuccessorExecutionSql, memoryWriteSuccessorMigration, memoryWriteSuccessorSourceSha256,
 } from './memory-lineage-publication-execution.js'
 import { pageThreadSourceExecutionSql } from './page-thread-execution.js'
+import { publicationCatalogOrderingExecutionSql } from './publication-catalog-ordering-execution.js'
 
 /** Execution-only adaptation of reviewed historical SQL; contract checks stay intact.
  * [COMP:api/migration-execution-sql]
  */
 const privateTranscriptPreparation = '82690_private_transcript_preparation_eligibility.sql'
 const canonicalConversation = '8269_canonical_conversation_publication.sql'
+const requirementConversion = '8273_conversation_requirement_conversion.sql'
+const executableContracts = '8274_inputtable_executable_contracts.sql'
 const pageAuthorityPrivileges = '82775_legacy_page_authority_privileges.sql'
 const conversationTriggerPrivileges = '82980_legacy_conversation_trigger_privileges.sql'
 const participationRetirement = '8290_participation_read_retirement.sql'
@@ -48,6 +51,8 @@ const reviewed: Readonly<Record<string, readonly [string, number]>> = {
   [participationRetirement]: ['5fdaec0ab2468bc805c7163478d58e88b5c407efbc02a55fafdb5dc89a74b8d0', 0],
   [crmSealedProjection]: ['97548d6aa29af708654e892377818288207eca5096082209e8ea06a74314445f', 0],
   [memoryPublicationMigration]: [memoryPublicationSourceSha256, 0],
+  [requirementConversion]: ['5617c736f9abf63b737ffd771479b4dba285c26b905532bf047ed470be9c4996', 0],
+  [executableContracts]: ['bb50ec5bcfcbb4a4c2f75ffb40f5de6441b8d3a21ce99c1d32783754b9479d0d', 0],
   [memoryWriteSuccessorMigration]: [memoryWriteSuccessorSourceSha256, 0],
   [privateTranscriptPreparation]: ['e5de14be570dea6f612243ef862c72a8e3af68126b0fe1bdbdd8ee8e3b672b80', 0],
 }
@@ -166,7 +171,13 @@ export function toMigrationExecutionSql(sql: string, file: string): string {
        AND actual.proacl @> ARRAY[makeaclitem(owner_id,owner_id,'EXECUTE',false),
          makeaclitem('app_user'::regrole,owner_id,'EXECUTE',false)])`)
   }
-  if (file === memoryPublicationMigration) return memoryLineagePublicationExecutionSql(sql)
+  if (file === memoryPublicationMigration) {
+    // Both the upstream Memory bridge and the original installer must render
+    // the same source-owned snapshots using this installation's OID ordering.
+    return memoryLineagePublicationExecutionSql(publicationCatalogOrderingExecutionSql(sql))
+  }
+  if (file === requirementConversion) return publicationCatalogOrderingExecutionSql(sql, 'c8273_')
+  if (file === executableContracts) return publicationCatalogOrderingExecutionSql(sql, 'a8273_')
   if (file === memoryWriteSuccessorMigration) return memoryWriteSuccessorExecutionSql(sql)
   if (file === configuredTaskPublication) return configuredTaskPublicationExecutionSql(sql)
   if (file === participationRetirement) return participationRetirementExecutionSql(sql)
