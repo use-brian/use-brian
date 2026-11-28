@@ -1,4 +1,4 @@
-/** [COMP:api/migration-execution-sql] Real upstream 8268 -> 8272, ordinary owner. */
+/** [COMP:api/migration-execution-sql] Historical restores through all copied installers, ordinary owner. */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
@@ -17,10 +17,28 @@ const directory = fileURLToPath(new URL('../../../../packages/api/migrations/', 
 const publication = '8272_durable_conversation_publications.sql'
 const upstream = '8268_native_memory_query_write_lineage.sql'
 
-test('[COMP:api/migration-execution-sql] upgrades historical Memory with reordered FK triggers and preserves strict body authentication', async () => {
+test('[COMP:api/migration-execution-sql] upgrades historical Memory with reordered relations, FK triggers and functions while preserving strict authentication', async () => {
   let db = await openOrdinaryOwnerPglite()
   try {
-    await migratePglite(db, directory, { through: '5630_department_scope_evidence.sql' })
+    await migratePglite(db, directory, { through: '562_decision_fk_cleanup.sql' })
+    const foundation = '5630_department_scope_evidence.sql'
+    const foundationSql = await readFile(`${directory}/${foundation}`, 'utf8')
+    const derivations = foundationSql.match(/^CREATE TABLE scope_derivations \([\s\S]*?^\);/m)?.[0]
+    const sources = foundationSql.match(/^CREATE TABLE scope_derivation_sources \([\s\S]*?^\);/m)?.[0]
+    assert.ok(derivations && sources)
+    const foreignKey = 'FOREIGN KEY (workspace_id,derivation_id) REFERENCES scope_derivations(workspace_id,id) ON DELETE CASCADE'
+    assert.equal(sources.split(foreignKey).length, 2)
+    // Like pg_restore, declare independent tables first and add the cross-table
+    // FK afterwards. Identical final declarations, but reverse relation OIDs.
+    const reorderedFoundation = foundationSql.replace(`${derivations}\n${sources}`,
+      `${sources.replace(`,\n  ${foreignKey}`, '')}\n${derivations}\nALTER TABLE scope_derivation_sources ADD CONSTRAINT scope_derivation_sources_workspace_id_derivation_id_fkey ${foreignKey};`)
+    assert.notEqual(reorderedFoundation, foundationSql)
+    await db.transaction(async tx => {
+      await tx.exec(withoutOuterTransaction(reorderedFoundation, foundation))
+      await tx.query('INSERT INTO public._migrations(name) VALUES($1)', [foundation])
+    })
+    assert.deepEqual((await db.query(`SELECT 'public.scope_derivation_sources'::regclass::oid
+      <'public.scope_derivations'::regclass::oid reordered`)).rows, [{ reordered: true }])
     // A valid restore/recreated FK can assign newer OIDs than the reference
     // trigger. Do this before any native comparator captures these objects.
     const foreignKeys = (await db.query<{ name: string; definition: string }>(`SELECT conname name,pg_get_constraintdef(oid) definition
@@ -94,14 +112,33 @@ test('[COMP:api/migration-execution-sql] upgrades historical Memory with reorder
     assert.deepEqual((await db.query('SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')).rows,
       [{ rolsuper: false, rolbypassrls: false }])
     assert.equal((await db.query<{ body: string }>(`SELECT prosrc body FROM pg_proc WHERE oid='native_turn_helpers_current()'::regprocedure`)).rows[0].body.includes('-- unreviewed body'), false)
-    await migratePglite(db, directory, { through: '8326_native_memory_query_write_contract.sql' })
+    await migratePglite(db, directory, { through: '8275_joint_native_preparation_acquisition.sql' })
+    const successor = '8276_registry_guard_successor.sql'
+    const successorSql = await readFile(`${directory}/${successor}`, 'utf8')
+    await assert.rejects(db.transaction(tx => tx.exec(withoutOuterTransaction(successorSql, successor))),
+      /installation_current_source_changed: native_turn_helpers_current/)
+    const current = (await db.query<{ body: string; definition: string }>(`SELECT prosrc body,pg_get_functiondef(oid) definition
+      FROM pg_proc WHERE oid='native_turn_helpers_current()'::regprocedure`)).rows[0]
+    await assert.rejects(db.transaction(async tx => {
+      await tx.exec(current.definition.replace(current.body, () => current.body + '\n-- unreviewed successor body'))
+      await tx.exec(toPgliteMigrationSql(successorSql, successor))
+    }), /changed|mismatch/)
+    assert.equal((await db.query<{ body: string }>(`SELECT prosrc body FROM pg_proc
+      WHERE oid='native_turn_helpers_current()'::regprocedure`)).rows[0].body, current.body)
+    assert.deepEqual((await db.query('SELECT name FROM _migrations WHERE name=$1', [successor])).rows, [])
+    const latest = '8338_native_workspace_skill_receipts.sql'
+    await migratePglite(db, directory, { through: latest })
+    assert.deepEqual((await db.query(`SELECT native_turn_helpers_current() native,
+      native_turn_publication_contract() publication,native_retained_helpers_current() retained`)).rows,
+      [{ native: true, publication: true, retained: true }])
     // The renderer also serves installations without upstream 8268. Reuse a
     // same-run pre-upstream image, not a cached migration verdict.
     await db.close()
     db = new PGlite({ extensions: { vector, pg_trgm }, loadDataDir: canonicalImage })
     await db.waitReady
     await db.exec('SET ROLE migration_owner')
-    await migratePglite(db, directory, { through: '8326_native_memory_query_write_contract.sql' })
+    await migratePglite(db, directory, { through: latest })
+    assert.deepEqual((await db.query('SELECT name FROM _migrations WHERE name=$1', [latest])).rows, [{ name: latest }])
     assert.deepEqual((await db.query('SELECT name FROM _migrations WHERE name=$1', [upstream])).rows, [])
     assert.deepEqual((await db.query('SELECT name FROM _migrations WHERE name=$1', [publication])).rows, [{ name: publication }])
   } finally { await db.close() }

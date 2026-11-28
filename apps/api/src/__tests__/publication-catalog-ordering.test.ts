@@ -1,10 +1,11 @@
 /** [COMP:api/migration-execution-sql] Historical catalog snapshots use local OID order. */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readFile, readdir } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { PGlite } from '@electric-sql/pglite'
 import { toMigrationExecutionSql } from '../../../../packages/api/src/migrations/execution-sql.js'
+import { publicationCatalogOrderingSuccessors } from '../../../../packages/api/src/migrations/publication-catalog-ordering-execution.js'
 
 const name = '8272_durable_conversation_publications.sql'
 const raw = await readFile(new URL(`../../../../packages/api/migrations/${name}`, import.meta.url), 'utf8')
@@ -125,6 +126,7 @@ test('[COMP:api/migration-execution-sql] reproduces local-OID snapshots before q
 for (const [file, prefix] of [
   ['8273_conversation_requirement_conversion.sql', 'c8273_'],
   ['8274_inputtable_executable_contracts.sql', 'a8273_'],
+  ...Object.entries(publicationCatalogOrderingSuccessors).map(([file, [, prefix]]) => [file, prefix]),
 ]) test(`[COMP:api/migration-execution-sql] preserves local catalog ordering in ${file}`, async () => {
   const source = await readFile(new URL(`../../../../packages/api/migrations/${file}`, import.meta.url), 'utf8')
   const adapted = toMigrationExecutionSql(source, file)
@@ -141,7 +143,27 @@ for (const [file, prefix] of [
     assert.ok(adapted.includes(`publication_predecessor_table_snapshot SELECT pg_temp.${prefix}publication_ordered_catalog(`))
     assert.ok(!adapted.includes(`publication_predecessor_table_snapshot SELECT pg_temp.${prefix}publication_json(`))
     assert.throws(() => toMigrationExecutionSql(source + '\n', file), /historical migration content changed/)
+    if (prefix.startsWith('a')) {
+      const cleanup = adapted.match(/^DO \$cleanup\$[\s\S]*?END \$cleanup\$;/m)?.[0]
+      assert.ok(cleanup)
+      await db.exec(cleanup)
+      assert.deepEqual((await db.query(`SELECT to_regprocedure($1) IS NULL removed`,
+        [`pg_temp.${prefix}publication_ordered_catalog(jsonb)`])).rows, [{ removed: true }])
+      // A subsequent migration may reuse this exact compiler namespace.
+      await db.exec(renderers(adapted, prefix))
+    }
   } finally { await db.close() }
+})
+
+test('[COMP:api/migration-execution-sql] reviews every copied successor compiler explicitly', async () => {
+  const directory = new URL('../../../../packages/api/migrations/', import.meta.url)
+  const copies: string[] = []
+  for (const file of (await readdir(directory)).filter(file => file.endsWith('.sql') && file >= '8276').sort()) {
+    const source = await readFile(new URL(file, directory), 'utf8')
+    if (/CREATE FUNCTION pg_temp\.\w+publication_body\(parts jsonb\)/.test(source)) copies.push(file)
+  }
+  assert.deepEqual(Object.keys(publicationCatalogOrderingSuccessors), copies,
+    'new copied compilers require source checksum and catalog ordering review')
 })
 
 test('[COMP:api/migration-execution-sql] authenticates only literal pin permutations without changing source output order', async () => {
