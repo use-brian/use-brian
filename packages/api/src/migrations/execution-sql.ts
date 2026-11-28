@@ -7,7 +7,7 @@ import {
   memoryWriteSuccessorExecutionSql, memoryWriteSuccessorMigration, memoryWriteSuccessorSourceSha256,
 } from './memory-lineage-publication-execution.js'
 import { pageThreadSourceExecutionSql } from './page-thread-execution.js'
-import { publicationCatalogOrderingExecutionSql } from './publication-catalog-ordering-execution.js'
+import { publicationCatalogOrderingExecutionSql, publicationCatalogOrderingSuccessors } from './publication-catalog-ordering-execution.js'
 import { publicationPinOrderingExecutionSql } from './publication-pin-ordering-execution.js'
 
 /** Execution-only adaptation of reviewed historical SQL; contract checks stay intact.
@@ -23,6 +23,7 @@ const participationRetirement = '8290_participation_read_retirement.sql'
 const configuredTaskPublication = '8296_configured_task_publication.sql'
 const crmSealedProjection = '8322_crm_summary_sealed_projection.sql'
 const reviewed: Readonly<Record<string, readonly [string, number]>> = {
+  ...Object.fromEntries(Object.entries(publicationCatalogOrderingSuccessors).map(([file, [digest]]) => [file, [digest, 0] as const])),
   [canonicalConversation]: ['d17106c521097797416a2a51ba53d07fce978ea1da587dae82d066da4575ec39', 0],
   [pageAuthorityPrivileges]: ['aec23511a8e0630a0b04a3aa5d9ac3e6405e0936e5eab580444da7747c40f42b', 0],
   [conversationTriggerPrivileges]: ['88b5922d0350f6c7dca79a8305ce428385d53a878d008797192a632ff436a7ed', 0],
@@ -148,6 +149,8 @@ export function toMigrationExecutionSql(sql: string, file: string): string {
   if (createHash('sha256').update(sql).digest('hex') !== expected[0]) {
     throw new Error(`${file}: historical migration content changed; refusing execution adapter`)
   }
+  const catalogSuccessor = publicationCatalogOrderingSuccessors[file]
+  if (catalogSuccessor) sql = publicationCatalogOrderingExecutionSql(sql, catalogSuccessor[1])
   if (file === crmSealedProjection) return crmSealedProjectionExecutionSql(sql)
   if (file === conversationTriggerPrivileges) return conversationTriggerPrivilegesExecutionSql(sql)
   if (file === pageAuthorityPrivileges) {
