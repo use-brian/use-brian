@@ -443,7 +443,7 @@ function frameObserver(overrides: Record<string, unknown> = {}) {
     resetEventLog: vi.fn(), turnReasoningRef: { current: "" }, eventLogRef: { current: EMPTY_LOG as EventLog },
     eventSeq: 0, mintEventId: () => `ev-${scope.eventSeq++}`, setStreamingEvents: vi.fn(),
     appendReasoning, appendStep, removeToolSteps, updateStepText, describeToolFromInput,
-    isBrowserToolName: (name: string) => name === "browse", openComputerTab: vi.fn(),
+    browserPreview: { started: vi.fn(), settled: vi.fn(), dropped: vi.fn() },
     eventToolIdsRef: { current: new Set() }, eventedToolIdsRef: { current: new Set() },
     announceResearchChanged: vi.fn(), openInChatPane: vi.fn(), parsePresentedDocumentPayload: (payload: { id?: string }) => (payload.id ? { id: payload.id } : null),
     setResearchQuota: vi.fn(), setResearchExhausted: vi.fn(), setResearchMode: vi.fn(), setUnreachableNote: vi.fn(),
@@ -554,17 +554,21 @@ describe("[COMP:app-web/chat-sessions-cache] stream completion ownership", () =>
     expect(scope.setResearchMode).toHaveBeenCalledWith(false);
   });
 
-  it("opens presented documents and created pages in this chat's pane, and browser steps as a tab", () => {
+  it("opens presented documents and pages and forwards the owning chat's tool lifecycle", () => {
     const { scope, frame } = frameObserver();
     sending(scope, { owningSessionId: "A" });
     frame("direct", "document_payload", { id: "doc-1" });
     frame("direct", "page_created", { pageId: "page-1" });
     frame("direct", "tool_start", { id: "t-1", name: "browse" });
+    frame("direct", "tool_result", { id: "t-1" });
+    frame("direct", "tool_dropped", { id: "t-2" });
     frame("direct", "research_saved", { activityId: "r-1", status: "saved" });
     expect(scope.openInChatPane).toHaveBeenCalledWith({ kind: "document", document: { id: "doc-1" } });
     expect(scope.openInChatPane).toHaveBeenCalledWith({ kind: "page", pageId: "page-1" });
     expect(scope.window.dispatchEvent).toHaveBeenCalledTimes(1);
-    expect(scope.openComputerTab).toHaveBeenCalledWith("A");
+    expect(scope.browserPreview.started).toHaveBeenCalledExactlyOnceWith("A", "t-1", "browse");
+    expect(scope.browserPreview.settled).toHaveBeenCalledExactlyOnceWith("A", "t-1");
+    expect(scope.browserPreview.dropped).toHaveBeenCalledExactlyOnceWith("A", "t-2");
     expect(scope.announceResearchChanged).toHaveBeenCalledOnce();
   });
 
@@ -576,7 +580,7 @@ describe("[COMP:app-web/chat-sessions-cache] stream completion ownership", () =>
     frame("direct", "tool_input", { id: "t-1", name: "browse", input: { url: "https://example.com" } });
     const live = scope.eventLogRef.current.events;
     expect(live.map((event: { kind: string }) => event.kind)).toEqual(["reasoning", "step"]);
-    expect(scope.openComputerTab).toHaveBeenCalledTimes(2);
+    expect(scope.browserPreview.started).toHaveBeenCalledTimes(2);
     // A replay from the conversation's build log (returning to a running
     // chat) rebuilds the same feed and repeats no side effect.
     const replay = frameObserver();
@@ -584,7 +588,9 @@ describe("[COMP:app-web/chat-sessions-cache] stream completion ownership", () =>
       replay.frame("direct", event, payload, true);
     }
     expect(replay.scope.eventLogRef.current.events).toHaveLength(2);
-    expect(replay.scope.openComputerTab).not.toHaveBeenCalled();
+    expect(replay.scope.browserPreview.started).not.toHaveBeenCalled();
+    expect(replay.scope.browserPreview.settled).not.toHaveBeenCalled();
+    expect(replay.scope.browserPreview.dropped).not.toHaveBeenCalled();
     expect(replay.scope.openInChatPane).not.toHaveBeenCalled();
   });
 

@@ -68,6 +68,18 @@ describe('Chromium snapshot document identity', () => {
     })
     expect((await executor.snapshot()).documentId).toBeUndefined()
   })
+  it('keeps link hints when optional DOM identity is unavailable', async () => {
+    const { executor, setRoot, send } = await fixture()
+    setRoot(undefined)
+    const original = send.getMockImplementation()!
+    send.mockImplementation(async (...args) => args[1] === 'Accessibility.getFullAXTree' ? {
+      nodes: [{ nodeId: 'link', backendDOMNodeId: 300, role: { value: 'link' }, name: { value: 'Details' },
+        properties: [{ name: 'url', value: { value: 'https://example.com/details' } }] }],
+    } : original(...args))
+    const result = await executor.snapshot()
+    expect(result.documentId).toBeUndefined()
+    expect(result.nodes[0]?.linkUrl).toBe('https://example.com/details')
+  })
   it('rejects repeated document changes during capture and discards refs', async () => {
     const { executor, send, setRoot } = await fixture()
     const first = await executor.snapshot()

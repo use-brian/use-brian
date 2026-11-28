@@ -40,6 +40,8 @@ type SnapshotNode = {
   role: string
   name: string
   value?: string
+  /** Optional same-origin navigation hint for a visible link. */
+  linkUrl?: string
   disabled?: boolean
   checked?: boolean | 'mixed'
   required?: boolean
@@ -128,12 +130,31 @@ function formState(node: CdpAXNode): Pick<SnapshotNode, 'checked' | 'required' |
   }
 }
 
+function parseWebUrl(raw: string | undefined): URL | undefined {
+  if (!raw) return undefined
+  try {
+    const url = new URL(raw)
+    if (url.protocol === 'http:' || url.protocol === 'https:') return url
+  } catch { /* No hint for a malformed URL. */ }
+  return undefined
+}
+
+/** Only surface simple link targets, never credentials, query parameters or fragments. */
+function sameOriginLink(node: CdpAXNode, pageOrigin: string): string | undefined {
+  const raw = asString(node.properties?.find(p => p.name === 'url')?.value?.value)
+  if (!raw || raw.length > 1024 || raw.includes('?') || raw.includes('#')) return undefined
+  const url = parseWebUrl(raw)
+  if (url?.origin === pageOrigin && !url.username && !url.password && url.href.length <= 1024) return url.href
+  return undefined
+}
+
 /**
  * Build the interactive-node list. Includes nodes whose role is interactive,
  * plus focusable nodes that carry a name (covers contenteditable message
  * boxes that report generic roles). Skips ignored/nameless-noise nodes.
  */
-export function buildSnapshot(axNodes: CdpAXNode[], mode: 'interactive' | 'full' = 'interactive'): BuiltSnapshot {
+export function buildSnapshot(axNodes: CdpAXNode[], mode: 'interactive' | 'full' = 'interactive', pageUrl?: string): BuiltSnapshot {
+  const pageOrigin = parseWebUrl(pageUrl)?.origin
   const nodes: SnapshotNode[] = []
   const refToBackendNodeId = new Map<string, number>()
   const refToName = new Map<string, string>()
@@ -154,13 +175,17 @@ export function buildSnapshot(axNodes: CdpAXNode[], mode: 'interactive' | 'full'
 
     const ref = interactive ? `@e${++counter}` : undefined
     const value = asString(ax.value?.value)
+    const disabled = propTrue(ax, 'disabled')
+    const linkUrl = role === 'link' && !disabled && pageOrigin
+      ? sameOriginLink(ax, pageOrigin) : undefined
     const node: SnapshotNode = {
       ...(typeof ax.backendDOMNodeId === 'number' ? { nodeId: String(ax.backendDOMNodeId) } : {}),
       role: role || 'node',
       name,
       ...(ref ? { ref } : {}),
       ...(value ? { value } : {}),
-      ...(propTrue(ax, 'disabled') ? { disabled: true } : {}),
+      ...(linkUrl ? { linkUrl } : {}),
+      ...(disabled ? { disabled: true } : {}),
       ...formState(ax),
     }
     nodes.push(node)

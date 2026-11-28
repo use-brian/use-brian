@@ -143,7 +143,10 @@ export function createLocalBrowserProvider(deps: {
       return BrowserNavigateResultSchema.parse(await send(ctx, 'navigate', { url }))
     },
     async snapshot(ctx, options) {
-      return BrowserSnapshotSchema.parse(await send(ctx, 'snapshot', { mode: options?.mode ?? 'interactive' }))
+      return BrowserSnapshotSchema.parse(await send(ctx, 'snapshot', {
+        mode: options?.mode ?? 'interactive',
+        ...(options?.afterClick ? { afterClick: true } : {}),
+      }))
     },
     async click(ctx, ref) {
       await send(ctx, 'click', { ref })

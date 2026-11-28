@@ -19,6 +19,7 @@ import type { ConversationFrame } from '../db/conversation-store.js'
 import { readAttendedSessionHistory, type PreparedAttendedSessionHistory } from '../routes/attended-session-context.js'
 import { noteAutomaticScopeEvidence } from '../context-scope/resolve-turn-scope.js'
 import {tryReadTurnConversationRecord} from '../context-scope/conversation-record-admission.js'
+import {telegramKnowledgeGroup} from '../context-scope/telegram-knowledge-audience.js'
 import {admitModelInput} from '../context-scope/admission.js'
 import {executionToolContext} from '@use-brian/agent-runtime/security/execution-context.js'
 import {ContextScopeAccumulator as EvidenceAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
@@ -28,7 +29,7 @@ import type { PublicTurnConversationBinding } from '../db/public-conversation.js
 import type {ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
 import {readRetainedContextFrame} from '../db/session-context-revisions.js'
 import {privateHistoryText} from '../db/session-legacy-history.js'
-import {recentTextDigest,selectVerifiedChannelRecentText} from '../db/verified-channel-record.js'
+import {previousRecentTextBoundary,recentTextDigest,selectVerifiedChannelRecentText,selectVerifiedChannelRecentTextWindows} from '../db/verified-channel-record.js'
 
 /** The swappable readers underneath the owner port. */
 export type TurnHistoryReaders = {
@@ -126,17 +127,30 @@ export function captureTurnHistory(sessionId: string, input: TurnHistoryRequest)
   }
 }
 
+export type RecentChannelTextWitness = Readonly<{ beforeSequence: number; fingerprint: string }>
+
+/** Recheck only the selection. The surrounding lease and retained-source
+ * owners perform the independent live and ancestry checks. */
+export async function recentChannelTextSelectionsCurrent(authority: SessionContextAuthority, witnesses: readonly RecentChannelTextWitness[], continued: boolean) {
+  const continuation = continued ? telegramKnowledgeGroup(authority.execution) : undefined
+  if (continued && !continuation) return false
+  const pages = await selectVerifiedChannelRecentTextWindows(authority.execution, witnesses.map(witness => witness.beforeSequence), continuation)
+  return pages !== null && witnesses.every((witness, index) => JSON.stringify(pages[index]) === witness.fingerprint)
+}
+
 /** Positive dialogue excerpts from the exact verified pre-input window. The
  * selector witness is local to the original invocation. Each model/reply
  * boundary independently checks the same slice and its retained source roots. */
-export async function readRecentChannelText(authority: SessionContextAuthority, beforeSequence: number, signal: AbortSignal) {
+export async function readRecentChannelText(authority: SessionContextAuthority, beforeSequence: number, signal: AbortSignal, continued: boolean) {
   const {execution} = authority
-  const select = () => selectVerifiedChannelRecentText(execution, beforeSequence)
+  const continuation = continued ? telegramKnowledgeGroup(execution) : undefined
+  if (continued && !continuation) throw new DerivedScopeError('scope_source_changed')
+  const select = () => continuation ? selectVerifiedChannelRecentText(execution, beforeSequence, continuation)
+    : selectVerifiedChannelRecentText(execution, beforeSequence)
   signal.throwIfAborted()
   await execution.security.authority.assertCurrent()
   const candidates = await select()
-  const witness = JSON.stringify(candidates)
-  const isCurrent = async () => JSON.stringify(await select()) === witness
+  const witness: RecentChannelTextWitness = { beforeSequence, fingerprint: JSON.stringify(candidates) }
   const sources = candidates.map(candidate => candidate.source)
   const messages = !sources.length ? [] : await readRetainedContextFrame(authority, sources, async client => {
     const {rows} = await client.query<{id:string;role:'user'|'assistant';sequence:number;digest:string;content:unknown}>(`SELECT
@@ -154,7 +168,7 @@ export async function readRecentChannelText(authority: SessionContextAuthority, 
       return [{role:row.role,text:text.length>1000?Array.from(text).slice(0,1000).join('')+'…':text}]
     })
   })
-  if (!await isCurrent()) throw new DerivedScopeError('scope_source_changed')
+  if (JSON.stringify(await select()) !== witness.fingerprint) throw new DerivedScopeError('scope_source_changed')
   signal.throwIfAborted()
-  return {messages,sources,isCurrent}
+  return {messages,sources,witness,nextBeforeSequence:previousRecentTextBoundary(beforeSequence)}
 }

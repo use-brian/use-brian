@@ -9,6 +9,7 @@ import { z } from 'zod'
 import type { ClientBase } from 'pg'
 import { query } from './client.js'
 import type { Session } from './sessions.js'
+import type { TelegramKnowledgeGroup } from '../context-scope/telegram-knowledge-audience.js'
 
 export type ChannelRecordAddress = {
   session: Pick<Session,'id'|'channelType'|'channelId'>
@@ -120,29 +121,63 @@ const recentTextCandidateSchema = z.object({
 
 export const recentTextDigest = "encode(sha256(convert_to(m.content::text,'UTF8')),'hex')"
 const recentTextSlots = 8
+const recentTextPageSchema = z.array(recentTextCandidateSchema).max(recentTextSlots)
+
+/** The next older window ends where the current window starts. */
+export function previousRecentTextBoundary(beforeSequence: number): number | undefined {
+  const boundary = beforeSequence - recentTextSlots
+  return boundary > 1 ? boundary : undefined
+}
 
 /** A fixed, server-owned selection of bounded metadata under the verified
  * workspace record floor. The room branch of addressedEnvelope applies the
  * workspace audience. The non-owner retained reader admits each selected
  * message and its ancestry before fetching model-visible bytes. */
-export async function selectVerifiedChannelRecentText(execution: ExecutionContext, beforeSequence: number) {
+export async function selectVerifiedChannelRecentText(execution: ExecutionContext, beforeSequence: number, continuation?: TelegramKnowledgeGroup) {
+  const pages = await selectVerifiedChannelRecentTextWindows(execution, [beforeSequence], continuation)
+  if (!pages) throw new DerivedScopeError('scope_source_changed')
+  return pages[0]!
+}
+
+/** Capture all selected pages under one binding and one database snapshot. */
+export async function selectVerifiedChannelRecentTextWindows(execution: ExecutionContext, beforeSequences: readonly number[],
+  continuation?: TelegramKnowledgeGroup) {
   const binding = verifiedSelections.get(execution)
   if (!binding || !binding.address.room || binding.address.session.channelType !== 'telegram'
-    || !Number.isSafeInteger(beforeSequence) || beforeSequence < 1 || beforeSequence > 2147483647) {
+    || !beforeSequences.length || beforeSequences.some(sequence => !Number.isSafeInteger(sequence) || sequence < 1 || sequence > 2147483647)) {
     throw new DerivedScopeError('scope_source_changed')
   }
-  const rows = await query<{ candidates: unknown }>(`SELECT COALESCE((SELECT jsonb_agg(jsonb_build_object(
+  if (continuation && (continuation.sessionId !== binding.address.session.id || continuation.address !== binding.address.session.channelId
+    || continuation.integrationId !== binding.address.integrationId || continuation.envelopeVersion !== binding.version)) return null
+  // Keep the metadata-only credential check with the exact page selection.
+  // The live lease still owns audience, membership and source admission.
+  const continuationBinding = continuation ? `AND s.status='running' AND s.turn_lease_token=$12
+    AND s.cancel_requested_at IS NULL AND coalesce(s.turn_assistant_id,s.assistant_id)=$5
+    AND EXISTS (SELECT 1 FROM public.linked_identities l WHERE l.provider='telegram' AND l.provider_id=$13 AND l.user_id=$6)
+    AND EXISTS (SELECT 1 FROM public.channel_integrations ci JOIN public.channels c ON c.id=ci.channel_id
+      WHERE ci.id=$14 AND ci.bot_user_id=$15 AND ci.identity_generation=$16
+        AND ci.channel_type='telegram' AND c.channel_type='telegram' AND c.workspace_id=$2
+        AND ci.status='active' AND c.status='active')` : ''
+  const continuationValues = continuation
+    ? [continuation.lease, continuation.speakerId, continuation.integrationId, continuation.botId, continuation.generation] : []
+  const afterSequences = beforeSequences.map(sequence => (previousRecentTextBoundary(sequence) ?? 1) - 1)
+  const throughSequences = beforeSequences.map(sequence => sequence - 1)
+  const { rows } = await query<{ candidates: unknown }>(`WITH bound AS MATERIALIZED (${addressedEnvelope} ${continuationBinding})
+    SELECT COALESCE((SELECT jsonb_agg(jsonb_build_object(
     'sequence',m.sequence_num,'role',m.role,'digest',${recentTextDigest},'source',jsonb_build_object(
       'workspaceId',m.workspace_id,'userId',m.user_id,'assistantId',m.assistant_id,'resourceKind','session_message',
       'resourceId',m.id,'version',m.scope_version::text,'sensitivity',m.sensitivity,
       'compartments',m.compartments,'projectIds',m.project_ids)) ORDER BY m.sequence_num)
-    FROM public.conversation_record_rows(bound.envelope,$10,$11,false,$6,false) m
+    FROM public.conversation_record_rows(bound.envelope,page.after_sequence,page.through_sequence,false,$6,false) m
     WHERE m.channel_message_id IS NOT NULL AND m.user_id IS NULL AND octet_length(m.content::text)<=16384
       AND NOT jsonb_path_exists(m.content,'$[*] ? (@.type == "tool_use" || @.type == "tool_result" || @.type == "host_observation")')
-  ),'[]'::jsonb) AS candidates FROM (${addressedEnvelope}) bound`,
-  [...addressValues(binding.address,binding.version),Math.max(0,beforeSequence-1-recentTextSlots),beforeSequence-1])
-  if (!rows.rows[0]) throw new DerivedScopeError('scope_source_changed')
-  return z.array(recentTextCandidateSchema).max(recentTextSlots).parse(rows.rows[0].candidates)
+  ),'[]'::jsonb) AS candidates FROM bound
+    CROSS JOIN unnest($10::integer[],$11::integer[]) WITH ORDINALITY AS page(after_sequence,through_sequence,ord)
+    ORDER BY page.ord`,
+  [...addressValues(binding.address,binding.version),afterSequences,throughSequences,...continuationValues])
+  if (rows.length === 0) return null
+  if (rows.length !== afterSequences.length) throw new DerivedScopeError('scope_source_changed')
+  return rows.map(row => recentTextPageSchema.parse(row.candidates))
 }
 
 export function channelEvidenceFitsEnvelope(envelope: ChannelRecordEnvelope, evidence: ScopeEvidence) {

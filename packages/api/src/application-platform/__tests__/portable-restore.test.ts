@@ -100,6 +100,19 @@ describe('[COMP:api/portable-restore] reviewed harness extension',()=>{
    'observe_native_prompt_memory_field_once','read_native_memory_query_projection_once',
   ])
  })
+ it('binds the recording lock migration and keeps the previous authentication profile', { timeout: 15_000 }, async()=>{
+  const {currentReleaseSource}=await import(new URL('installation-release.mjs',directory).href)
+  const previous='8352_packed_memory_observation.sql',head='8353_recording_channel_lock_wait.sql'
+  const [oldSource,newSource]=await Promise.all([currentReleaseSource(previous),currentReleaseSource(head)])
+  expect(oldSource.portableSuccessor.migrations.at(-1)).toBe(previous)
+  expect(newSource.portableSuccessor.migrations).toEqual([...oldSource.portableSuccessor.migrations,head])
+  expect(newSource.sourceDigest).not.toBe(oldSource.sourceDigest)
+  expect(newSource.additionalCatalogs).toEqual(oldSource.additionalCatalogs)
+  const orderedLock = 'PERFORM id FROM workspaces WHERE id=w FOR SHARE;'
+  expect(newSource.sql).toContain('lock_deadline:=clock_timestamp()+lock_wait_ms')
+  expect(newSource.sql).toContain(orderedLock)
+  expect(oldSource.sql).not.toContain('lock_deadline:=clock_timestamp()+lock_wait_ms')
+ })
 })
 
 describe('[COMP:api/portable-restore] finite portable restore roster',()=>{

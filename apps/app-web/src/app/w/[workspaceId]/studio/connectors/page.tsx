@@ -1745,7 +1745,8 @@ function ConnectorsList() {
 
     if (id === "cli") {
       setShowCliForm(rid);
-      setNewCliLabel(c.label ?? "");
+      revealConnectForm(rid);
+      setNewCliLabel(opts?.addAnother ? "" : (c.label ?? ""));
       setNewCliBinaryPath("");
       setNewCliArgs("");
       setNewCliCwd("");
@@ -1923,13 +1924,7 @@ function ConnectorsList() {
   async function handleAddAnother(c: Connector) {
     const flow = resolveConnectorAddAnotherFlow(c);
     if (flow === "cli-form") {
-      setShowCliForm(rowId(c));
-      setNewCliLabel("");
-      setNewCliBinaryPath("");
-      setNewCliArgs("");
-      setNewCliCwd("");
-      setNewCliError(null);
-      setSelected(rowId(c));
+      await handleConnect(c, { addAnother: true });
       return;
     }
     if (flow === "pat-form") {
@@ -3838,6 +3833,13 @@ function ConnectorsList() {
         // UUID, so its form key becomes stale when Directory Add refetches.
         onConnectorConnect={(entry, opts) => {
           const connector = resolveDirectoryConnectRow(connectors, entry.id) as Connector;
+          revealConnectForm(rowId(connector));
+          // PAT creation has its own label/token draft; OAuth and CLI keep
+          // their connect options, including workspace-app selection.
+          if (opts?.addAnother && isPatConnector(connector.id)) {
+            void handleAddAnother(connector);
+            return;
+          }
           void handleConnect(connector, {
             ...opts,
             // Hosted customers configure the workspace app, not this

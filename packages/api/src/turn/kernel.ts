@@ -77,7 +77,7 @@ import { currentTurnFrame, readTurnSqlLedger, turnSqlRecordingEnabled, withTurnF
 import type { SessionMessage } from '../db/sessions.js'
 import { writeTurnPublication, type TurnPublicationRequest } from './publication.js'
 import { captureCapabilityComposition, captureInitialChatArchiveTools, captureInitialKnowledgeSearch, captureInitialMailboxTools, initialCurrentTurnTools, type TurnCapabilityProfile, type TurnCapabilityRequest, type TurnCapabilityResult } from './capabilities.js'
-import { captureTurnHistory, readRecentChannelText, type CapturedTurnHistory, type TurnHistoryRequest } from './history.js'
+import { captureTurnHistory, readRecentChannelText, recentChannelTextSelectionsCurrent, type CapturedTurnHistory, type RecentChannelTextWitness, type TurnHistoryRequest } from './history.js'
 import { assertInitialReadEvidenceCurrent, closeInitialReadEvidence } from './initial-read-authority.js'
 import { resumePredecessorSlotWait, type ResumeSlotWaitOptions } from './resume-recovery.js'
 import { composeRecoveryMessage, type ComposeRecoveryMessageResult, type RecoveryPendingTurn } from './recovery-message.js'
@@ -457,7 +457,13 @@ class AssistantTurnOwner {
       let ready: DiscoveredQueryContext | undefined
       let continuationModel: PreparedTurnModel | undefined
       let loading: Promise<void> | undefined
-      let recent: Promise<ToolResult> | undefined
+      // A cursor only addresses a page issued by this turn. In-flight reads
+      // share one promise and the existing turn/tool budget bounds the chain.
+      const recentPages = recentText && new Map<string | undefined, { beforeSequence: number; result?: Promise<ToolResult> }>([
+        [undefined, { beforeSequence: recentText.beforeSequence }],
+      ])
+      const recentSelections: RecentChannelTextWitness[] = []
+      let continuedRecentText = false
       let failure: { error: unknown } | undefined
       if (recentText) {
         preparation.assertHistoryAuthority(recentText.authority)
@@ -486,31 +492,58 @@ class AssistantTurnOwner {
       const discoveryTool: Tool = {
         name: CONVERSATION_CONTEXT_TOOL,
         description: recentText
-          ? 'Read excerpts from the most recent retained conversation messages by default. Use mode full for older history, referenced material, or additional tools.'
+          ? 'Read excerpts from the most recent retained conversation messages. Pass the returned nextCursor as cursor to read the preceding window, even if the current window is empty. Use mode full for complete context, referenced material, or additional tools.'
           : 'Load permitted conversation history, referenced material, and additional tools. Use when the current request depends on earlier work or needs a tool that is not already available.',
-        inputSchema: recentText ? z.object({mode:z.enum(['recent_text','full']).optional()}).strict() : z.object({}).strict(),
+        inputSchema: recentPages ? z.object({
+          mode: z.enum(['recent_text', 'full']).optional(),
+          cursor: z.string().uuid().optional().describe('The nextCursor returned by a recent-text call in this turn.'),
+        }).strict().refine(({ mode, cursor }) => cursor === undefined || (mode !== 'full' && recentPages.has(cursor)), {
+          path: ['cursor'], message: 'Use a nextCursor returned in this turn with recent text. Omit cursor for the newest window or full mode.',
+        }) : z.object({}).strict(),
         isReadOnly: true, isConcurrencySafe: false, requiresConfirmation: false,
         timeoutMs: NO_TOOL_TIMEOUT,
         execute: async (input, toolContext) => {
           const signal = toolContext.abortSignal
           signal.throwIfAborted()
-          if (recentText && input.mode !== 'full') {
+          if (recentText && recentPages && input.mode !== 'full') {
+            const page = recentPages.get(input.cursor)
+            if (!page) throw new Error('The conversation context cursor is unavailable.')
             preparation.assertLoopContext(toolContext)
             if (toolContext.scopeAccumulator !== recentText.authority.accumulator) throw new AuthorityChangedError(false)
-            recent ??= this.frame('preparation', async () => {
+            const continued = input.cursor !== undefined
+            continuedRecentText ||= continued
+            page.result ??= this.frame('preparation', async () => {
               const startedAt = performance.now()
-              const selection = await readRecentChannelText(recentText.authority,recentText.beforeSequence,signal)
+              const selection = await readRecentChannelText(recentText.authority,page.beforeSequence,signal,continued)
                 .finally(() => recentText.onReadTiming?.(performance.now() - startedAt))
               preparation.assertLoopContext(toolContext)
               if (toolContext.scopeAccumulator !== recentText.authority.accumulator) throw new AuthorityChangedError(false)
               signal.throwIfAborted()
-              recentText.bindSelection(selection.isCurrent)
+              recentSelections.push(selection.witness)
+              if (recentSelections.length === 1) recentText.bindSelection(async () => {
+                // A progress write can check while a later page is acquired.
+                // Recheck the expanded set together if a page arrives mid-read.
+                for (;;) {
+                  const witnesses = [...recentSelections]
+                  const checkContinuation = continuedRecentText
+                  if (!await recentChannelTextSelectionsCurrent(recentText.authority, witnesses, checkContinuation)) return false
+                  if (witnesses.length === recentSelections.length && checkContinuation === continuedRecentText) return true
+                }
+              })
+              const nextCursor = selection.nextBeforeSequence === undefined ? undefined : randomUUID()
+              if (nextCursor && selection.nextBeforeSequence !== undefined) {
+                recentPages.set(nextCursor, { beforeSequence: selection.nextBeforeSequence })
+              }
               return {
-                data: {messages: selection.messages, scope: 'Recent retained text excerpts. Use full mode if you need older or more complete context.'},
+                data: { messages: selection.messages,
+                  scope: nextCursor
+                    ? 'Recent retained text excerpts. Pass nextCursor as cursor for the preceding window. Use full mode for more complete context.'
+                    : 'Recent retained text excerpts. Use full mode if you need older or more complete context.',
+                  ...(nextCursor ? { nextCursor } : {}) },
                 scopeEvidence: {sources: selection.sources},
               }
             })
-            const result = await recent
+            const result = await page.result
             signal.throwIfAborted()
             return structuredClone(result)
           }
@@ -575,9 +608,12 @@ class AssistantTurnOwner {
         ...(chatArchive && lane === 'channel' ? captureInitialChatArchiveTools(input.candidateTools, preparation.assertCurrent, chatArchive) : []),
         ...(mailbox ? captureInitialMailboxTools(lane, mailbox, preparation.assertCurrent) : []),
         ...(knowledge && lane !== 'public' ? [captureInitialKnowledgeSearch(lane, knowledge, preparation.assertCurrent)] : [])]
+      const browserDiscoveryHint = input.candidateTools.has('browserNavigate')
+        ? ` For a page that needs live interaction (forms, filters, checking availability through a search form), call ${CONVERSATION_CONTEXT_TOOL}${recentText ? ' in full mode' : ''} first to check for permitted browser tools. A static URL read cannot do those actions, even if the user gave the link.`
+        : ''
       initial = { ...input, candidateTools: new Map(tools.map(tool => [tool.name, tool])),
         trustedContributions: [...input.trustedContributions ?? [], { name: 'context_discovery',
-          content: `For a self-contained request, answer using the current message and any available tools. You can use tool results in subsequent calls. Call ${CONVERSATION_CONTEXT_TOOL} when the request depends on earlier conversation, referenced material, or a tool that is not already available.${recentText ? ' Use the default recent text for a recent follow-up. Select mode full for older history, referenced material, or a missing capability.' : ''}` }] }
+          content: `For a self-contained request, answer using the current message and any available tools. You can use tool results in subsequent calls. Call ${CONVERSATION_CONTEXT_TOOL} when the request depends on earlier conversation, referenced material, or a tool that is not already available.${recentText ? ' Use the default recent text for a recent follow-up and pass nextCursor for earlier text. Select mode full for complete context, referenced material, or a missing capability.' : ''}${browserDiscoveryHint}` }] }
     }
     const assemble = preparation.captureRun(initial, model, this.retainedPreparationAccumulator, Boolean(discover))
     const prepared = this.frame('preparation', () => Promise.resolve().then(assemble).then((run): PreparedTurnRunView => {

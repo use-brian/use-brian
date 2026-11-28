@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { createComputerTools, SEND_LIKE_LABEL_PATTERN, type ComputerToolProfiles } from '../tools.js'
 import { createLocalBrowserProvider } from '../local-browser-provider.js'
 import { createInMemoryBrowserProfileStore } from '../profiles.js'
@@ -137,6 +137,54 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
       'switchTab:tab-2',
       'snapshot:full',
       'closeTab:tab-2',
+    ])
+  })
+
+  it('resumes a filtered results tab with fresh refs without repeating navigation or filters', async () => {
+    const local = fakeProvider('local')
+    let active = 'results'
+    let scan = 0
+    local.snapshot = async () => {
+      local.calls.push('snapshot:full')
+      return { documentId: active, url: `https://rooms.example/${active}`, title: active, nodes: [
+        { nodeId: 'day', ref: `day-${++scan}`, role: 'combobox', name: 'Day', value: 'Next Thursday' },
+        { nodeId: 'birch', ref: `birch-${scan}`, role: 'link', name: 'Birch details', linkUrl: 'https://rooms.example/birch' },
+      ] }
+    }
+    local.openTab = async () => { active = 'willow'; return { tabId: active, url: `https://rooms.example/${active}`, title: active } }
+    local.listTabs = async () => ({ activeTabId: active, tabs: ['results', 'willow'].map(id => ({
+      id, url: `https://rooms.example/${id}`, title: id, active: active === id, taskOwned: true,
+    })) })
+    local.switchTab = async (_ctx, id) => { active = id; return { tabId: id, url: `https://rooms.example/${id}`, title: id } }
+    const tools = createComputerTools({ local, cloud: fakeProvider('cloud'),
+      profiles: await profilesWith([{ name: 'Personal', defaultBackend: 'local' }]) })
+    await run(tools.browserNavigate, { url: 'https://rooms.example/results' })
+    await run(tools.browserOpenTab, { url: 'https://rooms.example/willow' })
+    // The next attended turn has the same conversation, not the old ToolContext.
+    const resumed = toolContext()
+    expect((await run(tools.browserListTabs, {}, resumed)).data).toContain('results - results')
+    const switched = await run(tools.browserSwitchTab, { tabId: 'results' }, resumed)
+    expect(switched.data).toContain('value="Next Thursday"')
+    expect(switched.data).toContain('@e6 link "Birch details"')
+    expect((await run(tools.browserClick, { ref: '@e2' }, resumed)).isError).toBe(true)
+    await run(tools.browserClick, { ref: '@e6' }, resumed)
+    expect(local.calls.filter(call => call.startsWith('navigate:'))).toEqual(['navigate:https://rooms.example/results'])
+    expect(local.calls.filter(call => call.startsWith('click:'))).toEqual(['click:birch-3'])
+  })
+
+  it.each(['local', 'cloud'] as const)('requests post-click settling only for the inline observation on %s', async kind => {
+    const provider = fakeProvider(kind)
+    const snapshot = vi.spyOn(provider, 'snapshot')
+    const tools = createComputerTools({
+      local: kind === 'local' ? provider : fakeProvider('local'),
+      cloud: kind === 'cloud' ? provider : fakeProvider('cloud'),
+      cloudAvailable: () => true,
+      profiles: await profilesWith([{ name: 'Personal', defaultBackend: kind }]),
+    })
+    await run(tools.browserNavigate, { url: 'https://example.com/' })
+    await run(tools.browserClick, { ref: '@e3', intent: 'activate' })
+    expect(snapshot.mock.calls.map(([, options]) => options)).toEqual([
+      { mode: 'full' }, { mode: 'full', ...(kind === 'local' ? { afterClick: true } : {}) },
     ])
   })
 
